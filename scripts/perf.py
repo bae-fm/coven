@@ -5,8 +5,8 @@
     scripts/perf.sh run [--repeat N] [scenario...]
     scripts/perf.sh accept [scenario...]
 
-A scenario is one of coven-database's ignored measurements (the `SCENARIOS` table:
-its cargo command and how its numbers are read). They run on a person's
+A scenario is one of the workspace's ignored measurements (the `SCENARIOS`
+table: its cargo command and how its numbers are read). They run on a person's
 machine on demand, in the release profile, on an otherwise idle machine; no
 runner holds them and GitHub never does.
 
@@ -31,8 +31,7 @@ scenario's raw output beside it. `accept` copies the last run's medians and
 spreads into the machine's baseline file for the person to commit.
 
 The numbers are read from the lines the measurements print through
-`coven_database::test_utils::report_cost`:
-`COST metric=<name> value=<n> unit=<ms|ratio|count>`.
+`sqlive::report_cost`: `COST metric=<name> value=<n> unit=<ms|ratio|count>`.
 """
 
 from __future__ import annotations
@@ -106,13 +105,33 @@ SCENARIOS: tuple[Scenario, ...] = (
     ),
     Scenario(
         "statistics",
-        test_command(LIB, "gathering_statistics_on_a_library_sized_store"),
-        "gathering statistics on a library-sized store",
+        test_command(LIB, "gathering_statistics_on_a_library_sized_database", "sqlive"),
+        "gathering statistics on a library-sized database",
     ),
     Scenario(
         "commits-under-live-query",
         test_command(LIB, "commits_under_a_rerunning_live_query_cost"),
         "a writer's commits while a live query reruns or a reader reads",
+    ),
+    Scenario(
+        "sqlive-app-statements",
+        test_command(LIB, "a_triggered_statements_cost", "sqlive"),
+        "the same app statement through sqlive alone, against plain SQLite",
+    ),
+    Scenario(
+        "sqlive-local-table-writes",
+        test_command(LIB, "local_table_writes_against_plain_sqlite", "sqlive"),
+        "filling and clearing a table through sqlive alone, against plain SQLite",
+    ),
+    Scenario(
+        "sqlive-joined-live-query",
+        test_command(LIB, "joined_runs_against_one_shot_reads", "sqlive"),
+        "the same joined query and credit writes through sqlive alone",
+    ),
+    Scenario(
+        "sqlive-commits-under-live-query",
+        test_command(LIB, "commits_under_a_rerunning_live_query_cost", "sqlive"),
+        "a writer's commits through sqlive alone while a live query reruns or a reader reads",
     ),
     Scenario(
         "sending-state",

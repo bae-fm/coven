@@ -254,7 +254,7 @@ async fn a_write_moving_a_files_last_reference_to_another_row_keeps_its_record()
             sql.execute("DELETE FROM files WHERE id=?1", [removed])?;
             sql.execute(
                 "INSERT INTO files(id,file) VALUES(?1,?2)",
-                rusqlite::params![added, file],
+                sqlive::rusqlite::params![added, file],
             )?;
             Ok(())
         })

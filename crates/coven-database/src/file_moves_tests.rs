@@ -2,7 +2,7 @@
 //! cloud together, in one write once every one is stored; a move survives
 //! reopening; a cancelled move switches nothing.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     file_write::tests::{has_record, local_count, open},
     tests::TestStore,
@@ -688,7 +688,7 @@ async fn a_local_trigger_follows_each_move_coven_lists_fails_and_ends() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_moves(id,state)
            SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;
@@ -700,7 +700,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 }
 
 /// Record move `id` as still moving.
-pub(crate) fn moving(db: &DatabaseConnection, id: i64) {
+pub(crate) fn moving(db: &StoreSql, id: i64) {
     db.execute("INSERT INTO _coven_moves(id,state) VALUES(?1,'moving')", [id]).unwrap();
 }
 

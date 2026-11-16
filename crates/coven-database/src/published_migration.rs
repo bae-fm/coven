@@ -1,5 +1,5 @@
 //! Carry the counted projection through the same schema identities as app rows.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     migration_names::MigrationMatch, write_encoding::decoded, write_schema::WriteSchema, DbError,
 };
@@ -8,7 +8,7 @@ use coven_format::{
     merge_fields,
 };
 use coven_merge::{ColumnValue, RowId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 fn column(
     names: &MigrationMatch,
@@ -30,7 +30,7 @@ fn column(
 /// Returns the losses this freezes: the migration over the counted prefix,
 /// which the migration write's own freezes replace once they are put.
 pub(crate) fn carry(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     names: &MigrationMatch,
     schema: &WriteSchema,
     removed: &[Loss],

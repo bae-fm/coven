@@ -1,0 +1,109 @@
+//! What a test reads back of a connection's work: the work it counts, the
+//! statements its reads run, and the points a write transaction passes; and
+//! the costs a measurement prints for the performance suite.
+
+use caught::locks::lock_unpoisoned;
+use std::sync::{Arc, Mutex};
+
+/// The work a connection counts: its commits, its reads of the schema
+/// cookie, and the steps of the statements it runs for the app and for live
+/// queries' lookups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionWork {
+    /// Successful durable transaction commits, unchanged transactions'
+    /// included.
+    pub commits: usize,
+    /// Reads of SQLite's schema cookie.
+    pub cookie_reads: usize,
+    /// SQLite virtual machine steps the app's statements that return rows
+    /// ran.
+    pub app_read_steps: usize,
+    /// The app's statements that return rows, one per run.
+    pub app_read_statements: usize,
+    /// SQLite virtual machine steps the app's statements that write ran,
+    /// triggers' included.
+    pub app_write_steps: usize,
+    /// Steps of the lookups judging whether a write changed rows a live
+    /// query joins.
+    pub lookup_steps: usize,
+}
+
+/// Where connections count their work. Clones count into the same place.
+#[derive(Clone, Default)]
+pub struct ConnectionWorkCounter(Arc<Mutex<ConnectionWork>>);
+
+impl ConnectionWorkCounter {
+    /// A counter no connection has counted on yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The work counted since the last take, starting the count again.
+    pub fn take(&self) -> ConnectionWork {
+        std::mem::take(&mut *lock_unpoisoned(&self.0))
+    }
+
+    /// Count work a connection did.
+    pub(crate) fn record(&self, update: impl FnOnce(&mut ConnectionWork)) {
+        update(&mut lock_unpoisoned(&self.0));
+    }
+}
+
+/// The statements the reads of the connections it was given to ran, in
+/// order, from then on. Clones share one log.
+#[derive(Clone, Default)]
+pub struct StatementLog(Arc<Mutex<Vec<String>>>);
+
+impl StatementLog {
+    /// A log no connection has recorded into yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The recorded statements so far, each as SQLite's text with the bound
+    /// values written in.
+    pub fn statements(&self) -> Vec<String> {
+        lock_unpoisoned(&self.0).clone()
+    }
+
+    /// The recorded statements so far, emptying the log.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut lock_unpoisoned(&self.0))
+    }
+
+    pub(crate) fn push(&self, statement: String) {
+        lock_unpoisoned(&self.0).push(statement);
+    }
+}
+
+/// A point a write transaction passes as it commits, for tests that stop or
+/// end the process there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitPoint {
+    /// Live queries have judged the write, before SQLite commits it.
+    Judged,
+    /// SQLite has committed, before the handle's subscribers hear of it.
+    Committed,
+    /// The handle's subscribers have heard of the commit.
+    Observed,
+}
+
+/// What a connection calls at each commit point.
+pub(crate) type CommitPointObserver = Box<dyn Fn(CommitPoint) + Send>;
+
+/// One measured number, as a line `scripts/perf.sh` reads:
+/// `COST metric=<name> value=<n> unit=<ms|ratio|count>`. Lower is better in
+/// every unit. A character in `metric` outside letters, digits and `_./-`
+/// becomes `_`, so a label can be passed as it reads.
+pub fn report_cost(metric: &str, value: f64, unit: &str) {
+    let metric: String = metric
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "_./-".contains(c) { c } else { '_' })
+        .collect();
+    eprintln!("COST metric={metric} value={value} unit={unit}");
+}
+
+/// [`report_cost`] for a time, in milliseconds.
+pub fn report_time(metric: &str, time: std::time::Duration) {
+    report_cost(metric, time.as_secs_f64() * 1000.0, "ms");
+}

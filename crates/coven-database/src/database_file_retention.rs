@@ -2,14 +2,14 @@
 
 use super::StoreDatabase;
 use crate::file_protection::value as retain_value;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     DbError, DownloadedPartStream, DownloadedWriteStream, FileEvidence, Slot, UnprovenFiles,
 };
 use coven_format::{value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_merge::{ColumnValue, Operation};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 
@@ -340,11 +340,7 @@ pub struct FileCandidate {
     pub since: Slot,
 }
 
-fn insert_candidate(
-    db: &DatabaseConnection,
-    device: DeviceId,
-    object: ObjectId,
-) -> Result<(), DbError> {
+fn insert_candidate(db: &StoreSql, device: DeviceId, object: ObjectId) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_file_candidates(device,object,since) VALUES(?1,?2,(SELECT applied FROM _coven_sequence WHERE singleton=1)) ON CONFLICT DO UPDATE SET since=max(since,excluded.since)",
         params![device, object],
@@ -354,7 +350,7 @@ fn insert_candidate(
 
 /// Count every candidate from the applied slot `slot`, as though each lost
 /// its protection there.
-pub(crate) fn count_candidates_from(db: &DatabaseConnection, slot: u64) -> Result<(), DbError> {
+pub(crate) fn count_candidates_from(db: &StoreSql, slot: u64) -> Result<(), DbError> {
     db.execute("UPDATE _coven_file_candidates SET since=?1", [slot.to_be_bytes()])?;
     Ok(())
 }
@@ -363,7 +359,7 @@ pub(crate) fn count_candidates_from(db: &DatabaseConnection, slot: u64) -> Resul
 /// just read into this transaction. A location that won't decode is the
 /// snapshot's own failure.
 pub(crate) fn snapshot_references(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &crate::write_schema::WriteSchema,
     audience: &coven_merge::Audience,
 ) -> Result<BTreeSet<(DeviceId, ObjectId)>, DbError> {

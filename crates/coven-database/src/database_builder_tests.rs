@@ -16,7 +16,7 @@ fn migrations() -> Vec<Migration> {
 }
 
 fn page_size(store: &TestStore) -> usize {
-    let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+    let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
     raw.query_row("PRAGMA page_size", [], |r| r.get::<_, u32>(0)).unwrap() as usize
 }
 
@@ -247,11 +247,88 @@ async fn a_connection_that_wont_close_fails_close_after_every_one_was_tried() {
         failures.iter().all(|failure| matches!(
             failure,
             DbError::Sqlite(error)
-                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                if error.sqlite_error_code() == Some(sqlive::rusqlite::ErrorCode::DatabaseBusy)
         )),
         "{failures:?}"
     );
     assert!(matches!(database.close().await, Err(DbError::StoreClosed)));
     assert!(matches!(database.write(|_| Ok(())).await, Err(DbError::StoreClosed)));
     assert_eq!(notes_after_opening(&store).await, 1);
+}
+
+/// The store's handle records the changes of the app's rows and of coven's
+/// tables a live query can read, and none of the records a write keeps only
+/// beside its rows, which no live query reads (§4).
+#[test]
+fn the_store_records_no_table_only_a_write_reads() {
+    let bugs = coven_foundation::task::HeardBugs::shared();
+    let handle = super::store_observer(&(bugs as coven_foundation::task::BugSinkRef));
+    let unrecorded = handle.unrecorded();
+    assert!(unrecorded.recorded("notes"));
+    assert!(unrecorded.recorded("_coven_upload_pause"));
+    assert!(!unrecorded.recorded("_coven_creations"));
+}
+
+/// The checkpointer lives as long as the store: a store opened on a runtime
+/// that then shuts down, and kept open and written on another, still has
+/// its WAL checkpointed (§4).
+#[test]
+fn a_store_outliving_its_opening_runtime_still_checkpoints() {
+    let store = TestStore::new();
+    let settings = crate::SqliteSettings {
+        wal_autocheckpoint: Some(crate::WalAutocheckpoint::Pages(
+            std::num::NonZeroU32::new(100).unwrap(),
+        )),
+        ..crate::SqliteSettings::default()
+    };
+    let opening = tokio::runtime::Runtime::new().unwrap();
+    let db = opening
+        .block_on(store.builder(notes_tables(), migrations()).sqlite_settings(settings).open())
+        .unwrap();
+    let mut checkpoints = db.report_checkpoints();
+    drop(opening);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        // Each write adds some 5 frames to the WAL, and 40 pass the 100 the
+        // checkpointer waits for.
+        for _ in 0..40 {
+            db.write(|sql| {
+                sql.execute_batch(
+                    "INSERT INTO drafts(body) SELECT hex(randomblob(2000)) FROM (VALUES(1),(2),(3),(4))",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        tokio::time::timeout(coven_foundation::clock::HANG_GUARD, checkpoints.recv())
+            .await
+            .expect("the checkpointer checkpoints a WAL past its threshold")
+            .expect("the checkpointer runs while the store is open");
+        db.close().await.unwrap();
+    });
+}
+
+/// A setting SQLite can't hold fails the open, and leaves the store's
+/// writer lock free.
+#[tokio::test]
+async fn a_setting_sqlite_cannot_hold_fails_the_open() {
+    let store = TestStore::new();
+    let error = store
+        .builder(notes_tables(), notes_migrations())
+        .sqlite_settings(crate::SqliteSettings {
+            busy_timeout: Some(std::time::Duration::from_millis(i32::MAX as u64 + 1)),
+            ..crate::SqliteSettings::default()
+        })
+        .open()
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        crate::tests::database_error(error),
+        DbError::SqliteSettingOutOfRange {
+            setting: "busy_timeout",
+            maximum,
+        } if maximum == i32::MAX as u64
+    ));
+    store.assert_writer_unlocked();
 }

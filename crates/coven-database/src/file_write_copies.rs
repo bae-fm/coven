@@ -123,9 +123,11 @@ impl FileWrite<'_> {
                             sqlive::sql::identifier(column),
                             crate::write_rows::key_predicate(table)
                         ),
-                        rusqlite::params_from_iter(
-                            std::iter::once(rusqlite::types::Value::Text(copy.0.to_string()))
-                                .chain(crate::write_rows::key_parameters(&old.key)?),
+                        sqlive::rusqlite::params_from_iter(
+                            std::iter::once(sqlive::rusqlite::types::Value::Text(
+                                copy.0.to_string(),
+                            ))
+                            .chain(crate::write_rows::key_parameters(&old.key)?),
                         ),
                     )?;
                     crate::sqlite::changed_once(changed)?;

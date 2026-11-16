@@ -1,5 +1,5 @@
 //! The local captured prefix follows schema identities before its raise publishes.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{write_schema::WriteSchema, DbError};
 use coven_format::write::{WriteHeader, WritePart};
@@ -9,22 +9,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// All local originals through the migration marker follow the migrated schema,
 /// whether this installation has joined a store yet or not.
 pub(crate) fn capture(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     marker: coven_merge::WriteId,
     version: u32,
 ) -> Result<(), DbError> {
-    db.execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",rusqlite::params![marker.device,marker.number.to_be_bytes(),version])?;
+    db.execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",sqlive::rusqlite::params![marker.device,marker.number.to_be_bytes(),version])?;
     Ok(())
 }
 
-pub(crate) fn includes(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError> {
-    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",rusqlite::params![header.position.device,header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))?)
+pub(crate) fn includes(db: &StoreSql, header: &WriteHeader) -> Result<bool, DbError> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",sqlive::rusqlite::params![header.position.device,header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))?)
 }
 
-pub(crate) fn audiences(
-    db: &DatabaseConnection,
-    header: &WriteHeader,
-) -> Result<Vec<Audience>, DbError> {
+pub(crate) fn audiences(db: &StoreSql, header: &WriteHeader) -> Result<Vec<Audience>, DbError> {
     if !includes(db, header)? {
         return Ok(vec![]);
     }
@@ -36,7 +33,7 @@ pub(crate) fn audiences(
 }
 
 fn column(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     from: u32,
     to: u32,
     old: &str,
@@ -78,7 +75,7 @@ fn column(
 }
 
 pub(crate) fn project(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     header: &WriteHeader,
     part: &mut WritePart,
@@ -140,7 +137,7 @@ pub(crate) fn project(
 /// The two differ where only the kept state or only the app's state had a
 /// loss to freeze, so the write changes the rows of both.
 pub(crate) fn loss_rows(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
 ) -> Result<Vec<coven_merge::RowId>, DbError> {
     if header.disposition != coven_format::write::WriteDisposition::Migration
@@ -149,7 +146,7 @@ pub(crate) fn loss_rows(
         return Ok(Vec::new());
     }
     let write = coven_format::merge_fields::encode_write_id(&header.position)?;
-    let row = |r: &rusqlite::Row<'_>| {
+    let row = |r: &sqlive::rusqlite::Row<'_>| {
         Ok(crate::write_encoding::decoded(coven_format::merge_fields::decode_loss(
             &r.get::<_, Vec<u8>>(0)?,
         ))?
@@ -169,7 +166,7 @@ pub(crate) fn loss_rows(
 }
 
 pub(crate) fn losses(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,

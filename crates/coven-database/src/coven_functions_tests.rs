@@ -42,7 +42,7 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
         .await
         .unwrap_err();
     match error {
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(msg))) => {
+        DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(msg))) => {
             assert_eq!(msg, "coven_key takes a row's key: one value or more")
         }
         error => panic!("expected coven_key's refusal, received {error:?}"),
@@ -217,7 +217,7 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
+                matches!(error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(..))),
                 "{function}: {error:?}"
             );
         }
@@ -260,7 +260,7 @@ async fn a_variant_kind_is_the_name_serde_wrote_in_snake_case() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
+            matches!(error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(..))),
             "{damaged}: {error:?}"
         );
     }
@@ -318,7 +318,7 @@ async fn a_json_array_of_byte_numbers_becomes_a_blob() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
+            matches!(error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(..))),
             "{damaged}: {error:?}"
         );
     }

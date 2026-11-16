@@ -2,13 +2,13 @@
 
 use super::StoreDatabase;
 use crate::app_policy::CovenPolicy;
-use crate::sqlite::DatabaseConnection;
-use crate::sqlite_database::Database;
+use crate::sqlite::StoreSql;
 use crate::store_call::{StoreCall, TestRecords};
 use crate::DbError;
 use coven_format::path::{ObjectPath, PathError};
 use coven_foundation::id_source::{DeviceId, KeyId, ObjectId};
 use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
+use sqlive::Database;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
@@ -28,7 +28,7 @@ type InputConnection = Arc<RwLock<Option<Database<CovenPolicy>>>>;
 
 fn read_local<R>(
     database: &InputConnection,
-    run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, DbError>,
+    run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<R, DbError>,
 ) -> Result<R, DbError> {
     let guard = read_unpoisoned(database);
     let database = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -110,7 +110,7 @@ pub struct InputBudget {
 
 /// Copy the current claim attempt's exact bytes from the store connection into
 /// the input catalog, so applying a landed claim reads no provider bytes.
-fn copy_claim(inputs: &InputDatabase, source: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+fn copy_claim(inputs: &InputDatabase, source: &StoreSql, id: i64) -> Result<(), DbError> {
     inputs.write(|db, _| {
         db.execute("DELETE FROM _coven_input_ranges WHERE object=?1", [id])?;
         crate::claim::read_attempt::<_, DbError>(source, |chunks| {
@@ -195,8 +195,8 @@ impl InputDatabase {
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
         let database = read_unpoisoned(&self.database);
         let database = database.as_ref().expect("the store keeps its input database open");
-        database.each_reader(|reader| reader.test_track_work(counter.clone()));
-        database.host(|writer| writer.test_track_work(counter.clone()));
+        database.each_reader(|reader| counter.track(reader));
+        database.host(|writer| counter.track(writer));
         self.tests.track_work(counter.clone());
     }
     /// The input database `database`. Its writer's temporary storage, on
@@ -239,14 +239,14 @@ impl InputDatabase {
 
     fn read<R>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, DbError>,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
         read_local(&self.database, run)
     }
 
     fn write<R>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, DbError>,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
         self.with_writer(|writer, call| {
             #[cfg(any(test, feature = "test-utils"))]
@@ -256,7 +256,7 @@ impl InputDatabase {
     }
 
     /// Run `run` on the input writer, with constants of its own.
-    fn with_writer<R>(&self, run: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> R) -> R {
+    fn with_writer<R>(&self, run: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> R) -> R {
         let database = read_unpoisoned(&self.database);
         let database = database.as_ref().expect("the store keeps its input database open");
         database.host(|writer| run(writer, &crate::store_call::StoreCall::new(None, &self.tests)))
@@ -275,7 +275,7 @@ fn sql_offset(value: u64) -> Result<i64, DbError> {
     })
 }
 
-fn observation(db: &DatabaseConnection, path: &str) -> Result<Option<(i64, Vec<u8>)>, DbError> {
+fn observation(db: &StoreSql, path: &str) -> Result<Option<(i64, Vec<u8>)>, DbError> {
     Ok(db
         .query("SELECT id,identity FROM _coven_input_objects WHERE path=?1", [path], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -288,7 +288,7 @@ fn observation(db: &DatabaseConnection, path: &str) -> Result<Option<(i64, Vec<u
 // ranges beginning inside the requested interval. Seek to that boundary.
 const RANGES: &str = "SELECT max(start,?2),substr(bytes,max(start,?2)-start+1,min(end,?3)-max(start,?2)) FROM _coven_input_ranges WHERE object=?1 AND start>=coalesce((SELECT start FROM _coven_input_ranges WHERE object=?1 AND start<=?2 ORDER BY start DESC LIMIT 1),?2) AND start<?3 AND end>?2 ORDER BY start";
 
-fn budget(db: &DatabaseConnection) -> Result<InputBudget, DbError> {
+fn budget(db: &StoreSql) -> Result<InputBudget, DbError> {
     Ok(db.query_row(
         "SELECT maximum,retained,evicted FROM _coven_input_budget WHERE singleton=1",
         [],
@@ -302,10 +302,7 @@ fn budget(db: &DatabaseConnection) -> Result<InputBudget, DbError> {
     )?)
 }
 
-fn evict(
-    db: &DatabaseConnection,
-    active: &Mutex<BTreeMap<i64, Weak<InputRead>>>,
-) -> Result<(), DbError> {
+fn evict(db: &StoreSql, active: &Mutex<BTreeMap<i64, Weak<InputRead>>>) -> Result<(), DbError> {
     // A released object can be borrowed by another consumer. Keep its bytes
     // until that consumer drops its handle, including across network awaits.
     let active = lock_unpoisoned(active);
@@ -347,7 +344,7 @@ impl InputDatabase {
     /// Delete the records of the objects `select` picks, except those a live
     /// handle holds: a reader in flight keeps its rows. The cascades take each
     /// record's ranges, file evidence and unread parts.
-    fn forget(&self, select: &str, params: impl rusqlite::Params) -> Result<(), DbError> {
+    fn forget(&self, select: &str, params: impl sqlive::rusqlite::Params) -> Result<(), DbError> {
         self.write(|db, _| {
             let active = lock_unpoisoned(&self.active);
             for object in db.query(select, params, |r| r.get::<_, i64>(0))? {
@@ -387,7 +384,7 @@ impl StoreDatabase {
         let (database, reading, length) = self.call(|inner| {
             inner.access.with_committed(|source, _| {
                 let upload = crate::claim::upload(source)?;
-                let id = inner.inputs.write(|db: &DatabaseConnection, _| {
+                let id = inner.inputs.write(|db: &StoreSql, _| {
                     db.execute("DELETE FROM _coven_input_objects WHERE path='local-claim'", [])?;
                     Ok(db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES('local-claim',x'',x'') RETURNING id", [], |row| row.get(0))?)
                 })?;
@@ -441,7 +438,7 @@ impl StoreDatabase {
                 Some(_) if !replaceable => return Ok(None),
                 _ => (),
             }
-            inner.inputs.write(|db: &DatabaseConnection, _| {
+            inner.inputs.write(|db: &StoreSql, _| {
                 match observation(db, &path)? {
                     Some((id, saved)) if saved == identity => return Ok(Some(id)),
                     Some(_) if !replaceable => return Ok(None),
@@ -471,7 +468,7 @@ impl StoreDatabase {
             if previous.maximum == maximum {
                 return Ok(previous);
             }
-            inner.inputs.write(|db: &DatabaseConnection, _| {
+            inner.inputs.write(|db: &StoreSql, _| {
                 db.execute(
                     "UPDATE _coven_input_budget SET maximum=?1 WHERE singleton=1",
                     [sql_offset(maximum)?],
@@ -554,9 +551,7 @@ impl RetainedInput {
     }
     async fn read<R: Send + 'static>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>, i64) -> Result<R, DbError>
-            + Send
-            + 'static,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>, i64) -> Result<R, DbError> + Send + 'static,
     ) -> Result<R, DbError> {
         let id = self.id;
         self.database.call(move |inner| inner.inputs.read(|db, call| run(db, call, id))).await
@@ -564,9 +559,7 @@ impl RetainedInput {
 
     async fn write<R: Send + 'static>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>, i64) -> Result<R, DbError>
-            + Send
-            + 'static,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>, i64) -> Result<R, DbError> + Send + 'static,
     ) -> Result<R, DbError> {
         let id = self.id;
         self.database.call(move |inner| inner.inputs.write(|db, call| run(db, call, id))).await
@@ -634,7 +627,7 @@ impl RetainedInput {
         let offset = sql_offset(offset)?;
         let end = sql_offset(end)?;
         let id = self.id;
-        self.database.call(move |inner| inner.inputs.write(|db: &DatabaseConnection, _| {
+        self.database.call(move |inner| inner.inputs.write(|db: &StoreSql, _| {
             if !bytes.is_empty() {
                 db.execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
             }
@@ -713,7 +706,7 @@ impl RetainedInput {
         if self.files().await?.as_ref() == Some(&files) {
             return Ok(());
         }
-        self.write(move |db: &DatabaseConnection, _, id| {
+        self.write(move |db: &StoreSql, _, id| {
             db.execute("DELETE FROM _coven_input_files WHERE object=?1", [id])?;
             db.execute("DELETE FROM _coven_input_unread WHERE object=?1", [id])?;
             let (complete, schema) = match &files {

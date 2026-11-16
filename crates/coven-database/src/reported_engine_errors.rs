@@ -60,3 +60,7 @@ pub(crate) fn raised(
             .map(|error| DbError::from(*error)),
     }
 }
+
+#[cfg(test)]
+#[path = "reported_engine_errors_tests.rs"]
+mod tests;

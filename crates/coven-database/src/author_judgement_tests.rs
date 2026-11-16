@@ -237,7 +237,7 @@ async fn only_the_owner_dismisses_a_removed_row() {
             .filter(|value| matches!(value.target, crate::lost::LossTarget::Removed { .. }))
             .collect();
         assert_eq!(removed.len(), 1);
-        let owner = if removed[0].key.0[0] == rusqlite::types::Value::Text("ana".into()) {
+        let owner = if removed[0].key.0[0] == sqlive::rusqlite::types::Value::Text("ana".into()) {
             ANA
         } else {
             BEN
@@ -547,11 +547,12 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     let crate::lost::LossTarget::Removed { row, .. } = removed[0].target.clone() else {
         panic!("{removed:?}")
     };
-    let (owner, other) = if removed[0].key.0[0] == rusqlite::types::Value::Text("ana".into()) {
-        (ANA, 1)
-    } else {
-        (BEN, 0)
-    };
+    let (owner, other) =
+        if removed[0].key.0[0] == sqlive::rusqlite::types::Value::Text("ana".into()) {
+            (ANA, 1)
+        } else {
+            (BEN, 0)
+        };
     let (db, owners) = if other == 1 { (ben, ana) } else { (ana, ben) };
     owners.close().await.unwrap();
     refused_for(db.dismiss_lost_values(&removed).await.unwrap_err(), "labels", owner);

@@ -7,7 +7,7 @@
 //! it copied. The record lives apart from merge generations and dismissible
 //! losses, so none of them can change it.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_failure::{hosted, Hosted};
@@ -15,7 +15,7 @@ use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::write_sources::ChangeId;
 use coven_merge::{Audience, RowId, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 /// A row's selected generation-zero insert and the creation it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub(crate) struct Creation {
 }
 
 /// The selected creation of a row, if any write has created it.
-pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Creation>, DbError> {
+pub(crate) fn creation(db: &StoreSql, row: &RowId) -> Result<Option<Creation>, DbError> {
     Ok(db.query(
         "SELECT write_id,creator FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
@@ -44,7 +44,7 @@ pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Cr
 /// Offer a part's generation-zero inserts as creations, before any check
 /// decides about them (§9.6).
 pub(crate) fn offer_part(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     part: &coven_format::write::WritePart,
@@ -59,7 +59,7 @@ pub(crate) fn offer_part(
 /// generation-zero insert. Rows are keyed by their current table names; the
 /// creation keeps the original change's own names.
 pub(crate) fn offer_change(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
@@ -107,7 +107,7 @@ pub(crate) const LOADED: &str =
 
 /// Put back the creation the counted projection kept of `row`, if it kept
 /// one (`published`).
-pub(crate) fn restore_published(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
+pub(crate) fn restore_published(db: &StoreSql, row: &RowId) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
@@ -117,7 +117,7 @@ pub(crate) fn restore_published(db: &DatabaseConnection, row: &RowId) -> Result<
 
 /// Forget `row`'s creation, which a restoration puts back from what the
 /// counted projection kept.
-pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
+pub(crate) fn forget_row(db: &StoreSql, row: &RowId) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
@@ -126,14 +126,14 @@ pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbE
 }
 
 /// Forget an audience's creations before a loaded snapshot supplies them.
-pub(crate) fn clear_audience(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+pub(crate) fn clear_audience(db: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_creations WHERE audience=?1", [audience])?;
     Ok(())
 }
 
 /// Visit an audience's creations in row order.
 pub(crate) fn visit<E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &Audience,
     mut visit: impl FnMut(RowId, Creation) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -170,13 +170,13 @@ pub(crate) fn owner_table(schema: &crate::write_schema::WriteSchema, table: &str
 }
 
 /// Carry an audience's creations across a table rename (§18.4).
-pub(crate) fn rename(db: &DatabaseConnection, from: &str, to: &str) -> Result<(), DbError> {
+pub(crate) fn rename(db: &StoreSql, from: &str, to: &str) -> Result<(), DbError> {
     db.execute("UPDATE _coven_creations SET table_name=?2 WHERE table_name=?1", params![from, to])?;
     Ok(())
 }
 
 /// Forget a dropped table's creations.
-pub(crate) fn forget_table(db: &DatabaseConnection, table: &str) -> Result<(), DbError> {
+pub(crate) fn forget_table(db: &StoreSql, table: &str) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_creations WHERE table_name=?1", [table])?;
     Ok(())
 }

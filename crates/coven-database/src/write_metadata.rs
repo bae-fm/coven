@@ -1,12 +1,12 @@
 //! Fallible SQL reads behind the merge decoder's immutable metadata oracle.
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     write_encoding::{counter, decoded, slot_counter},
     DbError,
 };
 use coven_merge::{MergeError, Slot, Timestamp, WriteId, WriteOracle};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 /// A record decoded against write metadata failed: reading the metadata
 /// failed, or the record failed the format's or the merge's checks. The
@@ -58,7 +58,7 @@ pub(crate) struct StoredWrite {
 
 /// The number of `device`'s newest write in `_coven_writes`, if it has one.
 pub(crate) fn newest_number(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<Option<u64>, DbError> {
     let newest: Option<Vec<u8>> = db.query_row(
@@ -73,7 +73,7 @@ pub(crate) fn newest_number(
 /// landed. A device's writes land in the order it numbered them, and this
 /// device keeps each device's last landed write's entry, whatever else it
 /// forgot (§16.7).
-pub(crate) fn landed(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
+pub(crate) fn landed(db: &StoreSql, write: WriteId) -> Result<bool, DbError> {
     Ok(db.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number>=?2 AND slot IS NOT NULL)"
@@ -88,7 +88,7 @@ pub(crate) fn landed(db: &DatabaseConnection, write: WriteId) -> Result<bool, Db
 /// device's writes land in the order it numbered them, so its later writes'
 /// landing shows its own (§6.3, §9.5).
 pub(crate) fn landed_before(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     landing: WriteId,
 ) -> Result<bool, DbError> {
@@ -111,10 +111,7 @@ pub(crate) fn landed_before(
 /// write's entry stays (§16.7), so for a write landing for the first time
 /// this is that last write; for one a reload stages again, the nearest
 /// earlier write this device keeps.
-pub(crate) fn landed_below(
-    db: &DatabaseConnection,
-    write: WriteId,
-) -> Result<Option<StoredWrite>, DbError> {
+pub(crate) fn landed_below(db: &StoreSql, write: WriteId) -> Result<Option<StoredWrite>, DbError> {
     Ok(db
         .query(
             &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number<?2 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
@@ -128,7 +125,7 @@ pub(crate) fn landed_below(
 /// `slot`: then `write` landed before `slot` too, since a device's writes
 /// land in number order, and `slot` repeats it (§16.7).
 pub(crate) fn later_landed_before(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     slot: coven_merge::Slot,
 ) -> Result<bool, DbError> {
@@ -150,7 +147,7 @@ pub(crate) fn later_landed_before(
 /// so its landed write with the greatest number landed last; its applied
 /// slot never goes back, so that write read furthest (§6.3, §7.1).
 pub(crate) fn last_landed_read(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<Option<u64>, DbError> {
     Ok(db
@@ -165,7 +162,7 @@ pub(crate) fn last_landed_read(
 /// The least `read_through` among `device`'s writes still queued, if it has
 /// any: this device's own writes waiting for a slot (§6.2).
 pub(crate) fn queued_read(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<Option<u64>, DbError> {
     let least: Option<Vec<u8>> = db.query_row(
@@ -177,10 +174,7 @@ pub(crate) fn queued_read(
 }
 
 /// `id`'s row in `_coven_writes`, if coven has stored it.
-pub(crate) fn stored_write(
-    db: &DatabaseConnection,
-    id: WriteId,
-) -> Result<Option<StoredWrite>, DbError> {
+pub(crate) fn stored_write(db: &StoreSql, id: WriteId) -> Result<Option<StoredWrite>, DbError> {
     let mut rows = db.query(
         &format!(
             "SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
@@ -192,7 +186,7 @@ pub(crate) fn stored_write(
 }
 
 /// An entry selected as `id,timestamp,read_through,slot`.
-fn stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredWrite> {
+fn stored(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<StoredWrite> {
     Ok(StoredWrite {
         ordinal: r.get(0)?,
         timestamp: decoded(coven_format::merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(1)?))?,
@@ -203,10 +197,10 @@ fn stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredWrite> {
 
 /// The metadata of the writes coven applied, read from `_coven_writes`.
 pub(crate) struct DatabaseMetadata<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
 }
 impl<'a> DatabaseMetadata<'a> {
-    pub(crate) fn new(db: &'a DatabaseConnection) -> Self {
+    pub(crate) fn new(db: &'a StoreSql) -> Self {
         Self { db }
     }
 }

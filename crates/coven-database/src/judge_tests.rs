@@ -159,7 +159,8 @@ async fn lost(db: &StoreDatabase, table: &str, row: &str) -> Vec<LostValue> {
         .unwrap()
         .into_iter()
         .filter(|value| {
-            value.table == table && value.key.0 == [rusqlite::types::Value::Text(row.into())]
+            value.table == table
+                && value.key.0 == [sqlive::rusqlite::types::Value::Text(row.into())]
         })
         .collect()
 }

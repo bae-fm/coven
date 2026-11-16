@@ -60,7 +60,7 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     let record = records(&a).remove(0);
     b.inspect_writer(|sql, _| sql.batch("CREATE TRIGGER fail_apply AFTER INSERT ON notes BEGIN SELECT RAISE(ROLLBACK,'transaction refused'); END").unwrap());
     assert!(
-        matches!(b.receive(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
+        matches!(b.receive(record.clone().into()).await,Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
     );
     for table in ["notes", "_coven_rows", "_coven_cells", "_coven_writes", "_coven_lost"] {
         assert_eq!(count(&b, table), 0, "{table}");
@@ -165,7 +165,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                 db.receive(incoming.clone().into()).await
             };
             match result {
-                Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))))
+                Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message))))
                     if message == "injected apply failure" =>
                 {
                     assert_eq!(contents(&db), before, "streamed={streamed}, step={step}");
@@ -355,4 +355,34 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
     for db in [a, b] {
         db.close().await.unwrap();
     }
+}
+
+/// Applying another device's write records the values a waiting live
+/// query's scope tests, as a local write does: another release's tracks
+/// wake nothing (§4).
+#[tokio::test]
+async fn another_devices_writes_record_scoped_values() {
+    use coven_format::value::Value;
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("tracks", RowIdentity::SharedKey)],
+            "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, title TEXT)",
+        )
+        .await
+        .unwrap();
+    sql(&db, "INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')").await.unwrap();
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
+            r.get::<_, String>(0)
+        })?)
+    });
+    assert_eq!(crate::tests::next(&mut query).await, ["one"]);
+    crate::tests::remote_update(&db, "tracks", "2", &[("title", Value::Text("deux".into()))]).await;
+    assert!(!query.is_marked_for_rerun());
+    crate::tests::remote_update(&db, "tracks", "1", &[("title", Value::Text("uno".into()))]).await;
+    assert_eq!(crate::tests::next(&mut query).await, ["uno"]);
+    crate::tests::remote_update(&db, "tracks", "2", &[("release", Value::Text("a".into()))]).await;
+    assert_eq!(crate::tests::next(&mut query).await, ["uno", "deux"]);
+    db.close().await.unwrap();
 }

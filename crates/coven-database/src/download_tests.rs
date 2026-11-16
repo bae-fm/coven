@@ -9,7 +9,7 @@ use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Timestamp;
 use coven_merge::{Audience, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -250,12 +250,12 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     sql(&receiver, "INSERT INTO pins VALUES('n')").await.unwrap();
     let before = crate::tests::data(&receiver, Audience::Store);
     assert!(
-        matches!(sql(&receiver,"DELETE FROM notes").await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
+        matches!(sql(&receiver,"DELETE FROM notes").await,Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
     );
     sql(&source, "DELETE FROM notes").await.unwrap();
     let deleted = records(&source).remove(1);
     assert!(
-        matches!(receiver.receive(deleted.into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
+        matches!(receiver.receive(deleted.into()).await,Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
     );
     assert_eq!(count(&source, "notes"), 0);
     assert_eq!(count(&receiver, "notes"), 1);
@@ -376,7 +376,7 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
         let losses = db.lost_values().await.unwrap();
         assert_eq!(losses.len(), 1, "{order:?}");
         assert!(
-            matches!(&losses[0].lost,crate::Lost::Cell(cell) if cell.column=="parent" && cell.value==rusqlite::types::Value::Text("p".into()) && cell.set_by==changes[1].header.position),
+            matches!(&losses[0].lost,crate::Lost::Cell(cell) if cell.column=="parent" && cell.value==sqlive::rusqlite::types::Value::Text("p".into()) && cell.set_by==changes[1].header.position),
             "{order:?}: {losses:?}"
         );
         assert_eq!(losses[0].replaced_by, crate::Replacement::Write(changes[2].header.position));
@@ -450,7 +450,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&receiver, "_coven_lost"), 2);
     source.inspect_writer(|sql, _| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
     assert!(
-        matches!(crate::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
+        matches!(crate::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
     );
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);

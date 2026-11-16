@@ -11,12 +11,12 @@
 //! written value.
 
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_foundation::id_source::CircleId;
 use coven_merge::{Audience, RowId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// change, among the audiences the reload replaces and the rows that
 /// depend on them.
 pub(crate) fn rows(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     deleted: &BTreeMap<CircleId, coven_merge::Slot>,
 ) -> Result<BTreeSet<RowId>, DbError> {
@@ -180,7 +180,7 @@ pub(crate) fn rows(
 /// Installed rows taking a unique value the app's table shows for a row
 /// with another key: the row giving it up must be put first.
 fn taken(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     table: &TableLayout,
     unique: &crate::removal_schema::UniqueSql,

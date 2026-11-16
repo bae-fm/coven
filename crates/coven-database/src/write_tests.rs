@@ -419,7 +419,7 @@ async fn a_failed_statement_the_closure_ignores_fails_the_write() {
         .write(|context| {
             let found = context
                 .query_row("SELECT title FROM notes WHERE id='a'", [], |r| r.get::<_, String>(0));
-            assert!(matches!(found, Err(rusqlite::Error::QueryReturnedNoRows)));
+            assert!(matches!(found, Err(sqlive::rusqlite::Error::QueryReturnedNoRows)));
             context.execute("INSERT INTO notes(id,title) VALUES('a','Groceries')", [])?;
             Ok(())
         })
@@ -441,7 +441,7 @@ async fn a_null_key_is_refused_by_sqlite_before_capture() {
         .unwrap();
     let error = sql(&database, "INSERT INTO tags VALUES(NULL)").await.unwrap_err();
     assert!(
-        matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e,_)) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL)
+        matches!(error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(e,_)) if e.extended_code == sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL)
     );
     assert_eq!(count(&database, "tags"), 0);
     assert!(records(&database).is_empty());
@@ -732,7 +732,7 @@ async fn an_immediate_foreign_key_fails_at_the_app_statement() {
     let db = fixture.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))").await.unwrap();
     let result = db.write(|context| {
         let error = context.execute("INSERT INTO children VALUES('c','missing')",[]).expect_err("immediate foreign key must fail before the next statement");
-        assert!(matches!(error,rusqlite::Error::SqliteFailure(e,_) if e.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY));
+        assert!(matches!(error,sqlive::rusqlite::Error::SqliteFailure(e,_) if e.extended_code==sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY));
         context.execute("INSERT INTO parents VALUES('p')",[])?;
         Ok(())
     }).await;

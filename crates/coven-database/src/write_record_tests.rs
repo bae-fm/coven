@@ -113,7 +113,7 @@ async fn recording_a_writes_rows_prepares_no_statement_again_per_row() {
 }
 
 /// How many times SQLite prepared each statement again during one write.
-fn reprepares(statements: &[crate::sqlite::tests::ProfiledStatement]) -> BTreeMap<String, i32> {
+fn reprepares(statements: &[sqlive::ProfiledStatement]) -> BTreeMap<String, i32> {
     let mut first = BTreeMap::new();
     let mut again = BTreeMap::new();
     for statement in statements {

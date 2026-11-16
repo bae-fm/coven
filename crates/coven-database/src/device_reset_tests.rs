@@ -1,6 +1,6 @@
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1));
          INSERT INTO _coven_device_id_in_use VALUES(1,x'0000000000000001');",

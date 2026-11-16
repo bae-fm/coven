@@ -13,15 +13,15 @@
 
 use crate::file_write::FileWrite;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_foundation::id_source::FileId;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use sqlive::sql::identifier;
 
 pub(crate) fn protect(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     layout: &SnapshotLayout,
     files: &FileWrite<'_>,
@@ -80,7 +80,7 @@ pub(crate) fn protect(
 
 /// The files the protected keys' rows reference through `column`, as
 /// `_coven_file_references` keeps them.
-fn references(db: &DatabaseConnection, table: &TableLayout, column: &str) -> Result<(), DbError> {
+fn references(db: &StoreSql, table: &TableLayout, column: &str) -> Result<(), DbError> {
     // A cell on a column the table no longer has references nothing.
     let Some(j) = table.columns.iter().position(|name| name == column) else {
         return Ok(());
@@ -108,7 +108,7 @@ fn references(db: &DatabaseConnection, table: &TableLayout, column: &str) -> Res
 /// of coordinates; its stored file, from the record the app's table shows;
 /// and, for a record with any of its own here, what this device keeps for
 /// it, as one row at a time would settle it.
-fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> {
+fn records(db: &StoreSql, table: &TableLayout) -> Result<(), DbError> {
     let Some(j) = table
         .columns
         .iter()
@@ -203,7 +203,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
 /// Replace the protected keys' file references with the ones their rows
 /// hold now. A file whose last reference went while this device still has
 /// its record waits for this device's own write to delete it (§17.2).
-fn released(db: &DatabaseConnection) -> Result<(), DbError> {
+fn released(db: &StoreSql) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO temp._coven_install_released(file)
          SELECT r.file FROM temp._coven_install_protected p

@@ -2,7 +2,7 @@
 //! part's direct admission by the selected boundaries and the slot cut-off, then every admitted change's permission and data sources (§9.5,
 //! §9.6, §14.1, §18.6, §19.4). The original changes keep their kept
 //! records (format.md D7.3); only this interpretation reaches the merge.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -44,7 +44,7 @@ enum Interpretation {
 /// the write's parts on the connection staging it, under the schema it was
 /// judged with.
 pub(crate) struct Interpreter<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     call: &'a StoreCall<'a>,
     schema: &'a WriteSchema,
     header: WriteHeader,
@@ -57,7 +57,7 @@ impl<'a> Interpreter<'a> {
     /// records the caller has staged. Changes in other parts this device
     /// holds keep the verdicts already recorded for them.
     pub(crate) fn new(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         header: &WriteHeader,
@@ -346,7 +346,7 @@ fn provenance(record: &OriginalRow) -> Provenance<ChangeId> {
 /// change that does not survive, followed within the write as a least
 /// closure, so a cycle without a failed cause drops nothing.
 fn verdicts(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &WriteHeader,
     judgement: &crate::judge::Judgement,
     mut sources: BTreeMap<RowId, Provenance<ChangeId>>,
@@ -417,7 +417,7 @@ fn verdicts(
 /// Keep one original row change as a frozen loss with its written values:
 /// new values for an insert or update, old scalar values for a delete.
 fn freeze(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,

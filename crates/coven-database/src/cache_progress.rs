@@ -1,7 +1,7 @@
 //! Pin progress as a query over committed cache coverage (§17.8, E8).
 //! Nothing here counts bytes in flight.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, FileRef, LiveQuery, StoreDatabase};
 use coven_foundation::id_source::{DeviceId, FileId};
 
@@ -26,11 +26,7 @@ pub struct PinProgress {
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn covered(
-    db: &DatabaseConnection,
-    file: &FileRef,
-    device: DeviceId,
-) -> Result<u64, DbError> {
+pub(crate) fn covered(db: &StoreSql, file: &FileRef, device: DeviceId) -> Result<u64, DbError> {
     match file.place() {
         crate::FilePlace::DeviceOnly { device: on } if on == device => return Ok(file.size()),
         crate::FilePlace::DeviceOnly { .. } => return Ok(0),
@@ -61,7 +57,7 @@ pub(crate) fn covered(
 /// Requested files' verified coverage. A pin completes with its checked
 /// whole file; a file only on this device is already whole here.
 pub(crate) fn pin_progress(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     files: &[FileRef],
     device: DeviceId,
 ) -> Result<PinProgress, DbError> {
@@ -92,10 +88,7 @@ pub(crate) fn pin_progress(
 /// The answer is whether `coven_pins` lists the file, so the app's SQL and
 /// this call agree. It reads no merge state, so a live query of it reruns
 /// only for those tables' changes.
-pub(crate) fn files_pinned(
-    db: &DatabaseConnection,
-    files: &[FileId],
-) -> Result<Vec<Option<bool>>, DbError> {
+pub(crate) fn files_pinned(db: &StoreSql, files: &[FileId]) -> Result<Vec<Option<bool>>, DbError> {
     files
         .iter()
         .map(|file| {

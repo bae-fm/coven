@@ -3,7 +3,7 @@
 //! the removal rules leave over them (§16.2, §8.4). Each case compares the
 //! loading device with the device that wrote the snapshot.
 use crate::snapshot_write::tests::{decode, frames, id, load_one, SnapshotFrames};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::{Migration, RowIdentity, StoreDatabase, SyncedTable};
@@ -77,7 +77,7 @@ pub(crate) fn recorded(db: &StoreDatabase) -> Vec<Vec<crate::types::Value>> {
 }
 
 /// Every table's rows, ordered.
-pub(crate) fn everything(db: &DatabaseConnection) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
+pub(crate) fn everything(db: &StoreSql) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
     let tables = db
         .query(
             "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",

@@ -103,7 +103,7 @@ fn process_crashes_keep_every_unclaimed_file_recorded_and_reopen_removes_it() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+        let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
         let pending: i64 =
             raw.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r.get(0)).unwrap();
         assert_eq!(pending, 1, "{phase}");
@@ -452,7 +452,7 @@ async fn a_referenced_path_cannot_be_recorded_for_removal() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;",
     )

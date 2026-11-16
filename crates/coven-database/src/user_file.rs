@@ -1,7 +1,7 @@
 //! Preparing an original does no database work and never changes the file.
 
 use crate::file_hashes::{FileHasher, FileHashes};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::files::{FileLease, ObservationError, UserOriginal};
 use std::{
@@ -120,7 +120,7 @@ pub(crate) fn encode_time(time: SystemTime) -> Vec<u8> {
 /// Record `original` as `file`'s original on this device, with the content
 /// hash and chunk hashes of the bytes its read found (§17.3).
 pub(crate) fn record(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: coven_foundation::id_source::FileId,
     original: &UserFile,
     hashes: &FileHashes,
@@ -128,7 +128,7 @@ pub(crate) fn record(
     let size = crate::sqlite::integer("file size", original.size)?;
     db.execute(
         "INSERT INTO _coven_user_files(file,path,size,modified_at,hash) VALUES(?1,?2,?3,?4,?5)",
-        rusqlite::params![
+        sqlive::rusqlite::params![
             file,
             coven_foundation::files::path_bytes(&original.path),
             size,
@@ -139,7 +139,7 @@ pub(crate) fn record(
     for (index, hash) in hashes.chunks().iter().enumerate() {
         db.execute(
             "INSERT INTO _coven_user_chunks(file,chunk,hash) VALUES(?1,?2,?3)",
-            rusqlite::params![file, index as i64, hash.as_bytes().as_slice()],
+            sqlive::rusqlite::params![file, index as i64, hash.as_bytes().as_slice()],
         )?;
     }
     Ok(())
@@ -148,7 +148,7 @@ pub(crate) fn record(
 /// Forget `file`'s original here, and its chunk hashes with it: the file
 /// never touches it again (§17.3).
 pub(crate) fn forget(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: coven_foundation::id_source::FileId,
 ) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_user_files WHERE file=?1", [file])?;
@@ -158,19 +158,19 @@ pub(crate) fn forget(
 /// The new file `to` over `from`'s bytes shares `from`'s original here and
 /// its chunk hashes (§17.2).
 pub(crate) fn share(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     from: coven_foundation::id_source::FileId,
     to: coven_foundation::id_source::FileId,
 ) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_user_files(file,path,size,modified_at,hash)
          SELECT ?2,path,size,modified_at,hash FROM _coven_user_files WHERE file=?1",
-        rusqlite::params![from, to],
+        sqlive::rusqlite::params![from, to],
     )?;
     db.execute(
         "INSERT INTO _coven_user_chunks(file,chunk,hash)
          SELECT ?2,chunk,hash FROM _coven_user_chunks WHERE file=?1",
-        rusqlite::params![from, to],
+        sqlive::rusqlite::params![from, to],
     )?;
     Ok(())
 }
@@ -178,7 +178,7 @@ pub(crate) fn share(
 /// The files the upload `upload` switches are stored: a stored file never
 /// moves again, so its original's chunk hashes go; the original stays
 /// recorded (§17.3).
-pub(crate) fn uploaded(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
+pub(crate) fn uploaded(db: &StoreSql, upload: i64) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_user_chunks
          WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1)",
@@ -191,7 +191,7 @@ pub(crate) fn uploaded(db: &DatabaseConnection, upload: i64) -> Result<(), DbErr
 /// if it has one. Its chunk hashes are kept only while the file is on this
 /// device only: they go once it is stored (§17.3).
 pub(crate) fn hashes(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<FileHashes>, DbError> {
     let Some(content) = db
@@ -216,7 +216,7 @@ pub(crate) fn hashes(
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn read(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<UserFile>, DbError> {
     db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE file=?1", [file], |row| {

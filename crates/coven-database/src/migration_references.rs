@@ -1,7 +1,7 @@
 //! Recheck references reached from changed parents, using the reverse indexes.
 
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_rows::{row_id, AppKey, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -9,7 +9,7 @@ use coven_merge::Parent;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn changes(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     before: &AppView<'_>,
     visible: &AppView<'_>,

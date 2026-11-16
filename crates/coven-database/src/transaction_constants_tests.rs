@@ -81,7 +81,7 @@ async fn a_read_reads_the_schema_cookie_once() {
                             r.get::<_, String>(0)
                         })
                     })
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
+                    .collect::<sqlive::rusqlite::Result<Vec<_>>>()?,
             )
         })
         .await

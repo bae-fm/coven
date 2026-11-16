@@ -476,23 +476,6 @@
         "unit": "ms"
       }
     },
-    "statistics": {
-      "statistics/analyze_every_row": {
-        "median": 11.010208,
-        "spread": 0.017063710331358117,
-        "unit": "ms"
-      },
-      "statistics/first_optimize": {
-        "median": 1.539375,
-        "spread": 0.038299959399106825,
-        "unit": "ms"
-      },
-      "statistics/optimize_nothing_changed": {
-        "median": 0.193083,
-        "spread": 0.073372591061875,
-        "unit": "ms"
-      }
-    },
     "store-size": {
       "ten_thousand_row_store_bytes": {
         "median": 19976192.0,

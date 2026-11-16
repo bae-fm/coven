@@ -2,14 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::hooks::Action;
+use sqlive::rusqlite::hooks::Action;
 
-use crate::sqlite::Operation;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{key_columns, row_key, AppKey, AppValues};
 use crate::write_schema::WriteSchema;
 use crate::{DbError, RowIdentity, RowKey};
 use coven_format::value::Value;
+use sqlive::Operation;
 
 /// A row's values before the write; empty if it did not exist.
 pub(crate) struct CapturedRow {

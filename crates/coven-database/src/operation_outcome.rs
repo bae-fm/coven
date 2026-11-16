@@ -125,10 +125,12 @@ impl OperationOutcome {
 }
 
 /// Reads `coven_operations.outcome`, once it is not NULL.
-impl rusqlite::types::FromSql for OperationOutcome {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+impl sqlive::rusqlite::types::FromSql for OperationOutcome {
+    fn column_result(
+        value: sqlive::rusqlite::types::ValueRef<'_>,
+    ) -> sqlive::rusqlite::types::FromSqlResult<Self> {
         serde_json::from_slice(value.as_blob()?)
-            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+            .map_err(|error| sqlive::rusqlite::types::FromSqlError::Other(Box::new(error)))
     }
 }
 

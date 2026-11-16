@@ -2,7 +2,7 @@
 //! merge's own result for the write's rows, so the write itself deletes
 //! their records.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     file_protection::{loss_files, state_files},
@@ -19,7 +19,7 @@ use coven_format::{
 };
 use coven_foundation::id_source::FileId;
 use coven_merge::{RowId, RowUpdate, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The files whose last reference `record` removes: each one an app row it
@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// row that removal rules took out keeps its cells, so its own lost record
 /// adds none (§8.4). Merging here persists nothing.
 pub(crate) fn unreferenced(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
     record: &WriteRecord,
@@ -84,7 +84,7 @@ pub(crate) fn unreferenced(
 /// The deletion of each of `files`' records, as row changes of coven's
 /// files table, the first at step `sequence` and each next one after it.
 pub(crate) fn deletions(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     files: &BTreeSet<FileId>,
@@ -109,7 +109,7 @@ pub(crate) fn deletions(
 /// each of its audiences' merged state, the write's rows as merging gives
 /// them, and its frozen lost values, less the cells `dismissals` name.
 fn files_after(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
     key: &AppKey,

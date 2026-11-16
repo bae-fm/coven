@@ -1,7 +1,7 @@
 //! The shared merge, removal, and materialization transaction body.
 use crate::merge_store::MergeStore;
 use crate::removal_view::DatabaseRemovalView;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
@@ -19,7 +19,7 @@ pub(crate) struct Applied {
 }
 
 pub(crate) struct WriteApply<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     call: &'a StoreCall<'a>,
     schema: &'a WriteSchema,
     store: &'a MergeStore<'a>,
@@ -39,7 +39,7 @@ pub(crate) struct WriteApply<'a> {
 
 impl<'a> WriteApply<'a> {
     pub(crate) fn new(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         store: &'a MergeStore<'a>,
@@ -63,7 +63,7 @@ impl<'a> WriteApply<'a> {
     /// Apply a local write's record, whose inserted rows the app's own
     /// statements gave to SQLite to judge.
     pub(crate) fn local(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         store: &'a MergeStore<'a>,

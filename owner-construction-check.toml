@@ -84,7 +84,7 @@ capability_types = [
     "OAuthClients",
     "OAuthPresenter",
     "OAuthSession",
-    "DatabaseConnection",
+    "HostSql",
     # The reqwest client every HTTPS request goes through, with the clock its
     # stall window is timed by (§6.7, F.1): the provider connector holds one
     # and the sign-in exchange another, each built where its holder is.
@@ -145,7 +145,7 @@ construction_only_capability_types = [
     "PersonEntries",
     "OAuthClients",
     "OAuthSession",
-    "DatabaseConnection",
+    "HostSql",
     "HttpClient",
 ]
 non_owner_types = [
@@ -477,7 +477,7 @@ external_types = [
     "Mutex",
     "Condvar",
 ]
-internal_dependency_types = ["DatabaseConnection"]
+internal_dependency_types = ["HostSql"]
 closed_session_types = [
     "FileWrite",
     "JoiningWrite",
@@ -616,26 +616,13 @@ table_macros = [
     "coven_forgetting_tables",
     "coven_losses_tables",
 ]
-# The API re-exports the database crate's `rusqlite` so a host can name the
+# The API re-exports sqlive's `rusqlite`, through coven-database, so a host can name the
 # types its own SQL uses.
-rusqlite_reexport = "coven-database"
+rusqlite_reexport = "sqlive"
 # An open write: a function or closure taking one runs inside the write its
 # caller opened, so a domain's tables are written there or in its owner's
 # methods (F.2).
-write_types = ["DatabaseConnection"]
-# Public callables of a database home that take the raw connection (F.2).
-# coven-database passes the connection that prepared the statement; sqlive
-# holds no connection.
-[[database.raw_handle_parameters]]
-path = "crates/sqlive/src/scope_plan.rs"
-callable = "ScopePlan::build"
-
-# coven-database passes the connection that prepared the statement; sqlive
-# holds no connection.
-[[database.raw_handle_parameters]]
-path = "crates/sqlive/src/sql_value.rs"
-callable = "parameters"
-
+write_types = ["StoreSql"]
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement
 # or a trigger's body, create it and its indexes, and hold the tests that
@@ -1309,23 +1296,26 @@ tables = [
 "crates/sqlive/src/commit_scope.rs" = ["NEXT"]
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
 # holds for the whole process (§21.2).
-"crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
+"crates/sqlive/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
 # A connection's authorizer, whose state its SQLite hooks and the host's SQL
 # functions share.
-"crates/coven-database/src/authorization.rs" = [
+"crates/sqlive/src/authorization.rs" = [
     "SqlAuthorization::new",
     "SqlAuthorization::functions",
     "HostFunctions::function",
 ]
-# What a connection's setup registers on it, which `DatabaseConnection::open`
-# makes as it opens the connection.
-"crates/coven-database/src/connection_setup.rs" = ["Setup::new"]
-"crates/coven-database/src/sqlite.rs" = ["DatabaseConnection::open"]
+# What a connection's setup registers on it, which `HostSql::open` makes as
+# it opens the connection.
+"crates/sqlive/src/connection_setup.rs" = ["Setup::new"]
+"crates/sqlive/src/connection.rs" = ["HostSql::open"]
 # Coven's policy for a connection's authorizer, whose state the connection
 # shares with the authorizer: one judging for the handle that holds the
 # writer lock, one for a read-only handle. Opening a connection makes its
 # authorizer, which asks that policy. The connection hands itself to its
 # policy as the policy reads the connection's schema again.
+# The policy that judges nothing reads nothing again when the connection
+# hands itself to its refresh.
+"crates/sqlive/src/no_policy.rs" = ["NoPolicy::refresh"]
 "crates/coven-database/src/app_policy.rs" = [
     "CovenPolicy::new",
     "CovenPolicy::read_only",
@@ -1386,10 +1376,10 @@ tables = [
 # to its end with its record as its own task, though the call is dropped
 # (§17.3).
 "crates/coven-database/src/file_database_copies.rs" = ["CopyReservation::run_step"]
-"crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
+"crates/sqlive/src/read_pool.rs" = ["ReadPool::new"]
 # A database opens its writer, readers and upkeep threads, each connection
 # with a policy and setup of its own.
-"crates/coven-database/src/sqlite_database.rs" = ["Database::open_with"]
+"crates/sqlive/src/database.rs" = ["Database::open_with"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).
@@ -1406,11 +1396,11 @@ tables = [
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
 # Starts a thread of the store's upkeep, which the store stops and joins as
 # it closes (§4).
-"crates/coven-database/src/upkeep.rs" = ["UpkeepThread::spawn"]
+"crates/sqlive/src/upkeep.rs" = ["UpkeepThread::spawn"]
 # Starts a database's checkpointer on the store's upkeep thread (§4).
-"crates/coven-database/src/wal_checkpoints.rs" = ["UpkeepThread::start"]
+"crates/sqlive/src/wal_checkpoints.rs" = ["UpkeepThread::start"]
 # Starts the planner statistics' keeper on the store's upkeep thread (§4).
-"crates/coven-database/src/planner_statistics.rs" = ["UpkeepThread::start"]
+"crates/sqlive/src/planner_statistics.rs" = ["UpkeepThread::start"]
 # One per open store, which every connection tells of its commits (§4).
 "crates/sqlive/src/handle.rs" = [
     "Handle::new",
@@ -1876,7 +1866,7 @@ name = "current time"
 homes = [
     "crates/coven-foundation/src/clock.rs",
     # Times how long a checkpoint holds the writer, for a log line.
-    "crates/coven-database/src/wal_checkpoints.rs",
+    "crates/sqlive/src/wal_checkpoints.rs",
 ]
 
 [[capabilities.gates]]
@@ -1908,7 +1898,7 @@ name = "files on disk"
 homes = [
     "crates/coven-foundation/src/files/",
     # Checks the one folder an app names for SQLite's temporary tables.
-    "crates/coven-database/src/sqlite_temporary.rs",
+    "crates/sqlive/src/sqlite_temporary.rs",
 ]
 
 [[capabilities.gates]]

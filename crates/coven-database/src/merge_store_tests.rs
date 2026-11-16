@@ -3,7 +3,7 @@ use crate::write::tests::{records, sql};
 use crate::{RowIdentity, SyncedTable};
 use coven_format::{merge_fields, value::Value};
 use coven_merge::{Operation, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 #[tokio::test]
 async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
@@ -173,8 +173,8 @@ async fn reading_a_writes_keys_searches_the_key_index_and_scans_no_merge_rows() 
         .inspect_writer_schema(|db, _, _| {
             db.query(
                 &format!("EXPLAIN QUERY PLAN {}", super::key_rows_sql(super::KEY_CHUNK)),
-                rusqlite::params_from_iter(vec![
-                    rusqlite::types::Value::Null;
+                sqlive::rusqlite::params_from_iter(vec![
+                    sqlive::rusqlite::types::Value::Null;
                     2 * super::KEY_CHUNK
                 ]),
                 |r| r.get::<_, String>(3),

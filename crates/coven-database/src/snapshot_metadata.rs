@@ -1,14 +1,14 @@
 //! The decoder's oracle reads only identities carried by this snapshot.
 
 use crate::snapshot_error::{invalid, SnapshotError};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{counter, decoded, encoded, slot_counter};
 use crate::write_metadata::MetadataFailure;
 use crate::DbError;
 use coven_format::{merge_fields, snapshot::WriteSlots, snapshot_rows::AppliedWrite};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{MergeError, Timestamp, WriteId, WriteOracle};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 /// writes whose rows were excluded. Losses name these writes without repeating
 /// their headers or supplying additional oracle entries.
 pub(crate) struct SnapshotMetadata<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     /// The snapshot staged under this number on the input connection, or 0
     /// for the one snapshot a loading transaction installs at a time.
     source: i64,
@@ -36,23 +36,23 @@ const INSTALLING: i64 = 0;
 
 /// Create the table of staged snapshots' applied writes, in the connection's
 /// temporary storage.
-pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn create_table(db: &StoreSql) -> Result<(), DbError> {
     Ok(db.batch("CREATE TEMP TABLE _coven_snapshot_writes(source INTEGER NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(source,device,number)) WITHOUT ROWID")?)
 }
 
 /// Forget the applied writes of the snapshot staged as `source`.
-pub(crate) fn remove(db: &DatabaseConnection, source: i64) -> Result<(), DbError> {
+pub(crate) fn remove(db: &StoreSql, source: i64) -> Result<(), DbError> {
     db.execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
     Ok(())
 }
 
 impl<'a> SnapshotMetadata<'a> {
-    pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
+    pub(crate) fn new(database: &'a StoreSql) -> Self {
         Self::staged(database, INSTALLING)
     }
 
     /// The applied writes of the snapshot staged as `source` (§16.2).
-    pub(crate) fn staged(database: &'a DatabaseConnection, source: i64) -> Self {
+    pub(crate) fn staged(database: &'a StoreSql, source: i64) -> Self {
         Self { database, source, read: RefCell::new(BTreeMap::new()) }
     }
 
@@ -149,7 +149,7 @@ impl<'a> SnapshotMetadata<'a> {
 
 /// An applied write as `_coven_snapshot_writes` holds it, selected as
 /// [`STAGED_WRITES`] selects it.
-pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
+pub(crate) fn applied(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
         id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?)? },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,

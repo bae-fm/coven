@@ -447,7 +447,7 @@ async fn retained_openings_match_the_cell_proof_model() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_write_evidence SELECT CAST(device || n AS BLOB),x'00',x'00',x'',zeroblob(64) FROM fixture;
          INSERT INTO _coven_part_leaves SELECT CAST(device || n AS BLOB),audience,zeroblob(32) FROM fixture;

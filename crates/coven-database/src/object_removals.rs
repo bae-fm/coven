@@ -3,7 +3,7 @@
 //! (§13.2). Nothing references such an object; its row is only the deletion
 //! still owed.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 
 /// An object to delete from storage once `after` has passed.
@@ -15,7 +15,7 @@ pub struct ObjectRemoval {
     pub after: u64,
 }
 
-pub(crate) fn record(db: &DatabaseConnection, removal: &ObjectRemoval) -> Result<(), DbError> {
+pub(crate) fn record(db: &StoreSql, removal: &ObjectRemoval) -> Result<(), DbError> {
     let after = i64::try_from(removal.after)
         .map_err(|_overflow| DbError::Invariant { what: "an object's removal time fits i64" })?;
     db.execute(
@@ -27,7 +27,7 @@ pub(crate) fn record(db: &DatabaseConnection, removal: &ObjectRemoval) -> Result
 }
 
 /// The object at `path` is gone from storage: no deletion is owed.
-pub(crate) fn removed(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn removed(db: &StoreSql, path: &str) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_object_removals WHERE path=?1", [path])?;
     Ok(())
 }

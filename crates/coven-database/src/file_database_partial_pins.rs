@@ -5,7 +5,7 @@
 //! or when the stored bytes they are of leave this device.
 
 use super::{cache, BytesWriting, CacheReservation, FileDatabase};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
 
@@ -118,7 +118,7 @@ impl FileDatabase {
 /// The partial copy kept of `file`: its cache file and how many bytes of
 /// it are kept.
 #[expect(clippy::map_err_ignore, reason = "a stored size that won't convert is DamagedDatabase")]
-fn partial(db: &DatabaseConnection, file: &FileRef) -> Result<Option<(String, u64)>, DbError> {
+fn partial(db: &StoreSql, file: &FileRef) -> Result<Option<(String, u64)>, DbError> {
     let found = db
         .query(
             "SELECT path,size FROM _coven_cache_partials WHERE namespace=?1 AND object_path=?2",
@@ -135,7 +135,7 @@ fn partial(db: &DatabaseConnection, file: &FileRef) -> Result<Option<(String, u6
 /// updated when `kept`, which an unpin may have taken, and else made, naming
 /// the file's copy as a partial for the first time.
 fn record(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: &FileRef,
     name: &FileName,
     size: i64,
@@ -149,7 +149,7 @@ fn record(
         let updated = db.execute(
             "UPDATE _coven_cache_partials SET size=?4
              WHERE namespace=?1 AND object_path=?2 AND path=?3",
-            rusqlite::params![file.namespace(), object, name.as_str(), size],
+            sqlive::rusqlite::params![file.namespace(), object, name.as_str(), size],
         )?;
         return if updated == 1 { Ok(()) } else { Err(DbError::PinChanged { file: file.id() }) };
     }
@@ -157,18 +157,14 @@ fn record(
     crate::file_removals::keep(db, "cache", name.as_str())?;
     db.execute(
         "INSERT INTO _coven_cache_partials(namespace,object_path,path,size) VALUES(?1,?2,?3,?4)",
-        rusqlite::params![file.namespace(), object, name.as_str(), size],
+        sqlive::rusqlite::params![file.namespace(), object, name.as_str(), size],
     )?;
     Ok(())
 }
 
 /// Delete the partial copy of the stored bytes at `object` and record its
 /// cache file for removal; returns the name.
-pub(crate) fn remove(
-    db: &DatabaseConnection,
-    namespace: &str,
-    object: &str,
-) -> Result<Vec<String>, DbError> {
+pub(crate) fn remove(db: &StoreSql, namespace: &str, object: &str) -> Result<Vec<String>, DbError> {
     let paths = db.query(
         "DELETE FROM _coven_cache_partials WHERE namespace=?1 AND object_path=?2 RETURNING path",
         (namespace, object),

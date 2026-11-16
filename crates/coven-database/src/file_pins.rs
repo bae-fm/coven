@@ -4,10 +4,10 @@
 //! until the cache copy is made from it; a user's original is never read for
 //! the cache, so its request downloads from storage.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::{files::StagedName, id_source::FileId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 /// One file this device keeps whole as a switch asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub struct PinRequest {
 }
 
 /// Ask this device to keep `file` whole, from coven's copy when it has one.
-pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+pub(crate) fn request(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_pin_requests(file,copy)
          SELECT ?1,(SELECT path FROM _coven_device_files WHERE file=?1)
@@ -38,7 +38,7 @@ pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbErr
 /// End `file`'s request, if one waits: the app unpinned the file, or it is
 /// gone from this device or left its stored bytes. Returns whether a request
 /// waited.
-pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+pub(crate) fn end(db: &StoreSql, file: FileId) -> Result<bool, DbError> {
     let ended =
         db.query("DELETE FROM _coven_pin_requests WHERE file=?1 RETURNING copy", [file], |r| {
             r.get::<_, Option<String>>(0)
@@ -48,7 +48,7 @@ pub(crate) fn end(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError
 
 /// End the request `id`, if it still waits: its pin is made, or its file
 /// left the stored bytes. Returns whether it waited.
-pub(crate) fn end_request(db: &DatabaseConnection, id: i64) -> Result<bool, DbError> {
+pub(crate) fn end_request(db: &StoreSql, id: i64) -> Result<bool, DbError> {
     let ended =
         db.query("DELETE FROM _coven_pin_requests WHERE id=?1 RETURNING copy", [id], |r| {
             r.get::<_, Option<String>>(0)
@@ -58,7 +58,7 @@ pub(crate) fn end_request(db: &DatabaseConnection, id: i64) -> Result<bool, DbEr
 
 /// An ended request's record and wait went with its row; the copy it kept
 /// goes once nothing else names it. Returns whether a request ended.
-fn release(db: &DatabaseConnection, mut ended: Vec<Option<String>>) -> Result<bool, DbError> {
+fn release(db: &StoreSql, mut ended: Vec<Option<String>>) -> Result<bool, DbError> {
     let Some(copy) = ended.pop() else {
         return Ok(false);
     };
@@ -71,7 +71,7 @@ fn release(db: &DatabaseConnection, mut ended: Vec<Option<String>>) -> Result<bo
 /// The cache copy couldn't be made from coven's copy for request `id`: the
 /// pin downloads from storage instead, and the copy goes once nothing else
 /// names it.
-pub(crate) fn drop_copy(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn drop_copy(db: &StoreSql, id: i64) -> Result<(), DbError> {
     let copy = db
         .query("SELECT copy FROM _coven_pin_requests WHERE id=?1", [id], |r| {
             r.get::<_, Option<String>>(0)
@@ -86,7 +86,7 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, id: i64) -> Result<(), DbError>
 }
 
 /// Every request, with its persisted wait.
-pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> {
+pub(crate) fn read(db: &StoreSql) -> Result<Vec<PinRequest>, DbError> {
     db.query("SELECT id,file,copy FROM _coven_pin_requests ORDER BY file", [], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, FileId>(1)?, r.get::<_, Option<String>>(2)?))
     })?

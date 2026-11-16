@@ -1,0 +1,91 @@
+//! What the host registers on a connection as it opens, before any statement
+//! runs: SQL functions and collations.
+
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+
+use rusqlite::functions::{Context, FunctionFlags};
+use rusqlite::types::ToSql;
+
+use crate::authorization::{FunctionCall, HostFunctions, Policy, SqlAuthorization};
+
+/// What a connection's setup may register.
+pub struct Setup<'a, P: Policy> {
+    connection: &'a rusqlite::Connection,
+    functions: HostFunctions<P>,
+}
+
+impl<'a, P: Policy> Setup<'a, P> {
+    pub(crate) fn new(
+        connection: &'a rusqlite::Connection,
+        authorization: &SqlAuthorization<P>,
+    ) -> Self {
+        Self { connection, functions: authorization.functions() }
+    }
+
+    /// Run `register` on `connection`, a connection a test opened itself,
+    /// as the setup of a connection judged by `policy` would run it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn on_test_connection(
+        connection: &rusqlite::Connection,
+        policy: P,
+        register: impl FnOnce(&Setup<'_, P>) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<()> {
+        let authorization = SqlAuthorization::new(
+            std::sync::Arc::new(crate::WholeViews::new([])),
+            std::sync::Arc::new(policy),
+        );
+        register(&Setup::new(connection, &authorization))
+    }
+
+    /// Register `function` as `name`. rusqlite turns a function's panic into
+    /// an error that names no bug, so the authorizer catches the panic and
+    /// records it as a bug: the statement fails with the bug's text, and the
+    /// app's call fails with `Error::Bug` (E15).
+    pub fn scalar_function<T: ToSql>(
+        &self,
+        name: &'static str,
+        arguments: i32,
+        flags: FunctionFlags,
+        function: impl Fn(&FunctionCall<'_, P>) -> rusqlite::Result<T> + Send + 'static,
+    ) -> rusqlite::Result<()> {
+        self.connection.create_scalar_function(
+            name,
+            arguments,
+            flags,
+            self.functions.function(name, function),
+        )
+    }
+
+    /// Register `function` as `name`, a name only known as the connection
+    /// opens. Nothing catches a panic in it: the function ends the process
+    /// itself, or doesn't panic.
+    pub fn named_function<T: ToSql>(
+        &self,
+        name: &str,
+        arguments: i32,
+        flags: FunctionFlags,
+        function: impl Fn(&Context<'_>) -> rusqlite::Result<T> + Send + 'static,
+    ) -> rusqlite::Result<()> {
+        self.connection
+            .create_scalar_function(name, arguments, flags, move |context| function(context))
+    }
+
+    /// Register `compare` as the order the collation `name` gives text.
+    pub fn collation(
+        &self,
+        name: &str,
+        compare: impl Fn(&str, &str) -> Ordering + Send + 'static,
+    ) -> rusqlite::Result<()> {
+        self.connection.create_collation(name, compare)
+    }
+
+    /// The names of the functions registered so far, SQLite's own included,
+    /// in lowercase.
+    pub fn function_names(&self) -> rusqlite::Result<BTreeSet<String>> {
+        self.connection
+            .prepare("SELECT DISTINCT lower(name) FROM pragma_function_list")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect()
+    }
+}

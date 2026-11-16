@@ -1,6 +1,6 @@
 //! Resolve a file still on this device only to its one local byte source.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::task::{Bug, CarriesBug};
@@ -213,7 +213,7 @@ impl LocalFileReader {
 /// `None`: its bytes are read from the cache or storage, or it fails as its
 /// record says (§17.7). Reads only the database.
 pub(crate) fn device_only_source(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: DeviceId,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<LocalSource>, DbError> {
@@ -235,7 +235,7 @@ pub(crate) enum LocalSource {
 /// The bytes this device keeps for `file`, while it is on this device only;
 /// `None` for any other file. Reads only the database.
 fn file_source(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<LocalSource>, DbError> {
     if let Some(original) = crate::user_file::read(db, file)? {
@@ -255,10 +255,7 @@ fn file_source(
 
 /// The source an upload's entry fixed at staging; `None` once it is no
 /// longer queued. Reads only the database.
-pub(crate) fn queued_source(
-    db: &DatabaseConnection,
-    upload: i64,
-) -> Result<Option<LocalSource>, DbError> {
+pub(crate) fn queued_source(db: &StoreSql, upload: i64) -> Result<Option<LocalSource>, DbError> {
     let sources = db.query(
         "SELECT original,modified_at,copy FROM _coven_file_uploads WHERE id=?1",
         [upload],

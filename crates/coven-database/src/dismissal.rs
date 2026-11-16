@@ -2,7 +2,7 @@
 
 use crate::lost::LossTarget;
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
@@ -13,7 +13,7 @@ use coven_format::{
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Change, Operation, RowId, RowState};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The deletes and acknowledgements a local write's dismissals add to the
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// deletes fails with `DismissedRowChanged`: the delete is for good, and the
 /// app's change would make it something else.
 pub(crate) fn merge(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
@@ -155,7 +155,7 @@ fn dismisses(dismissal: &Dismissal, loss: &coven_format::loss::Loss) -> bool {
 
 /// The delete of a row, as this device authors it from its merged state.
 pub(crate) fn deletion(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     state: &RowState<Value>,
@@ -173,7 +173,7 @@ pub(crate) fn deletion(
 /// children. Record the same deletes, parent before child, with the written
 /// references that let every receiver verify the actions (§9.6).
 fn cascade_deletes(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
@@ -242,7 +242,7 @@ fn cascade_deletes(
     Ok(())
 }
 
-fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool, DbError> {
+fn contains(database: &StoreSql, dismissal: &Dismissal) -> Result<bool, DbError> {
     let row = &dismissal.row;
     let records = database.query(
         &format!(
@@ -263,7 +263,7 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
 /// Remove the lost values the write's dismissals name. Returns the rows
 /// whose losses it changed, whose file protection the caller refreshes.
 pub(crate) fn apply(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     record: &WriteRecord,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
@@ -305,7 +305,7 @@ pub(crate) fn apply(
 }
 
 pub(crate) fn validate_past(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &coven_format::write::WriteHeader,
     dismissal: &Dismissal,
 ) -> Result<(), DbError> {

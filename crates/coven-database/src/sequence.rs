@@ -1,7 +1,7 @@
 //! One committed store prefix, including claims whose contents were refused.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     write_encoding::{counter, slot_counter},
     DbError,
@@ -10,15 +10,15 @@ use coven_crypto::SigningKey;
 use coven_format::{admin::StoreChange, sequence::SlotHeader, snapshot::LastClaim};
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{ClaimOrder, Slot, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
-pub(crate) fn applied(db: &DatabaseConnection) -> Result<u64, DbError> {
+pub(crate) fn applied(db: &StoreSql) -> Result<u64, DbError> {
     Ok(db.query_row("SELECT applied FROM _coven_sequence WHERE singleton=1", [], |r| {
         counter(r.get(0)?)
     })?)
 }
 
-pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbError> {
+pub(crate) fn set_applied(db: &StoreSql, slot: u64) -> Result<(), DbError> {
     db.execute(
         "UPDATE _coven_sequence SET applied=?1 WHERE singleton=1",
         [slot.to_be_bytes().as_slice()],
@@ -26,7 +26,7 @@ pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbEr
     Ok(())
 }
 
-pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError> {
+pub(crate) fn claims(db: &StoreSql) -> Result<Vec<LastClaim>, DbError> {
     Ok(db.query(
         "SELECT device,number,digest FROM _coven_last_claims ORDER BY device",
         [],
@@ -41,11 +41,7 @@ pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError>
 }
 
 /// Coverage orders observations from different audience snapshots and their suffixes.
-pub(crate) fn note_record(
-    db: &DatabaseConnection,
-    claim: &LastClaim,
-    through: u64,
-) -> Result<(), DbError> {
+pub(crate) fn note_record(db: &StoreSql, claim: &LastClaim, through: u64) -> Result<(), DbError> {
     db.execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,?2,?3,?4) ON CONFLICT(device) DO UPDATE SET number=excluded.number,digest=excluded.digest,through=excluded.through WHERE excluded.through>=through AND excluded.number>=number",
         params![claim.device,claim.number.to_be_bytes(),claim.digest,through.to_be_bytes()])?;
     Ok(())
@@ -53,13 +49,13 @@ pub(crate) fn note_record(
 
 /// A device the store's state names starts with no claim: number zero,
 /// through slot zero. A device with a claim keeps it.
-pub(crate) fn note_device(db: &DatabaseConnection, device: DeviceId) -> Result<(), DbError> {
+pub(crate) fn note_device(db: &StoreSql, device: DeviceId) -> Result<(), DbError> {
     db.execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,zeroblob(8),NULL,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[device])?;
     Ok(())
 }
 
 pub(crate) fn note_claim(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &SlotHeader,
     slot: Slot,
     digest: [u8; 32],
@@ -71,7 +67,7 @@ pub(crate) fn note_claim(
     )
 }
 
-pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Option<Slot>, DbError> {
+pub(crate) fn write_slot(db: &StoreSql, write: WriteId) -> Result<Option<Slot>, DbError> {
     Ok(db.query_row(
         &format!(
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
@@ -82,7 +78,7 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
 }
 
 /// Local originals have no containing slot until their batch is applied.
-pub(crate) fn write_order(db: &DatabaseConnection, write: WriteId) -> Result<ClaimOrder, DbError> {
+pub(crate) fn write_order(db: &StoreSql, write: WriteId) -> Result<ClaimOrder, DbError> {
     Ok(match write_slot(db, write)? {
         Some(slot) => ClaimOrder::Published { slot, number: write.number },
         None => ClaimOrder::Local { number: write.number },
@@ -90,11 +86,7 @@ pub(crate) fn write_order(db: &DatabaseConnection, write: WriteId) -> Result<Cla
 }
 
 /// Record the irrevocable cut-off introduced by an applied admin slot.
-pub(crate) fn cutoff(
-    db: &DatabaseConnection,
-    slot: Slot,
-    change: &StoreChange,
-) -> Result<(), DbError> {
+pub(crate) fn cutoff(db: &StoreSql, slot: Slot, change: &StoreChange) -> Result<(), DbError> {
     let (device, member, signing) = match change {
         StoreChange::RemoveDevice { device }
         | StoreChange::AddDevice { replaces: Some(device), .. } => (Some(*device), None, None),
@@ -115,7 +107,7 @@ pub(crate) fn cutoff(
 /// Replace every recorded cut-off with `cutoffs`, as a reload's state
 /// settles them.
 pub(crate) fn replace_cutoffs(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     cutoffs: Vec<(Slot, StoreChange)>,
 ) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_cutoffs", [])?;
@@ -138,7 +130,7 @@ pub enum WriteCutoff {
 
 /// The earliest prior removal or replacement that refuses this original.
 pub(crate) fn refusal(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     slot: Slot,
     device: DeviceId,
     member: MemberId,
@@ -154,7 +146,7 @@ pub(crate) fn refusal(
         })?.pop())
 }
 
-pub(crate) fn refused(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
+pub(crate) fn refused(db: &StoreSql, write: WriteId) -> Result<bool, DbError> {
     Ok(db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_writes w JOIN _coven_write_refusals r ON r.slot=w.slot WHERE {WRITE_DEVICE_SQL}=?1 AND w.number=?2)"),
         params![write.device,write.number.to_be_bytes().as_slice()],|r|r.get(0))?)
 }

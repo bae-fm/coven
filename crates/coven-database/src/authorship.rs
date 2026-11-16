@@ -9,7 +9,7 @@
 //! it is one. Openings need only leaf hashes: a device that received a part
 //! whole keeps them and can open any leaf again without the audience key.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
@@ -21,7 +21,7 @@ use coven_format::write::WriteDisposition;
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::{Audience, ColumnValue, RowId, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What a loader needs from sync to authenticate another member's write.
@@ -66,7 +66,7 @@ fn hash_list(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DbError> {
 }
 
 pub(crate) fn retain_header(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     evidence: &HeaderEvidence,
 ) -> Result<(), DbError> {
@@ -86,11 +86,11 @@ pub(crate) fn retain_header(
 
 /// A write's stored header evidence. Roots that aren't whole hashes, or a
 /// signature of the wrong width, are `DamagedDatabase` (§19.3).
-fn header(db: &DatabaseConnection, write: WriteId) -> Result<Option<HeaderEvidence>, DbError> {
+fn header(db: &StoreSql, write: WriteId) -> Result<Option<HeaderEvidence>, DbError> {
     let damaged = |column| {
         crate::write_encoding::decode_failure(
             column,
-            rusqlite::types::Type::Blob,
+            sqlive::rusqlite::types::Type::Blob,
             DbError::DamagedDatabase,
         )
     };
@@ -114,7 +114,7 @@ fn header(db: &DatabaseConnection, write: WriteId) -> Result<Option<HeaderEviden
 
 /// Keep a received part's leaf hashes, so its leaves can be opened later.
 pub(crate) fn retain_leaves(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audience: &Audience,
     hashes: &[[u8; 32]],
@@ -134,7 +134,7 @@ pub(crate) fn retain_leaves(
 /// Whether this device keeps the leaf hashes of `write`'s part in
 /// `audience`, having received it whole.
 pub(crate) fn holds_leaves(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audience: &Audience,
 ) -> Result<bool, DbError> {
@@ -149,7 +149,7 @@ pub(crate) fn holds_leaves(
 /// its leaf hashes go, and the write's header evidence once no part of it
 /// keeps leaves or an opening.
 pub(crate) fn forget_part(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audience: &Audience,
 ) -> Result<(), DbError> {
@@ -184,7 +184,7 @@ fn missing(write: WriteId) -> DbError {
 
 /// A retained write's plaintext header.
 fn written(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
 ) -> Result<Option<coven_format::write::WriteHeader>, DbError> {
     if let Some(frame) = crate::write_headers::read(db, write)? {
@@ -210,11 +210,7 @@ pub(crate) struct Author {
 
 /// Whether a member other than the snapshot's author made a change in
 /// `write`: the snapshot needs that write's evidence for it.
-fn by_another_member(
-    db: &DatabaseConnection,
-    author: Author,
-    write: WriteId,
-) -> Result<bool, DbError> {
+fn by_another_member(db: &StoreSql, author: Author, write: WriteId) -> Result<bool, DbError> {
     Ok(write.device != author.device
         && (author.member.is_none()
             || crate::store_state_tables::device_member(db, write.device)? != author.member))
@@ -226,7 +222,7 @@ fn by_another_member(
 /// never need them here. While this device's member is unknown it keeps
 /// every other device's evidence, as [`by_another_member`] reads `None`.
 pub(crate) fn keeps_evidence(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     write: WriteId,
 ) -> Result<bool, DbError> {
@@ -242,7 +238,7 @@ pub(crate) fn keeps_evidence(
 
 /// Whether a leaf names this row, read through the write's schema version.
 fn same_row(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     version: u32,
     current: u32,
     leaf: &RowId,
@@ -257,7 +253,7 @@ fn same_row(
 /// Whether a leaf proves this need. The leaves name rows and columns as the
 /// write did, before any later rename.
 fn proves(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     version: u32,
     current: u32,
     leaf: &Leaf,
@@ -309,7 +305,7 @@ fn proves(
 /// owned row, with that part's needed leaves opened. The snapshot device's
 /// own writes are its signer's.
 pub(crate) fn evidence(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,
@@ -372,7 +368,7 @@ pub(crate) fn evidence(
 /// openings. A cell kept as a digest opens as the needed cell whose value it
 /// digests (D7.3).
 fn open(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audience: &Audience,
     version: u32,
@@ -430,7 +426,7 @@ fn open(
 /// The opening of one kept leaf, if it proves a need: a leaf kept whole as
 /// it is, a cell kept as a digest as each needed cell its value matches.
 fn opening(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     version: u32,
     current: u32,
     leaf: &KeptLeaf,
@@ -502,7 +498,7 @@ pub(crate) fn authenticate(
 /// later: the plaintext header always, the header evidence and opening only
 /// for another member's write ([`keeps_evidence`]).
 pub(crate) fn load(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     audience: &Audience,
     evidence: &WriteEvidence,
@@ -541,7 +537,7 @@ pub(crate) fn load(
 /// member as creating an owned row, or setting one of its present cells,
 /// without that write's authenticated opening (§9.6, §16.2).
 pub(crate) fn check(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,

@@ -9,7 +9,7 @@
 use crate::file_location::Place;
 use crate::internal_schema::FILES;
 use crate::sqlite::changed_once;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{encoded, sql_value};
 use crate::write_rows::AppValues;
 use crate::{DbError, RowIdentity, SyncedTable};
@@ -17,7 +17,7 @@ use coven_crypto::ContentHash;
 use coven_format::value::Value;
 use coven_foundation::id_source::FileId;
 use coven_merge::{Audience, RowId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 pub(crate) const ID: &str = "id";
 pub(crate) const AUDIENCE: &str = "audience";
@@ -54,7 +54,7 @@ pub(crate) fn declared(tables: &[SyncedTable]) -> Vec<(String, String)> {
 }
 
 /// The file references last registered, with whether each is write-once.
-pub(crate) fn registered(db: &DatabaseConnection) -> Result<Vec<(String, String, bool)>, DbError> {
+pub(crate) fn registered(db: &StoreSql) -> Result<Vec<(String, String, bool)>, DbError> {
     Ok(db.query(
         "SELECT table_name,column_name,write_once FROM _coven_file_columns
          ORDER BY table_name,column_name",
@@ -80,9 +80,7 @@ pub(crate) fn renamed(
 }
 
 /// The registered file references, as a table and column.
-pub(crate) fn registered_columns(
-    db: &DatabaseConnection,
-) -> Result<Vec<(String, String)>, DbError> {
+pub(crate) fn registered_columns(db: &StoreSql) -> Result<Vec<(String, String)>, DbError> {
     Ok(registered(db)?.into_iter().map(|(table, column, _)| (table, column)).collect())
 }
 
@@ -109,7 +107,7 @@ fn spelled(schema: &crate::schema::Schema, tables: &[SyncedTable]) -> Vec<(Strin
 /// Record the declared file references, which a later open or migration
 /// compares against (§18.1).
 pub(crate) fn register(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &crate::schema::Schema,
     tables: &[SyncedTable],
 ) -> Result<(), DbError> {
@@ -126,7 +124,7 @@ pub(crate) fn register(
 /// The first registered table whose file references differ from the
 /// declarations'. A table never registered has none to change.
 pub(crate) fn changed(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &crate::schema::Schema,
     tables: &[SyncedTable],
 ) -> Result<Option<String>, DbError> {
@@ -237,7 +235,7 @@ pub(crate) struct Record {
 
 impl Record {
     /// The record this device shows for `file`, if it has one.
-    pub(crate) fn read(db: &DatabaseConnection, file: FileId) -> Result<Option<Self>, DbError> {
+    pub(crate) fn read(db: &StoreSql, file: FileId) -> Result<Option<Self>, DbError> {
         db.query(
             "SELECT audience,size,hash,coordinates,namespace FROM main.coven_files WHERE id=?1",
             [file],
@@ -303,7 +301,7 @@ impl Record {
 
 /// Show a new record in `coven_files`, as coven's own statement in the write
 /// that makes it.
-pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbError> {
+pub(crate) fn insert(db: &StoreSql, record: &Record) -> Result<(), DbError> {
     let size = crate::sqlite::integer("file size", record.size)?;
     db.execute(
         "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
@@ -322,7 +320,7 @@ pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbE
 
 /// Switch a file's record to its stored bytes (§17.9).
 pub(crate) fn store(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: FileId,
     location: &crate::FileLocation,
     hash: ContentHash,
@@ -335,7 +333,7 @@ pub(crate) fn store(
 
 /// Switch a file's record off its stored bytes, to `device` only (§17.3).
 pub(crate) fn device_only(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: FileId,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<(), DbError> {
@@ -347,7 +345,7 @@ pub(crate) fn device_only(
 
 /// Delete a file's record, as coven's own statement in the write that
 /// removes its last reference (§17.2).
-pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+pub(crate) fn delete(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     changed_once(db.execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
 }
 

@@ -19,7 +19,7 @@
 //! and ends change (`transfers_in_flight.rs`), and the network through
 //! `coven_network`, which its changes change (`network_facts.rs`).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
@@ -143,9 +143,7 @@ const TRANSFER_RECORDS: &str = "SELECT p.id FROM _coven_pending AS p
             WHERE u.move=p.move AND u.holds IS NOT NULL))";
 
 /// Read the facts in the caller's snapshot.
-pub(crate) fn read<P: crate::PendingValue + Clone>(
-    db: &DatabaseConnection,
-) -> Result<SyncFacts<P>, DbError> {
+pub(crate) fn read<P: crate::PendingValue + Clone>(db: &StoreSql) -> Result<SyncFacts<P>, DbError> {
     let transfers: BTreeSet<i64> =
         db.query(TRANSFER_RECORDS, [], |row| row.get::<_, i64>(0))?.into_iter().collect();
     let records: Vec<(i64, P)> = crate::pending::positioned::<P>(db)?
@@ -243,7 +241,7 @@ pub struct UploadRecords<P> {
 /// Read the facts, and the queue with what is recorded about each upload,
 /// in the caller's snapshot.
 pub(crate) fn read_queue<P: crate::PendingValue + Clone>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
 ) -> Result<QueueFacts<P>, DbError> {
     let records: BTreeMap<i64, P> = crate::pending::positioned::<P>(db)?.into_iter().collect();
     let recorded = db

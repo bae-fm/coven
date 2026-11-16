@@ -2,7 +2,7 @@
 use crate::removal_view::DatabaseRemovalView;
 use crate::schema::TableSchema;
 use crate::sqlite::changed_once;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_commit::StoredGeneration;
 use crate::write_encoding::sql_value;
@@ -10,14 +10,14 @@ use crate::write_rows::{key_columns, AppValues, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{RemovalResult, RowId};
-use rusqlite::params_from_iter;
+use sqlive::rusqlite::params_from_iter;
 use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `stored` names the current generation's id of each present row the
 /// transaction just stored.
 pub(crate) fn materialize(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     visible: &AppView<'_>,
@@ -132,8 +132,8 @@ pub(crate) fn materialize(
 /// returns true, so the shared triggers skip their work. SQLite still
 /// enforces foreign keys, runs their actions and makes the deferred checks.
 pub(crate) fn applying<T>(
-    sql: &DatabaseConnection,
-    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
+    sql: &StoreSql,
+    run: impl FnOnce(&StoreSql) -> Result<T, DbError>,
 ) -> Result<T, DbError> {
     sql.within(crate::app_policy::CovenScope::Applying, || run(sql))
 }
@@ -146,12 +146,12 @@ pub(crate) fn applying<T>(
 /// One transaction's materialization holds it, on that transaction's
 /// connection.
 pub(crate) struct Deferral<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     deferred: bool,
 }
 
 impl<'a> Deferral<'a> {
-    pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
+    pub(crate) fn new(database: &'a StoreSql) -> Self {
         Self { database, deferred: false }
     }
 
@@ -170,7 +170,7 @@ impl<'a> Deferral<'a> {
 /// A row's current generation has the id `stored` names when the transaction
 /// stored that generation, and the id its prior record holds otherwise.
 pub(crate) fn record(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
@@ -288,7 +288,7 @@ fn reaches(dependencies: &BTreeMap<RowId, BTreeSet<RowId>>, from: &RowId, to: &R
 }
 
 fn put(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &TableSchema,
     id: &RowId,
     values: &AppValues,

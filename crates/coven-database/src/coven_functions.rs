@@ -3,12 +3,12 @@
 //! Appendix C.1).
 
 use coven_foundation::id_source::DeviceId;
-use rusqlite::functions::FunctionFlags;
-use rusqlite::types::{ToSql, Value, ValueRef};
+use sqlive::rusqlite::functions::FunctionFlags;
+use sqlive::rusqlite::types::{ToSql, Value, ValueRef};
 
 use crate::app_policy::CovenPolicy;
-use crate::authorization::Owner;
-use crate::connection_setup::Setup;
+use sqlive::Owner;
+use sqlive::Setup;
 
 /// A function whose result depends on its arguments alone, which views and
 /// indexes may call.
@@ -27,19 +27,22 @@ const INTERNAL: FunctionFlags = FunctionFlags::SQLITE_UTF8
 /// value. `test_utils::path_text_sql` hands it to an app's test that
 /// registers the function itself on a connection outside any store, so the
 /// test gets the result a store does.
-pub(crate) fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
+pub(crate) fn path_text_sql(value: ValueRef<'_>) -> sqlive::rusqlite::Result<Value> {
     Ok(match value {
         ValueRef::Null => Value::Null,
         ValueRef::Blob(bytes) => Value::Text(coven_foundation::files::path_bytes_text(bytes)),
         _ => {
-            return Err(rusqlite::Error::UserFunctionError(
+            return Err(sqlive::rusqlite::Error::UserFunctionError(
                 "coven_path_text takes a path's bytes, as coven_user_files holds them".into(),
             ))
         }
     })
 }
 
-pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Result<()> {
+pub(crate) fn register(
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    policy: &CovenPolicy,
+) -> sqlive::rusqlite::Result<()> {
     add(
         setup,
         "coven_applying",
@@ -58,7 +61,7 @@ pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Res
                 return Ok(true);
             }
             call.deny(crate::DbError::StatementForbidden { operation: "changing a hidden rowid" });
-            Err(rusqlite::Error::UserFunctionError("changing a hidden rowid".into()))
+            Err(sqlive::rusqlite::Error::UserFunctionError("changing a hidden rowid".into()))
         },
     )?;
     add(
@@ -108,7 +111,7 @@ pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Res
     add(setup, "_coven_file_of_key", 1, INTERNAL, |ctx| {
         crate::file_table::file_of_key(&ctx.get::<Vec<u8>>(0)?)
             .map(|file| file.0.to_string())
-            .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+            .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
     })?;
     add(setup, "_coven_stored_device", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| location.uploader().0.to_be_bytes().to_vec()))
@@ -177,7 +180,7 @@ pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Res
 /// The join request `bytes` encode: what an invite's `Waiting` and
 /// `Approving` states keep of the request they hold.
 #[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
-fn join_request(bytes: &[u8]) -> rusqlite::Result<coven_format::objects::JoinRequest> {
+fn join_request(bytes: &[u8]) -> sqlive::rusqlite::Result<coven_format::objects::JoinRequest> {
     match coven_format::Object::decode(bytes).map_err(|_| damaged())? {
         coven_format::Object::JoinRequest(request) => Ok(request),
         _ => Err(damaged()),
@@ -188,7 +191,7 @@ fn join_request(bytes: &[u8]) -> rusqlite::Result<coven_format::objects::JoinReq
 /// a unit variant as its name, any other as an object whose one key is its
 /// name. The name in snake case: `KeyCopy` is `key_copy`.
 #[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
-fn variant_kind(json: &[u8]) -> rusqlite::Result<String> {
+fn variant_kind(json: &[u8]) -> sqlive::rusqlite::Result<String> {
     let value: serde_json::Value = serde_json::from_slice(json).map_err(|_| damaged())?;
     let name = match &value {
         serde_json::Value::String(name) => name,
@@ -209,62 +212,67 @@ fn variant_kind(json: &[u8]) -> rusqlite::Result<String> {
 
 /// The bytes `json` lists as an array of numbers from 0 to 255.
 #[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
-fn json_bytes(json: &[u8]) -> rusqlite::Result<Vec<u8>> {
+fn json_bytes(json: &[u8]) -> sqlive::rusqlite::Result<Vec<u8>> {
     serde_json::from_slice(json).map_err(|_| damaged())
 }
 
 /// Register `function`, which reads only its arguments, as `name`.
 fn add<T: ToSql>(
-    setup: &Setup<'_>,
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     name: &'static str,
     arguments: i32,
     flags: FunctionFlags,
-    function: impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
-) -> rusqlite::Result<()> {
+    function: impl Fn(&sqlive::rusqlite::functions::Context<'_>) -> sqlive::rusqlite::Result<T>
+        + Send
+        + 'static,
+) -> sqlive::rusqlite::Result<()> {
     setup.scalar_function(name, arguments, flags, move |call| function(call.context()))
 }
 
 /// Where the coordinates in the function's argument store their file, or
 /// `None` for a file on one device only. Coordinates that don't decode are
 /// damage.
-fn stored(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Option<crate::FileLocation>> {
+fn stored(
+    ctx: &sqlive::rusqlite::functions::Context<'_>,
+) -> sqlive::rusqlite::Result<Option<crate::FileLocation>> {
     let coordinates = crate::write_encoding::value(ctx.get_raw(0))?;
     match crate::file_location::Place::decode(&coordinates) {
         Ok(crate::file_location::Place::Cloud(location)) => Ok(Some(location)),
         Ok(crate::file_location::Place::DeviceOnly(_)) => Ok(None),
-        Err(error) => Err(rusqlite::Error::UserFunctionError(Box::new(error))),
+        Err(error) => Err(sqlive::rusqlite::Error::UserFunctionError(Box::new(error))),
     }
 }
 
 /// A row's key from its key values; no values name no row, so the call is
 /// refused. SQLite may call it while it plans a statement, as well as when
 /// the statement runs.
-fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>> {
+fn coven_key(ctx: &sqlive::rusqlite::functions::Context<'_>) -> sqlive::rusqlite::Result<Vec<u8>> {
     if ctx.is_empty() {
-        return Err(rusqlite::Error::UserFunctionError(
+        return Err(sqlive::rusqlite::Error::UserFunctionError(
             "coven_key takes a row's key: one value or more".into(),
         ));
     }
     let values = (0..ctx.len())
         .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<sqlive::rusqlite::Result<Vec<_>>>()?;
     crate::write_rows::equality_key(&values)
-        .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
+        .map_err(|e| sqlive::rusqlite::Error::UserFunctionError(Box::new(e)))
 }
 
 /// The callback that registers, on a connection to the store's database, the
 /// functions coven's views call: the device id, the transfers in flight and
 /// the network state.
-pub(crate) type Views<'a> = dyn Fn(&Setup<'_>) -> rusqlite::Result<()> + 'a;
+pub(crate) type Views<'a> =
+    dyn Fn(&Setup<'_, crate::app_policy::CovenPolicy>) -> sqlive::rusqlite::Result<()> + 'a;
 
 /// Register what coven's views call: the device id, the transfers in flight
 /// and the network (§4).
 pub(crate) fn register_views(
-    setup: &Setup<'_>,
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     device: DeviceId,
     transfers: &crate::transfers_in_flight::TransfersInFlight,
     network: &crate::network_facts::NetworkFacts,
-) -> rusqlite::Result<()> {
+) -> sqlive::rusqlite::Result<()> {
     register_device(setup, device)?;
     transfers.register(setup)?;
     network.register(setup)
@@ -273,7 +281,10 @@ pub(crate) fn register_views(
 /// Register `_coven_device()`, this installation's device id as coven
 /// stores device ids. Coven's member and device views call it to say which
 /// ones are this device's.
-fn register_device(setup: &Setup<'_>, device: DeviceId) -> rusqlite::Result<()> {
+fn register_device(
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    device: DeviceId,
+) -> sqlive::rusqlite::Result<()> {
     setup.scalar_function(
         "_coven_device",
         0,
@@ -286,7 +297,7 @@ fn register_device(setup: &Setup<'_>, device: DeviceId) -> rusqlite::Result<()> 
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
+fn unix_ms(bytes: &[u8]) -> sqlive::rusqlite::Result<i64> {
     let time = crate::user_file::decode_time(bytes).map_err(|_| damaged())?;
     let millis = match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(elapsed) => i64::try_from(elapsed.as_millis()),
@@ -298,7 +309,9 @@ fn unix_ms(bytes: &[u8]) -> rusqlite::Result<i64> {
 /// The stored time in the function's argument as `unix_seconds_and_nanos`
 /// gives it, so the view and an app's own times agree.
 #[expect(clippy::map_err_ignore, reason = "a stored value that won't decode is DamagedDatabase")]
-fn unix_time(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<(i64, u32)> {
+fn unix_time(
+    ctx: &sqlive::rusqlite::functions::Context<'_>,
+) -> sqlive::rusqlite::Result<(i64, u32)> {
     let ValueRef::Blob(bytes) = ctx.get_raw(0) else {
         return Err(damaged());
     };
@@ -306,14 +319,14 @@ fn unix_time(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<(i64, u
     Ok(crate::user_file::unix_seconds_and_nanos(time))
 }
 
-fn invalid_coordinates() -> rusqlite::Error {
-    rusqlite::Error::UserFunctionError(
+fn invalid_coordinates() -> sqlive::rusqlite::Error {
+    sqlive::rusqlite::Error::UserFunctionError(
         "coven_file_device takes a file's coordinates, as coven_files holds them".into(),
     )
 }
 
-fn damaged() -> rusqlite::Error {
-    rusqlite::Error::UserFunctionError(Box::new(crate::DbError::DamagedDatabase))
+fn damaged() -> sqlive::rusqlite::Error {
+    sqlive::rusqlite::Error::UserFunctionError(Box::new(crate::DbError::DamagedDatabase))
 }
 
 #[cfg(test)]

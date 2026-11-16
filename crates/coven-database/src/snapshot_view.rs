@@ -1,5 +1,5 @@
 //! Snapshot projection of counted rows, independent of queued local originals.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::decoded;
 use crate::write_failure::{hosted, Hosted};
@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Each counted row of `audience`.
 pub(crate) fn rows<E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,
@@ -32,7 +32,7 @@ pub(crate) fn rows<E: From<DbError>>(
 /// Each counted loss of `audience`: the stored ones, and the removal losses
 /// of the kept rows `removed` takes out (`published::removals`).
 pub(crate) fn losses<E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     removed: &BTreeMap<RowId, BTreeSet<Rule>>,
     audience: &Audience,
@@ -83,7 +83,7 @@ pub(crate) fn losses<E: From<DbError>>(
 }
 
 pub(crate) fn creations<E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &Audience,
     mut visit: impl FnMut(Creation) -> Result<(), E>,
 ) -> Result<(), E> {

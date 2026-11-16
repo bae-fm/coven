@@ -2,7 +2,7 @@
 //! and place (§17.2, E8). A file never changes its bytes, so a reference
 //! taken earlier still reads what it named.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     file_location::{FileLocation, Place},
     file_table::Record,
@@ -108,7 +108,7 @@ impl FileRef {
 }
 
 /// The file this device has a record of under `file`.
-pub(crate) fn read(db: &DatabaseConnection, file: FileId) -> Result<FileRef, DbError> {
+pub(crate) fn read(db: &StoreSql, file: FileId) -> Result<FileRef, DbError> {
     FileRef::of(Record::read(db, file)?.ok_or(DbError::FileAbsent { file })?)
 }
 

@@ -257,7 +257,7 @@ async fn a_change_built_on_a_reset_ignored_part_is_a_data_dependency_loss() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;",
     )

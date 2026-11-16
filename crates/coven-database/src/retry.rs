@@ -10,7 +10,7 @@
 //! app's own reads and pins keep none: only its next call tries again
 //! (§17.7).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, OperationId};
 use std::time::{Duration, SystemTime};
 
@@ -116,11 +116,11 @@ const PIN: KeyStatements = KeyStatements {
 };
 
 impl Key {
-    fn value(&self) -> rusqlite::types::Value {
+    fn value(&self) -> sqlive::rusqlite::types::Value {
         match self {
-            Self::Scope(scope) => rusqlite::types::Value::Text((*scope).into()),
+            Self::Scope(scope) => sqlive::rusqlite::types::Value::Text((*scope).into()),
             Self::Operation(id) | Self::Upload(id) | Self::Pin(id) => {
-                rusqlite::types::Value::Integer(*id)
+                sqlive::rusqlite::types::Value::Integer(*id)
             }
         }
     }
@@ -135,7 +135,7 @@ impl Key {
     }
 }
 
-fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
+fn read_row(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<RawRow> {
     Ok(RawRow {
         scope: row.get(0)?,
         operation: row.get(1)?,
@@ -172,7 +172,7 @@ impl RawRow {
     }
 }
 
-pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
+pub(crate) fn read_all(db: &StoreSql) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
     db.query(
         "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries",
         [],
@@ -184,9 +184,7 @@ pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, Ret
 }
 
 /// The waits of the journal operations, with the operation each delays.
-pub(crate) fn operations(
-    db: &DatabaseConnection,
-) -> Result<Vec<(OperationId, RetryWait)>, DbError> {
+pub(crate) fn operations(db: &StoreSql) -> Result<Vec<(OperationId, RetryWait)>, DbError> {
     db.query(
         "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries
          WHERE operation>0",
@@ -201,10 +199,7 @@ pub(crate) fn operations(
     .collect()
 }
 
-pub(crate) fn find(
-    db: &DatabaseConnection,
-    subject: RetrySubject,
-) -> Result<Option<RetryWait>, DbError> {
+pub(crate) fn find(db: &StoreSql, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
     let key = key(subject);
     db.query(key.statements().find, [key.value()], read_row)?
         .pop()
@@ -220,16 +215,12 @@ fn millis(wait: &RetryWait) -> Result<i64, DbError> {
 }
 
 /// Replace the subject's wait.
-pub(crate) fn save(
-    db: &DatabaseConnection,
-    subject: RetrySubject,
-    wait: &RetryWait,
-) -> Result<(), DbError> {
+pub(crate) fn save(db: &StoreSql, subject: RetrySubject, wait: &RetryWait) -> Result<(), DbError> {
     clear(db, subject)?;
     let key = key(subject);
     db.execute(
         key.statements().insert,
-        rusqlite::params![
+        sqlive::rusqlite::params![
             key.value(),
             i64::from(wait.failures),
             crate::user_file::encode_time(wait.not_before),
@@ -242,7 +233,7 @@ pub(crate) fn save(
 /// Record a failed attempt's pending `record` with the subject's next wait,
 /// or with none, in the caller's transaction.
 pub(crate) fn save_failure<P: crate::PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     record: &P,
     subject: RetrySubject,
     wait: Option<&RetryWait>,
@@ -253,7 +244,7 @@ pub(crate) fn save_failure<P: crate::PendingValue>(
 
 /// Replace the subject's wait, or end it when there is none.
 pub(crate) fn set(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     subject: RetrySubject,
     wait: Option<&RetryWait>,
 ) -> Result<(), DbError> {
@@ -265,20 +256,16 @@ pub(crate) fn set(
 
 /// End the subject's wait at `now` in place: `T = now`, `W = 0`, keeping its
 /// failure count.
-pub(crate) fn end(
-    db: &DatabaseConnection,
-    subject: RetrySubject,
-    now: SystemTime,
-) -> Result<(), DbError> {
+pub(crate) fn end(db: &StoreSql, subject: RetrySubject, now: SystemTime) -> Result<(), DbError> {
     let key = key(subject);
     db.execute(
         key.statements().end,
-        rusqlite::params![key.value(), crate::user_file::encode_time(now)],
+        sqlive::rusqlite::params![key.value(), crate::user_file::encode_time(now)],
     )?;
     Ok(())
 }
 
-pub(crate) fn clear(db: &DatabaseConnection, subject: RetrySubject) -> Result<(), DbError> {
+pub(crate) fn clear(db: &StoreSql, subject: RetrySubject) -> Result<(), DbError> {
     let key = key(subject);
     db.execute(key.statements().delete, [key.value()])?;
     Ok(())

@@ -210,7 +210,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
                 sql.execute("INSERT INTO notes VALUES(?1,'store')", [NOTE])?;
                 sql.execute(
                     "INSERT INTO attachments(note_id,name,token) VALUES(?1,'song',?2)",
-                    rusqlite::params![NOTE, file],
+                    sqlive::rusqlite::params![NOTE, file],
                 )?;
                 Ok(file)
             },

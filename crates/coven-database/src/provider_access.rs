@@ -1,6 +1,6 @@
 //! Account intentions, confirmed provider state and their durable request (§14.2).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, NewOperation, OperationId, PendingValue};
 use coven_crypto::SecretBytes;
 
@@ -49,24 +49,17 @@ pub struct ProviderAccess {
     pub request: Option<ProviderAccessRequest>,
 }
 
-pub(crate) fn read(
-    db: &DatabaseConnection,
-    account: &str,
-) -> Result<Option<ProviderAccess>, DbError> {
+pub(crate) fn read(db: &StoreSql, account: &str) -> Result<Option<ProviderAccess>, DbError> {
     Ok(db.query("SELECT intended,granted,invitation,operation,target FROM _coven_provider_access WHERE account=?1", [account], |row| {
         let operation: Option<i64> = row.get(3)?;
         let target: Option<bool> = row.get(4)?;
-        if operation.is_none() && target.is_some() { return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Integer)); }
+        if operation.is_none() && target.is_some() { return Err(crate::write_encoding::damaged(4, sqlive::rusqlite::types::Type::Integer)); }
         Ok(ProviderAccess { intended: row.get(0)?, granted: row.get(1)?, invitation: row.get::<_,Option<Vec<u8>>>(2)?.map(SecretBytes::new),
             request: operation.map(|id| ProviderAccessRequest { operation: OperationId(id), target }) })
     }).map(|mut rows| rows.pop())?)
 }
 
-pub(crate) fn finish(
-    db: &DatabaseConnection,
-    account: &str,
-    id: OperationId,
-) -> Result<(), DbError> {
+pub(crate) fn finish(db: &StoreSql, account: &str, id: OperationId) -> Result<(), DbError> {
     db.execute("UPDATE _coven_provider_access SET operation=NULL,target=NULL WHERE account=?1 AND operation=?2", (account,id.0))?;
     crate::operation::finish(db, id)?;
     Ok(())
@@ -74,11 +67,7 @@ pub(crate) fn finish(
 
 /// Queue the account's request `id` again with no target fixed, ending the
 /// wait its last attempt left.
-pub(crate) fn requeue(
-    db: &DatabaseConnection,
-    account: &str,
-    id: OperationId,
-) -> Result<(), DbError> {
+pub(crate) fn requeue(db: &StoreSql, account: &str, id: OperationId) -> Result<(), DbError> {
     crate::operation::set_step(db, id, REQUEST_QUEUED_STEP)?;
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
     db.execute(
@@ -92,7 +81,7 @@ pub(crate) fn requeue(
 /// called. A revoke may remove the direct share supplying acceptance
 /// tokens even when other permissions remain, so neither confirmation is
 /// kept.
-pub(crate) fn fix_target(db: &DatabaseConnection, account: &str) -> Result<(), DbError> {
+pub(crate) fn fix_target(db: &StoreSql, account: &str) -> Result<(), DbError> {
     db.execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [account])?;
     Ok(())
 }
@@ -100,7 +89,7 @@ pub(crate) fn fix_target(db: &DatabaseConnection, account: &str) -> Result<(), D
 /// The provider confirmed `target`, with its acceptance information when
 /// it granted access; the request has no target fixed any more.
 pub(crate) fn confirm(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     account: &str,
     target: bool,
     invitation: Option<&SecretBytes>,
@@ -114,7 +103,7 @@ pub(crate) fn confirm(
 
 /// Called inside the same transaction as membership or an invitation change.
 pub(crate) fn adopt<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     changes: &[ProviderAccessChange],
 ) -> Result<(), DbError> {
     for change in changes {
@@ -184,7 +173,7 @@ pub(crate) fn adopt<P: PendingValue>(
 /// reply fails the call with `ProviderRequestRunning`, and nothing changes:
 /// that request's reply may precede the confirmation.
 pub(crate) fn retake<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     changes: &[ProviderAccessChange],
 ) -> Result<(), DbError> {
     for change in changes {

@@ -2,7 +2,7 @@
 
 use super::{DatabaseAccess, DatabaseInner, Mode, StoreDatabase, Writer};
 use crate::internal_schema::CACHE_NAME_USED_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::DatabaseChanges;
 use crate::{file_queue, file_ref, write_schema::WriteSchema, DbError, FileRef, FileUpload};
@@ -76,13 +76,7 @@ impl<M: Mode> FileDatabase<M> {
     /// or a read-only handle's cache connection.
     async fn run<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
-        run: impl FnOnce(
-                &mut DatabaseConnection,
-                &StoreCall<'_>,
-                &WriteSchema,
-                &StoreDir,
-                DeviceId,
-            ) -> Result<T, E>
+        run: impl FnOnce(&mut StoreSql, &StoreCall<'_>, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
             + Send
             + 'static,
     ) -> Result<T, E> {
@@ -208,7 +202,7 @@ impl FileDatabase {
     /// read-only decisions never take the writer (§21.2).
     async fn read<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
-        read: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<T, E> + Send + 'static,
+        read: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<T, E> + Send + 'static,
     ) -> Result<T, E> {
         self.database.call(move |inner| inner.access.with_committed(read)).await
     }

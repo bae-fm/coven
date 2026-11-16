@@ -1,5 +1,5 @@
 //! Bounded decoded records prepared independently of the application writer.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use std::cell::Cell;
 
@@ -7,13 +7,13 @@ use std::cell::Cell;
 /// transaction. Its SQLite temporary storage spills to disk; each cursor
 /// materializes only one bounded record.
 pub(crate) struct PreparedInputs<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     next: Cell<i64>,
 }
 impl<'a> PreparedInputs<'a> {
     /// Create the catalog in the transaction `db` has open. A failed
     /// transaction rolls it back; `finish` drops it once its records are read.
-    pub(crate) fn new(db: &'a DatabaseConnection) -> Result<Self, DbError> {
+    pub(crate) fn new(db: &'a StoreSql) -> Result<Self, DbError> {
         db.batch("CREATE TEMP TABLE _coven_prepared_records(source INTEGER NOT NULL,ordinal INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(source,ordinal)) WITHOUT ROWID")?;
         Ok(Self { db, next: Cell::new(0) })
     }
@@ -42,7 +42,7 @@ impl<'a> PreparedInputs<'a> {
 }
 
 pub(crate) struct PreparedRecords<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     id: i64,
     count: i64,
 }

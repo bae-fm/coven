@@ -87,7 +87,7 @@ async fn stale_references_are_judged_as_one_null_substitution() {
                 for (column, value) in [("a", "p"), ("b", "q")] {
                     assert_eq!(
                         cells.iter().find(|c| c.column == column).unwrap().value,
-                        rusqlite::types::Value::Text(value.into())
+                        sqlive::rusqlite::types::Value::Text(value.into())
                     );
                 }
             }

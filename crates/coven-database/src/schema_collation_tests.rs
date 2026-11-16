@@ -81,7 +81,7 @@ async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
 async fn an_app_defined_key_collation_is_refused_on_open() {
     let store = TestStore::new();
     store.builder(vec![], vec![]).open().await.unwrap().close().await.unwrap();
-    let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+    let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
     raw.create_collation("reverse", |a, b| b.cmp(a)).unwrap();
     raw.execute_batch("CREATE TABLE notes(id TEXT COLLATE reverse NOT NULL PRIMARY KEY)").unwrap();
     drop(raw);

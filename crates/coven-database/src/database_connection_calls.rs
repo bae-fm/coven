@@ -2,7 +2,7 @@
 //! with the state coven keeps for that call beside it.
 
 use super::DatabaseAccess;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_foundation::task::CarriesBug;
@@ -12,7 +12,7 @@ impl<L> DatabaseAccess<L> {
     /// the writer (§21.2).
     pub(super) fn with_committed<R, E: From<DbError> + CarriesBug>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, E>,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         self.call(|| {
             self.with_reader(|reader, call| {
@@ -24,25 +24,22 @@ impl<L> DatabaseAccess<L> {
     }
 
     /// Run `run` on an idle reader, with constants of its own.
-    pub(super) fn with_reader<R>(
-        &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> R,
-    ) -> R {
+    pub(super) fn with_reader<R>(&self, run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> R) -> R {
         self.with_leased(&self.database.reader(), run)
     }
 
     /// Run `run` on `reader`, which the caller reserved, with constants of its own.
     pub(super) fn with_leased<R>(
         &self,
-        reader: &crate::sqlite_database::Reader<'_, crate::app_policy::CovenPolicy>,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> R,
+        reader: &sqlive::Reader<'_, crate::app_policy::CovenPolicy>,
+        run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> R,
     ) -> R {
         reader.host(|reader| run(reader, &StoreCall::new(None, &self.tests)))
     }
 
     pub(super) fn with_writer<R, E: From<DbError>>(
         &self,
-        run: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> Result<R, E>,
+        run: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         self.database.host(|writer| {
             #[cfg(any(test, feature = "test-utils"))]

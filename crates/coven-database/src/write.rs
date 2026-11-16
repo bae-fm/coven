@@ -1,6 +1,6 @@
 //! Transaction-scoped app SQL. The connection remains inside its owner.
 
-use rusqlite::{Params, Row};
+use sqlive::rusqlite::{Params, Row};
 
 /// App SQL inside one local write, and coven's steps beside it (§4).
 /// Returning an error rolls back every statement and step. This borrowed
@@ -193,29 +193,29 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     }
 
     /// Execute one app statement with parameters.
-    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> sqlive::rusqlite::Result<usize> {
         self.files.execute(sql, params)
     }
 
     /// Execute app statements within this write's transaction.
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    pub fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.files.execute_batch(sql)
     }
 
     /// Map one app row, including changes already made by this write.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
-        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         self.files.query_row(sql, params, map)
     }
 
     /// Map all app rows produced by a query within this write.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
     where
         P: Params,
-        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         self.files.query(sql, params, map)
     }
@@ -226,40 +226,40 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
 /// every statement. This borrowed context cannot change the transaction,
 /// access coven's tables or write a synced one.
 pub struct BulkSqlContext<'connection> {
-    database: &'connection crate::sqlite::DatabaseConnection,
+    database: &'connection crate::sqlite::StoreSql,
 }
 
 impl<'connection> BulkSqlContext<'connection> {
-    pub(crate) fn new(database: &'connection crate::sqlite::DatabaseConnection) -> Self {
+    pub(crate) fn new(database: &'connection crate::sqlite::StoreSql) -> Self {
         Self { database }
     }
 
     /// Execute one app statement with parameters.
-    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> sqlive::rusqlite::Result<usize> {
         self.database.app_execute(sql, params)
     }
 
     /// Execute app statements within this write's transaction.
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    pub fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.database.app_batch(sql)
     }
 
     /// Map one app row, including changes already made by this write.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
-        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
+        self.database.app_query_row(sqlive::Recorded::No, sql, params, map)
     }
 
     /// Map all app rows produced by a query within this write.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
     where
         P: Params,
-        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.database.app_query(crate::sqlite::Recorded::No, sql, params, map)
+        self.database.app_query(sqlive::Recorded::No, sql, params, map)
     }
 }
 

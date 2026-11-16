@@ -9,7 +9,7 @@
 use crate::author_judgement::tests::{member, ANA, BEN};
 use crate::judge::tests::{receipts, verdict, CAROL};
 use crate::judge::{consistent, judge, Judgement};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::test_utils::tests::run_lean;
 use crate::write_rows::{column_name, key_columns, target_columns};
@@ -182,7 +182,7 @@ fn kept_old(
 }
 
 fn setter_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
@@ -206,7 +206,7 @@ fn setter_values(
 
 /// The runner input for one received write, and the ids it used.
 fn input(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     record: &WriteRecord,

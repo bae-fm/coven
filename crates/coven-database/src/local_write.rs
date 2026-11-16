@@ -1,17 +1,18 @@
 //! A local write: the app's SQL recorded one row operation at a time, then
 //! coven's capture, merge and queueing in the same transaction (§4, §9.6).
 
-use crate::sqlite::{DatabaseConnection, Operation};
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::Slot;
+use sqlive::Operation;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 pub(crate) fn local_write<F, R, E>(
-    sql: &mut DatabaseConnection,
+    sql: &mut StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     device: DeviceId,
@@ -43,10 +44,10 @@ where
 /// commit, or neither. Without one, or when `run` registered nothing,
 /// `stream_registering` runs `run` as `stream_transaction` does.
 pub(crate) fn stream_registering<T>(
-    sql: &mut DatabaseConnection,
+    sql: &mut StoreSql,
     call: &StoreCall<'_>,
     registering: Option<crate::joining_write::Registering<'_>>,
-    run: impl FnOnce(&DatabaseConnection) -> Result<(T, bool), DbError>,
+    run: impl FnOnce(&StoreSql) -> Result<(T, bool), DbError>,
 ) -> Result<T, DbError> {
     let Some(registering) = registering else {
         return sql.stream_transaction(|db| run(db).map(|(result, _)| result));
@@ -68,7 +69,7 @@ type DeletedCircles = BTreeMap<CircleId, Slot>;
 /// its row operations (§9.6). Returns the app's result and the circles
 /// deleted before it.
 fn app_phase<F, R, E>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     operations: &dyn Fn() -> Vec<Operation>,
     files: &crate::file_write::WriteFiles<'_>,
@@ -95,7 +96,7 @@ where
 /// A local write's host phase: coven's capture, merge, record, materializing
 /// and queueing of the app phase's operations.
 fn host_phase<R, E: crate::WriteFailure>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     events: &[Operation],
     (result, deleted_circles): (R, DeletedCircles),
@@ -188,3 +189,7 @@ fn host_phase<R, E: crate::WriteFailure>(
     files.before_commit()?;
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "local_write_tests.rs"]
+mod tests;

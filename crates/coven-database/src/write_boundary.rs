@@ -1,5 +1,5 @@
 //! Checked entry boundaries, their immutable coverage, and slot selection.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{audience, counter, damaged};
 use crate::{DbError, StoreState, StoreVersion};
 use coven_format::{
@@ -7,7 +7,7 @@ use coven_format::{
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 /// A checked raise/reset and the snapshot named by that entry. Its selection is
@@ -75,7 +75,7 @@ impl Boundary {
         }
     }
 
-    pub(crate) fn load_selected(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
+    pub(crate) fn load_selected(database: &StoreSql) -> Result<Vec<Self>, DbError> {
         Ok(retained(database)?.into_iter().map(|row| row.boundary).collect())
     }
 }
@@ -90,7 +90,7 @@ pub struct BoundaryCoverage {
 }
 
 /// Keep a checked boundary, once, at its entry's slot.
-pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Result<(), DbError> {
+pub(crate) fn record(database: &StoreSql, boundary: &Boundary) -> Result<(), DbError> {
     let (kind, version) = match boundary {
         Boundary::SchemaChange(version) => ("schema", Some(version.number)),
         Boundary::Reset { .. } => ("reset", None),
@@ -116,7 +116,7 @@ pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Resu
 /// data view: whether this applied it, which a boundary already applied
 /// does not. Coverage once checked never changes.
 pub(crate) fn record_coverage(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     coverage: &BoundaryCoverage,
 ) -> Result<bool, DbError> {
     record(database, &coverage.boundary)?;
@@ -145,7 +145,7 @@ pub(crate) fn record_coverage(
 /// checked coverage fact. The applied bit records the committed data view,
 /// not slot selection. It also distinguishes a repeated reset reload.
 pub(crate) fn replace(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     boundaries: Vec<BoundaryCoverage>,
 ) -> Result<Vec<Slot>, DbError> {
     let mut ids = BTreeSet::new();
@@ -182,7 +182,7 @@ struct RetainedBoundary {
     applied: bool,
 }
 
-fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbError> {
+fn retained(database: &StoreSql) -> Result<Vec<RetainedBoundary>, DbError> {
     Ok(database.query(
         "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied
          FROM _coven_boundaries b ORDER BY b.slot",
@@ -197,7 +197,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
             let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
                 ("schema", Some(number)) => Boundary::SchemaChange(StoreVersion { number, snapshot, entry }),
                 ("reset", None) => Boundary::Reset { entry, snapshot },
-                _ => return Err(damaged(0, rusqlite::types::Type::Text)),
+                _ => return Err(damaged(0, sqlive::rusqlite::types::Type::Text)),
             };
             let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter).transpose()?;
             Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })
@@ -223,7 +223,7 @@ pub(crate) struct WriteBoundary {
 }
 
 impl WriteBoundary {
-    pub(crate) fn load(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
+    pub(crate) fn load(database: &StoreSql) -> Result<Vec<Self>, DbError> {
         let mut state = StoreState::default();
         let mut result = Vec::new();
         for row in retained(database)? {
@@ -250,7 +250,7 @@ impl WriteBoundary {
     /// received writes before its raise is kept, so a capture taken again
     /// after its catch-up covers them (§16.3, §18.5). A capture whose
     /// audience already realized a raise to its version adds nothing.
-    pub(crate) fn judging(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
+    pub(crate) fn judging(database: &StoreSql) -> Result<Vec<Self>, DbError> {
         let mut boundaries = Self::load(database)?;
         for (audience, version, included) in crate::raise_capture::provisional(database)? {
             let realized = boundaries.iter().any(|b| {

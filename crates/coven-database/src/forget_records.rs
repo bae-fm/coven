@@ -7,14 +7,14 @@
 //! stopped; once every device that can still write has written past that
 //! slot, and this device's queued writes read past it, its record goes.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, RowId, RowState, Slot, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The other devices that can still write: every device besides this one
@@ -71,7 +71,7 @@ fn current(state: &RowState<coven_format::value::Value>) -> BTreeSet<WriteId> {
 /// current before and not after stopped being current at `slot`, and its
 /// kept record says so.
 pub(crate) fn stopped(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     write: WriteId,
     before: &RowState<coven_format::value::Value>,
@@ -90,7 +90,7 @@ pub(crate) fn stopped(
 /// Record that `writer`'s change at `row`, named as the row is now, stopped
 /// being current at `slot`.
 fn stop(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     writer: WriteId,
     row: &RowId,
@@ -118,7 +118,7 @@ pub(crate) fn applied<'a>(
 /// `write`'s change at `table` and `key` in `audience`, as its write named
 /// them, stopped being current at `slot`, unless it had already stopped.
 pub(crate) fn stopped_at(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audience: &Audience,
     table: &str,
@@ -142,7 +142,7 @@ pub(crate) fn stopped_at(
 /// staged, as a write the cut-off refuses: none of its changes there ever
 /// became current, so each stops at its own slot.
 pub(crate) fn none_current(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: WriteId,
     audiences: &[Audience],
     slot: Slot,
@@ -165,7 +165,7 @@ pub(crate) fn none_current(
 /// writes are judged; it deletes only what nothing can name, so no state is
 /// wrong before it runs.
 pub(crate) fn forget(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     writers: &Writers,
 ) -> Result<(), DbError> {
@@ -223,7 +223,7 @@ pub(crate) fn forget(
 /// it stays; a part received whole opens its leaves by their place among all
 /// its records, so its records go together, with its leaf hashes, or stay.
 fn forget_in_part(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     write: &[u8],
     audience: &Audience,
@@ -303,7 +303,7 @@ fn forget_in_part(
 /// The slot through which this device has looked at every stopped record
 /// and every applied-write entry, zero before it looked at any, and the
 /// latest stamped entry at or below it.
-fn forgotten_through(db: &DatabaseConnection) -> Result<(u64, Option<i64>), DbError> {
+fn forgotten_through(db: &StoreSql) -> Result<(u64, Option<i64>), DbError> {
     let forgotten = db
         .query("SELECT through,newest FROM _coven_forgotten WHERE singleton=1", [], |r| {
             Ok((counter(r.get(0)?)?, r.get::<_, Option<i64>>(1)?))
@@ -317,7 +317,7 @@ fn forgotten_through(db: &DatabaseConnection) -> Result<(u64, Option<i64>), DbEr
 /// entries its writer still held, a dropped table's creations no longer
 /// protect their records, and merge rows a reload or a migration deletes no
 /// longer name their writes. The next slot looks at every one again.
-pub(crate) fn look_again(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn look_again(db: &StoreSql) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_forgotten", [])?;
     Ok(())
 }

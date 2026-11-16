@@ -95,7 +95,7 @@ async fn bytes_and_streams_stage_in_the_order_the_batch_put_them() {
 
 /// The rows of `files` another connection sees committed.
 fn committed_rows(store: &TestStore) -> i64 {
-    rusqlite::Connection::open(store.database_path())
+    sqlive::rusqlite::Connection::open(store.database_path())
         .unwrap()
         .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
         .unwrap()
@@ -212,7 +212,7 @@ async fn a_writes_staged_files_are_flushed_once_before_its_commit() {
     db.test_on_file_flush(Arc::new({
         let (events, path) = (events.clone(), store.database_path());
         move || {
-            let rows: i64 = rusqlite::Connection::open(&path)
+            let rows: i64 = sqlive::rusqlite::Connection::open(&path)
                 .unwrap()
                 .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
                 .unwrap();
@@ -417,7 +417,7 @@ async fn close_waits_for_staging_and_reopen_removes_bytes_no_write_took() {
         };
         tokio::time::timeout(HANG_GUARD, closing).await.unwrap().unwrap();
         assert_eq!(owned_paths(&store).len(), 1);
-        let sql = rusqlite::Connection::open(store.database_path()).unwrap();
+        let sql = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
             sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r.get::<_, i64>(0))
                 .unwrap(),

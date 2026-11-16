@@ -118,7 +118,7 @@ async fn the_app_writes_no_view_and_makes_no_object_in_its_name() {
         // SQLite refuses to change a view, or the authorizer refuses to
         // write a name in coven's namespace first.
         match sql(&db, statement).await {
-            Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message)))) => {
+            Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message)))) => {
                 assert_eq!(message, format!("cannot modify {view} because it is a view"))
             }
             Err(DbError::InternalTable { table }) => assert_eq!(table, view),

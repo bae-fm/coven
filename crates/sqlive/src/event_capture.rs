@@ -1,0 +1,157 @@
+//! A local write's app phase, observed one SQLite row operation at a time.
+//!
+//! Sessions record only net changes. A write's steps need each operation, in
+//! order (§9.6, D5). A connection has one pre-update hook, which a session
+//! would otherwise own, so the app phase records through this hook and no
+//! session runs until it ends. The capture keeps every operation on a
+//! recorded table, and keeps only what live queries need from any other
+//! table.
+
+use super::pre_update_changes::{new_value, old_value, ImageColumns};
+use super::write_transaction::WriteTransaction;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
+use crate::SqlValue;
+use caught::locks::lock_unpoisoned;
+use rusqlite::hooks::{Action, PreUpdateCase};
+use std::sync::{Arc, Mutex};
+
+/// One row operation of the app phase.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Operation {
+    /// The table, as SQLite names it.
+    pub table: String,
+    /// Insert, update or delete.
+    pub action: Action,
+    /// Every column before the operation, in declaration order; `None` for a
+    /// virtual generated column, which keeps no value. Empty for an insert.
+    pub old: Vec<Option<SqlValue>>,
+    /// Every column after the operation; empty for a delete.
+    pub new: Vec<Option<SqlValue>>,
+    /// The rowid before and after, meaningful only for rowid tables.
+    pub rowids: (i64, i64),
+}
+
+struct CapturedEvents {
+    operations: Vec<(i32, Operation)>,
+    local: super::pre_update_changes::PreUpdateChanges,
+}
+
+/// A panic in the hook fails the transaction it observes before it commits
+/// (`write_transaction.rs`), so what a panicking hook call left half-recorded
+/// is never committed: the capture's lock is taken as it is.
+pub(super) struct EventCapture {
+    shapes: Arc<super::table_shapes::TableShapes>,
+    events: Arc<Mutex<CapturedEvents>>,
+}
+
+impl EventCapture {
+    /// Record `transaction`'s row operations until it stops observing them.
+    pub(super) fn begin<P: Policy>(
+        transaction: &mut WriteTransaction<'_, P>,
+    ) -> Result<Self, PolicyError<P>> {
+        let (tables, recorded, scoped) = transaction.within(|database| {
+            let recorded = Arc::clone(
+                &database
+                    .observation
+                    .as_ref()
+                    .ok_or(crate::Error::Invariant {
+                        what: "a local write's writer serves its handle",
+                    })?
+                    .recorded,
+            );
+            let tables = database.table_shapes()?;
+            let scoped = match &database.handle {
+                Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
+                None => std::collections::HashMap::new(),
+            };
+            Ok::<_, PolicyError<P>>((tables, recorded, scoped))
+        })?;
+        let events = Arc::new(Mutex::new(CapturedEvents {
+            operations: Vec::new(),
+            local: super::pre_update_changes::PreUpdateChanges::new(scoped),
+        }));
+        let captured = Arc::clone(&events);
+        let shapes = Arc::clone(&tables);
+        transaction.observe_operations(
+            move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
+                if schema != "main" {
+                    return Ok(());
+                }
+                match tables.position(table) {
+                    Some(position) if recorded.contains(&tables.shape(position).name) => {}
+                    Some(position) => {
+                        return lock_unpoisoned(&captured).local.record(&tables, position, case);
+                    }
+                    None => {
+                        lock_unpoisoned(&captured).local.unshaped(table);
+                        return Ok(());
+                    }
+                }
+                let depth = match case {
+                    PreUpdateCase::Insert(a) => a.get_query_depth(),
+                    PreUpdateCase::Delete(a) => a.get_query_depth(),
+                    PreUpdateCase::Update { new_value_accessor, .. } => {
+                        new_value_accessor.get_query_depth()
+                    }
+                    PreUpdateCase::Unknown => return Ok(()),
+                };
+                let count = |columns: i32| 0..usize::try_from(columns).unwrap_or(0);
+                let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
+                    count(accessor.get_column_count())
+                        .map(|i| Ok(old_value(accessor, i)?.map(SqlValue::from)))
+                        .collect::<Result<Vec<_>, PolicyError<P>>>()
+                };
+                let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
+                    count(accessor.get_column_count())
+                        .map(|i| Ok(new_value(accessor, i)?.map(SqlValue::from)))
+                        .collect::<Result<Vec<_>, PolicyError<P>>>()
+                };
+                let event = match case {
+                    PreUpdateCase::Insert(accessor) => Operation {
+                        table: table.to_owned(),
+                        action,
+                        old: Vec::new(),
+                        new: new(accessor)?,
+                        rowids: (accessor.get_new_row_id(), accessor.get_new_row_id()),
+                    },
+                    PreUpdateCase::Delete(accessor) => Operation {
+                        table: table.to_owned(),
+                        action,
+                        old: old(accessor)?,
+                        new: Vec::new(),
+                        rowids: (accessor.get_old_row_id(), accessor.get_old_row_id()),
+                    },
+                    PreUpdateCase::Update { old_value_accessor, new_value_accessor } => Operation {
+                        table: table.to_owned(),
+                        action,
+                        old: old(old_value_accessor)?,
+                        new: new(new_value_accessor)?,
+                        rowids: (
+                            old_value_accessor.get_old_row_id(),
+                            new_value_accessor.get_new_row_id(),
+                        ),
+                    },
+                    PreUpdateCase::Unknown => return Ok(()),
+                };
+                lock_unpoisoned(&captured).operations.push((depth, event));
+                Ok(())
+            },
+        )?;
+        Ok(Self { shapes, events })
+    }
+
+    /// The device-local tables' changes, as live queries read them.
+    pub(super) fn local_changes(&self) -> Vec<crate::RowChange> {
+        std::mem::take(&mut lock_unpoisoned(&self.events).local).finish(&self.shapes)
+    }
+
+    /// The recorded tables' operations so far, in order.
+    pub(super) fn events(&self) -> Vec<Operation> {
+        lock_unpoisoned(&self.events).operations.iter().map(|(_, event)| event.clone()).collect()
+    }
+}
+
+#[cfg(test)]
+#[path = "event_capture_tests.rs"]
+mod tests;

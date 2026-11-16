@@ -2,7 +2,7 @@
 //! changes and deletes for them, and the uploads it queues, all in the
 //! write's own transaction.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     file_location::{FileLocation, Place},
@@ -50,7 +50,7 @@ struct Trailing<'f> {
 /// copies, uploads, chunk hashes, links and moves as a statement for each
 /// table and chunk of rows (§17.3, §17.9). `trailing` is left empty.
 fn queue_trailing(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     trailing: &mut Vec<Trailing<'_>>,
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
@@ -230,7 +230,7 @@ enum FailedPart {
 
 /// A write's files on the connection its transaction runs on.
 pub(crate) struct FileWrite<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     call: &'a StoreCall<'a>,
     files: &'a WriteFiles<'a>,
 }
@@ -290,7 +290,7 @@ impl<'a> WriteFiles<'a> {
 impl<'a> FileWrite<'a> {
     /// `files` on the connection of the transaction that writes them.
     pub(crate) fn new(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         files: &'a WriteFiles<'a>,
     ) -> Self {
@@ -327,9 +327,12 @@ impl<'a> FileWrite<'a> {
     /// saw it change, so it fails the write even if the app goes on. An
     /// answer with no row, or the app's own mapping of a row, is no failure
     /// of the statement.
-    fn statement<T>(&self, run: impl FnOnce() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    fn statement<T>(
+        &self,
+        run: impl FnOnce() -> sqlive::rusqlite::Result<T>,
+    ) -> sqlive::rusqlite::Result<T> {
         let result = run();
-        if matches!(result, Err(rusqlite::Error::SqliteFailure(..))) {
+        if matches!(result, Err(sqlive::rusqlite::Error::SqliteFailure(..))) {
             self.fail(FailedPart::Statement);
         }
         result
@@ -355,36 +358,34 @@ impl<'a> FileWrite<'a> {
         self.files.committed.borrow_mut().push(effect);
     }
 
-    pub(crate) fn execute<P: rusqlite::Params>(
+    pub(crate) fn execute<P: sqlive::rusqlite::Params>(
         &self,
         sql: &str,
         params: P,
-    ) -> rusqlite::Result<usize> {
+    ) -> sqlive::rusqlite::Result<usize> {
         self.statement(|| self.database.app_execute(sql, params))
     }
 
-    pub(crate) fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    pub(crate) fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.statement(|| self.database.app_batch(sql))
     }
 
-    pub(crate) fn query_row<T, P: rusqlite::Params>(
+    pub(crate) fn query_row<T, P: sqlive::rusqlite::Params>(
         &self,
         sql: &str,
         params: P,
-        map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<T> {
-        self.statement(|| {
-            self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
-        })
+        map: impl FnOnce(&sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<T>,
+    ) -> sqlive::rusqlite::Result<T> {
+        self.statement(|| self.database.app_query_row(sqlive::Recorded::No, sql, params, map))
     }
 
-    pub(crate) fn query<T, P: rusqlite::Params>(
+    pub(crate) fn query<T, P: sqlive::rusqlite::Params>(
         &self,
         sql: &str,
         params: P,
-        map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<Vec<T>> {
-        self.statement(|| self.database.app_query(crate::sqlite::Recorded::No, sql, params, map))
+        map: impl FnMut(&sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<T>,
+    ) -> sqlive::rusqlite::Result<Vec<T>> {
+        self.statement(|| self.database.app_query(sqlive::Recorded::No, sql, params, map))
     }
 
     /// The new files the write's moves made for rows removal rules took out,
@@ -403,7 +404,7 @@ impl<'a> FileWrite<'a> {
     /// completed (§17.3).
     pub(crate) fn finish_app(
         &self,
-        events: impl Fn() -> Vec<crate::sqlite::Operation>,
+        events: impl Fn() -> Vec<sqlive::Operation>,
     ) -> Result<(), DbError> {
         self.finish_uploads()?;
         let captured = crate::write_capture::capture(self.files.schema, &events())?;

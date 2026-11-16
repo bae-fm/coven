@@ -3,12 +3,12 @@
 use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{Audience, RowState, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 /// Delete the audience's merge records before its snapshot's are written,
@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 /// which the app showed: at an odd generation, with no rules loss; and in
 /// `_coven_install_lost` the keys whose lost values it deletes, whose
 /// protection the install brings up to date once its rows are in.
-pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+pub(crate) fn begin(database: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     database.execute(
         &format!(
             "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
@@ -37,14 +37,14 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
     crate::forget_records::look_again(database)
 }
 
-pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn create_tables(database: &StoreSql) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
     crate::snapshot_metadata::create_table(database)
 }
 
 /// Validate live losses against the merged row before storing the common record.
 pub(crate) fn loss(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     loss: coven_format::loss::Loss,
@@ -99,7 +99,7 @@ pub(crate) fn loss(
     crate::loss_record::keep(database, call, schema, &loss)
 }
 
-pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
+pub(crate) fn ordinal(database: &StoreSql, id: WriteId) -> Result<i64, DbError> {
     Ok(database.query_row(
         &format!("SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
         params![id.device, id.number.to_be_bytes().as_slice()],
@@ -107,7 +107,7 @@ pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64,
     )?)
 }
 
-pub(crate) fn drop_tables(database: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn drop_tables(database: &StoreSql) -> Result<(), DbError> {
     Ok(database
         .batch("DROP TABLE temp._coven_snapshot_writes; DROP TABLE temp._coven_snapshot_columns")?)
 }

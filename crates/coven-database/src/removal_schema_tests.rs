@@ -31,7 +31,8 @@ async fn unnamed_check_identity_keeps_the_full_expression() {
                 .await
                 .unwrap();
             let error = sql(&db, "INSERT INTO notes VALUES('n',0)").await.unwrap_err();
-            let crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) = error
+            let crate::DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message))) =
+                error
             else {
                 panic!("expected SQLite CHECK failure: {error:?}")
             };
@@ -235,7 +236,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) if message == "CHECK constraint failed: n")
+            matches!(error, crate::DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message))) if message == "CHECK constraint failed: n")
         );
         sql(&b, "UPDATE notes SET y=3").await.unwrap();
         let repaired = records(&b).pop().unwrap();
@@ -351,8 +352,8 @@ async fn unnamed_check_sqlite_differential() {
                     Ok(_) => {
                         writer.execute(&format!("DELETE FROM oracle{i}"), []).unwrap();
                     }
-                    Err(sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
-                        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
+                    Err(sqlive::Error::Sqlite(sqlive::rusqlite::Error::SqliteFailure(e, _)))
+                        if e.extended_code == sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
                     {
                         expected.insert((*expression).to_owned());
                     }

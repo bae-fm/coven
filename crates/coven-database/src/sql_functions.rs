@@ -7,18 +7,18 @@ use std::cmp::Ordering;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
-use rusqlite::functions::{Context, FunctionFlags};
-use rusqlite::types::{FromSql, Value, ValueRef};
+use sqlive::rusqlite::functions::{Context, FunctionFlags};
+use sqlive::rusqlite::types::{FromSql, Value, ValueRef};
 
-use crate::connection_setup::Setup;
 use crate::DbError;
+use sqlive::Setup;
 
 /// SQLite's own collations. Coven's tables use only these, so an app name is
 /// refused only when it is one of them.
 const SQLITE_COLLATIONS: [&str; 3] = ["BINARY", "NOCASE", "RTRIM"];
 
 type Compare = dyn Fn(&str, &str) -> Ordering + Send + Sync;
-type Compute = dyn Fn(&FunctionArguments<'_>) -> rusqlite::Result<Value> + Send + Sync;
+type Compute = dyn Fn(&FunctionArguments<'_>) -> sqlive::rusqlite::Result<Value> + Send + Sync;
 
 /// The arguments SQLite passes one call of an app function. Only the
 /// arguments: the connection running the statement stays coven's.
@@ -29,7 +29,7 @@ pub struct FunctionArguments<'a> {
 impl FunctionArguments<'_> {
     /// Argument `index`, counted from zero, converted as a row's column is.
     /// An index past the function's arguments panics.
-    pub fn get<T: FromSql>(&self, index: usize) -> rusqlite::Result<T> {
+    pub fn get<T: FromSql>(&self, index: usize) -> sqlive::rusqlite::Result<T> {
         self.context.get(index)
     }
 
@@ -136,7 +136,7 @@ impl SqlFunctions {
         compute: F,
     ) -> Self
     where
-        F: Fn(&FunctionArguments<'_>) -> rusqlite::Result<T> + Send + Sync + 'static,
+        F: Fn(&FunctionArguments<'_>) -> sqlive::rusqlite::Result<T> + Send + Sync + 'static,
         T: Into<Value>,
     {
         self.scalars.push(Scalar {
@@ -172,8 +172,11 @@ impl SqlFunctions {
     /// has run no app statement, after coven's own functions. When coven
     /// refuses a name, opening the database fails, and this returns the
     /// refusal as a `DbError` inside the rusqlite error.
-    pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
-        let refused = |error: DbError| rusqlite::Error::UserFunctionError(Box::new(error));
+    pub(crate) fn register(
+        &self,
+        setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    ) -> sqlive::rusqlite::Result<()> {
+        let refused = |error: DbError| sqlive::rusqlite::Error::UserFunctionError(Box::new(error));
         for (position, collation) in self.collations.iter().enumerate() {
             let name = &collation.name;
             if SQLITE_COLLATIONS.iter().any(|own| own.eq_ignore_ascii_case(name)) {

@@ -679,3 +679,66 @@ async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
         matches!(crate::tests::database_error(error), DbError::InternalTable { table } if table == "_coven_rowid_guard_main_items")
     );
 }
+
+/// Notes, which sync, beside device-local tables: one a bulk write fills,
+/// one it writes alone, and an inbox whose trigger would write a note.
+const BULK_SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
+CREATE TABLE queue(position INTEGER PRIMARY KEY, track TEXT NOT NULL);
+CREATE TABLE other(id INTEGER PRIMARY KEY);
+CREATE TABLE inbox(id TEXT NOT NULL PRIMARY KEY);
+CREATE TRIGGER inbox_note AFTER INSERT ON inbox
+BEGIN INSERT INTO notes VALUES(new.id, 'from the inbox'); END;";
+
+async fn bulk(db: &StoreDatabase, sql: &'static str) -> Result<(), DbError> {
+    db.write_bulk(move |context| {
+        context.execute_batch(sql)?;
+        Ok(())
+    })
+    .await
+}
+
+/// A bulk write may read a synced table, but writing one fails the whole
+/// write: nothing it did commits, and no write record is queued.
+#[tokio::test]
+async fn a_bulk_write_to_a_synced_table_is_refused() {
+    let store = TestStore::new();
+    let db = store
+        .schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], BULK_SCHEMA)
+        .await
+        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('n1', 'Groceries')").await.unwrap();
+    let records = crate::write::tests::records(&db).len();
+    bulk(&db, "INSERT INTO queue(position, track) SELECT 0, title FROM notes").await.unwrap();
+    let error = bulk(&db, "INSERT INTO other VALUES(1); UPDATE notes SET title = 'Shopping'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::SyncedTableInBulkWrite { table } if table == "notes"),
+        "{error:?}"
+    );
+    assert_eq!(crate::write::tests::count(&db, "other"), 0);
+    assert_eq!(crate::write::tests::count(&db, "queue"), 1);
+    assert_eq!(crate::write::tests::records(&db).len(), records);
+    db.close().await.unwrap();
+}
+
+/// A trigger that would write a synced table is refused as SQLite prepares
+/// the statement that fires it, and the bulk write rolls back.
+#[tokio::test]
+async fn a_bulk_writes_trigger_writing_a_synced_table_is_refused() {
+    let store = TestStore::new();
+    let db = store
+        .schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], BULK_SCHEMA)
+        .await
+        .unwrap();
+    let error =
+        bulk(&db, "INSERT INTO other VALUES(1); INSERT INTO inbox VALUES('n1')").await.unwrap_err();
+    assert!(
+        matches!(&error, DbError::TriggerTarget { trigger, table }
+            if trigger == "inbox_note" && table == "notes"),
+        "{error:?}"
+    );
+    assert_eq!(crate::write::tests::count(&db, "other"), 0);
+    assert_eq!(crate::write::tests::count(&db, "notes"), 0);
+    db.close().await.unwrap();
+}

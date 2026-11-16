@@ -3,7 +3,7 @@
 use crate::{DbError, RowKey, Slot, WriteId};
 use coven_format::loss::{Loss, LossCause, LossValues};
 use coven_merge::Rule;
-use rusqlite::types::Value;
+use sqlive::rusqlite::types::Value;
 
 /// One durable lost cell or removed row.
 #[derive(Clone, Debug, PartialEq)]

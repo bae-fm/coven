@@ -54,10 +54,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
             !statements.iter().any(|statement| statement.sql.contains("FROM main.\"local_cache\"")),
             "local rows must never be snapshotted"
         );
-        for crate::sqlite::tests::ProfiledStatement {
-            sql: statement, fullscan_steps: rows, ..
-        } in &statements
-        {
+        for sqlive::ProfiledStatement { sql: statement, fullscan_steps: rows, .. } in &statements {
             if ["_coven_rows", "_coven_cells", "_coven_references", "_coven_writes"]
                 .iter()
                 .any(|table| statement.contains(table))
@@ -79,7 +76,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
 
 fn setters(db: &StoreDatabase, table: &str, key: &str) -> BTreeMap<String, u64> {
     let key = crate::tests::text_key(key);
-    db.inspect_writer(|db, _| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
+    db.inspect_writer(|db, _| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", sqlive::rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
 }
 
 async fn seeded(store: &TestStore) -> StoreDatabase {
@@ -224,7 +221,7 @@ async fn explicit_rename_chains_override_names_through_every_context_method() {
                                     2 => {
                                         assert!(matches!(
                                             context.query_row(statement, [], |_| Ok(())),
-                                            Err(rusqlite::Error::QueryReturnedNoRows)
+                                            Err(sqlive::rusqlite::Error::QueryReturnedNoRows)
                                         ));
                                     }
                                     _ => {
@@ -812,7 +809,7 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
          INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
@@ -834,5 +831,31 @@ pub(crate) fn scan_reason(
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
         _ => None,
+    }
+}
+
+/// Defensive mode refuses SQL that could damage the database file in a
+/// migration too: writing an FTS5 index's own data table fails it (§4).
+#[tokio::test]
+async fn a_migration_writing_an_indexs_own_table_fails() {
+    let error = crate::tests::TestStore::new()
+        .builder(
+            vec![],
+            vec![crate::Migration::addition(
+                1,
+                "index",
+                "CREATE VIRTUAL TABLE note_search USING fts5(title);
+                 DELETE FROM note_search_data",
+            )],
+        )
+        .open()
+        .await
+        .err()
+        .unwrap();
+    match crate::tests::database_error(error) {
+        DbError::Sqlite(error) => {
+            assert!(error.to_string().contains("may not be modified"), "{error}")
+        }
+        error => panic!("expected SQLite to refuse, received {error:?}"),
     }
 }

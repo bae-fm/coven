@@ -13587,12 +13587,12 @@ document:
 | Crate | Owns | Sections |
 | --- | --- | --- |
 | `caught` | catching a panic as a value that names where it began, handing a bug no caller waits for to a sink, finding the bug an error carries, and taking a lock whose holder panicked | api.md E15 |
-| `sqlive` | what a live query's statements read, the rows each read depends on, the live queries and change watches a commit wakes, the handle whose failure ends every later call, and the error its calls return | §4 |
+| `sqlive` | SQLite connections judged by a host's policy, their write transactions and what each commit changed, what a live query's statements read and the rows each read depends on, the live queries and change watches a commit wakes, each database's writer, readers and upkeep threads, the handle whose failure ends every later call, and the error its calls return | §4 |
 | `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, watching the device's network, reporting a panic in coven's work to the app's bug sink, and a runtime shutting down into a value | §6.7, §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
-| `coven-database` | the SQLite connection, coven's internal tables, applying the merge's results, triggers, migrations | §4, §9, §18 |
+| `coven-database` | coven's policy for its SQLite connections, coven's internal tables, applying the merge's results, triggers, migrations | §4, §9, §18 |
 | `coven-storage` | each provider, and the operations coven needs from it, including upload sessions | §20, Appendix E |
 | `coven-sync` | the sequence, members, circles, snapshots, files and the cache, operations, recovery | §5, §6, §10, §11, §13 to §19 |
 | `coven` | the API, and nothing else | api.md |
@@ -13636,10 +13636,11 @@ new ids          coven-foundation's id source
 files on disk    coven-foundation's files
 ```
 
-Two modules of coven-database's SQLite engine are exceptions. The checkpointer times how long a
-checkpoint holds the writer with std's monotonic `Instant`, for a log line. The temporary-folder
-setting checks with `std::fs` that the folder the app names exists. Neither takes a clock or a
-files capability from coven-foundation, so neither module depends on coven-foundation for them.
+Two modules of sqlive are exceptions. The checkpointer times how long a
+checkpoint holds the writer with std's monotonic `Instant`, for a log line. The
+temporary-folder setting checks with `std::fs` that the folder the app names
+exists. sqlive depends on no coven crate, so neither takes a clock or a files
+capability from coven-foundation.
 
 Everything else reaches a capability through the object that owns it, given to
 it when it is built. The snapshot writer never calls the system clock; it asks
@@ -13805,7 +13806,7 @@ but a task, or a handle that task makes, holding that type through one.
 **Owners don't hand out what they hold,** by returning it, through a public
 field, or as an argument a caller's callback can keep; callers ask the owner to
 do the work. A callback lent what it holds for one call, as one taking
-`&DatabaseConnection` with no lifetime of its own is, can use it while it runs
+`&HostSql` with no lifetime of its own is, can use it while it runs
 and keep none of it; one taking the connection for the lifetime its holder
 borrows it for has been given it. A value the method makes, such as a new
 cancellation token, is no part of what it holds, even when the owner holds one
@@ -13818,8 +13819,8 @@ not where they name a field after it, as `error!(operation = name)` does. A
 task taken whole, or mutably, may hand on by value a task it holds,
 as one step of an operation hands its product to the next, or a run of slot
 reads hands each slot it read to its reader: it no longer has it. Nothing
-outside `coven-database` gets the
-SQLite connection; it asks the database owner to run a write. A struct
+outside `coven-database` and `sqlive` gets the SQLite connection; it asks the
+database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
 used to pass collaborators; they are passed by name.
 

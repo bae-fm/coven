@@ -5,13 +5,13 @@ use crate::snapshot_layout::SnapshotLayout;
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::snapshot_metadata::STAGED_WRITES;
 use crate::snapshot_preparation::PreparedSnapshot;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LoadStep};
 use coven_format::snapshot::{section, SnapshotHeader, SnapshotRecord};
 use coven_foundation::progress::ProgressReport;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A circle installed from this device's own rebuild of it (§18.3).
@@ -25,9 +25,9 @@ pub(crate) struct Rebuilt<'a> {
 }
 
 pub(crate) fn load<P: crate::PendingValue>(
-    database: &mut DatabaseConnection,
+    database: &mut StoreSql,
     call: &StoreCall<'_>,
-    before: &DatabaseConnection,
+    before: &StoreSql,
     before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
@@ -211,7 +211,7 @@ pub(crate) fn begin_installing(
 /// Install one staged snapshot's rows, counting each table once in each
 /// pass toward the `Installing` step `progress` is on.
 pub(crate) fn read(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     mut prepared: PreparedSnapshot<'_>,

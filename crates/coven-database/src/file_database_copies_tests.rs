@@ -208,7 +208,7 @@ async fn a_closing_store_lets_a_failing_call_remove_its_copies() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
            SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,

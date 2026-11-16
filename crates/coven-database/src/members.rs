@@ -1,7 +1,7 @@
 //! Members, devices and circles as the committed prefix has them (E9, E12).
 //! Each call and its live subscription run the same query.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{store_state::DeviceState, DbError};
 use coven_format::admin::{MemberPublicKeys, MemberRole};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
@@ -58,10 +58,7 @@ pub struct CircleMemberInfo {
 
 use crate::store_state_tables::{circle, device_member, member};
 
-pub(crate) fn members(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Vec<MemberInfo>, DbError> {
+pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>, DbError> {
     let me = device_member(db, device)?;
     let members = db.query(
         "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members WHERE removed=0
@@ -90,7 +87,7 @@ pub(crate) fn members(
         .collect()
 }
 
-pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<Circle>, DbError> {
+pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, DbError> {
     let Some(me) = device_member(db, device)? else {
         return Ok(Vec::new());
     };
@@ -113,7 +110,7 @@ pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<C
 
 /// A circle's members who remain in the store; none for an absent or deleted circle.
 pub(crate) fn circle_members(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: DeviceId,
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {

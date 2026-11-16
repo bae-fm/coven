@@ -515,7 +515,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000013',?1,'store'),('00000000-0000-4000-8000-000000000014',?1,?2)",
-                    rusqlite::params![file, circle.to_string()],
+                    sqlive::rusqlite::params![file, circle.to_string()],
                 )?;
                 Ok(())
             },
@@ -551,7 +551,7 @@ async fn a_record_reaches_its_circle_and_not_the_store() {
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
-                    rusqlite::params![file, circle.to_string()],
+                    sqlive::rusqlite::params![file, circle.to_string()],
                 )?;
                 Ok(file)
             },
@@ -622,7 +622,7 @@ async fn a_deleted_circles_queued_upload_retires() {
         move |sql, file| {
             sql.execute(
                 "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
-                rusqlite::params![file, circle.to_string()],
+                sqlive::rusqlite::params![file, circle.to_string()],
             )?;
             Ok(file)
         },
@@ -665,7 +665,7 @@ async fn a_deleted_circles_user_original_is_forgotten() {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
             sql.execute(
                 "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
-                rusqlite::params![file, circle.to_string()],
+                sqlive::rusqlite::params![file, circle.to_string()],
             )?;
             Ok(file)
         })
@@ -815,7 +815,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES(?1,?2,'store')",
-                    rusqlite::params![row, file],
+                    sqlive::rusqlite::params![row, file],
                 )?;
                 Ok(())
             },
@@ -829,7 +829,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         db.write(move |sql| {
             sql.execute(
                 "UPDATE photos SET audience=?1 WHERE id=?2",
-                rusqlite::params![circle.to_string(), row],
+                sqlive::rusqlite::params![circle.to_string(), row],
             )?;
             Ok(())
         })

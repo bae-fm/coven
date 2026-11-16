@@ -1,16 +1,16 @@
 //! Indexed relations between synced rows, independent of app-table indexes.
 use crate::schema::TableSchema;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_merge::{ForeignKey, RowId, UniqueConstraint};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 pub(crate) fn children(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &TableSchema,
     key: &ForeignKey,
     parent: &RowId,
@@ -21,7 +21,7 @@ pub(crate) fn children(
 /// The registered row of a synced table's foreign key. Preparing the schema
 /// registers every one, so a reference can only name a registered key (Appendix B.1).
 pub(crate) fn foreign_key(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     table: &str,
     key: &ForeignKey,
@@ -40,7 +40,7 @@ pub(crate) fn foreign_key(
 /// carried renamed identities over and removed vanished ones, and on every
 /// writable open.
 pub(crate) fn register_schema(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
@@ -60,7 +60,7 @@ pub(crate) fn register_schema(
             database.execute(
                 "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)
                  ON CONFLICT(table_name,column_name) DO UPDATE SET synced=1 WHERE synced=0",
-                rusqlite::params![table.name, column.name],
+                sqlive::rusqlite::params![table.name, column.name],
             )?;
         }
         for key in &table.foreign_keys {
@@ -79,17 +79,17 @@ pub(crate) fn register_schema(
 /// breaking migration dropped (§18.7); such a column no longer syncs, so it
 /// has a row only once a frozen loss names it. A synced column is registered.
 pub(crate) fn frozen_column(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     column: &str,
 ) -> Result<i64, DbError> {
     database.execute(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
-        rusqlite::params![table, column],
+        sqlive::rusqlite::params![table, column],
     )?;
     Ok(database.query_row(
         "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
-        rusqlite::params![table, column],
+        sqlive::rusqlite::params![table, column],
         |r| r.get(0),
     )?)
 }
@@ -100,7 +100,7 @@ const COLUMN_STAGED: &str = "coven_migration_column_";
 
 /// Column `id`, which a migration dropped, no longer syncs. Its row stays
 /// only while a frozen loss names it (§18.7).
-pub(crate) fn drop_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn drop_column(database: &StoreSql, id: i64) -> Result<(), DbError> {
     retire_column(database, id)?;
     database.execute(
         "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",
@@ -111,29 +111,21 @@ pub(crate) fn drop_column(database: &DatabaseConnection, id: i64) -> Result<(), 
 
 /// Column `id` keeps its old name only for the frozen losses that name it,
 /// while a migration moves its cells to another column.
-pub(crate) fn retire_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn retire_column(database: &StoreSql, id: i64) -> Result<(), DbError> {
     database.execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
     Ok(())
 }
 
 /// Park column `id` under its staged table name with its new name `column`,
 /// until the migration gives it its new table.
-pub(crate) fn stage_column(
-    database: &DatabaseConnection,
-    id: i64,
-    column: &str,
-) -> Result<(), DbError> {
+pub(crate) fn stage_column(database: &StoreSql, id: i64, column: &str) -> Result<(), DbError> {
     rename_column(database, id, &format!("{COLUMN_STAGED}{id}"), column)
 }
 
 /// A new synced column, parked under the staged table name of column `id`
 /// with the name `column`, to take over `id`'s cells while `id` stays for
 /// the frozen losses that name it; its row id.
-pub(crate) fn stage_successor(
-    database: &DatabaseConnection,
-    id: i64,
-    column: &str,
-) -> Result<i64, DbError> {
+pub(crate) fn stage_successor(database: &StoreSql, id: i64, column: &str) -> Result<i64, DbError> {
     let staged = format!("{COLUMN_STAGED}{id}");
     database.execute(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)",
@@ -148,7 +140,7 @@ pub(crate) fn stage_successor(
 
 /// Give column `id` the table and name it has after the migration.
 pub(crate) fn rename_column(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     id: i64,
     table: &str,
     column: &str,
@@ -162,11 +154,7 @@ pub(crate) fn rename_column(
 
 /// Column `id`, whose cells the migration moved to `into`, goes; `into`,
 /// a dropped column a frozen loss kept, syncs again.
-pub(crate) fn merge_column(
-    database: &DatabaseConnection,
-    id: i64,
-    into: i64,
-) -> Result<(), DbError> {
+pub(crate) fn merge_column(database: &StoreSql, id: i64, into: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
     database.execute("UPDATE _coven_columns SET synced=1 WHERE id=?1", [into])?;
     Ok(())
@@ -176,7 +164,7 @@ pub(crate) fn merge_column(
 /// from the one last registered. A table never registered has no earlier
 /// declaration to change.
 pub(crate) fn owner_declaration_changed(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
 ) -> Result<Option<String>, DbError> {
@@ -198,7 +186,7 @@ pub(crate) fn owner_declaration_changed(
 }
 
 pub(crate) fn constraint(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     constraint: &UniqueConstraint,
 ) -> Result<i64, DbError> {
@@ -211,7 +199,7 @@ pub(crate) fn constraint(
 }
 
 pub(crate) fn claimants(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     constraint: &UniqueConstraint,
     audience: &coven_merge::Audience,
@@ -223,7 +211,7 @@ pub(crate) fn claimants(
 /// Whether a row the removal rules took out claims a unique value of `table`
 /// in `audience`: the claims table holds those rows' claims and no others'.
 pub(crate) fn holds_claims(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     audience: &coven_merge::Audience,
 ) -> Result<bool, DbError> {
@@ -236,7 +224,7 @@ const POINTED_CHUNK: usize = 500;
 /// Those of `rows` that a stored row names as a parent, whether or not the
 /// row itself is stored.
 pub(crate) fn pointed_at(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     rows: &BTreeSet<RowId>,
 ) -> Result<BTreeSet<RowId>, DbError> {
     let rows: Vec<&RowId> = rows.iter().collect();
@@ -245,8 +233,8 @@ pub(crate) fn pointed_at(
         let values = vec!["(?,?,?)"; chunk.len()].join(",");
         pointed.extend(database.query(
             &format!("WITH k(t,k,a) AS (VALUES {values}) SELECT DISTINCT k.t,k.k,k.a FROM k CROSS JOIN _coven_references v ON v.parent_table=k.t AND v.parent_key=k.k AND v.parent_audience=k.a"),
-            rusqlite::params_from_iter(chunk.iter().flat_map(|row| {
-                [&row.table as &dyn rusqlite::ToSql, &row.key, &row.audience]
+            sqlive::rusqlite::params_from_iter(chunk.iter().flat_map(|row| {
+                [&row.table as &dyn sqlive::rusqlite::ToSql, &row.key, &row.audience]
             })),
             read_identity,
         )?);
@@ -254,7 +242,7 @@ pub(crate) fn pointed_at(
     Ok(pointed)
 }
 
-pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
+pub(crate) fn read_identity(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<RowId> {
     Ok(RowId { table: r.get(0)?, key: r.get(1)?, audience: audience(r, 2)? })
 }
 
@@ -309,7 +297,7 @@ impl Definition {
 /// Park `definition` `id` under its staged table name, keeping its
 /// identity, until the migration gives it its new one.
 pub(crate) fn stage_definition(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     definition: Definition,
     id: i64,
 ) -> Result<(), DbError> {
@@ -324,7 +312,7 @@ pub(crate) fn stage_definition(
 /// Give `definition` `id` the table and encoded identity it has after the
 /// migration.
 pub(crate) fn rename_definition(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     definition: Definition,
     id: i64,
     table: &str,
@@ -337,7 +325,7 @@ pub(crate) fn rename_definition(
 /// Forget `definition` `id`, which the migration dropped: no later
 /// incarnation reuses it.
 pub(crate) fn forget_definition(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     definition: Definition,
     id: i64,
 ) -> Result<(), DbError> {
@@ -347,12 +335,12 @@ pub(crate) fn forget_definition(
 
 /// Insert a table-scoped metadata definition once and return its stable row id.
 fn definition_id(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     definitions: Definitions,
     table: &str,
-    identity: &dyn rusqlite::ToSql,
+    identity: &dyn sqlive::rusqlite::ToSql,
 ) -> Result<i64, DbError> {
-    let parameters = rusqlite::params![table, identity];
+    let parameters = sqlive::rusqlite::params![table, identity];
     database.execute(definitions.insert, parameters)?;
     Ok(database.query_row(definitions.id, parameters, |r| r.get(0))?)
 }

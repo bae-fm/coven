@@ -1,6 +1,6 @@
 //! SQLite's actual schema, declaration checks, and per-migration comparison.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
@@ -145,11 +145,11 @@ impl Schema {
             .expect("schema contains only JSON-compatible fields")
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> rusqlite::Result<Self> {
+    pub(crate) fn decode(bytes: &[u8]) -> sqlive::rusqlite::Result<Self> {
         type Objects = Vec<((String, String), SchemaObject)>;
         let (objects, tables): (Objects, BTreeMap<String, TableSchema>) =
             serde_json::from_slice(bytes).map_err(|error| {
-                crate::write_encoding::decode_failure(0, rusqlite::types::Type::Blob, error)
+                crate::write_encoding::decode_failure(0, sqlive::rusqlite::types::Type::Blob, error)
             })?;
         Ok(Self { objects: objects.into_iter().collect(), tables })
     }
@@ -158,10 +158,7 @@ impl Schema {
     /// table and column, read as a reference to a file (§17.2): a foreign key
     /// into `coven_files` that takes its row out, as restrict does, when its
     /// file is gone. SQLite knows nothing of these keys; coven checks them.
-    pub(crate) fn read(
-        db: &DatabaseConnection,
-        files: &[(String, String)],
-    ) -> Result<Self, DbError> {
+    pub(crate) fn read(db: &StoreSql, files: &[(String, String)]) -> Result<Self, DbError> {
         let objects = db.query(
             "SELECT type, name, tbl_name, sql FROM main.sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND substr(lower(name),1,7) != '_coven_' ORDER BY type, name",
             [], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), SchemaObject { table: row.get(2)?, sql: row.get(3)? })),
@@ -668,7 +665,7 @@ impl Schema {
 /// One table's columns, unique indexes and foreign keys, as SQLite reports
 /// them.
 fn table(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     name: &str,
     sql: String,
     objects: &BTreeMap<(String, String), SchemaObject>,
@@ -746,7 +743,7 @@ impl SchemaForeignKey {
 /// as a whole, by design. An integer rowid alias has no key index and can't
 /// hold NULL. Virtual tables and their shadow tables are SQLite's own.
 pub(crate) fn validate_local_keys(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &Schema,
     declarations: &[SyncedTable],
 ) -> Result<(), DbError> {

@@ -3,14 +3,14 @@
 //! A capture fixes eligibility through its marker. Snapshot bytes are made from
 //! the counted base only after that prefix has acquired slots; later local
 //! originals remain outside it.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, counter};
 use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{admin::SnapshotId, snapshot::SnapshotHeader};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 /// A breaking raise's fixed original prefix and current counted coverage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct RaiseCapture {
 }
 
 pub(crate) fn capture(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     _schema: &WriteSchema,
     marker: WriteId,
     version: u32,
@@ -59,7 +59,7 @@ pub(crate) fn capture(
 /// its creating app runs only once this device raises it, through the marker
 /// that migration queued (§18.3).
 pub(crate) fn capture_created(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
 ) -> Result<(), DbError> {
@@ -96,7 +96,7 @@ pub(crate) fn capture_created(
 /// none of it at the circle's version, and waits for a device that held it
 /// (§15.5, §18.3).
 pub(crate) fn capture_made(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     circle: coven_foundation::id_source::CircleId,
     state: &crate::StoreState,
@@ -126,7 +126,7 @@ pub(crate) fn capture_made(
 /// device's version, and open the journal through which passes publish the
 /// capture if the migration's has finished.
 fn capture_circle(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     audience: &Audience,
     through: u64,
@@ -156,7 +156,7 @@ fn capture_circle(
 /// writes after its migration marker `marker` wait for its raise (§18.3,
 /// §18.4).
 pub(crate) fn capture_rebuilt(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     audience: &Audience,
     marker: WriteId,
@@ -168,7 +168,7 @@ pub(crate) fn capture_rebuilt(
 /// Journal the operation through which passes publish this installation's
 /// raise captures at `version`, at its first step.
 pub(crate) fn journal(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     operation: &crate::migration::MigrationOperation,
     version: u32,
 ) -> Result<(), DbError> {
@@ -181,7 +181,7 @@ pub(crate) fn journal(
 }
 
 pub(crate) fn raise_to(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     _tables: &[crate::SyncedTable],
     device: DeviceId,
     version: u32,
@@ -201,7 +201,7 @@ pub(crate) fn raise_to(
 
 /// A marker queued behind the writes a waiting raise captured: the raise's
 /// prefix now runs through it, so no raise goes out ahead of it (§18.4).
-pub(crate) fn follow(db: &DatabaseConnection, marker: WriteId) -> Result<(), DbError> {
+pub(crate) fn follow(db: &StoreSql, marker: WriteId) -> Result<(), DbError> {
     for capture in captures(db, marker.device)? {
         db.execute(
             "UPDATE _coven_raise_captures SET through=?1 WHERE audience=?2 AND version=?3",
@@ -212,7 +212,7 @@ pub(crate) fn follow(db: &DatabaseConnection, marker: WriteId) -> Result<(), DbE
 }
 
 pub(crate) fn prepare(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     _schema: &WriteSchema,
     device: DeviceId,
     selected: &Audience,
@@ -227,13 +227,13 @@ pub(crate) fn prepare(
         .find(|capture| capture.audience == *selected && capture.version == version))
 }
 
-pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
+pub(crate) fn captured_through(db: &StoreSql) -> Result<Option<u64>, DbError> {
     Ok(db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
         r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()
     })?)
 }
 
-pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32, u64)>, DbError> {
+pub(crate) fn provisional(db: &StoreSql) -> Result<Vec<(Audience, u32, u64)>, DbError> {
     Ok(db.query(
         "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
@@ -241,10 +241,7 @@ pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32,
     )?)
 }
 
-pub(crate) fn captures(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Vec<RaiseCapture>, DbError> {
+pub(crate) fn captures(db: &StoreSql, device: DeviceId) -> Result<Vec<RaiseCapture>, DbError> {
     Ok(db.query(
         "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience",
         [],
@@ -260,7 +257,7 @@ pub(crate) fn captures(
 }
 
 pub(crate) fn write<E>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     id: SnapshotId,
@@ -284,7 +281,7 @@ pub(crate) fn write<E>(
 /// The version of the newest breaking migration this installation ran, zero
 /// if none: received writes are read from it on (§18.5), and a snapshot this
 /// installation writes announces it as its breaking version (§16.3).
-pub(crate) fn breaking_version(db: &DatabaseConnection) -> Result<u32, DbError> {
+pub(crate) fn breaking_version(db: &StoreSql) -> Result<u32, DbError> {
     Ok(db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| {
         r.get(0)
     })?)
@@ -292,18 +289,14 @@ pub(crate) fn breaking_version(db: &DatabaseConnection) -> Result<u32, DbError> 
 
 /// Read received writes from schema version `minimum` on, the version a
 /// breaking migration requires (§18.5).
-pub(crate) fn require(db: &DatabaseConnection, minimum: u32) -> Result<(), DbError> {
+pub(crate) fn require(db: &StoreSql, minimum: u32) -> Result<(), DbError> {
     db.execute("UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1", [minimum])?;
     Ok(())
 }
 
 /// A snapshot of `audience` loaded at schema `version` covers every capture
 /// of it at that version or before.
-pub(crate) fn loaded(
-    db: &DatabaseConnection,
-    audience: &Audience,
-    version: u32,
-) -> Result<(), DbError> {
+pub(crate) fn loaded(db: &StoreSql, audience: &Audience, version: u32) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
         params![audience, version],
@@ -312,16 +305,12 @@ pub(crate) fn loaded(
 }
 
 /// Every capture of `audience`: a rebuild of it replaces them.
-pub(crate) fn supersede(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+pub(crate) fn supersede(db: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_raise_captures WHERE audience=?1", [audience])?;
     Ok(())
 }
 
-pub(crate) fn discard(
-    db: &DatabaseConnection,
-    audience: &Audience,
-    version: u32,
-) -> Result<(), DbError> {
+pub(crate) fn discard(db: &StoreSql, audience: &Audience, version: u32) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version=?2",
         params![audience, version],

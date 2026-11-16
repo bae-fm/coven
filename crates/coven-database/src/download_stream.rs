@@ -1,6 +1,6 @@
 //! Incremental write parts supplied by synchronization.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::SnapshotError;
 use coven_format::chunks::CHUNK_SIZE;
@@ -138,7 +138,7 @@ impl PreparedWrite<'_> {
 /// version needs: the write doesn't wait, and each of its changes is kept as a
 /// frozen lost value (§18.3).
 pub(crate) fn stage_selected(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     write: PreparedWrite<'_>,
@@ -241,7 +241,7 @@ pub(crate) fn stage_selected(
 /// connection without changing rows or admission.
 #[cfg(test)]
 pub(crate) fn retain_sources(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     write: PreparedWrite<'_>,
@@ -263,7 +263,7 @@ pub(crate) fn retain_sources(
 /// leaf hashes and the header evidence in the store's connection
 /// (`authorship::keeps_evidence`).
 fn read_authenticated(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     write: PreparedWrite<'_>,
     mut consume: impl FnMut(

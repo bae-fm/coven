@@ -2,7 +2,7 @@
 //! the cache keeps with its entries (§17.8, Appendix C.3).
 
 use super::{Mode, StoreDatabase};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{next_result, DbError, LiveQuery};
 use coven_foundation::task::CarriesBug;
 use std::future::Future;
@@ -54,7 +54,7 @@ fn unsigned(value: i64) -> Result<u64, DbError> {
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn budgets(db: &DatabaseConnection) -> Result<Vec<NamespaceBytes>, DbError> {
+pub(crate) fn budgets(db: &StoreSql) -> Result<Vec<NamespaceBytes>, DbError> {
     db.query(
         "SELECT namespace,bytes,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
         [],
@@ -80,7 +80,7 @@ pub(crate) fn budgets(db: &DatabaseConnection) -> Result<Vec<NamespaceBytes>, Db
 }
 
 /// The sum of the partial downloads' sizes.
-pub(crate) fn partials(db: &DatabaseConnection) -> Result<u64, DbError> {
+pub(crate) fn partials(db: &StoreSql) -> Result<u64, DbError> {
     unsigned(db.query_row("SELECT coalesce(sum(size),0) FROM _coven_cache_partials", [], |r| {
         r.get::<_, i64>(0)
     })?)

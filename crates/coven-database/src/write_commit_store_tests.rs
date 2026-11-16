@@ -134,7 +134,7 @@ async fn stored_generations_tell_inserted_from_found() {
                 let write = |n: u8| {
                     writer.query_row(
                         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,zeroblob(8),NULL) RETURNING id",
-                        rusqlite::params![vec![n; 16], vec![0, 0, 0, 0, 0, 0, 0, n]],
+                        sqlive::rusqlite::params![vec![n; 16], vec![0, 0, 0, 0, 0, 0, 0, n]],
                         |r| r.get::<_, i64>(0),
                     )
                 };

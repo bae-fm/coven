@@ -9,7 +9,7 @@ use crate::database::{start_call, DatabaseInner, StoreDatabase};
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{encoded, sql_value};
 use crate::write_metadata::MetadataFailure;
@@ -26,7 +26,7 @@ use coven_format::{
     write::WriteHeader,
 };
 use coven_foundation::locks::read_unpoisoned;
-use rusqlite::{params, params_from_iter};
+use sqlive::rusqlite::{params, params_from_iter};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// records go with the connection: no restart finds them. That storage spills
 /// to files once the connection's cache fills; opening refuses a SQLite built
 /// to keep it in memory. Only the snapshot loader names these tables.
-pub(super) fn create_tables(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(super) fn create_tables(db: &StoreSql) -> Result<(), DbError> {
     db.batch("PRAGMA temp_store=FILE;")?;
     crate::snapshot_metadata::create_table(db)
 }
@@ -59,7 +59,7 @@ pub use damage::StagedDamage;
 pub use damage::StagedDigest;
 
 fn create_staged(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     layout: &SnapshotLayout,
     staging: i64,
 ) -> Result<Vec<String>, DbError> {
@@ -90,7 +90,7 @@ fn create_staged(
 }
 
 /// Drop a staging's tables whole.
-fn remove(db: &DatabaseConnection, staging: &StagedTables) -> Result<(), DbError> {
+fn remove(db: &StoreSql, staging: &StagedTables) -> Result<(), DbError> {
     for table in &staging.tables {
         db.batch(&format!("DROP TABLE {table}"))?;
     }
@@ -99,7 +99,7 @@ fn remove(db: &DatabaseConnection, staging: &StagedTables) -> Result<(), DbError
 
 /// Drop the tables of each of `stagings` that still holds its records, in
 /// the transaction of the operation that ends them.
-fn remove_all(db: &DatabaseConnection, stagings: &[SnapshotStaging]) -> Result<(), DbError> {
+fn remove_all(db: &StoreSql, stagings: &[SnapshotStaging]) -> Result<(), DbError> {
     stagings
         .iter()
         .filter_map(|staging| staging.tables.as_ref())
@@ -581,7 +581,7 @@ impl SnapshotStaging {
 }
 
 fn stage(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     #[cfg_attr(
         not(any(test, feature = "test-utils")),
         expect(unused_variables, reason = "only tests count coven's work")
@@ -630,7 +630,7 @@ fn stage(
 
 /// Where one staging's records go.
 struct RecordStaging<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     schema: &'a WriteSchema,
     inserts: &'a Inserts,
 }
@@ -701,7 +701,7 @@ impl RecordStaging<'_> {
         let layout = &self.inserts.layout.tables[at];
         let generation = state.generation();
         let writer = state.generations()[&generation];
-        let mut values = vec![rusqlite::types::Value::Null; layout.width()];
+        let mut values = vec![sqlive::rusqlite::types::Value::Null; layout.width()];
         values[TableLayout::KEY] = row.key.clone().into();
         values[TableLayout::AUDIENCE] = (&row.audience).into();
         values[TableLayout::PRESENT] = state.present().into();
@@ -831,7 +831,7 @@ fn check_merged(
 /// Stage the parents each column's value carries, by reference pair.
 fn put_parents<'a>(
     layout: &TableLayout,
-    values: &mut [rusqlite::types::Value],
+    values: &mut [sqlive::rusqlite::types::Value],
     column: impl Fn(usize) -> Option<&'a coven_merge::ColumnValue<Value>>,
 ) {
     for (q, (j, key)) in layout.pairs.iter().enumerate() {
@@ -843,9 +843,9 @@ fn put_parents<'a>(
                 values[at + 2] = parent.generation.to_be_bytes().to_vec().into();
             }
             None => {
-                values[at] = rusqlite::types::Value::Null;
-                values[at + 1] = rusqlite::types::Value::Null;
-                values[at + 2] = rusqlite::types::Value::Null;
+                values[at] = sqlive::rusqlite::types::Value::Null;
+                values[at + 1] = sqlive::rusqlite::types::Value::Null;
+                values[at + 2] = sqlive::rusqlite::types::Value::Null;
             }
         }
     }

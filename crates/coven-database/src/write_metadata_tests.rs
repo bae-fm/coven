@@ -1,4 +1,4 @@
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// metadata table moved away so reading a write's metadata fails in SQLite.
 /// `check` runs inside a savepoint that is rolled back afterwards.
 async fn unreadable_metadata(
-    check: impl FnOnce(&DatabaseConnection, &StoreCall<'_>, &crate::write_schema::WriteSchema),
+    check: impl FnOnce(&StoreSql, &StoreCall<'_>, &crate::write_schema::WriteSchema),
 ) {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
@@ -36,7 +36,7 @@ async fn unreadable_metadata(
 }
 
 fn is_sqlite_failure(error: &DbError) -> bool {
-    matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..)))
+    matches!(error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(..)))
 }
 
 #[tokio::test]

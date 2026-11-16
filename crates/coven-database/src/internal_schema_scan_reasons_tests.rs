@@ -8,13 +8,13 @@ use super::{reason, Statement};
 
 #[path = "internal_schema_scan_literals.rs"]
 mod literals;
-use rusqlite::Connection;
+use sqlive::rusqlite::Connection;
 use std::collections::BTreeSet;
 
 /// A populated internal schema the plan checks explain every statement
 /// against.
 mod fixture {
-    use rusqlite::{
+    use sqlive::rusqlite::{
         fallible_iterator::FallibleIterator, functions::FunctionFlags, Batch, Connection,
     };
 
@@ -58,22 +58,20 @@ mod fixture {
             Ok(Vec::<u8>::new())
         })
         .unwrap();
-        let authorization = crate::authorization::SqlAuthorization::new(
-            crate::internal_schema::whole_views(),
-            std::sync::Arc::new(crate::app_policy::CovenPolicy::new(&[])),
-        );
-        let setup = crate::connection_setup::Setup::new(&db, &authorization);
-        crate::transfers_in_flight::TransfersInFlight::new(
-            crate::store_failure::StoreHandle::recording_all(
-                coven_foundation::task::HeardBugs::shared(),
-            ),
-        )
-        .register(&setup)
-        .unwrap();
-        crate::network_facts::NetworkFacts::new(crate::store_failure::StoreHandle::recording_all(
-            coven_foundation::task::HeardBugs::shared(),
-        ))
-        .register(&setup)
+        sqlive::Setup::on_test_connection(&db, crate::app_policy::CovenPolicy::new(&[]), |setup| {
+            crate::transfers_in_flight::TransfersInFlight::new(
+                crate::store_failure::StoreHandle::recording_all(
+                    coven_foundation::task::HeardBugs::shared(),
+                ),
+            )
+            .register(setup)?;
+            crate::network_facts::NetworkFacts::new(
+                crate::store_failure::StoreHandle::recording_all(
+                    coven_foundation::task::HeardBugs::shared(),
+                ),
+            )
+            .register(setup)
+        })
         .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;").unwrap();
         let schema = crate::internal_schema::initial_schema();
@@ -160,7 +158,7 @@ mod fixture {
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
-            .collect::<rusqlite::Result<_>>()
+            .collect::<sqlive::rusqlite::Result<_>>()
             .unwrap();
         for table in tables {
             let count: i64 =
@@ -219,7 +217,7 @@ mod source {
         path::Path,
     };
 
-    use rusqlite::Connection;
+    use sqlive::rusqlite::Connection;
     use syn::{spanned::Spanned, visit::Visit};
     struct Source {
         strings: Vec<(usize, String)>,
@@ -271,7 +269,7 @@ mod source {
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
-            .collect::<rusqlite::Result<_>>()
+            .collect::<sqlive::rusqlite::Result<_>>()
             .unwrap();
         let pending = select_constant(&sources["pending.rs"].strings, "SELECT subject,");
         let losses = select_constant(&sources["loss_record.rs"].strings, "SELECT l.table_name,");
@@ -641,7 +639,7 @@ mod source {
                 .unwrap()
                 .query_map([], |r| r.get(0))
                 .unwrap()
-                .collect::<rusqlite::Result<_>>()
+                .collect::<sqlive::rusqlite::Result<_>>()
                 .unwrap();
             return tables.iter().map(|table| sql.replace("{table}", table)).collect();
         }
@@ -834,7 +832,7 @@ fn internal_query_plans() {
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
-        .collect::<rusqlite::Result<_>>()
+        .collect::<sqlive::rusqlite::Result<_>>()
         .unwrap();
     let mut failures = Vec::new();
     let mut answered = Answered::new();
@@ -873,7 +871,7 @@ fn internal_query_plans() {
                     drop(rows);
                     // VM counters have no relation name. Only a statement
                     // listed for "database" may walk unnamed entries.
-                    if read.get_status(rusqlite::StatementStatus::FullscanStep) != 0
+                    if read.get_status(sqlive::rusqlite::StatementStatus::FullscanStep) != 0
                         && answered.reason(statement, "database").is_none()
                     {
                         failures.push(format!(

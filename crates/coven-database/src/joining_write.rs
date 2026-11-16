@@ -2,7 +2,7 @@
 //! the person's profile, written in the transaction that first applies the
 //! device's registration, from the facts of its member's latest admission.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     file_write::{FileWrite, WriteFiles},
@@ -10,7 +10,7 @@ use crate::{
     DbError, StoreState,
 };
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
-use rusqlite::{Params, Row};
+use sqlive::rusqlite::{Params, Row};
 
 /// The facts of a member's latest admission, which the joining write reads
 /// (§13.2).
@@ -38,29 +38,29 @@ impl<'write> JoiningWrite<'write> {
     }
 
     /// Execute one app statement with parameters.
-    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> sqlive::rusqlite::Result<usize> {
         self.files.execute(sql, params)
     }
 
     /// Execute app statements within this write's transaction.
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    pub fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.files.execute_batch(sql)
     }
 
     /// Map one app row, including changes already made by this write.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
-        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         self.files.query_row(sql, params, map)
     }
 
     /// Map all app rows produced by a query within this write.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
     where
         P: Params,
-        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
         self.files.query(sql, params, map)
     }
@@ -107,7 +107,7 @@ impl Registering<'_> {
 /// the one transaction that first applies the registration, and in none after
 /// it (§13.2).
 pub(crate) fn owed<'a>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     hook: Option<&'a JoiningHook>,
     state: &StoreState,

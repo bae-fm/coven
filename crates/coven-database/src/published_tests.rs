@@ -4,7 +4,7 @@
 /// Fill the published merge state's tables, thousands of rows each but one marker,
 /// from the rows of the plan audit's `fixture` table, inside its transaction
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_published VALUES(1);
          INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00' FROM fixture;
@@ -873,7 +873,7 @@ fn kept_record(database: &crate::StoreDatabase, table: &str, id: &str) -> Option
     database.inspect_writer(|db, _| {
         db.query(
             "SELECT record FROM _coven_published_rows WHERE table_name=?1 AND key=?2",
-            rusqlite::params![table, key],
+            sqlive::rusqlite::params![table, key],
             |r| r.get::<_, Vec<u8>>(0),
         )
         .unwrap()

@@ -1,19 +1,19 @@
 //! Persist exactly the row updates produced by coven-merge, with their record.
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::encoded;
 use crate::DbError;
 use coven_format::{merge_fields, value::Value, write::WriteRecord, write_stream::WriteEncoder};
 use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_merge::{Audience, LostChange, RowId, RowUpdate, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Store a write and the row updates merging it produced. Returns each
 /// present row's current generation, as `persist` does.
 pub(crate) fn commit(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     record: &WriteRecord,
     store: &MergeStore<'_>,
@@ -30,14 +30,14 @@ pub(crate) fn commit(
 }
 
 pub(crate) fn retain_metadata(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     write: &coven_format::snapshot_rows::AppliedWrite,
 ) -> Result<i64, DbError> {
     retain(database, write.id, write.timestamp, write.read_through, Some(write.slot))
 }
 
 pub(crate) fn retain_original(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &coven_format::write::WriteHeader,
     slot: Option<coven_merge::Slot>,
 ) -> Result<i64, DbError> {
@@ -48,7 +48,7 @@ pub(crate) fn retain_original(
 /// writes (§7.1): a genuine device's applied slot never goes back, and
 /// forgetting kept records relies on it (§16.7).
 pub(crate) fn check_reads(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &coven_format::write::WriteHeader,
 ) -> Result<(), DbError> {
     let earlier = crate::write_metadata::landed_below(database, header.position)?;
@@ -62,7 +62,7 @@ pub(crate) fn check_reads(
 }
 
 fn retain(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     id: WriteId,
     timestamp: coven_merge::Timestamp,
     read_through: u64,
@@ -105,7 +105,7 @@ fn retain(
 
 /// Delete the applied-write entry `ordinal`, which no check reads any more
 /// (§16.7). A merge row naming it would refuse the delete.
-pub(crate) fn forget_entry(database: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
+pub(crate) fn forget_entry(database: &StoreSql, ordinal: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_writes WHERE id=?1", [ordinal])?;
     Ok(())
 }
@@ -124,7 +124,7 @@ pub(crate) enum StoredRows<'a> {
 }
 
 /// Remove the stored `rows` and their cells, references and claims.
-pub(crate) fn forget(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Result<(), DbError> {
+pub(crate) fn forget(database: &StoreSql, rows: &StoredRows<'_>) -> Result<(), DbError> {
     delete_children(database, rows)?;
     match rows {
         StoredRows::InAudience(audience) => {
@@ -144,7 +144,7 @@ pub(crate) fn forget(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Re
 
 /// Remove the cells, references and claims of `rows` in `_coven_rows`. The
 /// rows themselves stay for the caller to remove or keep.
-fn delete_children(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Result<(), DbError> {
+fn delete_children(database: &StoreSql, rows: &StoredRows<'_>) -> Result<(), DbError> {
     for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
         match rows {
             StoredRows::InAudience(audience) => database.execute(
@@ -185,7 +185,7 @@ pub(crate) struct StoredGeneration {
 /// Store each row's update over its prior record. Returns each present row's
 /// current generation.
 pub(crate) fn persist(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
     prior: impl Fn(&RowId) -> Result<crate::merge_store::StoredRow, DbError>,
@@ -293,7 +293,7 @@ pub(crate) fn persist(
 /// the value the row claims. Unchanged claims are left alone. A `fresh`
 /// generation (see [`StoredGeneration`]) has none to read.
 pub(crate) fn store_claims(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     row: i64,
     fresh: bool,
     audience: &Audience,
@@ -324,29 +324,21 @@ pub(crate) fn store_claims(
 }
 
 /// Table `old`'s stored rows take the name `new`.
-pub(crate) fn rename_table(
-    database: &DatabaseConnection,
-    old: &str,
-    new: &str,
-) -> Result<(), DbError> {
+pub(crate) fn rename_table(database: &StoreSql, old: &str, new: &str) -> Result<(), DbError> {
     database
         .execute("UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1", params![old, new])?;
     Ok(())
 }
 
 /// Delete the cells and references of column `id`, which a migration dropped.
-pub(crate) fn forget_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn forget_column(database: &StoreSql, id: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
     database.execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
     Ok(())
 }
 
 /// The cells and references of column `old` move to column `new`.
-pub(crate) fn move_column(
-    database: &DatabaseConnection,
-    old: i64,
-    new: i64,
-) -> Result<(), DbError> {
+pub(crate) fn move_column(database: &StoreSql, old: i64, new: i64) -> Result<(), DbError> {
     database
         .execute("UPDATE _coven_cells SET column_id=?2 WHERE column_id=?1", params![old, new])?;
     database.execute(
@@ -357,14 +349,14 @@ pub(crate) fn move_column(
 }
 
 /// Delete the references through foreign key `id`, which a migration dropped.
-pub(crate) fn forget_foreign_key(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn forget_foreign_key(database: &StoreSql, id: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_references WHERE foreign_key_id=?1", [id])?;
     Ok(())
 }
 
 /// The references through foreign key `id` name their parent table `parent`.
 pub(crate) fn repoint_references(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     id: i64,
     parent: &str,
 ) -> Result<(), DbError> {
@@ -376,7 +368,7 @@ pub(crate) fn repoint_references(
 }
 
 /// Delete the claims on unique constraint `id`, which a migration dropped.
-pub(crate) fn forget_constraint(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn forget_constraint(database: &StoreSql, id: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
     Ok(())
 }
@@ -386,7 +378,7 @@ pub(crate) fn forget_constraint(database: &DatabaseConnection, id: i64) -> Resul
 /// checks and commit, so a membership change cannot race the authorization.
 /// `replaced` is [`retain_queue`]'s.
 pub(crate) fn queue(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     record: &WriteRecord,
@@ -423,7 +415,7 @@ pub(crate) fn queue(
 /// write's rows, which never reach it, are checked in `migration_run`.
 /// The caller must keep its write transaction open until the authorized work commits.
 pub(crate) fn check_membership(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     device: DeviceId,
     audience: &Audience,
 ) -> Result<(), DbError> {
@@ -461,7 +453,7 @@ pub(crate) fn check_membership(
 /// paths the write moves its file records off, which it protects until it
 /// is published (§17.10).
 pub(crate) fn retain_queue(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     record: &WriteRecord,
@@ -488,7 +480,7 @@ pub(crate) fn retain_queue(
 /// Check the encoder's exact plaintext length against SQLite's connection limit
 /// before allocating the queue buffer, reserving room for its sealing keys.
 pub(crate) fn plaintext(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     encoder: WriteEncoder<'_>,
 ) -> Result<Vec<u8>, DbError> {
     let length = check_value_length(database, "write plaintext", encoder.plaintext_length())?;
@@ -504,11 +496,7 @@ pub(crate) fn plaintext(
 }
 
 /// Refuse a queued value before allocating it, using `sql`'s limit.
-fn check_value_length(
-    sql: &DatabaseConnection,
-    field: &'static str,
-    length: u64,
-) -> Result<usize, DbError> {
+fn check_value_length(sql: &StoreSql, field: &'static str, length: u64) -> Result<usize, DbError> {
     let maximum = sql.length_limit()? as u64;
     if length > maximum {
         return Err(DbError::TooLarge { field, actual: length, maximum });

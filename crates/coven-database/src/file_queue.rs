@@ -3,7 +3,7 @@
 use crate::file_location::FileLocation;
 use crate::insert_rows::{insert_rows, value};
 use crate::internal_schema::FILE_NAMED_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
@@ -142,7 +142,7 @@ impl UnsentWork {
     }
 }
 
-pub(crate) fn unsent(db: &DatabaseConnection) -> Result<UnsentWork, DbError> {
+pub(crate) fn unsent(db: &StoreSql) -> Result<UnsentWork, DbError> {
     Ok(db.query_row(
         "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)",
         [],
@@ -152,7 +152,7 @@ pub(crate) fn unsent(db: &DatabaseConnection) -> Result<UnsentWork, DbError> {
     )?)
 }
 
-pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError> {
+pub(crate) fn state(db: &StoreSql) -> Result<UploadQueueState, DbError> {
     Ok(UploadQueueState {
         paused: paused(db)?,
         uploads: read(db)?,
@@ -163,19 +163,16 @@ pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError
     })
 }
 
-pub(crate) fn paused(db: &DatabaseConnection) -> Result<bool, DbError> {
+pub(crate) fn paused(db: &StoreSql) -> Result<bool, DbError> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", [], |r| r.get(0))?)
 }
 
 /// Whether the app moves files only on unmetered networks, as persisted.
-pub(crate) fn unmetered_only(db: &DatabaseConnection) -> Result<bool, DbError> {
+pub(crate) fn unmetered_only(db: &StoreSql) -> Result<bool, DbError> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_unmetered_only)", [], |r| r.get(0))?)
 }
 
-pub(crate) fn set_unmetered_only(
-    db: &DatabaseConnection,
-    unmetered_only: bool,
-) -> Result<(), DbError> {
+pub(crate) fn set_unmetered_only(db: &StoreSql, unmetered_only: bool) -> Result<(), DbError> {
     if unmetered_only {
         db.execute(
             "INSERT INTO _coven_unmetered_only(unmetered_only) VALUES(1) ON CONFLICT DO NOTHING",
@@ -187,7 +184,7 @@ pub(crate) fn set_unmetered_only(
     Ok(())
 }
 
-pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), DbError> {
+pub(crate) fn set_paused(db: &StoreSql, paused: bool) -> Result<(), DbError> {
     if paused {
         db.execute("INSERT INTO _coven_upload_pause(paused) VALUES(1) ON CONFLICT DO NOTHING", [])?;
     } else {
@@ -199,7 +196,7 @@ pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), Db
 /// The uploads some file still waits for, oldest first: the queue the app
 /// sees and the worker serves (§17.9). One whose files are all gone waits
 /// only for retirement.
-pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+pub(crate) fn read(db: &StoreSql) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
                 u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
@@ -216,7 +213,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
 /// session, oldest first: each retires once its session is aborted, since
 /// retiring the row alone would leave the session's parts at the provider
 /// for good (§17.9).
-pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+pub(crate) fn abandoned(db: &StoreSql) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
                 u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
@@ -232,7 +229,7 @@ pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbEr
 
 /// Every queued upload, those no file waits for included, oldest first.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+pub(crate) fn read_all(db: &StoreSql) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
                 u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
@@ -250,7 +247,7 @@ type UploadRow = (
     (crate::MoveId, bool, Option<Vec<u8>>),
 );
 
-fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
+fn upload_row(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<UploadRow> {
     Ok((
         (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
         (r.get(5)?, r.get(6)?, r.get(7)?),
@@ -263,10 +260,7 @@ fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-fn decode_uploads(
-    db: &DatabaseConnection,
-    rows: Vec<UploadRow>,
-) -> Result<Vec<FileUpload>, DbError> {
+fn decode_uploads(db: &StoreSql, rows: Vec<UploadRow>) -> Result<Vec<FileUpload>, DbError> {
     rows.into_iter()
         .map(|((id, location, size, hash, queued), session, retry, (of, stored, holds))| {
             let retry = match retry {
@@ -318,7 +312,7 @@ fn decode_uploads(
 /// The first write this device's bound uploads hold, while a file waits
 /// for one (§17.4): no write from it on may be sent. An upload no file waits
 /// for holds nothing, since nothing a write names waits for its bytes.
-pub(crate) fn first_held(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
+pub(crate) fn first_held(db: &StoreSql) -> Result<Option<u64>, DbError> {
     let holds = db.query_row(
         "SELECT min(u.holds) FROM _coven_file_uploads AS u WHERE u.holds IS NOT NULL
          AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)",
@@ -330,7 +324,7 @@ pub(crate) fn first_held(db: &DatabaseConnection) -> Result<Option<u64>, DbError
 
 /// The queued upload of this stored object, by its unique identity index.
 pub(crate) fn upload_id(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     uploader: DeviceId,
     object: ObjectId,
 ) -> Result<Option<i64>, DbError> {
@@ -344,14 +338,14 @@ pub(crate) fn upload_id(
 }
 
 /// The upload a file waits for on this device, if it waits for one.
-pub(crate) fn upload_of(db: &DatabaseConnection, file: FileId) -> Result<Option<i64>, DbError> {
+pub(crate) fn upload_of(db: &StoreSql, file: FileId) -> Result<Option<i64>, DbError> {
     Ok(db
         .query("SELECT upload FROM _coven_upload_files WHERE file=?1", [file], |row| row.get(0))?
         .pop())
 }
 
 /// The queue ids of the bound uploads (§17.4).
-pub(crate) fn bound(db: &DatabaseConnection) -> Result<std::collections::BTreeSet<i64>, DbError> {
+pub(crate) fn bound(db: &StoreSql) -> Result<std::collections::BTreeSet<i64>, DbError> {
     Ok(db
         .query("SELECT id FROM _coven_file_uploads WHERE holds IS NOT NULL", [], |r| r.get(0))?
         .into_iter()
@@ -360,7 +354,7 @@ pub(crate) fn bound(db: &DatabaseConnection) -> Result<std::collections::BTreeSe
 
 /// Whether a bound upload stores `file`, holding this device's writes until
 /// it is stored (§17.4).
-pub(crate) fn held_upload_of(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+pub(crate) fn held_upload_of(db: &StoreSql, file: FileId) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_upload_files AS l
              JOIN _coven_file_uploads AS u ON u.id=l.upload
@@ -377,7 +371,7 @@ pub(crate) fn held_upload_of(db: &DatabaseConnection, file: FileId) -> Result<bo
     reason = "a stored value that won't convert is damage, a computed one a broken invariant"
 )]
 pub(crate) fn chunk_hash(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     location: &FileLocation,
     index: u64,
 ) -> Result<ContentHash, DbError> {
@@ -390,7 +384,9 @@ pub(crate) fn chunk_hash(
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
-            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
+            sqlive::Error::Sqlite(sqlive::rusqlite::Error::QueryReturnedNoRows) => {
+                DbError::DamagedDatabase
+            }
             error => DbError::from(error),
         })?;
     crate::file_hashes::stored_hash(hash)
@@ -398,7 +394,7 @@ pub(crate) fn chunk_hash(
 
 /// Queued uploads no file waits for any more and no provider session
 /// holds, with their locations: those that retire now (§17.9).
-pub(crate) fn retirable(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation)>, DbError> {
+pub(crate) fn retirable(db: &StoreSql) -> Result<Vec<(i64, FileLocation)>, DbError> {
     db.query(
         "SELECT u.id,u.location FROM _coven_file_uploads AS u
          WHERE u.session IS NULL
@@ -416,7 +412,7 @@ pub(crate) fn retirable(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocatio
 /// their copies and their originals' chunk hashes, needed only while they
 /// were on this device only, go with it, except a copy a pin request keeps
 /// for a file kept here.
-pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn switched(db: &StoreSql, id: i64) -> Result<(), DbError> {
     // A file kept here is pinned by the write that switched it: its request
     // keeps coven's copy until the cache copy is made from it (§17.8).
     for file in
@@ -447,11 +443,11 @@ pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
 /// names is recorded for removal after the caller commits once nothing else
 /// names it; the stored path becomes a deletion candidate if nothing else
 /// protects it (§17.10).
-pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn retire(db: &StoreSql, id: i64) -> Result<(), DbError> {
     let copy: Option<String> = db
         .query_row("SELECT copy FROM _coven_file_uploads WHERE id=?1", [id], |r| r.get(0))
         .map_err(|error| match error {
-            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            sqlive::Error::Sqlite(sqlive::rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a retired upload is queued" }
             }
             error => DbError::from(error),
@@ -467,7 +463,7 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
 /// Record coven's copy at `path` for removal once nothing names it: no file
 /// on this device only, no queued upload and no pin waiting to be made from
 /// it (Appendix C.3).
-pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn release_copy(db: &StoreSql, path: &str) -> Result<(), DbError> {
     let named: bool = db.query_row(&format!("SELECT {FILE_NAMED_SQL}"), [path], |r| r.get(0))?;
     if named {
         return Ok(());
@@ -494,7 +490,7 @@ pub(crate) struct Queued<'a> {
 /// and one hash per plaintext chunk, in their move, which lists each file
 /// from this write on (§17.3, §17.9).
 pub(crate) fn enqueue(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     queued: Queued<'_>,
     location: &FileLocation,
     now: std::time::SystemTime,
@@ -506,7 +502,7 @@ pub(crate) fn enqueue(
 /// as one statement for each table and chunk of rows. An upload's id is
 /// matched to its row by its stored object, which is unique.
 pub(crate) fn enqueue_all(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     uploads: &[(Queued<'_>, &FileLocation)],
     now: std::time::SystemTime,
 ) -> Result<(), DbError> {
@@ -599,7 +595,7 @@ pub(crate) fn enqueue_all(
 /// device only, with the hashes its first read found, which an upload
 /// checks if the file moves to the cloud (§17.3).
 pub(crate) fn keep_copy(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: FileId,
     name: &str,
     hashes: &crate::file_hashes::FileHashes,
@@ -610,7 +606,7 @@ pub(crate) fn keep_copy(
 /// `keep_copy` for several files, as one statement for each table and chunk
 /// of rows.
 pub(crate) fn keep_copies(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     copies: &[(FileId, &str, &crate::file_hashes::FileHashes)],
 ) -> Result<(), DbError> {
     let mut files = Vec::new();
@@ -644,16 +640,16 @@ pub(crate) fn keep_copies(
 
 /// The new file `to` over `from`'s bytes shares coven's copy of them and
 /// the upload queued for them, if any (§17.2).
-pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
+pub(crate) fn share(db: &StoreSql, from: FileId, to: FileId) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_upload_files(file,upload,keep)
          SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
-        rusqlite::params![from, to],
+        sqlive::rusqlite::params![from, to],
     )?;
     db.execute(
         "INSERT INTO _coven_device_files(file,path,hash)
          SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
-        rusqlite::params![from, to],
+        sqlive::rusqlite::params![from, to],
     )?;
     Ok(())
 }
@@ -661,7 +657,7 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
 /// `file`'s record is gone from this device: no upload switches it, and
 /// coven's copy of its bytes goes once nothing names it. An upload no other
 /// file shares is left for the upload worker to retire (§17.9).
-pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+pub(crate) fn forget(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_upload_files WHERE file=?1", [file])?;
     for copy in
         db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [file], |r| {
@@ -675,7 +671,7 @@ pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbErro
 
 /// Forget upload `id`'s session, once storage has aborted it, if no file
 /// waits for the upload; one a file waits for again keeps it.
-pub(crate) fn forget_session(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn forget_session(db: &StoreSql, id: i64) -> Result<(), DbError> {
     db.execute(
         "UPDATE _coven_file_uploads SET session=NULL,bytes_confirmed=NULL,bytes_total=NULL
          WHERE id=?1
@@ -688,7 +684,7 @@ pub(crate) fn forget_session(db: &DatabaseConnection, id: i64) -> Result<(), DbE
 /// Record upload `id`'s session and how far storage has confirmed it,
 /// returning how many uploads changed: none once it has gone.
 pub(crate) fn record_session(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     id: i64,
     session: &[u8],
     confirmed: i64,
@@ -702,14 +698,14 @@ pub(crate) fn record_session(
 }
 
 /// Mark an upload's bytes stored: its move switches it with the rest.
-pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
+pub(crate) fn stored(db: &StoreSql, upload: i64) -> Result<(), DbError> {
     db.execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
     Ok(())
 }
 
 /// The move `of` switches none of its files: no upload of it switches a
 /// file any more, so the upload worker retires them (§17.10).
-pub(crate) fn unswitch_move(db: &DatabaseConnection, of: crate::MoveId) -> Result<(), DbError> {
+pub(crate) fn unswitch_move(db: &StoreSql, of: crate::MoveId) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_upload_files
          WHERE upload IN (SELECT id FROM _coven_file_uploads WHERE move=?1)",

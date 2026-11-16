@@ -3,7 +3,7 @@
 //! the uploads queued for them once the write applied.
 
 use super::{FileWrite, StagedSource};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     file_hashes::FileHashes,
     file_location::{FileLocation, Place},
@@ -209,10 +209,7 @@ fn same_bytes(a: &MoveUpload, b: &MoveUpload) -> bool {
 }
 
 /// Coven's copy of an app file, with the hashes its first read recorded.
-fn copy(
-    db: &DatabaseConnection,
-    file: FileId,
-) -> Result<Option<(StagedName, FileHashes)>, DbError> {
+fn copy(db: &StoreSql, file: FileId) -> Result<Option<(StagedName, FileHashes)>, DbError> {
     let Some((path, content)) = db
         .query("SELECT path,hash FROM _coven_device_files WHERE file=?1", [file], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))

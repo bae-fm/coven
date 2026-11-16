@@ -1,6 +1,6 @@
 //! Original authored changes and their admission, independent of dismissible losses.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_failure::{hosted, Hosted};
 use crate::{merge_store::MergeStore, write_encoding::counter, DbError};
@@ -14,7 +14,7 @@ use coven_format::{
     write_sources::{CellSource, ChangeId, WriteSources},
 };
 use coven_merge::{Change, Operation, RowId, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeMap;
 
 pub(crate) struct Evidence {
@@ -60,7 +60,7 @@ pub(crate) enum Standing<T> {
 /// migrating device's own marker among them while it still waits in its
 /// queue.
 fn standing<T>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     source: &ChangeId,
     held: Option<(Option<u64>, T)>,
@@ -85,7 +85,7 @@ fn standing<T>(
 /// The named original record and its part's header, for the write `header`
 /// heads: never a current winner or an equal scalar.
 pub(crate) fn source(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     source: &ChangeId,
@@ -122,7 +122,7 @@ pub(crate) fn source(
 /// the source doesn't count; an unknown one waits. A row with operations but
 /// no net change set no generation or cell, so it is never a source.
 pub(crate) fn counting(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     named: &ChangeId,
@@ -143,7 +143,7 @@ pub(crate) fn counting(
 /// it is now, with that table's name as the write named it, when this device
 /// holds the part. Renames resolve through the recorded schema identities.
 pub(crate) fn kept_part(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     write: WriteId,
     row: &RowId,
@@ -172,7 +172,7 @@ pub(crate) fn kept_part(
 /// their original changes. Renames resolve their original names through the
 /// recorded schema identities.
 struct PreWrite<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     call: &'a StoreCall<'a>,
     row: RowId,
     state: coven_merge::RowState<Value>,
@@ -181,7 +181,7 @@ struct PreWrite<'a> {
 
 impl<'a> PreWrite<'a> {
     fn new(
-        db: &'a DatabaseConnection,
+        db: &'a StoreSql,
         call: &'a StoreCall<'a>,
         store: &MergeStore<'_>,
         row: RowId,
@@ -191,7 +191,7 @@ impl<'a> PreWrite<'a> {
 
     /// The pre-write merge state `state`, of its own row.
     fn over(
-        db: &'a DatabaseConnection,
+        db: &'a StoreSql,
         call: &'a StoreCall<'a>,
         state: coven_merge::RowState<Value>,
     ) -> Result<Self, DbError> {
@@ -251,7 +251,7 @@ impl<'a> PreWrite<'a> {
 /// receivers check (D5.6), never a displayed substitution such as a stale
 /// reference's NULL. An insert or update carries no replaced value.
 pub(crate) fn authored(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     row: RowId,
@@ -262,7 +262,7 @@ pub(crate) fn authored(
 
 /// [`authored`] over the pre-write merge state `state`, of its own row.
 pub(crate) fn authored_over(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     state: coven_merge::RowState<Value>,
     change: Change<Value>,
@@ -303,7 +303,7 @@ pub(crate) fn authored_over(
 /// setter of each pre-write cell an operation replaced before the row's
 /// incarnation ended. Cells this write itself set are not sources.
 pub(crate) fn executed(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     row: &RowId,
@@ -347,7 +347,7 @@ pub(crate) fn executed(
 /// copy's named creation. Ordinary merge losses remain source evidence:
 /// admission is retained but does not establish validity.
 pub(crate) fn validate(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
@@ -383,7 +383,7 @@ pub(crate) fn validate(
 /// entry goes only once every write still to be judged has read past its
 /// slot (§16.7).
 pub(crate) fn had_read(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     earlier: coven_merge::WriteId,
 ) -> Result<bool, DbError> {
@@ -411,7 +411,7 @@ pub(crate) fn encode_records(
 }
 
 pub(crate) fn validate_past(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     sources: &WriteSources,
 ) -> Result<(), DbError> {
@@ -427,7 +427,7 @@ pub(crate) fn validate_past(
 /// A creation that doesn't count as a source would, and one in a part this
 /// device could not read, leave the authenticated claim as written.
 fn creation(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
@@ -461,7 +461,7 @@ fn creation(
 /// The generation source and each replaced setter name changes at this row
 /// that established that generation, or set that cell in this incarnation.
 fn roles(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
@@ -536,7 +536,7 @@ fn roles(
 }
 
 fn part(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     audience: &coven_merge::Audience,
@@ -597,7 +597,7 @@ impl<'a> KeptForm<'a> {
 /// compare a repeated change has nothing to compare, and a row repeated
 /// within the write is refused by the table's key.
 pub(crate) fn retain_authored(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     form: &KeptForm<'_>,
     header: &WriteHeader,
@@ -618,7 +618,7 @@ pub(crate) fn retain_authored(
 /// staging, which judging the write and applying it read (D7.3). A reload
 /// that stages a slot again keeps again a record this device forgot.
 pub(crate) fn retain(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     form: &KeptForm<'_>,
     header: &WriteHeader,
@@ -644,10 +644,7 @@ pub(crate) fn retain(
 /// slot, and the snapshot's verdict replaces the device's, an unjudged one
 /// too. A record the device holds and the snapshot doesn't stays until the
 /// device forgets it (§16.7).
-pub(crate) fn install(
-    db: &DatabaseConnection,
-    audience: &coven_merge::Audience,
-) -> Result<(), DbError> {
+pub(crate) fn install(db: &StoreSql, audience: &coven_merge::Audience) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_authored_parts(write_id,audience,header)
          SELECT write_id,audience,header FROM temp._coven_install_parts s WHERE s.audience=?1
@@ -678,7 +675,7 @@ pub(crate) fn install(
 /// replacing an earlier one when a reload judges the original under its new data.
 /// NULL means unjudged; receiving covered bytes alone never judges them.
 pub(crate) fn admit(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
@@ -687,7 +684,7 @@ pub(crate) fn admit(
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = &row.audience;
     let original = crate::transaction_constants::authored_part(db, call, &write, audience)?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        .ok_or(sqlive::rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
     let table =
         crate::source_names::table(db, header.schema_version, &row.table, original.schema_version)?
@@ -710,7 +707,7 @@ pub(crate) fn admit(
 /// heads: it counts as a source for it, and was applied here, or never
 /// judged here because a loaded snapshot carries its effects.
 pub(crate) fn retained(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     source: &ChangeId,
 ) -> Result<bool, DbError> {
@@ -764,7 +761,7 @@ fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
 /// the slots this device applied, so every landed write; this device's own
 /// queued writes are left out.
 pub(crate) fn visit_evidence<E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &coven_merge::Audience,
     mut visit: impl FnMut(AuthoredRecord) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -814,7 +811,7 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
 /// covers a write: it lists its device's writes through its coverage by
 /// number, whatever this device has forgotten of them (§16.7).
 pub(crate) fn forget_own_migration(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     audience: &coven_merge::Audience,
     covers: impl Fn(WriteId) -> Result<bool, DbError>,

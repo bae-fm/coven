@@ -5,7 +5,7 @@
 //! or is cancelled switches none. Each moving or failed move lists its
 //! files, for the app to see in `coven_moves`.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::id_source::FileId;
 
@@ -17,14 +17,16 @@ pub struct MoveId(pub i64);
 
 /// A move id bound and read as an SQL integer, as `coven_uploads.move`
 /// and `coven_pending.move` hold it for the app's `cancel_move` (E4).
-impl rusqlite::ToSql for MoveId {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+impl sqlive::rusqlite::ToSql for MoveId {
+    fn to_sql(&self) -> sqlive::rusqlite::Result<sqlive::rusqlite::types::ToSqlOutput<'_>> {
         Ok(self.0.into())
     }
 }
 
-impl rusqlite::types::FromSql for MoveId {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+impl sqlive::rusqlite::types::FromSql for MoveId {
+    fn column_result(
+        value: sqlive::rusqlite::types::ValueRef<'_>,
+    ) -> sqlive::rusqlite::types::FromSqlResult<Self> {
         i64::column_result(value).map(Self)
     }
 }
@@ -56,14 +58,14 @@ impl MoveState {
 }
 
 /// Record a new move, moving.
-pub(crate) fn create(db: &DatabaseConnection) -> Result<MoveId, DbError> {
+pub(crate) fn create(db: &StoreSql) -> Result<MoveId, DbError> {
     Ok(db.query_row("INSERT INTO _coven_moves(state) VALUES('moving') RETURNING id", [], |r| {
         r.get(0)
     })?)
 }
 
 /// The move's state, or `None` for a move this device never made.
-pub(crate) fn state(db: &DatabaseConnection, id: MoveId) -> Result<Option<MoveState>, DbError> {
+pub(crate) fn state(db: &StoreSql, id: MoveId) -> Result<Option<MoveState>, DbError> {
     db.query("SELECT state FROM _coven_moves WHERE id=?1", [id], |r| r.get::<_, String>(0))?
         .pop()
         .map(|state| match state.as_str() {
@@ -78,7 +80,7 @@ pub(crate) fn state(db: &DatabaseConnection, id: MoveId) -> Result<Option<MoveSt
 
 /// Whether the move is a bound file's (§17.4): its upload holds a write
 /// until the file is stored, so the app can't cancel it.
-pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError> {
+pub(crate) fn bound(db: &StoreSql, id: MoveId) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE move=?1 AND holds IS NOT NULL)",
         [id],
@@ -87,10 +89,10 @@ pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError
 }
 
 /// The move an upload belongs to.
-pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, DbError> {
+pub(crate) fn of_upload(db: &StoreSql, upload: i64) -> Result<MoveId, DbError> {
     db.query_row("SELECT move FROM _coven_file_uploads WHERE id=?1", [upload], |r| r.get(0))
         .map_err(|error| match error {
-            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            sqlive::Error::Sqlite(sqlive::rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a queued upload belongs to a move" }
             }
             error => DbError::from(error),
@@ -99,13 +101,13 @@ pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, 
 
 /// The move that lists `file`, moving or failed, if any: a file is in at
 /// most one move (§17.3).
-pub(crate) fn of_file(db: &DatabaseConnection, file: FileId) -> Result<Option<MoveId>, DbError> {
+pub(crate) fn of_file(db: &StoreSql, file: FileId) -> Result<Option<MoveId>, DbError> {
     Ok(db.query("SELECT move FROM _coven_move_files WHERE file=?1", [file], |r| r.get(0))?.pop())
 }
 
 /// List each file as one of its move's, as the uploads of the moves come to
 /// store them (§17.3), as one statement for each chunk.
-pub(crate) fn list_all(db: &DatabaseConnection, files: &[(MoveId, FileId)]) -> Result<(), DbError> {
+pub(crate) fn list_all(db: &StoreSql, files: &[(MoveId, FileId)]) -> Result<(), DbError> {
     let rows: Vec<_> = files
         .iter()
         .map(|(id, file)| {
@@ -124,25 +126,25 @@ pub(crate) fn list_all(db: &DatabaseConnection, files: &[(MoveId, FileId)]) -> R
 
 /// The new file `to` over `from`'s bytes, now waiting for the upload `from`
 /// waits for, joins that upload's move (§17.2, §17.3).
-pub(crate) fn join(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
+pub(crate) fn join(db: &StoreSql, from: FileId, to: FileId) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_move_files(move,file)
          SELECT u.move,?2 FROM _coven_upload_files AS l
          JOIN _coven_file_uploads AS u ON u.id=l.upload WHERE l.file=?1",
-        rusqlite::params![from, to],
+        sqlive::rusqlite::params![from, to],
     )?;
     Ok(())
 }
 
 /// `file`'s record is gone from this device: no move lists it.
-pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+pub(crate) fn forget(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_move_files WHERE file=?1", [file])?;
     Ok(())
 }
 
 /// Move `id` now stands at `state`. A switch or a cancel ends its list with
 /// it; a failure keeps the list, for the app to cancel (§17.3).
-fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbError> {
+fn set(db: &StoreSql, id: MoveId, state: MoveState) -> Result<(), DbError> {
     match state {
         MoveState::Cancelled | MoveState::Finished => {
             db.execute("DELETE FROM _coven_move_files WHERE move=?1", [id])?;
@@ -151,7 +153,7 @@ fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbEr
     }
     db.execute(
         "UPDATE _coven_moves SET state=?2 WHERE id=?1",
-        rusqlite::params![id, state.text()],
+        sqlive::rusqlite::params![id, state.text()],
     )?;
     Ok(())
 }
@@ -162,11 +164,7 @@ fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbEr
 /// ends, and their stored bytes become deletion candidates (§17.10). A
 /// failed move keeps its list; a cancelled one ends it. The move's pending
 /// record is replaced or cleared by the caller.
-pub(crate) fn end_unswitched(
-    db: &DatabaseConnection,
-    id: MoveId,
-    state: MoveState,
-) -> Result<(), DbError> {
+pub(crate) fn end_unswitched(db: &StoreSql, id: MoveId, state: MoveState) -> Result<(), DbError> {
     crate::file_queue::unswitch_move(db, id)?;
     set(db, id, state)
 }
@@ -174,7 +172,7 @@ pub(crate) fn end_unswitched(
 /// The moving moves none of whose uploads that still store a file waits to
 /// be stored, each with those uploads: what one write switches now. A move
 /// whose files all dropped out has none.
-pub(crate) fn complete(db: &DatabaseConnection) -> Result<Vec<(MoveId, Vec<i64>)>, DbError> {
+pub(crate) fn complete(db: &StoreSql) -> Result<Vec<(MoveId, Vec<i64>)>, DbError> {
     let moves = db.query(
         "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving'
          AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u
@@ -199,7 +197,7 @@ pub(crate) fn complete(db: &DatabaseConnection) -> Result<Vec<(MoveId, Vec<i64>)
 }
 
 /// A move ended with its files switched: whatever its record said ends.
-pub(crate) fn finish(db: &DatabaseConnection, id: MoveId) -> Result<(), DbError> {
+pub(crate) fn finish(db: &StoreSql, id: MoveId) -> Result<(), DbError> {
     set(db, id, MoveState::Finished)?;
     crate::pending::clear_move(db, id)
 }

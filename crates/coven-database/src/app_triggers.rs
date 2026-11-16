@@ -5,7 +5,7 @@
 //! (§9.4). The authorizer judges what each writes, reads and calls as it would
 //! in an app statement, and a refusal names the trigger.
 
-use super::DatabaseConnection;
+use super::StoreSql;
 use crate::DbError;
 
 /// Each change coven makes to the sync status row and the retry effect:
@@ -45,21 +45,6 @@ const KEPT_CHANGES: [&str; 15] = [
     "DELETE FROM coven_pending",
 ];
 
-impl DatabaseConnection {
-    /// A statement as prepared, or what the authorizer refused in the app's
-    /// triggers it compiles.
-    pub(crate) fn trigger_judged<T>(&self, prepared: rusqlite::Result<T>) -> Result<T, DbError> {
-        Ok(self.authorization.app_result(prepared)?)
-    }
-
-    /// Prepare `sql` as coven's own statement, compiling every trigger it
-    /// would fire, and those they fire in turn, without running it.
-    pub(crate) fn prepare(&self, sql: &str) -> rusqlite::Result<()> {
-        let _scope = self.authorization.internal();
-        self.connection.prepare(sql).map(drop)
-    }
-}
-
 /// Refuse the app's triggers on the tables they may follow that do what
 /// app SQL may not: write coven's tables, read them other than through
 /// its views, or call what only those views may, and that write synced
@@ -70,9 +55,9 @@ impl DatabaseConnection {
 /// merged rows of `coven_files`; the authorizer judges the app's
 /// triggers alike in both. Preparing each change, without running it,
 /// compiles every trigger it would fire, and those they fire in turn.
-pub(crate) fn check_followed_triggers(sql: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn check_followed_triggers(sql: &StoreSql) -> Result<(), DbError> {
     for change in FILE_CHANGES.iter().chain(&KEPT_CHANGES).chain(&STATUS_CHANGES) {
-        sql.trigger_judged(sql.prepare(change))?;
+        sql.prepare_host(change)?;
     }
     Ok(())
 }

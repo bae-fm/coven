@@ -342,7 +342,7 @@ async fn errors_are_results_and_a_later_commit_can_recover() {
     });
     assert!(matches!(
         next_result(&mut query).await,
-        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+        Err(DbError::Sqlite(crate::SqliteError::QueryReturnedNoRows))
     ));
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
@@ -729,7 +729,7 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
         });
     let requests = query.requests();
     let event = query.next_inline().await.expect("the live query answers");
-    assert!(matches!(event.result, Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))));
+    assert!(matches!(event.result, Err(DbError::Sqlite(crate::SqliteError::QueryReturnedNoRows))));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for request in [1, 2, 1, 2] {
         let revision = requests.set(request).unwrap();

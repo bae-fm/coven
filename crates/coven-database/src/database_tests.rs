@@ -44,8 +44,8 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         let slot = database.inner.read().unwrap();
         slot.as_ref().unwrap().access.database.each_reader(|reader| {
             let error = reader.execute("INSERT INTO notes VALUES ('x', 'y', '')", []).unwrap_err();
-            assert!(matches!(error, sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-                if code.code == rusqlite::ErrorCode::ReadOnly));
+            assert!(matches!(error, sqlive::Error::Sqlite(sqlive::rusqlite::Error::SqliteFailure(code, _))
+                if code.code == sqlive::rusqlite::ErrorCode::ReadOnly));
         });
     }
     let hold_reader = |database: StoreDatabase| {
@@ -771,7 +771,7 @@ async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
 /// otherwise go unnoticed, as it did once.
 #[test]
 fn bundled_sqlite_is_built_without_global_memory_statistics() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let connection = sqlive::rusqlite::Connection::open_in_memory().unwrap();
     let disabled: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_compile_options
@@ -852,7 +852,7 @@ async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
     );
     assert!(bugs.take().is_empty(), "the write's caller reports the bug, not the sink");
     drop(db);
-    let notes: i64 = rusqlite::Connection::open(store.database_path())
+    let notes: i64 = sqlive::rusqlite::Connection::open(store.database_path())
         .unwrap()
         .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
         .unwrap();

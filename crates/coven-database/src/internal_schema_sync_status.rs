@@ -22,7 +22,7 @@
 //! handle can't tell whether that writer still runs, so app SQL there may not
 //! read the table (`app_policy.rs`).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use std::time::SystemTime;
 
@@ -135,7 +135,7 @@ fn columns(location: &RecordedLocation<String>) -> (&'static str, Option<&str>) 
 }
 
 /// The row as it stands.
-pub(crate) fn read(db: &DatabaseConnection) -> Result<SyncStatusRow, DbError> {
+pub(crate) fn read(db: &StoreSql) -> Result<SyncStatusRow, DbError> {
     let (storage, provider, last_pass, moved, last_synced) = db.query_row(
         "SELECT storage,provider,last_pass,moved,last_synced FROM coven_sync_status
          WHERE singleton=1",
@@ -169,7 +169,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<SyncStatusRow, DbError> {
 /// no pass moves and that no halt holds. A row that already says this is
 /// left alone.
 pub(crate) fn save_location(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     location: &RecordedLocation<String>,
     finished: Option<SystemTime>,
     opening: bool,
@@ -185,13 +185,13 @@ pub(crate) fn save_location(
          WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2
              OR (?4 AND (moved IS NOT NULL OR halted=1))
              OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))",
-        rusqlite::params![storage, provider, finished, opening],
+        sqlive::rusqlite::params![storage, provider, finished, opening],
     )?;
     Ok(())
 }
 
 /// Write what the running pass moved last, when that changes it.
-pub(crate) fn save_moved(db: &DatabaseConnection, moved: PassMove) -> Result<(), DbError> {
+pub(crate) fn save_moved(db: &StoreSql, moved: PassMove) -> Result<(), DbError> {
     db.execute(
         "UPDATE coven_sync_status SET moved=?1 WHERE singleton=1 AND halted=0 AND moved IS NOT ?1",
         [moved.column()],
@@ -200,7 +200,7 @@ pub(crate) fn save_moved(db: &DatabaseConnection, moved: PassMove) -> Result<(),
 }
 
 /// Write that sync started once more.
-pub(crate) fn save_start(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn save_start(db: &StoreSql) -> Result<(), DbError> {
     db.execute("UPDATE coven_sync_status SET starts=starts+1 WHERE singleton=1", [])?;
     Ok(())
 }
@@ -209,7 +209,7 @@ pub(crate) fn save_start(db: &DatabaseConnection) -> Result<(), DbError> {
 /// outside a pass's end, and that nothing moves: a loop that ends in a pass
 /// that moved a slot shows its failure, never syncing. Once a halt holds,
 /// it writes nothing: the halt's failure stands.
-pub(crate) fn save_last_pass(db: &DatabaseConnection, last_pass: &[u8]) -> Result<(), DbError> {
+pub(crate) fn save_last_pass(db: &StoreSql, last_pass: &[u8]) -> Result<(), DbError> {
     db.execute(
         "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
          WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)",
@@ -221,7 +221,7 @@ pub(crate) fn save_last_pass(db: &DatabaseConnection, last_pass: &[u8]) -> Resul
 /// Write that a store-wide worker's panic halted sync until the store
 /// reopens, with its failure as how the last pass ended, and that nothing
 /// moves: from here no pass writes the row.
-pub(crate) fn save_halt(db: &DatabaseConnection, last_pass: &[u8]) -> Result<(), DbError> {
+pub(crate) fn save_halt(db: &StoreSql, last_pass: &[u8]) -> Result<(), DbError> {
     db.execute(
         "UPDATE coven_sync_status SET last_pass=?1,moved=NULL,halted=1 WHERE singleton=1",
         [last_pass],
@@ -233,7 +233,7 @@ pub(crate) fn save_halt(db: &DatabaseConnection, last_pass: &[u8]) -> Result<(),
 /// `finished` names one, that it reached the end of the sequence then. A
 /// pass that ends after a halt writes nothing: the halt's failure stands.
 pub(crate) fn save_pass_end(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     last_pass: &[u8],
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {
@@ -244,7 +244,7 @@ pub(crate) fn save_pass_end(
                  ELSE max(coalesce(last_synced,?2),?2) END
          WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL
              OR (?2 IS NOT NULL AND (last_synced IS NULL OR last_synced<?2)))",
-        rusqlite::params![last_pass, finished],
+        sqlive::rusqlite::params![last_pass, finished],
     )?;
     Ok(())
 }

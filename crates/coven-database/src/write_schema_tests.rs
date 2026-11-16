@@ -187,7 +187,7 @@ async fn ordinary_sqlite_can_maintain_a_store_without_coven_functions() {
     .await
     .unwrap();
     db.close().await.unwrap();
-    let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+    let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
     raw.execute_batch("VACUUM; REINDEX").unwrap();
     assert_eq!(
         raw.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(),

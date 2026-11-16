@@ -22,7 +22,7 @@
 //! otherwise (`Admission.guard`).
 
 use crate::judge_view::{Authoring, ChildView};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -34,7 +34,7 @@ use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
 pub(crate) use place::Place;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeMap;
 
 /// One step as the index keeps it: enough to find a parent's last operation
@@ -198,7 +198,7 @@ pub(crate) enum Originals<'a> {
     /// The write's whole records staged for its receipt, every record of the
     /// parts this device opened: a received write, streamed, is never held
     /// whole in memory.
-    Staged { database: &'a DatabaseConnection, header: &'a WriteHeader },
+    Staged { database: &'a StoreSql, header: &'a WriteHeader },
     /// The author's own write, held whole as it is queued, its records
     /// retained from it a moment before.
     Held(&'a WriteRecord),
@@ -236,7 +236,7 @@ impl Originals<'_> {
 
 /// Judge every row change of the write's parts this device holds.
 pub(crate) fn judge(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     originals: Originals<'_>,
@@ -417,7 +417,7 @@ pub(crate) fn consistent(record: &OriginalRow) -> bool {
 
 /// Visit the write's staged original records, part by part in row order.
 pub(crate) fn visit_write(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     mut visit: impl FnMut(OriginalRow) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
@@ -456,7 +456,7 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
 /// Each row's owner, as the selected creations and the counted membership
 /// name them, for one check of a write's rows.
 pub(crate) struct Owners<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     schema: &'a WriteSchema,
     version: u32,
     current: u32,
@@ -467,7 +467,7 @@ pub(crate) struct Owners<'a> {
 
 impl<'a> Owners<'a> {
     pub(crate) fn new(
-        db: &'a DatabaseConnection,
+        db: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         device: DeviceId,
@@ -527,7 +527,7 @@ impl<'a> Owners<'a> {
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
 pub(crate) fn stored(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     header: &WriteHeader,
     row: &RowId,
 ) -> Result<coven_format::snapshot_rows::ChangeVerdict, DbError> {

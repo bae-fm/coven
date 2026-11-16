@@ -1,6 +1,6 @@
 //! A staged snapshot's write evidence authenticated before installation, and
 //! its staged tables read back without decoding the snapshot again.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     authorship::Authorship, snapshot_error::invalid, snapshot_metadata::SnapshotMetadata,
     write_metadata::MetadataFailure, DbError,
@@ -16,7 +16,7 @@ pub(crate) struct PreparedEvidence {
 /// A staged snapshot ready to install. Its evidence is authenticated, in
 /// staged order; its other records stay on the input connection.
 pub(crate) struct PreparedSnapshot<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     staging: i64,
     header: SnapshotHeader,
     evidence: VecDeque<PreparedEvidence>,
@@ -30,7 +30,7 @@ pub(crate) struct PreparedSnapshot<'a> {
 /// on the input transaction `db` has open. Staging checked every record but
 /// this one, and found `refusal`.
 pub(crate) fn prepare<'a>(
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     staging: i64,
     header: SnapshotHeader,
     refusal: Option<(usize, DbError)>,
@@ -85,11 +85,11 @@ impl PreparedSnapshot<'_> {
 
     /// Visit each row `sql` selects from the staged tables, on the input
     /// connection.
-    pub(crate) fn each<P: rusqlite::Params>(
+    pub(crate) fn each<P: sqlive::rusqlite::Params>(
         &self,
         sql: &str,
         params: P,
-        visit: impl FnMut(&rusqlite::Row<'_>) -> Result<(), DbError>,
+        visit: impl FnMut(&sqlive::rusqlite::Row<'_>) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
         self.db.for_each(sql, params, visit)
     }

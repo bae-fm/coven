@@ -2,7 +2,7 @@
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::row_cache::{value_weight, RowCache, Weight};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, slot_counter};
 use crate::write_metadata::StoredWrite;
@@ -13,7 +13,7 @@ use coven_merge::{
     Audience, Cell, ColumnValue, LostKey, LostValue, MergeError, RowId, RowState, RowUpdate,
     Timestamp, WriteId, WriteOracle,
 };
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,12 +31,12 @@ pub(crate) fn newest_read() -> String {
 }
 
 struct WriteMetadata<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     writes: RefCell<BTreeMap<WriteId, StoredWrite>>,
 }
 
 impl<'a> WriteMetadata<'a> {
-    pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
+    pub(crate) fn new(database: &'a StoreSql) -> Self {
         Self { database, writes: RefCell::new(BTreeMap::new()) }
     }
     pub(crate) fn load(&self, id: WriteId) -> Result<(), DbError> {
@@ -44,14 +44,18 @@ impl<'a> WriteMetadata<'a> {
             return Ok(());
         }
         let applied = crate::write_metadata::stored_write(self.database, id)?
-            .ok_or(DbError::from(rusqlite::Error::QueryReturnedNoRows))?;
+            .ok_or(DbError::from(sqlive::rusqlite::Error::QueryReturnedNoRows))?;
         self.writes.borrow_mut().insert(id, applied);
         Ok(())
     }
     pub(crate) fn ordinal(&self, id: WriteId) -> i64 {
         self.writes.borrow()[&id].ordinal
     }
-    fn retain(&self, row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<WriteId> {
+    fn retain(
+        &self,
+        row: &sqlive::rusqlite::Row<'_>,
+        offset: usize,
+    ) -> sqlive::rusqlite::Result<WriteId> {
         let timestamp =
             decoded(merge_fields::decode_timestamp(&row.get::<_, Vec<u8>>(offset + 1)?))?;
         let id = WriteId { device: timestamp.device(), number: counter(row.get(offset + 2)?)? };
@@ -110,7 +114,7 @@ impl Weight for StoredRow {
 }
 
 pub(crate) struct MergeStore<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     /// The call's state, where tests count the rows a merge loads.
     #[cfg_attr(not(test), expect(dead_code, reason = "only tests count a merge's loads"))]
     call: &'a StoreCall<'a>,
@@ -166,7 +170,7 @@ enum RowValues<'a> {
 
 impl<'a> MergeStore<'a> {
     pub(crate) fn new(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         app: &'a AppView<'a>,
     ) -> Self {
@@ -183,7 +187,7 @@ impl<'a> MergeStore<'a> {
 
     /// Read values and stored references without resolving app references.
     pub(crate) fn from_schema(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
     ) -> Self {
@@ -207,7 +211,7 @@ impl<'a> MergeStore<'a> {
         Ok(())
     }
     pub(crate) fn from_snapshot(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
         audiences: &'a BTreeSet<Audience>,
@@ -224,7 +228,7 @@ impl<'a> MergeStore<'a> {
     }
 
     pub(crate) fn from_staged(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
     ) -> Self {
@@ -301,10 +305,10 @@ impl<'a> MergeStore<'a> {
             let mut found = BTreeMap::<(String, Vec<u8>), BTreeSet<RowId>>::new();
             for row in self.database.query(
                 &key_rows_sql(chunk.len()),
-                rusqlite::params_from_iter(chunk.iter().flat_map(|(table, key)| {
+                sqlive::rusqlite::params_from_iter(chunk.iter().flat_map(|(table, key)| {
                     [
-                        rusqlite::types::Value::Text(table.clone()),
-                        rusqlite::types::Value::Blob(key.clone()),
+                        sqlive::rusqlite::types::Value::Text(table.clone()),
+                        sqlive::rusqlite::types::Value::Blob(key.clone()),
                     ]
                 })),
                 crate::row_queries::read_identity,

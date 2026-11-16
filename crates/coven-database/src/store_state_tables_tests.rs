@@ -2,11 +2,11 @@
 //! the plan audit, damaging them as broken storage would, and the full scans
 //! their statements' plans may contain.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 /// Fill the membership and audience tables, thousands of rows each,
 /// from the rows of the plan audit's `fixture` table, inside its transaction
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1,0);
          INSERT INTO _coven_members(member,signing,sealing,access,role,removed) SELECT member,key,key,x'00','member',i%2 FROM fixture;
@@ -41,7 +41,7 @@ pub(crate) const CIRCLE_DAMAGE: [&str; 3] = [
 
 /// Damage the membership tables with one of [`MEMBER_DAMAGE`], as broken
 /// storage would, for tests of what reading members does.
-pub(crate) fn damage(db: &DatabaseConnection, damage: &str) {
+pub(crate) fn damage(db: &StoreSql, damage: &str) {
     db.batch(&format!(
         "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; {damage};
          PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON;"

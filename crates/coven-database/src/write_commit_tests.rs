@@ -1,4 +1,4 @@
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use coven_format::value::Value;
 use coven_foundation::files::FileLease;
 use coven_foundation::id_source::{DeviceId, StoreId};
@@ -734,7 +734,7 @@ async fn a_root_audience_must_be_spelled_canonically() {
             assert_eq!(table, "roots");
             assert!(matches!(
                 key.0.as_slice(),
-                [rusqlite::types::Value::Text(id)] if id == other || id == ROOT
+                [sqlive::rusqlite::types::Value::Text(id)] if id == other || id == ROOT
             ));
             assert_eq!(count(&db, "local_rows"), 0);
             assert_eq!(records(&db).len(), queued);
@@ -834,7 +834,7 @@ async fn app_statements_cannot_change_the_merge_store() {
 /// second generation's record goes, and the first holds exactly `cells`,
 /// each a column's id and the id of the write that set it.
 pub(crate) fn restore_first_generation(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     row: &coven_merge::RowId,
     cells: &[(i64, i64)],
 ) -> Result<(), crate::DbError> {
@@ -859,10 +859,7 @@ pub(crate) fn restore_first_generation(
 }
 
 /// Damage: take every merge record of `table`'s rows away, leaving the rows.
-pub(crate) fn plant_unrecorded_rows(
-    db: &DatabaseConnection,
-    table: &str,
-) -> Result<(), crate::DbError> {
+pub(crate) fn plant_unrecorded_rows(db: &StoreSql, table: &str) -> Result<(), crate::DbError> {
     db.execute(
         "DELETE FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)",
         [table],
@@ -873,7 +870,7 @@ pub(crate) fn plant_unrecorded_rows(
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_writes
            SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;
@@ -891,7 +888,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 /// its timestamp, its number, the slot it read through and the slot it
 /// landed in, if it has.
 pub(crate) fn record_write(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     timestamp: &[u8],
     number: u64,
     read_through: u64,

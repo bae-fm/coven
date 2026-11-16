@@ -3,7 +3,7 @@
 //! refuses the whole local transaction, and the same judgement records each
 //! change's verdict.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -14,7 +14,7 @@ use coven_format::write::WriteRecord;
 /// Judge a queued write's retained changes, refuse it if any change fails,
 /// and record each change's verdict otherwise.
 pub(crate) fn judge_own_write(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     record: &WriteRecord,

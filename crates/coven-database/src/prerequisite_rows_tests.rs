@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 /// other column, so any change to a named row counts.
 #[test]
 fn reads_key_rows_by_primary_key_and_name_every_other_column() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let connection = sqlive::rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(&crate::internal_schema::initial_schema()).unwrap();
     let device = DeviceId(1);
     let samples = [

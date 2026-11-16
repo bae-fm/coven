@@ -415,7 +415,7 @@ async fn a_dismissal_records_each_row_of_a_cascade_cycle_once() {
         .await
         .unwrap()
         .into_iter()
-        .filter(|loss| loss.key.0 == [rusqlite::types::Value::Text("b".into())])
+        .filter(|loss| loss.key.0 == [sqlive::rusqlite::types::Value::Text("b".into())])
         .collect();
     a.dismiss_lost_values(&losses).await.unwrap();
     let record = records(&a).pop().unwrap();

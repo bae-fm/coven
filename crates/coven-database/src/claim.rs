@@ -1,14 +1,14 @@
 //! Durable identity and exact attempted bytes for one sequence claim (§5.1).
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     write_encoding::{counter, damaged},
     DbError, OperationId,
 };
 use coven_format::path::ObjectPath;
 use coven_foundation::id_source::DeviceId;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::io::Read;
 
 /// The original work carried by a claim. Every slot kind shares one counter.
@@ -78,41 +78,41 @@ pub enum ClaimRead {
     },
 }
 
-fn settlement(text: String) -> rusqlite::Result<ClaimSettlement> {
+fn settlement(text: String) -> sqlive::rusqlite::Result<ClaimSettlement> {
     match text.as_str() {
         "unknown" => Ok(ClaimSettlement::Unknown),
         "retry" => Ok(ClaimSettlement::Retry),
         "not-landed" => Ok(ClaimSettlement::NotLanded),
         "landed" => Ok(ClaimSettlement::Landed),
         "device-id-in-use" => Ok(ClaimSettlement::DeviceIdInUse),
-        _ => Err(damaged(4, rusqlite::types::Type::Text)),
+        _ => Err(damaged(4, sqlive::rusqlite::types::Type::Text)),
     }
 }
 
-fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
+fn metadata(db: &StoreSql) -> Result<Option<Claim>, DbError> {
     Ok(db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE singleton=1", [], |r| {
         let work = match (r.get::<_,Option<Vec<u8>>>(2)?, r.get::<_,Option<i64>>(3)?) {
             (Some(n),None) => ClaimWork::Writes(counter(n)?),
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
-            _ => return Err(damaged(2, rusqlite::types::Type::Blob)),
+            _ => return Err(damaged(2, sqlive::rusqlite::types::Type::Blob)),
         };
         Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?)?, work,
             attempts:Vec::new(), settlement:settlement(r.get(4)?)? })
     }).map(|mut rows| rows.pop())?)
 }
 
-pub(crate) fn current(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
+pub(crate) fn current(db: &StoreSql) -> Result<Option<Claim>, DbError> {
     metadata(db)?.map(|mut claim| {
         claim.attempts = db.query("SELECT path FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt",
             params![claim.device,claim.number.to_be_bytes().as_slice()], |r| {
                 let path:String=r.get(0)?;
-                ObjectPath::parse(&path).map_err(|e|crate::write_encoding::decode_failure(0,rusqlite::types::Type::Text,e))
+                ObjectPath::parse(&path).map_err(|e|crate::write_encoding::decode_failure(0,sqlive::rusqlite::types::Type::Text,e))
             })?;
         Ok(claim)
     }).transpose()
 }
 
-pub(crate) fn reserved(db: &DatabaseConnection, device: DeviceId) -> Result<u64, DbError> {
+pub(crate) fn reserved(db: &StoreSql, device: DeviceId) -> Result<u64, DbError> {
     let previous: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT number FROM _coven_claim_counters WHERE device=?1)",
         [device],
@@ -122,7 +122,7 @@ pub(crate) fn reserved(db: &DatabaseConnection, device: DeviceId) -> Result<u64,
 }
 
 pub(crate) fn begin<R: Read>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: DeviceId,
     work: ClaimWork,
     number: u64,
@@ -157,7 +157,7 @@ pub(crate) fn begin<R: Read>(
 }
 
 fn append(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     device: DeviceId,
     number: u64,
     prepared: crate::claim_preparation::PreparedClaim<impl Read>,
@@ -203,7 +203,7 @@ pub(crate) fn read_chunk(bytes: &mut dyn Read) -> Result<Vec<u8>, DbError> {
 
 /// Bounded reads of the current attempt's durable ciphertext.
 pub struct ClaimBytes<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     device: DeviceId,
     number: u64,
     attempt: i64,
@@ -238,7 +238,7 @@ impl Iterator for ClaimBytes<'_> {
 }
 
 pub(crate) fn read_attempt<T, E: From<DbError>>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     consume: impl FnOnce(ClaimBytes<'_>) -> Result<T, E>,
 ) -> Result<T, E> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
@@ -259,7 +259,7 @@ pub(crate) fn read_attempt<T, E: From<DbError>>(
     })
 }
 
-fn equal(db: &DatabaseConnection, mut received: Box<dyn Read + Send>) -> Result<bool, DbError> {
+fn equal(db: &StoreSql, mut received: Box<dyn Read + Send>) -> Result<bool, DbError> {
     read_attempt(db, |mut saved| {
         let mut equal = true;
         loop {
@@ -274,7 +274,7 @@ fn equal(db: &DatabaseConnection, mut received: Box<dyn Read + Send>) -> Result<
 }
 
 pub(crate) fn retry(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     attempt: crate::claim_preparation::PreparedClaim<impl Read>,
 ) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
@@ -286,7 +286,7 @@ pub(crate) fn retry(
     Ok(())
 }
 
-pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSettlement, DbError> {
+pub(crate) fn settle(db: &StoreSql, read: ClaimRead) -> Result<ClaimSettlement, DbError> {
     let claim = current(db)?.ok_or(DbError::NoClaim)?;
     if matches!(
         claim.settlement,
@@ -340,7 +340,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
 /// digest. An unsettled claim of a slot applied since, or compacted under a
 /// loaded floor, is one (§5.1).
 pub(crate) fn landed_operation(
-    db: &DatabaseConnection,
+    db: &StoreSql,
 ) -> Result<Option<(OperationId, coven_merge::Slot)>, DbError> {
     let Some(claim) = metadata(db)? else {
         return Ok(None);
@@ -361,19 +361,20 @@ pub(crate) fn landed_operation(
     let Some(path) = found.into_iter().next() else {
         return Ok(None);
     };
-    let path = ObjectPath::parse(&path)
-        .map_err(|e| crate::write_encoding::decode_failure(0, rusqlite::types::Type::Text, e))?;
+    let path = ObjectPath::parse(&path).map_err(|e| {
+        crate::write_encoding::decode_failure(0, sqlive::rusqlite::types::Type::Text, e)
+    })?;
     Ok(Some((id, path.slot_number().ok_or(DbError::InvalidClaimCoverage)?)))
 }
 
 /// Whether the open claim is the operation `id`'s.
-pub(crate) fn held_by(db: &DatabaseConnection, id: OperationId) -> Result<bool, DbError> {
+pub(crate) fn held_by(db: &StoreSql, id: OperationId) -> Result<bool, DbError> {
     Ok(metadata(db)?.is_some_and(|claim| claim.work == ClaimWork::Operation(id)))
 }
 
 /// End the open claim, settled or not, of an operation that ends without
 /// it: this device has stopped for good, and no attempt of it can count.
-pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+pub(crate) fn drop_operation(db: &StoreSql, id: OperationId) -> Result<(), DbError> {
     if held_by(db, id)? {
         db.execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
     }
@@ -382,7 +383,7 @@ pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result
 
 /// Finish only a settled attempt. The owning operation controls whether a lost
 /// claim is abandoned or retried; a landed batch removes its original queue rows.
-pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn finish(db: &StoreSql) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     let mut writes_landed = false;
     match claim.settlement {
@@ -412,7 +413,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
 
 /// Path evidence distinguishes contention from an unattempted use of this id.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn attempted(db: &DatabaseConnection, path: &ObjectPath) -> Result<bool, DbError> {
+pub(crate) fn attempted(db: &StoreSql, path: &ObjectPath) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE path=?1)",
         [path.as_str()],
@@ -421,7 +422,7 @@ pub(crate) fn attempted(db: &DatabaseConnection, path: &ObjectPath) -> Result<bo
 }
 
 pub(crate) fn attempted_digest(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     number: u64,
     path: &ObjectPath,
     digest: &[u8; 32],
@@ -438,24 +439,20 @@ pub struct ClaimUpload {
     pub session: Option<Vec<u8>>,
 }
 
-pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
+pub(crate) fn upload(db: &StoreSql) -> Result<ClaimUpload, DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     Ok(db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
         params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?)?, session: row.get(1)?}))?)
 }
 
-pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {
+pub(crate) fn save_upload(db: &StoreSql, session: Vec<u8>) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     db.execute("UPDATE _coven_claim_attempts SET session=?3 WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2)",
         params![claim.device, claim.number.to_be_bytes(), session])?;
     Ok(())
 }
 
-pub(crate) fn range(
-    db: &DatabaseConnection,
-    offset: u64,
-    length: usize,
-) -> Result<Vec<u8>, DbError> {
+pub(crate) fn range(db: &StoreSql, offset: u64, length: usize) -> Result<Vec<u8>, DbError> {
     if length == 0 {
         return Ok(Vec::new());
     }

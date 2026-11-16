@@ -4,7 +4,7 @@
 
 use crate::file_location::Place;
 use crate::file_table::{self, COORDINATES};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{write_rows::AppKey, write_schema::WriteSchema, DbError};
 use coven_format::{
@@ -13,7 +13,7 @@ use coven_format::{
     value::Value,
 };
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The merged state a write gave the rows it changed.
@@ -21,7 +21,7 @@ pub(crate) type Merged = BTreeMap<coven_merge::RowId, coven_merge::RowUpdate<Val
 
 /// The column naming a stored path: a record's coordinates.
 /// Whether any row names `file`.
-pub(crate) fn referenced(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+pub(crate) fn referenced(db: &StoreSql, file: FileId) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)",
         [file],
@@ -136,7 +136,7 @@ pub(crate) fn state_files(
 /// A loss may arrive without a displayed row change (schema exclusion or
 /// reload): its paths and file references are kept at once.
 pub(crate) fn retain_loss(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     record: &Loss,
 ) -> Result<(), DbError> {
@@ -164,7 +164,7 @@ pub(crate) fn retain_loss(
 /// references now. A row `merged` holds, the state a write just gave it, is
 /// not read back from the store.
 pub(crate) fn refresh(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
@@ -219,7 +219,7 @@ pub(crate) fn refresh(
 /// waits for this device's own write to delete it (§17.2). That happens when
 /// two devices each removed one of its references, neither seeing the other.
 pub(crate) fn refresh_received(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
@@ -229,7 +229,7 @@ pub(crate) fn refresh_received(
 
 /// A file referenced again, or whose record is gone, no longer waits for
 /// its record's delete.
-pub(crate) fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn settle_unreferenced(db: &StoreSql) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_unreferenced_files WHERE EXISTS(
              SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file)
@@ -242,7 +242,7 @@ pub(crate) fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError
 /// A migration renamed `table`'s file column `old` to `new`: its references
 /// take the new name.
 pub(crate) fn rename_reference_column(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &str,
     old: &str,
     new: &str,
@@ -256,11 +256,7 @@ pub(crate) fn rename_reference_column(
 
 /// A migration renamed the table `old` to `new`: its rows' references take
 /// the new name.
-pub(crate) fn rename_reference_table(
-    db: &DatabaseConnection,
-    old: &str,
-    new: &str,
-) -> Result<(), DbError> {
+pub(crate) fn rename_reference_table(db: &StoreSql, old: &str, new: &str) -> Result<(), DbError> {
     db.execute(
         "UPDATE _coven_file_references SET table_name=?2 WHERE table_name=?1",
         params![old, new],
@@ -271,10 +267,7 @@ pub(crate) fn rename_reference_table(
 /// Each of `released`, files left with no reference, whose record this
 /// device still has, waits for this device's next write of its own to
 /// delete that record (§17.2).
-pub(crate) fn await_own_write(
-    db: &DatabaseConnection,
-    released: BTreeSet<FileId>,
-) -> Result<(), DbError> {
+pub(crate) fn await_own_write(db: &StoreSql, released: BTreeSet<FileId>) -> Result<(), DbError> {
     for file in released {
         if file_table::Record::read(db, file)?.is_some() {
             db.execute(
@@ -291,7 +284,7 @@ pub(crate) fn await_own_write(
 /// `merged` holds takes its cells from there, as the store would give them
 /// after the write; the others are read.
 pub(crate) fn row_files(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
@@ -339,7 +332,7 @@ pub(crate) fn row_files(
 /// record gone for good, deleted or in a deleted circle, which never comes
 /// back (§15.9), has its original forgotten (§17.2).
 fn refresh_record(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
@@ -424,10 +417,7 @@ fn refresh_record(
 /// The namespace and object path of the stored bytes a file's record named as
 /// this device last recorded it, before its stored file is brought up to
 /// date.
-pub(crate) fn cached(
-    db: &DatabaseConnection,
-    file: FileId,
-) -> Result<Option<(String, String)>, DbError> {
+pub(crate) fn cached(db: &StoreSql, file: FileId) -> Result<Option<(String, String)>, DbError> {
     Ok(db
         .query(
             "SELECT namespace,object_path FROM _coven_stored_files WHERE file=?1",
@@ -443,7 +433,7 @@ pub(crate) fn cached(
 /// named, `cached`, a request to keep it whole, its original, its upload
 /// and coven's copy. A file with none of these has nothing to settle.
 pub(crate) fn settle_record(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     id: FileId,
     cached: Option<(String, String)>,
     shown: Option<&crate::file_table::Record>,
@@ -492,7 +482,7 @@ pub(crate) fn settle_record(
 /// the file device-only here and that switch lost to the other device's
 /// (§17.3). Such a copy is the losing download: it is recorded for removal,
 /// and goes once the writer is free if it is as coven left it (Appendix C.3).
-fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<(), DbError> {
+fn elsewhere(db: &StoreSql, file: FileId, device: DeviceId) -> Result<(), DbError> {
     let paths = db.query("SELECT path FROM _coven_user_files WHERE file=?1", [file], |r| {
         r.get::<_, Vec<u8>>(0)
     })?;
@@ -511,7 +501,7 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
 /// Schema changes can rename or drop every file column. Rebuild every
 /// affected row's file references inside that migration.
 pub(crate) fn migrate(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     tables: &[crate::SyncedTable],
 ) -> Result<BTreeSet<FileId>, DbError> {
@@ -578,7 +568,7 @@ pub(crate) fn replaced(
 /// while the write waits (§17.10). Original paths survive schema changes
 /// until publication removes the queue row.
 pub(crate) fn queued(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     record: &coven_format::write::WriteRecord,
     replaced: BTreeSet<(DeviceId, ObjectId)>,
 ) -> Result<(), DbError> {

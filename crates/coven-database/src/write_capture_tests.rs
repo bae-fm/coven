@@ -2,7 +2,7 @@ use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql, NOTES};
 use crate::{DbError, RowIdentity, RowKey, SyncedTable};
 use coven_merge::Operation;
-use rusqlite::types::Value;
+use sqlive::rusqlite::types::Value;
 
 const V4: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const V7: &str = "018f22bb-aaaa-7777-8ccc-000000000001";
@@ -49,8 +49,10 @@ async fn independent_key_insert_refuses_invalid_uuid_and_rolls_back() {
             .write(move |context| {
                 context.execute("INSERT INTO local_rows VALUES('rollback')", [])?;
                 context.execute("INSERT INTO notes VALUES(?1,'valid','')", [V4])?;
-                context
-                    .execute("INSERT INTO notes VALUES(?1,?2,'')", rusqlite::params![input, V7])?;
+                context.execute(
+                    "INSERT INTO notes VALUES(?1,?2,'')",
+                    sqlive::rusqlite::params![input, V7],
+                )?;
                 Ok(())
             })
             .await

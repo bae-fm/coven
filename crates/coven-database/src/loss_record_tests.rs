@@ -1,11 +1,11 @@
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{tests::TestStore, DbError, StoreDatabase};
 use crate::{Lost, LostCell, RemovalRule, Replacement, WriteId};
 use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{ColumnValue, Rule};
-use rusqlite::types::Value;
+use sqlive::rusqlite::types::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn setter(number: u64) -> WriteId {
@@ -340,14 +340,14 @@ async fn a_second_rules_loss_for_one_row_is_damaged_database() {
 
 /// Lose the record of every row removal rules took out, as a damaged
 /// database would: the merge row stays present with no values anywhere.
-pub(crate) fn lose_removed_rows(db: &DatabaseConnection) {
+pub(crate) fn lose_removed_rows(db: &StoreSql) {
     db.execute("DELETE FROM _coven_lost WHERE column_id IS NULL AND replacement_kind='rules'", [])
         .unwrap();
 }
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_lost
            (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)

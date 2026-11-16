@@ -16,7 +16,7 @@
 //! fails, or at the next open after a crash (§17.3). A copy goes only while
 //! it is as coven left it, and a folder coven made only while it is empty.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use coven_foundation::files::StoreDirAccess;
 use std::collections::BTreeSet;
@@ -34,7 +34,7 @@ pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 /// after a failed rollback the writer still holds a transaction and the read
 /// is refused, so uncommitted records never name bytes to remove.
 pub(crate) fn choose(
-    writer: &DatabaseConnection,
+    writer: &StoreSql,
     call: &StoreCall<'_>,
     active: &BTreeSet<OwnedFile>,
     copying: &BTreeSet<String>,
@@ -48,11 +48,7 @@ pub(crate) fn choose(
 
 /// The copies at `paths` a call that is failing left unswitched, with the
 /// folders it made for them, for that call to remove (§17.3).
-pub(crate) fn choose_copies(
-    writer: &DatabaseConnection,
-    call: &StoreCall<'_>,
-    paths: &[String],
-) -> Chosen {
+pub(crate) fn choose_copies(writer: &StoreSql, call: &StoreCall<'_>, paths: &[String]) -> Chosen {
     crate::transaction_constants::read_with_constants(writer, call, || {
         copies(writer, &Copies::Of(paths))
     })
@@ -73,9 +69,9 @@ enum Copies<'a> {
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-fn copies(db: &DatabaseConnection, which: &Copies<'_>) -> Chosen {
+fn copies(db: &StoreSql, which: &Copies<'_>) -> Chosen {
     type Row = (String, String, String, Option<i64>, Option<Vec<u8>>);
-    let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+    let read = |r: &sqlive::rusqlite::Row<'_>| -> sqlive::rusqlite::Result<Row> {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
     };
     let rows: Vec<Row> = match which {
@@ -209,7 +205,7 @@ pub(crate) enum CopyBytes {
 /// cache assembly still holds; the caller holds the writer and the set
 /// `active` came from, so a reservation still holds its name or its
 /// publication has committed and removed the record.
-fn pending(db: &DatabaseConnection, active: &BTreeSet<OwnedFile>) -> Chosen {
+fn pending(db: &StoreSql, active: &BTreeSet<OwnedFile>) -> Chosen {
     let rows =
         db.query("SELECT path,area FROM _coven_file_removals ORDER BY area,path", [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -257,7 +253,7 @@ pub(crate) fn remove_bytes(
 
 /// Record the cache range or file at `path` in the cache for removal once
 /// the writer is free.
-pub(crate) fn record_cached(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn record_cached(db: &StoreSql, path: &str) -> Result<(), DbError> {
     db.execute("INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)", [path])?;
     Ok(())
 }
@@ -265,7 +261,7 @@ pub(crate) fn record_cached(db: &DatabaseConnection, path: &str) -> Result<(), D
 /// Record the new name `path` in the files area for removal, unless a row
 /// names it, returning whether it was recorded: a staging write reserves
 /// it so a crash before its commit leaves nothing behind.
-pub(crate) fn record_unnamed(db: &DatabaseConnection, path: &str) -> Result<bool, DbError> {
+pub(crate) fn record_unnamed(db: &StoreSql, path: &str) -> Result<bool, DbError> {
     let recorded = db.execute(
         &format!(
             "INSERT INTO _coven_file_removals(path) SELECT ?1
@@ -278,24 +274,30 @@ pub(crate) fn record_unnamed(db: &DatabaseConnection, path: &str) -> Result<bool
 
 /// Record coven's copy at `path`, which nothing names any more, for
 /// removal; one already recorded stays so.
-pub(crate) fn record_released(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn record_released(db: &StoreSql, path: &str) -> Result<(), DbError> {
     db.execute("INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING", [path])?;
     Ok(())
 }
 
 /// The reserved name `path` in `area`'s bytes are kept: their removal
 /// record goes before a row names them.
-pub(crate) fn keep(db: &DatabaseConnection, area: &str, path: &str) -> Result<(), DbError> {
+pub(crate) fn keep(db: &StoreSql, area: &str, path: &str) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2", (path, area))?;
     Ok(())
 }
 
 /// Delete the records of files whose bytes are gone, in the writer's
 /// transaction. A record already gone needs nothing.
-pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<(), DbError> {
+pub(crate) fn forget(
+    db: &StoreSql,
+    call: &crate::store_call::StoreCall<'_>,
+    removed: &[Released],
+) -> Result<(), DbError> {
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let _ = call;
     for file in removed {
         #[cfg(any(test, feature = "test-utils"))]
-        db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
+        call.write_checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
         match file {
             Released::Owned(file) => {
                 let (area, path) = file.record();
@@ -307,7 +309,7 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
             Released::Folder(_) => {}
         }
         #[cfg(any(test, feature = "test-utils"))]
-        db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemovalRecorded);
+        call.write_checkpoint(crate::test_utils::WriteCheckpoint::FileRemovalRecorded);
     }
     Ok(())
 }
@@ -316,7 +318,7 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
 /// any app write can run, by the same steps. First, cache ranges still
 /// recorded as being written whose writer is gone become removals.
 pub(crate) fn finish_at_open(
-    writer: &mut DatabaseConnection,
+    writer: &mut StoreSql,
     call: &StoreCall<'_>,
     directory: &StoreDir,
 ) -> Result<(), DbError> {
@@ -325,7 +327,7 @@ pub(crate) fn finish_at_open(
     let released = choose(writer, call, &BTreeSet::new(), &BTreeSet::new())?;
     let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
-        if let Err(error) = writer.transaction(|db| forget(db, &removed)) {
+        if let Err(error) = writer.transaction(|db| forget(db, call, &removed)) {
             failures.push(error);
         }
     }
@@ -341,10 +343,7 @@ pub(crate) fn finish_at_open(
 /// lock shared, so once it is held exclusively, the ranges still recorded
 /// as being written have no live writer: they become removals. No other
 /// database lock is held while waiting, so a waited-for range can commit.
-fn abandon_cache_writes(
-    writer: &mut DatabaseConnection,
-    directory: &StoreDir,
-) -> Result<(), DbError> {
+fn abandon_cache_writes(writer: &mut StoreSql, directory: &StoreDir) -> Result<(), DbError> {
     if !writer.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", [], |r| {
         r.get::<_, bool>(0)
     })? {

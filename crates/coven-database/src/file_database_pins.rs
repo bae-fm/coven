@@ -104,7 +104,7 @@ impl FileDatabase {
             let hash = db
                 .query(
                     "SELECT hash FROM _coven_copy_chunks WHERE path=?1 AND chunk=?2",
-                    rusqlite::params![copy, index],
+                    sqlive::rusqlite::params![copy, index],
                     |r| r.get::<_, Vec<u8>>(0),
                 )?
                 .pop()

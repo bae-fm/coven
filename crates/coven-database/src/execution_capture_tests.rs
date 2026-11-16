@@ -616,10 +616,10 @@ async fn an_insert_carries_the_rows_still_naming_its_key() {
 /// not a check: run it with `--ignored --nocapture` on two commits and
 /// compare the statements; wall time follows the machine's load.
 mod write_cost {
-    use crate::sqlite::tests::ProfiledStatement;
     use crate::tests::TestStore;
     use crate::{RowIdentity, SyncedTable};
     use coven_foundation::id_source::CircleId;
+    use sqlive::ProfiledStatement;
     use std::collections::BTreeMap;
     use std::time::Instant;
 

@@ -13,7 +13,7 @@ const SHOWN: &str = "SELECT n.usable,n.metered,n.unmetered_only,
 
 type Shown = (Option<bool>, bool, bool, Option<bool>);
 
-fn shown(row: &rusqlite::Row<'_>) -> rusqlite::Result<Shown> {
+fn shown(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<Shown> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 

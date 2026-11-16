@@ -44,14 +44,14 @@ use sqlite3_parser::{
 
 /// The rows of each table a statement can depend on, before its values are
 /// bound.
-pub struct ScopePlan {
+pub(crate) struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
     sources: Option<Sources>,
 }
 
 impl ScopePlan {
     /// The plan for `sql`, prepared as `statement`.
-    pub fn build(
+    pub(crate) fn build(
         connection: &Connection,
         sql: &str,
         statement: &Statement<'_>,
@@ -62,7 +62,7 @@ impl ScopePlan {
 
     /// Where a run bound to `parameters` finds the row its scope ends at, or
     /// `None` when no row of the run bounds it (`scope_order.rs`).
-    pub fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
+    pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
         self.sources.as_ref()?.sorted.as_ref()?.last_row(parameters)
     }
 
@@ -70,7 +70,7 @@ impl ScopePlan {
     /// for a run bound to `parameters` that returned `last`, the ORDER BY's
     /// values of the row `last_row` names, when it returned that many rows. A
     /// table the plan doesn't name depends on every row.
-    pub fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
+    pub(crate) fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
         match &self.sources {
             Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             None => Scopes::default(),

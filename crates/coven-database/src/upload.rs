@@ -1,7 +1,7 @@
 //! Original authored plaintext, with format and keys fixed by its first upload attempt.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{counter, encoded};
 use crate::DbError;
 use coven_format::chunks::CHUNK_SIZE;
@@ -9,7 +9,7 @@ use coven_format::sealed_write::WriteObjectPrefix;
 use coven_format::write_stream::{PartHeader, WriteHeaderFrame};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::WriteId;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::rc::Rc;
 
 /// A waiting write's plaintext, fixed at commit, read under one committed
@@ -85,13 +85,13 @@ impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
 /// An incremental SQLite BLOB reader. It never collects the waiting write.
 #[derive(Clone)]
 pub struct UploadBytes<'a> {
-    blob: Rc<rusqlite::blob::Blob<'a>>,
+    blob: Rc<sqlive::rusqlite::blob::Blob<'a>>,
     offset: usize,
     end: usize,
 }
 
 impl<'a> UploadBytes<'a> {
-    pub(crate) fn new(blob: rusqlite::blob::Blob<'a>) -> Self {
+    pub(crate) fn new(blob: sqlive::rusqlite::blob::Blob<'a>) -> Self {
         let end = blob.len();
         Self { blob: Rc::new(blob), offset: 0, end }
     }
@@ -203,7 +203,7 @@ struct QueueEntry {
 impl QueueEntry {
     /// An entry selected as `rowid,device,number` from `_coven_uploads`,
     /// then its upload keys' `sealing_keys`, or NULL for none known.
-    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    fn read(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<Self> {
         Ok(Self {
             rowid: row.get(0)?,
             write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?)? },
@@ -213,7 +213,7 @@ impl QueueEntry {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-fn oldest(database: &DatabaseConnection) -> Result<Option<QueueEntry>, DbError> {
+fn oldest(database: &StoreSql) -> Result<Option<QueueEntry>, DbError> {
     Ok(database
         .query(
             "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1",
@@ -226,7 +226,7 @@ fn oldest(database: &DatabaseConnection) -> Result<Option<QueueEntry>, DbError> 
 /// The oldest waiting write and the keys its first attempt fixed, if any.
 #[cfg(test)]
 pub(crate) fn oldest_keys(
-    database: &DatabaseConnection,
+    database: &StoreSql,
 ) -> Result<Option<(WriteId, Option<WriteObjectPrefix>)>, DbError> {
     let Some(entry) = oldest(database)? else {
         return Ok(None);
@@ -237,7 +237,7 @@ pub(crate) fn oldest_keys(
 }
 
 fn plaintext<'a>(
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     rowid: i64,
     write: WriteId,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
@@ -258,7 +258,7 @@ fn plaintext<'a>(
 
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn read<R, E>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     consume: impl FnOnce(UploadPlaintext<'_>) -> Result<R, E>,
 ) -> Result<Option<R>, UploadReadError<E>> {
     let Some(entry) = oldest(database)? else {
@@ -270,7 +270,7 @@ pub(crate) fn read<R, E>(
 }
 
 fn read_plaintext<'a>(
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     rowid: i64,
     write: WriteId,
 ) -> Result<UploadPlaintext<'a>, DbError> {
@@ -279,11 +279,7 @@ fn read_plaintext<'a>(
     Ok(UploadPlaintext { header, header_frame, parts })
 }
 
-fn batch(
-    database: &DatabaseConnection,
-    device: DeviceId,
-    through: u64,
-) -> Result<Vec<QueueEntry>, DbError> {
+fn batch(database: &StoreSql, device: DeviceId, through: u64) -> Result<Vec<QueueEntry>, DbError> {
     Ok(database.query(
         "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u
         LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number
@@ -296,7 +292,7 @@ fn batch(
 /// Fix the keys of every write in `device`'s queue through `through` that
 /// has none yet, keeping the keys earlier attempts fixed.
 pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
-    database: &mut DatabaseConnection,
+    database: &mut StoreSql,
     device: DeviceId,
     through: u64,
     mut select: impl FnMut(&WriteHeaderFrame) -> Result<WriteObjectPrefix, E>,
@@ -327,7 +323,7 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
 }
 
 /// Fix the keys a queued write is sealed with, at its first attempt.
-fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Result<(), DbError> {
+fn keep_keys(database: &StoreSql, write: WriteId, keys: &[u8]) -> Result<(), DbError> {
     database.execute(
         "INSERT INTO _coven_upload_keys(device,number,sealing_keys) VALUES(?1,?2,?3)",
         params![write.device, write.number.to_be_bytes(), keys],
@@ -337,7 +333,7 @@ fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Resu
 
 /// Read each prepared write's plaintext, with the keys it seals with.
 pub(crate) fn read_batch<E: From<DbError>>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     prepared: PreparedUploads,
     mut consume: impl FnMut(WaitingUpload<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -351,7 +347,7 @@ pub(crate) fn read_batch<E: From<DbError>>(
 /// commit, to wait for its upload, with the rows its dismissals name,
 /// `dismissed`.
 pub(crate) fn queue<'a>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     write: WriteId,
     record: &[u8],
     dismissed: impl IntoIterator<Item = &'a coven_merge::RowId>,
@@ -372,7 +368,7 @@ pub(crate) fn queue<'a>(
 
 /// The rows the dismissals of this device's queued write `write` name.
 pub(crate) fn dismissed(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     write: WriteId,
 ) -> Result<Vec<coven_merge::RowId>, DbError> {
     Ok(database.query(
@@ -384,7 +380,7 @@ pub(crate) fn dismissed(
 
 /// The writes `device`'s landed claim `claim` carried leave the queue.
 pub(crate) fn forget_claimed(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     device: DeviceId,
     claim: u64,
 ) -> Result<(), DbError> {
@@ -398,7 +394,7 @@ pub(crate) fn forget_claimed(
 
 /// The header of this device's write `write` while it waits in the queue.
 pub(crate) fn queued(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     write: WriteId,
 ) -> Result<Option<WriteHeaderFrame>, DbError> {
     let Some(rowid) = database
@@ -417,7 +413,7 @@ pub(crate) fn queued(
 /// Read every waiting plaintext, including attempted entries.
 /// The caller holds a reader transaction for a consistent queue view.
 pub(crate) fn each_plaintext(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     mut consume: impl FnMut(WriteHeaderFrame, UploadParts<'_>) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
     let entries = database.query(
@@ -435,7 +431,7 @@ pub(crate) fn each_plaintext(
 
 #[cfg(test)]
 pub(crate) fn prepare(
-    database: &mut DatabaseConnection,
+    database: &mut StoreSql,
     call: &crate::store_call::StoreCall<'_>,
     log: &crate::StoreState,
     select: impl FnOnce(
@@ -467,10 +463,7 @@ pub(crate) fn prepare(
 /// upload holds on (§17.4). `None` with no write waiting. The caller holds
 /// one committed read, so a write is never sent past a hold it was queued
 /// with.
-pub(crate) fn sendable_through(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Option<u64>, DbError> {
+pub(crate) fn sendable_through(db: &StoreSql, device: DeviceId) -> Result<Option<u64>, DbError> {
     let newest =
         db.query_row("SELECT max(number) FROM _coven_uploads WHERE device=?1", [device], |r| {
             r.get::<_, Option<Vec<u8>>>(0)
@@ -487,10 +480,7 @@ pub(crate) fn sendable_through(
 /// stored. A snapshot covering own writes through `through` is sent only
 /// once this is none: capture may precede confirmation, but neither settles
 /// a queue slot (§16.1).
-pub(crate) fn unconfirmed(
-    db: &DatabaseConnection,
-    through: WriteId,
-) -> Result<Option<WriteId>, DbError> {
+pub(crate) fn unconfirmed(db: &StoreSql, through: WriteId) -> Result<Option<WriteId>, DbError> {
     Ok(db
         .query(
             &format!("SELECT u.number FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.number<=?2 AND w.slot IS NULL ORDER BY u.number LIMIT 1"),

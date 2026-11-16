@@ -4,7 +4,7 @@ use crate::write::tests::{notes, NOTES};
 use crate::DbError;
 
 /// One read, written once for either context.
-fn pantry_title(sql: &impl SqlRead) -> rusqlite::Result<String> {
+fn pantry_title(sql: &impl SqlRead) -> sqlive::rusqlite::Result<String> {
     sql.query_row("SELECT title FROM notes WHERE id='pantry'", [], |r| r.get(0))
 }
 

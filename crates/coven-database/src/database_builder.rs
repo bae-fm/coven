@@ -1,9 +1,9 @@
 //! Compose locked writers and read-only connections at the database boundary.
 
 use super::*;
-use crate::sqlite::DatabaseConnection;
-use crate::sqlite_database::{Database, Options};
+use crate::sqlite::StoreSql;
 use coven_foundation::files::StoreDirAccess;
+use sqlive::{Database, Options};
 use std::num::NonZeroUsize;
 
 /// The read-only connections of a store's database beside its writer.
@@ -243,7 +243,7 @@ impl DatabaseBuilder {
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
-        let views = |setup: &Setup<'_>| {
+        let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
         };
         let recorded = crate::file_table::synced(&tables)
@@ -351,7 +351,7 @@ impl DatabaseBuilder {
                 policy: &|| CovenPolicy::new(&[]),
                 setup: &input_setup,
                 capture: None,
-                checkpoint_pages: Some(crate::sqlite_settings::CHECKPOINT_PAGES),
+                checkpoint_pages: Some(sqlive::CHECKPOINT_PAGES),
                 statistics: false,
             },
             |input| -> Result<(), DbError> {
@@ -434,7 +434,7 @@ impl DatabaseBuilder {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
-        let views = |setup: &Setup<'_>| {
+        let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
         };
         // A read-only open runs no step, so nothing reaches `progress`.
@@ -577,7 +577,7 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
             let observer = store_observer(directory.bugs());
             let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
             let network = crate::network_facts::NetworkFacts::new(observer);
-            let views = |setup: &Setup<'_>| {
+            let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
                 crate::coven_functions::register_views(
                     setup,
                     settings.device_id,
@@ -643,10 +643,10 @@ pub(crate) fn coven_only(
     path: &std::path::Path,
     read_only: bool,
     views: Option<&crate::coven_functions::Views<'_>>,
-) -> Result<DatabaseConnection, DbError> {
+) -> Result<StoreSql, DbError> {
     let functions = crate::SqlFunctions::default();
     let setup = crate::app_policy::setup(&functions, views);
-    let connection = DatabaseConnection::open(
+    let connection = StoreSql::open(
         path,
         read_only,
         CovenPolicy::new(&[]),

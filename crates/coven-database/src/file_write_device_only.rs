@@ -3,7 +3,7 @@
 //! becoming the original this device records.
 
 use super::FileWrite;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     file_hashes::FileHashes,
@@ -38,7 +38,7 @@ pub struct DeviceOnlyCopy {
 /// which an `owner_only` table's rows another member created refuse. An
 /// admin gets no exception, as with any row (§9.6).
 pub(crate) fn permitted(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     device: DeviceId,

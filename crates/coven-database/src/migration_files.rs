@@ -5,10 +5,10 @@
 //! changes.
 
 use crate::migration_names::MigrationMatch;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 
-pub(crate) fn carry(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
+pub(crate) fn carry(db: &StoreSql, names: &MigrationMatch) -> Result<(), DbError> {
     let columns: Vec<_> = names.columns.iter().filter(|((_, old), new)| old != *new).collect();
     // Stage names first, so a swap of two names can't collide on a key.
     for (index, ((table, old), _)) in columns.iter().enumerate() {

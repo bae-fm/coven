@@ -1,8 +1,8 @@
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 /// Record a cache entry of `size` bytes at `path`, for chunk 0 of the stored
 /// object at `object_path` in the `files` namespace, last read at `read`.
 pub(crate) fn cached(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     object_path: &str,
     path: &str,
     size: i64,
@@ -17,7 +17,7 @@ pub(crate) fn cached(
 
 /// Record a partial download of `size` bytes at `path`, as a stopped pin
 /// leaves it.
-pub(crate) fn partial(db: &DatabaseConnection, object_path: &str, path: &str, size: i64) {
+pub(crate) fn partial(db: &StoreSql, object_path: &str, path: &str, size: i64) {
     db.execute(
         "INSERT INTO _coven_cache_partials(namespace,object_path,path,size) VALUES('files',?1,?2,?3)",
         (object_path, path, size),
@@ -27,13 +27,13 @@ pub(crate) fn partial(db: &DatabaseConnection, object_path: &str, path: &str, si
 
 /// Record a cache range at `path` as being written, as a crash mid-write
 /// leaves it.
-pub(crate) fn writing(db: &DatabaseConnection, path: &str) {
+pub(crate) fn writing(db: &StoreSql, path: &str) {
     db.execute("INSERT INTO _coven_cache_writes(path) VALUES(?1)", [path]).unwrap();
 }
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash)
            SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,

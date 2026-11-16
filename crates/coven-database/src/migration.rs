@@ -1,10 +1,10 @@
 //! Numbered app migrations and their transaction-scoped SQL access.
 
 use crate::migration_names::MigrationNames;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::SyncedTable;
 use crate::{DbError, MigrationError};
-use rusqlite::{Params, Row};
+use sqlive::rusqlite::{Params, Row};
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -190,7 +190,7 @@ pub(crate) fn validate_versions(migrations: &[Migration]) -> Result<u32, Migrati
 /// App SQL inside the transaction owned by the migration run.
 /// The context borrows its owner and cannot change the transaction or connection.
 pub struct MigrationContext<'connection> {
-    database: &'connection DatabaseConnection,
+    database: &'connection StoreSql,
     names: RefCell<MigrationNames>,
     /// The schema before this step, which the step hands back when it ends.
     before: crate::schema::Schema,
@@ -200,7 +200,7 @@ pub struct MigrationContext<'connection> {
 
 impl<'connection> MigrationContext<'connection> {
     pub(crate) fn new(
-        database: &'connection DatabaseConnection,
+        database: &'connection StoreSql,
         before: crate::schema::Schema,
         capture: crate::migration_snapshot::MigrationCapture<'connection>,
     ) -> Self {
@@ -232,8 +232,8 @@ impl<'connection> MigrationContext<'connection> {
     fn statement<T>(
         &self,
         sql: &str,
-        run: impl FnOnce() -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<T> {
+        run: impl FnOnce() -> sqlive::rusqlite::Result<T>,
+    ) -> sqlive::rusqlite::Result<T> {
         self.before_statement(sql)?;
         let before = self.database.schema_cookie()?;
         let result = run();
@@ -243,44 +243,40 @@ impl<'connection> MigrationContext<'connection> {
         result
     }
 
-    pub(crate) fn before_statement(&self, sql: &str) -> rusqlite::Result<()> {
+    fn before_statement(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.capture.borrow_mut().before(&self.before, sql)
     }
 
-    pub(crate) fn record(&self, sql: &str) -> rusqlite::Result<()> {
+    fn record(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
         self.names.borrow_mut().record(sql)
     }
 
     /// Execute one app statement with parameters.
-    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> sqlive::rusqlite::Result<usize> {
         self.statement(sql, || self.database.app_execute(sql, params))
     }
 
     /// Execute app statements without escaping the migration transaction.
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.database.app_batch_tracked(sql, Some(self))
+    pub fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
+        self.database.app_batch_each(sql, |text, step| self.statement(text, &mut *step))
     }
 
     /// Map one row from an app query.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
-        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.statement(sql, || {
-            self.database.app_query_row(crate::sqlite::Recorded::No, sql, params, map)
-        })
+        self.statement(sql, || self.database.app_query_row(sqlive::Recorded::No, sql, params, map))
     }
 
     /// Map every result of an app query.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
     where
         P: Params,
-        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.statement(sql, || {
-            self.database.app_query(crate::sqlite::Recorded::No, sql, params, map)
-        })
+        self.statement(sql, || self.database.app_query(sqlive::Recorded::No, sql, params, map))
     }
 }
 

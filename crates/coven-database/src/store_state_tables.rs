@@ -1,5 +1,5 @@
 //! SQLite representation of committed membership and audience state.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     store_state::*,
     write_encoding::{damaged, stored},
@@ -8,23 +8,20 @@ use crate::{
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId, StoreId};
 use coven_merge::Slot;
-use rusqlite::{params, types::Type, Row};
+use sqlive::rusqlite::{params, types::Type, Row};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) fn slot(row: &Row<'_>, column: usize) -> rusqlite::Result<Slot> {
+pub(crate) fn slot(row: &Row<'_>, column: usize) -> sqlive::rusqlite::Result<Slot> {
     crate::write_encoding::slot_counter(row.get(column)?)
 }
 
 /// A member id as the membership tables hold it: its canonical text.
-pub(crate) fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
+pub(crate) fn member(row: &Row<'_>, column: usize) -> sqlive::rusqlite::Result<MemberId> {
     stored(row, column, Type::Text)
 }
 
 /// The member a device registered under, once its registration has applied.
-pub(crate) fn device_member(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Option<MemberId>, DbError> {
+pub(crate) fn device_member(db: &StoreSql, device: DeviceId) -> Result<Option<MemberId>, DbError> {
     Ok(db
         .query("SELECT member FROM _coven_devices WHERE device=?1", [device], |r| member(r, 0))?
         .pop())
@@ -32,7 +29,7 @@ pub(crate) fn device_member(
 
 /// A public key pair as the membership tables hold it: the signing key at
 /// `signing`, the sealing key in the column after it.
-fn member_keys(row: &Row<'_>, signing: usize) -> rusqlite::Result<MemberPublicKeys> {
+fn member_keys(row: &Row<'_>, signing: usize) -> sqlive::rusqlite::Result<MemberPublicKeys> {
     Ok(MemberPublicKeys {
         signing: SigningKey::from_bytes(stored(row, signing, Type::Blob)?)
             .map_err(|_not_a_key| damaged(signing, Type::Blob))?,
@@ -44,7 +41,7 @@ fn member_keys(row: &Row<'_>, signing: usize) -> rusqlite::Result<MemberPublicKe
 /// `SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person`.
 /// A fact that doesn't
 /// decode is `DamagedDatabase`.
-pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreMember)> {
+pub(crate) fn stored_member(row: &Row<'_>) -> sqlive::rusqlite::Result<(MemberId, StoreMember)> {
     let joined = match stored::<Option<CircleId>>(row, 6, Type::Text)? {
         Some(circle) => Some(Joined { person: stored(row, 7, Type::Text)?, circle }),
         None => None,
@@ -66,13 +63,11 @@ pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreM
 
 /// A circle id as the membership and audience tables hold it: its canonical
 /// text.
-pub(crate) fn circle(row: &Row<'_>, column: usize) -> rusqlite::Result<CircleId> {
+pub(crate) fn circle(row: &Row<'_>, column: usize) -> sqlive::rusqlite::Result<CircleId> {
     stored(row, column, Type::Text)
 }
 
-pub(crate) fn deleted_circles(
-    db: &DatabaseConnection,
-) -> Result<BTreeMap<CircleId, Slot>, DbError> {
+pub(crate) fn deleted_circles(db: &StoreSql) -> Result<BTreeMap<CircleId, Slot>, DbError> {
     Ok(db
         .query("SELECT circle,slot FROM _coven_circle_deletions", [], |r| {
             Ok((circle(r, 0)?, slot(r, 1)?))
@@ -81,7 +76,7 @@ pub(crate) fn deleted_circles(
         .collect())
 }
 
-pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
+pub(crate) fn name(database: &StoreSql) -> Result<String, DbError> {
     database
         .query("SELECT name FROM _coven_store WHERE singleton=1", [], |row| row.get(0))?
         .pop()
@@ -90,7 +85,7 @@ pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
 
 /// The current name and the slot that set it; a local creation's name counts
 /// as set by slot 1, which will publish it (§13.1).
-pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbError> {
+pub(crate) fn named(database: &StoreSql) -> Result<(String, Slot), DbError> {
     database
         .query("SELECT name,named_at FROM _coven_store WHERE singleton=1", [], |row| {
             Ok((row.get(0)?, slot(row, 1)?))
@@ -108,7 +103,7 @@ pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbE
 /// device is registered only by the admission its first load applies, and
 /// until then it refuses synced writes (`awaiting_registration`).
 pub(crate) fn name_before_creation(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     store: StoreId,
     name: &str,
     named_at: Slot,
@@ -126,7 +121,7 @@ pub(crate) fn name_before_creation(
 /// slot it had applied, below the registration, and every other device would
 /// refuse it for lack of a device to author it (§7.1, §13.4).
 pub(crate) fn awaiting_registration(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     device: DeviceId,
 ) -> Result<bool, DbError> {
     Ok(database.query_row(
@@ -138,7 +133,7 @@ pub(crate) fn awaiting_registration(
 }
 
 /// Whether the applied history has created the store.
-pub(crate) fn created(database: &DatabaseConnection) -> Result<bool, DbError> {
+pub(crate) fn created(database: &StoreSql) -> Result<bool, DbError> {
     Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_store WHERE singleton=1 AND created=1)",
         [],
@@ -146,7 +141,7 @@ pub(crate) fn created(database: &DatabaseConnection) -> Result<bool, DbError> {
     )?)
 }
 
-pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError> {
+pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
     state.store = database
         .query(
@@ -202,7 +197,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
     }
     Ok(state)
 }
-pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
+pub(crate) fn replace(database: &StoreSql, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
         database.execute("INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,1,0) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
     }

@@ -2,14 +2,14 @@
 
 use crate::declaration::AudienceSource;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_capture::CapturedRow;
 use crate::write_encoding::{encoded, sql_value, value};
 use crate::write_schema::WriteSchema;
 use crate::{DbError, RowKey};
 use coven_format::value::Value;
 use coven_merge::{Audience, ForeignKey, RowId};
-use rusqlite::params_from_iter;
+use sqlive::rusqlite::params_from_iter;
 use sqlive::sql::identifier;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +59,7 @@ pub(crate) struct AppRow {
 }
 
 pub(crate) struct AppView<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     schema: &'a WriteSchema,
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
@@ -74,7 +74,7 @@ pub(crate) struct AppView<'a> {
 }
 
 impl<'a> AppView<'a> {
-    pub(crate) fn after(database: &'a DatabaseConnection, schema: &'a WriteSchema) -> Self {
+    pub(crate) fn after(database: &'a StoreSql, schema: &'a WriteSchema) -> Self {
         Self {
             database,
             schema,
@@ -88,7 +88,7 @@ impl<'a> AppView<'a> {
     }
 
     pub(crate) fn before(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         schema: &'a WriteSchema,
         captured: &BTreeMap<AppKey, CapturedRow>,
     ) -> Result<Self, DbError> {
@@ -232,7 +232,7 @@ impl<'a> AppView<'a> {
     }
 
     pub(crate) fn migration_before(
-        database: &'a DatabaseConnection,
+        database: &'a StoreSql,
         schema: &'a WriteSchema,
         snapshot: &'a crate::migration_snapshot::MigrationSnapshot<'a>,
     ) -> Self {
@@ -412,7 +412,7 @@ impl Drop for ParentsGuard<'_> {
 }
 
 pub(crate) fn read_values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &TableSchema,
     key: &[u8],
 ) -> Result<Option<AppValues>, DbError> {
@@ -435,8 +435,8 @@ pub(crate) fn read_values(
 
 pub(crate) fn read_row(
     table: &TableSchema,
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<AppValues> {
+    row: &sqlive::rusqlite::Row<'_>,
+) -> sqlive::rusqlite::Result<AppValues> {
     table
         .columns
         .iter()
@@ -531,10 +531,12 @@ pub(crate) fn column_audience(
         Value::Text(text) => crate::write_encoding::canonical_audience(text).ok_or_else(|| {
             DbError::InvalidAudience { table: table.name.clone(), key: error_key(table, values) }
         }),
-        v => {
-            Err(rusqlite::Error::InvalidColumnType(0, column.into(), sql_value(v).data_type())
-                .into())
-        }
+        v => Err(sqlive::rusqlite::Error::InvalidColumnType(
+            0,
+            column.into(),
+            sql_value(v).data_type(),
+        )
+        .into()),
     }
 }
 
@@ -542,8 +544,8 @@ pub(crate) fn column_audience(
 /// foreign key names no parent: a write coven finds leaving one fails with
 /// it before its commit could.
 fn dangling_reference() -> DbError {
-    DbError::Sqlite(rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+    DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(
+        sqlive::rusqlite::ffi::Error::new(sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
         Some("FOREIGN KEY constraint failed".into()),
     ))
 }
@@ -562,7 +564,7 @@ pub(crate) fn app_row_key(key: &AppKey) -> Result<RowKey, DbError> {
 }
 
 /// The SQL values of an encoded key, in key order.
-pub(crate) fn key_parameters(key: &[u8]) -> Result<Vec<rusqlite::types::Value>, DbError> {
+pub(crate) fn key_parameters(key: &[u8]) -> Result<Vec<sqlive::rusqlite::types::Value>, DbError> {
     Ok(RowKey::decode(key)?.0)
 }
 

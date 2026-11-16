@@ -1,14 +1,14 @@
 //! SQLite evaluates one region row at a time with the app's affinities and SQL.
 use crate::removal_schema::TableRules;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{column_list, equality_key, read_row, AppValues};
 use crate::write_schema::{evaluation_name, ordinal};
 use crate::DbError;
 use coven_format::value::Value;
 use coven_merge::{Constraints, RowState, UniqueClaim};
-use rusqlite::params_from_iter;
+use sqlive::rusqlite::params_from_iter;
 use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
@@ -39,7 +39,7 @@ fn kept_as_is(kind: &str, value: &Value) -> bool {
 /// The row SQLite would store for `values`, without staging it when it is
 /// that row already (§9.3).
 pub(crate) fn stored_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     values: &AppValues,
 ) -> Result<AppValues, DbError> {
@@ -52,7 +52,7 @@ pub(crate) fn stored_values(
 /// The row SQLite would store for `values`, staged in the table's evaluation
 /// row, where its unique and CHECK expressions read it.
 pub(crate) fn evaluate_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     values: &AppValues,
 ) -> Result<AppValues, DbError> {
@@ -87,7 +87,7 @@ pub(crate) fn evaluate_values(
 /// Rust casts, applies its exact affinity rules (including numeric text), to
 /// values those types don't keep as they are.
 pub(crate) fn reference_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     columns: &[String],
     values: &[Value],
@@ -122,7 +122,7 @@ pub(crate) fn reference_values(
 /// table's evaluation row: `evaluate_values` staged it, unless the table has
 /// neither, which reads nothing.
 pub(crate) fn constraints(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     rules: &TableRules,
     state: &RowState<Value>,
@@ -153,7 +153,7 @@ pub(crate) fn constraints(
 /// Materialization needs the prior SQL values' occupied unique slots, even when
 /// a snapshot has removed that row's merge state. No write stamp participates.
 pub(crate) fn unique_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     rules: &TableRules,
     values: &AppValues,
@@ -167,7 +167,7 @@ pub(crate) fn unique_values(
 
 /// The unique values of the row staged in the table's evaluation row.
 fn staged_unique_values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     rules: &TableRules,
 ) -> Result<std::collections::BTreeMap<coven_merge::UniqueConstraint, Vec<u8>>, DbError> {
@@ -186,7 +186,7 @@ fn staged_unique_values(
             |r| {
                 (0..claim.expressions.len())
                     .map(|i| value(r.get_ref(i)?))
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .collect::<sqlive::rusqlite::Result<Vec<_>>>()
             },
         )?;
         let Some(values) = values.into_iter().next() else {
@@ -201,7 +201,7 @@ fn staged_unique_values(
 }
 
 pub(crate) fn permits(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     rules: &TableRules,
     values: &AppValues,
@@ -219,7 +219,7 @@ pub(crate) fn permits(
 }
 
 fn checks(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &TableSchema,
     rules: &TableRules,
 ) -> Result<BTreeSet<String>, DbError> {

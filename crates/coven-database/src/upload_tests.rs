@@ -367,8 +367,10 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
     }
     // SAFETY: the isolated child has not opened SQLite on any thread yet.
     assert_eq!(
-        unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1) },
-        rusqlite::ffi::SQLITE_OK
+        unsafe {
+            sqlive::rusqlite::ffi::sqlite3_config(sqlive::rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1)
+        },
+        sqlive::rusqlite::ffi::SQLITE_OK
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
@@ -388,11 +390,11 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
         // This subprocess runs one test, so SQLite's global high-water counter
         // measures only these queue operations and their connection caches.
         let baseline = unsafe {
-            rusqlite::ffi::sqlite3_memory_highwater(1);
-            rusqlite::ffi::sqlite3_memory_used()
+            sqlive::rusqlite::ffi::sqlite3_memory_highwater(1);
+            sqlive::rusqlite::ffi::sqlite3_memory_used()
         };
         db.finish_claim(None).await.unwrap();
-        let peak = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) };
+        let peak = unsafe { sqlive::rusqlite::ffi::sqlite3_memory_highwater(0) };
         assert!(baseline > 0, "SQLite memory accounting must be enabled");
         assert!(
             peak - baseline < 8 * 1024 * 1024,
@@ -473,7 +475,7 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_uploads SELECT device,n,zeroblob(256) FROM fixture;
          INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;

@@ -2,7 +2,7 @@
 //! observe its work, and the connections it holds.
 
 use super::*;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 
 /// The removal of a snapshot staging its caller abandoned.
@@ -83,10 +83,7 @@ impl StoreDatabase {
         inner.as_ref().unwrap().access.database.observe_next_reader_wait()
     }
 
-    pub(crate) fn commit_writer<T>(
-        &self,
-        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> T,
-    ) -> T {
+    pub(crate) fn commit_writer<T>(&self, run: impl FnOnce(&StoreSql, &StoreCall<'_>) -> T) -> T {
         self.inspect_writer(|writer, call| {
             writer.transaction(|writer| Ok::<_, DbError>(run(writer, call))).unwrap()
         })
@@ -94,11 +91,7 @@ impl StoreDatabase {
 
     pub(crate) fn inspect_writer_schema<T>(
         &self,
-        inspect: impl FnOnce(
-            &mut DatabaseConnection,
-            &StoreCall<'_>,
-            &crate::write_schema::WriteSchema,
-        ) -> T,
+        inspect: impl FnOnce(&mut StoreSql, &StoreCall<'_>, &crate::write_schema::WriteSchema) -> T,
     ) -> T {
         let slot = self.inner.read().unwrap();
         let access = &slot.as_ref().unwrap().access;
@@ -107,16 +100,13 @@ impl StoreDatabase {
 
     pub(crate) fn inspect_writer<T>(
         &self,
-        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
+        inspect: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> T,
     ) -> T {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().access.inspect_writer(inspect)
     }
 
-    pub(crate) fn inspect_readers(
-        &self,
-        inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>),
-    ) {
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut StoreSql, &StoreCall<'_>)) {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().access.inspect_readers(inspect);
     }
@@ -124,7 +114,7 @@ impl StoreDatabase {
     /// Every connection the store holds open, one at a time, each under its
     /// own lock: the input database's, then the store database's readers,
     /// checkpointer, planner statistics' and writer.
-    pub(crate) fn inspect_connections(&self, mut inspect: impl FnMut(&DatabaseConnection)) {
+    pub(crate) fn inspect_connections(&self, mut inspect: impl FnMut(&StoreSql)) {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
         inner.inputs.each_connection(&mut inspect);
@@ -132,29 +122,9 @@ impl StoreDatabase {
     }
 
     /// The store's database, under the open store's lock.
-    fn with_store_database<T>(
-        &self,
-        run: impl FnOnce(&crate::sqlite_database::Database<CovenPolicy>) -> T,
-    ) -> T {
+    fn with_store_database<T>(&self, run: impl FnOnce(&sqlive::Database<CovenPolicy>) -> T) -> T {
         let slot = self.inner.read().unwrap();
         run(&slot.as_ref().unwrap().access.database)
-    }
-
-    /// Run `fault` as each checkpoint of the store's database, not its input
-    /// database's, takes the writer (§4).
-    pub(crate) fn fault_checkpoints(
-        &self,
-        fault: impl FnMut() -> Result<(), sqlive::Error<crate::store_failure::StoreFailure, crate::DbError>>
-            + Send
-            + 'static,
-    ) {
-        self.with_store_database(|database| database.fault_checkpoints(fault));
-    }
-
-    /// Run `step` as the copy of each pass a checkpoint of the store's
-    /// database makes while writes go on returns, before its sync (§4).
-    pub(crate) fn after_checkpoint_copies(&self, step: impl FnMut() + Send + 'static) {
-        self.with_store_database(|database| database.after_checkpoint_copies(step));
     }
 
     /// What each checkpoint of the store's database does at its last step
@@ -170,32 +140,17 @@ impl StoreDatabase {
     pub(crate) fn report_statistics_runs(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
         self.with_store_database(|database| database.report_statistics_runs())
     }
-
-    /// Whether coven checkpoints the store's database, not only its input
-    /// database (§4).
-    pub(crate) fn checkpoints_its_database(&self) -> bool {
-        self.with_store_database(|database| database.checkpoints())
-    }
-
-    /// Run one checkpoint of the store's database now, on its checkpointer's
-    /// connection, as a commit's wake does (§4).
-    pub(crate) fn checkpoint_now(&self) -> Result<(), DbError> {
-        Ok(self.with_store_database(|database| database.checkpoint_now())?)
-    }
 }
 
 impl StoreDatabase<ReadOnly> {
-    pub(crate) fn inspect_readers(
-        &self,
-        inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>),
-    ) {
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut StoreSql, &StoreCall<'_>)) {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().inspect_readers(inspect);
     }
 
     pub(crate) fn inspect_writer<T>(
         &self,
-        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
+        inspect: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> T,
     ) -> T {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().inspect_writer(inspect)
@@ -204,10 +159,7 @@ impl StoreDatabase<ReadOnly> {
 
 impl<L> DatabaseAccess<L> {
     /// Run `inspect` on the writer, as a call on it would see it.
-    fn inspect_writer<T>(
-        &self,
-        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
-    ) -> T {
+    fn inspect_writer<T>(&self, inspect: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> T) -> T {
         self.database.host(|writer| {
             let device = writer.observes_commits().then_some(self.device);
             inspect(writer, &crate::store_call::StoreCall::new(device, &self.tests))
@@ -215,7 +167,7 @@ impl<L> DatabaseAccess<L> {
     }
 
     /// Run `inspect` on each reader in turn, as a call on it would see it.
-    fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>)) {
+    fn inspect_readers(&self, inspect: impl Fn(&mut StoreSql, &StoreCall<'_>)) {
         self.database.each_reader(|reader| {
             inspect(reader, &crate::store_call::StoreCall::new(None, &self.tests));
         });

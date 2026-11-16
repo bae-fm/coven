@@ -3,16 +3,16 @@
 //! and snapshots keep what the cell's write set (Appendix B.1, §9.1). A
 //! generated column has no cell, so it never has a written value.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
 use crate::DbError;
 use coven_format::value::Value;
 use coven_merge::RowState;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
-pub(crate) fn load(database: &DatabaseConnection, row: i64) -> Result<AppValues, DbError> {
+pub(crate) fn load(database: &StoreSql, row: i64) -> Result<AppValues, DbError> {
     Ok(database
         .query(
             "SELECT c.column_name,v.value FROM _coven_written_values v
@@ -27,7 +27,7 @@ pub(crate) fn load(database: &DatabaseConnection, row: i64) -> Result<AppValues,
 /// Store the written values of the generation with id `row`. A `fresh`
 /// generation (see [`crate::write_commit::StoredGeneration`]) has none to clear.
 pub(crate) fn store(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     row: i64,
     fresh: bool,
@@ -59,7 +59,7 @@ pub(crate) fn store(
         &format!(
             "DELETE FROM _coven_written_values WHERE row_id=? AND column_id NOT IN ({others})"
         ),
-        rusqlite::params_from_iter(std::iter::once(row).chain(kept)),
+        sqlive::rusqlite::params_from_iter(std::iter::once(row).chain(kept)),
     )?;
     Ok(())
 }

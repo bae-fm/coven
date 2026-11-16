@@ -1,6 +1,6 @@
 //! Session changes, audience moves, and one causal write record.
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::timestamp;
 use crate::write_rows::{column_name, reference_error, row_id, AppKey, AppValues, AppView};
@@ -21,7 +21,7 @@ use std::time::SystemTime;
 /// Returns them by their old and new identities, and the keys of the
 /// inheriting children it added.
 pub(crate) fn moved(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     schema: &WriteSchema,
     before: &AppView<'_>,
     after: &AppView<'_>,
@@ -95,7 +95,7 @@ pub(crate) fn moved(
 /// in the row's new audience (§17.2); a shown row's file the write's SQL
 /// already changed.
 pub(crate) fn changes(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     before: &AppView<'_>,
@@ -383,7 +383,7 @@ pub(crate) fn changes(
 /// that produced them, or nothing when no row changed. Rows whose operations
 /// left no net change keep those operations as executions (D5).
 pub(crate) fn record(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
@@ -423,7 +423,7 @@ pub(crate) fn record(
 
 /// The record of these changes, for writes made without SQL operations.
 pub(crate) fn changed(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
@@ -450,7 +450,7 @@ pub(crate) fn changed_under(
 /// through the slot applied now, newer than every write the device holds
 /// (§18.4).
 pub(crate) fn rebuild_marker(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
@@ -461,7 +461,7 @@ pub(crate) fn rebuild_marker(
 }
 
 fn unordered(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,

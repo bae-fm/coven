@@ -18,7 +18,7 @@
 use crate::judge::{Indexed, Place, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 /// breaking migration since then retained the earlier one (§18.6), and the
 /// connection judging the write reads its history from.
 pub(crate) struct Authoring<'a> {
-    database: &'a DatabaseConnection,
+    database: &'a StoreSql,
     call: &'a StoreCall<'a>,
     schema: &'a Schema,
     /// SQLite's column affinities of the current schema.
@@ -42,7 +42,7 @@ pub(crate) struct Authoring<'a> {
 
 impl<'a> Authoring<'a> {
     pub(crate) fn new(
-        db: &'a DatabaseConnection,
+        db: &'a StoreSql,
         call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         version: u32,

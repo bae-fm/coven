@@ -573,7 +573,7 @@ async fn a_row_moved_out_of_a_circle_shares_coven_copy() {
             |sql, file| {
                 sql.execute(
                     "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
-                    rusqlite::params![file, CIRCLE],
+                    sqlive::rusqlite::params![file, CIRCLE],
                 )?;
                 Ok(file)
             },

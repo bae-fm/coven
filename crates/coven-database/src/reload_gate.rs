@@ -1,12 +1,12 @@
 //! Write gates for audiences whose replacement data has not committed.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, PendingValue};
 use coven_merge::Audience;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 pub(crate) fn require_reload<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &Audience,
 ) -> Result<(), DbError> {
     let record = P::reload(audience.clone());
@@ -23,7 +23,7 @@ pub(crate) fn require_reload<P: PendingValue>(
 /// `marker` (§18.3): the write gate and the waiting record are one row, so
 /// they are cleared together.
 pub(crate) fn require_rebuild<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &Audience,
     marker: coven_merge::WriteId,
 ) -> Result<(), DbError> {
@@ -38,7 +38,7 @@ pub(crate) fn require_rebuild<P: PendingValue>(
 /// A breaking migration made `marker`: every rebuild waiting runs under it
 /// instead, since its run now reaches that migration's version, and the
 /// marker has read through every slot applied before it (§18.4).
-pub(crate) fn follow(db: &DatabaseConnection, marker: coven_merge::WriteId) -> Result<(), DbError> {
+pub(crate) fn follow(db: &StoreSql, marker: coven_merge::WriteId) -> Result<(), DbError> {
     for audience in rebuilding(db)?.into_keys() {
         db.execute(
             "UPDATE _coven_data_reloads SET marker=?2 WHERE audience=?1",
@@ -51,7 +51,7 @@ pub(crate) fn follow(db: &DatabaseConnection, marker: coven_merge::WriteId) -> R
 /// Every audience waiting for its rebuild, with the migration write its
 /// rebuild runs under.
 pub(crate) fn rebuilding(
-    db: &DatabaseConnection,
+    db: &StoreSql,
 ) -> Result<std::collections::BTreeMap<Audience, coven_merge::WriteId>, DbError> {
     Ok(db
         .query(
@@ -72,7 +72,7 @@ pub(crate) fn rebuilding(
 /// The audience no longer waits for a reload, with its pending record: its
 /// selected data has committed, so writes into it may proceed, or this device
 /// no longer reads it.
-pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+pub(crate) fn clear_reload(db: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     crate::pending::pending_change(db, || {
         let subject = db
             .query("SELECT subject FROM _coven_data_reloads WHERE audience=?1", [audience], |r| {
@@ -88,7 +88,7 @@ pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Resu
 }
 
 /// Every audience waiting for a reload.
-pub(crate) fn reloading_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Audience>, DbError> {
+pub(crate) fn reloading_audiences(db: &StoreSql) -> Result<BTreeSet<Audience>, DbError> {
     Ok(db
         .query("SELECT audience FROM _coven_data_reloads", [], |r| {
             crate::write_encoding::audience(r, 0)
@@ -97,7 +97,7 @@ pub(crate) fn reloading_audiences(db: &DatabaseConnection) -> Result<BTreeSet<Au
         .collect())
 }
 
-pub(crate) fn reloading(db: &DatabaseConnection, audience: &Audience) -> Result<bool, DbError> {
+pub(crate) fn reloading(db: &StoreSql, audience: &Audience) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_data_reloads WHERE audience=?1)",
         [audience],

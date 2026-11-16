@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     tests::TestStore,
@@ -12,11 +12,7 @@ use std::collections::BTreeSet;
 
 /// The kept net change `id` names, as a write that read nothing yet would
 /// find it: held, and counting as its source.
-fn evidence(
-    db: &DatabaseConnection,
-    call: &StoreCall<'_>,
-    id: &ChangeId,
-) -> Result<Evidence, DbError> {
+fn evidence(db: &StoreSql, call: &StoreCall<'_>, id: &ChangeId) -> Result<Evidence, DbError> {
     let reader = WriteHeader {
         position: WriteId { device: coven_foundation::id_source::DeviceId(u64::MAX), number: 1 },
         timestamp: coven_merge::Timestamp::new(
@@ -730,7 +726,7 @@ async fn authored_sources_differential() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
          INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',CASE WHEN i%3=0 THEN n END FROM fixture;

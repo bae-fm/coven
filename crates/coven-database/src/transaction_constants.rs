@@ -6,12 +6,12 @@
 //! write's own authored parts too, and changes them only where the write
 //! records them (write_sources.rs).
 
-use crate::sqlite::CookieScope;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_failure::{hosted, Hosted};
 use crate::DbError;
 use coven_merge::Audience;
+use sqlive::CookieScope;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
@@ -79,20 +79,17 @@ impl StoreCall<'_> {
 
 /// Read each constant once until the returned scope drops. The caller's
 /// transaction on `sql` runs no migration and no DDL.
-pub(crate) fn keep_constants<'s>(
-    sql: &'s DatabaseConnection,
-    call: &'s StoreCall<'_>,
-) -> ConstantScope<'s> {
+pub(crate) fn keep_constants<'s>(sql: &'s StoreSql, call: &'s StoreCall<'_>) -> ConstantScope<'s> {
     let constants = call.constants();
     constants.keep();
     ConstantScope { constants, _cookie: sql.keep_schema_cookie() }
 }
 
-/// Run `read` in one snapshot, as `DatabaseConnection::read_transaction`
+/// Run `read` in one snapshot, as `StoreSql::read_transaction`
 /// does, and read each constant once. A read runs no migration and no
 /// DDL.
 pub(crate) fn read_with_constants<R, E: From<DbError>>(
-    sql: &DatabaseConnection,
+    sql: &StoreSql,
     call: &StoreCall<'_>,
     read: impl FnOnce() -> Result<R, E>,
 ) -> Result<R, E> {
@@ -101,10 +98,7 @@ pub(crate) fn read_with_constants<R, E: From<DbError>>(
 }
 
 /// The app schema version the store is at.
-pub(crate) fn schema_version(
-    sql: &DatabaseConnection,
-    call: &StoreCall<'_>,
-) -> Result<u32, DbError> {
+pub(crate) fn schema_version(sql: &StoreSql, call: &StoreCall<'_>) -> Result<u32, DbError> {
     if let Some(version) = call.constants().schema_version.get() {
         return Ok(version);
     }
@@ -122,7 +116,7 @@ pub(crate) fn schema_version(
 /// every one, so a cell or live loss can only name a registered column
 /// (Appendix B.1).
 pub(crate) fn column_id(
-    sql: &DatabaseConnection,
+    sql: &StoreSql,
     call: &StoreCall<'_>,
     table: &str,
     column: &str,
@@ -135,7 +129,7 @@ pub(crate) fn column_id(
     call.record_work(|work| work.constant_reads += 1);
     let id: Option<i64> = sql.query_row(
         "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
-        rusqlite::params![table, column],
+        sqlive::rusqlite::params![table, column],
         |r| r.get(0),
     )?;
     let id = id.unwrap_or_else(|| panic!("column {column} of {table} was never registered"));
@@ -148,7 +142,7 @@ pub(crate) fn column_id(
 /// The registered id of a synced table's foreign key, by its encoded
 /// identity, or none when it was never registered.
 pub(crate) fn foreign_key_id(
-    sql: &DatabaseConnection,
+    sql: &StoreSql,
     call: &StoreCall<'_>,
     table: &str,
     identity: &[u8],
@@ -161,7 +155,7 @@ pub(crate) fn foreign_key_id(
     call.record_work(|work| work.constant_reads += 1);
     let id: Option<i64> = sql.query_row(
         "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
-        rusqlite::params![table, identity],
+        sqlive::rusqlite::params![table, identity],
         |r| r.get(0),
     )?;
     if let Some(id) = id.filter(|_| call.constants().active.get()) {
@@ -173,7 +167,7 @@ pub(crate) fn foreign_key_id(
 /// The authored part of `write` in `audience`, as `_coven_authored_parts`
 /// holds it.
 pub(crate) fn authored_part(
-    sql: &DatabaseConnection,
+    sql: &StoreSql,
     call: &StoreCall<'_>,
     write: &[u8],
     audience: &Audience,
@@ -185,7 +179,7 @@ pub(crate) fn authored_part(
     let part = sql
         .query(
             "SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
-            rusqlite::params![write, audience],
+            sqlive::rusqlite::params![write, audience],
             |r| r.get::<_, Vec<u8>>(0),
         )?
         .pop();

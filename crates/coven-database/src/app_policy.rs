@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use coven_foundation::locks::lock_unpoisoned;
 
-use rusqlite::hooks::AuthAction;
+use sqlive::rusqlite::hooks::AuthAction;
 
-use crate::authorization::{Owner, Policy, PolicyAction, Refresh};
 use crate::coven_functions::Views;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, SyncedTable};
+use sqlive::{Owner, Policy, PolicyAction, Refresh};
 
 /// Coven's rules for the statements a connection prepares. A judgment
 /// changes several fields of the state together, so `judge` holds the
@@ -135,7 +135,9 @@ impl CovenPolicy {
     /// Whether materialized SQL is running, as `coven_applying()` says.
     pub(crate) fn applying_function(
         &self,
-    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
+    ) -> impl Fn(&sqlive::rusqlite::functions::Context<'_>) -> sqlive::rusqlite::Result<bool>
+           + Send
+           + 'static {
         let state = Arc::clone(&self.state);
         move |_| Ok(lock_unpoisoned(&state).applying)
     }
@@ -249,7 +251,7 @@ impl Policy for CovenPolicy {
     /// it altered one. Each table is read once as it appears, not again after
     /// every later statement: a schema of hundreds of tables would read them
     /// all after each one.
-    fn refresh(&self, sql: &DatabaseConnection, extent: Refresh) -> rusqlite::Result<()> {
+    fn refresh(&self, sql: &StoreSql, extent: Refresh) -> sqlive::rusqlite::Result<()> {
         let only = match extent {
             Refresh::Whole => None,
             Refresh::Changed => match self.take_changed_tables() {
@@ -258,7 +260,7 @@ impl Policy for CovenPolicy {
                 ChangedTables::All => None,
             },
         };
-        let unambiguous = sql.protect_rowids(only.as_ref())?;
+        let unambiguous = crate::sqlite::protect_rowids(sql, only.as_ref())?;
         self.set_hidden_rowids(only.as_ref(), unambiguous);
         Ok(())
     }
@@ -515,7 +517,11 @@ impl PolicyState {
 pub(crate) fn setup<'a>(
     functions: &'a crate::SqlFunctions,
     views: Option<&'a Views<'a>>,
-) -> impl Fn(&crate::connection_setup::Setup<'_>, &CovenPolicy) -> rusqlite::Result<()> + 'a {
+) -> impl Fn(
+    &sqlive::Setup<'_, crate::app_policy::CovenPolicy>,
+    &CovenPolicy,
+) -> sqlive::rusqlite::Result<()>
+       + 'a {
     move |setup, policy| {
         crate::coven_functions::register(setup, policy)?;
         functions.register(setup)?;

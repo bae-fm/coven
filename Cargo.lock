@@ -1001,7 +1001,6 @@ dependencies = [
  "coven-merge",
  "futures-lite",
  "proc-macro2",
- "rusqlite",
  "serde",
  "serde_json",
  "sqlite3-parser",
@@ -3146,8 +3145,10 @@ dependencies = [
  "futures-lite",
  "rusqlite",
  "sqlite3-parser",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

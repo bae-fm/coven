@@ -1,7 +1,7 @@
 //! Atomic application of the next shared slot and its provisional queue overlay.
 
 use crate::download_stream::PreparedWrite;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{write_schema::WriteSchema, DbError, StoreState};
 use coven_format::{admin::StoreChange, floor::OriginalSlot, sequence::SlotHeader};
@@ -68,23 +68,16 @@ pub struct AdminEffect {
     pub provider_access: Vec<crate::ProviderAccessChange>,
 }
 
-pub(crate) fn retain(
-    db: &DatabaseConnection,
-    kind: &str,
-    original: &OriginalSlot,
-) -> Result<(), DbError> {
+pub(crate) fn retain(db: &StoreSql, kind: &str, original: &OriginalSlot) -> Result<(), DbError> {
     db.execute("INSERT INTO _coven_slot_records(slot,kind,record) VALUES(?1,?2,?3) ON CONFLICT(slot) DO NOTHING",
-        rusqlite::params![original.slot.get().to_be_bytes().as_slice(),kind,original.object])?;
+        sqlive::rusqlite::params![original.slot.get().to_be_bytes().as_slice(),kind,original.object])?;
     Ok(())
 }
 
 /// Forget the original slots of announcements no rule reads any more
 /// (§16.8). Each is a kept announcement's: one missing means the history the
 /// caller holds and these records disagree.
-pub(crate) fn forget_announcements(
-    db: &DatabaseConnection,
-    slots: &BTreeSet<Slot>,
-) -> Result<(), DbError> {
+pub(crate) fn forget_announcements(db: &StoreSql, slots: &BTreeSet<Slot>) -> Result<(), DbError> {
     for slot in slots {
         let deleted = db.execute(
             "DELETE FROM _coven_slot_records WHERE slot=?1 AND kind='announcement'",
@@ -98,9 +91,9 @@ pub(crate) fn forget_announcements(
 }
 
 pub(crate) fn apply<P: crate::PendingValue>(
-    db: &mut DatabaseConnection,
+    db: &mut StoreSql,
     call: &StoreCall<'_>,
-    before: &DatabaseConnection,
+    before: &StoreSql,
     before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
@@ -144,9 +137,9 @@ pub(crate) fn apply<P: crate::PendingValue>(
 }
 
 fn apply_in<P: crate::PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
-    before: &DatabaseConnection,
+    before: &StoreSql,
     before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
@@ -290,7 +283,7 @@ fn apply_in<P: crate::PendingValue>(
 /// audience's next snapshot again (§16.2): their records of the audience's
 /// parts go, and each slot's size once no audience's part records it.
 fn snapshot_announced(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     announcement: &coven_format::sequence::SnapshotAnnouncement,
 ) -> Result<(), DbError> {
     if announcement.purpose != coven_format::sequence::Purpose::Ordinary {
@@ -299,7 +292,7 @@ fn snapshot_announced(
     let covers = announcement.covers.to_be_bytes();
     db.execute(
         "DELETE FROM _coven_write_slot_audiences WHERE audience=?1 AND slot<=?2",
-        rusqlite::params![announcement.snapshot.audience, covers],
+        sqlive::rusqlite::params![announcement.snapshot.audience, covers],
     )?;
     db.execute(
         "DELETE FROM _coven_write_slots WHERE slot<=?1
@@ -322,7 +315,7 @@ pub(crate) enum Staging<'a> {
 /// Ordinary application and reloads use the same ordering, cut-off and original
 /// validation.
 pub(crate) fn stage_writes<P: crate::PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     slot: Slot,
@@ -336,7 +329,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     let stored = crate::sqlite::integer("writes slot size", size)?;
     db.execute(
         "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
-        rusqlite::params![slot.get().to_be_bytes(), stored],
+        sqlive::rusqlite::params![slot.get().to_be_bytes(), stored],
     )?;
     // The parts of a circle awaiting its rebuild pass unread.
     let gated: BTreeSet<_> = match &staging {
@@ -355,7 +348,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         for part in &write.header().parts {
             db.execute(
                 "INSERT INTO _coven_write_slot_audiences(audience,slot) VALUES(?1,?2) ON CONFLICT DO NOTHING",
-                rusqlite::params![part.audience, slot.get().to_be_bytes()],
+                sqlive::rusqlite::params![part.audience, slot.get().to_be_bytes()],
             )?;
         }
         let cutoff =
@@ -378,7 +371,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         };
         if let Some((cutoff, cause)) = cutoff {
             db.execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
-                rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
+                sqlive::rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
             crate::pending::save(db, &P::writes_refused(slot, cutoff, cause))?;
         }
         if let Staging::Reload(coverage) = &staging {

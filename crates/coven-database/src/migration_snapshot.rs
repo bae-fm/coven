@@ -3,24 +3,24 @@
 use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::migration_names::MigrationMatch;
 use crate::schema::{Schema, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{key_columns, AppKey, AppRow, AppValues};
 use crate::{DbError, SyncedTable};
-use rusqlite::{params, params_from_iter};
 use sqlite3_parser::{
     ast::{AlterTableBody, Cmd, ColumnConstraint, CreateTableBody, Stmt},
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
+use sqlive::rusqlite::{params, params_from_iter};
 use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What one migration run captures of the synced state before its first
 /// breaking statement, on the connection the run migrates.
 pub(crate) struct MigrationCapture<'c> {
-    database: &'c DatabaseConnection,
+    database: &'c StoreSql,
     call: &'c StoreCall<'c>,
     synced: BTreeSet<String>,
     snapshot: Option<MigrationSnapshot<'c>>,
@@ -33,7 +33,7 @@ pub(crate) struct MigrationCapture<'c> {
 /// The synced rows before a run's first breaking statement, in temporary
 /// tables of the run's connection until the run drops them.
 pub(crate) struct MigrationSnapshot<'c> {
-    database: &'c DatabaseConnection,
+    database: &'c StoreSql,
     tables: BTreeMap<String, SnapshotTable>,
 }
 
@@ -44,7 +44,7 @@ struct SnapshotTable {
 
 impl<'c> MigrationCapture<'c> {
     pub(crate) fn new(
-        db: &'c DatabaseConnection,
+        db: &'c StoreSql,
         call: &'c StoreCall<'c>,
         tables: &[SyncedTable],
     ) -> Result<Self, DbError> {
@@ -78,12 +78,12 @@ impl<'c> MigrationCapture<'c> {
         std::mem::take(&mut self.targets)
     }
 
-    pub(crate) fn before(&mut self, before: &Schema, sql: &str) -> rusqlite::Result<()> {
+    pub(crate) fn before(&mut self, before: &Schema, sql: &str) -> sqlive::rusqlite::Result<()> {
         let db = self.database;
         let bump = Bump::new();
         let command = Parser::new(&bump, sql.as_bytes())
             .next()
-            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+            .map_err(|e| sqlive::rusqlite::Error::UserFunctionError(Box::new(e)))?;
         let named = named_table(&command);
         // The synced tables whose rows this statement may change, lowercase.
         let mut changes = BTreeSet::new();
@@ -153,7 +153,7 @@ impl<'c> MigrationCapture<'c> {
             }
         };
         if breaking {
-            let failed = |e| rusqlite::Error::UserFunctionError(Box::new(e));
+            let failed = |e| sqlive::rusqlite::Error::UserFunctionError(Box::new(e));
             changes.extend(named);
             changes.retain(|table| self.synced.contains(table));
             crate::published::before_migrating(db, self.call, before, &changes).map_err(failed)?;
@@ -196,7 +196,7 @@ fn named_table(command: &Option<Cmd<'_>>) -> Option<String> {
 
 impl<'c> MigrationSnapshot<'c> {
     fn capture(
-        db: &'c DatabaseConnection,
+        db: &'c StoreSql,
         schema: &Schema,
         synced: &BTreeSet<String>,
     ) -> Result<Self, DbError> {
@@ -375,7 +375,7 @@ impl<'c> MigrationSnapshot<'c> {
                         Ok(false) => None,
                         Err(e) => Some(Err(e)),
                     })
-                    .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+                    .collect::<sqlive::rusqlite::Result<BTreeSet<_>>>()?;
                 changed.insert((table.name.clone(), r.get(0)?), columns);
                 Ok(())
             })?;
@@ -403,7 +403,7 @@ impl SnapshotTable {
         }
         self.columns.values().map(|s| identifier(s)).collect::<Vec<_>>().join(",")
     }
-    fn values(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<AppValues> {
+    fn values(&self, row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<AppValues> {
         self.columns
             .keys()
             .enumerate()
@@ -425,7 +425,7 @@ pub(crate) fn key_sql(table: &TableSchema, prefix: &str) -> String {
 
 /// The tables of `main` the migration statement `sql` changes, as live
 /// queries name them, from what preparing it shows coven's policy.
-fn migration_targets(db: &DatabaseConnection, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
+fn migration_targets(db: &StoreSql, sql: &str) -> sqlive::rusqlite::Result<BTreeSet<String>> {
     let targets = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
     db.within(crate::app_policy::CovenScope::Mutations(std::sync::Arc::clone(&targets)), || {
         db.prepare_app(sql)

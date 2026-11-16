@@ -3,7 +3,7 @@
 use crate::migration_names::{MigrationEffects, MigrationMatch, MigrationNames};
 use crate::migration_snapshot::MigrationCapture;
 use crate::schema::Schema;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_rows::AppView;
 use crate::{DbError, Migration, MigrationChange, MigrationContext, MigrationOutcome, SyncedTable};
@@ -52,7 +52,7 @@ struct MigrationStep<'a> {
 }
 
 pub(crate) fn run<'a>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     tables: &[SyncedTable],
     migrations: &'a [Migration],
@@ -270,7 +270,7 @@ pub(crate) fn run<'a>(
 /// store has applied: the merge counts a write's changes only over what it read
 /// (§18.3).
 fn check_rebuild_header(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     device: DeviceId,
     breaking: Option<u32>,
     supported: u32,
@@ -311,7 +311,7 @@ fn check_rebuild_header(
 /// before its statements, by the rules the final declarations meet, and, for the
 /// first pending migration, against what this device registered (§18.3).
 fn check_starts_from(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     migration: &Migration,
     current: u32,
 ) -> Result<(), DbError> {
@@ -333,7 +333,7 @@ fn check_starts_from(
 }
 
 fn finish(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     tables: &[SyncedTable],
     initial_schema: &Schema,
@@ -459,7 +459,7 @@ fn finish(
         for loss in &counted_frozen {
             database.execute(
                 "INSERT INTO _coven_migration_counted_losses(write_id,audience,record) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-                rusqlite::params![
+                sqlive::rusqlite::params![
                     coven_format::merge_fields::encode_write_id(&record.header.position)?,
                     &loss.row.audience,
                     coven_format::merge_fields::encode_loss(loss)?
@@ -475,13 +475,13 @@ fn finish(
 /// Keep a freeze the breaking migration made, which the migration write
 /// `migration` puts as its loss once it applies (§18.5).
 pub(crate) fn keep_loss(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     migration: coven_merge::WriteId,
     loss: &coven_format::loss::Loss,
 ) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
-        rusqlite::params![
+        sqlive::rusqlite::params![
             coven_format::merge_fields::encode_write_id(&migration)?,
             &loss.row.audience,
             coven_format::merge_fields::encode_loss(loss)?
@@ -493,7 +493,7 @@ pub(crate) fn keep_loss(
 /// Forget the migration losses kept for `audience`, whose state a loaded
 /// snapshot replaces.
 pub(crate) fn forget_audience(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
@@ -505,7 +505,7 @@ pub(crate) fn forget_audience(
 /// Keep this device's migration write's record whole, for its marker's slot
 /// to apply: the marker carries no row changes (§18.4).
 fn retain_record(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &coven_format::write::WriteHeader,
     record: coven_format::write::PartRecord<'_>,
     bytes: &[u8],
@@ -513,7 +513,7 @@ fn retain_record(
     let row = record.row();
     database.execute(
         "INSERT INTO _coven_migration_records VALUES(?1,?2,?3,?4,?5)",
-        rusqlite::params![
+        sqlive::rusqlite::params![
             coven_format::merge_fields::encode_write_id(&header.position)?,
             &row.audience,
             row.table,
@@ -527,7 +527,7 @@ fn retain_record(
 /// Forget one of this device's migration write's whole records, with its
 /// kept record, once a loaded snapshot replaced it (§18.5).
 pub(crate) fn forget_record(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     write: &[u8],
     audience: &coven_merge::Audience,
     table: &str,
@@ -535,7 +535,7 @@ pub(crate) fn forget_record(
 ) -> Result<(), DbError> {
     database.execute(
         "DELETE FROM _coven_migration_records WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
-        rusqlite::params![write, audience, table, key],
+        sqlive::rusqlite::params![write, audience, table, key],
     )?;
     Ok(())
 }

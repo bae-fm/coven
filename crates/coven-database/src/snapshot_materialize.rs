@@ -10,18 +10,18 @@
 
 use crate::removal::Deferral;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{key_columns, key_parameters, key_predicate, AppValues};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::RowId;
-use rusqlite::{params, params_from_iter};
+use sqlive::rusqlite::{params, params_from_iter};
 use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 pub(crate) fn materialize(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     region: &BTreeSet<RowId>,
     files: &crate::file_write::FileWrite<'_>,
@@ -77,7 +77,7 @@ fn same_key(schema: &WriteSchema, table: &TableLayout, a: &str, b: &str) -> Stri
 
 /// Insert the rows the app's table doesn't have yet, in key order.
 fn insert(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     table: &TableLayout,
     deferred: &mut Deferral<'_>,
@@ -113,7 +113,7 @@ fn insert(
         [&table.table],
     )?;
     if inserted as i64 != count {
-        return Err(rusqlite::Error::StatementChangedRows(inserted).into());
+        return Err(sqlive::rusqlite::Error::StatementChangedRows(inserted).into());
     }
     Ok(())
 }
@@ -121,7 +121,7 @@ fn insert(
 /// Change in place each row the app's table shows differently, setting
 /// only the columns that differ.
 fn update(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     table: &TableLayout,
     deferred: &mut Deferral<'_>,
@@ -172,7 +172,7 @@ fn update(
         ),
         [&table.table],
         |r| {
-            let read = |offset: usize| -> rusqlite::Result<AppValues> {
+            let read = |offset: usize| -> sqlive::rusqlite::Result<AppValues> {
                 names
                     .iter()
                     .enumerate()
@@ -211,7 +211,7 @@ fn update(
 /// Delete each row the app showed for the audience that its snapshot no
 /// longer has.
 fn delete(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     table: &TableLayout,
     deferred: &mut Deferral<'_>,

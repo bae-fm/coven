@@ -2,7 +2,7 @@
 //! breaking version, so the device never held its rows at the circle's version
 //! (§18.3). Its parts pass unread and writes into it are refused until the
 //! rebuild commits.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, PendingValue, StoreState};
@@ -12,7 +12,7 @@ use std::time::SystemTime;
 /// End the wait of every circle `state` no longer lets this device read, or
 /// deleted: there is nothing to rebuild.
 pub(crate) fn release(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     state: &StoreState,
 ) -> Result<(), DbError> {
@@ -41,7 +41,7 @@ pub(crate) fn release(
 /// a record naming it. Queuing it moves every waiting raise capture's prefix
 /// to it (§18.4).
 pub(crate) fn begin<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,
@@ -61,7 +61,7 @@ pub(crate) fn begin<P: PendingValue>(
 /// now, for rebuilds whose history at their marker's slot is gone (§18.3).
 /// The old marker counts as an empty write.
 pub(crate) fn restart(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,
@@ -71,7 +71,7 @@ pub(crate) fn restart(
 }
 
 fn queue_marker(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,

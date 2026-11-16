@@ -7,7 +7,7 @@ use crate::{DbError, RowKey};
 use coven_format::value::Value as WireValue;
 use coven_format::write::RowChange as WrittenRow;
 use coven_merge::{ColumnValue, ForeignKey, Operation, Parent};
-use rusqlite::types::Value;
+use sqlive::rusqlite::types::Value;
 use std::collections::BTreeMap;
 
 /// One row change of a waiting write (E13).

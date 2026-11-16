@@ -2,17 +2,17 @@
 
 use crate::migration_names::MigrationMatch;
 use crate::schema::Schema;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::merge_fields;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 pub(crate) fn carry(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     before: &Schema,
     names: &MigrationMatch,
@@ -65,11 +65,7 @@ pub(crate) fn carry(
 /// Lean `Migration.freezeDropped`: a loss whose table or column goes keeps its
 /// written values, setters, old names and original cause, without live
 /// parent links; it no longer follows merge or removal rules (§18.7, D7).
-pub(crate) fn freeze(
-    db: &DatabaseConnection,
-    call: &StoreCall<'_>,
-    ids: Vec<i64>,
-) -> Result<(), DbError> {
+pub(crate) fn freeze(db: &StoreSql, call: &StoreCall<'_>, ids: Vec<i64>) -> Result<(), DbError> {
     for id in ids {
         let loss = db.query_row(
             &format!("{} WHERE l.id=?1", crate::loss_record::SELECT),
@@ -86,18 +82,14 @@ pub(crate) fn freeze(
     Ok(())
 }
 
-fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
+fn rename_table(db: &StoreSql, old: &str, new: &str) -> Result<(), DbError> {
     crate::write_commit::rename_table(db, old, new)?;
     // A renamed table's rows keep their original creations (§9.6).
     crate::ownership::rename(db, old, new)?;
     crate::loss_record::rename_table(db, old, new)
 }
 
-fn columns(
-    db: &DatabaseConnection,
-    call: &StoreCall<'_>,
-    names: &MigrationMatch,
-) -> Result<(), DbError> {
+fn columns(db: &StoreSql, call: &StoreCall<'_>, names: &MigrationMatch) -> Result<(), DbError> {
     let columns =
         db.query("SELECT id,table_name,column_name FROM _coven_columns WHERE synced=1", [], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
@@ -166,13 +158,13 @@ fn columns(
     Ok(())
 }
 
-fn move_column(db: &DatabaseConnection, old: i64, new: i64) -> Result<(), DbError> {
+fn move_column(db: &StoreSql, old: i64, new: i64) -> Result<(), DbError> {
     crate::write_commit::move_column(db, old, new)?;
     crate::loss_record::move_column(db, old, new)
 }
 
 fn references(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     names: &MigrationMatch,
     after: &WriteSchema,
     refresh: &mut BTreeSet<String>,
@@ -238,7 +230,7 @@ fn references(
 }
 
 fn constraints(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     before: &Schema,
     names: &MigrationMatch,
     after: &WriteSchema,
@@ -300,7 +292,7 @@ fn constraints(
 }
 
 pub(crate) fn refresh(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     tables: &BTreeSet<String>,

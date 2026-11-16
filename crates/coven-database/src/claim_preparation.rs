@@ -1,5 +1,5 @@
 //! Ciphertext staging outside the application writer.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{ClaimAttempt, DbError};
 use std::io::{self, Read};
 
@@ -12,7 +12,7 @@ pub(crate) struct PreparedClaim<R> {
 /// The input database owns this temporary table and its transaction. A failed
 /// preparation rolls it back; a successful journal commit drops it before return.
 pub(crate) fn prepare<T>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     mut attempt: ClaimAttempt<impl Read>,
     consume: impl FnOnce(PreparedClaim<PreparedBytes<'_>>) -> Result<T, DbError>,
 ) -> Result<T, DbError> {
@@ -46,7 +46,7 @@ pub(crate) fn prepare<T>(
 }
 
 pub(crate) struct PreparedBytes<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     chunk: i64,
     current: io::Cursor<Vec<u8>>,
     ended: bool,

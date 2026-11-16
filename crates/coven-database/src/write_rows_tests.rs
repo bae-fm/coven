@@ -375,7 +375,10 @@ mod typed_bindings {
             .unwrap();
         assert_eq!(key.0, uuid::Uuid::parse_str(KEY).unwrap());
         assert_eq!(text, KEY);
-        assert_eq!(crate::RowKey::from(key).values(), [rusqlite::types::Value::Text(KEY.into())]);
+        assert_eq!(
+            crate::RowKey::from(key).values(),
+            [sqlive::rusqlite::types::Value::Text(KEY.into())]
+        );
         let error = db
             .write(|sql| {
                 sql.execute("UPDATE notes SET id=?1", [KEY.to_uppercase()])?;
@@ -391,8 +394,8 @@ mod typed_bindings {
 fn foreign_key_failure(error: &DbError) -> bool {
     matches!(
         error,
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
-            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+        DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(failure, _))
+            if failure.extended_code == sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
     )
 }
 

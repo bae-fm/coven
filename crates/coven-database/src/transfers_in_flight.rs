@@ -8,12 +8,12 @@
 //! ends. How far each has got is progress no table holds: a `TransferWatch`
 //! hears it, by file, and how each ended (E7, E8).
 
-use crate::connection_setup::Setup;
 use crate::store_failure::StoreHandle;
 use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
-use rusqlite::functions::FunctionFlags;
+use sqlive::rusqlite::functions::FunctionFlags;
+use sqlive::Setup;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -88,7 +88,10 @@ impl TransfersInFlight {
 
     /// Register both ways' functions on a connection to the store's
     /// database. None is deterministic; all are safe in coven's views.
-    pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
+    pub(crate) fn register(
+        &self,
+        setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    ) -> sqlive::rusqlite::Result<()> {
         self.uploads.register(setup)?;
         self.downloads.register(setup)
     }
@@ -280,7 +283,10 @@ impl InFlight {
         self.shared.observer.changed_without_write(self.shared.direction.read_as);
     }
 
-    fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
+    fn register(
+        &self,
+        setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    ) -> sqlive::rusqlite::Result<()> {
         let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
         if let Some(name) = self.shared.direction.contains {
             let owner = self.clone();
@@ -298,7 +304,7 @@ impl InFlight {
                 .map(|(object, entry)| format!("{:016x}{}", entry.device.0, object.0.simple()))
                 .collect();
             serde_json::to_string(&objects)
-                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
         })
     }
 }

@@ -1,6 +1,6 @@
 //! Stage a write's merged values in SQLite before changing app-visible rows.
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_rows::AppView;
@@ -11,7 +11,7 @@ use coven_format::{
     write::{OriginalRow, PartRecord, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_merge::{Audience, RowId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The staging of one transaction's merged values: the rows its writes
@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// SQLite would parse and plan each again in every slot. A transaction that
 /// rolls back takes its staged rows with it, and the tables too if it made
 /// them.
-pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn begin(database: &StoreSql) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE IF NOT EXISTS _coven_download_rows(table_name TEXT NOT NULL,key BLOB NOT NULL,audience TEXT NOT NULL,columns BLOB,PRIMARY KEY(table_name,key,audience)) WITHOUT ROWID;
         CREATE TEMP TABLE IF NOT EXISTS _coven_download_dismissals(id INTEGER PRIMARY KEY,record BLOB NOT NULL);
         CREATE TEMP TABLE IF NOT EXISTS _coven_download_replaced(audience TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID;
@@ -45,7 +45,7 @@ pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
 
 /// The reload replaces `audience` with the snapshot it installed: the rows
 /// no write stages are read from the install tables until it commits.
-pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
+pub(crate) fn replace(database: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     database.execute(
         "INSERT INTO temp._coven_download_replaced(audience) VALUES(?1) ON CONFLICT DO NOTHING",
         [audience],
@@ -54,10 +54,7 @@ pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Res
 }
 
 /// Whether a reload replaces `audience` with the snapshot it installed.
-pub(crate) fn replaced(
-    database: &DatabaseConnection,
-    audience: &Audience,
-) -> Result<bool, DbError> {
+pub(crate) fn replaced(database: &StoreSql, audience: &Audience) -> Result<bool, DbError> {
     Ok(database.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._coven_download_replaced WHERE audience=?1)",
         [audience],
@@ -68,7 +65,7 @@ pub(crate) fn replaced(
 /// A present row's staged values: those a write staged for it, else those
 /// of the snapshot that replaces its audience, else none staged.
 pub(crate) fn values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     schema: &crate::schema::Schema,
     row: &RowId,
 ) -> Result<Option<crate::write_rows::AppValues>, DbError> {
@@ -96,7 +93,7 @@ pub(crate) fn values(
 /// the whole write is judged, since a foreign-key action and its causes can
 /// be anywhere in it (§9.6).
 pub(crate) fn ignored(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &WriteHeader,
     audience: &Audience,
 ) -> Result<bool, DbError> {
@@ -109,7 +106,7 @@ pub(crate) fn ignored(
 }
 
 pub(crate) fn frame(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     form: &crate::write_sources::KeptForm<'_>,
     header: &WriteHeader,
@@ -140,7 +137,7 @@ pub(crate) fn frame(
 /// Stage one received record whole until its write is judged and applied:
 /// the history keeps only its kept form (D7.3).
 pub(crate) fn stage_record(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
@@ -159,7 +156,7 @@ pub(crate) fn stage_record(
 }
 
 /// Release a received write's staged records once it is applied or consumed.
-pub(crate) fn release(database: &DatabaseConnection, header: &WriteHeader) -> Result<(), DbError> {
+pub(crate) fn release(database: &StoreSql, header: &WriteHeader) -> Result<(), DbError> {
     database.execute(
         "DELETE FROM temp._coven_received_records WHERE write_id=?1",
         [merge_fields::encode_write_id(&header.position)?],
@@ -193,7 +190,7 @@ pub(crate) fn records_table(header: &WriteHeader) -> &'static str {
 /// stopped (§16.7). A queued write folded over the counted state has no slot
 /// and marks nothing: what it replaces is current still in the counted state.
 pub(crate) fn stage(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
@@ -343,7 +340,7 @@ pub(crate) fn stage(
 }
 
 pub(crate) fn put_values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     row: &RowId,
     state: &coven_merge::RowState<coven_format::value::Value>,
 ) -> Result<(), DbError> {
@@ -357,7 +354,7 @@ pub(crate) fn put_values(
 /// Keep raw values before app materialization can replace or cascade them.
 /// Already staged rows retain the result produced by their merge frame.
 pub(crate) fn retain_values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     row: &RowId,
     state: &coven_merge::RowState<coven_format::value::Value>,
 ) -> Result<(), DbError> {
@@ -373,7 +370,7 @@ pub(crate) fn retain_values(
 }
 
 /// The rows staged so far in this transaction.
-pub(crate) fn staged_rows(database: &DatabaseConnection) -> Result<Vec<RowId>, DbError> {
+pub(crate) fn staged_rows(database: &StoreSql) -> Result<Vec<RowId>, DbError> {
     Ok(database.query(
         "SELECT table_name,key,audience FROM temp._coven_download_rows",
         [],
@@ -383,9 +380,9 @@ pub(crate) fn staged_rows(database: &DatabaseConnection) -> Result<Vec<RowId>, D
 
 /// Install app rows once after the counted and queued folds have completed.
 pub(crate) fn materialize(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
-    before: &DatabaseConnection,
+    before: &StoreSql,
     before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
@@ -404,9 +401,9 @@ pub(crate) fn materialize(
 /// in both the committed state and this transaction's, and materialize the
 /// app rows of that region. Returns the region.
 pub(crate) fn rules(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
-    before: &DatabaseConnection,
+    before: &StoreSql,
     before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
@@ -432,7 +429,7 @@ pub(crate) fn rules(
 }
 
 /// Empty the staging once the transaction's rows are materialized.
-pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn finish(database: &StoreSql) -> Result<(), DbError> {
     Ok(database.batch(
         "DELETE FROM temp._coven_download_rows; DELETE FROM temp._coven_download_dismissals; DELETE FROM temp._coven_download_replaced",
     )?)
@@ -445,7 +442,7 @@ pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
 /// staged, so materializing works each one out again under the state the
 /// queue leaves (§6.2).
 pub(crate) fn count(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     touched: BTreeSet<RowId>,

@@ -28,10 +28,10 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.test_track_work(counter.clone());
+                counter.track(writer);
                 Ok::<_, DbError>(())
             })?;
-            inner.access.database.each_reader(|reader| reader.test_track_work(counter.clone()));
+            inner.access.database.each_reader(|reader| counter.track(reader));
             inner.access.tests.track_work(counter.clone());
             inner.inputs.test_track_work(&counter);
             Ok(())
@@ -74,8 +74,8 @@ impl StoreDatabase {
         callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer, _| {
-                writer.on_write_checkpoint(callback);
+            inner.access.with_writer(|writer, call| {
+                call.on_write_checkpoint(writer, callback);
                 Ok(())
             })
         })
@@ -179,7 +179,7 @@ impl StoreDatabase {
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 #[cfg(test)]
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_gone_storage_cleared SELECT n FROM fixture;
          INSERT INTO _coven_requests_ended SELECT n FROM fixture;",

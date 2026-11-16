@@ -2,12 +2,12 @@
 
 use crate::schema::Schema;
 use coven_merge::{ConstraintColumns, ForeignKey};
-use rusqlite::fallible_iterator::FallibleIterator;
 use sqlite3_parser::{
     ast::{AlterTableBody, Cmd, Stmt},
     lexer::sql::Parser,
     Bump,
 };
+use sqlive::rusqlite::fallible_iterator::FallibleIterator;
 use sqlive::sql::name;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,10 +64,11 @@ impl MigrationNames {
     }
 
     /// Called for an executed statement, never a failed or merely prepared rename.
-    pub(crate) fn record(&mut self, sql: &str) -> rusqlite::Result<()> {
+    pub(crate) fn record(&mut self, sql: &str) -> sqlive::rusqlite::Result<()> {
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
-        let command = parser.next().map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        let command =
+            parser.next().map_err(|e| sqlive::rusqlite::Error::UserFunctionError(Box::new(e)))?;
         match command {
             Some(Cmd::Stmt(Stmt::AlterTable(table, body))) if main(&table.db_name) => {
                 let table = name(table.name.0).to_ascii_lowercase();
@@ -117,7 +118,7 @@ impl MigrationNames {
         before: &Schema,
         after: &Schema,
         statements: impl Iterator<Item = &'a str>,
-    ) -> rusqlite::Result<MigrationMatch> {
+    ) -> sqlive::rusqlite::Result<MigrationMatch> {
         let mut names = Self::new(before);
         for statement in statements {
             names.record(statement)?;

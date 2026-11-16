@@ -4,7 +4,7 @@
 //! removal of what a failing call made.
 
 use super::{BytesWriting, FileDatabase, StoreDatabase};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{BugSinkRef, CarriesBug, TaskFailed};
@@ -12,7 +12,7 @@ use coven_foundation::{
     files::{Flushed, ObservedFile},
     id_source::FileId,
 };
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -127,7 +127,7 @@ impl StoreDatabase {
         let writing = BytesWriting::of(self).await;
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.transaction(|db: &DatabaseConnection| {
+                writer.transaction(|db: &StoreSql| {
                     for copy in &copies {
                         let path = text(&copy.path)?;
                         if db.execute(
@@ -171,7 +171,7 @@ impl StoreDatabase {
         let folder = text(folder)?.to_owned();
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.transaction(|db: &DatabaseConnection| {
+                writer.transaction(|db: &StoreSql| {
                     db.execute("UPDATE _coven_copy_folders SET made=1 WHERE folder=?1", [&folder])?;
                     Ok(())
                 })
@@ -188,7 +188,7 @@ impl StoreDatabase {
         let modified_at = crate::user_file::encode_time(observed.modified_at());
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.transaction(|db: &DatabaseConnection| {
+                writer.transaction(|db: &StoreSql| {
                     if db.execute(
                         "UPDATE _coven_copies SET state='placed',size=?2,modified_at=?3
                          WHERE path=?1 AND state='writing'",
@@ -321,7 +321,7 @@ impl Drop for CopyNames {
 
 /// The call's copy at `path` is placed and its file switched to it: the
 /// copy is an original this device records (§17.3).
-pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn keep(db: &StoreSql, path: &str) -> Result<(), DbError> {
     db.execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
     Ok(())
 }
@@ -329,7 +329,7 @@ pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
 /// The kept copy at the original's `path` lost its switch to another
 /// device's, unless another of this device's files is recorded there: it is
 /// recorded for removal (Appendix C.3).
-pub(crate) fn lose(db: &DatabaseConnection, path: &[u8], file: FileId) -> Result<(), DbError> {
+pub(crate) fn lose(db: &StoreSql, path: &[u8], file: FileId) -> Result<(), DbError> {
     db.execute(
         "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
          AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
@@ -340,7 +340,7 @@ pub(crate) fn lose(db: &DatabaseConnection, path: &[u8], file: FileId) -> Result
 
 /// The copy at `path`, recorded as `state`, is removed; its folder links go
 /// with it.
-pub(crate) fn forget(db: &DatabaseConnection, path: &str, state: &str) -> Result<(), DbError> {
+pub(crate) fn forget(db: &StoreSql, path: &str, state: &str) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_copies WHERE path=?1 AND state=?2", (path, state))?;
     Ok(())
 }

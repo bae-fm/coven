@@ -440,7 +440,7 @@ async fn lean_differential_clocks() {
 
 #[test]
 fn stored_scalar_fields_pin_sqlite_classes_and_primitive_bytes() {
-    use rusqlite::types::ValueRef;
+    use sqlive::rusqlite::types::ValueRef;
     for (sql, expected) in [
         (ValueRef::Null, &[0][..]),
         (ValueRef::Integer(-2), &[1, 255, 255, 255, 255, 255, 255, 255, 254]),
@@ -592,7 +592,7 @@ async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen()
 /// audience is spelled as, or a value of another type, is damage.
 #[test]
 fn a_stored_audience_that_does_not_decode_is_damaged_database() {
-    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let db = sqlive::rusqlite::Connection::open_in_memory().unwrap();
     let read = |sql: &str| -> Result<Audience, DbError> {
         Ok(db.query_row(sql, [], |r| super::audience(r, 0))?)
     };

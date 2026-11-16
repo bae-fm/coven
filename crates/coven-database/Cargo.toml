@@ -15,7 +15,6 @@ coven-foundation.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
 sqlive.workspace = true
-rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -29,9 +28,9 @@ syn.workspace = true
 coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-merge = { workspace = true, features = ["test-utils"] }
 coven-format = { workspace = true, features = ["test-utils"] }
-rusqlite = { workspace = true, features = ["trace"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
-sqlive = { workspace = true, features = ["test-utils"] }
+# The statement profiles coven's tests read, on for its own tests only.
+sqlive = { workspace = true, features = ["test-utils", "profiles"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "fs"] }
 

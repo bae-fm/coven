@@ -136,7 +136,7 @@ pub enum DbError {
     StoreFailed(coven_foundation::task::Bug),
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
-    Sqlite(rusqlite::Error),
+    Sqlite(sqlive::rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
     /// `SQLITE_NOTADB`), decoding stored facts found damage (§19.3), or a
     /// snapshot's staged records differ from a second staging's (§19.1).
@@ -727,7 +727,7 @@ pub enum DbError {
         operation: Box<DbError>,
         /// SQLite's rollback failure.
         #[source]
-        rollback: rusqlite::Error,
+        rollback: sqlive::rusqlite::Error,
     },
 }
 
@@ -748,16 +748,16 @@ impl DbError {
 
 /// Whether SQLite failed because of the disk under it: full, failing, gone
 /// read-only, or damaged.
-pub fn sqlite_error_is_disk(error: &rusqlite::Error) -> bool {
+pub fn sqlite_error_is_disk(error: &sqlive::rusqlite::Error) -> bool {
     matches!(
         error.sqlite_error_code(),
         Some(
-            rusqlite::ErrorCode::DiskFull
-                | rusqlite::ErrorCode::SystemIoFailure
-                | rusqlite::ErrorCode::CannotOpen
-                | rusqlite::ErrorCode::ReadOnly
-                | rusqlite::ErrorCode::DatabaseCorrupt
-                | rusqlite::ErrorCode::NotADatabase
+            sqlive::rusqlite::ErrorCode::DiskFull
+                | sqlive::rusqlite::ErrorCode::SystemIoFailure
+                | sqlive::rusqlite::ErrorCode::CannotOpen
+                | sqlive::rusqlite::ErrorCode::ReadOnly
+                | sqlive::rusqlite::ErrorCode::DatabaseCorrupt
+                | sqlive::rusqlite::ErrorCode::NotADatabase
         )
     )
 }
@@ -817,32 +817,33 @@ impl From<coven_format::Error> for DbError {
     }
 }
 
-impl From<rusqlite::Error> for DbError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<sqlive::rusqlite::Error> for DbError {
+    fn from(error: sqlive::rusqlite::Error) -> Self {
         match error {
-            rusqlite::Error::UserFunctionError(source) => {
+            sqlive::rusqlite::Error::UserFunctionError(source) => {
                 match crate::reported_engine_errors::raised(source) {
                     Ok(error) => error,
-                    Err(source) => Self::Sqlite(rusqlite::Error::UserFunctionError(source)),
+                    Err(source) => Self::Sqlite(sqlive::rusqlite::Error::UserFunctionError(source)),
                 }
             }
             // A column coven reads into one of its types, such as a `RowKey`,
             // fails with what that type found.
-            rusqlite::Error::FromSqlConversionFailure(index, kind, source) => {
+            sqlive::rusqlite::Error::FromSqlConversionFailure(index, kind, source) => {
                 match crate::reported_engine_errors::raised(source) {
                     Ok(error) => error,
-                    Err(source) => {
-                        Self::Sqlite(rusqlite::Error::FromSqlConversionFailure(index, kind, source))
-                    }
+                    Err(source) => Self::Sqlite(sqlive::rusqlite::Error::FromSqlConversionFailure(
+                        index, kind, source,
+                    )),
                 }
             }
             // SQLite found a page it can't read as what it should hold, or a
             // file that isn't a database: the damage, wherever a statement
             // met it, is the store's, not the statement's (§19.3).
-            rusqlite::Error::SqliteFailure(failure, _)
+            sqlive::rusqlite::Error::SqliteFailure(failure, _)
                 if matches!(
                     failure.code,
-                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                    sqlive::rusqlite::ErrorCode::DatabaseCorrupt
+                        | sqlive::rusqlite::ErrorCode::NotADatabase
                 ) =>
             {
                 Self::DamagedDatabase
@@ -921,8 +922,8 @@ impl From<StoreLockError> for OpenError {
     }
 }
 
-impl From<rusqlite::Error> for OpenError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<sqlive::rusqlite::Error> for OpenError {
+    fn from(error: sqlive::rusqlite::Error) -> Self {
         Self::Database(error.into())
     }
 }

@@ -4,7 +4,7 @@
 //! setters.
 use crate::merge_store::MergeStore;
 use crate::migration_names::MigrationMatch;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The rows removal rules hide before the migration, under their old names,
 /// for the migration run on this connection.
 pub(crate) struct Hidden<'c> {
-    database: &'c DatabaseConnection,
+    database: &'c StoreSql,
     call: &'c StoreCall<'c>,
     /// Merge state under the old identity and column names, by new identity.
     rows: BTreeMap<RowId, (RowId, RowState<Value>)>,
@@ -28,7 +28,7 @@ impl<'c> Hidden<'c> {
     /// table has no generation left to delete; its losses are frozen with the
     /// table's (`migration_state::carry`).
     pub(crate) fn before(
-        db: &'c DatabaseConnection,
+        db: &'c StoreSql,
         call: &'c StoreCall<'c>,
         before: &crate::schema::Schema,
         names: &MigrationMatch,

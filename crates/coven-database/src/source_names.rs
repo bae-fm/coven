@@ -1,11 +1,11 @@
 //! Schema identities used to validate original sources across explicit renames.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{migration_names::MigrationMatch, schema::Schema, DbError};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
 pub(crate) fn record(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     previous: u32,
     version: u32,
     after: &Schema,
@@ -56,11 +56,7 @@ pub(crate) fn record(
     Ok(())
 }
 
-fn table_origin(
-    db: &DatabaseConnection,
-    version: u32,
-    table: &str,
-) -> Result<(u32, String), DbError> {
+fn table_origin(db: &StoreSql, version: u32, table: &str) -> Result<(u32, String), DbError> {
     Ok(db.query_row(
         "SELECT origin_version,origin_name FROM _coven_table_origins WHERE version=?1 AND name=?2",
         params![version, table],
@@ -69,7 +65,7 @@ fn table_origin(
 }
 
 fn column_origin(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     version: u32,
     table: &str,
     column: &str,
@@ -80,7 +76,7 @@ fn column_origin(
 /// Resolve one known schema identity into another version. Absence means the
 /// target schema has no such object; a reused spelling is a different origin.
 pub(crate) fn table(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     from: u32,
     name: &str,
     to: u32,
@@ -92,7 +88,7 @@ pub(crate) fn table(
 }
 
 pub(crate) fn column(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     from: u32,
     table: &str,
     name: &str,

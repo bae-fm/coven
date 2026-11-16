@@ -6,7 +6,7 @@
 use super::table;
 use super::{Phase, SnapshotStaging, StagedTables};
 use crate::snapshot_error::SnapshotError;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 
 /// A digest of one staging's records as its tables hold them. Staging is a
@@ -18,12 +18,9 @@ pub struct StagedDigest([u8; 32]);
 
 /// Read back every record `tables` hold and digest them, each table's rows
 /// in the order of their encodings, so the digest is of their values alone.
-pub(super) fn digest(
-    db: &DatabaseConnection,
-    tables: &StagedTables,
-) -> Result<StagedDigest, DbError> {
+pub(super) fn digest(db: &StoreSql, tables: &StagedTables) -> Result<StagedDigest, DbError> {
     let mut hasher = coven_crypto::ContentHasher::new();
-    let mut table = |name: &str, select: &str, params: &[&dyn rusqlite::ToSql]| {
+    let mut table = |name: &str, select: &str, params: &[&dyn sqlive::rusqlite::ToSql]| {
         let mut rows = Vec::new();
         db.for_each(select, params, |row| {
             rows.push(encoded(row)?);
@@ -54,7 +51,7 @@ pub(super) fn digest(
 /// Fail with `DamagedDatabase` unless the records the disk holds are the
 /// ones `staging` ended with (§16.2). A staging whose stream hasn't ended
 /// has no digest yet, and the load refuses it.
-pub(super) fn unchanged(db: &DatabaseConnection, staging: &SnapshotStaging) -> Result<(), DbError> {
+pub(super) fn unchanged(db: &StoreSql, staging: &SnapshotStaging) -> Result<(), DbError> {
     let (Phase::Staged { digest, .. }, Some(tables)) = (&staging.phase, &staging.tables) else {
         return Ok(());
     };
@@ -67,8 +64,8 @@ pub(super) fn unchanged(db: &DatabaseConnection, staging: &SnapshotStaging) -> R
 
 /// One row's values, each tagged with its type and text or blob lengths
 /// written out, so no two rows share an encoding.
-fn encoded(row: &rusqlite::Row<'_>) -> Result<Vec<u8>, DbError> {
-    use rusqlite::types::ValueRef;
+fn encoded(row: &sqlive::rusqlite::Row<'_>) -> Result<Vec<u8>, DbError> {
+    use sqlive::rusqlite::types::ValueRef;
     let mut bytes = Vec::new();
     for i in 0..row.as_ref().column_count() {
         match row.get_ref(i)? {
@@ -96,7 +93,7 @@ fn encoded(row: &rusqlite::Row<'_>) -> Result<Vec<u8>, DbError> {
 /// from the snapshot's own (§19.1). When the staging can't be read back,
 /// that failure is the one reported: the input database failed.
 pub(super) fn with_staged_digest(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     stagings: &[SnapshotStaging],
     error: DbError,
 ) -> DbError {
@@ -132,11 +129,7 @@ pub enum StagedDamage {
 
 /// Make `damage` to the staging `staging`.
 #[cfg(any(test, feature = "test-utils"))]
-pub(super) fn damage(
-    db: &DatabaseConnection,
-    staging: i64,
-    damage: StagedDamage,
-) -> Result<(), DbError> {
+pub(super) fn damage(db: &StoreSql, staging: i64, damage: StagedDamage) -> Result<(), DbError> {
     let changed = match damage {
         StagedDamage::Record => {
             let records = table(staging, "records");
@@ -188,8 +181,8 @@ pub(super) fn damage(
 /// The disk error a test's request fails a staging removal with.
 #[cfg(any(test, feature = "test-utils"))]
 pub(super) fn removal_failure() -> DbError {
-    DbError::Sqlite(rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+    DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(
+        sqlive::rusqlite::ffi::Error::new(sqlive::rusqlite::ffi::SQLITE_IOERR),
         Some("injected staging removal failure".into()),
     ))
 }

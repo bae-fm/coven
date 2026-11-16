@@ -44,7 +44,10 @@ fn a_bug_reading_settings_is_openings_bug() {
 #[test]
 fn a_database_failure_says_whether_the_disk_caused_it() {
     let sqlite = |code| {
-        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error { code, extended_code: 0 }, None)
+        sqlive::rusqlite::Error::SqliteFailure(
+            sqlive::rusqlite::ffi::Error { code, extended_code: 0 },
+            None,
+        )
     };
     let file = || FileError::Io {
         operation: "write",
@@ -52,13 +55,13 @@ fn a_database_failure_says_whether_the_disk_caused_it() {
         source: Box::new(std::io::Error::from(std::io::ErrorKind::StorageFull)),
     };
     assert!(DbError::from(file()).is_disk());
-    assert!(DbError::Sqlite(sqlite(rusqlite::ErrorCode::DiskFull)).is_disk());
-    assert!(DbError::Sqlite(sqlite(rusqlite::ErrorCode::ReadOnly)).is_disk());
-    assert!(!DbError::Sqlite(sqlite(rusqlite::ErrorCode::ConstraintViolation)).is_disk());
+    assert!(DbError::Sqlite(sqlite(sqlive::rusqlite::ErrorCode::DiskFull)).is_disk());
+    assert!(DbError::Sqlite(sqlite(sqlive::rusqlite::ErrorCode::ReadOnly)).is_disk());
+    assert!(!DbError::Sqlite(sqlite(sqlive::rusqlite::ErrorCode::ConstraintViolation)).is_disk());
     assert!(!DbError::StoreClosed.is_disk());
     let rolled_back = DbError::Rollback {
-        operation: Box::new(DbError::Sqlite(sqlite(rusqlite::ErrorCode::DiskFull))),
-        rollback: sqlite(rusqlite::ErrorCode::DiskFull),
+        operation: Box::new(DbError::Sqlite(sqlite(sqlive::rusqlite::ErrorCode::DiskFull))),
+        rollback: sqlite(sqlive::rusqlite::ErrorCode::DiskFull),
     };
     assert!(rolled_back.is_disk());
 }

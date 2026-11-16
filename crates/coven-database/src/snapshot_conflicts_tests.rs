@@ -127,7 +127,7 @@ async fn judged_by_the_rows_this_device_has(other_circle: u128) {
         db.inspect_writer(|db, _| {
             db.query_row(
                 "SELECT count(*) FROM _coven_lost WHERE key=?1 AND audience=?2 AND replacement_kind='rules'",
-                rusqlite::params![key, GIFTS.to_string()],
+                sqlive::rusqlite::params![key, GIFTS.to_string()],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::tests::{database_error, remote_update, try_remote_update, TestStore};
 use crate::write::tests::{records, sql};
 use crate::{Migration, RowIdentity, SyncedTable};
@@ -37,11 +37,11 @@ fn ordered_migrations() -> Vec<Migration> {
 
 const IN_ORDER: &str = "SELECT title FROM notes ORDER BY title COLLATE reversed";
 
-fn titles(connection: &DatabaseConnection, sql: &str) -> Vec<String> {
+fn titles(connection: &StoreSql, sql: &str) -> Vec<String> {
     connection.query(sql, [], |row| row.get(0)).unwrap()
 }
 
-fn plan(connection: &DatabaseConnection, sql: &str) -> String {
+fn plan(connection: &StoreSql, sql: &str) -> String {
     connection
         .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get::<_, String>(3))
         .unwrap()
@@ -122,8 +122,8 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
     // before 'z' in bytes comes after it, so it passes the titles above, which
     // BINARY would refuse, and refuses only one past 'z'.
     match sql(&ben_db, "INSERT INTO notes VALUES ('5','zebras')").await {
-        Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))) => {
-            assert_eq!(failure.code, rusqlite::ErrorCode::ConstraintViolation)
+        Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(failure, _))) => {
+            assert_eq!(failure.code, sqlive::rusqlite::ErrorCode::ConstraintViolation)
         }
         result => panic!("expected the CHECK to refuse, received {result:?}"),
     }
@@ -172,7 +172,7 @@ async fn a_migration_declares_the_apps_collation_on_the_writer() {
         .err()
         .expect("the index needs its collation");
     match database_error(error) {
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) => {
+        DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message))) => {
             assert_eq!(message, "no such collation sequence: reversed")
         }
         error => panic!("expected the unknown collation, received {error:?}"),
@@ -346,8 +346,8 @@ const MATCHING: &str = "SELECT title FROM notes WHERE fold(title) = 'école' ORD
 /// SQLite's message for a statement it refused.
 fn sqlite_message(error: DbError) -> String {
     match error {
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message)))
-        | DbError::Sqlite(rusqlite::Error::SqlInputError { msg: message, .. }) => message,
+        DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_, Some(message)))
+        | DbError::Sqlite(sqlive::rusqlite::Error::SqlInputError { msg: message, .. }) => message,
         error => panic!("expected SQLite's refusal, received {error:?}"),
     }
 }
@@ -414,8 +414,8 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
     .await;
     // The CHECK calls the function too: "BANNED" folds to the refused title.
     match sql(&ben_db, "INSERT INTO notes VALUES ('4','BANNED')").await {
-        Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))) => {
-            assert_eq!(failure.code, rusqlite::ErrorCode::ConstraintViolation)
+        Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(failure, _))) => {
+            assert_eq!(failure.code, sqlive::rusqlite::ErrorCode::ConstraintViolation)
         }
         result => panic!("expected the CHECK to refuse, received {result:?}"),
     }
@@ -577,7 +577,9 @@ fn refusing() -> SqlFunctions {
         |arguments| {
             let title = arguments.get::<String>(0)?;
             if title == "poison" {
-                return Err(rusqlite::Error::UserFunctionError("fold refuses poison".into()));
+                return Err(sqlive::rusqlite::Error::UserFunctionError(
+                    "fold refuses poison".into(),
+                ));
             }
             Ok(title.to_lowercase())
         },

@@ -111,7 +111,7 @@ async fn final_schema_failure_rolls_back_the_entire_app_run() {
         .err()
         .unwrap();
     assert!(matches!(database_error(error), DbError::Schema(SchemaError::NoPrimaryKey { .. })));
-    let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+    let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
     assert_eq!(raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
     assert_eq!(
         raw.query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'notes'", [], |r| r
@@ -313,7 +313,7 @@ async fn an_implicit_sqlite_rollback_cannot_escape_the_owned_transaction() {
             .open()
             .await;
         assert!(result.is_err(), "the rolled-back migration cannot be committed");
-        let raw = rusqlite::Connection::open(store.database_path()).unwrap();
+        let raw = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(raw.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
         assert_eq!(
             raw.query_row(
@@ -515,9 +515,9 @@ pub(crate) mod declarations {
 
     // Inspect the committed file before reopening can run any registration work.
     fn committed(store: &TestStore) -> Committed {
-        let db = rusqlite::Connection::open_with_flags(
+        let db = sqlive::rusqlite::Connection::open_with_flags(
             store.database_path(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            sqlive::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
         let version = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();

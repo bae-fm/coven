@@ -2,7 +2,7 @@
 //! that completes one, and the app's pause of them (§17.3, §17.9).
 
 use super::{FileWrite, StagedFile, StagedSource};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     file_location::{FileLocation, Place},
@@ -13,8 +13,7 @@ use coven_foundation::id_source::{FileId, ObjectId};
 
 /// What the transaction completing an upload does once its write applied:
 /// clear the upload's pending record (§17.9).
-pub(crate) type AfterCompletion =
-    Box<dyn FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<(), DbError>>;
+pub(crate) type AfterCompletion = Box<dyn FnOnce(&StoreSql, &StoreCall<'_>) -> Result<(), DbError>>;
 
 /// What a write retires once it applied: the uploads whose files it
 /// switched, and those no file waits for; and whether it completes a bound
@@ -32,11 +31,7 @@ pub(super) struct Completion {
 /// coven's copy of app bytes, each with the hashes its first read found,
 /// which an upload checks if the file moves to the cloud. Its staging
 /// cleanup record goes before anything names the copy.
-pub(super) fn keep_source(
-    db: &DatabaseConnection,
-    id: FileId,
-    file: &StagedFile,
-) -> Result<(), DbError> {
+pub(super) fn keep_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Result<(), DbError> {
     release_source(db, id, file)?;
     if let StagedSource::Copy(name) = &file.source {
         crate::file_queue::keep_copy(db, id, name.as_str(), &file.hashes)?;
@@ -46,11 +41,7 @@ pub(super) fn keep_source(
 
 /// The part of `keep_source` that must precede anything naming the copy:
 /// a copy's staging cleanup record goes, a user's original is recorded.
-pub(super) fn release_source(
-    db: &DatabaseConnection,
-    id: FileId,
-    file: &StagedFile,
-) -> Result<(), DbError> {
+pub(super) fn release_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Result<(), DbError> {
     match &file.source {
         StagedSource::Copy(name) => crate::file_removals::keep(db, "files", name.as_str()),
         StagedSource::Original(original) => {
@@ -63,7 +54,7 @@ pub(super) fn release_source(
 /// its bytes here, the user's original or coven's copy, and its upload if
 /// one is queued, joining its move: the upload's completion switches both to
 /// the cloud (§17.2, §17.3).
-pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
+pub(crate) fn share(db: &StoreSql, from: FileId, to: FileId) -> Result<(), DbError> {
     crate::file_queue::share(db, from, to)?;
     crate::file_moves::join(db, from, to)?;
     crate::user_file::share(db, from, to)
@@ -102,7 +93,7 @@ impl FileWrite<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|error| match error {
-                sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                sqlive::Error::Sqlite(sqlive::rusqlite::Error::QueryReturnedNoRows) => {
                     DbError::Invariant { what: "a completed upload is queued" }
                 }
                 error => DbError::from(error),

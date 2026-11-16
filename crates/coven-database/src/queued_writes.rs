@@ -1,7 +1,7 @@
 //! Reapply eligible original queue records once over counted state.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{write_schema::WriteSchema, DbError};
 use coven_format::write::WriteHeader;
@@ -18,7 +18,7 @@ pub(crate) enum Refold<'a> {
 }
 
 pub(crate) fn stage(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     refold: Refold<'_>,
@@ -79,7 +79,7 @@ pub(crate) fn stage(
 
 /// Whether the overlay folds the queued write `header` heads: one that
 /// landed is counted already, and a removed device's never applies.
-fn folded(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError> {
+fn folded(db: &StoreSql, header: &WriteHeader) -> Result<bool, DbError> {
     if crate::write_metadata::landed(db, header.position)? {
         return Ok(false);
     }
@@ -101,7 +101,7 @@ pub(crate) struct WriteRows {
 /// the rows whose losses a captured migration write puts or replaces, those
 /// of a row it doesn't change or whose table it dropped among them.
 pub(crate) fn rows(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
@@ -157,11 +157,7 @@ struct Queue {
 }
 
 impl Queue {
-    fn read(
-        db: &DatabaseConnection,
-        call: &StoreCall<'_>,
-        schema: &WriteSchema,
-    ) -> Result<Self, DbError> {
+    fn read(db: &StoreSql, call: &StoreCall<'_>, schema: &WriteSchema) -> Result<Self, DbError> {
         let mut writes: Vec<(WriteId, Vec<RowId>)> = Vec::new();
         crate::upload::each_plaintext(db, |header, _| {
             if !folded(db, &header.header)? {
@@ -208,7 +204,7 @@ impl Reach {
 /// earlier write of the slot changed is reached already, so every row
 /// put back holds the counted state from before the slot.
 pub(crate) fn put_back(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
@@ -247,7 +243,7 @@ pub(crate) fn put_back(
     Ok(())
 }
 
-pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
+pub(crate) fn present(db: &StoreSql) -> Result<bool, DbError> {
     Ok(db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE w.slot IS NULL)"),[],|r|r.get(0))?)
 }
 
@@ -262,7 +258,7 @@ pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
 /// every row still kept is put back into `touched`: no write of the slot
 /// reached it, so what it kept is the counted state.
 pub(crate) fn overlay(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     touched: &mut BTreeSet<RowId>,

@@ -2,7 +2,7 @@
 //! indexes were built with, and of the SQLite library that built them, and
 //! the rebuild a new version takes (§4).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sqlite3_parser::ast::{ColumnConstraint, CreateTableBody, Stmt, TableConstraint};
@@ -55,7 +55,7 @@ pub(crate) struct SqlVersion {
 /// SQLite's own `REINDEX EXPRESSIONS` rebuilds the same indexes, all at
 /// once; coven rebuilds them one by one.
 pub(crate) fn rebuild(
-    db: &mut DatabaseConnection,
+    db: &mut StoreSql,
     synced: &[crate::SyncedTable],
     registered: &[SqlVersion],
     progress: &mut ProgressReport<OpenStep>,
@@ -146,12 +146,13 @@ pub(crate) fn rebuild(
 /// The SQLite library this process runs, as SQLite numbers its versions:
 /// 3.53.2 is 3053002.
 fn library() -> u32 {
-    u32::try_from(rusqlite::version_number()).expect("SQLite numbers its versions from 3000000")
+    u32::try_from(sqlive::rusqlite::version_number())
+        .expect("SQLite numbers its versions from 3000000")
 }
 
 /// The SQLite library that last opened the store for writing; none in a
 /// store from before coven recorded it.
-fn recorded_library(db: &DatabaseConnection) -> Result<Option<u32>, DbError> {
+fn recorded_library(db: &StoreSql) -> Result<Option<u32>, DbError> {
     Ok(db
         .query(
             "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
@@ -165,7 +166,7 @@ fn recorded_library(db: &DatabaseConnection) -> Result<Option<u32>, DbError> {
 /// Record the SQLite library a writable open runs, as the one that built
 /// the store's indexes. A new database records it as it is created: its
 /// indexes are all built by this library.
-pub(crate) fn record_library(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn record_library(db: &StoreSql) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_sql_versions(kind,name,version) VALUES('library','sqlite',?1)
          ON CONFLICT(kind,name) DO UPDATE SET version=excluded.version",
@@ -178,7 +179,7 @@ pub(crate) fn record_library(db: &DatabaseConnection) -> Result<(), DbError> {
 /// one with a term that is an expression, or a column the table computes
 /// as it is read (a VIRTUAL generated column). A partial index's condition
 /// doesn't count.
-fn expression_indexes(db: &DatabaseConnection) -> Result<Vec<String>, DbError> {
+fn expression_indexes(db: &StoreSql) -> Result<Vec<String>, DbError> {
     Ok(db.query(
         "SELECT s.name FROM main.sqlite_schema AS s
          WHERE s.type='index' AND EXISTS(
@@ -195,10 +196,7 @@ fn expression_indexes(db: &DatabaseConnection) -> Result<Vec<String>, DbError> {
 /// and deterministic function the store's indexes were built with is at
 /// the version they were built with. A name with no recorded version is
 /// one nothing in the store uses yet (§4).
-pub(crate) fn require_built(
-    db: &DatabaseConnection,
-    registered: &[SqlVersion],
-) -> Result<(), DbError> {
+pub(crate) fn require_built(db: &StoreSql, registered: &[SqlVersion]) -> Result<(), DbError> {
     let recorded = recorded(db)?;
     for version in registered {
         if let Some(&built) = recorded.get(&(version.kind, version.name.clone())) {
@@ -214,7 +212,7 @@ pub(crate) fn require_built(
     Ok(())
 }
 
-fn recorded(db: &DatabaseConnection) -> Result<BTreeMap<(Versioned, String), u32>, DbError> {
+fn recorded(db: &StoreSql) -> Result<BTreeMap<(Versioned, String), u32>, DbError> {
     db.query(
         "SELECT kind,name,version FROM _coven_sql_versions WHERE kind IN ('collation','function')",
         [],
@@ -241,7 +239,7 @@ struct AppObject {
 
 /// The app's tables and the indexes it declared; SQLite's own and coven's
 /// use none of the app's collations or functions.
-fn app_objects(db: &DatabaseConnection) -> Result<Vec<AppObject>, DbError> {
+fn app_objects(db: &StoreSql) -> Result<Vec<AppObject>, DbError> {
     Ok(db
         .query(
             "SELECT name,tbl_name,sql FROM main.sqlite_schema
@@ -314,7 +312,7 @@ impl ObjectSql {
 /// calls `regexp`), each collation it names, and the collation of each
 /// column it reads.
 fn expression_uses(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     table: &str,
     expression: &str,
 ) -> Result<BTreeSet<(Versioned, String)>, DbError> {

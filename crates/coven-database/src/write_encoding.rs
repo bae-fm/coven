@@ -1,13 +1,13 @@
 //! Conversions at the SQL/format boundary and timestamp construction.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coven_format::value::Value;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Timestamp};
-use rusqlite::types::{Type, ValueRef};
-use rusqlite::Row;
+use sqlive::rusqlite::types::{Type, ValueRef};
+use sqlive::rusqlite::Row;
 
 use crate::DbError;
 
@@ -22,7 +22,7 @@ pub(crate) fn encoded<T>(result: Result<T, coven_format::Error>) -> Result<T, Db
 
 /// A stored fact at `column` that doesn't decode: the database is damaged
 /// (§19.3).
-pub(crate) fn damaged(column: usize, kind: Type) -> rusqlite::Error {
+pub(crate) fn damaged(column: usize, kind: Type) -> sqlive::rusqlite::Error {
     decode_failure(column, kind, DbError::DamagedDatabase)
 }
 
@@ -32,22 +32,22 @@ pub(crate) fn damaged(column: usize, kind: Type) -> rusqlite::Error {
     clippy::map_err_ignore,
     reason = "stored bytes that fail to decode are damage, which damaged() names"
 )]
-pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
+pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> sqlive::rusqlite::Result<T> {
     result.map_err(|_| damaged(0, Type::Blob))
 }
 
 /// The value at `column`, which the table's constraints and coven's own
 /// writes keep decodable as `T`; a value that isn't is `DamagedDatabase`
 /// (§19.3).
-pub(crate) fn stored<T: rusqlite::types::FromSql>(
+pub(crate) fn stored<T: sqlive::rusqlite::types::FromSql>(
     row: &Row<'_>,
     column: usize,
     kind: Type,
-) -> rusqlite::Result<T> {
+) -> sqlive::rusqlite::Result<T> {
     row.get(column).map_err(|error| match error {
-        rusqlite::Error::InvalidColumnType(..)
-        | rusqlite::Error::FromSqlConversionFailure(..)
-        | rusqlite::Error::IntegralValueOutOfRange(..) => damaged(column, kind),
+        sqlive::rusqlite::Error::InvalidColumnType(..)
+        | sqlive::rusqlite::Error::FromSqlConversionFailure(..)
+        | sqlive::rusqlite::Error::IntegralValueOutOfRange(..) => damaged(column, kind),
         error => error,
     })
 }
@@ -56,14 +56,12 @@ pub(crate) fn decode_failure(
     column: usize,
     kind: Type,
     error: impl std::error::Error + Send + Sync + 'static,
-) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, kind, Box::new(error))
+) -> sqlive::rusqlite::Error {
+    sqlive::rusqlite::Error::FromSqlConversionFailure(column, kind, Box::new(error))
 }
 
 /// Applied and locally queued originals share one timestamp clock.
-pub(crate) fn latest_timestamp(
-    database: &DatabaseConnection,
-) -> Result<Option<Timestamp>, DbError> {
+pub(crate) fn latest_timestamp(database: &StoreSql) -> Result<Option<Timestamp>, DbError> {
     Ok(database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
         row.get::<_, Option<Vec<u8>>>(0)?
             .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
@@ -90,7 +88,7 @@ pub(crate) fn timestamp(
     })
 }
 
-pub(crate) fn value(value: ValueRef<'_>) -> rusqlite::Result<Value> {
+pub(crate) fn value(value: ValueRef<'_>) -> sqlive::rusqlite::Result<Value> {
     Ok(match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(number) => Value::Integer(number),
@@ -101,9 +99,9 @@ pub(crate) fn value(value: ValueRef<'_>) -> rusqlite::Result<Value> {
     })
 }
 
-pub(crate) fn sql_value(value: &Value) -> rusqlite::types::Value {
+pub(crate) fn sql_value(value: &Value) -> sqlive::rusqlite::types::Value {
     match value {
-        Value::Null => rusqlite::types::Value::Null,
+        Value::Null => sqlive::rusqlite::types::Value::Null,
         Value::Integer(number) => (*number).into(),
         Value::Real(bits) => f64::from_bits(*bits).into(),
         Value::Text(text) => text.clone().into(),
@@ -120,13 +118,13 @@ pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
 
 /// The audience a column of coven's tables holds; a value no audience is
 /// spelled as is damage (§19.3).
-pub(crate) fn audience(row: &Row<'_>, column: usize) -> rusqlite::Result<Audience> {
+pub(crate) fn audience(row: &Row<'_>, column: usize) -> sqlive::rusqlite::Result<Audience> {
     stored(row, column, Type::Text)
 }
 
 /// A stored counter, eight big-endian bytes; any other length is damage
 /// (§19.3).
-pub(crate) fn counter(bytes: Vec<u8>) -> rusqlite::Result<u64> {
+pub(crate) fn counter(bytes: Vec<u8>) -> sqlive::rusqlite::Result<u64> {
     let bytes: [u8; 8] =
         bytes.try_into().map_err(|_not_eight_bytes: Vec<u8>| damaged(0, Type::Blob))?;
     Ok(u64::from_be_bytes(bytes))
@@ -134,7 +132,7 @@ pub(crate) fn counter(bytes: Vec<u8>) -> rusqlite::Result<u64> {
 
 /// A stored slot number: a counter that is positive. Slot 0 names no slot,
 /// so a stored 0 is damage (§19.3).
-pub(crate) fn slot_counter(bytes: Vec<u8>) -> rusqlite::Result<coven_merge::Slot> {
+pub(crate) fn slot_counter(bytes: Vec<u8>) -> sqlive::rusqlite::Result<coven_merge::Slot> {
     coven_merge::Slot::new(counter(bytes)?).ok_or_else(|| damaged(0, Type::Blob))
 }
 

@@ -14,16 +14,16 @@
 //! it, when its device lands a later write, and when a later stamped entry
 //! takes its place. No pass reads every entry.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_encoding::{counter, decoded, encoded, slot_counter};
 use crate::DbError;
 use coven_format::{merge_fields, value::Value};
 use coven_merge::{RowId, RowState, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeSet;
 
 /// Look again at `write`'s entry in the next applied slot.
-fn look_again(db: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
+fn look_again(db: &StoreSql, ordinal: i64) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_unnamed_writes(write_id) VALUES(?1) ON CONFLICT DO NOTHING",
         [ordinal],
@@ -47,7 +47,7 @@ fn names(state: &RowState<Value>) -> BTreeSet<WriteId> {
 /// A landed write moved a row from `before` to `after`: the writes the row no
 /// longer names may have lost their last name.
 pub(crate) fn changed(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     before: &RowState<Value>,
     after: &RowState<Value>,
 ) -> Result<(), DbError> {
@@ -78,10 +78,7 @@ pub(crate) fn active_writes(loss: &coven_format::loss::Loss) -> Vec<WriteId> {
 
 /// A dismissal removed or changed a lost value: the writes it named may have
 /// lost their last name.
-pub(crate) fn dismissed(
-    db: &DatabaseConnection,
-    loss: &coven_format::loss::Loss,
-) -> Result<(), DbError> {
+pub(crate) fn dismissed(db: &StoreSql, loss: &coven_format::loss::Loss) -> Result<(), DbError> {
     for write in active_writes(loss) {
         look_again(db, crate::snapshot_state::ordinal(db, write)?)?;
     }
@@ -90,10 +87,7 @@ pub(crate) fn dismissed(
 
 /// The counted state kept aside for `row`, or for every row, is put back or
 /// let go: the writes it named may have lost their last name.
-pub(crate) fn unnamed_by_published(
-    db: &DatabaseConnection,
-    row: Option<&RowId>,
-) -> Result<(), DbError> {
+pub(crate) fn unnamed_by_published(db: &StoreSql, row: Option<&RowId>) -> Result<(), DbError> {
     match row {
         Some(row) => db.execute(
             "INSERT INTO _coven_unnamed_writes(write_id) SELECT write_id FROM _coven_published_writes
@@ -112,7 +106,7 @@ pub(crate) fn unnamed_by_published(
 
 /// `write` lands: the last write its device landed before is no longer its
 /// last.
-pub(crate) fn superseded(db: &DatabaseConnection, write: WriteId) -> Result<(), DbError> {
+pub(crate) fn superseded(db: &StoreSql, write: WriteId) -> Result<(), DbError> {
     if let Some(previous) = crate::write_metadata::landed_below(db, write)? {
         look_again(db, previous.ordinal)?;
     }
@@ -124,7 +118,7 @@ pub(crate) fn superseded(db: &DatabaseConnection, write: WriteId) -> Result<(), 
 /// the latest stamped entry at or below `through` from `newest`, the one at
 /// or below `from`, and those. A replaced one is looked at again.
 pub(crate) fn passed(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     from: u64,
     through: u64,
     newest: Option<i64>,
@@ -165,11 +159,7 @@ pub(crate) fn passed(
 /// `newest`, the latest stamped one at or below `through`. Its plaintext
 /// header goes with it. An entry above `through` is looked at again once the
 /// slot passes it.
-pub(crate) fn forget(
-    db: &DatabaseConnection,
-    through: u64,
-    newest: Option<i64>,
-) -> Result<(), DbError> {
+pub(crate) fn forget(db: &StoreSql, through: u64, newest: Option<i64>) -> Result<(), DbError> {
     let candidates =
         db.query("SELECT write_id FROM _coven_unnamed_writes", [], |r| r.get::<_, i64>(0))?;
     db.execute("DELETE FROM _coven_unnamed_writes", [])?;
@@ -197,7 +187,7 @@ pub(crate) fn forget(
 
 /// Whether `write` is its device's last landed write: no write of its
 /// device numbered above it landed.
-fn last(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
+fn last(db: &StoreSql, write: WriteId) -> Result<bool, DbError> {
     let Some(next) = write.number.checked_add(1) else {
         return Ok(true);
     };
@@ -207,7 +197,7 @@ fn last(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
 /// Whether something reads `write`'s entry, `ordinal`: a merge row's
 /// generation or cell, the counted state kept aside for a row, or an active
 /// lost value's setter or replacer.
-fn named(db: &DatabaseConnection, ordinal: i64, write: WriteId) -> Result<bool, DbError> {
+fn named(db: &StoreSql, ordinal: i64, write: WriteId) -> Result<bool, DbError> {
     let id = encoded(merge_fields::encode_write_id(&write))?;
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_rows WHERE write_id=?1)

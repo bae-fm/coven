@@ -52,14 +52,14 @@ use coven_foundation::id_source::FileId;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::app_policy::CovenPolicy;
-use crate::connection_setup::Setup;
 use crate::read::RunningRead;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_failure::StoreFailure;
 use crate::store_failure::StoreHandle;
 use crate::write_failure::Hosted;
 use crate::{DbError, Migration, MigrationOutcome, SyncedTable};
 use crate::{LiveQuery, LostValue, Read, SqlReadContext};
+use sqlive::Setup;
 
 #[path = "database_builder.rs"]
 mod builder;
@@ -216,7 +216,7 @@ pub struct DatabaseInner {
 /// handle is dropped.
 pub struct DatabaseAccess<L> {
     /// The store's database: its writer, readers and upkeep threads.
-    database: crate::sqlite_database::Database<CovenPolicy>,
+    database: sqlive::Database<CovenPolicy>,
     // Every connection reports its commits and handle failures here (§4).
     observer: StoreHandle,
     write_schema: crate::write_schema::WriteSchema,
@@ -271,10 +271,10 @@ impl<L> DatabaseAccess<L> {
         };
         let (removed, mut failures) = crate::file_removals::remove_bytes(&self.directory, released);
         if !removed.is_empty() {
-            let forgotten = self.with_writer(|writer, _| {
-                writer.transaction(|db| crate::file_removals::forget(db, &removed))?;
+            let forgotten = self.with_writer(|writer, call| {
+                writer.transaction(|db| crate::file_removals::forget(db, call, &removed))?;
                 #[cfg(any(test, feature = "test-utils"))]
-                writer.checkpoint(crate::test_utils::WriteCheckpoint::Finished);
+                call.write_checkpoint(crate::test_utils::WriteCheckpoint::Finished);
                 Ok::<_, DbError>(())
             });
             if let Err(error) = forgotten {
@@ -348,7 +348,7 @@ impl<L> DatabaseAccess<L> {
 
     /// Every connection has the same settings, so one reader reports them.
     fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        Ok(self.database.reader().host(DatabaseConnection::sqlite_settings)?)
+        Ok(self.database.reader().host(StoreSql::sqlite_settings)?)
     }
 
     fn close(self) -> Result<(), DbError> {
@@ -361,14 +361,6 @@ impl<L> DatabaseAccess<L> {
             Err(DbError::Closing { failures })
         }
     }
-}
-
-/// Run `run` on `connection`, one of the store's SQLite connections. A
-/// panic while one is held leaves it whole: its open transaction rolls back
-/// as the panic unwinds (`write_transaction.rs`), and a failed rollback fails
-/// the handle. So the lock is taken as it is.
-pub(crate) fn with_locked<T, R>(connection: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
-    run(&mut lock_unpoisoned(connection))
 }
 
 impl DatabaseInner {
@@ -393,7 +385,7 @@ impl DatabaseInner {
         &self,
         operation: &'static str,
         run: impl FnOnce(
-            &mut DatabaseConnection,
+            &mut StoreSql,
             &StoreCall<'_>,
             &crate::file_write::WriteFiles<'_>,
         ) -> Result<R, E>,
@@ -465,7 +457,7 @@ pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]
 /// The removals the write that just ran under `writer` released, chosen
 /// with the staging and copying sets held (Appendix C.3).
 fn released(
-    writer: &DatabaseConnection,
+    writer: &StoreSql,
     call: &StoreCall<'_>,
     inner: &DatabaseInner,
 ) -> crate::file_removals::Chosen {
@@ -634,7 +626,7 @@ impl StoreDatabase {
                 inner.release_file_reservations(&files.take_brought());
                 release_copies(&inner.copying, &files.take_held_copies());
                 #[cfg(any(test, feature = "test-utils"))]
-                writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
+                call.write_checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
                 result.unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
             })
         })

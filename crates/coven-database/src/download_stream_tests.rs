@@ -387,8 +387,13 @@ mod memory {
         }
         // SAFETY: this isolated child has not opened SQLite on any thread.
         assert_eq!(
-            unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1) },
-            rusqlite::ffi::SQLITE_OK
+            unsafe {
+                sqlive::rusqlite::ffi::sqlite3_config(
+                    sqlive::rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
+                    1,
+                )
+            },
+            sqlive::rusqlite::ffi::SQLITE_OK
         );
         tokio::runtime::Runtime::new().unwrap().block_on(async {
         let ids = SequentialIds::new();
@@ -445,8 +450,8 @@ mod memory {
             let baseline = LIVE.load(Ordering::SeqCst);
             PEAK.store(baseline, Ordering::SeqCst);
             let sqlite_baseline = unsafe {
-                rusqlite::ffi::sqlite3_memory_highwater(1);
-                rusqlite::ffi::sqlite3_memory_used()
+                sqlive::rusqlite::ffi::sqlite3_memory_highwater(1);
+                sqlive::rusqlite::ffi::sqlite3_memory_used()
             };
             assert!(sqlite_baseline > 0, "SQLite memory accounting must be enabled");
             let rows = count(receiver, "links");
@@ -455,7 +460,7 @@ mod memory {
             assert_eq!(state_digest(receiver),prior);
             receiver.receive_stream(input(), || Ok(())).await.unwrap();
             let rust_extra = PEAK.load(Ordering::SeqCst).checked_sub(baseline).unwrap();
-            let sqlite_extra = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) } - sqlite_baseline;
+            let sqlite_extra = unsafe { sqlive::rusqlite::ffi::sqlite3_memory_highwater(0) } - sqlite_baseline;
             let extra = rust_extra + usize::try_from(sqlite_extra).unwrap();
             // Adding separate peaks is a conservative bound even when they occur
             // at different instants. It includes SQLite's page and temp caches.
@@ -523,7 +528,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
         }
         .unwrap_err();
         assert!(
-            matches!(&error, DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            matches!(&error, DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
             "{error:?}"
         );
         assert_eq!(crate::tests::contents(&b), before);

@@ -8,10 +8,9 @@
 //! result with the real run's finds every read across audiences.
 
 use crate::app_policy::CovenPolicy;
-use crate::connection_setup::Setup;
 use crate::migration_snapshot::{key_sql, MigrationCapture};
 use crate::schema::{Schema, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{column_list, key_columns, AppValues, AppView};
@@ -19,16 +18,17 @@ use crate::write_schema::WriteSchema;
 use crate::{DbError, Migration, MigrationContext, SyncedTable};
 use coven_foundation::files::{StoreDir, StoreDirAccess};
 use coven_merge::Audience;
-use rusqlite::params_from_iter;
-use rusqlite::types::Value as SqlValue;
+use sqlive::rusqlite::params_from_iter;
+use sqlive::rusqlite::types::Value as SqlValue;
 use sqlive::sql::identifier;
+use sqlive::Setup;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Stages the database for a run from the live connection, whose schema and
 /// rows it copies.
 pub(crate) type Stage<'a> =
-    dyn Fn(&DatabaseConnection, &StoreCall<'_>) -> Result<AudienceDatabase, DbError> + 'a;
+    dyn Fn(&StoreSql, &StoreCall<'_>) -> Result<AudienceDatabase, DbError> + 'a;
 
 /// The app's rows before a run, split by audience, in a database of their
 /// own: the store's in its tables, each circle's in staging tables until its
@@ -36,7 +36,7 @@ pub(crate) type Stage<'a> =
 pub(crate) struct AudienceDatabase {
     /// None only while dropping, which closes the connection before the
     /// files go.
-    database: Option<DatabaseConnection>,
+    database: Option<StoreSql>,
     directory: StoreDir,
     circles: BTreeSet<Audience>,
     /// The staged tables: each one's name, its staging table and its columns.
@@ -64,17 +64,17 @@ impl AudienceDatabase {
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
         whole: &Arc<sqlive::WholeViews>,
-        live: &DatabaseConnection,
+        live: &StoreSql,
         call: &StoreCall<'_>,
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
         let before = Schema::read(live, &crate::file_table::registered_columns(live)?)?;
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
-        let views = |setup: &Setup<'_>| {
+        let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(setup, device, &transfers, &network)
         };
-        let database = DatabaseConnection::open(
+        let database = StoreSql::open(
             &directory.audience_database_path(),
             false,
             CovenPolicy::new(tables),
@@ -152,7 +152,7 @@ impl Drop for AudienceDatabase {
 /// `MigrationReadsAcross`.
 pub(crate) fn verify(
     audiences: &mut AudienceDatabase,
-    live: &DatabaseConnection,
+    live: &StoreSql,
     call: &StoreCall<'_>,
     migrations: &[&Migration],
     tables: &[SyncedTable],
@@ -251,7 +251,7 @@ fn differing(
 }
 
 fn run_migrations(
-    scratch: &DatabaseConnection,
+    scratch: &StoreSql,
     call: &StoreCall<'_>,
     migrations: &[&Migration],
     tables: &[SyncedTable],
@@ -271,7 +271,7 @@ fn run_migrations(
 
 /// A synced table's rows in `live` by key, each with its audience.
 fn read_live(
-    live: &DatabaseConnection,
+    live: &StoreSql,
     view: &AppView<'_>,
     table: &TableSchema,
 ) -> Result<BTreeMap<Vec<u8>, (AppValues, Audience)>, DbError> {
@@ -285,7 +285,7 @@ fn read_live(
 
 /// A synced table's rows by key.
 fn read_table(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &TableSchema,
 ) -> Result<BTreeMap<Vec<u8>, AppValues>, DbError> {
     let sql = format!(
@@ -302,7 +302,7 @@ fn read_table(
             .iter()
             .enumerate()
             .map(|(i, c)| Ok((c.name.clone(), value(r.get_ref(i + 1)?)?)))
-            .collect::<rusqlite::Result<AppValues>>()?;
+            .collect::<sqlive::rusqlite::Result<AppValues>>()?;
         rows.insert(key, values);
         Ok(())
     })?;
@@ -320,8 +320,8 @@ fn read_table(
 /// (`synced_before_run` is false): its rows belong to this device alone and
 /// every run holds them, as it holds the store's.
 fn copy_rows(
-    live: &DatabaseConnection,
-    scratch: &DatabaseConnection,
+    live: &StoreSql,
+    scratch: &StoreSql,
     table: &TableSchema,
     synced_before_run: bool,
     circles: &mut BTreeSet<Audience>,
@@ -342,7 +342,7 @@ fn copy_rows(
         let key: Vec<u8> = r.get(0)?;
         let values = (0..columns.len())
             .map(|i| r.get::<_, SqlValue>(i + 1))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<sqlive::rusqlite::Result<Vec<_>>>()?;
         let audience = match audiences.get(&key) {
             Some(audience) => audience.clone(),
             None if !synced_before_run => Audience::Store,
@@ -383,7 +383,7 @@ fn copy_rows(
 }
 
 /// The tables whose columns the library recorded as synced before this run, lowercase.
-fn synced_before(live: &DatabaseConnection) -> Result<BTreeSet<String>, DbError> {
+fn synced_before(live: &StoreSql) -> Result<BTreeSet<String>, DbError> {
     Ok(live
         .query("SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", [], |r| {
             r.get(0)
@@ -393,10 +393,7 @@ fn synced_before(live: &DatabaseConnection) -> Result<BTreeSet<String>, DbError>
 }
 
 /// The audience of each row of `table` that is present, by key.
-fn row_audiences(
-    live: &DatabaseConnection,
-    table: &str,
-) -> Result<BTreeMap<Vec<u8>, Audience>, DbError> {
+fn row_audiences(live: &StoreSql, table: &str) -> Result<BTreeMap<Vec<u8>, Audience>, DbError> {
     let rows = live.query(
         &format!(
             "SELECT r.key,r.audience,r.generation FROM _coven_rows r WHERE r.table_name=?1 AND NOT EXISTS(SELECT 1 FROM _coven_rows newer WHERE newer.table_name=r.table_name AND newer.key=r.key AND newer.audience=r.audience AND newer.generation>r.generation) AND NOT {}",

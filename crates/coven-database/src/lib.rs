@@ -9,10 +9,7 @@
 mod app_policy;
 mod audience_database;
 mod author_judgement;
-mod authorization;
 mod authorship;
-mod change_capture;
-mod connection_setup;
 mod coven_functions;
 mod sql_functions;
 mod sql_versions;
@@ -113,19 +110,15 @@ mod snapshot_write;
 mod snapshot_writes;
 mod sql_read;
 mod sqlite;
-mod sqlite_database;
-mod sqlite_path;
-mod sqlite_settings;
-mod sqlite_temporary;
 mod store_call;
 mod sync_facts;
 mod transaction_constants;
-pub use sqlite_settings::{
+pub use sqlive::{set_temporary_directory, TemporaryDirectoryError};
+pub use sqlive::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
-pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 pub use sync_facts::{QueueFacts, SyncFacts, UploadFacts, UploadRecords};
 mod written_values;
 pub use file_hashes::{FileHasher, FileHashes};
@@ -135,13 +128,10 @@ pub use file_write::{DeviceOnlyCopy, Journal, MoveFile};
 pub use pending::{FileWork, PendingValue};
 mod file_protection;
 mod network_facts;
-mod planner_statistics;
 mod source_names;
 mod transfer_watch;
 mod transfers_in_flight;
-mod upkeep;
 mod upload;
-mod wal_checkpoints;
 pub use transfer_watch::{TransferChange, TransferEnd, TransferWatch};
 pub use transfers_in_flight::{InFlight, TransferMeter, TransferProgress, Transferring};
 mod user_file;
@@ -224,7 +214,7 @@ pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;
 
 // SQL values, parameters and callback results are public. Connections remain private.
-pub use rusqlite::{
+pub use sqlive::rusqlite::{
     named_params, params, types, Error as SqliteError, Params, Result as SqliteResult, Row, ToSql,
 };
 

@@ -1,6 +1,6 @@
 //! The common durable loss record and its snapshot projection.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, damaged, decoded, encoded};
 use crate::write_failure::{hosted, Hosted};
@@ -11,7 +11,7 @@ use coven_format::{
     merge_fields,
 };
 use coven_merge::{Audience, Cell, ColumnValue, LostKey, LostValue, RowId, Rule, WriteId};
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const SELECT: &str = "SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.frozen,l.column_id,c.table_name FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id";
@@ -27,7 +27,7 @@ pub(crate) fn select_listed() -> String {
     )
 }
 
-pub(crate) fn lost_values(sql: &DatabaseConnection) -> Result<Vec<crate::LostValue>, DbError> {
+pub(crate) fn lost_values(sql: &StoreSql) -> Result<Vec<crate::LostValue>, DbError> {
     let records = sql.query(&format!("{SELECT} ORDER BY l.id"), [], read)?;
     records.into_iter().map(crate::LostValue::from_record).collect()
 }
@@ -70,7 +70,7 @@ impl LossTable {
 }
 
 pub(crate) fn visit<E: From<DbError>>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     audience: &Audience,
     visit: impl FnMut(Loss) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -78,7 +78,7 @@ pub(crate) fn visit<E: From<DbError>>(
 }
 
 pub(crate) fn visit_table<E: From<DbError>>(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     audience: &Audience,
     table: LossTable,
     mut visit: impl FnMut(Loss) -> Result<(), E>,
@@ -91,14 +91,14 @@ pub(crate) fn visit_table<E: From<DbError>>(
     ).map_err(Hosted::into_inner)
 }
 
-pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
+pub(crate) fn read(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<Loss> {
     let row = crate::row_queries::read_identity(r)?;
     let generation = counter(r.get(3)?)?;
     let column: Option<String> = r.get(4)?;
     let column_id: Option<i64> = r.get(10)?;
     let column_table: Option<String> = r.get(11)?;
     if column_id.is_some() && (column.is_none() || column_table.as_ref() != Some(&row.table)) {
-        return Err(damaged(0, rusqlite::types::Type::Blob));
+        return Err(damaged(0, sqlive::rusqlite::types::Type::Blob));
     }
     let value: Vec<u8> = r.get(5)?;
     let setter: Vec<u8> = r.get(6)?;
@@ -120,12 +120,12 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
                 .map(|(name, value)| {
                     let write = setters
                         .remove(&name)
-                        .ok_or_else(|| damaged(0, rusqlite::types::Type::Blob))?;
+                        .ok_or_else(|| damaged(0, sqlive::rusqlite::types::Type::Blob))?;
                     Ok((name, Cell { write, value }))
                 })
-                .collect::<rusqlite::Result<_>>()?;
+                .collect::<sqlive::rusqlite::Result<_>>()?;
             if !setters.is_empty() {
-                return Err(damaged(0, rusqlite::types::Type::Blob));
+                return Err(damaged(0, sqlive::rusqlite::types::Type::Blob));
             }
             LossValues::Row(cells)
         }
@@ -145,7 +145,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
             let (write, reason) = decoded(merge_fields::decode_unauthorized(&replacement))?;
             LossCause::NotAuthorized { write, reason }
         }
-        _ => return Err(damaged(0, rusqlite::types::Type::Blob)),
+        _ => return Err(damaged(0, sqlive::rusqlite::types::Type::Blob)),
     };
     if !matches!(
         (&values, &cause),
@@ -158,7 +158,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
                     | LossCause::NotAuthorized { .. }
             )
     ) {
-        return Err(damaged(0, rusqlite::types::Type::Blob));
+        return Err(damaged(0, sqlive::rusqlite::types::Type::Blob));
     }
     Ok(Loss { row, generation, frozen: r.get(9)?, values, cause })
 }
@@ -166,7 +166,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
 /// Store a new loss that arrived without a displayed row change, and keep
 /// its paths and file references at once (`file_protection::retain_loss`).
 pub(crate) fn keep(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     loss: &Loss,
@@ -177,7 +177,7 @@ pub(crate) fn keep(
 
 /// Keep an existing local identity when freezing or dismissing part of a loss.
 pub(crate) fn put(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     loss: &Loss,
     id: Option<i64>,
@@ -186,7 +186,7 @@ pub(crate) fn put(
 }
 
 pub(crate) fn put_table(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     loss: &Loss,
     id: Option<i64>,
@@ -266,7 +266,7 @@ pub(crate) fn put_table(
 }
 
 /// Delete the stored loss `id`.
-pub(crate) fn delete(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+pub(crate) fn delete(database: &StoreSql, id: i64) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
     Ok(())
 }
@@ -274,7 +274,7 @@ pub(crate) fn delete(database: &DatabaseConnection, id: i64) -> Result<(), DbErr
 /// Store `row`'s lost cell `key` as `value` names it: over its loss `id`
 /// when the row holds one, as a new loss otherwise.
 pub(crate) fn put_write_loss(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     row: &RowId,
     key: &LostKey,
@@ -302,7 +302,7 @@ pub(crate) fn put_write_loss(
 /// new loss otherwise. An unchanged loss is left alone, so unchanged region
 /// neighbors make no metadata writes or local trigger effects.
 pub(crate) fn put_rules_loss(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     row: &RowId,
     generation: u64,
     columns: &BTreeMap<String, ColumnValue<Value>>,
@@ -321,7 +321,7 @@ pub(crate) fn put_rules_loss(
 }
 
 /// Delete every loss of `row`, frozen ones too.
-pub(crate) fn forget_row(database: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
+pub(crate) fn forget_row(database: &StoreSql, row: &RowId) -> Result<(), DbError> {
     database.execute(
         "DELETE FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
@@ -330,10 +330,7 @@ pub(crate) fn forget_row(database: &DatabaseConnection, row: &RowId) -> Result<(
 }
 
 /// Delete every loss of `audience`.
-pub(crate) fn forget_audience(
-    database: &DatabaseConnection,
-    audience: &Audience,
-) -> Result<(), DbError> {
+pub(crate) fn forget_audience(database: &StoreSql, audience: &Audience) -> Result<(), DbError> {
     database.execute("DELETE FROM _coven_lost WHERE audience=?1", [audience])?;
     Ok(())
 }
@@ -341,11 +338,7 @@ pub(crate) fn forget_audience(
 /// The active losses of table `old` follow its rows to `new`: a hidden row
 /// keeps its values in its removal record (§18.7). Frozen ones keep the
 /// names they were frozen under.
-pub(crate) fn rename_table(
-    database: &DatabaseConnection,
-    old: &str,
-    new: &str,
-) -> Result<(), DbError> {
+pub(crate) fn rename_table(database: &StoreSql, old: &str, new: &str) -> Result<(), DbError> {
     database.execute(
         "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND frozen=0",
         params![old, new],
@@ -358,7 +351,7 @@ pub(crate) fn rename_table(
 /// `columns` maps each of `table`'s changed columns to its new name, or to
 /// none when it is dropped.
 pub(crate) fn rename_removed_values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     columns: &BTreeMap<String, Option<String>>,
 ) -> Result<(), DbError> {
@@ -385,11 +378,7 @@ pub(crate) fn rename_removed_values(
 }
 
 /// The active cell losses of column `old` follow its cells to column `new`.
-pub(crate) fn move_column(
-    database: &DatabaseConnection,
-    old: i64,
-    new: i64,
-) -> Result<(), DbError> {
+pub(crate) fn move_column(database: &StoreSql, old: i64, new: i64) -> Result<(), DbError> {
     database.execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'",params![old,new])?;
     Ok(())
 }
@@ -397,7 +386,7 @@ pub(crate) fn move_column(
 /// Give each active cell loss of `table` the value `carry` makes of it: a
 /// lost value embeds the identities of the references it held.
 pub(crate) fn carry_cell_values(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     table: &str,
     carry: impl Fn(ColumnValue<Value>) -> ColumnValue<Value>,
 ) -> Result<(), DbError> {
@@ -413,7 +402,7 @@ pub(crate) fn carry_cell_values(
 }
 
 /// Delete the stored loss equal to `loss`, a frozen one; whether there was one.
-pub(crate) fn remove(database: &DatabaseConnection, loss: &Loss) -> Result<bool, DbError> {
+pub(crate) fn remove(database: &StoreSql, loss: &Loss) -> Result<bool, DbError> {
     let ids = database.query(
         "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND frozen=1",
         params![loss.row.table, loss.row.key, &loss.row.audience],
@@ -431,7 +420,7 @@ pub(crate) fn remove(database: &DatabaseConnection, loss: &Loss) -> Result<bool,
 
 /// SQLite sorts without collecting a row's potentially unbounded loss history.
 /// Escape names so their byte order matches the format's logical key order.
-pub(crate) fn sort_key(column: Option<String>, setter: &[u8]) -> rusqlite::Result<Vec<u8>> {
+pub(crate) fn sort_key(column: Option<String>, setter: &[u8]) -> sqlive::rusqlite::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     match column {
         Some(column) => {
@@ -472,7 +461,7 @@ pub(crate) struct RemovedRow {
 /// rules leave it shown. A row has at most one (format.md D7.2); a second is
 /// `DamagedDatabase` (§19.3).
 pub(crate) fn removed(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     row: &coven_merge::RowId,
     generation: u64,
 ) -> Result<Option<RemovedRow>, DbError> {

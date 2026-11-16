@@ -1,6 +1,6 @@
 //! Audience snapshots stream the counted prefix from one pinned transaction.
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, slot_counter};
 use crate::write_failure::{hosted, Hosted};
@@ -43,7 +43,7 @@ impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
 /// Returns the snapshot's breaking version, read in the transaction that
 /// reads its schema version (§16.3).
 pub(crate) fn write<E>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     schema: &WriteSchema,
     id: SnapshotId,
@@ -105,7 +105,7 @@ pub(crate) fn write<E>(
             counts[at] = db
                 .query_row(
                     "SELECT count(*) FROM _coven_slot_records WHERE kind=?1 AND slot<=?2",
-                    rusqlite::params![kind, covers.to_be_bytes()],
+                    sqlive::rusqlite::params![kind, covers.to_be_bytes()],
                     |r| r.get::<_, i64>(0).map(|n| n as u64),
                 )
                 .map_err(DbError::from)?;
@@ -144,7 +144,7 @@ pub(crate) fn write<E>(
     }
     if audience == Audience::Store {
         for kind in ["admin", "key", "announcement"] {
-            db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",rusqlite::params![kind,covers.to_be_bytes()],|r| hosted(|| {
+            db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",sqlive::rusqlite::params![kind,covers.to_be_bytes()],|r| hosted(|| {
                 let original=coven_format::floor::OriginalSlot {slot:slot_counter(r.get(0).map_err(DbError::from)?).map_err(DbError::from)?,object:r.get(1).map_err(DbError::from)?};
                 record(match kind {"admin"=>SnapshotRecord::Admin(original),"key"=>SnapshotRecord::KeyCopy(original),_=>SnapshotRecord::Announcement(original)})
             })).map_err(Hosted::into_inner)?;
@@ -157,7 +157,7 @@ pub(crate) fn write<E>(
     Ok(breaking)
 }
 
-pub(crate) fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
+pub(crate) fn read_write(r: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<AppliedWrite> {
     let timestamp = decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?;
     Ok(AppliedWrite {
         id: WriteId { device: timestamp.device(), number: counter(r.get(1)?)? },

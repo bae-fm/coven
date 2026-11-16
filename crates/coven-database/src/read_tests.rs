@@ -1,13 +1,14 @@
 use crate::{
     test_utils::{notes_migrations, notes_tables},
-    tests::TestStore,
-    DbError,
+    tests::{next, TestStore},
+    DbError, LiveQuery, StoreDatabase,
 };
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc, Arc,
 };
+use std::time::Duration;
 
 #[tokio::test]
 async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
@@ -287,7 +288,7 @@ pub(crate) enum AppError {
     Rollback {
         operation: Box<AppError>,
         #[source]
-        rollback: rusqlite::Error,
+        rollback: sqlive::rusqlite::Error,
     },
     #[error("file cleanup failed: {failures:?}; write failed: {write}")]
     FileCleanup { write: Box<AppError>, failures: Vec<DbError> },
@@ -299,8 +300,8 @@ impl From<DbError> for AppError {
     }
 }
 
-impl From<rusqlite::Error> for AppError {
-    fn from(error: rusqlite::Error) -> Self {
+impl From<sqlive::rusqlite::Error> for AppError {
+    fn from(error: sqlive::rusqlite::Error) -> Self {
         Self::Database(error.into())
     }
 }
@@ -319,7 +320,7 @@ impl coven_foundation::task::CarriesBug for AppError {
 }
 
 impl crate::WriteFailure for AppError {
-    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+    fn with_rollback(self, rollback: sqlive::rusqlite::Error) -> Self {
         match self {
             Self::Database(error) => Self::Database(error.with_rollback(rollback)),
             error => Self::Rollback { operation: Box::new(error), rollback },
@@ -381,4 +382,109 @@ async fn statement_log_records_a_reads_statements_in_order_with_their_values() {
         ]
     );
     db.close().await.unwrap();
+}
+
+fn write(db: &StoreDatabase, sql: &str) {
+    db.commit_writer(|db, _| db.batch(sql).unwrap());
+}
+
+/// The tracks [`credit`] credits, all of releases other than the timed
+/// query's.
+const CREDITED: u32 = 1_000;
+
+/// The median of `runs` writes that each credit another artist on
+/// [`CREDITED`] tracks. None of them may mark `live` to run again.
+async fn credit(
+    db: &StoreDatabase,
+    runs: u32,
+    live: Option<&LiveQuery<Vec<String>, crate::DbError>>,
+) -> Duration {
+    let mut times = Vec::new();
+    for run in 0..runs {
+        let started = std::time::Instant::now();
+        write(
+            db,
+            &format!("UPDATE track_artists SET artist = {} WHERE track <= {CREDITED}", run % 500),
+        );
+        times.push(started.elapsed());
+        if let Some(live) = live {
+            assert!(
+                !live.is_marked_for_rerun(),
+                "a credit on another release's track reran the page"
+            );
+        }
+    }
+    times.sort();
+    times[times.len() / 2]
+}
+
+/// A joined query's live run against the same SQL read once: an album
+/// page's tracks with their credited artists, over 10,000 releases of 12
+/// tracks. A run reads nothing for its joins, so the two should match. And
+/// what the query costs a write that credits artists on 1,000 tracks of
+/// other releases: one lookup of each track. A credit's key columns are
+/// NOT NULL, so a changed credit names its row; a key that could hold NULL
+/// wouldn't, and every query reading the table would run again. Run
+/// explicitly, in the release profile.
+#[tokio::test]
+#[ignore = "one timing measurement, run explicitly"]
+async fn joined_runs_against_one_shot_reads() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE releases(id INTEGER PRIMARY KEY, album INTEGER);
+        CREATE TABLE tracks(id INTEGER PRIMARY KEY, release INTEGER, position INTEGER, title TEXT);
+        CREATE INDEX tracks_release ON tracks(release);
+        CREATE TABLE track_artists(track INTEGER NOT NULL, position INTEGER NOT NULL, artist INTEGER, PRIMARY KEY(track, position));
+        CREATE TABLE artists(id INTEGER PRIMARY KEY, name TEXT);").await.unwrap();
+    write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO releases SELECT i, i FROM n;
+        WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<120000) INSERT INTO tracks SELECT i, (i-1)/12+1, (i-1)%12, 'track ' || i FROM n;
+        INSERT INTO track_artists SELECT id, 0, id % 500 FROM tracks;
+        WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<499) INSERT INTO artists SELECT i, 'artist ' || i FROM n;");
+    const SQL: &str = "SELECT t.title, a.name FROM tracks t LEFT JOIN track_artists c ON c.track = t.id LEFT JOIN artists a ON a.id = c.artist WHERE t.release = ?1 ORDER BY t.position, c.position";
+    const RUNS: u32 = 200;
+    let mut one_shot = Duration::ZERO;
+    for _ in 0..RUNS {
+        one_shot += db
+            .read(|sql| {
+                let started = std::time::Instant::now();
+                sql.query(SQL, [5000], |r| r.get::<_, String>(0))?;
+                Ok::<_, DbError>(started.elapsed())
+            })
+            .await
+            .unwrap();
+    }
+    let one_shot = one_shot / RUNS;
+    let alone = credit(&db, RUNS / 4, None).await;
+    let spent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let times = spent.clone();
+    let mut live = db.subscribe(move |sql| {
+        let started = std::time::Instant::now();
+        let rows = sql.query(SQL, [5000], |r| r.get::<_, String>(0))?;
+        times.lock().unwrap().push(started.elapsed());
+        Ok(rows)
+    });
+    next(&mut live).await;
+    for run in 0..RUNS {
+        write(&db, &format!("UPDATE tracks SET title = 'run {run}' WHERE id = 59990"));
+        next(&mut live).await;
+        assert!(!live.is_marked_for_rerun());
+    }
+    write(&db, "UPDATE tracks SET title = 'outside' WHERE id = 1");
+    assert!(!live.is_marked_for_rerun());
+    let beside = credit(&db, RUNS / 4, Some(&live)).await;
+    let spent = spent.lock().unwrap();
+    let live_run = spent.iter().skip(1).sum::<Duration>() / RUNS;
+    for (metric, time) in [
+        ("joined_query/one_shot_read", one_shot),
+        ("joined_query/live_run", live_run),
+        ("credit_write/no_live_query", alone),
+        ("credit_write/query_open", beside),
+    ] {
+        crate::test_utils::report_time(metric, time);
+    }
+    eprintln!("joined query: {one_shot:?} a one-shot read, {live_run:?} a live run");
+    eprintln!(
+        "a write crediting {CREDITED} tracks of other releases: {alone:?} with no live query, \
+         {beside:?} with the query open, {:?} a track",
+        beside.saturating_sub(alone) / CREDITED
+    );
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
@@ -18,7 +18,7 @@ fn write(device: u64, number: u64, slot: u64, through: u64, milliseconds: u64) -
 /// Stage `writes` as snapshot 1's on a store's writer, then run `check`.
 async fn staged<T>(
     writes: &[AppliedWrite],
-    check: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
+    check: impl FnOnce(&mut StoreSql, &StoreCall<'_>) -> T,
 ) -> T {
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
@@ -134,7 +134,7 @@ async fn a_failed_read_of_a_staged_write_keeps_its_error() {
             metadata.had_read(writes[0].id, writes[0].id).map(drop),
         ] {
             match result.map_err(MetadataFailure::snapshot) {
-                Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(..))) => {}
+                Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(..))) => {}
                 other => panic!("expected SQLite's error, got {other:?}"),
             }
         }

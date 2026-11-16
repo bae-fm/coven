@@ -1,12 +1,12 @@
 //! Checked plaintext headers remain available after queued or received bodies leave.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_merge::WriteId;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 
-pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Result<(), DbError> {
+pub(crate) fn retain(db: &StoreSql, header: &WriteHeaderFrame) -> Result<(), DbError> {
     let bytes = header.encode()?;
     let id = header.header.position;
     let previous = read(db, id)?;
@@ -27,7 +27,7 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
 }
 
 /// Delete `id`'s plaintext header, with its applied-write entry (§16.7).
-pub(crate) fn forget(db: &DatabaseConnection, id: WriteId) -> Result<(), DbError> {
+pub(crate) fn forget(db: &StoreSql, id: WriteId) -> Result<(), DbError> {
     db.execute(
         "DELETE FROM _coven_write_headers WHERE device=?1 AND number=?2",
         params![id.device, id.number.to_be_bytes()],
@@ -39,10 +39,7 @@ pub(crate) fn forget(db: &DatabaseConnection, id: WriteId) -> Result<(), DbError
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn read(
-    db: &DatabaseConnection,
-    id: WriteId,
-) -> Result<Option<WriteHeaderFrame>, DbError> {
+pub(crate) fn read(db: &StoreSql, id: WriteId) -> Result<Option<WriteHeaderFrame>, DbError> {
     let bytes: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT header FROM _coven_write_headers WHERE device=?1 AND number=?2)",
         params![id.device, id.number.to_be_bytes()],

@@ -4,7 +4,7 @@
 use crate::internal_schema;
 use crate::migration::validate_versions;
 use crate::schema::Schema;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
     CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
@@ -14,7 +14,7 @@ use crate::{
 /// Create coven's internal tables on a database that has none, before the
 /// app's migrations or any other work reads them. A read-only connection
 /// requires the database to hold the current internal version already.
-pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<(), OpenError> {
+pub(crate) fn prepare_internal_schema(sql: &mut StoreSql) -> Result<(), OpenError> {
     let internal: i32 = sql.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let internal = internal as u32;
     if internal > internal_schema::VERSION {
@@ -48,7 +48,7 @@ pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<()
 /// read-only one, require the app's versions rebuilt and the migrations
 /// done, which reports nothing.
 pub(crate) fn prepare_schema(
-    sql: &mut DatabaseConnection,
+    sql: &mut StoreSql,
     call: &StoreCall<'_>,
     tables: &[SyncedTable],
     migrations: &[Migration],
@@ -99,7 +99,7 @@ pub(crate) fn prepare_schema(
         if !read_only {
             sql.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
         }
-        sql.refresh_policy(crate::authorization::Refresh::Changed)?;
+        sql.refresh_policy(sqlive::Refresh::Changed)?;
         return Ok(Vec::new());
     }
     let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
@@ -179,7 +179,7 @@ pub(crate) fn prepare_schema(
                 &Schema::read(db, &crate::file_table::declared(tables))?,
                 tables,
             )?;
-            db.refresh_policy(crate::authorization::Refresh::Whole)?;
+            db.refresh_policy(sqlive::Refresh::Whole)?;
             Ok(outcomes)
         })
     });

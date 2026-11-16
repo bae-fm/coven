@@ -1,5 +1,5 @@
 use super::*;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::tests::TestStore;
 use coven_format::{path::ObjectPath, value::Slot};
@@ -8,7 +8,7 @@ use coven_foundation::clock::HANG_GUARD;
 impl InputDatabase {
     /// Visit each of the input database's connections, each under its own
     /// lock.
-    pub(crate) fn each_connection(&self, visit: impl FnMut(&DatabaseConnection)) {
+    pub(crate) fn each_connection(&self, visit: impl FnMut(&StoreSql)) {
         let database = read_unpoisoned(&self.database);
         database.as_ref().expect("the store keeps its input database open").each_connection(visit);
     }
@@ -135,11 +135,10 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
 async fn input_connections_take_covens_checkpoint_sync() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let syncs =
-        |connection: &DatabaseConnection, _: &StoreCall<'_>| -> Result<(bool, bool), DbError> {
-            let settings = connection.sqlite_settings()?;
-            Ok((settings.fullfsync, settings.checkpoint_fullfsync))
-        };
+    let syncs = |connection: &StoreSql, _: &StoreCall<'_>| -> Result<(bool, bool), DbError> {
+        let settings = connection.sqlite_settings()?;
+        Ok((settings.fullfsync, settings.checkpoint_fullfsync))
+    };
     // Coven's own checkpoint sync on macOS and iOS (§3); SQLite's off elsewhere.
     let expected = (false, cfg!(any(target_os = "macos", target_os = "ios")));
     let read = db.call(move |inner| inner.inputs.read(syncs)).await.unwrap();

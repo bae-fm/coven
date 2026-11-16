@@ -10,38 +10,17 @@ pub use followed_tables::followed_tables_sql;
 /// registers the function on a connection it opened itself, outside any
 /// store: the body every store registers.
 pub fn path_text_sql(
-    value: rusqlite::types::ValueRef<'_>,
-) -> rusqlite::Result<rusqlite::types::Value> {
+    value: sqlive::rusqlite::types::ValueRef<'_>,
+) -> sqlive::rusqlite::Result<sqlive::rusqlite::types::Value> {
     crate::coven_functions::path_text_sql(value)
 }
 
 #[path = "work_counts.rs"]
 mod work_counts;
-pub(crate) use work_counts::{ConnectionWork, StoreWork};
+pub(crate) use work_counts::StoreWork;
 pub use work_counts::{WorkCounter, WorkCounts};
 
-#[path = "statement_log.rs"]
-mod statement_log;
-pub use statement_log::StatementLog;
-
-/// One measured number, as a line `scripts/perf.sh` reads:
-/// `COST metric=<name> value=<n> unit=<ms|ratio|count>`. Lower is better in
-/// every unit. A character in `metric` outside letters, digits and `_./-`
-/// becomes `_`, so a label can be passed as it reads.
-pub fn report_cost(metric: &str, value: f64, unit: &str) {
-    let metric: String = metric
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "_./-".contains(c) { c } else { '_' })
-        .collect();
-    eprintln!("COST metric={metric} value={value} unit={unit}");
-}
-
-/// [`report_cost`] for a time, in milliseconds.
-pub fn report_time(metric: &str, time: std::time::Duration) {
-    report_cost(metric, time.as_secs_f64() * 1000.0, "ms");
-}
-
-pub(crate) type WriteCheckpointObserver = Box<dyn Fn(WriteCheckpoint) + Send>;
+pub use sqlive::{report_cost, report_time, StatementLog};
 
 /// Boundaries after a local write's durable commit, for process-crash tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +40,16 @@ pub enum WriteCheckpoint {
     FileRemovalRecorded,
     /// Post-commit file cleanup has committed the deletion of those rows.
     Finished,
+}
+
+impl From<sqlive::CommitPoint> for WriteCheckpoint {
+    fn from(point: sqlive::CommitPoint) -> Self {
+        match point {
+            sqlive::CommitPoint::Judged => Self::Judged,
+            sqlive::CommitPoint::Committed => Self::Committed,
+            sqlive::CommitPoint::Observed => Self::Observed,
+        }
+    }
 }
 
 /// A live query's results as a test follows them: each in the order the

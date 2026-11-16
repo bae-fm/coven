@@ -3,7 +3,7 @@
 
 use super::DatabaseAccess;
 use crate::internal_schema::CACHE_NAME_USED_SQL;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{DbError, FileRef};
 use coven_foundation::files::StoreDirAccess;
 
@@ -36,13 +36,13 @@ pub(crate) fn object_path(
 ) -> String {
     format!("{}/{}", uploader.0, object)
 }
-fn tick(db: &DatabaseConnection) -> Result<i64, DbError> {
+fn tick(db: &StoreSql) -> Result<i64, DbError> {
     Ok(db.query_row("SELECT coalesce(max(last_read),0)+1 FROM _coven_cache", [], |r| r.get(0))?)
 }
 /// One stored entry and where `index` lies in it: a verified range of
 /// consecutive chunks, a header, or a checked whole file.
 fn covering(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: &FileRef,
     index: i64,
 ) -> Result<Option<(String, i64, i64, i64)>, DbError> {
@@ -129,7 +129,7 @@ pub(super) fn read<L>(
     let (offset, length) = within(file, first, index)?;
     let bytes = reader.read_at(offset, length).map_err(observation)?;
     access.with_writer(|db, _| {
-        db.transaction(|db: &DatabaseConnection| {
+        db.transaction(|db: &StoreSql| {
             db.execute("UPDATE _coven_cache SET last_read=?2 WHERE path=?1", (&path, tick(db)?))?;
             Ok::<_, DbError>(())
         })
@@ -206,7 +206,7 @@ pub(super) fn put<L>(
     }
     let _writing = access.directory.lock_cache_write()?;
     let recorded = access.with_writer(|db, _| {
-        db.transaction(|db: &DatabaseConnection| {
+        db.transaction(|db: &StoreSql| {
             if db.query_row(&format!("SELECT {CACHE_NAME_USED_SQL}"), [name.as_str()], |r| {
                 r.get::<_, bool>(0)
             })? {
@@ -244,12 +244,7 @@ pub(super) fn put<L>(
     crate::write_failure::after_cleanup(result, release(access, name))
 }
 /// Whether any chunk of the range already has a stored entry.
-fn overlaps(
-    db: &DatabaseConnection,
-    file: &FileRef,
-    first: i64,
-    chunks: i64,
-) -> Result<bool, DbError> {
+fn overlaps(db: &StoreSql, file: &FileRef, first: i64, chunks: i64) -> Result<bool, DbError> {
     for index in first..first + chunks {
         if covering(db, file, index)?.is_some() {
             return Ok(true);
@@ -262,7 +257,7 @@ fn overlaps(
 /// file's stored bytes any more, its name becomes a recorded removal
 /// instead and the result is false.
 fn publish_range(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     file: &FileRef,
     first: i64,
     chunks: i64,
@@ -281,7 +276,7 @@ fn publish_range(
     db.execute(
         "INSERT INTO _coven_cache(namespace,object_path,chunk,chunks,path,size,last_read)
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        rusqlite::params![
+        sqlive::rusqlite::params![
             file.namespace(),
             object_path_of(file)?,
             first,
@@ -299,7 +294,7 @@ fn publish_range(
 /// removed by the next open.
 fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
     let recorded = access.with_writer(|db, _| {
-        db.transaction(|db: &DatabaseConnection| {
+        db.transaction(|db: &StoreSql| {
             if db.execute("DELETE FROM _coven_cache_writes WHERE path=?1", [name.as_str()])? == 1 {
                 crate::file_removals::record_cached(db, name.as_str())?;
             }
@@ -317,7 +312,7 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
 /// `set_cache_budget` changes it after (E8). Two declarations of one
 /// namespace are refused.
 pub(crate) fn declare_budgets(
-    db: &mut DatabaseConnection,
+    db: &mut StoreSql,
     namespaces: &[crate::Namespace],
 ) -> Result<(), DbError> {
     let mut declared = std::collections::BTreeSet::new();
@@ -344,7 +339,7 @@ pub(crate) fn declare_budgets(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, DbError> {
+pub(super) fn budget(db: &StoreSql, namespace: &str) -> Result<u64, DbError> {
     let bytes = db
         .query("SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
             r.get::<_, Vec<u8>>(0)
@@ -354,11 +349,7 @@ pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, Db
     Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
 }
 /// Set a declared namespace's budget, in the transaction under way.
-pub(crate) fn set_budget(
-    db: &DatabaseConnection,
-    namespace: &str,
-    bytes: u64,
-) -> Result<(), DbError> {
+pub(crate) fn set_budget(db: &StoreSql, namespace: &str, bytes: u64) -> Result<(), DbError> {
     let changed = db.execute(
         "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
         (namespace, bytes.to_be_bytes().as_slice()),
@@ -371,7 +362,7 @@ pub(crate) fn set_budget(
 /// The namespace's cached bytes: its chunks' and headers', which its budget
 /// counts. Maintained with its cache records. An undeclared namespace is
 /// `UndeclaredNamespace`, not zero bytes.
-pub(crate) fn cached(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
+pub(crate) fn cached(db: &StoreSql, namespace: &str) -> Result<i64, DbError> {
     db.query("SELECT cached FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
         r.get::<_, i64>(0)
     })?
@@ -381,7 +372,7 @@ pub(crate) fn cached(db: &DatabaseConnection, namespace: &str) -> Result<i64, Db
 /// Evict over-budget entries in a transaction of their own; returns their
 /// recorded names, whose bytes the caller removes once the writer is free
 /// (Appendix C.3).
-pub(super) fn trim(db: &mut DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
+pub(super) fn trim(db: &mut StoreSql, namespace: &str) -> Result<Vec<String>, DbError> {
     db.transaction(|db| trim_entries(db, namespace))
 }
 /// Evict over-budget entries in the transaction under way, such as a
@@ -391,10 +382,7 @@ pub(super) fn trim(db: &mut DatabaseConnection, namespace: &str) -> Result<Vec<S
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn trim_entries(
-    db: &DatabaseConnection,
-    namespace: &str,
-) -> Result<Vec<String>, DbError> {
+pub(crate) fn trim_entries(db: &StoreSql, namespace: &str) -> Result<Vec<String>, DbError> {
     let budget = budget(db, namespace)?;
     let mut cached = cached(db, namespace)?;
     let mut removed = Vec::new();
@@ -432,7 +420,7 @@ pub(crate) fn trim_entries(
 /// removed entry's name is recorded for removal, and its bytes go once the
 /// writer is free (Appendix C.3). An undeclared namespace is
 /// `UndeclaredNamespace`.
-pub(crate) fn clear_entries(db: &DatabaseConnection, namespace: &str) -> Result<(), DbError> {
+pub(crate) fn clear_entries(db: &StoreSql, namespace: &str) -> Result<(), DbError> {
     budget(db, namespace)?;
     let paths = db.query(
         "DELETE FROM _coven_cache WHERE namespace=?1 AND chunk!=?2 RETURNING path",
@@ -445,7 +433,7 @@ pub(crate) fn clear_entries(db: &DatabaseConnection, namespace: &str) -> Result<
     Ok(())
 }
 /// Whether a pinned, checked whole copy of this file is on the device.
-pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+pub(crate) fn kept(db: &StoreSql, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND object_path=?2 AND chunk=?4 AND checked_hash=?3)",
@@ -463,11 +451,7 @@ pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbEr
     clippy::map_err_ignore,
     reason = "a size past SQLite's integer is TooLarge, which names the field and size"
 )]
-pub(crate) fn publish(
-    db: &DatabaseConnection,
-    file: &FileRef,
-    name: &FileName,
-) -> Result<bool, DbError> {
+pub(crate) fn publish(db: &StoreSql, file: &FileRef, name: &FileName) -> Result<bool, DbError> {
     let encrypted = coven_format::file::FileHeader::new(file.size()).encrypted_size()?;
     let (_, hash) = stored(file)?;
     let size = i64::try_from(encrypted).map_err(|_| DbError::TooLarge {
@@ -487,14 +471,14 @@ pub(crate) fn publish(
     )?;
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
-    db.execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE])?;
+    db.execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?6)",sqlive::rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE])?;
     Ok(true)
 }
 /// Whether a record here names the stored bytes `file` was taken over. The
 /// cache keeps bytes only while one does (§17.8): the transaction taking
 /// the last such record off them removes their entries, and one publishing
 /// an entry after it would name bytes nothing could read or unpin.
-pub(crate) fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+pub(crate) fn named(db: &StoreSql, file: &FileRef) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_stored_files WHERE namespace=?1 AND object_path=?2)",
         (file.namespace(), object_path_of(file)?),
@@ -504,7 +488,7 @@ pub(crate) fn named(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbE
 /// Delete a file's cache entries and record their names for removal, once
 /// no row names them; returns the names.
 pub(crate) fn remove_entries(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     namespace: &str,
     object: &str,
 ) -> Result<Vec<String>, DbError> {
@@ -527,7 +511,7 @@ fn observation(error: coven_foundation::files::ObservationError) -> DbError {
 
 /// Opening found the cache ranges recorded as being written abandoned:
 /// their records go, once the caller has recorded each for removal.
-pub(crate) fn forget_writes(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn forget_writes(db: &StoreSql) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_cache_writes", [])?;
     Ok(())
 }

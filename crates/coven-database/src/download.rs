@@ -1,5 +1,5 @@
 //! Authenticated, decoded writes at the sync/database boundary.
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_format::write::WriteHeader;
@@ -72,7 +72,7 @@ pub(crate) fn source_wait(result: Result<ApplyOutcome, DbError>) -> Result<Apply
 /// What the write `header` waits for before it applies. Its prefix needs no check: its slot holds its
 /// `read_through` to the slot's `after`, which the caller has applied.
 pub(crate) fn prerequisite(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     call: &StoreCall<'_>,
     header: &WriteHeader,
 ) -> Result<Option<WriteWait>, DbError> {

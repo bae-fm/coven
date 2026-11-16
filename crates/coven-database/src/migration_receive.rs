@@ -1,12 +1,12 @@
 //! Derive received values from the migration's retained schema identities.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{
     migration::MigrationKind, migration_names::MigrationMatch, schema::Schema, DbError, Migration,
     OldWrites, RowChange,
 };
 use coven_format::write::WritePart;
-use rusqlite::params;
+use sqlive::rusqlite::params;
 use std::collections::BTreeMap;
 
 pub(crate) struct ReceivedMigration {
@@ -17,7 +17,7 @@ pub(crate) struct ReceivedMigration {
 }
 
 pub(crate) fn retain(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     version: u32,
     before: &Schema,
     after: &Schema,
@@ -34,20 +34,20 @@ pub(crate) fn retain(
 }
 
 pub(crate) fn read(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     migrations: &[Migration],
 ) -> Result<BTreeMap<u32, ReceivedMigration>, DbError> {
     let steps = db.query(
         "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version",
         [], |r| {
-            let decode = |index| -> rusqlite::Result<serde_json::Value> {
+            let decode = |index| -> sqlive::rusqlite::Result<serde_json::Value> {
                 serde_json::from_slice(&r.get::<_, Vec<u8>>(index)?).map_err(|error|
-                    crate::write_encoding::decode_failure(index, rusqlite::types::Type::Blob, error))
+                    crate::write_encoding::decode_failure(index, sqlive::rusqlite::types::Type::Blob, error))
             };
             let tables = serde_json::from_value(decode(3)?).map_err(|error|
-                crate::write_encoding::decode_failure(3, rusqlite::types::Type::Blob, error))?;
+                crate::write_encoding::decode_failure(3, sqlive::rusqlite::types::Type::Blob, error))?;
             let columns: Vec<((String, String), String)> = serde_json::from_value(decode(4)?).map_err(|error|
-                crate::write_encoding::decode_failure(4, rusqlite::types::Type::Blob, error))?;
+                crate::write_encoding::decode_failure(4, sqlive::rusqlite::types::Type::Blob, error))?;
             Ok((r.get::<_,u32>(0)?, Schema::decode(&r.get::<_,Vec<u8>>(1)?)?,
                 Schema::decode(&r.get::<_,Vec<u8>>(2)?)?, MigrationMatch { tables, columns: columns.into_iter().collect() }))
         },

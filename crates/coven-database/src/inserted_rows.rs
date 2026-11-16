@@ -8,7 +8,7 @@
 //! and every other row keeps the removal it has without them.
 
 use crate::merge_store::MergeStore;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_format::value::Value;
 use coven_merge::{Audience, RowId, RowUpdate};
@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// it. A parent the write doesn't change keeps the removal it had, under which
 /// the app shows it.
 pub(crate) fn unjudged(
-    database: &DatabaseConnection,
+    database: &StoreSql,
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
 ) -> Result<BTreeSet<RowId>, DbError> {

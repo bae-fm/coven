@@ -97,7 +97,7 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
         let reopened = if refuse_cleanup {
             assert!(matches!(opened, Err(crate::OpenError::Database(DbError::FileCleanup { .. }))));
             store.assert_writer_unlocked();
-            let sql = rusqlite::Connection::open(store.database_path()).unwrap();
+            let sql = sqlive::rusqlite::Connection::open(store.database_path()).unwrap();
             assert_eq!(
                 sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r
                     .get::<_, u32>(0))

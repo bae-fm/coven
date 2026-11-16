@@ -11,10 +11,10 @@ use crate::DbError;
 /// database clients, sync's error for sync's writes, and an app's own type
 /// for the app's writes through the facade (E3).
 pub trait WriteFailure:
-    From<DbError> + From<rusqlite::Error> + coven_foundation::task::CarriesBug
+    From<DbError> + From<sqlive::rusqlite::Error> + coven_foundation::task::CarriesBug
 {
     /// Retain a failed rollback alongside the original failure.
-    fn with_rollback(self, rollback: rusqlite::Error) -> Self;
+    fn with_rollback(self, rollback: sqlive::rusqlite::Error) -> Self;
     /// Retain the failed write's error and every failed byte-removal operation.
     fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self
     where
@@ -44,7 +44,7 @@ pub(crate) fn after_cleanup<R, E: WriteFailure>(
 }
 
 impl WriteFailure for DbError {
-    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+    fn with_rollback(self, rollback: sqlive::rusqlite::Error) -> Self {
         Self::Rollback { operation: Box::new(self), rollback }
     }
     fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
@@ -53,7 +53,7 @@ impl WriteFailure for DbError {
 }
 
 impl sqlive::RollbackJoin<StoreFailure, DbError> for DbError {
-    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+    fn with_rollback(self, rollback: sqlive::rusqlite::Error) -> Self {
         WriteFailure::with_rollback(self, rollback)
     }
 }
@@ -82,7 +82,7 @@ impl<E: From<DbError>> From<sqlive::Error<StoreFailure, DbError>> for Hosted<E> 
 }
 
 impl<E: WriteFailure> sqlive::RollbackJoin<StoreFailure, DbError> for Hosted<E> {
-    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+    fn with_rollback(self, rollback: sqlive::rusqlite::Error) -> Self {
         Self(self.0.with_rollback(rollback))
     }
 }

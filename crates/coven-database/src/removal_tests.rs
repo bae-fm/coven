@@ -323,8 +323,8 @@ async fn expression_and_partial_unique_claims_use_sqlite_equality() {
     let before = crate::tests::contents(&db);
     let error = sql(&db, "UPDATE notes SET title='GROCERIES' WHERE id='46'").await.unwrap_err();
     assert!(
-        matches!(error, crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
-        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+        matches!(error, crate::DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(e, _))
+        if e.extended_code == sqlive::rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
         "{error:?}"
     );
     assert_eq!(crate::tests::contents(&db), before);
@@ -461,7 +461,7 @@ async fn a_trigger_cannot_silently_ignore_a_required_restoration() {
         .await;
     assert!(matches!(
         sql(&db, "DELETE FROM notes WHERE id='45'").await,
-        Err(crate::DbError::Sqlite(rusqlite::Error::StatementChangedRows(0)))
+        Err(crate::DbError::Sqlite(sqlive::rusqlite::Error::StatementChangedRows(0)))
     ));
     assert_eq!(records(&db).len(), 2);
     assert_eq!(count(&db, "notes"), 1);

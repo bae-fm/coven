@@ -260,9 +260,7 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     assert!(!statements.is_empty(), "the open must be traced");
-    for crate::sqlite::tests::ProfiledStatement { sql: statement, fullscan_steps: steps, .. } in
-        statements
-    {
+    for sqlive::ProfiledStatement { sql: statement, fullscan_steps: steps, .. } in statements {
         // Metadata enumeration may scan sqlite_schema and pragma virtual
         // tables, and SQLite loads its statistics whole. `PRAGMA optimize`
         // analyzes again only a table SQLite keeps no statistics for, which

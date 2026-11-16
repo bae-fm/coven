@@ -151,7 +151,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
            SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;

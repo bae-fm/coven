@@ -10,8 +10,8 @@ const OBJECTS: &str = "SELECT type,name,sql FROM sqlite_schema
     WHERE type IN ('table','index') AND tbl_name=?1 ORDER BY type,name";
 
 /// A connection outside any store, with the followed tables made on it.
-fn outside_store() -> rusqlite::Connection {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
+fn outside_store() -> sqlive::rusqlite::Connection {
+    let connection = sqlive::rusqlite::Connection::open_in_memory().unwrap();
     for table in followed_tables_sql() {
         connection.execute_batch(table).unwrap();
     }

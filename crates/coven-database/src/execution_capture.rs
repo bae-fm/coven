@@ -13,7 +13,7 @@
 use crate::declaration::AudienceSource;
 use crate::merge_store::MergeStore;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::write_capture::values;
 use crate::write_rows::{
     column_audience, column_name, row_key, target_columns, AppKey, AppValues, AppView,
@@ -26,7 +26,7 @@ use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Tracker<'a> {
-    db: &'a DatabaseConnection,
+    db: &'a StoreSql,
     schema: &'a WriteSchema,
     /// The merge rows as stored before the write.
     store: &'a MergeStore<'a>,
@@ -325,12 +325,12 @@ impl Tracker<'_> {
 /// Every operation of the app phase on a declared table, as steps of the
 /// merge rows they changed: each row's steps, in sequence order.
 pub(crate) fn capture(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
     before: &AppView<'_>,
     after: &AppView<'_>,
-    events: &[crate::sqlite::Operation],
+    events: &[sqlive::Operation],
 ) -> Result<BTreeMap<RowId, Vec<Step>>, DbError> {
     let mut tracker = Tracker {
         db,

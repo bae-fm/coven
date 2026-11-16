@@ -7,14 +7,24 @@ license.workspace = true
 [features]
 # The hooks tests use to make the engine fail, and the counts they read back.
 test-utils = []
+# Trace each statement a connection runs inside `with_profile`, with what
+# SQLite counted of it, for tests of the plans SQLite chose. Tracing slows
+# every statement, so only a crate's own tests turn it on.
+profiles = ["rusqlite/trace"]
 
 [dependencies]
 caught.workspace = true
 futures-lite = { workspace = true, features = ["std"] }
-rusqlite = { workspace = true, features = ["bundled", "functions"] }
+rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true

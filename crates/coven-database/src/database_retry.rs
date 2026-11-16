@@ -200,8 +200,8 @@ impl StoreDatabase {
                 writer.transaction(|db| {
                     #[cfg(any(test, feature = "test-utils"))]
                     if injected {
-                        return Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
-                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                        return Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(
+                            sqlive::rusqlite::ffi::Error::new(sqlive::rusqlite::ffi::SQLITE_IOERR),
                             Some("injected retry end failure".into()),
                         )));
                     }

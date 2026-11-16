@@ -2,7 +2,7 @@
 
 use super::{Mode, StoreDatabase};
 use crate::internal_schema::retry_effect::{self, RetryState};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_foundation::task::CarriesBug;
@@ -430,7 +430,7 @@ impl StoreDatabase {
     /// Write `coven_sync_status` in the step that changes it, on the writer.
     async fn save_sync_status(
         &self,
-        save: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<(), DbError> + Send + 'static,
+        save: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<(), DbError> + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, call| {
@@ -471,7 +471,7 @@ impl StoreDatabase {
         &self,
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
         then: impl FnOnce(RetryState) -> T + Send + 'static,
-        also: fn(&DatabaseConnection) -> Result<(), DbError>,
+        also: fn(&StoreSql) -> Result<(), DbError>,
     ) -> Result<T, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
@@ -592,12 +592,12 @@ impl StoreDatabase {
         &self,
         subject: S,
         checked: F,
-        settled: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<T, DbError> + Send + 'static,
+        settled: impl FnOnce(&StoreSql, &StoreCall<'_>) -> Result<T, DbError> + Send + 'static,
     ) -> Result<Option<T>, DbError>
     where
         S: serde::Serialize + Send + 'static,
         T: Send + 'static,
-        F: Fn(&DatabaseConnection, &StoreCall<'_>, &S) -> Result<bool, DbError> + Send + 'static,
+        F: Fn(&StoreSql, &StoreCall<'_>, &S) -> Result<bool, DbError> + Send + 'static,
     {
         self.call(move |inner| {
             let should_clear = inner.access.with_reader(|db, call| checked(db, call, &subject))?;
@@ -768,8 +768,8 @@ impl StoreDatabase {
                 )
                 .is_ok()
             {
-                return Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                return Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(
+                    sqlive::rusqlite::ffi::Error::new(sqlive::rusqlite::ffi::SQLITE_IOERR),
                     Some("injected applied slot read failure".into()),
                 )));
             }

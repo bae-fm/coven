@@ -1,6 +1,6 @@
 //! Typed persistence for sync-owned pending values, without depending on providers.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{DbError, OperationId};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
@@ -78,14 +78,16 @@ impl SubjectKey {
     }
 }
 
-impl rusqlite::ToSql for SubjectKey {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+impl sqlive::rusqlite::ToSql for SubjectKey {
+    fn to_sql(&self) -> sqlive::rusqlite::Result<sqlive::rusqlite::types::ToSqlOutput<'_>> {
         self.0.to_sql()
     }
 }
 
-impl rusqlite::types::FromSql for SubjectKey {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+impl sqlive::rusqlite::types::FromSql for SubjectKey {
+    fn column_result(
+        value: sqlive::rusqlite::types::ValueRef<'_>,
+    ) -> sqlive::rusqlite::types::FromSqlResult<Self> {
         Vec::column_result(value).map(Self)
     }
 }
@@ -108,7 +110,7 @@ struct StoredRecord {
     cause: Option<String>,
 }
 impl StoredRecord {
-    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    fn read(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<Self> {
         Ok(Self {
             subject: row.get(0)?,
             value: row.get(1)?,
@@ -121,7 +123,12 @@ impl StoredRecord {
             ) {
                 (Some(work), Some(device), Some(object)) => Some((work, device, object)),
                 (None, None, None) => None,
-                _ => return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Text)),
+                _ => {
+                    return Err(crate::write_encoding::damaged(
+                        4,
+                        sqlive::rusqlite::types::Type::Text,
+                    ))
+                }
             },
             build: u128::from_be_bytes(row.get(7)?),
             moved: row.get(8)?,
@@ -151,22 +158,20 @@ impl StoredRecord {
 
 /// Every record, in the order the records arose, as `coven_pending` lists
 /// them by position.
-pub(crate) fn read<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
+pub(crate) fn read<P: PendingValue>(db: &StoreSql) -> Result<Vec<P>, DbError> {
     Ok(positioned(db)?.into_iter().map(|(_, record)| record).collect())
 }
 
 /// Every record with its place, in the order the records arose, as
 /// `coven_pending.position` names it.
-pub(crate) fn positioned<P: PendingValue>(
-    db: &DatabaseConnection,
-) -> Result<Vec<(i64, P)>, DbError> {
+pub(crate) fn positioned<P: PendingValue>(db: &StoreSql) -> Result<Vec<(i64, P)>, DbError> {
     db.query(&format!("{SELECT} ORDER BY id"), [], StoredRecord::read)?
         .iter()
         .map(|stored| Ok((stored.position, stored.decode::<P>()?)))
         .collect()
 }
 
-pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Result<(), DbError> {
+pub(crate) fn save<P: PendingValue>(db: &StoreSql, record: &P) -> Result<(), DbError> {
     pending_change(db, || {
         let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
@@ -183,7 +188,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
              ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,slot_key=excluded.slot_key,work=excluded.work,device=excluded.device,object=excluded.object,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause
              WHERE value!=excluded.value OR build!=excluded.build OR cause IS NOT excluded.cause",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
+            sqlive::rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
         )?;
         Ok(())
     })
@@ -192,17 +197,17 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
 /// Opening clears every record's cause: a cause names an error the run that
 /// wrote it met, and a later run has met none of its own yet (§19.1). It
 /// runs before any app query observes the database.
-pub(crate) fn forget_causes(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn forget_causes(db: &StoreSql) -> Result<(), DbError> {
     db.execute("UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", [])?;
     Ok(())
 }
 
-pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {
+pub(crate) fn clear<S: Serialize>(db: &StoreSql, subject: &S) -> Result<(), DbError> {
     clear_key(db, &SubjectKey::of(subject)?)
 }
 
 /// Clear the record of a subject already encoded for its key.
-pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result<(), DbError> {
+pub(crate) fn clear_key(db: &StoreSql, subject: &SubjectKey) -> Result<(), DbError> {
     pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE subject=?1", [subject])?;
         Ok(())
@@ -210,7 +215,7 @@ pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result
 }
 
 /// Clear the record of the move `id`, whatever it says.
-pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(), DbError> {
+pub(crate) fn clear_move(db: &StoreSql, id: crate::MoveId) -> Result<(), DbError> {
     pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
         Ok(())
@@ -219,7 +224,7 @@ pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(
 
 /// An operation's retry wait lives only while its condition does: advancing,
 /// finishing or an explicit retry ends both (§6.7).
-pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+pub(crate) fn clear_operation(db: &StoreSql, id: OperationId) -> Result<(), DbError> {
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
     pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
@@ -228,10 +233,7 @@ pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Resul
 }
 
 /// Whether the operation `id` has a pending record.
-pub(crate) fn operation_recorded(
-    db: &DatabaseConnection,
-    id: OperationId,
-) -> Result<bool, DbError> {
+pub(crate) fn operation_recorded(db: &StoreSql, id: OperationId) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE operation=?1)",
         [id.0],
@@ -240,7 +242,7 @@ pub(crate) fn operation_recorded(
 }
 
 pub(crate) fn operation<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     id: OperationId,
 ) -> Result<Option<P>, DbError> {
     db.query(&format!("{SELECT} WHERE operation=?1"), [id.0], StoredRecord::read)?
@@ -250,10 +252,7 @@ pub(crate) fn operation<P: PendingValue>(
 }
 
 /// Whether a subject has a local record.
-pub(crate) fn recorded<S: Serialize>(
-    db: &DatabaseConnection,
-    subject: &S,
-) -> Result<bool, DbError> {
+pub(crate) fn recorded<S: Serialize>(db: &StoreSql, subject: &S) -> Result<bool, DbError> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1)",
         [SubjectKey::of(subject)?],
@@ -262,10 +261,7 @@ pub(crate) fn recorded<S: Serialize>(
 }
 
 /// A subject's stored record, if it has one.
-fn stored<S: Serialize>(
-    db: &DatabaseConnection,
-    subject: &S,
-) -> Result<Option<StoredRecord>, DbError> {
+fn stored<S: Serialize>(db: &StoreSql, subject: &S) -> Result<Option<StoredRecord>, DbError> {
     Ok(db
         .query(
             &format!("{SELECT} WHERE subject=?1"),
@@ -277,14 +273,14 @@ fn stored<S: Serialize>(
 
 /// The current local record for a subject, if any.
 pub(crate) fn find<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     subject: &P::Subject,
 ) -> Result<Option<P>, DbError> {
     stored(db, subject)?.map(|stored| stored.decode()).transpose()
 }
 
 pub(crate) fn retry<P: PendingValue>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     subject: &P::Subject,
 ) -> Result<bool, DbError> {
@@ -299,7 +295,7 @@ pub(crate) fn retry<P: PendingValue>(
 /// Make every record one `build` recorded, as a store opened by another
 /// build of coven finds the records an earlier one wrote.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbError> {
+pub(crate) fn set_build(db: &StoreSql, build: u128) -> Result<(), DbError> {
     pending_change(db, || {
         db.execute("UPDATE _coven_pending SET build=?1", [build.to_be_bytes()])?;
         Ok(())
@@ -329,7 +325,7 @@ fn stored_slot_key<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
 }
 
 /// An applied reset clears data-related observations permanently (§19.4).
-pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn reset(db: &StoreSql) -> Result<(), DbError> {
     pending_change(db, || {
         db.execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
         Ok(())
@@ -337,7 +333,7 @@ pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 /// Kept progress removes only this installation's condition, in its transaction.
-pub(crate) fn clear_slot(db: &DatabaseConnection, slot: coven_merge::Slot) -> Result<(), DbError> {
+pub(crate) fn clear_slot(db: &StoreSql, slot: coven_merge::Slot) -> Result<(), DbError> {
     pending_change(db, || {
         for covered in [false, true] {
             db.execute("DELETE FROM _coven_pending WHERE slot_key=?1", [slot_key(slot, covered)])?;
@@ -348,7 +344,7 @@ pub(crate) fn clear_slot(db: &DatabaseConnection, slot: coven_merge::Slot) -> Re
 
 /// Snapshot coverage that passes a waiting write ends that
 /// wait in the same transaction. Verdicts on a write's bytes remain (§19.1).
-pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn clear_covered_slots(db: &StoreSql) -> Result<(), DbError> {
     let waiting = db.query(
         "SELECT slot_key FROM _coven_pending WHERE slot_key>=?1 AND slot_key<?2",
         ([COVERED_SLOT].as_slice(), [COVERED_SLOT + 1].as_slice()),
@@ -370,7 +366,7 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
 }
 
 pub(crate) fn pending_change<T>(
-    sql: &DatabaseConnection,
+    sql: &StoreSql,
     run: impl FnOnce() -> Result<T, DbError>,
 ) -> Result<T, DbError> {
     run().map_err(|error| pending_failure(sql, error))
@@ -379,8 +375,8 @@ pub(crate) fn pending_change<T>(
 /// A transaction on `sql` that saves pending state: a failure fails the
 /// handle, so every later call reports it.
 pub(crate) fn state_transaction<T>(
-    sql: &mut DatabaseConnection,
-    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
+    sql: &mut StoreSql,
+    run: impl FnOnce(&StoreSql) -> Result<T, DbError>,
 ) -> Result<T, DbError> {
     let result = sql.transaction(run);
     result.map_err(|error| pending_failure(sql, error))
@@ -388,7 +384,7 @@ pub(crate) fn state_transaction<T>(
 
 /// Fail the handle `sql` serves when saving pending state failed, so every
 /// later call reports it.
-fn pending_failure(sql: &DatabaseConnection, error: DbError) -> DbError {
+fn pending_failure(sql: &StoreSql, error: DbError) -> DbError {
     if matches!(error, DbError::StatePersistence(_)) {
         return error;
     }

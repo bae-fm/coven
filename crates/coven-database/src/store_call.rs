@@ -26,6 +26,10 @@ pub(crate) struct StoreCall<'a> {
 pub(crate) struct TestRecords {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::sync::Mutex<Option<crate::test_utils::WorkCounter>>,
+    /// Where a test hears of each point a write passes, coven's and
+    /// sqlive's (`test_on_write_checkpoint`).
+    #[cfg(any(test, feature = "test-utils"))]
+    write_checkpoints: std::sync::Arc<std::sync::Mutex<Option<WriteCheckpoints>>>,
     /// Each queued write's record and judgement, also of a refused one, for
     /// tests of its classification.
     #[cfg(test)]
@@ -39,6 +43,8 @@ impl TestRecords {
         Self {
             #[cfg(any(test, feature = "test-utils"))]
             work: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-utils"))]
+            write_checkpoints: std::sync::Arc::default(),
             #[cfg(test)]
             judged: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -58,7 +64,41 @@ impl TestRecords {
             counter.record(update);
         }
     }
+
+    /// Call `callback` at each point a write on `writer` passes from now on:
+    /// sqlive's as it commits, and coven's after.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn on_write_checkpoint(
+        &self,
+        writer: &crate::sqlite::StoreSql,
+        callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
+    ) {
+        *coven_foundation::locks::lock_unpoisoned(&self.write_checkpoints) =
+            Some(Box::new(callback));
+        let checkpoints = std::sync::Arc::clone(&self.write_checkpoints);
+        writer.on_commit_point(move |point| {
+            if let Some(callback) = coven_foundation::locks::lock_unpoisoned(&checkpoints).as_ref()
+            {
+                callback(point.into());
+            }
+        });
+    }
+
+    /// Tell the test's callback, if any, that a write passed `point`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn write_checkpoint(&self, point: crate::test_utils::WriteCheckpoint) {
+        if let Some(callback) =
+            coven_foundation::locks::lock_unpoisoned(&self.write_checkpoints).as_ref()
+        {
+            callback(point);
+        }
+    }
 }
+
+/// What a test hears each point a write passes with. A callback that panics
+/// leaves the slot whole, so it is taken as it is.
+#[cfg(any(test, feature = "test-utils"))]
+type WriteCheckpoints = Box<dyn Fn(crate::test_utils::WriteCheckpoint) + Send>;
 
 /// Run `run` with the state of one call on a connection that serves no open
 /// store's calls: no device, and test records of its own.
@@ -82,6 +122,22 @@ impl<'a> StoreCall<'a> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::StoreWork)) {
         self.tests.record_work(update);
+    }
+
+    /// Tell the test's callback, if any, that a write passed `point`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn write_checkpoint(&self, point: crate::test_utils::WriteCheckpoint) {
+        self.tests.write_checkpoint(point);
+    }
+
+    /// Call `callback` at each point a write on `writer` passes from now on.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn on_write_checkpoint(
+        &self,
+        writer: &crate::sqlite::StoreSql,
+        callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
+    ) {
+        self.tests.on_write_checkpoint(writer, callback);
     }
 
     /// The last queued write's record and judgement, also of a refused one.

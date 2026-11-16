@@ -1,4 +1,4 @@
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::sql;
 use crate::{
@@ -73,18 +73,18 @@ fn reindexed(database: &StoreDatabase) -> Vec<String> {
     })
 }
 
-fn rows(connection: &DatabaseConnection, sql: &str) -> Vec<String> {
+fn rows(connection: &StoreSql, sql: &str) -> Vec<String> {
     connection.query(sql, [], |row| row.get(0)).unwrap()
 }
 
-fn plan(connection: &DatabaseConnection, sql: &str) -> String {
+fn plan(connection: &StoreSql, sql: &str) -> String {
     connection
         .query(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get::<_, String>(3))
         .unwrap()
         .join("; ")
 }
 
-fn integrity(connection: &DatabaseConnection) -> Vec<String> {
+fn integrity(connection: &StoreSql) -> Vec<String> {
     rows(connection, "PRAGMA integrity_check")
 }
 
@@ -284,8 +284,8 @@ async fn a_rebuild_a_unique_index_refuses_changes_nothing() {
     sql(&database, "INSERT INTO words VALUES ('rock'),('Rock')").await.unwrap();
     database.close().await.unwrap();
     match open(&store, TAGS, caseless).await.err().map(database_error) {
-        Some(DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))) => {
-            assert_eq!(failure.code, rusqlite::ErrorCode::ConstraintViolation)
+        Some(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(failure, _))) => {
+            assert_eq!(failure.code, sqlive::rusqlite::ErrorCode::ConstraintViolation)
         }
         error => panic!("expected the unique index to refuse, received {error:?}"),
     }
@@ -308,7 +308,7 @@ fn recorded_library(database: &StoreDatabase) -> Vec<i64> {
 }
 
 /// [`recorded_library`] as `connection` reads it.
-fn recorded_library_in(connection: &DatabaseConnection) -> Vec<i64> {
+fn recorded_library_in(connection: &StoreSql) -> Vec<i64> {
     connection
         .query(
             "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
@@ -328,7 +328,7 @@ fn a_new_database_records_the_sqlite_that_created_it() {
         crate::database::coven_only(&directory.path().join("new.db"), false, None).unwrap();
     let connection = &mut connection;
     crate::schema_preparation::prepare_internal_schema(connection).unwrap();
-    assert_eq!(recorded_library_in(connection), [i64::from(rusqlite::version_number())]);
+    assert_eq!(recorded_library_in(connection), [i64::from(sqlive::rusqlite::version_number())]);
 }
 
 /// Ana's app indexes each score as text. SQLite 3.53 writes a third as
@@ -340,7 +340,7 @@ fn a_new_database_records_the_sqlite_that_created_it() {
 /// SQLite's version, so the open after that rebuilds nothing.
 #[tokio::test]
 async fn a_new_sqlite_version_rebuilds_every_expression_index() {
-    let library = i64::from(rusqlite::version_number());
+    let library = i64::from(sqlive::rusqlite::version_number());
     let store = TestStore::new();
     let database = open(&store, SCORED_WORDS, SqlFunctions::default()).await.unwrap();
     assert_eq!(recorded_library(&database), [library]);
@@ -378,7 +378,7 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_sql_versions SELECT CASE i%2 WHEN 0 THEN 'collation' ELSE 'function' END,'name_' || i,i FROM fixture;",
     )

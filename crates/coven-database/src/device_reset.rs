@@ -1,12 +1,12 @@
 //! This installation's completed replacement notice, and the record that it
 //! stopped because another installation uses its device id (§19.3).
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 use coven_foundation::files::DeviceReset;
 use coven_merge::Slot;
 
-pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<DeviceReset>, DbError> {
+pub(crate) fn read(database: &StoreSql) -> Result<Option<DeviceReset>, DbError> {
     Ok(database
         .query(
             "SELECT old_device,new_device FROM _coven_device_reset WHERE singleton=1",
@@ -17,7 +17,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<DeviceReset>,
         .next())
 }
 
-pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Result<(), DbError> {
+pub(crate) fn record(database: &StoreSql, reset: &DeviceReset) -> Result<(), DbError> {
     database.execute(
         "INSERT INTO _coven_device_reset(singleton,old_device,new_device) VALUES(1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET old_device=excluded.old_device,
@@ -30,7 +30,7 @@ pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Resu
 /// Record the slot that showed another installation using this device's id.
 /// The first record stays: a later pass finding the same evidence changes
 /// nothing.
-pub(crate) fn record_in_use(database: &DatabaseConnection, slot: Slot) -> Result<(), DbError> {
+pub(crate) fn record_in_use(database: &StoreSql, slot: Slot) -> Result<(), DbError> {
     database.execute(
         "INSERT INTO _coven_device_id_in_use(singleton,slot) VALUES(1,?1)
          ON CONFLICT(singleton) DO NOTHING",
@@ -41,7 +41,7 @@ pub(crate) fn record_in_use(database: &DatabaseConnection, slot: Slot) -> Result
 
 /// The slot this installation recorded when it stopped on another
 /// installation's use of its device id, if it did.
-pub(crate) fn read_in_use(database: &DatabaseConnection) -> Result<Option<Slot>, DbError> {
+pub(crate) fn read_in_use(database: &StoreSql) -> Result<Option<Slot>, DbError> {
     let found = database.query(
         "SELECT slot FROM _coven_device_id_in_use WHERE singleton=1",
         [],

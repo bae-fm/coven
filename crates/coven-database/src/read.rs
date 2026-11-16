@@ -1,9 +1,9 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::{database, DbError, LostValue, Mode, StoreDatabase, Writer};
 use coven_foundation::task::CarriesBug;
-use rusqlite::{Params, Row};
+use sqlive::rusqlite::{Params, Row};
 use std::{
     any::Any,
     future::Future,
@@ -14,30 +14,30 @@ use std::{
 /// SQL access to one read-only snapshot. The connection and internal tables
 /// remain private; even SQL with RETURNING cannot write through this context.
 pub struct SqlReadContext<'connection> {
-    database: &'connection DatabaseConnection,
+    database: &'connection StoreSql,
 }
 
 impl<'connection> SqlReadContext<'connection> {
-    pub(crate) fn new(database: &'connection DatabaseConnection) -> Self {
+    pub(crate) fn new(database: &'connection StoreSql) -> Self {
         Self { database }
     }
 
     /// Map the first result row of an ordinary SQL read.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
-        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.database.app_query_row(crate::sqlite::Recorded::Yes, sql, params, map)
+        self.database.app_query_row(sqlive::Recorded::Yes, sql, params, map)
     }
 
     /// Map all result rows of an ordinary SQL read.
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<Vec<T>>
     where
         P: Params,
-        F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.database.app_query(crate::sqlite::Recorded::Yes, sql, params, map)
+        self.database.app_query(sqlive::Recorded::Yes, sql, params, map)
     }
 
     /// The journal's rows of `kind`, oldest first, as this read sees them:

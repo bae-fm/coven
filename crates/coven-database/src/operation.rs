@@ -1,7 +1,7 @@
 //! Durable operation records. Sync owns kinds and interprets their data (§11).
 
 use crate::operation_kind::{INVITE, PAIRING};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::DbError;
 
 /// The local, never reused identity of an operation.
@@ -80,7 +80,7 @@ pub struct OperationUpdate {
     pub data: Vec<u8>,
 }
 
-pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<OperationId, DbError> {
+pub(crate) fn insert(db: &StoreSql, new: &NewOperation) -> Result<OperationId, DbError> {
     let id = db.query_row("INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
         (&new.kind, &new.data, &new.started_by), |r| Ok(OperationId(r.get(0)?)))?;
     if new.pauses_writes {
@@ -95,7 +95,7 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
 /// it: listed in `coven_operations` from this write's commit until the app
 /// acknowledges its outcome.
 pub(crate) fn insert_for_app(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     new: &NewOperation,
     kind: &str,
 ) -> Result<OperationId, DbError> {
@@ -108,7 +108,7 @@ pub(crate) fn insert_for_app(
 /// it did: in `coven_operations` until the app acknowledges it. An invite
 /// ends this way when a refusal only a person can fix ends it (§13.2).
 pub(crate) fn list_outcome(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     id: OperationId,
     kind: &str,
     outcome: &crate::OperationOutcome,
@@ -124,7 +124,7 @@ pub(crate) fn list_outcome(
 /// `coven_operations`. One still running fails with `OperationRunning`;
 /// one this device doesn't list, never journaled by the app or
 /// acknowledged already, with `OperationUnknown`.
-pub(crate) fn acknowledge(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+pub(crate) fn acknowledge(db: &StoreSql, id: OperationId) -> Result<(), DbError> {
     let finished: Option<bool> = db
         .query(
             "SELECT outcome IS NOT NULL FROM _coven_app_operations WHERE operation=?1",
@@ -143,14 +143,14 @@ pub(crate) fn acknowledge(db: &DatabaseConnection, id: OperationId) -> Result<()
 }
 
 /// Whether a self-replacement pauses this device's writes (§12.3).
-pub(crate) fn writes_paused(db: &DatabaseConnection) -> Result<bool, DbError> {
+pub(crate) fn writes_paused(db: &StoreSql) -> Result<bool, DbError> {
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| {
         r.get(0)
     })?)
 }
 
 /// Refuse an app write while a self-replacement pauses writes (§12.3).
-pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn check_write_pause(db: &StoreSql) -> Result<(), DbError> {
     if writes_paused(db)? {
         return Err(DbError::MemberKeysChanging);
     }
@@ -161,7 +161,7 @@ pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> 
 /// preparation takes a fresh one, so an abandoned attempt's path is never
 /// reused, and §19.3's identity check compares stored snapshots with the
 /// greatest number reserved, published or not.
-pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZeroU64, DbError> {
+pub(crate) fn reserve_snapshot(db: &StoreSql) -> Result<std::num::NonZeroU64, DbError> {
     let number = db.query_row(
         "UPDATE _coven_snapshot_reservation SET number=number+1 WHERE singleton=1 RETURNING number",
         [],
@@ -170,7 +170,7 @@ pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZ
     u64::try_from(number).ok().and_then(std::num::NonZeroU64::new).ok_or(DbError::DamagedDatabase)
 }
 
-pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbError> {
+pub(crate) fn read(db: &StoreSql) -> Result<Vec<OperationRecord>, DbError> {
     Ok(db.query(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id",
         [],
@@ -178,10 +178,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbEr
     )?)
 }
 
-pub(crate) fn of_kind(
-    db: &DatabaseConnection,
-    kind: &str,
-) -> Result<Vec<OperationRecord>, DbError> {
+pub(crate) fn of_kind(db: &StoreSql, kind: &str) -> Result<Vec<OperationRecord>, DbError> {
     Ok(db.query(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id",
         [kind],
@@ -189,10 +186,7 @@ pub(crate) fn of_kind(
     )?)
 }
 
-pub(crate) fn find(
-    db: &DatabaseConnection,
-    id: OperationId,
-) -> Result<Option<OperationRecord>, DbError> {
+pub(crate) fn find(db: &StoreSql, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
     Ok(db
         .query(
             "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE id=?1",
@@ -202,10 +196,7 @@ pub(crate) fn find(
         .pop())
 }
 
-pub(crate) fn first(
-    db: &DatabaseConnection,
-    kind: &str,
-) -> Result<Option<OperationRecord>, DbError> {
+pub(crate) fn first(db: &StoreSql, kind: &str) -> Result<Option<OperationRecord>, DbError> {
     Ok(db.query(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id LIMIT 1",
         [kind],
@@ -213,7 +204,7 @@ pub(crate) fn first(
     )?.pop())
 }
 
-fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
+fn record(row: &sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<OperationRecord> {
     Ok(OperationRecord {
         id: OperationId(row.get(0)?),
         kind: row.get(1)?,
@@ -223,7 +214,7 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
     })
 }
 
-pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {
+pub(crate) fn advance(db: &StoreSql, update: &OperationUpdate) -> Result<(), DbError> {
     let changed = db.execute(
         "UPDATE _coven_operations SET last_step=?1,data=?2 WHERE id=?3 AND last_step=?4",
         (&update.last_step, &update.data, update.id.0, update.previous),
@@ -237,7 +228,7 @@ pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Resu
 /// Put the operation `id` at `step`, keeping its data, unguarded by the step
 /// it was at: a provider-access request moves between its steps as the
 /// account's row says (§14.2).
-pub(crate) fn set_step(db: &DatabaseConnection, id: OperationId, step: u32) -> Result<(), DbError> {
+pub(crate) fn set_step(db: &StoreSql, id: OperationId, step: u32) -> Result<(), DbError> {
     db.execute(
         "UPDATE _coven_operations SET last_step=?2 WHERE id=?1 AND last_step!=?2",
         (id.0, step),
@@ -252,7 +243,7 @@ pub(crate) fn set_step(db: &DatabaseConnection, id: OperationId, step: u32) -> R
 /// journal row's end requires; the caller's transaction undoes it when the
 /// operation had already ended.
 pub(crate) fn finish_with_outcome(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     id: OperationId,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
@@ -270,7 +261,7 @@ pub(crate) fn finish_with_outcome(
 /// An operation whose claim is still open never ends: nothing would finish
 /// that claim, and the device, one claim at a time, would claim no slot
 /// again (§5.1).
-pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
+pub(crate) fn finish(db: &StoreSql, id: OperationId) -> Result<usize, DbError> {
     if crate::claim::held_by(db, id)? {
         return Err(DbError::Invariant { what: "an operation ends after its claim" });
     }
@@ -283,7 +274,7 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
 /// stops this installation for good: it removes or replaces this device,
 /// removes its member, or binds its member to a pair it doesn't hold (§12.3,
 /// §14.1). None of them would ever run (`end_for_good`).
-pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn end_on_stop(db: &StoreSql) -> Result<(), DbError> {
     let (running, invites) = journaled_for_good(db)?;
     if running.is_empty() && invites.is_empty() {
         return Ok(());
@@ -303,10 +294,7 @@ pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
 /// and pending records go, and it leaves `coven_invites` (§13.2). A pairing's
 /// row goes the same way; it started nothing, and its request or handover is
 /// left to the gone device's marker sweep (§13.2, §14.1).
-pub(crate) fn end_for_good(
-    db: &DatabaseConnection,
-    stop: crate::DeviceStop,
-) -> Result<(), DbError> {
+pub(crate) fn end_for_good(db: &StoreSql, stop: crate::DeviceStop) -> Result<(), DbError> {
     if stop == crate::DeviceStop::Copied {
         return Err(DbError::Invariant { what: "a copy's stop records its slot (end_for_copy)" });
     }
@@ -317,10 +305,7 @@ pub(crate) fn end_for_good(
 /// `end_for_good` for a copy that found another installation using its
 /// device id at `slot`: the same transaction records the stop, which stays
 /// until a reset replaces the installation or the store is deleted (§19.3).
-pub(crate) fn end_for_copy(
-    db: &DatabaseConnection,
-    slot: coven_merge::Slot,
-) -> Result<(), DbError> {
+pub(crate) fn end_for_copy(db: &StoreSql, slot: coven_merge::Slot) -> Result<(), DbError> {
     let (running, invites) = journaled_for_good(db)?;
     end(db, crate::DeviceStop::Copied, running, invites)?;
     crate::device_reset::record_in_use(db, slot)
@@ -328,9 +313,7 @@ pub(crate) fn end_for_copy(
 
 /// The app's operations still running, and the journal rows of invites and
 /// of the operations invites started, and of pairings.
-fn journaled_for_good(
-    db: &DatabaseConnection,
-) -> Result<(Vec<OperationId>, Vec<OperationId>), DbError> {
+fn journaled_for_good(db: &StoreSql) -> Result<(Vec<OperationId>, Vec<OperationId>), DbError> {
     let running = db.query(
         "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
         [],
@@ -345,7 +328,7 @@ fn journaled_for_good(
 }
 
 fn end(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     stop: crate::DeviceStop,
     running: Vec<OperationId>,
     invites: Vec<OperationId>,
@@ -368,7 +351,7 @@ fn end(
 
 /// How the applied state stops this installation for good, if it does. One
 /// whose device isn't registered yet hasn't started.
-pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceStop>, DbError> {
+pub(crate) fn stopped(db: &StoreSql) -> Result<Option<crate::DeviceStop>, DbError> {
     use crate::DeviceState::{Active, Replaced};
     let held: bool =
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", [], |r| r.get(0))?;
@@ -408,7 +391,7 @@ pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceSto
 
 /// Record member pairs this installation holds, or is about to keep.
 pub(crate) fn hold_keys(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     keys: &[coven_crypto::MemberPublicKeys],
 ) -> Result<(), DbError> {
     for pair in keys {

@@ -2,7 +2,7 @@
 
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{DbError, SyncedTable};
 use coven_merge::ForeignKey;
@@ -23,7 +23,7 @@ pub(crate) struct WriteSchema {
 
 impl WriteSchema {
     pub(crate) fn read(
-        db: &DatabaseConnection,
+        db: &StoreSql,
         call: &StoreCall<'_>,
         declarations: Vec<SyncedTable>,
     ) -> Result<Self, DbError> {
@@ -311,7 +311,7 @@ impl WriteSchema {
 /// transaction. Failure rolls back their temporary tables with that
 /// transaction; success removes them before returning.
 pub(crate) fn with_evaluators<R>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     run: impl FnOnce() -> Result<R, DbError>,
 ) -> Result<R, DbError> {
@@ -322,7 +322,7 @@ pub(crate) fn with_evaluators<R>(
 /// holds, by table name: a schema no open declares, such as the one a
 /// migration run starts from.
 pub(crate) fn with_rule_evaluators<R>(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &Schema,
     rules: &BTreeMap<String, TableRules>,
     run: impl FnOnce() -> Result<R, DbError>,
@@ -342,15 +342,12 @@ pub(crate) fn with_rule_evaluators<R>(
 
 /// Create the one-row tables in which `db` evaluates each synced table's
 /// removal rules and column affinities under `schema`.
-pub(crate) fn prepare_evaluators(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-) -> Result<(), DbError> {
+pub(crate) fn prepare_evaluators(db: &StoreSql, schema: &WriteSchema) -> Result<(), DbError> {
     prepare_rule_evaluators(db, &schema.schema, &schema.rules)
 }
 
 fn prepare_rule_evaluators(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &Schema,
     rules: &BTreeMap<String, TableRules>,
 ) -> Result<(), DbError> {

@@ -6,7 +6,7 @@ use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_preparation::PreparedSnapshot;
-use crate::sqlite::DatabaseConnection;
+use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
@@ -14,8 +14,8 @@ use crate::write_schema::WriteSchema;
 use crate::{DbError, LoadStep};
 use coven_foundation::progress::ProgressReport;
 use coven_merge::{Audience, RowId};
-use rusqlite::types::ToSqlOutput;
-use rusqlite::{params, params_from_iter};
+use sqlive::rusqlite::types::ToSqlOutput;
+use sqlive::rusqlite::{params, params_from_iter};
 use sqlive::sql::identifier;
 
 /// The passes installing makes over each snapshot's tables, one table at a
@@ -28,7 +28,7 @@ pub(crate) const TABLE_PASSES: u64 = 3;
 /// what installing works out from them: the rows shown before, those the
 /// removal rules start from and reach, the app rows changed, the keys whose
 /// lost values the install replaced, and what those rows protect.
-pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
+pub(crate) fn create_tables(db: &StoreSql, schema: &WriteSchema) -> Result<(), DbError> {
     for table in &SnapshotLayout::new(schema).tables {
         db.batch(&table.create_installed(schema))?;
     }
@@ -50,7 +50,7 @@ pub(crate) fn create_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Re
 }
 
 /// Drop the install's tables whole.
-pub(crate) fn drop_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
+pub(crate) fn drop_tables(db: &StoreSql, schema: &WriteSchema) -> Result<(), DbError> {
     for table in &SnapshotLayout::new(schema).tables {
         db.batch(&format!("DROP TABLE {}", table.installed()))?;
     }
@@ -65,7 +65,7 @@ pub(crate) fn drop_tables(db: &DatabaseConnection, schema: &WriteSchema) -> Resu
 /// Copy `select`'s rows from the staged tables into the writer with
 /// `insert`, which takes each row's columns as its parameters, in order.
 fn copy(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     prepared: &PreparedSnapshot<'_>,
     select: &str,
     insert: &str,
@@ -74,7 +74,7 @@ fn copy(
         let count = row.as_ref().column_count();
         let values = (0..count)
             .map(|i| row.get_ref(i).map(ToSqlOutput::Borrowed))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<sqlive::rusqlite::Result<Vec<_>>>()?;
         db.execute(insert, params_from_iter(values))?;
         Ok(())
     })
@@ -84,7 +84,7 @@ fn copy(
 /// given as SQLite stores them: a column a cell sets takes the cell's value,
 /// any other its default.
 pub(crate) fn copy_rows(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     prepared: &PreparedSnapshot<'_>,
     layout: &SnapshotLayout,
     progress: &mut ProgressReport<LoadStep>,
@@ -130,8 +130,8 @@ pub(crate) fn copy_rows(
     )
 }
 
-fn exists<P: rusqlite::Params>(
-    db: &DatabaseConnection,
+fn exists<P: sqlive::rusqlite::Params>(
+    db: &StoreSql,
     sql: &str,
     params: P,
 ) -> Result<bool, DbError> {
@@ -143,7 +143,7 @@ fn exists<P: rusqlite::Params>(
 /// cells and per reference for their parents. The audience's records were
 /// deleted first, so nothing conflicts.
 pub(crate) fn persist_rows(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     call: &StoreCall<'_>,
     layout: &SnapshotLayout,
     audience: &Audience,
@@ -216,7 +216,7 @@ pub(crate) fn persist_rows(
 /// its column. A row its author took out, with a live rules loss, keeps its
 /// cells as written, whatever the columns became since.
 pub(crate) fn finish(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     layout: &SnapshotLayout,
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
@@ -262,7 +262,7 @@ pub(crate) fn finish(
 /// the one the device holds, and an original the device holds must be the
 /// same bytes. The snapshot's verdicts and stop slots replace the device's.
 pub(crate) fn sources(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     prepared: &PreparedSnapshot<'_>,
     audience: &Audience,
 ) -> Result<(), DbError> {
@@ -304,7 +304,7 @@ pub(crate) fn sources(
 
 /// Whether the snapshot carries the source record of this change.
 pub(crate) fn carried(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     write: &[u8],
     audience: &Audience,
     table: &str,
@@ -319,10 +319,7 @@ pub(crate) fn carried(
 
 /// The audience's creations, after `ownership::clear_audience` removed its
 /// earlier ones.
-pub(crate) fn creations(
-    db: &DatabaseConnection,
-    prepared: &PreparedSnapshot<'_>,
-) -> Result<(), DbError> {
+pub(crate) fn creations(db: &StoreSql, prepared: &PreparedSnapshot<'_>) -> Result<(), DbError> {
     copy(
         db,
         prepared,
@@ -336,7 +333,7 @@ pub(crate) fn creations(
 
 /// The merged values of an installed row: each value its cells give.
 pub(crate) fn values(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &crate::schema::Schema,
     row: &RowId,
 ) -> Result<AppValues, DbError> {
@@ -359,7 +356,7 @@ pub(crate) fn values(
         |r| {
             let mut values = AppValues::new();
             for (j, name) in layout.columns.iter().enumerate() {
-                if r.get_ref(1 + 2 * j)? != rusqlite::types::ValueRef::Null {
+                if r.get_ref(1 + 2 * j)? != sqlive::rusqlite::types::ValueRef::Null {
                     values.insert(name.clone(), value(r.get_ref(2 * j)?)?);
                 }
             }
@@ -371,7 +368,7 @@ pub(crate) fn values(
 /// The installed rows of `audience` holding `value` for the unique
 /// constraint `unique`, as SQLite reads their merged values.
 pub(crate) fn claim_holders(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &crate::schema::Schema,
     table: &crate::schema::TableSchema,
     unique: &crate::removal_schema::UniqueSql,
@@ -386,7 +383,7 @@ pub(crate) fn claim_holders(
         .map(|(n, expression)| format!("({expression})=?{}", n + 2))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let mut parameters = vec![rusqlite::types::Value::from(audience)];
+    let mut parameters = vec![sqlive::rusqlite::types::Value::from(audience)];
     parameters.extend(value.iter().map(sql_value));
     Ok(db.query(
         &format!(
@@ -406,7 +403,7 @@ pub(crate) fn claim_holders(
 /// Each coordinates value of the audience's file records, as the snapshot
 /// gives it.
 pub(crate) fn file_locations(
-    db: &DatabaseConnection,
+    db: &StoreSql,
     schema: &WriteSchema,
     audience: &Audience,
     mut visit: impl FnMut(&coven_format::value::Value) -> Result<(), DbError>,

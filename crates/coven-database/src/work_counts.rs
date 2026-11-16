@@ -39,19 +39,6 @@ pub struct WorkCounts {
     pub lookup_steps: usize,
 }
 
-/// The work a connection counts: its commits, its reads of the schema
-/// cookie, and the steps of the statements it runs for the app and for live
-/// queries' lookups.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ConnectionWork {
-    pub(crate) commits: usize,
-    pub(crate) cookie_reads: usize,
-    pub(crate) app_read_steps: usize,
-    pub(crate) app_read_statements: usize,
-    pub(crate) app_write_steps: usize,
-    pub(crate) lookup_steps: usize,
-}
-
 /// The work coven counts beside its connections'.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct StoreWork {
@@ -67,7 +54,7 @@ pub(crate) struct StoreWork {
 /// Injected counter; clones observe the same database, never other test databases.
 #[derive(Clone)]
 pub struct WorkCounter {
-    connections: Arc<Mutex<ConnectionWork>>,
+    connections: sqlive::ConnectionWorkCounter,
     store: Arc<Mutex<StoreWork>>,
 }
 
@@ -75,14 +62,14 @@ impl WorkCounter {
     /// A counter no database has counted on yet, for a test to give one.
     pub fn new() -> Self {
         Self {
-            connections: Arc::new(Mutex::new(ConnectionWork::default())),
+            connections: sqlive::ConnectionWorkCounter::new(),
             store: Arc::new(Mutex::new(StoreWork::default())),
         }
     }
 
     /// Start another measurement after the preceding work has completed.
     pub fn take(&self) -> WorkCounts {
-        let connections = std::mem::take(&mut *lock_unpoisoned(&self.connections));
+        let connections = self.connections.take();
         let store = std::mem::take(&mut *lock_unpoisoned(&self.store));
         WorkCounts {
             writer_holds: store.writer_holds,
@@ -98,9 +85,9 @@ impl WorkCounter {
         }
     }
 
-    /// Count work a connection did.
-    pub(crate) fn record_connection(&self, update: impl FnOnce(&mut ConnectionWork)) {
-        update(&mut lock_unpoisoned(&self.connections));
+    /// Have `connection` count its work here from now on.
+    pub(crate) fn track(&self, connection: &crate::sqlite::StoreSql) {
+        connection.test_track_work(self.connections.clone());
     }
 
     /// Count work coven did beside its connections.

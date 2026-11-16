@@ -477,7 +477,7 @@ async fn a_claim_finishes_when_a_write_it_landed_lost_its_entry() {
 
 /// Fill the forgetting tables for the plan audit, inside its transaction
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_forgotten VALUES(1,counter(1),1);
          INSERT INTO _coven_unnamed_writes SELECT i FROM fixture;",
