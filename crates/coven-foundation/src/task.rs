@@ -18,7 +18,7 @@ mod in_flight;
 
 pub use ::caught::{
     catching_operation, caught, caught_sync, panic_message, report, Bug, BugKind, BugSink,
-    BugSinkRef, SourceLocation,
+    BugSinkRef, CarriesBug, SourceLocation,
 };
 
 /// Name the step the blocking operation running on this thread has reached.
@@ -242,34 +242,6 @@ impl Drop for HeardBugs {
         if !untaken.is_empty() && !std::thread::panicking() {
             panic!("coven reported bugs no test took: {untaken:?}");
         }
-    }
-}
-
-/// An error that may carry a bug: work its call ran panicked, and the call's
-/// error says so (E15). Work nobody waits for reports the bug its error
-/// carries, as it reports its own panic.
-pub trait CarriesBug {
-    /// The bug this error carries, itself or through the failure it keeps.
-    fn bug(&self) -> Option<&Bug>;
-}
-
-impl CarriesBug for Bug {
-    fn bug(&self) -> Option<&Bug> {
-        Some(self)
-    }
-}
-
-/// An I/O error carries the bug it was made from, if any.
-impl CarriesBug for std::io::Error {
-    fn bug(&self) -> Option<&Bug> {
-        self.get_ref()?.downcast_ref::<Bug>()
-    }
-}
-
-/// An error that can't happen carries no bug.
-impl CarriesBug for std::convert::Infallible {
-    fn bug(&self) -> Option<&Bug> {
-        match *self {}
     }
 }
 

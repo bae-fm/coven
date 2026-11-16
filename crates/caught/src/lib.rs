@@ -8,8 +8,8 @@
 //! the panic began, which a panic's payload does not hold.
 //!
 //! Work nobody waits for hands its bug to a [`BugSink`] instead, through
-//! [`report`]. [`locks`] holds the helpers that take a lock whose holder
-//! panicked.
+//! [`report`], and an error that holds a bug says so through [`CarriesBug`].
+//! [`locks`] holds the helpers that take a lock whose holder panicked.
 
 use std::any::Any;
 use std::future::Future;
@@ -132,6 +132,34 @@ pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 pub fn report(bugs: &dyn BugSink, bug: &Bug) {
     if let Err(again) = caught_sync("report a bug", || bugs.report(bug)) {
         tracing::error!(operation = bug.operation, "reporting {bug} panicked: {again}");
+    }
+}
+
+/// An error that may carry a bug: work its call ran panicked, and the call's
+/// error says so. Work nobody waits for reports the bug its error carries, as
+/// it reports its own panic.
+pub trait CarriesBug {
+    /// The bug this error carries, itself or through the failure it keeps.
+    fn bug(&self) -> Option<&Bug>;
+}
+
+impl CarriesBug for Bug {
+    fn bug(&self) -> Option<&Bug> {
+        Some(self)
+    }
+}
+
+/// An I/O error carries the bug it was made from, if any.
+impl CarriesBug for std::io::Error {
+    fn bug(&self) -> Option<&Bug> {
+        self.get_ref()?.downcast_ref::<Bug>()
+    }
+}
+
+/// An error that can't happen carries no bug.
+impl CarriesBug for std::convert::Infallible {
+    fn bug(&self) -> Option<&Bug> {
+        match *self {}
     }
 }
 
