@@ -51,7 +51,7 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::app_policy::CovenPolicy;
 use crate::connection_setup::Setup;
-use crate::observation::{CommitObserver, HandleFailure, HostFailure, UnrecordedTables};
+use crate::observation::{CommitObserver, HandleFailure, UnrecordedTables};
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
@@ -611,7 +611,7 @@ impl Database {
     /// later call and live query fails with `DbError::WallTimer` until the
     /// store is reopened (§13.2).
     pub fn fail_expiry_wait(&self, error: coven_foundation::clock::WallTimerError) {
-        self.observer.fail(HandleFailure::Host(HostFailure::new(StoreFailure::WallTimer(error))));
+        self.observer.fail(HandleFailure::Host(StoreFailure::WallTimer(error)));
     }
 
     /// `first` reports the initial state as a change; `inserted_only`

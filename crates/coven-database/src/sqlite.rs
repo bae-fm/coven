@@ -56,7 +56,7 @@ use crate::authorization::SqlAuthorization;
 use crate::connection_setup::Setup;
 use crate::internal_schema;
 use crate::migration::validate_versions;
-use crate::observation::{CommitObserver, HostFailure};
+use crate::observation::CommitObserver;
 use crate::schema::Schema;
 use crate::store_failure::StoreFailure;
 use crate::{
@@ -493,9 +493,8 @@ impl DatabaseConnection {
         }
         let error = Arc::new(error);
         if let Some(handle) = &self.handle {
-            handle.fail(crate::observation::HandleFailure::Host(HostFailure::new(
-                StoreFailure::State(error.clone()),
-            )));
+            handle
+                .fail(crate::observation::HandleFailure::Host(StoreFailure::State(error.clone())));
         }
         DbError::StatePersistence(error)
     }

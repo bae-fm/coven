@@ -79,25 +79,11 @@ fn inserted(change: &RowChange) -> bool {
     change.column.is_empty() && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
 }
 
-/// A failure the host reported, after which every call fails with it.
-#[derive(Clone, Debug)]
-pub(crate) struct HostFailure(Arc<dyn std::error::Error + Send + Sync>);
-
-impl HostFailure {
-    pub(crate) fn new(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self(Arc::new(error))
-    }
-
-    pub(crate) fn error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-        &*self.0
-    }
-}
-
 /// Why this handle refuses every call until the store is reopened.
 #[derive(Clone)]
 pub(crate) enum HandleFailure {
-    /// A failure the host reported.
-    Host(HostFailure),
+    /// A failure coven reported as the handle's host.
+    Host(StoreFailure),
     /// Rolling back a failed transaction failed, so the writer may still hold
     /// its uncommitted changes.
     Rollback,
@@ -117,7 +103,7 @@ pub(crate) enum HandleFailure {
 impl HandleFailure {
     fn error(&self) -> DbError {
         match self {
-            Self::Host(failure) => StoreFailure::of(failure).error(),
+            Self::Host(failure) => failure.error(),
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
             Self::Statistics(cause) => DbError::StatisticsFailed(cause.clone()),
