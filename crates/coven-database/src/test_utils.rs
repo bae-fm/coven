@@ -65,8 +65,9 @@ pub enum WriteCheckpoint {
 /// A live query's results as a test follows them: each in the order the
 /// query reports it, kept as the latest one seen.
 pub struct Followed<T, E> {
-    /// `None` only while a result is awaited, which a test that gives up
-    /// on it does not come back from.
+    /// `next` takes the query out while it waits for a result and puts it
+    /// back when the result arrives, so this is `None` only after a test
+    /// stops waiting partway.
     query: Option<crate::LiveQuery<T, E>>,
     latest: Option<T>,
 }
@@ -84,7 +85,10 @@ where
     /// The next result the query reports. Panics on an error result or
     /// after the query ends, and when none ever comes.
     pub async fn next(&mut self) -> T {
-        let query = self.query.take().expect("the live query was awaited and abandoned");
+        let query = self
+            .query
+            .take()
+            .expect("a test stopped waiting for this live query's result, so the query is gone");
         let (query, next) = coven_foundation::clock::within(crate::next_result(query))
             .await
             .unwrap_or_else(|| panic!("no result after {:?}", self.latest));

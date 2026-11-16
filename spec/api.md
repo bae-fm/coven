@@ -3634,10 +3634,10 @@ let moved = handle
   the store closed or its handle fails every call, and one that carries a bug,
   as a run that panicked does (E15): after that one, `next_blocking()` returns
   `None`, and never repeats it.
-- A live query's calls block and need no async runtime. `changed()` returns a
-  future that resolves on any executor once a write changed what the query
-  read, a new request came, or the handle failed or closed. `run_changed()`
-  then runs the query once on the calling thread, without waiting.
+- A live query's calls need no async runtime, and only `next_blocking()`
+  waits. `changed()` returns a future that resolves on any executor once a
+  write changed what the query read, a new request came, or the handle failed
+  or closed. `run_changed()` then runs the query once on the calling thread, without waiting.
   `next_blocking()` parks the calling thread until `changed()` would resolve
   and runs the query on it. An async app awaits `changed()` and runs
   `run_changed()` on a blocking thread, which leaves no thread waiting when a
@@ -4134,8 +4134,8 @@ where
     where
         T: Clone + PartialEq;
 
-    /// The first result at once; after that, parks this thread until a write
-    /// changes the result, then runs the query on it and returns the new
+    /// Returns the first result at once; after that, parks this thread until a
+    /// write changes the result, then runs the query on it and returns the new
     /// result. An error is a result too, and doesn't end the query, except the
     /// one saying the store closed, the handle fails every call
     /// (`RollbackFailed`, `StatePersistence`, `CheckpointFailed`,
@@ -4159,8 +4159,8 @@ where
     pub fn runs(&self) -> LiveQueryRuns;
 
     /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next_blocking` runs it again. A commit marks the queries it changes
-    /// as it commits, so this answers at once.
+    /// reads, so `next_blocking` runs it again. A commit marks the queries it
+    /// changes as it commits, so this answers at once.
     #[cfg(feature = "test-utils")]
     pub fn is_marked_for_rerun(&self) -> bool;
 }
@@ -4188,7 +4188,8 @@ where
     pub fn runs(&self) -> LiveQueryRuns;
 
     /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next_blocking` runs it again, answered at once.
+    /// reads, so `next_blocking` runs it again. A commit marks the queries it
+    /// changes as it commits, so this call answers at once.
     #[cfg(feature = "test-utils")]
     pub fn is_marked_for_rerun(&self) -> bool;
 
@@ -4200,10 +4201,10 @@ where
     where
         T: Clone + PartialEq;
 
-    /// As `LiveQuery::next_blocking`: the next result, with the request and
-    /// revision that produced it, and whether a new request, a write, or both
-    /// caused it; `None` after the result saying the store closed or the
-    /// handle failed, or one carrying a bug.
+    /// As `LiveQuery::next_blocking`, returns the next result, with the
+    /// request and revision that produced it and whether a new request, a
+    /// write, or both caused it. Returns `None` after the result saying the
+    /// store closed or the handle failed, or one carrying a bug.
     pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq;
@@ -10378,7 +10379,7 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
   (E6). A test of the app opens the store on its own runtime and ends while
   that wait's query is still reading. The query's next read goes to a blocking
   pool that runs nothing more, and `operation_outcome` fails with a
-  `DbError::Shutdown(Shutdown { operation: "live query", outcome:
+  `SyncError::Shutdown(Shutdown { operation: "live query", outcome:
   ShutdownOutcome::NotRun })`. Had coven panicked there, the test process
   would have aborted.
 - `Shutdown.outcome` says how far the work got, so whether a write took

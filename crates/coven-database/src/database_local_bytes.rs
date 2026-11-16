@@ -179,8 +179,9 @@ type NextBudgets = std::pin::Pin<
 /// The measurements of what the store keeps on this device, as they change.
 pub struct LocalBytesWatch {
     database: Database,
-    /// The next result of the budgets query, in flight until it arrives, so
-    /// a cancelled `next` loses nothing. `None` once the query has ended.
+    /// The pending read of the budgets query's next result, kept until the
+    /// result arrives, so a cancelled `next` loses nothing. The field is
+    /// `None` once the query has ended.
     budgets: Option<NextBudgets>,
     changed: tokio::sync::watch::Receiver<u64>,
 }

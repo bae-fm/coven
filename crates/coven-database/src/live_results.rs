@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 /// The query's next result, with the query to ask again: it waits for
 /// `changed()` on the executor, runs `run_changed` on tokio's blocking pool,
 /// and waits again when a write-caused result equals the last, so no pool
-/// thread waits. `None` once the query has ended (E15). A pool that has begun
-/// shutting down answers `Some(Err(DbError::Shutdown))`, and a panic outside
-/// the run itself answers `Some(Err(DbError::Bug))`.
+/// thread waits. The function returns `None` once the query has ended (E15).
+/// When the pool has begun shutting down, it returns
+/// `Some(Err(DbError::Shutdown))`, and when a panic happens outside the run
+/// itself, it returns `Some(Err(DbError::Bug))`.
 ///
-/// Dropping this future loses the query, since the pool's thread holds it; a
-/// run in flight ends on its own thread, and a bug in its result goes to the
-/// store's bug sink (E15).
+/// Dropping this future loses the query, since the pool's thread holds it. A
+/// run that has already started ends on its own thread, and a bug in its
+/// result goes to the store's bug sink (E15).
 pub async fn next_result<T, E>(
     mut query: LiveQuery<T, E>,
 ) -> (LiveQuery<T, E>, Option<Result<T, E>>)
@@ -29,7 +30,8 @@ where
         query.changed().await;
         let bugs = query.bugs().clone();
         // The slot keeps the query when the pool drops the work unstarted or
-        // the work panics, so either answers with the query.
+        // the work panics, so the function can still return the query in both
+        // cases.
         let slot = Arc::new(Mutex::new(query));
         let held = Arc::clone(&slot);
         let result = blocking_completing(

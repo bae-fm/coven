@@ -410,8 +410,9 @@ impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuer
         self.inner.has_ended()
     }
 
-    /// The first result at once; then only changed results. This thread
-    /// parks until `changed` would resolve, then runs the query on it.
+    /// Returns the first result at once, and after that only results that
+    /// changed. The call parks this thread until `changed` would resolve,
+    /// then runs the query on it.
     /// Errors remain results and don't end the query, except the one
     /// reporting that the store closed, the handle failed or a run's error
     /// carries a bug, as a panic's does: after it, `None`.

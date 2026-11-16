@@ -112,7 +112,9 @@ async fn changed_resolves_for_a_first_run_a_relevant_commit_a_request_and_the_en
     idle.await;
     assert_eq!(query.next_inline().await.unwrap().request, 2);
 
-    // A closed store is a result, and the query's end resolves it again.
+    // Closing the store makes the query deliver a `StoreClosed` error as its
+    // next result. After that result, the future `changed()` returns resolves
+    // at once.
     let idle = Box::pin(query.changed());
     db.close().await.unwrap();
     idle.await;

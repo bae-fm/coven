@@ -152,7 +152,8 @@ impl CommitSubscription {
         self.receiver.borrow().clone()
     }
 
-    /// The state now, marked as seen: `changed` then waits for a later one.
+    /// Returns the current state and marks it as seen, so `changed` waits for a
+    /// later state.
     pub(crate) fn observe(&mut self) -> CommitState {
         self.receiver.borrow_and_update().clone()
     }

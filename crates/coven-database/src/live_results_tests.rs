@@ -37,7 +37,7 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
             .await
             .expect("the pool's one thread is free")
             .unwrap();
-        assert!(!answer.is_finished(), "an equal result was returned");
+        assert!(!answer.is_finished(), "next_result returned an equal result");
         db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
         let (_query, second) = answer.await.unwrap();
         assert!(!second.unwrap().unwrap());
