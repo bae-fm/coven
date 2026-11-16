@@ -142,8 +142,8 @@ impl Drop for PanicsElsewhereWhenDropped {
 }
 
 /// A panic on another thread, while this thread's panic unwinds to its catch,
-/// leaves this thread's catch naming its own: each thread's catch hears only
-/// its own thread's panics.
+/// leaves this thread's catch naming its own: each thread's catch records only
+/// the panics that begin on its own thread.
 #[test]
 fn a_panic_on_another_thread_leaves_this_catch_s_place() {
     let failed = caught_sync("read callback", || -> i32 {
@@ -189,8 +189,8 @@ fn a_panic_handled_inside_a_catch_names_the_catch_s_operation() {
     assert_eq!(*NAMED.lock().unwrap(), [Some("serve a message")]);
 }
 
-/// coven's hook runs in front of the one the app set, which still hears
-/// every panic.
+/// This crate's hook runs before the hook the app set, and the app's hook
+/// still runs for every panic.
 #[test]
 fn the_app_s_own_panic_hook_still_runs() {
     static HEARD: AtomicBool = AtomicBool::new(false);
@@ -203,7 +203,7 @@ fn the_app_s_own_panic_hook_still_runs() {
     }));
     let failed = caught_sync("read callback", || -> i32 { panics("the app's hook hears this") });
     assert_eq!(failed, Err(panicked("read callback", "the app's hook hears this")));
-    assert!(HEARD.load(Ordering::SeqCst), "the app's hook heard the panic");
+    assert!(HEARD.load(Ordering::SeqCst), "the app's hook ran for the panic");
 }
 
 /// A bug code finds without a panic names the line that made it.

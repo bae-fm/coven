@@ -30,8 +30,8 @@ pub struct Bug {
     /// The text the panic carried ([`panic_message`]).
     pub message: String,
     /// Where the bug showed itself: where the panic began, or where the code
-    /// that found the bug made it ([`Bug::new`]). `None` for a panic no catch
-    /// of this crate's saw begin: one that reached a join uncaught
+    /// that found the bug made it ([`Bug::new`]). `None` for a panic that began
+    /// outside this crate's catches: one that reached a join uncaught
     /// ([`bug_of_unlocated`]), or one resumed with
     /// `std::panic::resume_unwind` from a panic elsewhere.
     pub location: Option<SourceLocation>,
@@ -59,8 +59,8 @@ pub enum BugKind {
 }
 
 impl Bug {
-    /// The bug code found in `operation` without a panic, such as state a
-    /// `Drop` finds wrong, located where this is called.
+    /// Make the bug that code found in `operation` without a panic, such as
+    /// state a `Drop` finds wrong. Its location is the caller's.
     #[track_caller]
     pub fn new(operation: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -72,8 +72,8 @@ impl Bug {
     }
 }
 
-/// The bug a panic's `payload` stands for when no catch of this crate saw it
-/// begin, so it names no place in the code.
+/// Make the bug for a panic's `payload` when the panic began outside this
+/// crate's catches, so the bug has no location.
 pub fn bug_of_unlocated(operation: &'static str, payload: Box<dyn Any + Send>) -> Bug {
     bug_of(operation, payload, None)
 }
@@ -92,12 +92,12 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
 
 /// Run `work` inline, catching a panic in any of its polls. For one message of
 /// a long-lived loop: the panic fails that message and the loop serves the
-/// next. Run inline, the work can't be dropped by its runtime, so a panic is
-/// its only failure.
+/// next. The runtime can't drop work that runs inline, so a panic is its
+/// only failure.
 ///
-/// After a panic `work` is dropped at once, inside a catch of its own, so a
-/// drop that panics on what the first panic left behind does not unwind into
-/// the caller either.
+/// After a panic, `caught` drops `work` at once, inside a catch of its own, so
+/// a drop that panics on what the first panic left behind does not unwind
+/// into the caller either.
 pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -> Result<T, Bug> {
     Caught { operation, work: Some(Box::pin(work)) }.await
 }
@@ -110,10 +110,10 @@ pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Resu
     location::catch_located(operation, work).map_err(|(payload, at)| bug_of(operation, payload, at))
 }
 
-/// The bug a caught panic's `payload`, begun at `location`, stands for. The
-/// payload is dropped here inside a catch of its own: a payload whose `Drop`
-/// panics would otherwise unwind out of the helper that caught the first
-/// panic.
+/// Make the bug for a caught panic's `payload`, which began at `location`.
+/// This function drops the payload inside a catch of its own: a payload whose
+/// `Drop` panics would otherwise unwind out of the helper that caught the
+/// first panic.
 fn bug_of(
     operation: &'static str,
     payload: Box<dyn Any + Send>,
@@ -124,8 +124,7 @@ fn bug_of(
     if bug.location.is_none() {
         tracing::warn!(
             operation,
-            "{bug}, where no catch of this crate's saw the panic begin, so its bug names no place \
-             in the code"
+            "{bug}: the panic began outside this crate's catches, so the bug has no location"
         );
     }
     if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {

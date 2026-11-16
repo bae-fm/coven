@@ -1,9 +1,10 @@
 //! Taking a lock whose holder may have panicked.
 //!
-//! A panic while a `Mutex` is held, or an `RwLock` is held for writing,
-//! poisons it: std's way of saying the value may be half-changed. These
-//! helpers are for a lock whose every change is whole before anything in it
-//! can panic, so a poisoned lock holds a whole value and is used as it is. A
+//! A panic in a thread that holds a `Mutex`, or holds an `RwLock` for
+//! writing, poisons the lock: std's way of saying the value may be
+//! half-changed. These helpers are for a lock whose every change is whole
+//! before anything in it can panic, so the caller uses the poisoned lock's
+//! value as it is. A
 //! lock whose change can leave half-made state needs a different answer, which
 //! its owner chooses.
 
@@ -25,8 +26,8 @@ pub fn write_unpoisoned<T: ?Sized>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> 
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The value of `mutex`, whose value no panic can leave half-changed, as it
-/// goes.
+/// Return the value of `mutex`, which no panic can leave half-changed, and
+/// consume the mutex.
 pub fn into_unpoisoned<T>(mutex: Mutex<T>) -> T {
     mutex.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
