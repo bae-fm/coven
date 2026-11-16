@@ -13977,7 +13977,10 @@ the same on any platform.
    `<name>_tests.rs` files, each crate's `tests/` directory, files only test
    modules declare, and every item that compiles only into tests: under
    `cfg(test)`, or under a Cargo feature only tests turn on, such as the
-   fakes' `test-utils` (F.5). The policy lists those features. A test may
+   fakes' `test-utils` (F.5). The policy lists those features. The test
+   module F.2's rule places in `<name>_tests.rs` is one under `cfg(test)`
+   alone: a module under such a feature is test support that other crates
+   use, and it stays where its crate keeps it. A test may
    assemble its own graph (F.3) from raw material, and nothing outside tests
    can reach what it builds.
    The checker expands each of coven's own `macro_rules!` where it is invoked,
