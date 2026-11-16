@@ -45,9 +45,8 @@ struct PolicyState {
 /// them: the ones statements created or dropped, by schema and name in
 /// lowercase, or every table after one that altered a table, since a
 /// renamed table's new name never reaches the authorizer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) enum ChangedTables {
-    #[default]
     None,
     Named(BTreeSet<(String, String)>),
     All,
@@ -174,7 +173,7 @@ impl CovenPolicy {
     /// The tables whose hidden rowids may have changed since this was last
     /// asked, which the caller now reads again.
     pub(crate) fn take_changed_tables(&self) -> ChangedTables {
-        std::mem::take(&mut lock_unpoisoned(&self.state).changed_tables)
+        std::mem::replace(&mut lock_unpoisoned(&self.state).changed_tables, ChangedTables::None)
     }
 
     /// Of the tables `read`, or every table when `None`, those whose hidden
