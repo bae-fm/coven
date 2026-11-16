@@ -1,6 +1,7 @@
-//! Live queries over the scopes sqlive judges: a write outside a query's
-//! scope wakes nothing, and one inside it does (§4). Each module covers one
-//! part of the scope judging, with the store's live queries and writes.
+//! These tests check that the store reruns no live query after a write
+//! outside the query's scope, and reruns it after a write inside the scope
+//! (§4). Each module covers one part of the scope judging, with the store's
+//! live queries and writes.
 
 #[path = "live_judging_tests/derived.rs"]
 mod derived;

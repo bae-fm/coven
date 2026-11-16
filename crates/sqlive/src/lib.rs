@@ -1,9 +1,9 @@
 //! What a live query's statements read, and the rows each read depends on.
 //!
-//! A statement's SQL is parsed into the conditions that narrow each table it
-//! reads, and a read set records the tables, columns and rows a run read. A
-//! commit's row changes are then judged against a read set to tell whether the
-//! run's result could have changed.
+//! sqlive parses a statement's SQL into the conditions that narrow each table
+//! it reads, and a read set records the tables, columns and rows a run read.
+//! sqlive then judges a commit's row changes against a read set to tell whether
+//! the run's result could have changed.
 
 mod derived;
 mod from_item;

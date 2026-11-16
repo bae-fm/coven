@@ -96,8 +96,9 @@ fn a_conditions_truth_compared_with_a_value_binds_as_sqlite_compares() {
     }
 }
 
-/// A condition on both sides of nothing coven narrows by stays whole: a
-/// truth compared with an expression, an IN, or a condition of conditions.
+/// coven does not narrow the scope when the true or false result of a
+/// condition is compared with an expression, an IN list, or conditions
+/// joined with AND.
 #[test]
 fn other_truths_narrow_nothing() {
     let connection = Connection::open_in_memory().unwrap();

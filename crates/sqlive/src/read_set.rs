@@ -6,8 +6,8 @@ use crate::scope_lookup::{Judging, Lookups};
 use crate::sql_value::SqlValue;
 use std::collections::{BTreeSet, HashMap};
 
-/// Past this many row changes to one table, a write keeps that the table
-/// changed instead of each row, so its memory stays bounded; every live
+/// Past this many row changes to one table, a write records only that the
+/// table changed, not each row, so its memory stays bounded; every live
 /// query that reads the table then runs again.
 pub const ROWS_PER_TABLE: usize = 10_000;
 
@@ -99,9 +99,10 @@ pub fn affected(
     Ok(false)
 }
 
-/// The questions one judging asked, by lookup and value, or by condition
-/// and values, so rows sharing a value, and a row's old and new images that
-/// agree on the columns a condition names, ask once.
+/// The answers to the lookups `affected` has run, keyed by lookup and value
+/// or by condition and values. Rows that share a value, and a row's old and
+/// new images that agree on the columns a condition names, share one run of
+/// the lookup.
 #[derive(Default)]
 pub struct Answers {
     partners: HashMap<(usize, ValueKey), bool>,

@@ -22,7 +22,7 @@ pub enum RowScope {
     Compare {
         /// The tested column, lowercase.
         column: String,
-        /// The value the column is compared with.
+        /// The value the scope compares the column with.
         value: Value,
         /// The order the column's value has to `value`.
         ordering: Ordering,
