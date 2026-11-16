@@ -45,25 +45,31 @@ const KEPT_CHANGES: [&str; 12] = [
 impl DatabaseConnection {
     /// A statement as prepared, or what the authorizer refused in the app's
     /// triggers it compiles.
-    pub(super) fn trigger_judged<T>(&self, prepared: rusqlite::Result<T>) -> Result<T, DbError> {
+    pub(crate) fn trigger_judged<T>(&self, prepared: rusqlite::Result<T>) -> Result<T, DbError> {
         Ok(self.authorization.app_result(prepared)?)
     }
 
-    /// Refuse the app's triggers on the tables they may follow that do what
-    /// app SQL may not: write coven's tables, read them other than through
-    /// its views, or call what only those views may, and that write synced
-    /// tables, since a pin, a move, a queued file, the sync status, the retry
-    /// effect and what a trigger keeps of a file's record are this device's
-    /// alone.
-    /// Coven changes these tables in its own statements, and as it applies
-    /// merged rows of `coven_files`; the authorizer judges the app's
-    /// triggers alike in both. Preparing each change, without running it,
-    /// compiles every trigger it would fire, and those they fire in turn.
-    pub(crate) fn check_followed_triggers(&self) -> Result<(), DbError> {
+    /// Prepare `sql` as coven's own statement, compiling every trigger it
+    /// would fire, and those they fire in turn, without running it.
+    pub(crate) fn prepare(&self, sql: &str) -> rusqlite::Result<()> {
         let _scope = self.authorization.internal();
-        for change in FILE_CHANGES.iter().chain(&KEPT_CHANGES).chain(&STATUS_CHANGES) {
-            self.trigger_judged(self.connection.prepare(change))?;
-        }
-        Ok(())
+        self.connection.prepare(sql).map(drop)
     }
+}
+
+/// Refuse the app's triggers on the tables they may follow that do what
+/// app SQL may not: write coven's tables, read them other than through
+/// its views, or call what only those views may, and that write synced
+/// tables, since a pin, a move, a queued file, the sync status, the retry
+/// effect and what a trigger keeps of a file's record are this device's
+/// alone.
+/// Coven changes these tables in its own statements, and as it applies
+/// merged rows of `coven_files`; the authorizer judges the app's
+/// triggers alike in both. Preparing each change, without running it,
+/// compiles every trigger it would fire, and those they fire in turn.
+pub(crate) fn check_followed_triggers(sql: &DatabaseConnection) -> Result<(), DbError> {
+    for change in FILE_CHANGES.iter().chain(&KEPT_CHANGES).chain(&STATUS_CHANGES) {
+        sql.trigger_judged(sql.prepare(change))?;
+    }
+    Ok(())
 }

@@ -3,6 +3,7 @@
 use crate::lost::LossTarget;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
 use coven_format::{
@@ -25,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// app's change would make it something else.
 pub(crate) fn merge(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
     device: DeviceId,
@@ -41,7 +43,7 @@ pub(crate) fn merge(
                 // A stale query must not delete a restored or re-created row.
                 // Only an owned row's owner may delete it; queueing judges that (§9.6).
                 if old.loss.is_some() && old.state.generation() == *generation {
-                    deletes.insert(row.clone(), deletion(database, store, &old.state)?);
+                    deletes.insert(row.clone(), deletion(database, call, store, &old.state)?);
                 }
             }
             LossTarget::Acknowledgements(dismissals) => {
@@ -53,7 +55,7 @@ pub(crate) fn merge(
             }
         }
     }
-    cascade_deletes(database, schema, store, device, &mut deletes)?;
+    cascade_deletes(database, call, schema, store, device, &mut deletes)?;
     let after = coven_format::write::Step::after(steps.values().flatten());
     for (row, mut change) in deletes {
         if changes.contains_key(&row) || steps.contains_key(&row) {
@@ -154,11 +156,13 @@ fn dismisses(dismissal: &Dismissal, loss: &coven_format::loss::Loss) -> bool {
 /// The delete of a row, as this device authors it from its merged state.
 pub(crate) fn deletion(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     state: &RowState<Value>,
 ) -> Result<RowChange, DbError> {
     crate::write_sources::authored(
         database,
+        call,
         store,
         state.row().clone(),
         Change { generation: state.generation(), operation: Operation::Delete },
@@ -170,13 +174,19 @@ pub(crate) fn deletion(
 /// references that let every receiver verify the actions (§9.6).
 fn cascade_deletes(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     store: &MergeStore<'_>,
     device: DeviceId,
     changes: &mut BTreeMap<RowId, RowChange>,
 ) -> Result<(), DbError> {
-    let mut owners =
-        crate::judge::Owners::new(database, schema, device, database.schema_version()?)?;
+    let mut owners = crate::judge::Owners::new(
+        database,
+        call,
+        schema,
+        device,
+        crate::transaction_constants::schema_version(database, call)?,
+    )?;
     let mut roots = Vec::new();
     for row in changes.keys() {
         roots.push((owners.foreign_owner(row)?.is_some(), row.clone()));
@@ -219,7 +229,7 @@ fn cascade_deletes(
                         if let std::collections::btree_map::Entry::Vacant(entry) =
                             changes.entry(child.clone())
                         {
-                            entry.insert(deletion(database, store, &state)?);
+                            entry.insert(deletion(database, call, store, &state)?);
                         }
                         // Finish this root's cascade before trying another
                         // selected row as a direct target.
@@ -254,6 +264,7 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
 /// whose losses it changed, whose file protection the caller refreshes.
 pub(crate) fn apply(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     record: &WriteRecord,
 ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
     let mut affected = BTreeSet::new();
@@ -283,7 +294,7 @@ pub(crate) fn apply(
                 _ => false,
             };
             if keep {
-                crate::loss_record::put(database, &loss, Some(id))?;
+                crate::loss_record::put(database, call, &loss, Some(id))?;
             } else {
                 crate::loss_record::delete(database, id)?;
             }

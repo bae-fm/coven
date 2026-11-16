@@ -29,7 +29,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
     for db in [&a, &b] {
         TestStore::register(db, a_store.device(), 1);
         TestStore::register(db, b_store.device(), 1);
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             let state = crate::store_state_tables::read(writer).unwrap();
             writer
                 .transaction(|writer| crate::store_state_tables::replace(writer, &state))
@@ -80,7 +80,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
             .is_err());
         assert_eq!(contents(&b), original);
     }
-    b.inspect_writer(|db|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
+    b.inspect_writer(|db, _|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
     let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
         Ok(db.query("SELECT value FROM notes ORDER BY audience", [], |r| r.get::<_, i64>(0))?)
     });
@@ -270,7 +270,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         a.receive(records(&b)[0].clone().into()).await.unwrap();
         let circle = frames(&b, audience).await;
         let history = |db: &Database| {
-            db.inspect_writer(|db|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
+            db.inspect_writer(|db, _|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
         };
         let child_history = history(&b);
         sql(&c, "DELETE FROM parents WHERE id='parent'").await.unwrap();
@@ -712,7 +712,7 @@ async fn a_late_edit_after_a_snapshot_load_revives_no_deleted_generation() {
     load(&b, Audience::Store, snapshot).await;
     b.receive(late.into()).await.unwrap();
     let title = |db: &Database| {
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0)).unwrap()
         })
     };

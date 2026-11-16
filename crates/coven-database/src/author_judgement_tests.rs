@@ -127,7 +127,7 @@ fn refused_for(error: DbError, table: &str, owner: u8) {
 }
 
 pub(crate) fn value(db: &Database, sql: &'static str) -> Option<String> {
-    db.inspect_writer(|c| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
+    db.inspect_writer(|c, _| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
 /// Ben deleting his track cascades to Ana's review and on to her comment:
@@ -163,7 +163,7 @@ async fn direct_targets_of_another_members_rows_refuse_the_whole_transaction() {
     ] {
         refused_for(sql(&pair.ben, attempt).await.unwrap_err(), "reviews", ANA);
         // The refusal is the verdict every receiver gives that row.
-        let (_, judgement) = pair.ben.inspect_writer(|c| c.take_judged().unwrap());
+        let (_, judgement) = pair.ben.inspect_writer(|_, call| call.take_judged().unwrap());
         let review = judgement
             .rows
             .iter()
@@ -279,9 +279,9 @@ async fn local_admission_matches_the_model() {
         assert_eq!(committed.is_ok(), expected, "{statement}: {committed:?}");
         let operations = Classified::last(&pair.ben);
         let (mut input, ids) =
-            pair.ben.inspect_writer_schema(|_, schema| effects(schema, &operations, true));
+            pair.ben.inspect_writer_schema(|_, _, schema| effects(schema, &operations, true));
         // Owners as the rolled-back database holds them; a new row is Ben's.
-        let rows: Vec<_> = pair.ben.inspect_writer(|c| {
+        let rows: Vec<_> = pair.ben.inspect_writer(|c, _| {
             ids.rows
                 .iter()
                 .map(|(row, id)| {
@@ -556,7 +556,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     owners.close().await.unwrap();
     refused_for(db.dismiss_lost_values(&removed).await.unwrap_err(), "labels", owner);
     let creation =
-        |db: &Database| db.inspect_writer(|c| crate::ownership::creation(c, &row).unwrap());
+        |db: &Database| db.inspect_writer(|c, _| crate::ownership::creation(c, &row).unwrap());
     let created = creation(&db);
     assert!(created.is_some());
     db.close().await.unwrap();
@@ -629,7 +629,7 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
     let record = records(&pair.ben).pop().unwrap();
     deliver(&pair.ben, &pair.ana).await;
     let verdicts = |db: &Database| {
-        db.inspect_writer(|c| {
+        db.inspect_writer(|c, _| {
             record
                 .parts
                 .iter()
@@ -722,9 +722,9 @@ async fn a_derived_change_the_schema_doesnt_make_refuses_the_authors_write() {
     // The note's net change sets its album where the delete's action set it NULL.
     let forged = album_kept(&genuine);
     let note = store_row("notes", "n");
-    let refused = pair.ben.inspect_writer_schema(|db, schema| {
+    let refused = pair.ben.inspect_writer_schema(|db, call, schema| {
         db.batch("SAVEPOINT judged").unwrap();
-        let result = judge_own_write(db, schema, &forged);
+        let result = judge_own_write(db, call, schema, &forged);
         db.batch("ROLLBACK TO judged; RELEASE judged").unwrap();
         result
     });
@@ -747,7 +747,7 @@ async fn the_author_judges_its_write_without_reading_it_back() {
     )
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let reads = statements
         .iter()
         .filter(|s| {
@@ -829,7 +829,7 @@ async fn a_record_naming_a_generated_column_is_refused() {
             ),
             "{case}: {refused:?}"
         );
-        let shown: String = pair.ana.inspect_writer(|db| {
+        let shown: String = pair.ana.inspect_writer(|db, _| {
             db.query_row("SELECT shown FROM notes", [], |r| r.get(0)).unwrap()
         });
         assert_eq!(shown, "a", "{case}");

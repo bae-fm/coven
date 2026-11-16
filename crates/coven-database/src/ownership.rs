@@ -8,6 +8,7 @@
 //! losses, so none of them can change it.
 
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
@@ -43,11 +44,12 @@ pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Cr
 /// decides about them (§9.6).
 pub(crate) fn offer_part(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     part: &coven_format::write::WritePart,
 ) -> Result<(), DbError> {
     for change in &part.rows {
-        offer_change(db, header, change)?;
+        offer_change(db, call, header, change)?;
     }
     Ok(())
 }
@@ -57,6 +59,7 @@ pub(crate) fn offer_part(
 /// creation keeps the original change's own names.
 pub(crate) fn offer_change(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
 ) -> Result<(), DbError> {
@@ -69,7 +72,7 @@ pub(crate) fn offer_change(
         db,
         header.schema_version,
         &change.row.table,
-        db.schema_version()?,
+        crate::transaction_constants::schema_version(db, call)?,
     )?
     else {
         return Ok(());
@@ -82,7 +85,7 @@ pub(crate) fn offer_change(
     // Counted state is installed before the queue. An established creation
     // therefore stays selected when later slots or local originals arrive.
     let creation = Creation { write: header.position, creator };
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_creations(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(table_name,key,audience) DO NOTHING",
         params![
@@ -104,7 +107,7 @@ pub(crate) const LOADED: &str =
 /// Put back the creation the counted projection kept of `row`, if it kept
 /// one (`published`).
 pub(crate) fn restore_published(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
     )?;
@@ -114,7 +117,7 @@ pub(crate) fn restore_published(db: &DatabaseConnection, row: &RowId) -> Result<
 /// Forget `row`'s creation, which a restoration puts back from what the
 /// counted projection kept.
 pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
     )?;
@@ -123,7 +126,7 @@ pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbE
 
 /// Forget an audience's creations before a loaded snapshot supplies them.
 pub(crate) fn clear_audience(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_creations WHERE audience=?1", [audience])?;
+    db.execute("DELETE FROM _coven_creations WHERE audience=?1", [audience])?;
     Ok(())
 }
 
@@ -167,16 +170,13 @@ pub(crate) fn owner_table(schema: &crate::write_schema::WriteSchema, table: &str
 
 /// Carry an audience's creations across a table rename (§18.4).
 pub(crate) fn rename(db: &DatabaseConnection, from: &str, to: &str) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_creations SET table_name=?2 WHERE table_name=?1",
-        params![from, to],
-    )?;
+    db.execute("UPDATE _coven_creations SET table_name=?2 WHERE table_name=?1", params![from, to])?;
     Ok(())
 }
 
 /// Forget a dropped table's creations.
 pub(crate) fn forget_table(db: &DatabaseConnection, table: &str) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_creations WHERE table_name=?1", [table])?;
+    db.execute("DELETE FROM _coven_creations WHERE table_name=?1", [table])?;
     Ok(())
 }
 

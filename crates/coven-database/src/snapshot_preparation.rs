@@ -1,8 +1,9 @@
 //! A staged snapshot's write evidence authenticated before installation, and
 //! its staged tables read back without decoding the snapshot again.
+use crate::sqlite::DatabaseConnection;
 use crate::{
     authorship::Authorship, snapshot_error::invalid, snapshot_metadata::SnapshotMetadata,
-    sqlite::DatabaseConnection, write_metadata::MetadataFailure, DbError,
+    write_metadata::MetadataFailure, DbError,
 };
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use std::collections::VecDeque;

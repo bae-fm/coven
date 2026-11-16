@@ -56,7 +56,7 @@ impl FileDatabase {
     /// Whether a checked whole copy of this stored file is kept here, pinned.
     pub async fn kept(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
-        self.read(move |db| super::cache::kept(db, &file)).await
+        self.read(move |db, _| super::cache::kept(db, &file)).await
     }
 }
 

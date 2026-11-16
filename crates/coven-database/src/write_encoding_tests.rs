@@ -93,7 +93,7 @@ async fn clock_and_counter_limits_roll_back_without_using_a_number() {
         Err(DbError::ClockOutOfRange)
     ));
     assert_eq!(records(&database).len(), 2);
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         assert_eq!(
             db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0)).unwrap(),
             "Hardware store"
@@ -313,7 +313,7 @@ fn timestamp_json(timestamp: Timestamp) -> Value {
 }
 
 fn latest(db: &Database) -> Timestamp {
-    db.inspect_writer(|db| crate::write_encoding::latest_timestamp(db).unwrap().unwrap())
+    db.inspect_writer(|db, _| crate::write_encoding::latest_timestamp(db).unwrap().unwrap())
 }
 
 #[tokio::test]
@@ -476,7 +476,7 @@ async fn queued_row_frames_pin_operation_tags_and_delete_field_omission() {
     for statement in ["INSERT INTO t VALUES('k',1)", "UPDATE t SET v=2", "DELETE FROM t"] {
         sql(&db, statement).await.unwrap();
     }
-    let records: Vec<Vec<u8>> = db.inspect_writer(|db| {
+    let records: Vec<Vec<u8>> = db.inspect_writer(|db, _| {
         db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |row| row.get(0)).unwrap()
     });
     // D5 frames: insert tag 0/new id+v; update tag 1/new v; delete tag 2/old
@@ -572,7 +572,7 @@ async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen()
     let store = TestStore::new();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH - Duration::from_secs(1)));
     let db = open(&store, &clock).await;
-    assert!(db.inspect_writer(|sql| super::latest_timestamp(sql).unwrap()).is_none());
+    assert!(db.inspect_writer(|sql, _| super::latest_timestamp(sql).unwrap()).is_none());
     sql(&db, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
     let first = records(&db).pop().unwrap().header.timestamp;
     assert_eq!((first.milliseconds(), first.counter()), (0, 0));

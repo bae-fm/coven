@@ -4,6 +4,7 @@
 //! change's verdict.
 
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::loss::AuthorizationFailure;
@@ -14,12 +15,14 @@ use coven_format::write::WriteRecord;
 /// and record each change's verdict otherwise.
 pub(crate) fn judge_own_write(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     record: &WriteRecord,
 ) -> Result<(), DbError> {
-    let judgement = crate::judge::judge(database, schema, crate::judge::Originals::Held(record))?;
+    let judgement =
+        crate::judge::judge(database, call, schema, crate::judge::Originals::Held(record))?;
     #[cfg(test)]
-    database.judged((record.clone(), judgement.clone()));
+    call.judged((record.clone(), judgement.clone()));
     // A refused action follows from its root, so name a refused direct
     // change first: a row the app's own SQL changed.
     let refused = judgement
@@ -44,7 +47,7 @@ pub(crate) fn judge_own_write(
         } else {
             ChangeVerdict::Applied
         };
-        crate::write_sources::admit(database, &record.header, row, &verdict)?;
+        crate::write_sources::admit(database, call, &record.header, row, &verdict)?;
     }
     Ok(())
 }

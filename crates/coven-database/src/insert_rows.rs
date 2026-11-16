@@ -1,6 +1,7 @@
 //! Statements that insert many rows at once, a chunk of rows to each.
 
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 
 /// The most parameters one statement takes.
 pub(crate) const PARAMETERS: usize = 32_766;

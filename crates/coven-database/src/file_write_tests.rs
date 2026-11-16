@@ -73,29 +73,23 @@ pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
 pub(crate) async fn complete_uploads(db: &Database) {
     let owner = crate::FileDatabase::new(db.clone());
     // Uploads no file waits for too: their attempts end the same way.
-    let ids = db.inspect_writer(|sql| {
-        sql.query("SELECT id FROM _coven_file_uploads ORDER BY id", [], |r| r.get::<_, i64>(0))
-            .unwrap()
-    });
+    let uploads = "SELECT id FROM _coven_file_uploads ORDER BY id";
+    let ids = db.inspect_writer(|c, _| c.query(uploads, [], |r| r.get::<_, i64>(0)).unwrap());
     for id in ids {
         owner.complete_upload(id, ()).await.unwrap();
     }
 }
 
 pub(crate) fn local_count(db: &Database, table: &str) -> i64 {
-    db.inspect_writer(|sql| {
-        sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    db.inspect_writer(|c, _| {
+        c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
 }
 
 /// Whether this device has a record of `file`.
 pub(crate) fn has_record(db: &Database, file: FileId) -> bool {
-    db.inspect_writer(|sql| {
-        sql.query_row("SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1)", [file], |r| {
-            r.get(0)
-        })
-        .unwrap()
-    })
+    let record = "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1)";
+    db.inspect_writer(|c, _| c.query_row(record, [file], |r| r.get(0)).unwrap())
 }
 
 #[tokio::test]
@@ -167,8 +161,8 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
     assert_eq!(reference.size(), LENGTH as u64);
     assert_eq!(reference.place(), FilePlace::DeviceOnly { device: store.device() });
     let prepared = prepare_user_file(&paths[0], &lease().await, |_| {}).await.unwrap();
-    let hash: Vec<u8> = db.inspect_writer(|sql| {
-        sql.query_row("SELECT hash FROM _coven_file_uploads", [], |r| r.get(0)).unwrap()
+    let hash: Vec<u8> = db.inspect_writer(|c, _| {
+        c.query_row("SELECT hash FROM _coven_file_uploads", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(hash, prepared.hashes.content.as_bytes());
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
@@ -731,10 +725,8 @@ async fn two_rows_share_a_file_and_it_stays_until_both_go() {
     assert_eq!(changes, [("coven_files", true), ("files", false)]);
     // Its stored bytes stay while the write naming them waits to publish.
     let candidate = || {
-        db.inspect_writer(|sql| {
-            sql.query_row("SELECT count(*) FROM _coven_file_candidates", [], |r| r.get::<_, i64>(0))
-                .unwrap()
-        })
+        let candidates = "SELECT count(*) FROM _coven_file_candidates";
+        db.inspect_writer(|c, _| c.query_row(candidates, [], |r| r.get::<_, i64>(0)).unwrap())
     };
     assert_eq!(candidate(), 0);
     crate::tests::publish(&db).await.unwrap();

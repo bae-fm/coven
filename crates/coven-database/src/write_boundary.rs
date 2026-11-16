@@ -97,7 +97,7 @@ pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Resu
     };
     let entry = boundary.entry();
     let snapshot = boundary.snapshot();
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
          VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",
         params![
@@ -134,7 +134,7 @@ pub(crate) fn record_coverage(
     if previous.1 {
         return Ok(false);
     }
-    database.internal_execute(
+    database.execute(
         "UPDATE _coven_boundaries SET included=?2,applied=1 WHERE slot=?1",
         params![coverage.boundary.entry().get().to_be_bytes().as_slice(), included],
     )?;
@@ -169,7 +169,7 @@ pub(crate) fn replace(
             _ => None,
         })
         .collect();
-    database.internal_execute("DELETE FROM _coven_boundaries", [])?;
+    database.execute("DELETE FROM _coven_boundaries", [])?;
     for boundary in &boundaries {
         record_coverage(database, boundary)?;
     }

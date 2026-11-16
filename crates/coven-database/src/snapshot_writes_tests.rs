@@ -47,7 +47,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     ));
     assert_eq!(contents(&b), original);
     assert!(!query.is_marked_for_rerun());
-    b.inspect_writer(|db| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
+    b.inspect_writer(|db, _| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
     b.load_snapshots::<crate::pending::tests::Record, _>(
         crate::tests::reload(
             &b,
@@ -67,7 +67,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     .unwrap();
     assert_eq!(records(&b), waiting);
     assert!(!query.is_marked_for_rerun());
-    b.inspect_writer(|db| db.batch("DROP TRIGGER refuse_waiting").unwrap());
+    b.inspect_writer(|db, _| db.batch("DROP TRIGGER refuse_waiting").unwrap());
     drop(query);
     for duplicate in [false, true] {
         let mut supplied = vec![stream(&missing)];

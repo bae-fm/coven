@@ -1,6 +1,7 @@
 //! Resolve a file still on this device only to its one local byte source.
 
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::task::{Bug, CarriesBug};
 use coven_foundation::{

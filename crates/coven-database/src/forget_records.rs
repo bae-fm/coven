@@ -7,8 +7,10 @@
 //! stopped; once every device that can still write has written past that
 //! slot, and this device's queued writes read past it, its record goes.
 
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, encoded};
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::DbError;
 use coven_format::merge_fields;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, RowId, RowState, Slot, WriteId};
@@ -70,6 +72,7 @@ fn current(state: &RowState<coven_format::value::Value>) -> BTreeSet<WriteId> {
 /// kept record says so.
 pub(crate) fn stopped(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     write: WriteId,
     before: &RowState<coven_format::value::Value>,
     after: &RowState<coven_format::value::Value>,
@@ -78,7 +81,7 @@ pub(crate) fn stopped(
     let after = current(after);
     for writer in current(before) {
         if writer != write && !after.contains(&writer) {
-            stop(db, writer, before.row(), slot)?;
+            stop(db, call, writer, before.row(), slot)?;
         }
     }
     Ok(())
@@ -86,8 +89,14 @@ pub(crate) fn stopped(
 
 /// Record that `writer`'s change at `row`, named as the row is now, stopped
 /// being current at `slot`.
-fn stop(db: &DatabaseConnection, writer: WriteId, row: &RowId, slot: Slot) -> Result<(), DbError> {
-    let Some((_, table)) = crate::write_sources::kept_part(db, writer, row)? else {
+fn stop(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    writer: WriteId,
+    row: &RowId,
+    slot: Slot,
+) -> Result<(), DbError> {
+    let Some((_, table)) = crate::write_sources::kept_part(db, call, writer, row)? else {
         // A migration write another raise replaced, or one a loaded
         // snapshot covers without its part: no history holds its changes,
         // so there is no record to mark (§9.5).
@@ -116,7 +125,7 @@ pub(crate) fn stopped_at(
     key: &[u8],
     slot: Slot,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_authored_changes SET stop=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4 AND stop IS NULL",
         params![
             encoded(merge_fields::encode_write_id(&write))?,
@@ -140,7 +149,7 @@ pub(crate) fn none_current(
 ) -> Result<(), DbError> {
     let id = encoded(merge_fields::encode_write_id(&write))?;
     for audience in audiences {
-        db.internal_execute(
+        db.execute(
             "UPDATE _coven_authored_changes SET stop=?3 WHERE write_id=?1 AND audience=?2 AND stop IS NULL",
             params![id, audience, slot.get().to_be_bytes().as_slice()],
         )?;
@@ -155,14 +164,18 @@ pub(crate) fn none_current(
 /// (`forget_entries`). Run in the transaction that applies a slot, after its
 /// writes are judged; it deletes only what nothing can name, so no state is
 /// wrong before it runs.
-pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), DbError> {
+pub(crate) fn forget(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    writers: &Writers,
+) -> Result<(), DbError> {
     let mut reads = BTreeMap::new();
     for device in writers.devices() {
         if let Some(read) = crate::write_metadata::last_landed_read(db, device)? {
             reads.insert(device, read);
         }
     }
-    let own = db
+    let own = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     // No record stopped after the slot this device has applied, so looking
@@ -193,10 +206,10 @@ pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), D
         parts.entry((write, audience)).or_default().push((table, key));
     }
     for ((write, audience), records) in parts {
-        forget_in_part(db, &write, &audience, records, through)?;
+        forget_in_part(db, call, &write, &audience, records, through)?;
     }
     let newest = crate::forget_entries::passed(db, from, through, newest)?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_forgotten(singleton,through,newest) VALUES(1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET through=excluded.through,newest=excluded.newest",
         params![through.to_be_bytes().as_slice(), newest],
@@ -211,20 +224,27 @@ pub(crate) fn forget(db: &DatabaseConnection, writers: &Writers) -> Result<(), D
 /// its records, so its records go together, with its leaf hashes, or stay.
 fn forget_in_part(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     write: &[u8],
     audience: &Audience,
     candidates: Vec<(String, Vec<u8>)>,
     through: u64,
 ) -> Result<(), DbError> {
     let id = decoded(merge_fields::decode_write_id(write))?;
-    let header = db.authored_part(write, audience)?.ok_or(DbError::DamagedDatabase)?;
+    let header = crate::transaction_constants::authored_part(db, call, write, audience)?
+        .ok_or(DbError::DamagedDatabase)?;
     let version = merge_fields::decode_write_header(&header)?.schema_version;
-    let evidence = crate::authorship::keeps_evidence(db, id)?;
+    let evidence = crate::authorship::keeps_evidence(db, call, id)?;
     let protected = |table: &str, key: &[u8]| -> Result<bool, DbError> {
         if !evidence {
             return Ok(false);
         }
-        let Some(table) = crate::source_names::table(db, version, table, db.schema_version()?)?
+        let Some(table) = crate::source_names::table(
+            db,
+            version,
+            table,
+            crate::transaction_constants::schema_version(db, call)?,
+        )?
         else {
             return Ok(false);
         };
@@ -261,18 +281,18 @@ fn forget_in_part(
         records
     };
     for (table, key) in records {
-        db.internal_execute(
+        db.execute(
             "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
             params![write, audience, table, key],
         )?;
     }
-    let emptied = db.internal_execute(
+    let emptied = db.execute(
         "DELETE FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2
          AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=?1 AND c.audience=?2)",
         params![write, audience],
     )?;
     if emptied > 0 {
-        db.forget_authored_part(write, audience);
+        call.forget_authored_part(write, audience);
         if leaves {
             crate::authorship::forget_part(db, id, audience)?;
         }
@@ -298,7 +318,7 @@ fn forgotten_through(db: &DatabaseConnection) -> Result<(u64, Option<i64>), DbEr
 /// protect their records, and merge rows a reload or a migration deletes no
 /// longer name their writes. The next slot looks at every one again.
 pub(crate) fn look_again(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_forgotten", [])?;
+    db.execute("DELETE FROM _coven_forgotten", [])?;
     Ok(())
 }
 

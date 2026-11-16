@@ -18,7 +18,7 @@ use std::{
 };
 
 fn rows(db: &Database) -> Vec<String> {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query("SELECT id FROM files ORDER BY id", [], |r| r.get(0)).unwrap()
     })
 }
@@ -277,7 +277,7 @@ async fn a_row_the_reference_check_read_is_not_read_again() {
     let db = open(&store, Provenance::AppProvided).await;
     let reads = |db: &Database, table: &str| {
         let text = format!("FROM main.\"{table}\" WHERE \"id\"=?");
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.profiled_statements().iter().filter(|s| s.sql.contains(&text)).count()
         })
     };
@@ -310,7 +310,7 @@ async fn a_row_the_reference_check_read_is_not_read_again() {
 }
 
 fn count_titles(db: &Database) -> i64 {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query_row("SELECT count(*) FROM files WHERE title='t'", [], |r| r.get(0)).unwrap()
     })
 }

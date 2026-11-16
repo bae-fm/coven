@@ -45,7 +45,7 @@ pub(crate) fn rows(
         // A table whose rows reference rows of the same table, directly or
         // through other tables, has its rows put in order one at a time.
         if cyclic.contains(&table.table) {
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                      SELECT ?1,i.{key},i.{audience_column} FROM {installed} AS i WHERE i.{present}=1
@@ -57,7 +57,7 @@ pub(crate) fn rows(
         }
         // A reference whose parent isn't at the generation it names.
         for (q, (_, foreign)) in table.pairs.iter().enumerate() {
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                      SELECT ?1,i.{key},i.{audience_column} FROM {installed} AS i WHERE i.{present}=1 AND i.{parent_key} IS NOT NULL
@@ -72,7 +72,7 @@ pub(crate) fn rows(
         }
         // A failing CHECK, on the values as SQLite stores them.
         for (_, expression) in &rules.checks {
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                      SELECT ?1,{key},{audience_column} FROM {installed} AS {alias} WHERE {present}=1 AND COALESCE(CAST(({expression}) AS NUMERIC)=0,0)
@@ -91,7 +91,7 @@ pub(crate) fn rows(
                 .map(|expression| format!("({expression}) IS NOT NULL"))
                 .collect::<Vec<_>>()
                 .join(" AND ");
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                      SELECT ?1,{key},{audience_column} FROM {installed} AS {alias} WHERE {present}=1 AND ({predicate}) AND {held}
@@ -105,7 +105,7 @@ pub(crate) fn rows(
             taken(db, schema, table, unique, &held)?;
         }
         // A key a row of another audience has.
-        db.internal_execute(
+        db.execute(
             &format!(
                 "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                  SELECT ?1,i.{key},i.{audience_column} FROM {installed} AS i WHERE i.{present}=1
@@ -117,7 +117,7 @@ pub(crate) fn rows(
         // A row of another audience whose reference to a replaced row, as
         // the row is now or was before, names a generation that isn't
         // current.
-        db.internal_execute(
+        db.execute(
             &format!(
                 "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                  SELECT r.table_name,r.key,r.audience FROM {installed} AS i
@@ -130,7 +130,7 @@ pub(crate) fn rows(
             params![table.table],
         )?;
     }
-    db.internal_execute(
+    db.execute(
         "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
          SELECT r.table_name,r.key,r.audience FROM temp._coven_install_before AS b
          CROSS JOIN _coven_references v ON v.parent_table=b.table_name AND v.parent_key=b.key AND v.parent_audience=b.audience
@@ -145,7 +145,7 @@ pub(crate) fn rows(
         if let Audience::Circle(circle) = audience {
             if deleted.contains_key(circle) {
                 for table in &layout.tables {
-                    db.internal_execute(
+                    db.execute(
                         &format!(
                             "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
                              SELECT ?1,i.{key},i.{audience_column} FROM {installed} AS i WHERE i.{audience_column}=?2 AND i.{present}=1
@@ -163,7 +163,7 @@ pub(crate) fn rows(
     }
     // A row the rules take out now: one the snapshot's author took out, or
     // one of another audience, which a replaced row can bring back.
-    db.internal_execute(
+    db.execute(
         "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
          SELECT DISTINCT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'
          ON CONFLICT DO NOTHING",
@@ -215,7 +215,7 @@ fn taken(
         .enumerate()
         .map(|(n, column)| format!("s.key_{n} IS {alias}.{}", identifier(&column.name)))
         .collect();
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_conflicts(table_name,key,audience)
              SELECT ?1,{key},{audience} FROM {} AS {alias} WHERE {}=1 AND ({}) AND {held}

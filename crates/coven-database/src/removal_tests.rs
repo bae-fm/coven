@@ -14,7 +14,7 @@ fn table(name: &str) -> SyncedTable {
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
 fn losses(database: &Database) -> Vec<RemovedRow> {
-    database.inspect_writer(|db| db.query("SELECT table_name,value,replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
+    database.inspect_writer(|db, _| db.query("SELECT table_name,value,replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
 }
 
 #[tokio::test]
@@ -58,7 +58,7 @@ async fn readding_a_removed_row_without_its_removal_record_is_a_damaged_database
     )
     .await;
     assert_eq!(count(&db, "ranges"), 0);
-    db.commit_writer(crate::loss_record::tests::lose_removed_rows);
+    db.commit_writer(|db, _| crate::loss_record::tests::lose_removed_rows(db));
     let writes = records(&db).len();
     let error = sql(&db, "INSERT INTO ranges VALUES('urgent',10,20)").await.unwrap_err();
     assert!(matches!(error, crate::DbError::DamagedDatabase), "{error:?}");
@@ -85,7 +85,7 @@ async fn deleting_groceries_winner_returns_note_46_and_its_link() {
     assert!(losses(&db).is_empty());
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(count(&db, "links"), 1);
-    let (title, parent, count): (String, String, i64) = db.inspect_writer(|db| {
+    let (title, parent, count): (String, String, i64) = db.inspect_writer(|db, _| {
         db.query_row("SELECT notes.title,links.note_id,counts.n FROM notes,links,counts", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
@@ -125,7 +125,7 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
         sql(&db, "DELETE FROM notes").await.unwrap();
         assert_eq!(count(&db, "links"), i64::from(restored), "{action}");
         if restored {
-            let parent: Option<String> = db.inspect_writer(|db| {
+            let parent: Option<String> = db.inspect_writer(|db, _| {
                 db.query_row("SELECT note_id FROM links", [], |r| r.get(0)).unwrap()
             });
             assert_eq!(parent, None);
@@ -141,7 +141,7 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
             assert!(losses(&db).is_empty());
         }
         assert_eq!(
-            db.inspect_writer(|db| db
+            db.inspect_writer(|db, _| db
                 .query_row("SELECT n FROM counts", [], |r| r.get::<_, i64>(0))
                 .unwrap()),
             1
@@ -229,9 +229,9 @@ async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_
     assert_eq!(removed[0].2, [Rule::ForeignKey(foreign_key.clone())].into());
     assert_eq!(removed[0].1["note_id"].value, Value::Text("43".into()));
     assert_eq!(removed[0].1["note_id"].parents[&foreign_key].generation, 1);
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        let merge = crate::merge_store::MergeStore::new(db, &app);
+        let merge = crate::merge_store::MergeStore::new(db, call, &app);
         let link = initial.parts[0].rows.iter().find(|r| r.row.table == "links").unwrap();
         let state = merge.row(&link.row).unwrap().state;
         assert_eq!(state.generation(), 1);
@@ -241,7 +241,7 @@ async fn a_check_that_forbids_null_preserves_the_written_reference_as_a_removed_
     sql(&db, "INSERT INTO links VALUES('6','44')").await.unwrap();
     assert!(losses(&db).is_empty());
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT note_id FROM links", [], |r| r.get::<_, String>(0))
             .unwrap()),
         "44"
@@ -371,13 +371,13 @@ async fn restoration_skips_shared_triggers_and_runs_local_triggers() {
         .await;
     sql(&db, "DELETE FROM notes WHERE id='45'").await.unwrap();
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT edited FROM notes", [], |r| r.get::<_, i64>(0))
             .unwrap()),
         1
     );
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT n FROM counts", [], |r| r.get::<_, i64>(0))
             .unwrap()),
         1
@@ -420,10 +420,10 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
         )
         .await;
         let before = crate::tests::contents(&db);
-        db.inspect_writer(|db| db.fail_at("_coven_fail", point, "materialization failed"));
+        db.inspect_writer(|db, _| db.fail_at("_coven_fail", point, "materialization failed"));
         assert!(matches!(sql(&db, statement).await, Err(crate::DbError::Sqlite(_))), "{point}");
         assert_eq!(crate::tests::contents(&db), before, "{point}");
-        db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
+        db.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_fail").unwrap());
         db.close().await.unwrap();
     }
 }
@@ -443,7 +443,7 @@ async fn taking_a_row_out_runs_foreign_key_actions_on_local_tables() {
     assert_eq!(count(&db, "notes"), 0);
     assert_eq!(count(&db, "search_index"), 0);
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT note_id FROM selection", [], |r| r.get::<_, Option<String>>(0))
             .unwrap()),
         None
@@ -497,7 +497,7 @@ async fn moving_note_42_also_moves_its_removed_attachments() {
     assert_eq!(record.parts.len(), 2);
     assert!(record.parts.iter().all(|part| part.rows.len() == 2));
     assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::Check("ordered".into())]));
-    let audience: String = db.inspect_writer(|db| {
+    let audience: String = db.inspect_writer(|db, _| {
         db.query_row("SELECT audience FROM _coven_lost", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(audience, "00000000-0000-4000-8000-00000000000a");
@@ -547,7 +547,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         columns.get_mut("audience").unwrap().value = Value::Text(other.into());
         columns.get_mut("title").unwrap().value = Value::Text("Other".into());
         crate::tests::remote_write(&db, other_row).await;
-        let winner: String = db.inspect_writer(|db| {
+        let winner: String = db.inspect_writer(|db, _| {
             db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap()
         });
         assert_eq!(winner, if other == "store" { "store" } else { ANA });
@@ -555,7 +555,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
         if other == "store" {
             sql(&db, "DELETE FROM notes WHERE audience='store'").await.unwrap();
             assert!(losses(&db).is_empty());
-            let audience: String = db.inspect_writer(|db| {
+            let audience: String = db.inspect_writer(|db, _| {
                 db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap()
             });
             assert_eq!(audience, ANA);
@@ -566,7 +566,7 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
                 .unwrap();
             assert_eq!(records(&db).len(), 1);
             assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::DeletedCircle(deleting_entry())]));
-            let audience: String = db.inspect_writer(|db| {
+            let audience: String = db.inspect_writer(|db, _| {
                 db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap()
             });
             assert_eq!(audience, BEN);
@@ -613,8 +613,9 @@ async fn the_earlier_slot_decides_between_circles_rows_not_the_timestamp() {
     columns.get_mut("audience").unwrap().value = Value::Text(BEN.into());
     columns.get_mut("title").unwrap().value = Value::Text("Ben".into());
     crate::tests::remote_write_stamped_earlier(&db, other_row).await;
-    let shown: String = db
-        .inspect_writer(|db| db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap());
+    let shown: String = db.inspect_writer(|db, _| {
+        db.query_row("SELECT audience FROM notes", [], |r| r.get(0)).unwrap()
+    });
     assert_eq!(shown, ANA, "Ana's row started in slot 1, Ben's in slot 2");
     assert_eq!(losses(&db)[0].2, BTreeSet::from([Rule::OtherAudience]));
     db.close().await.unwrap();
@@ -645,7 +646,7 @@ async fn a_circle_deletion_runs_local_foreign_key_actions_once() {
     .await
     .unwrap();
     let remaining = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             (
                 db.query_row("SELECT count(*) FROM search_index", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
@@ -752,14 +753,14 @@ async fn a_generated_unique_claim_dates_from_its_stored_inputs() {
     sql(&db, "UPDATE notes SET title='PLAN'").await.unwrap();
     let writes = records(&db);
     assert!(writes[2].header.timestamp > writes[1].header.timestamp);
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         let row = &writes[0].parts[0].rows[0].row;
         let app = crate::write_rows::AppView::after(db, schema);
-        let store = crate::merge_store::MergeStore::new(db, &app);
+        let store = crate::merge_store::MergeStore::new(db, call, &app);
         let updates = BTreeMap::new();
         let deleted = BTreeMap::new();
         let view = crate::removal_view::DatabaseRemovalView::new(
-            db, &store, schema, &app, &updates, &deleted, None,
+            db, call, &store, schema, &app, &updates, &deleted, None,
         )
         .unwrap();
         let evaluated = view.evaluated(row).unwrap();
@@ -785,7 +786,7 @@ async fn a_constant_unique_index_keeps_its_expression_term() {
 
     assert_eq!(count(&db, "notes"), 1);
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT id FROM notes", [], |r| r.get::<_, String>(0))
             .unwrap()),
         "45"
@@ -812,15 +813,15 @@ pub(crate) fn materialize_deleted(
     keys: &[&str],
     circle: coven_foundation::id_source::CircleId,
 ) -> Result<(), crate::DbError> {
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         db.transaction(|db| {
             db.batch("PRAGMA defer_foreign_keys=ON")?;
             let app = crate::write_rows::AppView::after(db, schema);
-            let store = crate::merge_store::MergeStore::new(db, &app);
+            let store = crate::merge_store::MergeStore::new(db, call, &app);
             let updates = std::collections::BTreeMap::new();
             let deleted = [(circle, deleting_entry())].into();
             let view = crate::removal_view::DatabaseRemovalView::new(
-                db, &store, schema, &app, &updates, &deleted, None,
+                db, call, &store, schema, &app, &updates, &deleted, None,
             )?;
             let rows = keys.iter().map(|key| coven_merge::RowId {
                 table: table.into(),
@@ -836,6 +837,7 @@ pub(crate) fn materialize_deleted(
             };
             crate::removal::materialize(
                 db,
+                call,
                 schema,
                 &app,
                 &view,
@@ -923,7 +925,7 @@ async fn two_devices(schema: &'static str) -> (Database, Database, [TestStore; 2
 
 /// Each node's arrival on `db`, in the order its triggers saw them.
 fn arrivals(db: &Database) -> Vec<(String, String, bool)> {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.query("SELECT kind,id,parent_here FROM arrivals ORDER BY rowid", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })

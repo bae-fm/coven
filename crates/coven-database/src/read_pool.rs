@@ -1,6 +1,6 @@
 //! Reader reservations keep committed reads independent of the writer.
 
-use crate::{sqlite::DatabaseConnection, DbError, SqlReadContext};
+use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Condvar, Mutex};
 
@@ -70,32 +70,8 @@ pub(super) struct ReaderLease<'a> {
 }
 
 impl ReaderLease<'_> {
-    pub(super) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
-        E: From<DbError>,
-    {
-        self.with_reader(|reader| reader.read_snapshot(read))
-    }
-
-    pub(super) fn live_read<F, R, E>(
-        &self,
-        judge: &mut dyn FnMut(sqlive::ReadSet, &mut sqlive::Lookups<'_>) -> rusqlite::Result<()>,
-        read: F,
-    ) -> Result<R, E>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
-        E: From<DbError>,
-    {
-        self.with_reader(|reader| reader.live_read(judge, read))
-    }
-
     pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection) -> R) -> R {
         super::with_locked(&self.database.readers[self.index], |reader| read(reader))
-    }
-
-    pub(super) fn schema_version(&self) -> Result<u32, DbError> {
-        self.with_reader(DatabaseConnection::schema_version)
     }
 }
 

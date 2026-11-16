@@ -19,6 +19,7 @@
 //! reads it (`app_policy.rs`): a read-only handle can't tell whether the
 //! writer that last wrote it still runs.
 
+use crate::sqlite::DatabaseConnection;
 use crate::stored_millis::{since_epoch, stored_time, Round};
 use crate::DbError;
 use std::time::SystemTime;
@@ -81,7 +82,7 @@ fn millis(time: SystemTime) -> Result<i64, DbError> {
 }
 
 /// The state as the row holds it.
-pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<RetryState, DbError> {
+pub(crate) fn read(db: &DatabaseConnection) -> Result<RetryState, DbError> {
     let (syncing, held, cooling_until) = db.query_row(
         "SELECT syncing,held,cooling_until FROM coven_retry_effect WHERE singleton=1",
         [],
@@ -97,16 +98,13 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<RetryState,
 
 /// Write the state whole, leaving the row alone when it already says this.
 /// The cooldown's end is stored rounded up to the millisecond.
-pub(crate) fn save(
-    db: &crate::sqlite::DatabaseConnection,
-    state: RetryState,
-) -> Result<(), DbError> {
+pub(crate) fn save(db: &DatabaseConnection, state: RetryState) -> Result<(), DbError> {
     let held = state.held;
     let (syncing, cooling_until) = match state.sync {
         RetrySync::Stopped => (false, None),
         RetrySync::Started { cooling_until } => (true, cooling_until.map(millis).transpose()?),
     };
-    db.internal_execute(
+    db.execute(
         "UPDATE coven_retry_effect SET syncing=?1,held=?2,cooling_until=?3
          WHERE singleton=1 AND (syncing IS NOT ?1 OR held IS NOT ?2 OR cooling_until IS NOT ?3)",
         rusqlite::params![syncing, held, cooling_until],

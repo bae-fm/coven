@@ -1,6 +1,7 @@
 //! Schema identities used to validate original sources across explicit renames.
 
-use crate::{migration_names::MigrationMatch, schema::Schema, sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::{migration_names::MigrationMatch, schema::Schema, DbError};
 use rusqlite::params;
 
 pub(crate) fn record(
@@ -14,12 +15,12 @@ pub(crate) fn record(
         // Coven's files table is one table in every version, which no
         // migration renames: its origin is fixed.
         if crate::file_table::is_files(&table.name) {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_table_origins VALUES(?1,?2,0,?2) ON CONFLICT(version,name) DO NOTHING",
                 params![version, table.name],
             )?;
             for column in &table.columns {
-                db.internal_execute(
+                db.execute(
                     "INSERT INTO _coven_column_origins VALUES(?1,?2,?3,0,?2,?3) ON CONFLICT(version,table_name,name) DO NOTHING",
                     params![version, table.name, column.name],
                 )?;
@@ -34,7 +35,7 @@ pub(crate) fn record(
         };
         // A batch can introduce an object before its final version. Its per-step
         // origin remains authoritative when it has no predecessor at batch start.
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_table_origins VALUES(?1,?2,?3,?4) ON CONFLICT(version,name) DO UPDATE SET origin_version=excluded.origin_version,origin_name=excluded.origin_name WHERE ?5",
             params![version,table.name,origin.0,origin.1,prior.is_some()],
         )?;
@@ -46,7 +47,7 @@ pub(crate) fn record(
                 Some(((table, column), _)) => column_origin(db, previous, table, column)?,
                 None => (version, table.name.clone(), column.name.clone()),
             };
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_column_origins VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(version,table_name,name) DO UPDATE SET origin_version=excluded.origin_version,origin_table=excluded.origin_table,origin_name=excluded.origin_name WHERE ?7",
                 params![version,table.name,column.name,origin.0,origin.1,origin.2,prior.is_some()],
             )?;

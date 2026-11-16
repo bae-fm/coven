@@ -1,6 +1,7 @@
 //! Session changes, audience moves, and one causal write record.
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::timestamp;
 use crate::write_rows::{column_name, reference_error, row_id, AppKey, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -95,6 +96,7 @@ pub(crate) fn moved(
 /// already changed.
 pub(crate) fn changes(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     before: &AppView<'_>,
     after: &AppView<'_>,
@@ -145,6 +147,7 @@ pub(crate) fn changes(
                     row.clone(),
                     crate::write_sources::authored(
                         database,
+                        call,
                         stored,
                         row,
                         Change { generation, operation: Operation::Delete },
@@ -208,6 +211,7 @@ pub(crate) fn changes(
                 row.clone(),
                 crate::write_sources::authored(
                     database,
+                    call,
                     stored,
                     row,
                     Change { generation, operation },
@@ -224,6 +228,7 @@ pub(crate) fn changes(
             old.clone(),
             crate::write_sources::authored(
                 database,
+                call,
                 stored,
                 old.clone(),
                 Change { generation: state.state.generation(), operation: Operation::Delete },
@@ -246,6 +251,7 @@ pub(crate) fn changes(
         if let std::collections::btree_map::Entry::Vacant(entry) = changes.entry(new.clone()) {
             entry.insert(crate::write_sources::authored(
                 database,
+                call,
                 stored,
                 new.clone(),
                 Change { generation, operation },
@@ -378,6 +384,7 @@ pub(crate) fn changes(
 /// left no net change keep those operations as executions (D5).
 pub(crate) fn record(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
@@ -394,6 +401,7 @@ pub(crate) fn record(
             Some(change) => {
                 change.execution = crate::write_sources::executed(
                     database,
+                    call,
                     store,
                     &row,
                     steps,
@@ -401,7 +409,8 @@ pub(crate) fn record(
                 )?;
             }
             None => {
-                let execution = crate::write_sources::executed(database, store, &row, steps, None)?;
+                let execution =
+                    crate::write_sources::executed(database, call, store, &row, steps, None)?;
                 executions
                     .entry(row.audience.clone())
                     .or_default()
@@ -409,17 +418,18 @@ pub(crate) fn record(
             }
         }
     }
-    unordered(database, device, now, changes, executions).map(Some)
+    unordered(database, call, device, now, changes, executions).map(Some)
 }
 
 /// The record of these changes, for writes made without SQL operations.
 pub(crate) fn changed(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
 ) -> Result<WriteRecord, DbError> {
-    unordered(database, device, now, changes, BTreeMap::new())
+    unordered(database, call, device, now, changes, BTreeMap::new())
 }
 
 /// The record of these changes under the header of a write made elsewhere, as
@@ -441,16 +451,18 @@ pub(crate) fn changed_under(
 /// (§18.4).
 pub(crate) fn rebuild_marker(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
 ) -> Result<WriteRecord, DbError> {
-    let mut record = unordered(database, device, now, BTreeMap::new(), BTreeMap::new())?;
+    let mut record = unordered(database, call, device, now, BTreeMap::new(), BTreeMap::new())?;
     record.header.disposition = WriteDisposition::Migration;
     Ok(record)
 }
 
 fn unordered(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     device: DeviceId,
     now: SystemTime,
     changes: BTreeMap<RowId, RowChange>,
@@ -466,7 +478,7 @@ fn unordered(
         position: WriteId { device, number },
         timestamp,
         read_through: crate::sequence::applied(database)?,
-        schema_version: database.schema_version()?,
+        schema_version: crate::transaction_constants::schema_version(database, call)?,
         disposition: WriteDisposition::Apply,
     };
     Ok(grouped(header, changes, executions))

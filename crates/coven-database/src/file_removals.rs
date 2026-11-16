@@ -16,11 +16,13 @@
 //! fails, or at the next open after a crash (§17.3). A copy goes only while
 //! it is as coven left it, and a folder coven made only while it is empty.
 
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use coven_foundation::files::StoreDirAccess;
 use std::collections::BTreeSet;
 
 use crate::internal_schema::FILE_NAMED_SQL;
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::DbError;
 use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, StagedName, StoreDir};
 
 /// The removals to perform, or the failure choosing them.
@@ -33,10 +35,11 @@ pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 /// is refused, so uncommitted records never name bytes to remove.
 pub(crate) fn choose(
     writer: &DatabaseConnection,
+    call: &StoreCall<'_>,
     active: &BTreeSet<OwnedFile>,
     copying: &BTreeSet<String>,
 ) -> Chosen {
-    writer.read_with_constants(|| {
+    crate::transaction_constants::read_with_constants(writer, call, || {
         let mut released = pending(writer, active)?;
         released.extend(copies(writer, &Copies::Settled(copying))?);
         Ok(released)
@@ -45,8 +48,14 @@ pub(crate) fn choose(
 
 /// The copies at `paths` a call that is failing left unswitched, with the
 /// folders it made for them, for that call to remove (§17.3).
-pub(crate) fn choose_copies(writer: &DatabaseConnection, paths: &[String]) -> Chosen {
-    writer.read_with_constants(|| copies(writer, &Copies::Of(paths)))
+pub(crate) fn choose_copies(
+    writer: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    paths: &[String],
+) -> Chosen {
+    crate::transaction_constants::read_with_constants(writer, call, || {
+        copies(writer, &Copies::Of(paths))
+    })
 }
 
 /// Which copies a removal takes.
@@ -249,7 +258,7 @@ pub(crate) fn remove_bytes(
 /// Record the cache range or file at `path` in the cache for removal once
 /// the writer is free.
 pub(crate) fn record_cached(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)", [path])?;
+    db.execute("INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)", [path])?;
     Ok(())
 }
 
@@ -257,7 +266,7 @@ pub(crate) fn record_cached(db: &DatabaseConnection, path: &str) -> Result<(), D
 /// names it, returning whether it was recorded: a staging write reserves
 /// it so a crash before its commit leaves nothing behind.
 pub(crate) fn record_unnamed(db: &DatabaseConnection, path: &str) -> Result<bool, DbError> {
-    let recorded = db.internal_execute(
+    let recorded = db.execute(
         &format!(
             "INSERT INTO _coven_file_removals(path) SELECT ?1
              WHERE NOT {FILE_NAMED_SQL}"
@@ -270,20 +279,14 @@ pub(crate) fn record_unnamed(db: &DatabaseConnection, path: &str) -> Result<bool
 /// Record coven's copy at `path`, which nothing names any more, for
 /// removal; one already recorded stays so.
 pub(crate) fn record_released(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
-        [path],
-    )?;
+    db.execute("INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING", [path])?;
     Ok(())
 }
 
 /// The reserved name `path` in `area`'s bytes are kept: their removal
 /// record goes before a row names them.
 pub(crate) fn keep(db: &DatabaseConnection, area: &str, path: &str) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
-        (path, area),
-    )?;
+    db.execute("DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2", (path, area))?;
     Ok(())
 }
 
@@ -314,11 +317,12 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
 /// recorded as being written whose writer is gone become removals.
 pub(crate) fn finish_at_open(
     writer: &mut DatabaseConnection,
+    call: &StoreCall<'_>,
     directory: &StoreDir,
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
     // Nothing is staging or copying before the first write runs.
-    let released = choose(writer, &BTreeSet::new(), &BTreeSet::new())?;
+    let released = choose(writer, call, &BTreeSet::new(), &BTreeSet::new())?;
     let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
         if let Err(error) = writer.transaction(|db| forget(db, &removed)) {
@@ -348,7 +352,7 @@ fn abandon_cache_writes(
     }
     let _excluded = directory.exclude_cache_writes()?;
     writer.transaction(|db| {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes",
             [],
         )?;

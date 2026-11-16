@@ -26,7 +26,7 @@ async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let reset = DeviceReset { old_device: DeviceId(1), new_device: DeviceId(2) };
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch(
             "CREATE TEMP TRIGGER fail_reset BEFORE INSERT ON _coven_device_reset
             BEGIN SELECT RAISE(ABORT,'injected reset notice failure'); END;",
@@ -39,7 +39,7 @@ async fn reset_notice_and_carried_cleanup_commit_once_or_roll_back_together() {
     assert!(db.operations().await.unwrap().is_empty());
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     assert!(db.provider_access("carol@example.test".into()).await.unwrap().is_none());
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_reset").unwrap());
+    db.inspect_writer(|sql, _| sql.batch("DROP TRIGGER fail_reset").unwrap());
     let (operations, provider) = cleanup();
     db.record_device_reset::<Record>(reset, operations, provider).await.unwrap();
     assert_eq!(db.device_reset().await.unwrap(), Some(reset));

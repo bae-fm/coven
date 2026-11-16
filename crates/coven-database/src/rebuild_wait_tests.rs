@@ -75,8 +75,9 @@ async fn beginning_a_wait_queues_a_marker_read_through_the_applied_slot_and_gate
     let before = records(&db);
     let applied = db.applied_slot().await.unwrap();
     let newest = before.iter().map(|r| r.header.timestamp).max().unwrap();
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[garden()])
+            .unwrap();
     });
     let queued = records(&db);
     assert_eq!(queued.len(), before.len() + 1);
@@ -104,8 +105,9 @@ async fn a_waiting_raise_captures_the_marker_too() {
     let (_store, db) = migrated().await;
     let before = db.raise_captures().await.unwrap();
     assert!(!before.is_empty(), "the migration captured the store");
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[garden()])
+            .unwrap();
     });
     let marker = records(&db).last().unwrap().header.position;
     for capture in db.raise_captures().await.unwrap() {
@@ -118,8 +120,8 @@ async fn a_waiting_raise_captures_the_marker_too() {
 async fn beginning_the_stores_wait_drops_the_capture_the_migration_made_of_it() {
     let (_store, db) = migrated().await;
     assert!(db.raise_captures().await.unwrap().iter().any(|c| c.audience == Audience::Store));
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[Audience::Store])
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[Audience::Store])
             .unwrap();
     });
     assert!(
@@ -133,8 +135,9 @@ async fn beginning_the_stores_wait_drops_the_capture_the_migration_made_of_it() 
 #[tokio::test]
 async fn a_reload_replaces_a_rebuild_wait() {
     let (_store, db) = migrated().await;
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[garden()])
+            .unwrap();
         crate::reload_gate::require_reload::<Record>(connection, &garden()).unwrap();
     });
     assert!(db.rebuilds_waiting().await.unwrap().is_empty());
@@ -145,8 +148,9 @@ async fn a_reload_replaces_a_rebuild_wait() {
 #[tokio::test]
 async fn a_breaking_migration_points_a_waiting_rebuild_at_its_own_marker() {
     let (store, db) = migrated().await;
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[garden()])
+            .unwrap();
     });
     let first = db.rebuilds_waiting().await.unwrap()[&garden()];
     db.close().await.unwrap();
@@ -173,8 +177,9 @@ async fn a_breaking_migration_points_a_waiting_rebuild_at_its_own_marker() {
 #[tokio::test]
 async fn restarting_points_a_waiting_rebuild_at_a_new_marker_read_through_the_applied_slot() {
     let (_store, db) = migrated().await;
-    db.inspect_writer_schema(|connection, schema| {
-        begin::<Record>(connection, schema, std::time::SystemTime::now(), &[garden()]).unwrap();
+    db.inspect_writer_schema(|connection, call, schema| {
+        begin::<Record>(connection, call, schema, std::time::SystemTime::now(), &[garden()])
+            .unwrap();
     });
     let first = db.rebuilds_waiting().await.unwrap()[&garden()];
     db.restart_rebuilds().await.unwrap();

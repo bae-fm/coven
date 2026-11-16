@@ -1,6 +1,7 @@
 //! Compose locked writers and read-only connections at the database boundary.
 
 use super::*;
+use crate::sqlite::DatabaseConnection;
 use coven_foundation::files::StoreDirAccess;
 
 use crate::{migration::MigrationOperation, AutoVacuum, NewOperation, OpenError, OpenStep};
@@ -251,7 +252,12 @@ impl DatabaseBuilder {
             &self.functions,
             Some(&views),
         )?;
-        let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
+        // The writer observes no commits while it opens, so coven's view of
+        // it names no device.
+        let opening = crate::store_call::TestRecords::new();
+        let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) = {
+            let call = &crate::store_call::StoreCall::new(None, &opening);
+            let writer = &mut writer;
             writer.with_profile(|writer| -> Result<_, OpenError> {
                 coven_foundation::task::operation_step("switching the store's database to WAL");
                 writer.enable_wal()?;
@@ -260,7 +266,9 @@ impl DatabaseBuilder {
                 coven_foundation::task::operation_step(
                     "preparing the schema and running migrations",
                 );
-                let outcomes = writer.prepare_schema(
+                let outcomes = crate::schema_preparation::prepare_schema(
+                    writer,
+                    call,
                     &tables,
                     &migrations,
                     &self.functions.versions(),
@@ -270,7 +278,7 @@ impl DatabaseBuilder {
                         self.installation.clone(),
                     )),
                     self.migration_operation.as_deref(),
-                    Some(&|live| {
+                    Some(&|live, call| {
                         crate::audience_database::AudienceDatabase::stage(
                             &self.directory,
                             &self.sqlite,
@@ -280,24 +288,26 @@ impl DatabaseBuilder {
                             &tables,
                             &whole,
                             live,
+                            call,
                         )
                     }),
                     &mut progress,
                 )?;
                 coven_foundation::task::operation_step("reading the store's state after migrating");
                 crate::database::file_database::declare_budgets(writer, &self.namespaces)?;
-                crate::file_removals::finish_at_open(writer, &self.directory)?;
-                crate::pending::forget_causes(writer)?;
+                crate::file_removals::finish_at_open(writer, call, &self.directory)?;
+                let db = &*writer;
+                crate::pending::forget_causes(db)?;
                 // No connection plans until sync starts in this process.
                 crate::internal_schema::retry_effect::save(
-                    writer,
+                    db,
                     crate::internal_schema::retry_effect::RetryState::OPENED,
                 )?;
                 let mut write_schema =
-                    crate::write_schema::WriteSchema::read(writer, tables.clone())?;
-                write_schema.conversions = crate::migration_receive::read(writer, &migrations)?;
+                    crate::write_schema::WriteSchema::read(db, call, tables.clone())?;
+                write_schema.conversions = crate::migration_receive::read(db, &migrations)?;
                 write_schema.namespaces = self.namespaces;
-                crate::write_schema::prepare_evaluators(writer, &write_schema)?;
+                crate::write_schema::prepare_evaluators(db, &write_schema)?;
                 let migrated = clock.elapsed();
                 coven_foundation::task::operation_step(
                     "gathering statistics on a connection of its own",
@@ -342,7 +352,8 @@ impl DatabaseBuilder {
                 )?];
                 let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
                 Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
-            })?;
+            })
+        }?;
         coven_foundation::task::operation_step(
             "starting the writer's commit capture and upkeep threads",
         );
@@ -350,7 +361,7 @@ impl DatabaseBuilder {
             .iter()
             .map(|table| table.name.to_ascii_lowercase())
             .collect();
-        writer.observe_commits(observer.clone(), settings.device_id, recorded);
+        writer.observe_commits(observer.clone(), recorded);
         #[cfg(any(test, feature = "test-utils"))]
         if self.refuse_close {
             writer.leave_statement_open();
@@ -430,6 +441,7 @@ impl DatabaseBuilder {
                     directory: self.directory,
                     device: settings.device_id,
                     lock,
+                    tests: crate::store_call::TestRecords::new(),
                     #[cfg(test)]
                     local_open_gate: Mutex::new(None),
                 },
@@ -484,16 +496,24 @@ impl DatabaseBuilder {
             Some(clock) => clock,
             None => Arc::new(SystemClock),
         };
-        first.prepare_schema(
-            &tables,
-            &migrations,
-            &self.functions.versions(),
-            None,
-            None,
-            None,
-            &mut ProgressReport::of(&self.progress, clock),
-        )?;
-        let mut schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
+        crate::store_call::outside_store(|call| {
+            let first = &mut first;
+            crate::schema_preparation::prepare_schema(
+                first,
+                call,
+                &tables,
+                &migrations,
+                &self.functions.versions(),
+                None,
+                None,
+                None,
+                &mut ProgressReport::of(&self.progress, clock),
+            )
+        })?;
+        let mut schema = crate::store_call::outside_store(|call| {
+            let first = &first;
+            crate::write_schema::WriteSchema::read(first, call, tables.clone())
+        })?;
         schema.namespaces = self.namespaces;
         first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];
@@ -531,6 +551,7 @@ impl DatabaseBuilder {
                 write_schema: schema,
                 directory: self.directory,
                 device: settings.device_id,
+                tests: crate::store_call::TestRecords::new(),
                 #[cfg(test)]
                 local_open_gate: Mutex::new(None),
             }))),
@@ -624,8 +645,15 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
                 )
             };
             let mut database = coven_only(&directory.database_path(), true, Some(&views))?;
-            database.prepare_internal_schema()?;
-            database.read_snapshot(|sql| Ok::<_, OpenError>(sql.sync_facts()?))
+            crate::store_call::outside_store(|call| {
+                let database = &mut database;
+                crate::schema_preparation::prepare_internal_schema(database)?;
+                let db = &*database;
+                let _constants = crate::transaction_constants::keep_constants(db, call);
+                db.read_snapshot(|db| {
+                    Ok::<_, OpenError>(crate::SqlReadContext::new(db).sync_facts()?)
+                })
+            })
         })
         .await,
     )

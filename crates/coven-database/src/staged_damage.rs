@@ -140,14 +140,14 @@ pub(super) fn damage(
     let changed = match damage {
         StagedDamage::Record => {
             let records = table(staging, "records");
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "UPDATE {records} SET record=substr(record,1,1) WHERE rowid=(SELECT min(rowid) FROM {records})"
                 ),
                 [],
             )?
         }
-        StagedDamage::Writes => db.internal_execute(
+        StagedDamage::Writes => db.execute(
             "UPDATE temp._coven_snapshot_writes SET read_through=slot WHERE source=?1",
             [staging],
         )?,
@@ -166,7 +166,7 @@ pub(super) fn damage(
             let mut changed = 0;
             for name in rows.into_iter().filter(|name| !others.contains(name)) {
                 let name = format!("temp.{}", sqlive::sql::identifier(&name));
-                changed = db.internal_execute(
+                changed = db.execute(
                     &format!("DELETE FROM {name} WHERE rowid=(SELECT min(rowid) FROM {name})"),
                     [],
                 )?;
@@ -215,7 +215,7 @@ impl SnapshotStaging {
         let tables = self.tables.as_ref().map(|tables| (tables.id, tables.tables.clone()));
         let (id, tables) = tables.expect("a staging with an id holds its tables");
         self.database
-            .call(move |inner| inner.inputs.write(|db| digest(db, &StagedTables { id, tables })))
+            .call(move |inner| inner.inputs.write(|db, _| digest(db, &StagedTables { id, tables })))
             .await
     }
 }

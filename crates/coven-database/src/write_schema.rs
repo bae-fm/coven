@@ -3,6 +3,7 @@
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{DbError, SyncedTable};
 use coven_merge::ForeignKey;
 use sqlive::sql::identifier;
@@ -23,6 +24,7 @@ pub(crate) struct WriteSchema {
 impl WriteSchema {
     pub(crate) fn read(
         db: &DatabaseConnection,
+        call: &StoreCall<'_>,
         declarations: Vec<SyncedTable>,
     ) -> Result<Self, DbError> {
         let schema = Schema::read(db, &crate::file_table::declared(&declarations))?;
@@ -41,7 +43,8 @@ impl WriteSchema {
         }
         let result = Self {
             schema,
-            versions: crate::raise_capture::breaking_version(db)?..=db.schema_version()?,
+            versions: crate::raise_capture::breaking_version(db)?
+                ..=crate::transaction_constants::schema_version(db, call)?,
             declarations,
             rules,
             conversions: BTreeMap::new(),

@@ -3,6 +3,7 @@
 //! (§18.3). Its parts pass unread and writes into it are refused until the
 //! rebuild commits.
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, PendingValue, StoreState};
 use coven_merge::Audience;
@@ -10,8 +11,12 @@ use std::time::SystemTime;
 
 /// End the wait of every circle `state` no longer lets this device read, or
 /// deleted: there is nothing to rebuild.
-pub(crate) fn release(db: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
-    let device = db
+pub(crate) fn release(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    state: &StoreState,
+) -> Result<(), DbError> {
+    let device = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     let member = state.devices.get(&device).map(|device| device.member);
@@ -37,11 +42,12 @@ pub(crate) fn release(db: &DatabaseConnection, state: &StoreState) -> Result<(),
 /// to it (§18.4).
 pub(crate) fn begin<P: PendingValue>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,
     circles: &[Audience],
 ) -> Result<(), DbError> {
-    let marker = queue_marker(db, schema, now)?;
+    let marker = queue_marker(db, call, schema, now)?;
     for circle in circles {
         crate::reload_gate::require_rebuild::<P>(db, circle, marker.header.position)?;
         // A holder's capture of the audience, made before the slot that
@@ -56,24 +62,26 @@ pub(crate) fn begin<P: PendingValue>(
 /// The old marker counts as an empty write.
 pub(crate) fn restart(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,
 ) -> Result<(), DbError> {
-    let marker = queue_marker(db, schema, now)?;
+    let marker = queue_marker(db, call, schema, now)?;
     crate::reload_gate::follow(db, marker.header.position)
 }
 
 fn queue_marker(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     now: SystemTime,
 ) -> Result<coven_format::write::WriteRecord, DbError> {
-    let device = db
+    let device = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
-    let marker = crate::write_record::rebuild_marker(db, device, now)?;
+    let marker = crate::write_record::rebuild_marker(db, call, device, now)?;
     crate::write_commit::retain_original(db, &marker.header, None)?;
-    crate::write_commit::queue(db, schema, &marker, Default::default())?;
+    crate::write_commit::queue(db, call, schema, &marker, Default::default())?;
     crate::raise_capture::follow(db, marker.header.position)?;
     Ok(marker)
 }

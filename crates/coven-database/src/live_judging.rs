@@ -5,7 +5,7 @@
 
 use super::DatabaseConnection;
 use crate::observation::CommitObserver;
-use crate::{DbError, SqlReadContext};
+use crate::DbError;
 use sqlive::{Judging, Lookups, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,13 +20,13 @@ impl DatabaseConnection {
         read: F,
     ) -> Result<R, E>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        F: FnOnce(&Self) -> Result<R, E>,
         E: From<DbError>,
     {
         let mut finished = false;
-        let result = self.read_with_constants(|| {
+        let result = self.read_transaction(|| {
             let _reading = self.authorization.live_reading();
-            let result = read(SqlReadContext::new(self));
+            let result = read(self);
             let reads = self.authorization.reads();
             finished = true;
             let judged = judge(reads, &mut |judging| {

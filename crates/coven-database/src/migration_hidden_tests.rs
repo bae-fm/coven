@@ -291,7 +291,7 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
 }
 
 fn read(db: &Database) -> Vec<Loss> {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query(
             &format!("{} ORDER BY l.id", crate::loss_record::SELECT),
             [],

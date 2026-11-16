@@ -13,7 +13,7 @@ use std::sync::{
 async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         sql.batch("INSERT INTO notes VALUES ('f47ac10b-58cc-4372-a567-0e02b2c3d479','Plan','body')")
             .unwrap()
     });
@@ -48,7 +48,7 @@ async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
 async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','old','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','old','')").unwrap());
     let (entered, entry) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let clone = db.clone();
@@ -66,7 +66,7 @@ async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
             .await
     });
     entry.recv_timeout(HANG_GUARD).unwrap();
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET title='new'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET title='new'").unwrap());
     release.send(()).unwrap();
     assert_eq!(task.await.unwrap().unwrap(), ("old".into(), "old".into()));
     assert_eq!(
@@ -208,7 +208,7 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
             Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
         });
         assert!(notes.next_inline().await.expect("the live query answers").unwrap().is_empty());
-        db.inspect_readers(|reader| reader.refuse_transaction_end(true));
+        db.inspect_readers(|reader, _| reader.refuse_transaction_end(true));
         let error = db
             .read(move |sql| {
                 sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
@@ -240,7 +240,7 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
 async fn a_panicking_read_whose_rollback_fails_keeps_its_bug_and_fails_the_handle() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_readers(|reader| reader.refuse_transaction_end(true));
+    db.inspect_readers(|reader, _| reader.refuse_transaction_end(true));
     let error = db.read(|_| -> Result<(), DbError> { panic!("app read panic") }).await.unwrap_err();
     assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert!(rollback_failed(db.read(|_| Ok(())).await));
@@ -254,14 +254,14 @@ async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_bac
     open().open().await.unwrap().close().await.unwrap();
     // A reader ending its snapshot.
     let ro = open().open_read_only().await.unwrap();
-    ro.inspect_readers(|reader| reader.refuse_transaction_end(true));
+    ro.inspect_readers(|reader, _| reader.refuse_transaction_end(true));
     assert!(matches!(ro.read(|_| Ok(())).await, Err(DbError::Sqlite(_))));
     assert!(rollback_failed(ro.read(|_| Ok(())).await));
     assert!(matches!(ro.schema_version().await, Err(DbError::RollbackFailed)));
     ro.close().await.unwrap();
     // The cache connection rolling back a transaction whose COMMIT failed.
     let ro = open().open_read_only().await.unwrap();
-    ro.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    ro.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
     let files = crate::FileDatabase::new(ro.clone());
     let error = files.trim_cache("files").await.unwrap_err();
     assert!(matches!(error, DbError::Rollback { .. }), "{error:?}");
@@ -359,7 +359,7 @@ async fn a_read_fails_with_its_closures_own_error() {
 async fn statement_log_records_a_reads_statements_in_order_with_their_values() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         sql.batch("INSERT INTO notes VALUES ('a','Plan','body')").unwrap();
     });
     let log = crate::test_utils::StatementLog::new();
@@ -372,7 +372,7 @@ async fn statement_log_records_a_reads_statements_in_order_with_their_values() {
     .await
     .unwrap();
     // A write's statements are not recorded.
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Two','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Two','')").unwrap());
     assert_eq!(
         log.statements(),
         vec![

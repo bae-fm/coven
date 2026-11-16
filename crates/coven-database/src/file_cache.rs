@@ -3,7 +3,8 @@
 
 use super::DatabaseAccess;
 use crate::internal_schema::CACHE_NAME_USED_SQL;
-use crate::{sqlite::DatabaseConnection, DbError, FileRef};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, FileRef};
 use coven_foundation::files::StoreDirAccess;
 
 pub(super) use crate::internal_schema::{
@@ -103,7 +104,9 @@ pub(super) fn read<L>(
     file: &FileRef,
     index: i64,
 ) -> Result<Option<Vec<u8>>, DbError> {
-    let entry = access.with_writer(|db| db.read_with_constants(|| covering(db, file, index)))?;
+    let entry = access.with_writer(|db, call| {
+        crate::transaction_constants::read_with_constants(db, call, || covering(db, file, index))
+    })?;
     let Some((path, first, _, length)) = entry else {
         return Ok(None);
     };
@@ -125,12 +128,9 @@ pub(super) fn read<L>(
     }
     let (offset, length) = within(file, first, index)?;
     let bytes = reader.read_at(offset, length).map_err(observation)?;
-    access.with_writer(|db| {
+    access.with_writer(|db, _| {
         db.transaction(|db: &DatabaseConnection| {
-            db.internal_execute(
-                "UPDATE _coven_cache SET last_read=?2 WHERE path=?1",
-                (&path, tick(db)?),
-            )?;
+            db.execute("UPDATE _coven_cache SET last_read=?2 WHERE path=?1", (&path, tick(db)?))?;
             Ok(())
         })
     })?;
@@ -152,7 +152,9 @@ pub(super) fn repair<L>(
     index: i64,
     bytes: &[u8],
 ) -> Result<(), DbError> {
-    let entry = access.with_writer(|db| db.read_with_constants(|| covering(db, file, index)))?;
+    let entry = access.with_writer(|db, call| {
+        crate::transaction_constants::read_with_constants(db, call, || covering(db, file, index))
+    })?;
     let Some((path, first, _, _)) = entry else {
         return Ok(());
     };
@@ -170,7 +172,7 @@ pub(super) fn repair<L>(
 /// An entry's bytes are missing: evicted since it was looked up, unless a
 /// row still names them, which is damage.
 fn evicted<L>(access: &DatabaseAccess<L>, path: &str) -> Result<(), DbError> {
-    let recorded = access.with_writer(|db| {
+    let recorded = access.with_writer(|db, _| {
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)", [path], |r| {
             r.get::<_, bool>(0)
         })
@@ -201,7 +203,7 @@ pub(super) fn put<L>(
         });
     }
     let _writing = access.directory.lock_cache_write()?;
-    let recorded = access.with_writer(|db| {
+    let recorded = access.with_writer(|db, _| {
         db.transaction(|db: &DatabaseConnection| {
             if db.query_row(&format!("SELECT {CACHE_NAME_USED_SQL}"), [name.as_str()], |r| {
                 r.get::<_, bool>(0)
@@ -213,10 +215,7 @@ pub(super) fn put<L>(
             if overlaps(db, file, first, chunks)? {
                 return Ok(false);
             }
-            db.internal_execute(
-                "INSERT INTO _coven_cache_writes(path) VALUES(?1)",
-                [name.as_str()],
-            )?;
+            db.execute("INSERT INTO _coven_cache_writes(path) VALUES(?1)", [name.as_str()])?;
             Ok(true)
         })
     })?;
@@ -229,7 +228,7 @@ pub(super) fn put<L>(
         .write_recorded(bytes)
         .map_err(DbError::from)
         .and_then(|()| {
-            access.with_writer(|db| {
+            access.with_writer(|db, _| {
                 db.transaction(|db| publish_range(db, file, first, chunks, name, bytes))
             })
         });
@@ -268,7 +267,7 @@ fn publish_range(
     name: &FileName,
     bytes: &[u8],
 ) -> Result<bool, DbError> {
-    if db.internal_execute("DELETE FROM _coven_cache_writes WHERE path=?1", [name.as_str()])? != 1 {
+    if db.execute("DELETE FROM _coven_cache_writes WHERE path=?1", [name.as_str()])? != 1 {
         return Err(DbError::Invariant {
             what: "a cache range being published is recorded as being written",
         });
@@ -277,7 +276,7 @@ fn publish_range(
         crate::file_removals::record_cached(db, name.as_str())?;
         return Ok(false);
     }
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_cache(namespace,object_path,chunk,chunks,path,size,last_read)
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
         rusqlite::params![
@@ -297,13 +296,9 @@ fn publish_range(
 /// the writer is free. Returns the failures; a record they leave is
 /// removed by the next open.
 fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
-    let recorded = access.with_writer(|db| {
+    let recorded = access.with_writer(|db, _| {
         db.transaction(|db: &DatabaseConnection| {
-            if db.internal_execute(
-                "DELETE FROM _coven_cache_writes WHERE path=?1",
-                [name.as_str()],
-            )? == 1
-            {
+            if db.execute("DELETE FROM _coven_cache_writes WHERE path=?1", [name.as_str()])? == 1 {
                 crate::file_removals::record_cached(db, name.as_str())?;
             }
             Ok(())
@@ -334,7 +329,7 @@ pub(crate) fn declare_budgets(
     }
     db.transaction(|db| {
         for namespace in namespaces {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
                  ON CONFLICT(namespace) DO NOTHING",
                 (&namespace.name, namespace.cache_budget.to_be_bytes().as_slice()),
@@ -362,7 +357,7 @@ pub(crate) fn set_budget(
     namespace: &str,
     bytes: u64,
 ) -> Result<(), DbError> {
-    let changed = db.internal_execute(
+    let changed = db.execute(
         "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
         (namespace, bytes.to_be_bytes().as_slice()),
     )?;
@@ -423,7 +418,7 @@ pub(crate) fn trim_entries(
         let Some((path, size)) = next.into_iter().next() else {
             break;
         };
-        db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
+        db.execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
         crate::file_removals::record_cached(db, &path)?;
         cached -= size;
         removed.push(path);
@@ -484,13 +479,13 @@ pub(crate) fn publish(
     let object = object_path_of(file)?;
     remove_entries(db, file.namespace(), &object)?;
     // The partial download this copy completed is the copy now.
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_cache_partials WHERE namespace=?1 AND object_path=?2 AND path=?3",
         (file.namespace(), &object, name.as_str()),
     )?;
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE])?;
+    db.execute("INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?6)",rusqlite::params![file.namespace(),object,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE])?;
     Ok(true)
 }
 /// Whether a record here names the stored bytes `file` was taken over. The
@@ -531,7 +526,7 @@ fn observation(error: coven_foundation::files::ObservationError) -> DbError {
 /// Opening found the cache ranges recorded as being written abandoned:
 /// their records go, once the caller has recorded each for removal.
 pub(crate) fn forget_writes(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_cache_writes", [])?;
+    db.execute("DELETE FROM _coven_cache_writes", [])?;
     Ok(())
 }
 

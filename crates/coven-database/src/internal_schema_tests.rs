@@ -28,9 +28,9 @@ async fn migrations_change_present_values_without_a_second_copy() {
     ));
     let db = store.builder(declarations(), migrations).open().await.unwrap();
     let migration = crate::write::tests::records(&db).pop().unwrap();
-    db.inspect_writer_schema(|sql, schema| {
+    db.inspect_writer_schema(|sql, call, schema| {
         let visible = crate::write_rows::AppView::after(sql, schema);
-        let merge = crate::merge_store::MergeStore::new(sql, &visible);
+        let merge = crate::merge_store::MergeStore::new(sql, call, &visible);
         let state = merge.row(&original.parts[0].rows[0].row).unwrap().state;
         assert_eq!(state.cells()["title"].value.value, Value::Text("migrated".into()));
         assert_eq!(state.cells()["title"].write, migration.header.position);
@@ -51,7 +51,7 @@ async fn migrations_change_present_values_without_a_second_copy() {
 async fn only_the_spec_tables_are_created() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         let objects = sql
             .query(
                 "SELECT type,name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name",

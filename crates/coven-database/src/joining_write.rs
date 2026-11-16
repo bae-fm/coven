@@ -2,9 +2,10 @@
 //! the person's profile, written in the transaction that first applies the
 //! device's registration, from the facts of its member's latest admission.
 
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     file_write::{FileWrite, WriteFiles},
-    sqlite::DatabaseConnection,
     write_schema::WriteSchema,
     DbError, StoreState,
 };
@@ -107,13 +108,14 @@ impl Registering<'_> {
 /// it (§13.2).
 pub(crate) fn owed<'a>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     hook: Option<&'a JoiningHook>,
     state: &StoreState,
     schema: &'a WriteSchema,
     now: std::time::SystemTime,
     files: &'a WriteFiles<'a>,
 ) -> Result<Option<Registering<'a>>, DbError> {
-    let (Some(hook), Some(device)) = (hook, db.local_device()) else {
+    let (Some(hook), Some(device)) = (hook, call.local_device()) else {
         return Ok(None);
     };
     if crate::store_state_tables::device_member(db, device)?.is_some() {

@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 fn write(db: &Database, sql: &str) {
-    db.commit_writer(|db| db.batch(sql).unwrap());
+    db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
 #[tokio::test]
@@ -238,8 +238,8 @@ async fn commit_before_the_statement_reveals_its_range_is_not_missed() {
 async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE texts(id TEXT NOT NULL PRIMARY KEY, value INTEGER); CREATE TABLE numbers(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO numbers VALUES (1,0),(2,0),(3,0)").await.unwrap();
-    db.commit_writer(|db| {
-        db.internal_execute("INSERT INTO texts VALUES (?1,0),(?2,0)", ["a\0b", "a"]).unwrap();
+    db.commit_writer(|db, _| {
+        db.execute("INSERT INTO texts VALUES (?1,0),(?2,0)", ["a\0b", "a"]).unwrap();
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
@@ -251,9 +251,7 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
     write(&db, "UPDATE texts SET value=1 WHERE id='a'");
     assert!(!text.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    db.commit_writer(|db| {
-        db.internal_execute("UPDATE texts SET value=2 WHERE id=?", ["a\0b"]).unwrap()
-    });
+    db.commit_writer(|db, _| db.execute("UPDATE texts SET value=2 WHERE id=?", ["a\0b"]).unwrap());
     assert_eq!(next(&mut text).await, 2);
 
     // Expanded SQL prints this f64 as 2.0, which would exclude key 2 from `<`.
@@ -407,12 +405,9 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
 async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE \"a\"\"b\"(\"i\"\"d\" TEXT NOT NULL PRIMARY KEY, value INTEGER); INSERT INTO \"a\"\"b\" VALUES ('other',0)").await.unwrap();
-    db.commit_writer(|db| {
-        db.internal_execute(
-            "INSERT INTO \"a\"\"b\" VALUES (?,0)",
-            [sqlive::SqlValue::Text(vec![255, 0, 1])],
-        )
-        .unwrap()
+    db.commit_writer(|db, _| {
+        db.execute("INSERT INTO \"a\"\"b\" VALUES (?,0)", [sqlive::SqlValue::Text(vec![255, 0, 1])])
+            .unwrap()
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
@@ -428,8 +423,8 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
     write(&db, "UPDATE \"a\"\"b\" SET value=1 WHERE \"i\"\"d\"='other'");
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    db.commit_writer(|db| {
-        db.internal_execute(
+    db.commit_writer(|db, _| {
+        db.execute(
             "UPDATE \"a\"\"b\" SET value=2 WHERE \"i\"\"d\"=?",
             [sqlive::SqlValue::Text(vec![255, 0, 1])],
         )
@@ -466,7 +461,7 @@ async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
     });
     entry.await.unwrap();
     write(&db, "INSERT INTO items VALUES (9,'outside')");
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         assert!(writer
             .transaction::<()>(|writer| {
                 writer.batch("INSERT INTO items VALUES (3,'rolled back')")?;

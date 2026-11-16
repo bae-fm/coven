@@ -1,12 +1,15 @@
 //! Fold every retained slot needed by the selected audience prefixes.
 use crate::download_stream::PreparedWrite;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
-    snapshot_coverage::SnapshotCoverage, snapshot_error::invalid, sqlite::DatabaseConnection,
-    write_schema::WriteSchema, DbError, IncomingSlot, LoadStep, SlotContent,
+    snapshot_coverage::SnapshotCoverage, snapshot_error::invalid, write_schema::WriteSchema,
+    DbError, IncomingSlot, LoadStep, SlotContent,
 };
 use coven_foundation::progress::ProgressReport;
 pub(crate) fn apply<P: crate::PendingValue>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     slots: Vec<IncomingSlot<PreparedWrite<'_>>>,
     coverage: &SnapshotCoverage,
@@ -27,6 +30,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
         match incoming.content {
             SlotContent::Writes { size, writes } => crate::sequence_apply::stage_writes::<P>(
                 db,
+                call,
                 schema,
                 incoming.slot,
                 &incoming.header,

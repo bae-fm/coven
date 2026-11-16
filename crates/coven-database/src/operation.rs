@@ -1,7 +1,8 @@
 //! Durable operation records. Sync owns kinds and interprets their data (§11).
 
 use crate::operation_kind::{INVITE, PAIRING};
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 
 /// The local, never reused identity of an operation.
 #[derive(
@@ -85,10 +86,7 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
     if new.pauses_writes {
         // Finishing or discarding the operation deletes its row and with it
         // the pause, in that same transaction.
-        db.internal_execute(
-            "INSERT INTO _coven_write_pause(paused,operation) VALUES(1,?1)",
-            [id.0],
-        )?;
+        db.execute("INSERT INTO _coven_write_pause(paused,operation) VALUES(1,?1)", [id.0])?;
     }
     Ok(id)
 }
@@ -102,10 +100,7 @@ pub(crate) fn insert_for_app(
     kind: &str,
 ) -> Result<OperationId, DbError> {
     let id = insert(db, new)?;
-    db.internal_execute(
-        "INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)",
-        (id.0, kind),
-    )?;
+    db.execute("INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)", (id.0, kind))?;
     Ok(id)
 }
 
@@ -118,7 +113,7 @@ pub(crate) fn list_outcome(
     kind: &str,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_app_operations(operation,kind,outcome) VALUES(?1,?2,?3)",
         (id.0, kind, outcome.encode()),
     )?;
@@ -141,7 +136,7 @@ pub(crate) fn acknowledge(db: &DatabaseConnection, id: OperationId) -> Result<()
         None => Err(DbError::OperationUnknown(id)),
         Some(false) => Err(DbError::OperationRunning(id)),
         Some(true) => {
-            db.internal_execute("DELETE FROM _coven_app_operations WHERE operation=?1", [id.0])?;
+            db.execute("DELETE FROM _coven_app_operations WHERE operation=?1", [id.0])?;
             Ok(())
         }
     }
@@ -227,7 +222,7 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 }
 
 pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Result<(), DbError> {
-    let changed = db.internal_execute(
+    let changed = db.execute(
         "UPDATE _coven_operations SET last_step=?1,data=?2 WHERE id=?3 AND last_step=?4",
         (&update.last_step, &update.data, update.id.0, update.previous),
     )?;
@@ -241,7 +236,7 @@ pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Resu
 /// it was at: a provider-access request moves between its steps as the
 /// account's row says (§14.2).
 pub(crate) fn set_step(db: &DatabaseConnection, id: OperationId, step: u32) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_operations SET last_step=?2 WHERE id=?1 AND last_step!=?2",
         (id.0, step),
     )?;
@@ -259,7 +254,7 @@ pub(crate) fn finish_with_outcome(
     id: OperationId,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
         (id.0, outcome.encode()),
     )?;
@@ -278,7 +273,7 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
         return Err(DbError::Invariant { what: "an operation ends after its claim" });
     }
     crate::pending::clear_operation(db, id)?;
-    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
+    db.execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
 }
 
 /// End every operation an app's write journaled that still runs, and every
@@ -408,7 +403,7 @@ pub(crate) fn hold_keys(
     keys: &[coven_crypto::MemberPublicKeys],
 ) -> Result<(), DbError> {
     for pair in keys {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_held_keys(signing,sealing) VALUES(?1,?2) ON CONFLICT DO NOTHING",
             (pair.signing.as_bytes().as_slice(), pair.sealing.as_bytes().as_slice()),
         )?;

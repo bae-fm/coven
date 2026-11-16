@@ -111,7 +111,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
 /// How many of the writer's statements in its last profiled commit read a
 /// table's shape: its columns, or which tables are shadow tables.
 fn shape_reads(db: &crate::Database) -> usize {
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .profiled_statements()
             .iter()
@@ -148,7 +148,7 @@ async fn commits_read_no_table_shape_their_schema_already_gave() {
         .await
         .unwrap();
         reads.push(shape_reads(&db));
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.with_profile(|writer| {
                 writer.transaction(|db| db.batch("UPDATE queue SET played=0"))
             })
@@ -169,17 +169,17 @@ async fn a_commit_after_a_schema_change_reads_the_tables_new_shape() {
     let store = TestStore::new();
     let db = queue(&store).await;
     sql(&db, "UPDATE queue SET played=1 WHERE id=1").await.unwrap();
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("UPDATE queue SET played=2 WHERE id=1").unwrap();
     });
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("ALTER TABLE queue ADD COLUMN rating INTEGER").unwrap();
     });
     let mut ratings: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT rating FROM queue WHERE id = 1", [], |r| r.get::<_, Option<i64>>(0))?)
     });
     assert_eq!(ratings.next_inline().await.expect("the live query answers").unwrap(), [None]);
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("UPDATE queue SET rating=5 WHERE id=1").unwrap();
     });
     assert!(ratings.is_marked_for_rerun());

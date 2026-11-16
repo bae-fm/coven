@@ -53,7 +53,7 @@ async fn unique_terms_follow_changed_constraints_when_reopening() {
         .open()
         .await
         .unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         assert_eq!(schema.rules["notes"].unique[0].identity, ["body"].into());
     });
     db.close().await.unwrap();
@@ -160,7 +160,7 @@ async fn removing_and_restoring_two_parents_keeps_each_foreign_key_reason() {
     }
     sql(&db, "INSERT INTO lefts VALUES('1',1)").await.unwrap();
     assert_eq!(count(&db, "children"), 0);
-    let rules = db.inspect_writer(|db| {
+    let rules = db.inspect_writer(|db, _| {
         db.query_row(
             "SELECT replaced_by FROM _coven_lost WHERE table_name='children' AND column_id IS NULL",
             [],
@@ -229,7 +229,7 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
         .await;
         sql(&db, "UPDATE notes SET active=2 WHERE id='45'").await.unwrap();
         let expected = if partial { [Rule::Unique(column)].into() } else { expected };
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE table_name='notes' AND column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
             assert_eq!(rules,expected);
             let identities:BTreeSet<_> = db.query("SELECT c.identity FROM _coven_claims v JOIN _coven_constraints c ON c.id=v.constraint_id",[],|r| Ok(coven_format::merge_fields::decode_unique_constraint(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap().into_iter().collect();
@@ -250,13 +250,13 @@ async fn reading_schema_leaves_connection_evaluators_unchanged() {
         .schema(tables.clone(), "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)")
         .await
         .unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, call| {
         let before = writer
             .query("SELECT name,sql FROM temp.sqlite_schema ORDER BY name", [], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
             })
             .unwrap();
-        let schema = super::WriteSchema::read(writer, tables).unwrap();
+        let schema = super::WriteSchema::read(writer, call, tables).unwrap();
         assert_eq!(schema.table("notes").name, "notes");
         let after = writer
             .query("SELECT name,sql FROM temp.sqlite_schema ORDER BY name", [], |r| {

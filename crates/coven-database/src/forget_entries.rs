@@ -14,8 +14,9 @@
 //! it, when its device lands a later write, and when a later stamped entry
 //! takes its place. No pass reads every entry.
 
+use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, decoded, encoded, slot_counter};
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::DbError;
 use coven_format::{merge_fields, value::Value};
 use coven_merge::{RowId, RowState, WriteId};
 use rusqlite::params;
@@ -23,7 +24,7 @@ use std::collections::BTreeSet;
 
 /// Look again at `write`'s entry in the next applied slot.
 fn look_again(db: &DatabaseConnection, ordinal: i64) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_unnamed_writes(write_id) VALUES(?1) ON CONFLICT DO NOTHING",
         [ordinal],
     )?;
@@ -94,13 +95,13 @@ pub(crate) fn unnamed_by_published(
     row: Option<&RowId>,
 ) -> Result<(), DbError> {
     match row {
-        Some(row) => db.internal_execute(
+        Some(row) => db.execute(
             "INSERT INTO _coven_unnamed_writes(write_id) SELECT write_id FROM _coven_published_writes
              WHERE table_name=?1 AND key=?2 AND audience=?3 ON CONFLICT DO NOTHING",
             params![row.table, row.key, &row.audience],
         )?,
         // SQLite reads an upsert after a bare SELECT's FROM as a join's ON.
-        None => db.internal_execute(
+        None => db.execute(
             "INSERT INTO _coven_unnamed_writes(write_id) SELECT write_id FROM _coven_published_writes WHERE true
              ON CONFLICT DO NOTHING",
             [],
@@ -130,7 +131,7 @@ pub(crate) fn passed(
 ) -> Result<Option<i64>, DbError> {
     let (from, through) = (from.to_be_bytes(), through.to_be_bytes());
     let range = params![from.as_slice(), through.as_slice()];
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_unnamed_writes(write_id) SELECT id FROM _coven_writes WHERE slot>?1 AND slot<=?2
          ON CONFLICT DO NOTHING",
         range,
@@ -171,7 +172,7 @@ pub(crate) fn forget(
 ) -> Result<(), DbError> {
     let candidates =
         db.query("SELECT write_id FROM _coven_unnamed_writes", [], |r| r.get::<_, i64>(0))?;
-    db.internal_execute("DELETE FROM _coven_unnamed_writes", [])?;
+    db.execute("DELETE FROM _coven_unnamed_writes", [])?;
     for ordinal in candidates.into_iter().filter(|ordinal| Some(*ordinal) != newest) {
         let (write, slot) = db.query_row(
             "SELECT timestamp,number,slot FROM _coven_writes WHERE id=?1",

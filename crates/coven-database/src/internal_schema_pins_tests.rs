@@ -15,7 +15,7 @@ const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEX
 
 /// Whether `coven_pins` holds exactly what its source says.
 fn agrees(db: &crate::Database) -> bool {
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .query_row(
                 "SELECT NOT EXISTS(SELECT * FROM coven_pins EXCEPT SELECT * FROM _coven_pin_source)
@@ -350,7 +350,7 @@ async fn releases(
         .await
         .unwrap();
     if !follow {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             let triggers = writer
                 .query(
                     "SELECT name FROM sqlite_schema WHERE type='trigger'
@@ -366,7 +366,7 @@ async fn releases(
     }
     let timed = |sql: &str| {
         let started = std::time::Instant::now();
-        db.inspect_writer(|writer| writer.batch(sql).unwrap());
+        db.inspect_writer(|writer, _| writer.batch(sql).unwrap());
         started.elapsed()
     };
     let rows = timed(
@@ -437,7 +437,7 @@ async fn counting_unpinned_releases_costs() {
     for _ in 0..5 {
         let started = std::time::Instant::now();
         computed =
-            bare.inspect_writer(|writer| writer.query_row(&source, [], |r| r.get(0)).unwrap());
+            bare.inspect_writer(|writer, _| writer.query_row(&source, [], |r| r.get(0)).unwrap());
         computing = computing.min(started.elapsed());
     }
     assert_eq!((probed, kept, computed), (1000, 1000, 1000));

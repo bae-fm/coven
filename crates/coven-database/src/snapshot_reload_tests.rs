@@ -3,6 +3,7 @@
 //! the removal rules leave over them (§16.2, §8.4). Each case compares the
 //! loading device with the device that wrote the snapshot.
 use crate::snapshot_write::tests::{decode, frames, id, load_one, SnapshotFrames};
+use crate::sqlite::DatabaseConnection;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
@@ -60,7 +61,7 @@ pub(crate) fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::
 /// What the removal rules recorded, by row identity rather than local id:
 /// unique claims and written values.
 pub(crate) fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.query(
                 "SELECT 'claim',r.table_name,r.key,r.audience,k.identity,c.value FROM _coven_claims c
                  JOIN _coven_rows r ON r.id=c.row_id JOIN _coven_constraints k ON k.id=c.constraint_id
@@ -76,9 +77,7 @@ pub(crate) fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
 }
 
 /// Every table's rows, ordered.
-pub(crate) fn everything(
-    db: &crate::sqlite::DatabaseConnection,
-) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
+pub(crate) fn everything(db: &DatabaseConnection) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
     let tables = db
         .query(
             "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
@@ -105,9 +104,11 @@ pub(crate) fn everything(
 /// nothing an install left: the rows the rules didn't reach show what the
 /// rules give them, with their losses, claims and written values.
 pub(crate) fn assert_rules_settled(db: &Database) {
-    db.inspect_writer_schema(|writer, schema| {
-        writer
-            .discarded_write_transaction(|writer| {
+    db.inspect_writer_schema(|writer, call, schema| {
+        let db = &*writer;
+        db
+            .discarded_write_transaction(|_| {
+                let writer = &db;
                 let before = everything(writer);
                 crate::download_stage::begin(writer)?;
                 let rows = writer.query(
@@ -116,7 +117,7 @@ pub(crate) fn assert_rules_settled(db: &Database) {
                     crate::row_queries::read_identity,
                 )?;
                 let deleted = crate::store_state_tables::deleted_circles(writer)?;
-                crate::download_stage::rules(writer, writer, schema, &deleted, rows.into_iter().collect())?;
+                crate::download_stage::rules(writer, call, writer, call, schema, &deleted, rows.into_iter().collect())?;
                 crate::download_stage::finish(writer)?;
                 assert_eq!(everything(writer), before);
                 Ok::<_, crate::DbError>(())
@@ -153,11 +154,11 @@ pub(crate) fn log_changes(db: &Database) {
             ));
         }
     }
-    db.inspect_writer(|db| db.batch(&sql).unwrap());
+    db.inspect_writer(|db, _| db.batch(&sql).unwrap());
 }
 
 pub(crate) fn changes(db: &Database) -> Vec<(String, String, String)> {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.query("SELECT kind,tbl,row FROM changes ORDER BY id", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
@@ -287,7 +288,7 @@ async fn a_new_device_installs_the_library_with_its_removals_and_written_values(
     // The source's own state has every kind of removal and written value.
     assert!(count(&a, "_coven_claims") > 0);
     assert!(count(&a, "_coven_written_values") > 0);
-    let lost = a.inspect_writer(|db| {
+    let lost = a.inspect_writer(|db, _| {
         db.query("SELECT DISTINCT replacement_kind FROM _coven_lost ORDER BY 1", [], |r| {
             r.get::<_, String>(0)
         })
@@ -366,7 +367,7 @@ async fn reloading_a_device_that_has_rows_changes_only_what_differs() {
     assert_eq!(logged(&c), expected_changes(&before, &app_rows(&c)));
     assert_parents_first(&c, &before);
     // Loading the same snapshot again changes no app row.
-    c.inspect_writer(|db| db.batch("DELETE FROM changes").unwrap());
+    c.inspect_writer(|db, _| db.batch("DELETE FROM changes").unwrap());
     load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
         .await
         .unwrap();
@@ -465,7 +466,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
     }
     circle_history(&a, &b, &d).await;
     let rules = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query(
                 "SELECT count(*) FROM _coven_lost WHERE replacement_kind='rules' GROUP BY audience ORDER BY audience",
                 [],

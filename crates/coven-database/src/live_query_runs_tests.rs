@@ -4,7 +4,7 @@ use crate::Database;
 use crate::DbError;
 
 fn write(db: &Database, sql: &str) {
-    db.commit_writer(|db| db.batch(sql).unwrap());
+    db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
 /// A run a write causes counts as one; one whose result is the same counts

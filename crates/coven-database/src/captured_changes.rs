@@ -1,5 +1,7 @@
 //! The local captured prefix follows schema identities before its raise publishes.
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::write::{WriteHeader, WritePart};
 use coven_merge::{Audience, ColumnValue, ConstraintColumns, ForeignKey, Operation};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +13,7 @@ pub(crate) fn capture(
     marker: coven_merge::WriteId,
     version: u32,
 ) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",rusqlite::params![marker.device,marker.number.to_be_bytes(),version])?;
+    db.execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",rusqlite::params![marker.device,marker.number.to_be_bytes(),version])?;
     Ok(())
 }
 
@@ -168,6 +170,7 @@ pub(crate) fn loss_rows(
 
 pub(crate) fn losses(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
 ) -> Result<(), DbError> {
@@ -198,11 +201,11 @@ pub(crate) fn losses(
         [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| {
             let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?;
-            crate::loss_record::keep(db, schema, &loss)
+            crate::loss_record::keep(db, call, schema, &loss)
         },
     )?;
     for key in &released {
-        crate::file_protection::refresh_received(db, schema, key)?;
+        crate::file_protection::refresh_received(db, call, schema, key)?;
     }
     Ok(())
 }

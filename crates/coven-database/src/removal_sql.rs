@@ -58,9 +58,9 @@ pub(crate) fn evaluate_values(
 ) -> Result<AppValues, DbError> {
     let target = identifier(&evaluation_name(table));
     let ordinal = identifier(&ordinal(table));
-    db.internal_execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
+    db.execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
     let columns: Vec<_> = table.columns.iter().filter(|c| !c.generated).collect();
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp.{target} ({ordinal},{}) VALUES (1,{})",
             columns.iter().map(|c| identifier(&c.name)).collect::<Vec<_>>().join(","),
@@ -104,9 +104,9 @@ pub(crate) fn reference_values(
     }
     let target = identifier(&crate::write_schema::affinity_name(table));
     let ordinal = identifier(&ordinal(table));
-    db.internal_execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
+    db.execute(&format!("DELETE FROM temp.{target} WHERE {ordinal}=1"), [])?;
     let names = columns.iter().map(|c| identifier(c)).collect::<Vec<_>>().join(",");
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp.{target} ({ordinal},{names}) VALUES (1,{})",
             vec!["?"; columns.len()].join(",")

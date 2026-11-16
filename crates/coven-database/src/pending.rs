@@ -1,6 +1,8 @@
 //! Typed persistence for sync-owned pending values, without depending on providers.
 
-use crate::{sqlite::DatabaseConnection, DbError, OperationId};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{DbError, OperationId};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -164,7 +166,7 @@ pub(crate) fn positioned<P: PendingValue>(
 }
 
 pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Result<(), DbError> {
-    db.pending_change(|| {
+    crate::store_call::pending_change(db, || {
         let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
         let (work, device, object) = match stored_object(record) {
@@ -174,7 +176,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         // A download of bytes no file over them names any more records
         // nothing: no pin or read can try them again. The cause is the
         // record's, written with it.
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build,move,pin,cause)
              SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
@@ -190,7 +192,7 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
 /// wrote it met, and a later run has met none of its own yet (§19.1). It
 /// runs before any app query observes the database.
 pub(crate) fn forget_causes(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", [])?;
+    db.execute("UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", [])?;
     Ok(())
 }
 
@@ -200,16 +202,16 @@ pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Resul
 
 /// Clear the record of a subject already encoded for its key.
 pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE subject=?1", [subject])?;
+    crate::store_call::pending_change(db, || {
+        db.execute("DELETE FROM _coven_pending WHERE subject=?1", [subject])?;
         Ok(())
     })
 }
 
 /// Clear the record of the move `id`, whatever it says.
 pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
+    crate::store_call::pending_change(db, || {
+        db.execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
         Ok(())
     })
 }
@@ -218,8 +220,8 @@ pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(
 /// finishing or an explicit retry ends both (§6.7).
 pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-    db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
+    crate::store_call::pending_change(db, || {
+        db.execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
         Ok(())
     })
 }
@@ -280,11 +282,14 @@ pub(crate) fn find<P: PendingValue>(
 
 pub(crate) fn retry<P: PendingValue>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     subject: &P::Subject,
 ) -> Result<bool, DbError> {
     match stored(db, subject)? {
         None => Ok(true),
-        Some(stored) => Ok(stored.decode::<P>()?.can_retry(stored.build, db.schema_version()?)),
+        Some(stored) => Ok(stored
+            .decode::<P>()?
+            .can_retry(stored.build, crate::transaction_constants::schema_version(db, call)?)),
     }
 }
 
@@ -292,8 +297,8 @@ pub(crate) fn retry<P: PendingValue>(
 /// build of coven finds the records an earlier one wrote.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute("UPDATE _coven_pending SET build=?1", [build.to_be_bytes()])?;
+    crate::store_call::pending_change(db, || {
+        db.execute("UPDATE _coven_pending SET build=?1", [build.to_be_bytes()])?;
         Ok(())
     })
 }
@@ -322,20 +327,17 @@ fn stored_slot_key<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
 
 /// An applied reset clears data-related observations permanently (§19.4).
 pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
+    crate::store_call::pending_change(db, || {
+        db.execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
         Ok(())
     })
 }
 
 /// Kept progress removes only this installation's condition, in its transaction.
 pub(crate) fn clear_slot(db: &DatabaseConnection, slot: coven_merge::Slot) -> Result<(), DbError> {
-    db.pending_change(|| {
+    crate::store_call::pending_change(db, || {
         for covered in [false, true] {
-            db.internal_execute(
-                "DELETE FROM _coven_pending WHERE slot_key=?1",
-                [slot_key(slot, covered)],
-            )?;
+            db.execute("DELETE FROM _coven_pending WHERE slot_key=?1", [slot_key(slot, covered)])?;
         }
         Ok(())
     })
@@ -353,11 +355,11 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
         return Ok(());
     }
     let applied = crate::sequence::applied(db)?;
-    db.pending_change(|| {
+    crate::store_call::pending_change(db, || {
         for key in waiting {
             let slot = u64::from_be_bytes(key[1..].try_into().expect("eight-byte slot"));
             if slot <= applied {
-                db.internal_execute("DELETE FROM _coven_pending WHERE slot_key=?1", [key])?;
+                db.execute("DELETE FROM _coven_pending WHERE slot_key=?1", [key])?;
             }
         }
         Ok(())

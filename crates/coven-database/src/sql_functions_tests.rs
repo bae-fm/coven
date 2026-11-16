@@ -69,8 +69,8 @@ async fn order_by_the_apps_collation_uses_its_function_on_every_connection() {
         .await
         .unwrap();
     assert_eq!(read, expected);
-    database.inspect_writer(|writer| assert_eq!(titles(writer, IN_ORDER), expected));
-    database.inspect_readers(|reader| assert_eq!(titles(reader, IN_ORDER), expected));
+    database.inspect_writer(|writer, _| assert_eq!(titles(writer, IN_ORDER), expected));
+    database.inspect_readers(|reader, _| assert_eq!(titles(reader, IN_ORDER), expected));
 
     let reading = store
         .builder(notes(), migrations())
@@ -83,8 +83,8 @@ async fn order_by_the_apps_collation_uses_its_function_on_every_connection() {
         .await
         .unwrap();
     assert_eq!(read, expected);
-    reading.inspect_writer(|writer| assert_eq!(titles(writer, IN_ORDER), expected));
-    reading.inspect_readers(|reader| assert_eq!(titles(reader, IN_ORDER), expected));
+    reading.inspect_writer(|writer, _| assert_eq!(titles(writer, IN_ORDER), expected));
+    reading.inspect_readers(|reader, _| assert_eq!(titles(reader, IN_ORDER), expected));
     reading.close().await.unwrap();
     database.close().await.unwrap();
 }
@@ -128,7 +128,7 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
         result => panic!("expected the CHECK to refuse, received {result:?}"),
     }
 
-    ben_db.inspect_readers(|reader| {
+    ben_db.inspect_readers(|reader, _| {
         let ordered = plan(reader, IN_ORDER);
         assert!(ordered.contains("INDEX notes_reversed"), "{ordered}");
         assert_eq!(titles(reader, IN_ORDER), ["figs", "cherries", "bananas", "apples"]);
@@ -137,7 +137,7 @@ async fn an_index_in_the_apps_order_is_used_and_stays_ordered_through_remote_wri
         assert!(searched.contains("INDEX notes_reversed (title=?)"), "{searched}");
         assert_eq!(titles(reader, search), ["figs"]);
     });
-    ben_db.inspect_writer(|writer| {
+    ben_db.inspect_writer(|writer, _| {
         let check: Vec<String> =
             writer.query("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, ["ok"]);
@@ -362,15 +362,15 @@ async fn the_apps_function_is_called_on_every_connection() {
         .unwrap();
     // SQLite's own lower leaves É alone.
     let lower = "SELECT title FROM notes WHERE lower(title) = 'école' ORDER BY id";
-    database.inspect_readers(|reader| assert!(titles(reader, lower).is_empty()));
+    database.inspect_readers(|reader, _| assert!(titles(reader, lower).is_empty()));
     let expected = ["École", "ÉCOLE"];
     let read = database
         .read(|sql| Ok::<_, DbError>(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
-    database.inspect_writer(|writer| assert_eq!(titles(writer, MATCHING), expected));
-    database.inspect_readers(|reader| assert_eq!(titles(reader, MATCHING), expected));
+    database.inspect_writer(|writer, _| assert_eq!(titles(writer, MATCHING), expected));
+    database.inspect_readers(|reader, _| assert_eq!(titles(reader, MATCHING), expected));
 
     let reading =
         store.builder(notes(), migrations()).sql_functions(fold()).open_read_only().await.unwrap();
@@ -379,8 +379,8 @@ async fn the_apps_function_is_called_on_every_connection() {
         .await
         .unwrap();
     assert_eq!(read, expected);
-    reading.inspect_writer(|writer| assert_eq!(titles(writer, MATCHING), expected));
-    reading.inspect_readers(|reader| assert_eq!(titles(reader, MATCHING), expected));
+    reading.inspect_writer(|writer, _| assert_eq!(titles(writer, MATCHING), expected));
+    reading.inspect_readers(|reader, _| assert_eq!(titles(reader, MATCHING), expected));
     reading.close().await.unwrap();
     database.close().await.unwrap();
 }
@@ -420,7 +420,7 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
         result => panic!("expected the CHECK to refuse, received {result:?}"),
     }
 
-    ben_db.inspect_readers(|reader| {
+    ben_db.inspect_readers(|reader, _| {
         let searched = plan(reader, MATCHING);
         assert!(searched.contains("INDEX notes_folded (<expr>=?)"), "{searched}");
         assert_eq!(titles(reader, MATCHING), ["École", "ÉCOLE"]);
@@ -430,7 +430,7 @@ async fn an_index_check_and_view_on_the_apps_function_hold_through_remote_writes
             ["apples", "école", "école"]
         );
     });
-    ben_db.inspect_writer(|writer| {
+    ben_db.inspect_writer(|writer, _| {
         let check: Vec<String> =
             writer.query("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, ["ok"]);

@@ -1,6 +1,7 @@
 //! Indexed relations between synced rows, independent of app-table indexes.
 use crate::schema::TableSchema;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
@@ -21,10 +22,16 @@ pub(crate) fn children(
 /// registers every one, so a reference can only name a registered key (Appendix B.1).
 pub(crate) fn foreign_key(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     table: &str,
     key: &ForeignKey,
 ) -> Result<i64, DbError> {
-    let id = database.foreign_key_id(table, &encoded(merge_fields::encode_foreign_key(key))?)?;
+    let id = crate::transaction_constants::foreign_key_id(
+        database,
+        call,
+        table,
+        &encoded(merge_fields::encode_foreign_key(key))?,
+    )?;
     Ok(id.unwrap_or_else(|| panic!("foreign key {key:?} of {table} was never registered")))
 }
 
@@ -38,13 +45,11 @@ pub(crate) fn register_schema(
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
     // The declarations a later open or migration compares against (§18.3).
-    database.internal_execute("DELETE FROM _coven_owner_tables", [])?;
+    database.execute("DELETE FROM _coven_owner_tables", [])?;
     for declaration in tables.iter().filter(|d| d.owner_only) {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
-        database.internal_execute(
-            "INSERT INTO _coven_owner_tables(table_name) VALUES(?1)",
-            [&table.name],
-        )?;
+        database
+            .execute("INSERT INTO _coven_owner_tables(table_name) VALUES(?1)", [&table.name])?;
     }
     crate::file_table::register(database, schema, tables)?;
     for declaration in &crate::file_table::synced(tables) {
@@ -52,7 +57,7 @@ pub(crate) fn register_schema(
         for column in &table.columns {
             // A dropped column a frozen loss still names takes up the name
             // again when a migration brings it back (§18.7).
-            database.internal_execute(
+            database.execute(
                 "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)
                  ON CONFLICT(table_name,column_name) DO UPDATE SET synced=1 WHERE synced=0",
                 rusqlite::params![table.name, column.name],
@@ -78,7 +83,7 @@ pub(crate) fn frozen_column(
     table: &str,
     column: &str,
 ) -> Result<i64, DbError> {
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
         rusqlite::params![table, column],
     )?;
@@ -97,7 +102,7 @@ const COLUMN_STAGED: &str = "coven_migration_column_";
 /// only while a frozen loss names it (§18.7).
 pub(crate) fn drop_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     retire_column(database, id)?;
-    database.internal_execute(
+    database.execute(
         "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",
         [id],
     )?;
@@ -107,7 +112,7 @@ pub(crate) fn drop_column(database: &DatabaseConnection, id: i64) -> Result<(), 
 /// Column `id` keeps its old name only for the frozen losses that name it,
 /// while a migration moves its cells to another column.
 pub(crate) fn retire_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    database.internal_execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
+    database.execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
     Ok(())
 }
 
@@ -130,7 +135,7 @@ pub(crate) fn stage_successor(
     column: &str,
 ) -> Result<i64, DbError> {
     let staged = format!("{COLUMN_STAGED}{id}");
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)",
         params![staged, column],
     )?;
@@ -148,7 +153,7 @@ pub(crate) fn rename_column(
     table: &str,
     column: &str,
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "UPDATE _coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
         params![id, table, column],
     )?;
@@ -162,8 +167,8 @@ pub(crate) fn merge_column(
     id: i64,
     into: i64,
 ) -> Result<(), DbError> {
-    database.internal_execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
-    database.internal_execute("UPDATE _coven_columns SET synced=1 WHERE id=?1", [into])?;
+    database.execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
+    database.execute("UPDATE _coven_columns SET synced=1 WHERE id=?1", [into])?;
     Ok(())
 }
 
@@ -309,7 +314,7 @@ pub(crate) fn stage_definition(
     id: i64,
 ) -> Result<(), DbError> {
     let statements = definition.statements();
-    database.internal_execute(
+    database.execute(
         statements.rename,
         params![id, format!("{}{id}", statements.staged), None::<Vec<u8>>],
     )?;
@@ -325,7 +330,7 @@ pub(crate) fn rename_definition(
     table: &str,
     identity: &[u8],
 ) -> Result<(), DbError> {
-    database.internal_execute(definition.statements().rename, params![id, table, identity])?;
+    database.execute(definition.statements().rename, params![id, table, identity])?;
     Ok(())
 }
 
@@ -336,7 +341,7 @@ pub(crate) fn forget_definition(
     definition: Definition,
     id: i64,
 ) -> Result<(), DbError> {
-    database.internal_execute(definition.statements().forget, [id])?;
+    database.execute(definition.statements().forget, [id])?;
     Ok(())
 }
 
@@ -348,7 +353,7 @@ fn definition_id(
     identity: &dyn rusqlite::ToSql,
 ) -> Result<i64, DbError> {
     let parameters = rusqlite::params![table, identity];
-    database.internal_execute(definitions.insert, parameters)?;
+    database.execute(definitions.insert, parameters)?;
     database.query_row(definitions.id, parameters, |r| r.get(0))
 }
 

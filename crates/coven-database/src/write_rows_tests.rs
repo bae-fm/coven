@@ -480,7 +480,7 @@ async fn a_parent_many_rows_name_is_read_once_per_write() {
         .await
         .unwrap();
     let parent_reads = |db: &crate::Database| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer
                 .profiled_statements()
                 .iter()

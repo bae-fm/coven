@@ -30,7 +30,7 @@ pub(crate) fn scan_reason(
 }
 
 fn references(db: &crate::Database) -> Vec<(coven_foundation::id_source::FileId, String)> {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query("SELECT file,column_name FROM _coven_file_references ORDER BY file", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })

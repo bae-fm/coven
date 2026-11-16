@@ -1,7 +1,8 @@
 //! Pin progress as a query over committed cache coverage (§17.8, E8).
 //! Nothing here counts bytes in flight.
 
-use crate::{sqlite::DatabaseConnection, Database, DbError, FileRef, LiveQuery};
+use crate::sqlite::DatabaseConnection;
+use crate::{Database, DbError, FileRef, LiveQuery};
 use coven_foundation::id_source::{DeviceId, FileId};
 
 /// Verified cache coverage of requested files (§17.8, E8).

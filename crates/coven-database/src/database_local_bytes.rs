@@ -2,7 +2,8 @@
 //! the cache keeps with its entries (§17.8, Appendix C.3).
 
 use super::{Database, Mode};
-use crate::{next_result, sqlite::DatabaseConnection, DbError, LiveQuery};
+use crate::sqlite::DatabaseConnection;
+use crate::{next_result, DbError, LiveQuery};
 use coven_foundation::task::CarriesBug;
 use std::future::Future;
 

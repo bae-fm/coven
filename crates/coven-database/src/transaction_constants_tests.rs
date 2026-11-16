@@ -21,7 +21,7 @@ async fn a_write_reads_its_constants_once() {
     )
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("PRAGMA user_version"), 1);
     assert_eq!(runs("FROM _coven_columns WHERE table_name=?1 AND column_name=?2"), 3);
@@ -49,7 +49,7 @@ async fn a_write_reads_the_schema_cookie_once() {
     })
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql == text).count();
     assert_eq!(runs("PRAGMA main.schema_version"), 1);
     assert_eq!(runs("INSERT INTO notes VALUES(?1,'title','body')"), 50);
@@ -117,7 +117,7 @@ async fn a_write_reads_each_foreign_key_id_once() {
     })
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(
         runs("SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)"),

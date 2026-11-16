@@ -1,7 +1,9 @@
 //! Atomic application of the next shared slot and its provisional queue overlay.
 
 use crate::download_stream::PreparedWrite;
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, StoreState};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{write_schema::WriteSchema, DbError, StoreState};
 use coven_format::{admin::StoreChange, floor::OriginalSlot, sequence::SlotHeader};
 use coven_merge::Slot;
 use std::collections::BTreeSet;
@@ -71,7 +73,7 @@ pub(crate) fn retain(
     kind: &str,
     original: &OriginalSlot,
 ) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_slot_records(slot,kind,record) VALUES(?1,?2,?3) ON CONFLICT(slot) DO NOTHING",
+    db.execute("INSERT INTO _coven_slot_records(slot,kind,record) VALUES(?1,?2,?3) ON CONFLICT(slot) DO NOTHING",
         rusqlite::params![original.slot.get().to_be_bytes().as_slice(),kind,original.object])?;
     Ok(())
 }
@@ -84,7 +86,7 @@ pub(crate) fn forget_announcements(
     slots: &BTreeSet<Slot>,
 ) -> Result<(), DbError> {
     for slot in slots {
-        let deleted = db.internal_execute(
+        let deleted = db.execute(
             "DELETE FROM _coven_slot_records WHERE slot=?1 AND kind='announcement'",
             [slot.get().to_be_bytes()],
         )?;
@@ -97,7 +99,9 @@ pub(crate) fn forget_announcements(
 
 pub(crate) fn apply<P: crate::PendingValue>(
     db: &mut DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &DatabaseConnection,
+    before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
     writers: &crate::Writers,
@@ -111,21 +115,39 @@ pub(crate) fn apply<P: crate::PendingValue>(
     // same transaction (§13.2).
     let registering = match &incoming.content {
         SlotContent::Admin { effect: Some(effect), .. } => {
-            crate::joining_write::owed(db, joining, &effect.state, schema, now, files)?
+            crate::joining_write::owed(db, call, joining, &effect.state, schema, now, files)?
         }
         _ => None,
     };
-    crate::download::source_wait(db.stream_registering(registering, |db| {
-        let outcome =
-            apply_in::<P>(db, before, schema, incoming, writers, files, raises, now, authenticate)?;
-        let applied = matches!(outcome, crate::ApplyOutcome::Applied);
-        Ok((outcome, applied))
-    }))
+    crate::download::source_wait(crate::local_write::stream_registering(
+        db,
+        call,
+        registering,
+        |db| {
+            let outcome = apply_in::<P>(
+                db,
+                call,
+                before,
+                before_call,
+                schema,
+                incoming,
+                writers,
+                files,
+                raises,
+                now,
+                authenticate,
+            )?;
+            let applied = matches!(outcome, crate::ApplyOutcome::Applied);
+            Ok((outcome, applied))
+        },
+    ))
 }
 
 fn apply_in<P: crate::PendingValue>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &DatabaseConnection,
+    before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
     writers: &crate::Writers,
@@ -135,9 +157,9 @@ fn apply_in<P: crate::PendingValue>(
     authenticate: impl FnOnce() -> Result<(), DbError>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     {
-        let files = &crate::file_write::FileWrite::new(db, files);
+        let files = &crate::file_write::FileWrite::new(db, call, files);
         // Applying a slot runs no migration and no DDL.
-        let _constants = db.keep_constants();
+        let _constants = crate::transaction_constants::keep_constants(db, call);
         let applied = crate::sequence::applied(db)?;
         if incoming.slot.get() <= applied {
             return Ok(crate::ApplyOutcome::AlreadyApplied);
@@ -170,12 +192,13 @@ fn apply_in<P: crate::PendingValue>(
         // slot puts back only the kept rows its writes reach (§6.2).
         let whole = matches!(&incoming.content, SlotContent::Admin { effect: Some(_), .. });
         let mut touched =
-            if whole { crate::published::restore(db, schema)? } else { BTreeSet::new() };
+            if whole { crate::published::restore(db, call, schema)? } else { BTreeSet::new() };
         let mut reach = crate::queued_writes::Reach::new();
         crate::pending::clear_slot(db, incoming.slot)?;
         match incoming.content {
             SlotContent::Writes { size, writes } => stage_writes::<P>(
                 db,
+                call,
                 schema,
                 incoming.slot,
                 &incoming.header,
@@ -191,12 +214,18 @@ fn apply_in<P: crate::PendingValue>(
                         !crate::store_state_tables::created(db)? && effect.state.store.is_some();
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
-                    crate::rebuild_wait::release(db, &effect.state)?;
+                    crate::rebuild_wait::release(db, call, &effect.state)?;
                     if created {
-                        crate::raise_capture::capture_created(db, schema)?;
+                        crate::raise_capture::capture_created(db, call, schema)?;
                     }
                     if let Some(circle) = effect.change.made_circle() {
-                        crate::raise_capture::capture_made(db, *circle, &effect.state, raises)?;
+                        crate::raise_capture::capture_made(
+                            db,
+                            call,
+                            *circle,
+                            &effect.state,
+                            raises,
+                        )?;
                     }
                     crate::provider_access::adopt::<P>(db, &effect.provider_access)?;
                     for circle in effect
@@ -228,18 +257,27 @@ fn apply_in<P: crate::PendingValue>(
         crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.get())?;
         if !rebuilding.is_empty() {
-            crate::rebuild_wait::begin::<P>(db, schema, now, &rebuilding)?;
+            crate::rebuild_wait::begin::<P>(db, call, schema, now, &rebuilding)?;
         }
-        crate::forget_records::forget(db, writers)?;
+        crate::forget_records::forget(db, call, writers)?;
         let refold = if whole {
             crate::queued_writes::Refold::Whole
         } else {
             touched.extend(reach.restored().iter().cloned());
             crate::queued_writes::Refold::Reached(&reach)
         };
-        crate::queued_writes::overlay(db, schema, &mut touched, refold)?;
+        crate::queued_writes::overlay(db, call, schema, &mut touched, refold)?;
         let deleted = crate::store_state_tables::deleted_circles(db)?;
-        crate::download_stage::materialize(db, before, schema, &deleted, touched, files)?;
+        crate::download_stage::materialize(
+            db,
+            call,
+            before,
+            before_call,
+            schema,
+            &deleted,
+            touched,
+            files,
+        )?;
         files.before_commit()?;
         crate::operation::end_on_stop(db)?;
         Ok(crate::ApplyOutcome::Applied)
@@ -259,11 +297,11 @@ fn snapshot_announced(
         return Ok(());
     }
     let covers = announcement.covers.to_be_bytes();
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_write_slot_audiences WHERE audience=?1 AND slot<=?2",
         rusqlite::params![announcement.snapshot.audience, covers],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_write_slots WHERE slot<=?1
          AND NOT EXISTS(SELECT 1 FROM _coven_write_slot_audiences a WHERE a.slot=_coven_write_slots.slot)",
         [covers],
@@ -285,6 +323,7 @@ pub(crate) enum Staging<'a> {
 /// validation.
 pub(crate) fn stage_writes<P: crate::PendingValue>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     slot: Slot,
     header: &SlotHeader,
@@ -295,7 +334,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     // A slot's object never changes, so a reload that stages it again
     // finds the same size.
     let stored = crate::sqlite::integer("writes slot size", size)?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
         rusqlite::params![slot.get().to_be_bytes(), stored],
     )?;
@@ -314,7 +353,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         }
         previous = Some(write.header().header.position.number);
         for part in &write.header().parts {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_write_slot_audiences(audience,slot) VALUES(?1,?2) ON CONFLICT DO NOTHING",
                 rusqlite::params![part.audience, slot.get().to_be_bytes()],
             )?;
@@ -328,7 +367,8 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         let schema_version = write.header().header.schema_version;
         let ahead = match &staging {
             Staging::Reload(coverage)
-                if coverage.is_rebuild() && schema_version > db.schema_version()? =>
+                if coverage.is_rebuild()
+                    && schema_version > crate::transaction_constants::schema_version(db, call)? =>
             {
                 Some(coverage.needed(schema_version).ok_or(DbError::Invariant {
                     what: "a rebuild knows the breaking migration a write above it needs",
@@ -337,7 +377,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
             _ => None,
         };
         if let Some((cutoff, cause)) = cutoff {
-            db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
+            db.execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.get().to_be_bytes(), cutoff.get().to_be_bytes()])?;
             crate::pending::save(db, &P::writes_refused(slot, cutoff, cause))?;
         }
@@ -353,6 +393,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         match &mut staging {
             Staging::Next(reach) => crate::download_stream::stage_selected(
                 db,
+                call,
                 schema,
                 write,
                 slot,
@@ -363,6 +404,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
             )?,
             Staging::Reload(coverage) => crate::download_stream::stage_selected(
                 db,
+                call,
                 schema,
                 write,
                 slot,

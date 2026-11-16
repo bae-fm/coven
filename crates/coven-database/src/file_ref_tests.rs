@@ -49,8 +49,8 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     let id = uuid::Uuid::from_u128(7);
     let location = format!("file 1 {id} {}", "ab".repeat(32));
     // A committed fixture naming another uploader's object.
-    db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&location]).unwrap()
+    db.commit_writer(|sql, _| {
+        sql.execute("UPDATE main.coven_files SET coordinates=?1", [&location]).unwrap()
     });
     let uploaded = db.file_ref(file).await.unwrap();
     let FilePlace::Cloud { location, .. } = uploaded.place() else {
@@ -76,15 +76,14 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
         format!("file 1  {id} {}", "ab".repeat(32)),
     ]);
     for malformed in malformed {
-        db.commit_writer(|sql| {
-            sql.internal_execute("UPDATE main.coven_files SET coordinates=?1", [&malformed])
-                .unwrap()
+        db.commit_writer(|sql, _| {
+            sql.execute("UPDATE main.coven_files SET coordinates=?1", [&malformed]).unwrap()
         });
         assert!(matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)), "{malformed}");
     }
     // A device-only file has no content hash; a stored one has one.
-    db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE main.coven_files SET coordinates='device 1'", []).unwrap()
+    db.commit_writer(|sql, _| {
+        sql.execute("UPDATE main.coven_files SET coordinates='device 1'", []).unwrap()
     });
     assert!(matches!(db.file_ref(file).await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
@@ -95,7 +94,7 @@ async fn stored_paths_are_found_by_retention() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stage(&db, b"original".to_vec(), true).await.unwrap();
-    let queued: (DeviceId, ObjectId) = db.inspect_writer(|sql| {
+    let queued: (DeviceId, ObjectId) = db.inspect_writer(|sql, _| {
         sql.query_row("SELECT location FROM _coven_file_uploads", [], |r| r.get::<_, String>(0))
             .map(|text| {
                 let location = crate::FileLocation::decode(&text).unwrap();
@@ -105,14 +104,11 @@ async fn stored_paths_are_found_by_retention() {
     });
     let text =
         include_str!("../../coven-format/fixtures/file-reference.txt").lines().nth(1).unwrap();
-    db.inspect_writer_schema(|sql, schema| {
+    db.inspect_writer_schema(|sql, call, schema| {
         sql.transaction(|sql| {
-            sql.internal_execute(
-                "UPDATE main.coven_files SET coordinates=?1,hash=zeroblob(32)",
-                [text],
-            )?;
+            sql.execute("UPDATE main.coven_files SET coordinates=?1,hash=zeroblob(32)", [text])?;
             let key = ("coven_files".into(), crate::file_table::key(file)?);
-            crate::file_protection::refresh(sql, schema, &key, &Default::default()).map(drop)
+            crate::file_protection::refresh(sql, call, schema, &key, &Default::default()).map(drop)
         })
         .unwrap()
     });

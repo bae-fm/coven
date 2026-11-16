@@ -67,7 +67,7 @@ impl FileWrite<'_> {
         }
         let before = AppView::before(db, self.files.schema, captured)?;
         let after = AppView::after(db, self.files.schema);
-        let store = crate::merge_store::MergeStore::new(db, &before);
+        let store = crate::merge_store::MergeStore::new(db, self.call, &before);
         let (moved, _) = crate::write_record::moved(
             db,
             self.files.schema,
@@ -116,7 +116,7 @@ impl FileWrite<'_> {
                     }
                 };
                 if shown {
-                    let changed = db.internal_execute(
+                    let changed = db.execute(
                         &format!(
                             "UPDATE main.{} SET {}=?1 WHERE {}",
                             sqlive::sql::identifier(&table.name),

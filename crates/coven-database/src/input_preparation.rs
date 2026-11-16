@@ -1,5 +1,6 @@
 //! Bounded decoded records prepared independently of the application writer.
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use std::cell::Cell;
 
 /// A transaction-local catalog on the input connection, for one input
@@ -47,7 +48,7 @@ pub(crate) struct PreparedRecords<'a> {
 }
 impl PreparedRecords<'_> {
     pub(crate) fn push(&mut self, bytes: Vec<u8>) -> Result<(), DbError> {
-        self.db.internal_execute(
+        self.db.execute(
             "INSERT INTO temp._coven_prepared_records VALUES(?1,?2,?3)",
             (self.id, self.count, bytes),
         )?;

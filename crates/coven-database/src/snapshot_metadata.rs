@@ -42,7 +42,7 @@ pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
 
 /// Forget the applied writes of the snapshot staged as `source`.
 pub(crate) fn remove(db: &DatabaseConnection, source: i64) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
+    db.execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
     Ok(())
 }
 
@@ -62,7 +62,7 @@ impl<'a> SnapshotMetadata<'a> {
         Ok(())
     }
     pub(crate) fn stage(&self, write: &AppliedWrite) -> Result<(), DbError> {
-        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device,write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.get().to_be_bytes().as_slice()])?;
+        self.database.execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device,write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.get().to_be_bytes().as_slice()])?;
         Ok(())
     }
 

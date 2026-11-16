@@ -2,13 +2,13 @@
 //! indexes were built with, and of the SQLite library that built them, and
 //! the rebuild a new version takes (§4).
 
+use crate::sqlite::DatabaseConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sqlite3_parser::ast::{ColumnConstraint, CreateTableBody, Stmt, TableConstraint};
 use sqlite3_parser::Bump;
 
 use crate::schema_sql::stored_statement;
-use crate::sqlite::DatabaseConnection;
 use crate::{DbError, OpenStep};
 use coven_foundation::progress::ProgressReport;
 use sqlive::sql::{identifier, tokens, Token};
@@ -130,7 +130,7 @@ pub(crate) fn rebuild(
             progress.done(done as u64 + 1);
         }
         for version in &changed {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_sql_versions(kind,name,version) VALUES(?1,?2,?3)
                  ON CONFLICT(kind,name) DO UPDATE SET version=excluded.version",
                 (version.kind.kind(), &version.name, version.version),
@@ -166,7 +166,7 @@ fn recorded_library(db: &DatabaseConnection) -> Result<Option<u32>, DbError> {
 /// the store's indexes. A new database records it as it is created: its
 /// indexes are all built by this library.
 pub(crate) fn record_library(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_sql_versions(kind,name,version) VALUES('library','sqlite',?1)
          ON CONFLICT(kind,name) DO UPDATE SET version=excluded.version",
         [library()],

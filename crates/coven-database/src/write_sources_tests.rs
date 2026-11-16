@@ -1,4 +1,6 @@
 use super::*;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     tests::TestStore,
     write::tests::{notes, records, sql, NOTES},
@@ -10,7 +12,11 @@ use std::collections::BTreeSet;
 
 /// The kept net change `id` names, as a write that read nothing yet would
 /// find it: held, and counting as its source.
-fn evidence(db: &DatabaseConnection, id: &ChangeId) -> Result<Evidence, DbError> {
+fn evidence(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    id: &ChangeId,
+) -> Result<Evidence, DbError> {
     let reader = WriteHeader {
         position: WriteId { device: coven_foundation::id_source::DeviceId(u64::MAX), number: 1 },
         timestamp: coven_merge::Timestamp::new(
@@ -23,7 +29,8 @@ fn evidence(db: &DatabaseConnection, id: &ChangeId) -> Result<Evidence, DbError>
         schema_version: 1,
         disposition: WriteDisposition::Apply,
     };
-    Ok(counting(db, &reader, id)?.expect("a held source counts for a write that read nothing"))
+    Ok(counting(db, call, &reader, id)?
+        .expect("a held source counts for a write that read nothing"))
 }
 
 /// The kept record this device keeps for `change`, a row of a write at
@@ -50,7 +57,7 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     sql(&db, "DELETE FROM notes").await.unwrap();
     let records = records(&db);
     let first = &records[0];
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         let judgments = db
             .query("SELECT a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key)", [], |r| {
                 r.get::<_, Option<Vec<u8>>>(0)
@@ -77,14 +84,14 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let mut deletion = records[3].clone();
     deletion.parts[0].rows[0].old.clear();
     assert_eq!(receiver.receive(deletion.clone().into()).await.unwrap(), ApplyOutcome::Applied);
-    receiver.inspect_writer_schema(|db, schema| {
+    receiver.inspect_writer_schema(|db, call, schema| {
         let id = ChangeId {
             write: deletion.header.position,
             row: deletion.parts[0].rows[0].row.clone(),
         };
         // An accepted delete keeps its identity and generation, not the
         // values it replaced or the sources it named (D7.3).
-        let retained = evidence(db, &id).unwrap();
+        let retained = evidence(db, call, &id).unwrap();
         assert_eq!(retained.original, kept_change(schema, 1, &deletion.parts[0].rows[0]));
         assert_eq!(retained.original.change.operation, Operation::Delete);
     });
@@ -123,13 +130,13 @@ async fn author_source_survives_a_different_canonical_generation_winner() {
     }
     let source = later[1].parts[0].rows[0].sources.generation.as_ref().unwrap();
     assert_eq!(source.write, later[0].header.position);
-    c.inspect_writer_schema(|db, schema| {
+    c.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        let state = MergeStore::new(db, &app).row(&source.row).unwrap().state;
+        let state = MergeStore::new(db, call, &app).row(&source.row).unwrap().state;
         assert_eq!(state.generations()[&1], early.header.position);
         assert_eq!(state.cells()["title"].write, later[1].header.position);
         assert_eq!(
-            evidence(db, source).unwrap().original,
+            evidence(db, call, source).unwrap().original,
             kept_change(schema, 1, &later[0].parts[0].rows[0])
         );
     });
@@ -157,7 +164,7 @@ async fn equal_scalars_keep_distinct_setters() {
 
 /// The verdict `db` gave the change of `write` at `row`.
 fn verdict(db: &crate::Database, write: WriteId, row: &coven_merge::RowId) -> ChangeVerdict {
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let admission: Vec<u8> = c
             .query_row(
                 "SELECT admission FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
@@ -288,9 +295,9 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     assert_eq!(setter.column, "title");
     assert_eq!(setter.change.write, original[1].header.position);
     assert_eq!(setter.change.row, original[1].parts[0].rows[0].row);
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         assert_eq!(
-            evidence(db, &setter.change).unwrap().original,
+            evidence(db, call, &setter.change).unwrap().original,
             kept_change(schema, 1, &original[1].parts[0].rows[0])
         );
         let uploads = db
@@ -307,7 +314,7 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
         coven_format::write_stream::decode_plaintext(&bytes).unwrap(),
         *history.last().unwrap()
     );
-    let transmitted = db.inspect_writer(|db| {
+    let transmitted = db.inspect_writer(|db, _| {
         db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
             r.get::<_, Vec<u8>>(0)
         })
@@ -408,7 +415,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         _ => unreachable!(),
     }
     .is_empty());
-    target.inspect_writer(|db| {
+    target.inspect_writer(|db, _| {
         let losses = db.query(crate::loss_record::SELECT, [], crate::loss_record::read).unwrap();
         for loss in losses {
             let coven_format::loss::LossValues::Row(cells) = loss.values else {
@@ -417,7 +424,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
             assert!(cells.values().all(|c| c.value.parents.is_empty()));
         }
     });
-    let before = target.inspect_writer(|db| {
+    let before = target.inspect_writer(|db, _| {
         db.query(
             "SELECT c.record,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) ORDER BY c.table_name,c.key",
             [],
@@ -428,8 +435,8 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     target.dismiss_lost_values(&target.lost_values().await.unwrap()).await.unwrap();
     assert!(target.lost_values().await.unwrap().is_empty());
     assert_eq!(target.receive(write.clone().into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
-    target.inspect_writer_schema(|db, schema| {
-        assert_eq!(evidence(db, &id).unwrap().original, kept_change(schema, 1, original));
+    target.inspect_writer_schema(|db, call, schema| {
+        assert_eq!(evidence(db, call, &id).unwrap().original, kept_change(schema, 1, original));
         assert_eq!(
             db.query(
                 "SELECT c.record,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) ORDER BY c.table_name,c.key",
@@ -471,7 +478,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     assert_eq!(crate::tests::contents(&target), before);
     assert_eq!(target.retain_write_sources(stream(), || Ok(())).await.unwrap(), ());
     assert_eq!(crate::write::tests::count(&target, "notes"), 0);
-    target.inspect_writer(|db| {
+    target.inspect_writer(|db, _| {
         let unknown: i64 = db
             .query_row(
                 "SELECT count(*) FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) WHERE a.admission IS NULL",
@@ -542,7 +549,7 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
     sql(&source, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let first = records(&source).remove(0);
     author.receive(first.clone().into()).await.unwrap();
-    author.inspect_writer(|db| {
+    author.inspect_writer(|db, _| {
         assert_eq!(crate::source_names::table(db, 2, "notes", 1).unwrap(), Some("notes".into()));
         assert_eq!(
             crate::source_names::column(db, 2, "notes", "title", 1, "notes").unwrap(),
@@ -659,10 +666,11 @@ async fn authored_sources_differential() {
             // capture found; its kept record is what later writes are judged
             // against.
             let record = records(db).pop().unwrap();
-            db.inspect_writer_schema(|db, schema| {
+            db.inspect_writer_schema(|db, call, schema| {
                 for row in record.parts.iter().flat_map(|p| &p.rows) {
                     let retained = evidence(
                         db,
+                        call,
                         &ChangeId { write: record.header.position, row: row.row.clone() },
                     )
                     .unwrap();
@@ -705,9 +713,10 @@ async fn authored_sources_differential() {
         let refused = crate::tests::lean_model(&runner, input(&forged));
         assert_eq!(refused["authored"], false);
         assert_eq!(refused["dataValid"], false);
-        databases[0].inspect_writer(|db| {
+        databases[0].inspect_writer(|db, call| {
             assert!(validate(
                 db,
+                call,
                 &forged[index].header,
                 PartRecord::Change(&forged[index].parts[0].rows[0])
             )
@@ -767,14 +776,14 @@ async fn a_write_keeps_its_records_and_queues_the_bytes_they_encode_to() {
         .unwrap();
     let records = records(&db);
     assert_eq!(records.len(), 3);
-    let queued: Vec<Vec<u8>> = db.inspect_writer(|db| {
+    let queued: Vec<Vec<u8>> = db.inspect_writer(|db, _| {
         db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| r.get(0)).unwrap()
     });
     for (record, queued) in records.iter().zip(&queued) {
         assert_eq!(&coven_format::test_utils::write_plaintext(record).unwrap(), queued);
         for part in &record.parts {
             for row in part.records() {
-                let retained: Vec<u8> = db.inspect_writer(|db| {
+                let retained: Vec<u8> = db.inspect_writer(|db, _| {
                     db.query_row(
                         "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
                         params![
@@ -787,7 +796,7 @@ async fn a_write_keeps_its_records_and_queues_the_bytes_they_encode_to() {
                     )
                     .unwrap()
                 });
-                let expected = db.inspect_writer_schema(|_, schema| {
+                let expected = db.inspect_writer_schema(|_, _, schema| {
                     KeptForm::new(schema, record.header.schema_version).keep(row).unwrap()
                 });
                 assert_eq!(retained, expected);

@@ -17,7 +17,7 @@ impl Database {
         after: u64,
     ) -> Result<u64, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 let mut bytes = 0u64;
                 db.for_each("SELECT s.size FROM _coven_write_slot_audiences a JOIN _coven_write_slots s ON s.slot=a.slot WHERE a.audience=?1 AND a.slot>?2",
                     rusqlite::params![audience, after.to_be_bytes()], |row| {
@@ -43,7 +43,7 @@ impl Database {
         audience: coven_merge::Audience,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 let held: i64 = db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM _coven_write_slot_audiences WHERE audience=?1)",
                     rusqlite::params![audience],
@@ -61,7 +61,7 @@ impl Database {
         &self,
     ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 let mut headers = Vec::new();
                 crate::upload::each_plaintext(db, |header, _| {
                     headers.push(header);
@@ -108,8 +108,10 @@ impl Database {
                     staged: None,
                 };
                 let prepared = staging.prepare(inputs, authorship.as_ref()).map_err(&body)?;
-                inner.access.with_writer(|writer| {
-                    writer.discarded_transaction(|writer| {
+                inner.access.with_writer(|writer, call| {
+                    let db = &*writer;
+                    db.discarded_transaction(|_| {
+                        let writer = &db;
                         let schema = &inner.access.write_schema;
                         crate::snapshot_state::create_tables(writer)?;
                         crate::snapshot_install::create_tables(writer, schema)?;
@@ -119,6 +121,7 @@ impl Database {
                         crate::snapshot_load::begin_installing(schema, 1, &mut progress);
                         crate::snapshot_load::read(
                             writer,
+                            call,
                             schema,
                             prepared,
                             Some(author),
@@ -153,7 +156,7 @@ impl Database {
         E: coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_committed(|reader| {
+            inner.access.with_committed(|reader, call| {
                 // In the transaction that reads the schema version the
                 // snapshot is written at.
                 if crate::raise_capture::provisional(reader)?
@@ -163,7 +166,14 @@ impl Database {
                     return Err(DbError::RaiseWaiting.into());
                 }
                 crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
-                crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
+                crate::snapshot_write::write(
+                    reader,
+                    call,
+                    &inner.access.write_schema,
+                    id,
+                    begin,
+                    emit,
+                )
             })
         })
         .await
@@ -184,9 +194,16 @@ impl Database {
         E: coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_committed(|reader| {
+            inner.access.with_committed(|reader, call| {
                 crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
-                crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
+                crate::snapshot_write::write(
+                    reader,
+                    call,
+                    &inner.access.write_schema,
+                    id,
+                    begin,
+                    emit,
+                )
             })
         })
         .await
@@ -196,8 +213,7 @@ impl Database {
     /// zero if none: its snapshots' breaking version (§16.3).
     pub async fn breaking_version(&self) -> Result<u32, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(crate::raise_capture::breaking_version)
+            inner.access.with_reader(|db, _| crate::raise_capture::breaking_version(db))
         })
         .await
     }
@@ -206,8 +222,9 @@ impl Database {
     /// one per audience this device read then (§18.3, §11.5).
     pub async fn raise_captures(&self) -> Result<Vec<crate::RaiseCapture>, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| crate::raise_capture::captures(reader, inner.access.device))
+            inner.access.with_reader(|reader, _| {
+                crate::raise_capture::captures(reader, inner.access.device)
+            })
         })
         .await
     }
@@ -224,7 +241,7 @@ impl Database {
     ) -> Result<Option<crate::RaiseCapture>, DbError> {
         self.call(move |inner| {
             let device = inner.access.device;
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|writer| {
                     crate::raise_capture::prepare(
                         writer,
@@ -248,8 +265,7 @@ impl Database {
         through: coven_merge::WriteId,
     ) -> Result<Option<coven_merge::WriteId>, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| crate::upload::unconfirmed(reader, through))
+            inner.access.with_reader(|reader, _| crate::upload::unconfirmed(reader, through))
         })
         .await
     }
@@ -269,10 +285,11 @@ impl Database {
         E: coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_committed(|reader| {
+            inner.access.with_committed(|reader, call| {
                 crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
                 crate::raise_capture::write(
                     reader,
+                    call,
                     &inner.access.write_schema,
                     id,
                     version,
@@ -291,7 +308,7 @@ impl Database {
         version: u32,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer
                     .transaction(|writer| crate::raise_capture::discard(writer, &audience, version))
             })
@@ -429,30 +446,36 @@ impl Database {
                 // Reserve a reader before locking the writer: snapshot consumers
                 // may be waiting for a commit before releasing their readers.
                 let reader = inner.access.readers.acquire_reader();
-                let loaded = inner.with_files("load a snapshot", |writer, files| {
-                    reader.with_reader(|reader| {
-                        reader.read_with_constants(|| {
-                            crate::write_schema::prepare_evaluators(
-                                reader,
-                                &inner.access.write_schema,
-                            )?;
-                            crate::snapshot_load::load::<P>(
-                                writer,
-                                reader,
-                                &inner.access.write_schema,
-                                reload,
-                                files,
-                                &mut progress,
-                                rebuilding,
-                                inner.joining_write.as_deref(),
-                                inner.clock.now(),
-                                rebuilt.map(|(circle, marker)| crate::snapshot_load::Rebuilt {
-                                    circle,
-                                    marker,
-                                    operation: inner.raise_operation.as_deref(),
-                                }),
-                            )
-                        })
+                let loaded = inner.with_files("load a snapshot", |writer, call, files| {
+                    inner.access.with_leased(&reader, |reader, reader_call| {
+                        crate::transaction_constants::read_with_constants(
+                            reader,
+                            reader_call,
+                            || {
+                                crate::write_schema::prepare_evaluators(
+                                    reader,
+                                    &inner.access.write_schema,
+                                )?;
+                                crate::snapshot_load::load::<P>(
+                                    writer,
+                                    call,
+                                    reader,
+                                    reader_call,
+                                    &inner.access.write_schema,
+                                    reload,
+                                    files,
+                                    &mut progress,
+                                    rebuilding,
+                                    inner.joining_write.as_deref(),
+                                    inner.clock.now(),
+                                    rebuilt.map(|(circle, marker)| crate::snapshot_load::Rebuilt {
+                                        circle,
+                                        marker,
+                                        operation: inner.raise_operation.as_deref(),
+                                    }),
+                                )
+                            },
+                        )
                     })
                 });
                 tracing::info!(

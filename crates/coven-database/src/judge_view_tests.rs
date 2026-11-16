@@ -10,6 +10,7 @@ use crate::author_judgement::tests::{member, ANA, BEN};
 use crate::judge::tests::{receipts, verdict, CAROL};
 use crate::judge::{consistent, judge, Judgement};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::test_utils::tests::run_lean;
 use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
@@ -182,6 +183,7 @@ fn kept_old(
 
 fn setter_values(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
 ) -> BTreeMap<String, KeptValue> {
@@ -191,7 +193,7 @@ fn setter_values(
         .iter()
         .map(|(column, setter)| {
             let source =
-                crate::write_sources::counting(db, header, &setter.change).unwrap().unwrap();
+                crate::write_sources::counting(db, call, header, &setter.change).unwrap().unwrap();
             let columns = match &source.original.change.operation {
                 coven_merge::Operation::Insert(columns)
                 | coven_merge::Operation::Update(columns) => columns,
@@ -205,11 +207,12 @@ fn setter_values(
 /// The runner input for one received write, and the ids it used.
 fn input(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     record: &WriteRecord,
     owners: &BTreeMap<coven_foundation::id_source::MemberId, u8>,
 ) -> (Json, Ids, Judgement) {
-    let judgement = judge(db, schema, crate::judge::Originals::Held(record)).unwrap();
+    let judgement = judge(db, call, schema, crate::judge::Originals::Held(record)).unwrap();
     let steps = steps(record);
     let step = |row: &RowId, sequence: u32| {
         steps[row].iter().find(|s| s.sequence == sequence).unwrap().clone()
@@ -224,7 +227,7 @@ fn input(
         let net = record.parts.iter().flat_map(|part| &part.rows).find(|change| change.row == *row);
         let setters = match net {
             Some(change) if matches!(change.change.operation, coven_merge::Operation::Delete) => {
-                setter_values(db, &record.header, change)
+                setter_values(db, call, &record.header, change)
             }
             _ => BTreeMap::new(),
         };
@@ -453,7 +456,7 @@ fn compare(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> usi
     let owners: BTreeMap<_, _> =
         [ANA, BEN, CAROL].into_iter().map(|seed| (member(seed), seed)).collect();
     let (input, mut ids, judgement) =
-        db.inspect_writer_schema(|c, schema| input(c, schema, record, &owners));
+        db.inspect_writer_schema(|c, call, schema| input(c, call, schema, record, &owners));
     let result = run_lean(runner, &input);
     let mut compared = 0;
     for lean in result.as_array().unwrap() {
@@ -509,11 +512,11 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
     use crate::judge::{Originals, StepIndex};
     // The received write's records, judged again as the receiver judged them.
     let originals = Originals::Held(record);
-    db.inspect_writer_schema(|c, schema| {
+    db.inspect_writer_schema(|c, call, schema| {
         let header = &record.header;
-        let authoring = Authoring::new(c, schema, header.schema_version).unwrap();
+        let authoring = Authoring::new(c, call, schema, header.schema_version).unwrap();
         let index = StepIndex::of(&originals).unwrap();
-        let judgement = judge(c, schema, Originals::Held(record)).unwrap();
+        let judgement = judge(c, call, schema, Originals::Held(record)).unwrap();
         let mut all: Vec<(RowId, Step, Vec<HeldReference>)> = Vec::new();
         originals.visit(|original| {
             let row = original.row().clone();
@@ -735,7 +738,7 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
         deliver(carol, to).await;
         deliver(ana, to).await;
     }
-    let shown = ben.inspect_writer(|c| {
+    let shown = ben.inspect_writer(|c, _| {
         c.query_row("SELECT pin FROM reviews WHERE id='r'", [], |r| r.get::<_, Option<String>>(0))
             .unwrap()
     });

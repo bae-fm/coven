@@ -22,6 +22,7 @@
 //! handle can't tell whether that writer still runs, so app SQL there may not
 //! read the table (`app_policy.rs`).
 
+use crate::sqlite::DatabaseConnection;
 use crate::DbError;
 use std::time::SystemTime;
 
@@ -134,7 +135,7 @@ fn columns(location: &RecordedLocation<String>) -> (&'static str, Option<&str>) 
 }
 
 /// The row as it stands.
-pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusRow, DbError> {
+pub(crate) fn read(db: &DatabaseConnection) -> Result<SyncStatusRow, DbError> {
     let (storage, provider, last_pass, moved, last_synced) = db.query_row(
         "SELECT storage,provider,last_pass,moved,last_synced FROM coven_sync_status
          WHERE singleton=1",
@@ -168,14 +169,14 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusR
 /// no pass moves and that no halt holds. A row that already says this is
 /// left alone.
 pub(crate) fn save_location(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     location: &RecordedLocation<String>,
     finished: Option<SystemTime>,
     opening: bool,
 ) -> Result<(), DbError> {
     let (storage, provider) = columns(location);
     let finished = finished.map(millis).transpose()?;
-    db.internal_execute(
+    db.execute(
         "UPDATE coven_sync_status SET storage=?1,provider=?2,
              moved=CASE WHEN ?4 THEN NULL ELSE moved END,
              halted=CASE WHEN ?4 THEN 0 ELSE halted END,
@@ -190,11 +191,8 @@ pub(crate) fn save_location(
 }
 
 /// Write what the running pass moved last, when that changes it.
-pub(crate) fn save_moved(
-    db: &crate::sqlite::DatabaseConnection,
-    moved: PassMove,
-) -> Result<(), DbError> {
-    db.internal_execute(
+pub(crate) fn save_moved(db: &DatabaseConnection, moved: PassMove) -> Result<(), DbError> {
+    db.execute(
         "UPDATE coven_sync_status SET moved=?1 WHERE singleton=1 AND halted=0 AND moved IS NOT ?1",
         [moved.column()],
     )?;
@@ -202,8 +200,8 @@ pub(crate) fn save_moved(
 }
 
 /// Write that sync started once more.
-pub(crate) fn save_start(db: &crate::sqlite::DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute("UPDATE coven_sync_status SET starts=starts+1 WHERE singleton=1", [])?;
+pub(crate) fn save_start(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.execute("UPDATE coven_sync_status SET starts=starts+1 WHERE singleton=1", [])?;
     Ok(())
 }
 
@@ -211,11 +209,8 @@ pub(crate) fn save_start(db: &crate::sqlite::DatabaseConnection) -> Result<(), D
 /// outside a pass's end, and that nothing moves: a loop that ends in a pass
 /// that moved a slot shows its failure, never syncing. Once a halt holds,
 /// it writes nothing: the halt's failure stands.
-pub(crate) fn save_last_pass(
-    db: &crate::sqlite::DatabaseConnection,
-    last_pass: &[u8],
-) -> Result<(), DbError> {
-    db.internal_execute(
+pub(crate) fn save_last_pass(db: &DatabaseConnection, last_pass: &[u8]) -> Result<(), DbError> {
+    db.execute(
         "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
          WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)",
         [last_pass],
@@ -226,11 +221,8 @@ pub(crate) fn save_last_pass(
 /// Write that a store-wide worker's panic halted sync until the store
 /// reopens, with its failure as how the last pass ended, and that nothing
 /// moves: from here no pass writes the row.
-pub(crate) fn save_halt(
-    db: &crate::sqlite::DatabaseConnection,
-    last_pass: &[u8],
-) -> Result<(), DbError> {
-    db.internal_execute(
+pub(crate) fn save_halt(db: &DatabaseConnection, last_pass: &[u8]) -> Result<(), DbError> {
+    db.execute(
         "UPDATE coven_sync_status SET last_pass=?1,moved=NULL,halted=1 WHERE singleton=1",
         [last_pass],
     )?;
@@ -241,12 +233,12 @@ pub(crate) fn save_halt(
 /// `finished` names one, that it reached the end of the sequence then. A
 /// pass that ends after a halt writes nothing: the halt's failure stands.
 pub(crate) fn save_pass_end(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     last_pass: &[u8],
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {
     let finished = finished.map(millis).transpose()?;
-    db.internal_execute(
+    db.execute(
         "UPDATE coven_sync_status SET last_pass=?1,moved=NULL,
              last_synced=CASE WHEN ?2 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?2),?2) END

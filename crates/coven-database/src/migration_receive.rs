@@ -1,8 +1,9 @@
 //! Derive received values from the migration's retained schema identities.
 
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    migration::MigrationKind, migration_names::MigrationMatch, schema::Schema,
-    sqlite::DatabaseConnection, DbError, Migration, OldWrites, RowChange,
+    migration::MigrationKind, migration_names::MigrationMatch, schema::Schema, DbError, Migration,
+    OldWrites, RowChange,
 };
 use coven_format::write::WritePart;
 use rusqlite::params;
@@ -25,7 +26,7 @@ pub(crate) fn retain(
     let tables = serde_json::to_vec(&names.tables).expect("string map");
     let columns =
         serde_json::to_vec(&names.columns.iter().collect::<Vec<_>>()).expect("string pairs");
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_conversion_schemas VALUES(?1,?2,?3,?4,?5)",
         params![version, before.encode(), after.encode(), tables, columns],
     )?;

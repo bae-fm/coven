@@ -3,6 +3,7 @@
 use crate::schema::{SchemaIndex, TableSchema};
 use crate::schema_source::SchemaSource;
 use crate::schema_sql::stored_statement;
+use crate::sqlite::DatabaseConnection;
 use sqlite3_parser::{
     ast::{ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint},
     Bump,
@@ -29,7 +30,7 @@ struct AutomaticUnique {
 
 impl TableRules {
     pub(crate) fn read(
-        db: &crate::sqlite::DatabaseConnection,
+        db: &DatabaseConnection,
         table: &TableSchema,
     ) -> Result<Self, crate::DbError> {
         let bump = Bump::new();
@@ -182,7 +183,7 @@ impl TableRules {
 /// whose write could date a claim (§9.2). SQLite reports a generated column
 /// read, not its inputs.
 fn stored_inputs(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     table: &TableSchema,
     generated: &std::collections::BTreeMap<String, String>,
     columns: Vec<String>,

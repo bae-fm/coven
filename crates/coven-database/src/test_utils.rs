@@ -17,6 +17,7 @@ pub fn path_text_sql(
 
 #[path = "work_counts.rs"]
 mod work_counts;
+pub(crate) use work_counts::{ConnectionWork, StoreWork};
 pub use work_counts::{WorkCounter, WorkCounts};
 
 #[path = "statement_log.rs"]

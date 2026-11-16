@@ -68,7 +68,7 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
 async fn coven_key_takes_every_width_an_sql_call_can_pass() {
     let store = TestStore::new();
     let db = analyzed_keys(&store).await;
-    let widest = db.inspect_writer(|sql| sql.function_argument_limit()).unwrap();
+    let widest = db.inspect_writer(|sql, _| sql.function_argument_limit()).unwrap();
     for width in [1, 2, widest] {
         let arguments = vec!["1"; width].join(",");
         let statement = format!("SELECT coven_key({arguments})");
@@ -333,7 +333,7 @@ async fn a_json_array_of_byte_numbers_becomes_a_blob() {
 async fn a_panicking_sql_function_fails_the_call_with_its_bug() {
     let store = TestStore::new();
     let db = analyzed_keys(&store).await;
-    db.inspect_writer(|writer| writer.panic_next_function());
+    db.inspect_writer(|writer, _| writer.panic_next_function());
     let failed = db
         .write(|sql| Ok(sql.query_row("SELECT coven_key('a')", [], |r| r.get::<_, Vec<u8>>(0))?))
         .await

@@ -7,6 +7,7 @@ use crate::snapshot_error::invalid;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
 use crate::write_schema::WriteSchema;
@@ -74,7 +75,7 @@ fn copy(
         let values = (0..count)
             .map(|i| row.get_ref(i).map(ToSqlOutput::Borrowed))
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        db.internal_execute(insert, params_from_iter(values))?;
+        db.execute(insert, params_from_iter(values))?;
         Ok(())
     })
 }
@@ -143,11 +144,12 @@ fn exists<P: rusqlite::Params>(
 /// deleted first, so nothing conflicts.
 pub(crate) fn persist_rows(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     layout: &SnapshotLayout,
     audience: &Audience,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
              SELECT g.table_name,g.key,g.audience,g.generation,
@@ -161,7 +163,7 @@ pub(crate) fn persist_rows(
         let key = table.column("key");
         let audience_column = table.column("audience");
         let generation = table.column("generation");
-        db.internal_execute(
+        db.execute(
             &format!(
                 "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
                  SELECT ?2,i.{key},i.{audience_column},i.{generation},
@@ -173,7 +175,7 @@ pub(crate) fn persist_rows(
             params![audience, table.table],
         )?;
         for (j, name) in table.columns.iter().enumerate() {
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO _coven_cells(column_id,row_id,write_id)
                      SELECT ?3,r.id,(SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=i.{setter_device} AND number=i.{setter_number})
@@ -182,11 +184,11 @@ pub(crate) fn persist_rows(
                     setter_device = table.setter_device(j),
                     setter_number = table.setter_number(j),
                 ),
-                params![audience, table.table, db.column_id(&table.table, name)?],
+                params![audience, table.table, crate::transaction_constants::column_id(db, call, &table.table, name)?],
             )?;
         }
         for (q, (j, foreign)) in table.pairs.iter().enumerate() {
-            db.internal_execute(
+            db.execute(
                 &format!(
                     "INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation)
                      SELECT r.id,?3,?4,?5,i.{parent_key},i.{parent_audience},i.{parent_generation}
@@ -199,8 +201,8 @@ pub(crate) fn persist_rows(
                 params![
                     audience,
                     table.table,
-                    db.column_id(&table.table, &table.columns[*j])?,
-                    crate::row_queries::foreign_key(db, &table.table, foreign)?,
+                    crate::transaction_constants::column_id(db, call, &table.table, &table.columns[*j])?,
+                    crate::row_queries::foreign_key(db, call, &table.table, foreign)?,
                     foreign.parent
                 ],
             )?;

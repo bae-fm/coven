@@ -67,7 +67,7 @@ async fn point(
 
 /// Each queued upload's files, with the write it holds.
 fn holds(db: &Database) -> Vec<(Vec<FileId>, Option<u64>)> {
-    db.inspect_writer(|db| crate::file_queue::read_all(db).unwrap())
+    db.inspect_writer(|db, _| crate::file_queue::read_all(db).unwrap())
         .into_iter()
         .map(|upload| (upload.files, upload.holds))
         .collect()
@@ -179,7 +179,7 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
     let [before, held] = waiting(&db)[..] else {
         panic!("two writes wait: {:?}", waiting(&db));
     };
-    let uploads = db.inspect_writer(|db| crate::file_queue::read_all(db).unwrap());
+    let uploads = db.inspect_writer(|db, _| crate::file_queue::read_all(db).unwrap());
     let of = |file: FileId| uploads.iter().find(|upload| upload.files.contains(&file)).unwrap();
     assert_eq!(of(first).holds, None);
     assert_eq!(of(photo).holds, None);
@@ -276,7 +276,7 @@ async fn overlapping_bound_uploads_hold_from_the_first_held_write_until_both_are
     assert_eq!(holds(&db), [(vec![first], Some(held)), (vec![second], Some(held))]);
     let owner = crate::FileDatabase::new(db.clone());
     let upload = |file: FileId| {
-        db.inspect_writer(|db| crate::file_queue::upload_of(db, file).unwrap().unwrap())
+        db.inspect_writer(|db, _| crate::file_queue::upload_of(db, file).unwrap().unwrap())
     };
     // The first cover stored alone: its completion waits behind the second
     // cover's held write, so its own held write still waits too.
@@ -300,7 +300,7 @@ async fn a_bound_files_move_cant_be_cancelled() {
     let db = open(&store, FileColumn::new("file").bound()).await;
     let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let held = waiting(&db)[0];
-    let of = db.inspect_writer(|db| {
+    let of = db.inspect_writer(|db, _| {
         crate::file_queue::read_all(db)
             .unwrap()
             .into_iter()

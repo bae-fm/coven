@@ -2,6 +2,7 @@
 //! the writer lock. Blocking calls retain these resources after its last owner
 //! drops, while another open waits for their release.
 
+use crate::store_call::StoreCall;
 use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use coven_foundation::task::{blocking_completing, CarriesBug};
 use std::collections::BTreeSet;
@@ -65,6 +66,8 @@ mod store;
 
 #[path = "database_call.rs"]
 mod call;
+#[path = "database_connection_calls.rs"]
+mod connection_calls;
 #[path = "database_retry.rs"]
 mod retry;
 #[path = "database_sync.rs"]
@@ -224,6 +227,8 @@ pub struct DatabaseAccess<L> {
     directory: StoreDir,
     device: DeviceId,
     lock: L,
+    /// What coven's tests read back of the calls on these connections.
+    tests: crate::store_call::TestRecords,
     /// Runs once, where the next read of a file on this device only has
     /// found where its bytes are and is about to open them, so a test can
     /// commit between the two.
@@ -260,35 +265,6 @@ impl<L> DatabaseAccess<L> {
         }
     }
 
-    /// Read one committed state on a reader: read-only decisions never take
-    /// the writer (§21.2).
-    fn with_committed<R, E: From<DbError> + CarriesBug>(
-        &self,
-        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
-    ) -> Result<R, E> {
-        self.call(|| {
-            self.readers
-                .acquire_reader()
-                .with_reader(|reader| reader.read_with_constants(|| run(reader)))
-        })
-    }
-
-    fn with_writer<R, E: From<DbError>>(
-        &self,
-        run: impl FnOnce(&mut DatabaseConnection) -> Result<R, E>,
-    ) -> Result<R, E> {
-        with_locked(&self.writer, |writer| {
-            #[cfg(any(test, feature = "test-utils"))]
-            writer.record_work(|work| work.writer_holds += 1);
-            if let Some(error) = self.observer.error() {
-                return Err(error.into());
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            let run = |writer| coven_foundation::test_work::writing(|| run(writer));
-            run(writer)
-        })
-    }
-
     /// Remove released files' bytes now that the writer is free, then forget
     /// their records under it (§21.2, Appendix C.3). `chosen` is what the writer
     /// that recorded them chose.
@@ -299,7 +275,7 @@ impl<L> DatabaseAccess<L> {
         };
         let (removed, mut failures) = crate::file_removals::remove_bytes(&self.directory, released);
         if !removed.is_empty() {
-            let forgotten = self.with_writer(|writer| {
+            let forgotten = self.with_writer(|writer, _| {
                 writer.transaction(|db| crate::file_removals::forget(db, &removed))?;
                 #[cfg(any(test, feature = "test-utils"))]
                 writer.checkpoint(crate::test_utils::WriteCheckpoint::Finished);
@@ -327,11 +303,7 @@ impl<L> DatabaseAccess<L> {
         place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let file = reference.id();
-        let source = || {
-            self.readers
-                .acquire_reader()
-                .read_snapshot(|sql| sql.device_only_source(self.device, file))
-        };
+        let source = || self.read(|sql| sql.device_only_source(self.device, file));
         let Some(found) = source()? else {
             return Ok(None);
         };
@@ -353,22 +325,27 @@ impl<L> DatabaseAccess<L> {
     }
 
     fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
-        self.readers.acquire_reader().read_snapshot(|sql| sql.file_ref(file))
+        self.read(|sql| sql.file_ref(file))
     }
 
     fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
-        self.readers.acquire_reader().read_snapshot(|sql| sql.user_file(file))
+        self.read(|sql| sql.user_file(file))
     }
 
+    /// Run `read` in one snapshot on an idle reader, reading each constant
+    /// once.
     fn read<R, E: From<DbError>>(
         &self,
         read: impl FnOnce(SqlReadContext<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        self.readers.acquire_reader().read_snapshot(read)
+        self.with_reader(|reader, call| {
+            let _constants = crate::transaction_constants::keep_constants(reader, call);
+            reader.read_snapshot(|reader| read(SqlReadContext::new(reader)))
+        })
     }
 
     fn schema_version(&self) -> Result<u32, DbError> {
-        self.readers.acquire_reader().schema_version()
+        self.with_reader(crate::transaction_constants::schema_version)
     }
 
     /// Every connection has the same settings, so one reader reports them.
@@ -428,9 +405,13 @@ impl DatabaseInner {
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         operation: &'static str,
-        run: impl FnOnce(&mut DatabaseConnection, &crate::file_write::WriteFiles<'_>) -> Result<R, E>,
+        run: impl FnOnce(
+            &mut DatabaseConnection,
+            &StoreCall<'_>,
+            &crate::file_write::WriteFiles<'_>,
+        ) -> Result<R, E>,
     ) -> Result<R, E> {
-        let (result, chosen, committed) = self.access.with_writer(|writer| {
+        let (result, chosen, committed) = self.access.with_writer(|writer, call| {
             let files = crate::file_write::WriteFiles::new(
                 &self.access.write_schema,
                 self.access.device,
@@ -438,12 +419,13 @@ impl DatabaseInner {
                 &self.staging,
                 &self.copying,
             );
-            let result = coven_foundation::task::caught_sync(operation, || run(writer, &files))
-                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
+            let result =
+                coven_foundation::task::caught_sync(operation, || run(writer, call, &files))
+                    .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
             // After a failed rollback the writer may still hold this write;
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
-            let chosen = usable.then(|| released(writer, self));
+            let chosen = usable.then(|| released(writer, call, self));
             Ok::<_, E>((result, chosen, files.take_committed()))
         })?;
         let result = match chosen {
@@ -492,10 +474,14 @@ pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]
 
 /// The removals the write that just ran under `writer` released, chosen
 /// with the staging and copying sets held (Appendix C.3).
-fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_removals::Chosen {
+fn released(
+    writer: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    inner: &DatabaseInner,
+) -> crate::file_removals::Chosen {
     inner.staging.with_names(|active| {
         let copying = lock_unpoisoned(&inner.copying);
-        crate::file_removals::choose(writer, active, &copying)
+        crate::file_removals::choose(writer, call, active, &copying)
     })
 }
 
@@ -708,10 +694,13 @@ impl Database {
                 let slot = coven_foundation::locks::read_unpoisoned(&database);
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                 inner.call(|inner| {
-                    inner.access.readers.acquire_reader().live_read(
-                        &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                        |sql| query(request, sql),
-                    )
+                    inner.access.with_reader(|reader, call| {
+                        let _constants = crate::transaction_constants::keep_constants(reader, call);
+                        reader.live_read(
+                            &mut |reads, lookups| completion.finish_judging(reads, lookups),
+                            |reader| query(request, SqlReadContext::new(reader)),
+                        )
+                    })
                 })
             }),
             commits,
@@ -747,9 +736,11 @@ impl Database {
         E: crate::WriteFailure + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_files("write", |writer, files| {
+            inner.with_files("write", |writer, call, files| {
                 let result = coven_foundation::task::caught_sync("write", || {
-                    writer.local_write(
+                    crate::local_write::local_write(
+                        writer,
+                        call,
                         &inner.access.write_schema,
                         inner.access.device,
                         inner.clock.now(),
@@ -849,7 +840,7 @@ impl Database {
         R: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.bulk_write(sql))).await
+        self.call(move |inner| inner.access.with_writer(|writer, _| writer.bulk_write(sql))).await
     }
 
     /// Checkpoint the store's WAL on the writer, between writes (§4).
@@ -857,14 +848,17 @@ impl Database {
         &self,
         mode: crate::CheckpointMode,
     ) -> Result<crate::WalCheckpoint, DbError> {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.wal_checkpoint(mode))).await
+        self.call(move |inner| inner.access.with_writer(|writer, _| writer.wal_checkpoint(mode)))
+            .await
     }
 
     /// Give back free pages of a store created with incremental auto-vacuum,
     /// on the writer, between writes (§4). On any other store it does nothing.
     pub async fn incremental_vacuum(&self, pages: crate::IncrementalVacuum) -> Result<(), DbError> {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.incremental_vacuum(pages)))
-            .await
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, _| writer.incremental_vacuum(pages))
+        })
+        .await
     }
 
     /// Give back every connection's cached pages that no statement is using

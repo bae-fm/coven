@@ -4,7 +4,8 @@
 //! removal of what a failing call made.
 
 use super::{BytesWriting, Database, FileDatabase};
-use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{BugSinkRef, CarriesBug, TaskFailed};
 use coven_foundation::{
@@ -37,12 +38,13 @@ impl FileDatabase {
     pub async fn device_only_files(&self, files: Vec<FileId>) -> Result<Vec<FileRef>, DbError> {
         self.database
             .call(move |inner| {
-                inner.access.with_committed(|db| {
+                inner.access.with_committed(|db, call| {
                     files
                         .iter()
                         .map(|file| {
                             crate::file_write::permitted(
                                 db,
+                                call,
                                 &inner.access.write_schema,
                                 inner.access.device,
                                 *file,
@@ -124,11 +126,11 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
         let writing = BytesWriting::of(self).await;
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db: &DatabaseConnection| {
                     for copy in &copies {
                         let path = text(&copy.path)?;
-                        if db.internal_execute(
+                        if db.execute(
                             "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
                              ON CONFLICT(path) DO NOTHING",
                             params![path, text(&copy.temporary)?],
@@ -139,7 +141,7 @@ impl Database {
                             });
                         }
                         for folder in &copy.folders {
-                            db.internal_execute(
+                            db.execute(
                                 "INSERT INTO _coven_copy_folders(folder,copy) VALUES(?1,?2)",
                                 params![text(folder)?, path],
                             )?;
@@ -168,12 +170,9 @@ impl Database {
     pub(crate) async fn made_folder(&self, folder: &Path) -> Result<(), DbError> {
         let folder = text(folder)?.to_owned();
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db: &DatabaseConnection| {
-                    db.internal_execute(
-                        "UPDATE _coven_copy_folders SET made=1 WHERE folder=?1",
-                        [&folder],
-                    )?;
+                    db.execute("UPDATE _coven_copy_folders SET made=1 WHERE folder=?1", [&folder])?;
                     Ok(())
                 })
             })
@@ -188,9 +187,9 @@ impl Database {
         let size = crate::sqlite::integer("file size", observed.size())?;
         let modified_at = crate::user_file::encode_time(observed.modified_at());
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db: &DatabaseConnection| {
-                    if db.internal_execute(
+                    if db.execute(
                         "UPDATE _coven_copies SET state='placed',size=?2,modified_at=?3
                          WHERE path=?1 AND state='writing'",
                         params![path, size, modified_at],
@@ -213,8 +212,8 @@ impl Database {
     /// keeps its record, and the next open removes it.
     pub(crate) async fn abandon_copies(&self, paths: Vec<String>) -> Result<(), DbError> {
         self.call(move |inner| {
-            let chosen = inner.access.with_writer(|writer| {
-                Ok::<_, DbError>(crate::file_removals::choose_copies(writer, &paths))
+            let chosen = inner.access.with_writer(|writer, call| {
+                Ok::<_, DbError>(crate::file_removals::choose_copies(writer, call, &paths))
             })?;
             inner.finish_removals(Ok::<_, DbError>(()), chosen)
         })
@@ -323,7 +322,7 @@ impl Drop for CopyNames {
 /// The call's copy at `path` is placed and its file switched to it: the
 /// copy is an original this device records (§17.3).
 pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
+    db.execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
     Ok(())
 }
 
@@ -331,7 +330,7 @@ pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
 /// device's, unless another of this device's files is recorded there: it is
 /// recorded for removal (Appendix C.3).
 pub(crate) fn lose(db: &DatabaseConnection, path: &[u8], file: FileId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
          AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
         params![path, file],
@@ -342,7 +341,7 @@ pub(crate) fn lose(db: &DatabaseConnection, path: &[u8], file: FileId) -> Result
 /// The copy at `path`, recorded as `state`, is removed; its folder links go
 /// with it.
 pub(crate) fn forget(db: &DatabaseConnection, path: &str, state: &str) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_copies WHERE path=?1 AND state=?2", (path, state))?;
+    db.execute("DELETE FROM _coven_copies WHERE path=?1 AND state=?2", (path, state))?;
     Ok(())
 }
 

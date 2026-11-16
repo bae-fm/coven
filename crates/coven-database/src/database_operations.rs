@@ -8,14 +8,15 @@ use std::collections::BTreeSet;
 impl Database {
     /// Read every unfinished operation, including permanently failed ones.
     pub async fn operations(&self) -> Result<Vec<OperationRecord>, DbError> {
-        self.call(move |inner| inner.access.with_committed(crate::operation::read)).await
+        self.call(move |inner| inner.access.with_committed(|db, _| crate::operation::read(db)))
+            .await
     }
 
     /// Read one committed journal row without loading unrelated operation data.
     /// Absence means the operation has finished or never existed.
     pub async fn operation(&self, id: OperationId) -> Result<Option<OperationRecord>, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|writer| crate::operation::find(writer, id))
+            inner.access.with_committed(|writer, _| crate::operation::find(writer, id))
         })
         .await
     }
@@ -24,7 +25,7 @@ impl Database {
     pub async fn first_operation(&self, kind: &str) -> Result<Option<OperationRecord>, DbError> {
         let kind = kind.to_owned();
         self.call(move |inner| {
-            inner.access.with_committed(|writer| crate::operation::first(writer, &kind))
+            inner.access.with_committed(|writer, _| crate::operation::first(writer, &kind))
         })
         .await
     }
@@ -32,7 +33,7 @@ impl Database {
     /// Commit the operation before its first step.
     pub async fn start_operation(&self, operation: NewOperation) -> Result<OperationId, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::insert(db, &operation))
             })
         })
@@ -48,7 +49,7 @@ impl Database {
         kind: String,
     ) -> Result<OperationId, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::insert_for_app(db, &operation, &kind))
             })
         })
@@ -65,7 +66,7 @@ impl Database {
         update: impl FnOnce(OperationId) -> Result<OperationUpdate, E> + Send + 'static,
     ) -> Result<OperationId, E> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction_as(|db| {
                     let id = crate::operation::insert(db, &operation)?;
                     crate::operation::advance(db, &update(id)?)?;
@@ -83,7 +84,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_writer(|writer| writer.transaction(crate::operation::reserve_snapshot))
+                .with_writer(|writer, _| writer.transaction(crate::operation::reserve_snapshot))
         })
         .await
     }
@@ -91,7 +92,7 @@ impl Database {
     /// Commit a local step's state after an idempotent storage effect.
     pub async fn advance_operation(&self, update: OperationUpdate) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::advance(db, &update))
             })
         })
@@ -113,8 +114,8 @@ impl Database {
     ) -> Result<T, DbError> {
         let kind = kind.to_owned();
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     let (updates, concluded) = step(&crate::operation::of_kind(db, &kind)?)?;
                     for update in &updates {
                         crate::operation::advance(db, update)?;
@@ -141,8 +142,8 @@ impl Database {
     ) -> Result<T, DbError> {
         let kind = kind.to_owned();
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     let (updates, finished, concluded) =
                         step(&crate::operation::of_kind(db, &kind)?)?;
                     for update in &updates {
@@ -169,7 +170,7 @@ impl Database {
         removal: crate::ObjectRemoval,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     crate::operation::advance(db, &update)?;
                     crate::object_removals::record(db, &removal)
@@ -187,7 +188,7 @@ impl Database {
         keys: Vec<coven_crypto::MemberPublicKeys>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::hold_keys(db, &keys))
             })
         })
@@ -199,7 +200,7 @@ impl Database {
         &self,
         id: OperationId,
     ) -> Result<Option<P>, DbError> {
-        self.call(move |inner| inner.access.with_writer(|db| crate::pending::operation(db, id)))
+        self.call(move |inner| inner.access.with_writer(|db, _| crate::pending::operation(db, id)))
             .await
     }
 
@@ -207,7 +208,7 @@ impl Database {
     #[cfg(test)]
     pub async fn retry_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::pending::clear_operation(db, id))
             })
         })
@@ -222,7 +223,7 @@ impl Database {
         pending: P,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 if pending.operation() != Some(update.id) {
                     return Err(DbError::Invariant {
                         what: "an operation's condition names its journal row",
@@ -247,7 +248,7 @@ impl Database {
         outcome: crate::OperationOutcome,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::finish_with_outcome(db, id, &outcome))
             })
         })
@@ -268,7 +269,7 @@ impl Database {
         outcome: Option<(String, crate::OperationOutcome)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     // The invite's outcome is listed in `coven_operations`
                     // until the app acknowledges it, the journal row's end
@@ -301,7 +302,7 @@ impl Database {
         parent: OperationUpdate,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     crate::operation::advance(db, &parent)?;
                     crate::operation::finish_with_outcome(db, child, &outcome)
@@ -318,8 +319,10 @@ impl Database {
     /// handle with its cause: they would otherwise run, listed, forever.
     pub async fn end_for_good(&self, stop: crate::DeviceStop) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| crate::operation::end_for_good(db, stop))
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
+                    crate::operation::end_for_good(db, stop)
+                })
             })
         })
         .await
@@ -331,8 +334,10 @@ impl Database {
     /// database (§19.3). The record stays until a reset or deletion.
     pub async fn end_for_copy(&self, slot: coven_merge::Slot) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| crate::operation::end_for_copy(db, slot))
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
+                    crate::operation::end_for_copy(db, slot)
+                })
             })
         })
         .await
@@ -344,7 +349,7 @@ impl Database {
     /// state doesn't name its device. A restore ending without its store
     /// reads it for the facts (§13.1).
     pub async fn device_stop(&self) -> Result<Option<crate::DeviceStop>, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::operation::stopped)).await
+        self.call(|inner| inner.access.with_committed(|db, _| crate::operation::stopped(db))).await
     }
 
     /// The paths of objects whose time to go has passed by `now`, in seconds
@@ -352,7 +357,7 @@ impl Database {
     pub async fn due_object_removals(&self, now: u64) -> Result<Vec<String>, DbError> {
         let now = i64::try_from(now).unwrap_or(i64::MAX);
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 db.query(
                     "SELECT path FROM _coven_object_removals WHERE after<=?1 ORDER BY after",
                     [now],
@@ -366,7 +371,7 @@ impl Database {
     /// The object at `path` is gone from storage.
     pub async fn object_removed(&self, path: String) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::object_removals::removed(db, &path))
             })
         })
@@ -377,7 +382,7 @@ impl Database {
     /// (§13.2).
     pub async fn requests_ended(&self) -> Result<BTreeSet<DeviceId>, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 db.query("SELECT device FROM _coven_requests_ended", [], |r| {
                     r.get::<_, DeviceId>(0)
                 })
@@ -391,13 +396,10 @@ impl Database {
     /// storage, and nothing else was under its requests when listed (§13.2).
     pub async fn record_requests_ended(&self, device: DeviceId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
-                    db.internal_execute(
-                        "INSERT INTO _coven_requests_ended(device) VALUES(?1)",
-                        [device],
-                    )
-                    .map(drop)
+                    db.execute("INSERT INTO _coven_requests_ended(device) VALUES(?1)", [device])
+                        .map(drop)
                 })
             })
         })
@@ -408,7 +410,7 @@ impl Database {
     /// (§16.6, §17.10).
     pub async fn gone_storage_cleared(&self) -> Result<BTreeSet<DeviceId>, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 db.query("SELECT device FROM _coven_gone_storage_cleared", [], |r| {
                     r.get::<_, DeviceId>(0)
                 })
@@ -424,9 +426,9 @@ impl Database {
     /// its operation hadn't finished, changes nothing.
     pub async fn record_gone_storage_cleared(&self, device: DeviceId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
-                    db.internal_execute(
+                    db.execute(
                         "INSERT INTO _coven_gone_storage_cleared(device) VALUES(?1) ON CONFLICT DO NOTHING",
                         [device],
                     )
@@ -441,7 +443,7 @@ impl Database {
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| crate::operation::finish(db, id).map(drop))
             })
         })

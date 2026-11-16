@@ -1,5 +1,6 @@
 //! Conversions at the SQL/format boundary and timestamp construction.
 
+use crate::sqlite::DatabaseConnection;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coven_format::value::Value;
@@ -61,7 +62,7 @@ pub(crate) fn decode_failure(
 
 /// Applied and locally queued originals share one timestamp clock.
 pub(crate) fn latest_timestamp(
-    database: &crate::sqlite::DatabaseConnection,
+    database: &DatabaseConnection,
 ) -> Result<Option<Timestamp>, DbError> {
     database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
         row.get::<_, Option<Vec<u8>>>(0)?

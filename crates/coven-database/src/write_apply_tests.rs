@@ -58,14 +58,14 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     let a = databases.pop().unwrap();
     sql(&a, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let record = records(&a).remove(0);
-    b.inspect_writer(|sql| sql.batch("CREATE TRIGGER fail_apply AFTER INSERT ON notes BEGIN SELECT RAISE(ROLLBACK,'transaction refused'); END").unwrap());
+    b.inspect_writer(|sql, _| sql.batch("CREATE TRIGGER fail_apply AFTER INSERT ON notes BEGIN SELECT RAISE(ROLLBACK,'transaction refused'); END").unwrap());
     assert!(
         matches!(b.receive(record.clone().into()).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="transaction refused")
     );
     for table in ["notes", "_coven_rows", "_coven_cells", "_coven_writes", "_coven_lost"] {
         assert_eq!(count(&b, table), 0, "{table}");
     }
-    b.inspect_writer(|sql| sql.batch("DROP TRIGGER fail_apply").unwrap());
+    b.inspect_writer(|sql, _| sql.batch("DROP TRIGGER fail_apply").unwrap());
     sql(&b, "INSERT INTO notes VALUES('local','local','')").await.unwrap();
     assert_eq!(records(&b)[0].header.timestamp.milliseconds(), 1_000);
     assert_eq!(b.receive(record.into()).await.unwrap(), ApplyOutcome::Applied);
@@ -128,7 +128,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         let old_rows = query.next_inline().await.expect("the live query answers").unwrap();
         // Count actual row mutations, including repeated changes to one table,
         // local trigger effects, losses and the applied slot.
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.batch("CREATE TEMP TABLE failure_step(number INTEGER NOT NULL,fail_at INTEGER NOT NULL); INSERT INTO failure_step VALUES(0,1)").unwrap();
             for (index, table) in before.keys().filter(|name| !name.starts_with("sqlite_")).enumerate() {
                 for action in ["INSERT", "UPDATE", "DELETE"] {
@@ -138,10 +138,8 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         });
         let mut applied = false;
         for step in 1..1000 {
-            db.inspect_writer(|writer| {
-                writer
-                    .internal_execute("UPDATE failure_step SET number=0,fail_at=?1", [step])
-                    .unwrap()
+            db.inspect_writer(|writer, _| {
+                writer.execute("UPDATE failure_step SET number=0,fail_at=?1", [step]).unwrap()
             });
             let result = if streamed {
                 let encoder = coven_format::write_stream::WriteEncoder::new(&incoming).unwrap();
@@ -191,10 +189,10 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                     assert_eq!(rows, old_rows);
                     // The staging tables stay on the writer, and the rollback
                     // empties them of what the failed slot staged.
-                    db.inspect_writer(|writer| assert_eq!(writer.query_row("SELECT (SELECT count(*) FROM temp._coven_download_rows)+(SELECT count(*) FROM temp._coven_download_dismissals)+(SELECT count(*) FROM temp._coven_download_replaced)", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "streamed={streamed}, step={step}"));
+                    db.inspect_writer(|writer, _| assert_eq!(writer.query_row("SELECT (SELECT count(*) FROM temp._coven_download_rows)+(SELECT count(*) FROM temp._coven_download_dismissals)+(SELECT count(*) FROM temp._coven_download_replaced)", [], |r| r.get::<_, i64>(0)).unwrap(), 0, "streamed={streamed}, step={step}"));
                 }
                 Ok(ApplyOutcome::Applied) => {
-                    let mutations = db.inspect_writer(|writer| {
+                    let mutations = db.inspect_writer(|writer, _| {
                         writer
                             .query_row("SELECT number FROM failure_step", [], |r| {
                                 r.get::<_, i64>(0)

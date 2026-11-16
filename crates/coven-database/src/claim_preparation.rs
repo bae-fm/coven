@@ -1,5 +1,6 @@
 //! Ciphertext staging outside the application writer.
-use crate::{sqlite::DatabaseConnection, ClaimAttempt, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::{ClaimAttempt, DbError};
 use std::io::{self, Read};
 
 pub(crate) struct PreparedClaim<R> {
@@ -25,10 +26,7 @@ pub(crate) fn prepare<T>(
         }
         hash.update(&bytes);
         size += bytes.len() as u64;
-        db.internal_execute(
-            "INSERT INTO temp._coven_prepared_claim VALUES(?1,?2)",
-            (chunk, bytes),
-        )?;
+        db.execute("INSERT INTO temp._coven_prepared_claim VALUES(?1,?2)", (chunk, bytes))?;
     }
     let result = consume(PreparedClaim {
         attempt: ClaimAttempt {

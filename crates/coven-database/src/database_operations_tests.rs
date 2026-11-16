@@ -10,7 +10,7 @@ impl Database {
     /// migrations are not recorded. Install while the database is quiescent.
     pub async fn record_statements(&self, log: StatementLog) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.test_record_statements(log.clone());
                 Ok::<_, DbError>(())
             })?;
@@ -27,11 +27,12 @@ impl Database {
         counter: crate::test_utils::WorkCounter,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.test_track_work(counter.clone());
                 Ok::<_, DbError>(())
             })?;
             inner.access.readers.test_track_work(&counter);
+            inner.access.tests.track_work(counter.clone());
             inner.inputs.test_track_work(&counter);
             Ok(())
         })
@@ -73,7 +74,7 @@ impl Database {
         callback: impl Fn(crate::test_utils::WriteCheckpoint) + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.on_write_checkpoint(callback);
                 Ok(())
             })
@@ -101,7 +102,7 @@ impl Database {
     /// start still writes, so the loop starts and its first pass fails.
     pub async fn test_fail_sync_status(&self) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.batch(
                     "CREATE TEMP TRIGGER fail_sync_status
                      BEFORE UPDATE OF last_pass,moved,last_synced ON coven_sync_status
@@ -115,7 +116,7 @@ impl Database {
     /// Make every later write of the reset notice fail, as a full disk would.
     pub async fn test_fail_device_reset(&self) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.batch(
                     "CREATE TEMP TRIGGER fail_device_reset BEFORE INSERT ON _coven_device_reset
                      BEGIN SELECT RAISE(ABORT,'injected reset notice failure'); END;",
@@ -129,7 +130,7 @@ impl Database {
     /// would, or let them succeed again.
     pub async fn test_fail_device_id_in_use(&self, fail: bool) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.batch(if fail {
                     "CREATE TEMP TRIGGER fail_device_id_in_use BEFORE INSERT ON _coven_device_id_in_use
                      BEGIN SELECT RAISE(ABORT,'injected device id record failure'); END;"
@@ -144,7 +145,7 @@ impl Database {
     /// Make every later write of the retry effect fail, as a full disk would.
     pub async fn test_fail_retry_effect(&self) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.batch(
                     "CREATE TEMP TRIGGER fail_retry_effect BEFORE UPDATE ON coven_retry_effect
                      BEGIN SELECT RAISE(ABORT,'injected retry effect failure'); END;",
@@ -159,7 +160,7 @@ impl Database {
         &self,
     ) -> Result<Vec<coven_format::write::WriteRecord>, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer
                     .query("SELECT record FROM _coven_uploads ORDER BY device,number", [], |r| {
                         r.get::<_, Vec<u8>>(0)

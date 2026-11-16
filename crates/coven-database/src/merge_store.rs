@@ -3,6 +3,7 @@
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, slot_counter};
 use crate::write_metadata::StoredWrite;
 use crate::write_rows::AppView;
@@ -110,6 +111,9 @@ impl Weight for StoredRow {
 
 pub(crate) struct MergeStore<'a> {
     database: &'a DatabaseConnection,
+    /// The call's state, where tests count the rows a merge loads.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests count a merge's loads"))]
+    call: &'a StoreCall<'a>,
     values: RowValues<'a>,
     metadata: WriteMetadata<'a>,
     rows: RowCache<RowId, StoredRow>,
@@ -161,9 +165,14 @@ enum RowValues<'a> {
 }
 
 impl<'a> MergeStore<'a> {
-    pub(crate) fn new(database: &'a DatabaseConnection, app: &'a AppView<'a>) -> Self {
+    pub(crate) fn new(
+        database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
+        app: &'a AppView<'a>,
+    ) -> Self {
         Self {
             database,
+            call,
             values: RowValues::App(app),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
@@ -175,10 +184,12 @@ impl<'a> MergeStore<'a> {
     /// Read values and stored references without resolving app references.
     pub(crate) fn from_schema(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
     ) -> Self {
         Self {
             database,
+            call,
             values: RowValues::Schema(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
@@ -197,11 +208,13 @@ impl<'a> MergeStore<'a> {
     }
     pub(crate) fn from_snapshot(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
         audiences: &'a BTreeSet<Audience>,
     ) -> Self {
         Self {
             database,
+            call,
             values: RowValues::Snapshot(schema, audiences),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
@@ -212,10 +225,12 @@ impl<'a> MergeStore<'a> {
 
     pub(crate) fn from_staged(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a crate::schema::Schema,
     ) -> Self {
         Self {
             database,
+            call,
             values: RowValues::Staged(schema),
             metadata: WriteMetadata::new(database),
             rows: RowCache::all(),
@@ -375,7 +390,7 @@ impl<'a> MergeStore<'a> {
 
     fn read_row(&self, id: &RowId, with_losses: bool) -> Result<StoredRow, DbError> {
         #[cfg(test)]
-        self.database.record_merge_load(&id.table);
+        self.call.record_merge_load(&id.table);
         let audience = &id.audience;
         let generations = self.generations(id, false)?.0;
         let current = generations.last().map(|(ordinal, generation, _)| (*ordinal, *generation));

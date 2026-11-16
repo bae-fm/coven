@@ -12,10 +12,10 @@
 use crate::removal_schema::TableRules;
 use crate::removal_view::DatabaseRemovalView;
 use crate::schema::Schema;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
-use crate::{
-    merge_store::MergeStore, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError,
-};
+use crate::{merge_store::MergeStore, write_schema::WriteSchema, DbError};
 use coven_format::{loss::Loss, merge_fields, snapshot_rows::MergeRow, value::Value};
 use coven_merge::{RowId, RowState, RowUpdate, Rule};
 use rusqlite::params;
@@ -45,13 +45,15 @@ fn identity_parameters<'r>(rows: &[&'r RowId]) -> Vec<&'r dyn rusqlite::ToSql> {
 /// aside a chunk at a time, so a write's rows share each statement.
 pub(crate) fn capture_rows<'a>(
     db: &DatabaseConnection,
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        expect(unused_variables, reason = "only tests count coven's work")
+    )]
+    call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     rows: impl IntoIterator<Item = &'a RowId>,
 ) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING",
-        [],
-    )?;
+    db.execute("INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING", [])?;
     let rows: BTreeSet<&RowId> = rows.into_iter().collect();
     let rows: Vec<&RowId> = rows.into_iter().collect();
     for chunk in rows.chunks(CAPTURE_CHUNK) {
@@ -71,21 +73,21 @@ pub(crate) fn capture_rows<'a>(
             continue;
         }
         #[cfg(any(test, feature = "test-utils"))]
-        db.record_work(|work| work.published_rows += new.len());
+        call.record_work(|work| work.published_rows += new.len());
         let states = new
             .iter()
             .map(|row| Ok(store.row_without_losses(row)?.state))
             .collect::<Result<Vec<_>, DbError>>()?;
         put_rows(db, &states)?;
         keep_losses(db, &new)?;
-        db.internal_execute(
+        db.execute(
             &format!(
                 "WITH k(t,k,a) AS (VALUES {}) INSERT INTO _coven_published_creations SELECT c.* FROM k CROSS JOIN _coven_creations c ON c.table_name=k.t AND c.key=k.k AND c.audience=k.a",
                 identity_values(new.len())
             ),
             rusqlite::params_from_iter(identity_parameters(&new)),
         )?;
-        db.internal_execute(
+        db.execute(
             &format!(
                 "WITH k(t,k,a) AS (VALUES {}) INSERT INTO _coven_published_file_refs(table_name,key,audience,device,object) SELECT f.table_name,f.key,k.a,f.device,f.object FROM k CROSS JOIN _coven_row_file_refs f ON f.table_name=k.t AND f.key=k.k WHERE true ON CONFLICT DO NOTHING",
                 identity_values(new.len())
@@ -168,7 +170,7 @@ fn put_rows(db: &DatabaseConnection, states: &[RowState<Value>]) -> Result<(), D
 /// Keep a loss in the counted state, beside its row's record.
 pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
     name_writes(db, &loss.row, crate::forget_entries::active_writes(loss))?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
         params![
             loss.row.table,
@@ -188,7 +190,7 @@ fn name_writes(
     writes: impl IntoIterator<Item = coven_merge::WriteId>,
 ) -> Result<(), DbError> {
     for write in writes {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_published_writes(table_name,key,audience,write_id) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",
             params![row.table, row.key, &row.audience, crate::snapshot_state::ordinal(db, write)?],
         )?;
@@ -223,10 +225,7 @@ pub(crate) fn capture_dropped<'a>(
     db: &DatabaseConnection,
     rows: impl IntoIterator<Item = &'a RowId>,
 ) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING",
-        [],
-    )?;
+    db.execute("INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING", [])?;
     for row in rows {
         let audience = &row.audience;
         let kept: bool = db.query_row(
@@ -238,7 +237,7 @@ pub(crate) fn capture_dropped<'a>(
         if kept {
             continue;
         }
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3)",
             params![row.table, row.key, audience],
         )?;
@@ -253,10 +252,11 @@ pub(crate) fn capture_dropped<'a>(
 /// queued write, keeps what it kept.
 pub(crate) fn before_migrating(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &crate::schema::Schema,
     tables: &BTreeSet<String>,
 ) -> Result<(), DbError> {
-    let store = MergeStore::from_schema(db, schema).without_row_cache();
+    let store = MergeStore::from_schema(db, call, schema).without_row_cache();
     for table in tables.iter().filter_map(|table| schema.tables.get(table)) {
         let rows = db.query(
             "SELECT table_name,key,audience FROM _coven_rows WHERE table_name=?1
@@ -264,7 +264,7 @@ pub(crate) fn before_migrating(
             [&table.name],
             crate::row_queries::read_identity,
         )?;
-        capture_rows(db, &store, &rows)?;
+        capture_rows(db, call, &store, &rows)?;
     }
     Ok(())
 }
@@ -296,6 +296,7 @@ pub(crate) fn kept_state(
 /// is the one its stored state records.
 pub(crate) fn removals(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &Schema,
     rules: &BTreeMap<String, TableRules>,
 ) -> Result<BTreeMap<RowId, BTreeSet<Rule>>, DbError> {
@@ -310,9 +311,9 @@ pub(crate) fn removals(
         )?
         .into_iter()
         .collect();
-    let store = MergeStore::from_schema(db, schema).with_recent_rows();
+    let store = MergeStore::from_schema(db, call, schema).with_recent_rows();
     let deleted = crate::store_state_tables::deleted_circles(db)?;
-    let view = DatabaseRemovalView::counted(db, &store, schema, rules, &deleted);
+    let view = DatabaseRemovalView::counted(db, call, &store, schema, rules, &deleted);
     view.prime(kept.iter().cloned())?;
     let mut result =
         coven_merge::recompute(&view, &view, kept.clone()).map_err(|e| e.into_db_error(None))?;
@@ -324,11 +325,12 @@ pub(crate) fn removals(
 /// under `schema` and its synced tables' `rules`.
 pub(crate) fn removal_losses(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &Schema,
     rules: &BTreeMap<String, TableRules>,
 ) -> Result<Vec<Loss>, DbError> {
     let mut losses = Vec::new();
-    for (row, rules) in removals(db, schema, rules)? {
+    for (row, rules) in removals(db, call, schema, rules)? {
         let state = kept_state(db, &row)?
             .ok_or(DbError::Invariant { what: "a kept row's removal names a kept record" })?;
         losses.push(Loss::removed(&state, rules));
@@ -342,6 +344,7 @@ pub(crate) fn removal_losses(
 /// once its rules are gone, nothing could work them out again.
 pub(crate) fn removal_losses_before_migrating(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &Schema,
 ) -> Result<Vec<Loss>, DbError> {
     if !exists(db)? {
@@ -359,7 +362,7 @@ pub(crate) fn removal_losses_before_migrating(
         }
     }
     crate::write_schema::with_rule_evaluators(db, before, &rules, || {
-        removal_losses(db, before, &rules)
+        removal_losses(db, call, before, &rules)
     })
 }
 
@@ -374,7 +377,7 @@ pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
         "_coven_published_file_refs",
         "_coven_published",
     ] {
-        db.internal_execute(&format!("DELETE FROM {table}"), [])?;
+        db.execute(&format!("DELETE FROM {table}"), [])?;
     }
     Ok(())
 }
@@ -385,6 +388,7 @@ pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
 /// queued write is left nothing waits to be folded over the counted state.
 pub(crate) fn restore(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
 ) -> Result<BTreeSet<RowId>, DbError> {
     if !exists(db)? {
@@ -393,7 +397,7 @@ pub(crate) fn restore(
     let rows=db.query("SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses UNION SELECT table_name,key,audience FROM _coven_published_dropped",[],crate::row_queries::read_identity)?;
     let mut touched = BTreeSet::new();
     for row in rows {
-        if put_back(db, schema, &row)? {
+        if put_back(db, call, schema, &row)? {
             touched.insert(row);
         }
     }
@@ -407,6 +411,7 @@ pub(crate) fn restore(
 /// whose table the current schema has.
 pub(crate) fn restore_rows<'a>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     rows: impl IntoIterator<Item = &'a RowId>,
 ) -> Result<BTreeSet<RowId>, DbError> {
@@ -423,7 +428,7 @@ pub(crate) fn restore_rows<'a>(
         if !kept {
             continue;
         }
-        if put_back(db, schema, row)? {
+        if put_back(db, call, schema, row)? {
             touched.insert(row.clone());
         }
         crate::forget_entries::unnamed_by_published(db, Some(row))?;
@@ -435,7 +440,7 @@ pub(crate) fn restore_rows<'a>(
             "_coven_published_dropped",
             "_coven_published_file_refs",
         ] {
-            db.internal_execute(
+            db.execute(
                 &format!("DELETE FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3"),
                 params![row.table, row.key, audience],
             )?;
@@ -449,9 +454,14 @@ pub(crate) fn restore_rows<'a>(
 /// untouched until the final materialization, which works out the row's
 /// removal under the current schema and records its removal loss. Returns
 /// whether the current schema has the row's table.
-fn put_back(db: &DatabaseConnection, schema: &WriteSchema, row: &RowId) -> Result<bool, DbError> {
+fn put_back(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    schema: &WriteSchema,
+    row: &RowId,
+) -> Result<bool, DbError> {
     #[cfg(any(test, feature = "test-utils"))]
-    db.record_work(|work| work.published_rows += 1);
+    call.record_work(|work| work.published_rows += 1);
     crate::write_commit::forget(db, &crate::write_commit::StoredRows::Row(row))?;
     crate::loss_record::forget_row(db, row)?;
     crate::ownership::forget_row(db, row)?;
@@ -461,6 +471,7 @@ fn put_back(db: &DatabaseConnection, schema: &WriteSchema, row: &RowId) -> Resul
             crate::download_stage::put_values(db, row, &state)?;
             crate::write_commit::persist(
                 db,
+                call,
                 &BTreeMap::from([(row.clone(), RowUpdate { state, lost_changes: Vec::new() })]),
                 |row| {
                     Ok(crate::merge_store::StoredRow {
@@ -479,7 +490,7 @@ fn put_back(db: &DatabaseConnection, schema: &WriteSchema, row: &RowId) -> Resul
         params![row.table, row.key, &row.audience],
         |r| {
             let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-            crate::loss_record::keep(db, schema, &loss)
+            crate::loss_record::keep(db, call, schema, &loss)
         },
     )?;
     crate::ownership::restore_published(db, row)?;

@@ -246,7 +246,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         let mut ordinary =
             db.subscribe(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?));
         assert_eq!(ordinary.next_inline().await.expect("the live query answers").unwrap(), 1);
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             if statement == "COMMIT" {
                 sql.batch("CREATE TEMP TABLE parent(id INTEGER PRIMARY KEY);
                     CREATE TEMP TABLE child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
@@ -285,7 +285,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let pending = record(1);
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap();
     });
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -403,7 +403,7 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
             .unwrap();
         let original = operation_record(id);
         db.record_pending(original.clone()).await.unwrap();
-        db.inspect_writer(|sql| sql.batch(&format!("CREATE TEMP TRIGGER fail_pending BEFORE {statement} ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;")).unwrap());
+        db.inspect_writer(|sql, _| sql.batch(&format!("CREATE TEMP TRIGGER fail_pending BEFORE {statement} ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;")).unwrap());
         let update = OperationUpdate { id, previous: 0, last_step: 1, data: vec![1] };
         let error = if statement == "INSERT" {
             db.advance_operation_pending(
@@ -443,14 +443,16 @@ async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remai
     }
     // A loaded snapshot covers slots 1 and 2 without applying
     // them: the wait ends, the refusal stays, the uncovered wait stays.
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         crate::sequence::set_applied(sql, 2).unwrap();
         crate::pending::clear_covered_slots(sql).unwrap();
     });
     assert_eq!(db.pending::<Record>().await.unwrap(), vec![refused.clone(), later.clone()]);
     // Applying a write itself ends any record for it, verdicts included.
     for number in [2, 3] {
-        db.commit_writer(|sql| crate::pending::clear_slot(sql, coven_merge::slot(number)).unwrap());
+        db.commit_writer(|sql, _| {
+            crate::pending::clear_slot(sql, coven_merge::slot(number)).unwrap()
+        });
     }
     assert!(db.pending::<Record>().await.unwrap().is_empty());
 }
@@ -505,11 +507,11 @@ async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let pending = record(7);
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         let subject = serde_json::to_vec(pending.subject()).unwrap();
         let value = serde_json::to_vec(&pending).unwrap();
         for _ in 0..2 {
-            sql.internal_execute(
+            sql.execute(
                 "INSERT INTO _coven_pending(subject,value,build) VALUES(?1,?2,?3)
                  ON CONFLICT(subject) DO UPDATE SET value=excluded.value",
                 (&subject, &value, Record::BUILD.to_be_bytes()),
@@ -583,7 +585,7 @@ async fn coven_pending_shows_the_kinds_the_record_names_and_an_originals_path() 
         .await
         .unwrap();
     db.record_pending(operation_record(id)).await.unwrap();
-    db.inspect_writer(|sql| crate::file_moves::tests::moving(sql, 3));
+    db.inspect_writer(|sql, _| crate::file_moves::tests::moving(sql, 3));
     db.record_pending(moving(7, crate::MoveId(3))).await.unwrap();
     db.record_pending(record(8)).await.unwrap();
     db.record_pending(Record {
@@ -708,7 +710,7 @@ async fn a_stored_record_with_part_of_a_file_is_damaged_database() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.record_pending(record(1)).await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch(
             "PRAGMA ignore_check_constraints=ON; UPDATE _coven_pending SET work='upload';
              PRAGMA ignore_check_constraints=OFF;",
@@ -727,7 +729,7 @@ async fn a_pending_record_read_as_another_type_fails_as_state_encoding() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.record_pending(record(1)).await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch("UPDATE _coven_pending SET value=CAST('{\"shape\":\"another type\"}' AS BLOB)")
             .unwrap()
     });

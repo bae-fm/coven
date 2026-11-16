@@ -55,7 +55,7 @@ mod dropped_schema {
     }
 
     fn evidence(db: &Database, table: &str) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             sql.query(
                 "SELECT c.write_id,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) WHERE c.table_name=?1 ORDER BY c.write_id,c.key",
                 [table],
@@ -238,7 +238,7 @@ mod dropped_schema {
             .await
             .unwrap();
         let body = |db: &Database| {
-            db.inspect_writer(|db| {
+            db.inspect_writer(|db, _| {
                 db.query_row(
                     "SELECT count(*) FROM _coven_columns WHERE table_name='notes' AND column_name='body'",
                     [],

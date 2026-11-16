@@ -6,7 +6,7 @@ use coven_merge::ForeignKey;
 type Registered = (Vec<(String, String)>, Vec<(String, ForeignKey)>);
 
 fn registered(db: &Database) -> Registered {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         let mut columns = db
             .query("SELECT table_name,column_name FROM _coven_columns", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))

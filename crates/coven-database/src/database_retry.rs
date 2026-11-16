@@ -19,8 +19,8 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     if let Some(record) = record {
                         crate::pending::save(db, &record)?;
                     } else {
@@ -39,7 +39,7 @@ impl Database {
         connection: S,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            let changed = inner.access.readers.acquire_reader().with_reader(|db| {
+            let changed = inner.access.with_reader(|db, _| {
                 Ok::<_, DbError>(
                     retry::find(db, RetrySubject::Sync)?.is_some()
                         || crate::pending::recorded(db, &connection)?,
@@ -48,8 +48,8 @@ impl Database {
             if !changed {
                 return Ok(());
             }
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     retry::clear(db, RetrySubject::Sync)?;
                     crate::pending::clear(db, &connection)
                 })
@@ -68,8 +68,8 @@ impl Database {
             let id = record
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     retry::save_failure(db, &record, RetrySubject::Operation(id), wait.as_ref())
                 })
             })
@@ -94,8 +94,8 @@ impl Database {
             let id = record
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     if crate::operation::find(db, id)?.is_none_or(|row| row.last_step != step) {
                         return Ok(false);
                     }
@@ -118,16 +118,13 @@ impl Database {
         step: u32,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            let recorded = inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| crate::pending::operation_recorded(db, id))?;
+            let recorded =
+                inner.access.with_reader(|db, _| crate::pending::operation_recorded(db, id))?;
             if !recorded {
                 return Ok(());
             }
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     if crate::operation::find(db, id)?.is_some_and(|row| row.last_step == step) {
                         crate::pending::clear_operation(db, id)?;
                     }
@@ -140,16 +137,12 @@ impl Database {
 
     /// Every persisted wait, for arming on reopen (§6.7).
     pub async fn retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
-        self.call(move |inner| inner.access.readers.acquire_reader().with_reader(retry::read_all))
-            .await
+        self.call(move |inner| inner.access.with_reader(|db, _| retry::read_all(db))).await
     }
 
     /// The subject's persisted wait, if one is armed.
     pub async fn retry_wait(&self, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
-        self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(|db| retry::find(db, subject))
-        })
-        .await
+        self.call(move |inner| inner.access.with_reader(|db, _| retry::find(db, subject))).await
     }
 
     /// The same wait, live (E4), for a test waiting for a failure to arm it.
@@ -171,7 +164,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_writer(|writer| writer.transaction(|db| retry::save(db, subject, &wait)))
+                .with_writer(|writer, _| writer.transaction(|db| retry::save(db, subject, &wait)))
         })
         .await
     }
@@ -203,7 +196,7 @@ impl Database {
                     |left| left.checked_sub(1),
                 )
                 .is_ok();
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     #[cfg(any(test, feature = "test-utils"))]
                     if injected {
@@ -255,7 +248,7 @@ impl Database {
     /// Forget a wait once its work succeeds or no longer retries automatically.
     pub async fn clear_retry(&self, subject: RetrySubject) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| writer.transaction(|db| retry::clear(db, subject)))
+            inner.access.with_writer(|writer, _| writer.transaction(|db| retry::clear(db, subject)))
         })
         .await
     }

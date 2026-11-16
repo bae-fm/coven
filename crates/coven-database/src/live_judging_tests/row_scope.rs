@@ -86,7 +86,7 @@ async fn coven_transactions_read_unchanged_scoped_values() {
     let commit = {
         let db = db.clone();
         move |sql: &'static str| -> Pending {
-            db.commit_writer(|writer| writer.batch(sql).unwrap());
+            db.commit_writer(|writer, _| writer.batch(sql).unwrap());
             Box::pin(async {})
         }
     };
@@ -723,7 +723,7 @@ async fn run_seed(seed: u64) -> usize {
             sql = remote(&db, &mut rng, &synced).await;
         } else if coven {
             let statement = sql.clone();
-            db.commit_writer(move |writer| writer.batch(&statement).unwrap());
+            db.commit_writer(move |writer, _| writer.batch(&statement).unwrap());
         } else {
             let leaked: &'static str = Box::leak(sql.clone().into_boxed_str());
             crate::write::tests::sql(&db, leaked).await.unwrap();

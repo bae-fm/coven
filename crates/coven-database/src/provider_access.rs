@@ -1,6 +1,7 @@
 //! Account intentions, confirmed provider state and their durable request (§14.2).
 
-use crate::{sqlite::DatabaseConnection, DbError, NewOperation, OperationId, PendingValue};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, NewOperation, OperationId, PendingValue};
 use coven_crypto::SecretBytes;
 
 /// A provider-access operation's steps (§14.2): queued; its request's
@@ -66,7 +67,7 @@ pub(crate) fn finish(
     account: &str,
     id: OperationId,
 ) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_provider_access SET operation=NULL,target=NULL WHERE account=?1 AND operation=?2", (account,id.0))?;
+    db.execute("UPDATE _coven_provider_access SET operation=NULL,target=NULL WHERE account=?1 AND operation=?2", (account,id.0))?;
     crate::operation::finish(db, id)?;
     Ok(())
 }
@@ -80,7 +81,7 @@ pub(crate) fn requeue(
 ) -> Result<(), DbError> {
     crate::operation::set_step(db, id, REQUEST_QUEUED_STEP)?;
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_provider_access SET target=NULL WHERE account=?1 AND target IS NOT NULL",
         [account],
     )?;
@@ -92,7 +93,7 @@ pub(crate) fn requeue(
 /// tokens even when other permissions remain, so neither confirmation is
 /// kept.
 pub(crate) fn fix_target(db: &DatabaseConnection, account: &str) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [account])?;
+    db.execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [account])?;
     Ok(())
 }
 
@@ -104,7 +105,7 @@ pub(crate) fn confirm(
     target: bool,
     invitation: Option<&SecretBytes>,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_provider_access SET granted=?1,invitation=?2,target=NULL WHERE account=?3",
         (target, invitation.map(SecretBytes::as_bytes), account),
     )?;
@@ -120,7 +121,7 @@ pub(crate) fn adopt<P: PendingValue>(
         let before = match read(db, &change.account)? {
             Some(before) => before,
             None => {
-                db.internal_execute(
+                db.execute(
                     "INSERT INTO _coven_provider_access(account,intended,granted) VALUES(?1,?2,?3)",
                     (&change.account, change.intended, change.initially_granted),
                 )?;
@@ -132,7 +133,7 @@ pub(crate) fn adopt<P: PendingValue>(
                 }
             }
         };
-        db.internal_execute(
+        db.execute(
             "UPDATE _coven_provider_access SET intended=?1 WHERE account=?2 AND intended!=?1",
             (change.intended, &change.account),
         )?;
@@ -162,7 +163,7 @@ pub(crate) fn adopt<P: PendingValue>(
             }
             None => {
                 let id = crate::operation::insert(db, &change.operation)?;
-                db.internal_execute(
+                db.execute(
                     "UPDATE _coven_provider_access SET operation=?1 WHERE account=?2",
                     (id.0, &change.account),
                 )?;
@@ -199,12 +200,12 @@ pub(crate) fn retake<P: PendingValue>(
                 requeue(db, &change.account, request.operation)?;
             }
         }
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_provider_access(account,intended) VALUES(?1,?2) \
              ON CONFLICT(account) DO NOTHING",
             (&change.account, change.intended),
         )?;
-        db.internal_execute(
+        db.execute(
             "UPDATE _coven_provider_access SET granted=NULL,invitation=NULL WHERE account=?1",
             [&change.account],
         )?;

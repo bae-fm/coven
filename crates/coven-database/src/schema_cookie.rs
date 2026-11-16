@@ -56,7 +56,7 @@ impl DatabaseConnection {
             return Ok(cookie);
         }
         #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.constant_reads += 1);
+        self.record_work(|work| work.cookie_reads += 1);
         let cookie = self.schema_cookie()?;
         if self.cookie.holders.get() > 0 {
             self.cookie.value.set(Some(cookie));

@@ -6,6 +6,7 @@ use crate::snapshot_metadata::SnapshotMetadata;
 use crate::snapshot_metadata::STAGED_WRITES;
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LoadStep};
 use coven_format::snapshot::{section, SnapshotHeader, SnapshotRecord};
@@ -25,7 +26,9 @@ pub(crate) struct Rebuilt<'a> {
 
 pub(crate) fn load<P: crate::PendingValue>(
     database: &mut DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &DatabaseConnection,
+    before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::WriteFiles<'_>,
@@ -38,9 +41,9 @@ pub(crate) fn load<P: crate::PendingValue>(
     // A load that brings the state registering this device runs the app's
     // joining write in the same transaction (§13.2).
     let registering =
-        crate::joining_write::owed(database, joining, &reload.state, schema, now, files)?;
-    database.stream_registering(registering, |database| {
-        let files = &crate::file_write::FileWrite::new(database, files);
+        crate::joining_write::owed(database, call, joining, &reload.state, schema, now, files)?;
+    crate::local_write::stream_registering(database, call, registering, |database| {
+        let files = &crate::file_write::FileWrite::new(database, call, files);
         let crate::SnapshotReload {
             snapshots,
             slots,
@@ -74,7 +77,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             None => crate::snapshot_coverage::SnapshotCoverage::new(target),
         };
         crate::download_stage::begin(database)?;
-        let mut touched = crate::published::restore(database, schema)?;
+        let mut touched = crate::published::restore(database, call, schema)?;
         crate::snapshot_state::create_tables(database)?;
         crate::snapshot_install::create_tables(database, schema)?;
         let mut loaded = Vec::new();
@@ -93,13 +96,11 @@ pub(crate) fn load<P: crate::PendingValue>(
                     if !selected.insert(id.audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    let header =
-                        read(database, schema, input, Some(author), progress).map_err(|error| {
-                            SnapshotError::Body {
-                                snapshot: id.clone(),
-                                error: Box::new(error),
-                                staged: None,
-                            }
+                    let header = read(database, call, schema, input, Some(author), progress)
+                        .map_err(|error| SnapshotError::Body {
+                            snapshot: id.clone(),
+                            error: Box::new(error),
+                            staged: None,
                         })?;
                     crate::download_stage::replace(database, &id.audience)?;
                     let files = crate::database::file_retention::snapshot_references(
@@ -128,19 +129,17 @@ pub(crate) fn load<P: crate::PendingValue>(
         }
         // A published row the reload replaces is read from its snapshot now.
         for audience in &selected {
-            database.internal_execute(
-                "DELETE FROM temp._coven_download_rows WHERE audience=?1",
-                [audience],
-            )?;
+            database
+                .execute("DELETE FROM temp._coven_download_rows WHERE audience=?1", [audience])?;
         }
         crate::snapshot_state::drop_tables(database)?;
-        crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage, progress)?;
+        crate::snapshot_writes::apply::<P>(database, call, schema, slots, &coverage, progress)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
         if !rebuilds.is_empty() {
             let gated: Vec<_> = rebuilds.into_iter().map(|(audience, _)| audience).collect();
-            crate::rebuild_wait::begin::<P>(database, schema, now, &gated)?;
+            crate::rebuild_wait::begin::<P>(database, call, schema, now, &gated)?;
         }
         if let Some(rebuilt) = rebuilt {
             if !selected.contains(&rebuilt.circle) {
@@ -148,6 +147,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             }
             crate::raise_capture::capture_rebuilt(
                 database,
+                call,
                 &rebuilt.circle,
                 rebuilt.marker,
                 rebuilt.operation,
@@ -159,11 +159,20 @@ pub(crate) fn load<P: crate::PendingValue>(
         touched.extend(crate::snapshot_conflicts::rows(database, schema, &deleted)?);
         crate::queued_writes::overlay(
             database,
+            call,
             schema,
             &mut touched,
             crate::queued_writes::Refold::Whole,
         )?;
-        let region = crate::download_stage::rules(database, before, schema, &deleted, touched)?;
+        let region = crate::download_stage::rules(
+            database,
+            call,
+            before,
+            before_call,
+            schema,
+            &deleted,
+            touched,
+        )?;
         crate::snapshot_materialize::materialize(database, schema, &region, files)?;
         files.retain_rows(
             region.into_iter().map(|row| (row.table, row.key)).collect(),
@@ -203,6 +212,7 @@ pub(crate) fn begin_installing(
 /// pass toward the `Installing` step `progress` is on.
 pub(crate) fn read(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     mut prepared: PreparedSnapshot<'_>,
     author: Option<coven_foundation::id_source::MemberId>,
@@ -235,7 +245,7 @@ pub(crate) fn read(
             if !synced {
                 crate::row_queries::frozen_column(database, &table, &column)?;
             }
-            database.internal_execute(
+            database.execute(
                 "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
                 params![table, column],
             )?;
@@ -244,11 +254,11 @@ pub(crate) fn read(
     )?;
     crate::snapshot_install::copy_rows(database, &prepared, &layout, progress)?;
     prepared.refuse(section::MERGE)?;
-    crate::snapshot_install::persist_rows(database, &layout, audience, progress)?;
+    crate::snapshot_install::persist_rows(database, call, &layout, audience, progress)?;
     let mut loss_state = None;
     prepared.frames(section::LOSS..=section::LOSS, &metadata, |record| match record {
         SnapshotRecord::Loss(loss) => {
-            crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)
+            crate::snapshot_state::loss(database, call, schema, loss, &metadata, &mut loss_state)
         }
         _ => Err(invalid("staged loss section holds another record")),
     })?;
@@ -262,6 +272,7 @@ pub(crate) fn read(
             SnapshotRecord::Evidence(evidence) => {
                 crate::authorship::load(
                     database,
+                    call,
                     audience,
                     &evidence.original,
                     &evidence.verified,
@@ -286,6 +297,7 @@ pub(crate) fn read(
     })?;
     crate::write_sources::forget_own_migration(
         database,
+        call,
         audience,
         |write| metadata.covers(write),
         header.schema_version,
@@ -296,6 +308,7 @@ pub(crate) fn read(
     crate::snapshot_install::finish(database, &layout, audience, progress)?;
     crate::authorship::check(
         database,
+        call,
         schema,
         audience,
         crate::authorship::Author { device: expected.device, member: author },

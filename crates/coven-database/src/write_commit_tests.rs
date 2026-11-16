@@ -1,3 +1,4 @@
+use crate::sqlite::DatabaseConnection;
 use coven_format::value::Value;
 use coven_foundation::files::FileLease;
 use coven_foundation::id_source::{DeviceId, StoreId};
@@ -33,7 +34,7 @@ fn circle_tables() -> Vec<SyncedTable> {
 
 fn leave_circle(db: &Database) {
     let member = crate::tests::member(2);
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.transaction(|db| {
             let mut state = crate::store_state_tables::read(db)?;
             state.members.insert(
@@ -343,13 +344,13 @@ async fn failure_after_every_step_restores_app_rows_records_and_metadata() {
     seed(&database).await;
     let before = contents(&database);
     for (table, action) in STEPS {
-        database.inspect_writer(|db| {
+        database.inspect_writer(|db, _| {
             db.fail_at("_coven_fail", &format!("AFTER {action} ON {table}"), "injected failure")
         });
         let error = sql(&database, WRITE).await.unwrap_err();
         assert!(matches!(error, crate::DbError::Sqlite(_)), "{table}: {error:?}");
         assert_eq!(contents(&database), before, "failure after {table}");
-        database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
+        database.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_fail").unwrap());
     }
     sql(&database, WRITE).await.unwrap();
     assert_eq!(records(&database)[2].header.position.number, 3);
@@ -364,10 +365,10 @@ async fn sqlite_value_limit_refuses_the_whole_write_and_rolls_back() {
     let database = store.builder(tables(), migrations()).open().await.unwrap();
     seed(&database).await;
     let before = contents(&database);
-    let old_limit = database.inspect_writer(|db| db.set_value_limit(4096));
+    let old_limit = database.inspect_writer(|db, _| db.set_value_limit(4096));
     const INSERT: &str = "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO notes SELECT 'import-'||i,'Imported note','' FROM n; INSERT INTO local_rows VALUES('import')";
     let error = sql(&database, INSERT).await.unwrap_err();
-    database.inspect_writer(|db| db.set_value_limit(old_limit));
+    database.inspect_writer(|db, _| db.set_value_limit(old_limit));
     assert_eq!(contents(&database), before);
     assert!(
         matches!(error, crate::DbError::TooLarge { field: "write plaintext", actual, maximum: 4096 } if actual > 4096),
@@ -386,11 +387,15 @@ async fn sqlite_value_limit_refuses_the_whole_write_and_rolls_back() {
 async fn queued_value_errors_preserve_full_width_lengths() {
     let store = TestStore::new();
     let database = store.builder(tables(), migrations()).open().await.unwrap();
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.set_value_limit(4096);
-        assert_eq!(db.check_value_length("write plaintext", 4096).unwrap(), 4096);
+        assert_eq!(
+            crate::store_call::check_value_length(db, "write plaintext", 4096).unwrap(),
+            4096
+        );
         for length in [4097, u64::from(u32::MAX) + 1, u64::MAX] {
-            let error = db.check_value_length("write plaintext", length).unwrap_err();
+            let error =
+                crate::store_call::check_value_length(db, "write plaintext", length).unwrap_err();
             let crate::DbError::TooLarge { field, actual, maximum } = error else {
                 panic!("expected TooLarge, got {error:?}");
             };
@@ -413,9 +418,9 @@ async fn the_queue_limit_reserves_key_ids_without_reserving_ciphertext() {
         coven_format::write_stream::WriteEncoder::new(&record).unwrap().plaintext_length();
     let target = TestStore::new();
     let db = target.schema(notes(), NOTES).await.unwrap();
-    let old = db.inspect_writer(|db| db.set_value_limit(plaintext as i32 + 24));
+    let old = db.inspect_writer(|db, _| db.set_value_limit(plaintext as i32 + 24));
     let result = sql(&db, INSERT).await;
-    db.inspect_writer(|db| db.set_value_limit(old));
+    db.inspect_writer(|db, _| db.set_value_limit(old));
     assert!(matches!(result, Err(crate::DbError::TooLarge { .. })), "{result:?}");
     for table in ["notes", "_coven_writes", "_coven_uploads"] {
         assert_eq!(count(&db, table), 0, "{table}");
@@ -428,12 +433,12 @@ async fn the_queue_limit_reserves_key_ids_without_reserving_ciphertext() {
     .unwrap();
     let limit = plaintext + 71; // One store key, one part key and the queue row overhead.
     assert!(sealed > limit);
-    db.inspect_writer(|db| db.set_value_limit(limit as i32));
+    db.inspect_writer(|db, _| db.set_value_limit(limit as i32));
     sql(&db, INSERT).await.unwrap();
     crate::upload::tests::attempt(&db, 17).await.unwrap();
     assert_eq!(records(&db)[0].parts, record.parts);
     assert!(crate::upload::tests::selected(&db).await.1.is_some());
-    db.inspect_writer(|db| db.set_value_limit(old));
+    db.inspect_writer(|db, _| db.set_value_limit(old));
     db.close().await.unwrap();
     source.close().await.unwrap();
 }
@@ -452,7 +457,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
     database.close().await.unwrap();
 
     let database = store.schema(notes(), NOTES).await.unwrap();
-    let bytes = database.inspect_writer(|db| {
+    let bytes = database.inspect_writer(|db, _| {
         db.query_row("SELECT u.record FROM _coven_uploads u LEFT JOIN _coven_upload_keys k USING(device,number) WHERE k.sealing_keys IS NULL", [], |r| {
             r.get::<_, Vec<u8>>(0)
         })
@@ -521,7 +526,7 @@ fn a_process_crash_after_every_step_leaves_no_partial_write() {
         );
         let database = runtime.block_on(store.builder(tables(), migrations()).open()).unwrap();
         assert_eq!(contents(&database), before, "crash after {table}");
-        database.inspect_writer(|db| db.batch("DROP TRIGGER _coven_crash").unwrap());
+        database.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_crash").unwrap());
         runtime.block_on(database.close()).unwrap();
     }
     let database = runtime.block_on(store.builder(tables(), migrations()).open()).unwrap();
@@ -551,7 +556,7 @@ fn crashing_writer() {
                 .open(),
         )
         .unwrap();
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.crash_after(
             &std::env::var("COVEN_CRASH_TABLE").unwrap(),
             &std::env::var("COVEN_CRASH_ACTION").unwrap(),
@@ -632,7 +637,7 @@ fn a_process_crash_during_removal_or_restoration_keeps_the_previous_database() {
                 ))
                 .unwrap();
             assert_eq!(contents(&db), before, "{target} {action}");
-            db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_crash").unwrap());
+            db.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_crash").unwrap());
             runtime.block_on(db.close()).unwrap();
         }
         let db = runtime
@@ -669,7 +674,7 @@ fn crashing_removal_writer() {
                 .open(),
         )
         .unwrap();
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.crash_after(
             &std::env::var("COVEN_REMOVAL_TABLE").unwrap(),
             &std::env::var("COVEN_REMOVAL_ACTION").unwrap(),
@@ -806,7 +811,7 @@ async fn a_row_with_unique_values_is_evaluated_once() {
     })
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let staged = statements
         .iter()
         .filter(|s| s.sql.starts_with("INSERT INTO temp.\"_coven_eval_tracks\""))
@@ -833,12 +838,12 @@ async fn app_statements_cannot_change_the_merge_store() {
 /// second generation's record goes, and the first holds exactly `cells`,
 /// each a column's id and the id of the write that set it.
 pub(crate) fn restore_first_generation(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     row: &coven_merge::RowId,
     cells: &[(i64, i64)],
 ) -> Result<(), crate::DbError> {
     let audience = &row.audience;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",
         crate::params![row.table, row.key, audience, 2u64.to_be_bytes().as_slice()],
     )?;
@@ -847,9 +852,9 @@ pub(crate) fn restore_first_generation(
         crate::params![row.table, row.key, audience, 1u64.to_be_bytes().as_slice()],
         |r| r.get(0),
     )?;
-    db.internal_execute("DELETE FROM _coven_cells WHERE row_id=?1", [id])?;
+    db.execute("DELETE FROM _coven_cells WHERE row_id=?1", [id])?;
     for (column, write) in cells {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)",
             crate::params![column, id, write],
         )?;
@@ -859,14 +864,14 @@ pub(crate) fn restore_first_generation(
 
 /// Damage: take every merge record of `table`'s rows away, leaving the rows.
 pub(crate) fn plant_unrecorded_rows(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     table: &str,
 ) -> Result<(), crate::DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_cells WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)",
         [table],
     )?;
-    db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [table])?;
+    db.execute("DELETE FROM _coven_rows WHERE table_name=?1", [table])?;
     Ok(())
 }
 
@@ -890,13 +895,13 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 /// its timestamp, its number, the slot it read through and the slot it
 /// landed in, if it has.
 pub(crate) fn record_write(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     timestamp: &[u8],
     number: u64,
     read_through: u64,
     slot: Option<u64>,
 ) {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4)",
         crate::params![
             timestamp,
@@ -937,7 +942,7 @@ async fn a_stored_timestamp_that_does_not_decode_is_damaged_database() {
     let database =
         store.builder(notes(), vec![Migration::addition(1, "notes", NOTES)]).open().await.unwrap();
     sql(&database, "INSERT INTO notes VALUES('42','Grocery list','')").await.unwrap();
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.batch(
             "PRAGMA ignore_check_constraints=ON; UPDATE _coven_writes SET timestamp=x'00';
              PRAGMA ignore_check_constraints=OFF;",

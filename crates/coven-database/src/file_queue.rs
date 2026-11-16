@@ -3,7 +3,8 @@
 use crate::file_location::FileLocation;
 use crate::insert_rows::{insert_rows, value};
 use crate::internal_schema::FILE_NAMED_SQL;
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
@@ -176,24 +177,21 @@ pub(crate) fn set_unmetered_only(
     unmetered_only: bool,
 ) -> Result<(), DbError> {
     if unmetered_only {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_unmetered_only(unmetered_only) VALUES(1) ON CONFLICT DO NOTHING",
             [],
         )?;
     } else {
-        db.internal_execute("DELETE FROM _coven_unmetered_only", [])?;
+        db.execute("DELETE FROM _coven_unmetered_only", [])?;
     }
     Ok(())
 }
 
 pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), DbError> {
     if paused {
-        db.internal_execute(
-            "INSERT INTO _coven_upload_pause(paused) VALUES(1) ON CONFLICT DO NOTHING",
-            [],
-        )?;
+        db.execute("INSERT INTO _coven_upload_pause(paused) VALUES(1) ON CONFLICT DO NOTHING", [])?;
     } else {
-        db.internal_execute("DELETE FROM _coven_upload_pause", [])?;
+        db.execute("DELETE FROM _coven_upload_pause", [])?;
     }
     Ok(())
 }
@@ -458,8 +456,8 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
             }
             error => error,
         })?;
-    db.internal_execute("DELETE FROM _coven_upload_files WHERE upload=?1", [id])?;
-    db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
+    db.execute("DELETE FROM _coven_upload_files WHERE upload=?1", [id])?;
+    db.execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
     if let Some(copy) = copy {
         release_copy(db, &copy)?;
     }
@@ -474,7 +472,7 @@ pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), Db
     if named {
         return Ok(());
     }
-    db.internal_execute("DELETE FROM _coven_copy_chunks WHERE path=?1", [path])?;
+    db.execute("DELETE FROM _coven_copy_chunks WHERE path=?1", [path])?;
     crate::file_removals::record_released(db, path)?;
     Ok(())
 }
@@ -647,12 +645,12 @@ pub(crate) fn keep_copies(
 /// The new file `to` over `from`'s bytes shares coven's copy of them and
 /// the upload queued for them, if any (§17.2).
 pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_upload_files(file,upload,keep)
          SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
         rusqlite::params![from, to],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_device_files(file,path,hash)
          SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
         rusqlite::params![from, to],
@@ -664,7 +662,7 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
 /// coven's copy of its bytes goes once nothing names it. An upload no other
 /// file shares is left for the upload worker to retire (§17.9).
 pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [file])?;
+    db.execute("DELETE FROM _coven_upload_files WHERE file=?1", [file])?;
     for copy in
         db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [file], |r| {
             r.get::<_, String>(0)
@@ -678,7 +676,7 @@ pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbErro
 /// Forget upload `id`'s session, once storage has aborted it, if no file
 /// waits for the upload; one a file waits for again keeps it.
 pub(crate) fn forget_session(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_file_uploads SET session=NULL,bytes_confirmed=NULL,bytes_total=NULL
          WHERE id=?1
          AND NOT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=?1)",
@@ -696,7 +694,7 @@ pub(crate) fn record_session(
     confirmed: i64,
     total: i64,
 ) -> Result<usize, DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_file_uploads SET session=?2,bytes_confirmed=?3,bytes_total=?4
          WHERE id=?1",
         (id, session, confirmed, total),
@@ -705,14 +703,14 @@ pub(crate) fn record_session(
 
 /// Mark an upload's bytes stored: its move switches it with the rest.
 pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
+    db.execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
     Ok(())
 }
 
 /// The move `of` switches none of its files: no upload of it switches a
 /// file any more, so the upload worker retires them (§17.10).
 pub(crate) fn unswitch_move(db: &DatabaseConnection, of: crate::MoveId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_upload_files
          WHERE upload IN (SELECT id FROM _coven_file_uploads WHERE move=?1)",
         [of],

@@ -18,7 +18,7 @@ async fn writer_is_exclusive_readers_coexist_and_clones_close_together() {
     );
     let reader = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(reader.schema_version().await.unwrap(), 1);
-    database.inspect_writer(|sql| {
+    database.inspect_writer(|sql, _| {
         assert_eq!(
             sql.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap(),
             "wal"
@@ -102,10 +102,15 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     let clone = database.clone();
     let worker = std::thread::spawn(move || {
         let slot = clone.inner.read().unwrap();
-        let reader = slot.as_ref().unwrap().access.readers.acquire_reader();
+        let access = &slot.as_ref().unwrap().access;
+        let reader = access.readers.acquire_reader();
         entered_tx.send(()).unwrap();
         release_rx.recv_timeout(HANG_GUARD).unwrap();
-        reader.schema_version().unwrap()
+        access
+            .with_leased(&reader, |reader, call| {
+                crate::transaction_constants::schema_version(reader, call)
+            })
+            .unwrap()
     });
     entered_rx.recv().unwrap();
     let clone = database.clone();
@@ -602,7 +607,7 @@ async fn a_panicking_write_whose_rollback_fails_keeps_its_bug_and_fails_the_hand
     let store = TestStore::new();
     let open = || store.builder(notes_tables(), notes_migrations()).open();
     let db = open().await.unwrap();
-    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
     let error = db
         .write(|sql| -> Result<(), DbError> {
             sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
@@ -612,7 +617,7 @@ async fn a_panicking_write_whose_rollback_fails_keeps_its_bug_and_fails_the_hand
         .unwrap_err();
     assert!(matches!(&error, DbError::Bug(bug) if bug.message == "app write panic"), "{error:?}");
     let held = |db: &Database| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
         })
         .unwrap()
@@ -671,7 +676,7 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
             bytes.extend(encoder.finish().unwrap());
             std::io::Cursor::new(bytes)
         };
-        db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+        db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
         let error = crate::snapshot_write::tests::validate_one(
             &db,
             id,
@@ -690,7 +695,7 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
                 "{error:?}"
             );
         }
-        let scratch = db.inspect_writer(|writer| {
+        let scratch = db.inspect_writer(|writer, _| {
             writer
                 .query_row(
                     "SELECT count(*) FROM temp.sqlite_schema WHERE name='_coven_snapshot_columns'",
@@ -783,7 +788,7 @@ async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
     let bugs = coven_foundation::task::HeardBugs::shared();
     let store = TestStore::reporting_to(bugs.clone());
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.inspect_writer(|writer| writer.panic_next_authorization());
+    db.inspect_writer(|writer, _| writer.panic_next_authorization());
     let failed = db
         .write(|sql| {
             sql.execute(
@@ -857,7 +862,7 @@ async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
 async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.inspect_writer(|writer| writer.panic_in_next_hook());
+    db.inspect_writer(|writer, _| writer.panic_in_next_hook());
     let failed = db
         .write(|sql| {
             sql.execute(
@@ -873,7 +878,7 @@ async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
         "{failed:?}"
     );
     let count = |db: &Database| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
         })
         .unwrap()

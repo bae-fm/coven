@@ -1,4 +1,6 @@
 use super::*;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
 
@@ -14,17 +16,21 @@ fn write(device: u64, number: u64, slot: u64, through: u64, milliseconds: u64) -
 }
 
 /// Stage `writes` as snapshot 1's on a store's writer, then run `check`.
-async fn staged<T>(writes: &[AppliedWrite], check: impl FnOnce(&mut DatabaseConnection) -> T) -> T {
+async fn staged<T>(
+    writes: &[AppliedWrite],
+    check: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
+) -> T {
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    let checked = database.inspect_writer(|db| {
+    let checked = database.inspect_writer(|db, call| {
         super::create_table(db).unwrap();
-        let metadata = SnapshotMetadata::staged(db, 1);
+        let sql = &*db;
+        let metadata = SnapshotMetadata::staged(sql, 1);
         for write in writes {
             metadata.stage(write).unwrap();
         }
         drop(metadata);
-        check(db)
+        check(db, call)
     });
     database.close().await.unwrap();
     checked
@@ -55,7 +61,7 @@ async fn a_write_outside_the_snapshots_coverage_is_refused() {
     for (slot, through) in [(3, 1), (2, 2)] {
         let writes = [write(1, 1, slot, through, 1_000), write(2, 1, 1, 0, 2_000)];
         refused_as_uncovered(
-            staged(&writes, |db| SnapshotMetadata::staged(db, 1).validate(2)).await,
+            staged(&writes, |db, _| SnapshotMetadata::staged(db, 1).validate(2)).await,
         );
     }
 }
@@ -64,8 +70,9 @@ async fn a_write_outside_the_snapshots_coverage_is_refused() {
 #[tokio::test]
 async fn a_write_stamped_before_one_it_read_is_refused() {
     let writes = [write(1, 1, 1, 0, 2_000), write(2, 1, 2, 1, 1_500)];
-    let refused =
-        refused_as_causal(staged(&writes, |db| SnapshotMetadata::staged(db, 1).validate(2)).await);
+    let refused = refused_as_causal(
+        staged(&writes, |db, _| SnapshotMetadata::staged(db, 1).validate(2)).await,
+    );
     assert_eq!(refused, writes[1].id);
 }
 
@@ -74,8 +81,9 @@ async fn a_write_stamped_before_one_it_read_is_refused() {
 #[tokio::test]
 async fn a_write_stamped_before_its_devices_earlier_write_is_refused() {
     let writes = [write(1, 1, 1, 0, 2_000), write(1, 2, 2, 0, 1_500)];
-    let refused =
-        refused_as_causal(staged(&writes, |db| SnapshotMetadata::staged(db, 1).validate(2)).await);
+    let refused = refused_as_causal(
+        staged(&writes, |db, _| SnapshotMetadata::staged(db, 1).validate(2)).await,
+    );
     assert_eq!(refused, writes[1].id);
 }
 
@@ -84,7 +92,7 @@ async fn a_write_stamped_before_its_devices_earlier_write_is_refused() {
 #[tokio::test]
 async fn a_write_need_not_follow_an_earlier_slot_it_did_not_read() {
     let writes = [write(1, 1, 1, 0, 2_000), write(2, 1, 2, 0, 1_500)];
-    staged(&writes, |db| SnapshotMetadata::staged(db, 1).validate(2)).await.unwrap();
+    staged(&writes, |db, _| SnapshotMetadata::staged(db, 1).validate(2)).await.unwrap();
 }
 
 /// Checking a snapshot's writes reads each write a bounded number of times,
@@ -98,7 +106,7 @@ async fn checking_a_snapshots_writes_takes_steps_in_proportion_to_them() {
     let writes: Vec<_> = (1..=WRITES)
         .map(|slot| write(slot % 10 + 1, slot / 10 + 1, slot, slot - 1, 1_000 + slot))
         .collect();
-    let steps = staged(&writes, |db| {
+    let steps = staged(&writes, |db, _| {
         db.with_profile(|db| SnapshotMetadata::staged(db, 1).validate(WRITES)).unwrap();
         // Each statement's count is its total so far, so its last one counts.
         let mut steps: BTreeMap<String, i32> = BTreeMap::new();
@@ -116,9 +124,10 @@ async fn checking_a_snapshots_writes_takes_steps_in_proportion_to_them() {
 #[tokio::test]
 async fn a_failed_read_of_a_staged_write_keeps_its_error() {
     let writes = [write(1, 1, 1, 0, 1_000)];
-    staged(&writes, |db| {
+    staged(&writes, |db, _| {
         db.batch("DROP TABLE temp._coven_snapshot_writes").unwrap();
-        let metadata = SnapshotMetadata::staged(db, 1);
+        let sql = &*db;
+        let metadata = SnapshotMetadata::staged(sql, 1);
         for result in [
             metadata.timestamp(writes[0].id).map(drop),
             metadata.slot(writes[0].id).map(drop),
@@ -130,7 +139,7 @@ async fn a_failed_read_of_a_staged_write_keeps_its_error() {
             }
         }
         drop(metadata);
-        super::create_table(db).unwrap();
+        super::create_table(sql).unwrap();
     })
     .await;
 }

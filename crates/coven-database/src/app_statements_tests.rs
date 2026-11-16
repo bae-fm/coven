@@ -25,7 +25,7 @@ const INSERT: &str = "INSERT INTO notes VALUES (?1, 'title')";
 async fn a_repeated_app_statement_is_prepared_once() {
     let store = TestStore::new();
     let db = notes(&store).await;
-    let before = db.inspect_writer(|writer| writer.app_statements.fresh.get());
+    let before = db.inspect_writer(|writer, _| writer.app_statements.fresh.get());
     for id in ["1", "2", "3"] {
         db.write(move |sql| {
             sql.execute(INSERT, [id])?;
@@ -34,7 +34,7 @@ async fn a_repeated_app_statement_is_prepared_once() {
         .await
         .unwrap();
     }
-    let prepared = db.inspect_writer(|writer| writer.app_statements.fresh.get()) - before;
+    let prepared = db.inspect_writer(|writer, _| writer.app_statements.fresh.get()) - before;
     assert_eq!(prepared, 1);
     db.close().await.unwrap();
 }
@@ -94,7 +94,7 @@ async fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
     })
     .await
     .unwrap();
-    let refused = db.inspect_writer(|writer| {
+    let refused = db.inspect_writer(|writer, _| {
         writer
             .transaction(|writer| {
                 let _reading = writer.authorization.reading();
@@ -130,11 +130,11 @@ async fn a_schema_change_prepares_again() {
         })
     };
     write("1").await.unwrap();
-    let before = db.inspect_writer(|writer| writer.app_statements.fresh.get());
-    db.inspect_writer(|writer| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
+    let before = db.inspect_writer(|writer, _| writer.app_statements.fresh.get());
+    db.inspect_writer(|writer, _| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
     write("2").await.unwrap();
     write("3").await.unwrap();
-    let prepared = db.inspect_writer(|writer| writer.app_statements.fresh.get()) - before;
+    let prepared = db.inspect_writer(|writer, _| writer.app_statements.fresh.get()) - before;
     assert_eq!(prepared, 1);
     let count: i64 = db
         .read(|sql| {
@@ -281,7 +281,7 @@ async fn a_write_leaves_the_apps_statements_prepared() {
         .await
         .unwrap();
     }
-    let reprepared = db.inspect_writer(|writer| {
+    let reprepared = db.inspect_writer(|writer, _| {
         writer
             .connection
             .prepare_cached(INSERT)

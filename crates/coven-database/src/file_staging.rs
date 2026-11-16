@@ -83,7 +83,7 @@ impl FileStaging {
                 Ok::<_, E>((batch.into_files(), value))
             })
             .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
-            let prepared = inner.access.with_writer(|writer| {
+            let prepared = inner.access.with_writer(|writer, call| {
                 let prepared = built.and_then(|(files, value)| {
                     if files.is_empty() {
                         return Ok((VecDeque::new(), value));
@@ -124,7 +124,7 @@ impl FileStaging {
                         );
                         Ok::<_, E>(Ok((sources, value)))
                     }
-                    Err(error) => Ok(Err((error, super::released(writer, inner)))),
+                    Err(error) => Ok(Err((error, super::released(writer, call, inner)))),
                 }
             })?;
             // A refused batch's recorded names go once the writer is free.
@@ -279,8 +279,9 @@ impl FileStaging {
         let inner = slot.as_ref().expect("staging holds close guard");
         inner.release_file_reservations(&self.names);
         self.names.clear();
-        let chosen =
-            inner.access.with_writer(|writer| Ok::<_, DbError>(super::released(writer, inner)));
+        let chosen = inner
+            .access
+            .with_writer(|writer, call| Ok::<_, DbError>(super::released(writer, call, inner)));
         let failures = match chosen {
             Ok(chosen) => inner.remove_chosen(chosen),
             Err(cleanup) => vec![cleanup],

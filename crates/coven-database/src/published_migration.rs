@@ -1,7 +1,7 @@
 //! Carry the counted projection through the same schema identities as app rows.
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    migration_names::MigrationMatch, sqlite::DatabaseConnection, write_encoding::decoded,
-    write_schema::WriteSchema, DbError,
+    migration_names::MigrationMatch, write_encoding::decoded, write_schema::WriteSchema, DbError,
 };
 use coven_format::{
     loss::{Loss, LossValues},
@@ -54,7 +54,7 @@ pub(crate) fn carry(
             // Its table goes, and the app's row with it, but this device's
             // queue still reached it: the counted state keeps only its kept
             // losses, never the ones the app's row leaves frozen (§18.7).
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
                 params![old.table, old.key, &old.audience],
             )?;
@@ -68,7 +68,7 @@ pub(crate) fn carry(
     })?;
     db.batch("DROP TABLE temp._coven_carried_rows; CREATE TEMP TABLE _coven_carried_creations AS SELECT * FROM _coven_published_creations; CREATE INDEX temp._coven_carried_creations_table ON _coven_carried_creations(table_name); DELETE FROM _coven_published_creations")?;
     for (old, new) in &names.tables {
-        db.internal_execute("INSERT INTO _coven_published_creations SELECT ?2,key,audience,write_id,creator FROM temp._coven_carried_creations WHERE table_name=?1",params![old,new])?;
+        db.execute("INSERT INTO _coven_published_creations SELECT ?2,key,audience,write_id,creator FROM temp._coven_carried_creations WHERE table_name=?1",params![old,new])?;
     }
     db.batch("DROP TABLE temp._coven_carried_creations; CREATE TEMP TABLE _coven_carried_losses AS SELECT record FROM _coven_published_losses; DELETE FROM _coven_published_losses")?;
     db.for_each("SELECT record FROM temp._coven_carried_losses", [], |r| {

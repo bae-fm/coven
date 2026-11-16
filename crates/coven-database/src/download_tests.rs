@@ -302,7 +302,7 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
     }
     let store = TestStore::new();
     let db = open(&store).await;
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch("CREATE TABLE pins(note TEXT REFERENCES notes(id))").unwrap()
     });
     db.close().await.unwrap();
@@ -363,12 +363,12 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
         let db = reference_db(&store).await;
         db.receive(initial.clone().into()).await.unwrap();
         for (position, index) in order.into_iter().enumerate() {
-            let loaded = db.inspect_writer(|db| db.merge_loads());
+            let loaded = db.inspect_writer(|_, call| call.merge_loads());
             db.receive(changes[index].clone().into()).await.unwrap();
             if index == 0 && position == 2 {
                 // Only the lost value points at P: its deletion need not load the child.
                 assert_eq!(
-                    db.inspect_writer(|db| db.merge_loads()).get("links"),
+                    db.inspect_writer(|_, call| call.merge_loads()).get("links"),
                     loaded.get("links")
                 );
             }
@@ -380,7 +380,7 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
             "{order:?}: {losses:?}"
         );
         assert_eq!(losses[0].replaced_by, crate::Replacement::Write(changes[2].header.position));
-        let stored = db.inspect_writer(|db| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
+        let stored = db.inspect_writer(|db, _| db.query("SELECT table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen FROM _coven_lost ORDER BY id", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,Vec<u8>>(5)?,r.get::<_,String>(6)?,r.get::<_,Vec<u8>>(7)?,r.get::<_,bool>(8)?))).unwrap());
         if let Some(expected) = &expected_losses {
             assert_eq!(&stored, expected, "{order:?}");
         } else {
@@ -448,7 +448,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(count(&receiver, "children"), 0);
     assert_eq!(count(&receiver, "_coven_lost"), 2);
-    source.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
+    source.inspect_writer(|sql, _| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
     assert!(
         matches!(crate::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
     );
@@ -457,7 +457,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     let state = source.store_state().await.unwrap();
     assert!(!state.circle_deletions.contains_key(&circle));
     assert_eq!(count(&source, "_coven_lost"), 0);
-    source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
+    source.inspect_writer(|sql, _| sql.batch("DROP TRIGGER refuse").unwrap());
     crate::tests::delete_circle(&source, circle).await.unwrap();
     assert_eq!(
         crate::tests::data(&source, Audience::Circle(circle)),
@@ -599,7 +599,7 @@ async fn an_invalid_local_child_migration_rolls_back_its_schema_and_version() {
     let db = open(&store).await;
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(
-        db.inspect_writer(|sql| sql
+        db.inspect_writer(|sql, _| sql
             .query_row("SELECT count(*) FROM sqlite_schema WHERE name='pins'", [], |r| r
                 .get::<_, i64>(0))
             .unwrap()),
@@ -750,15 +750,16 @@ async fn applying_a_write_reads_each_row_a_few_times() {
     })
     .await
     .unwrap();
-    let before = b.inspect_writer(|db| db.merge_loads());
+    let before = b.inspect_writer(|_, call| call.merge_loads());
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    let after = b.inspect_writer(|db| db.merge_loads());
+    let after = b.inspect_writer(|_, call| call.merge_loads());
     let loads = after.get("links").copied().unwrap_or_default()
         - before.get("links").copied().unwrap_or_default();
     assert_eq!(count(&b, "links"), 40);
-    // Once as the write is staged and once as its region is put back: 13
+    // On the writer, once as the write is staged and once as its region is
+    // put back, and on the reader once as the region's committed state: 13
     // times each when nothing is kept.
-    assert_eq!(loads, 2 * 40);
+    assert_eq!(loads, 3 * 40);
     a.close().await.unwrap();
     b.close().await.unwrap();
 }

@@ -96,7 +96,7 @@ impl<'write> Journal<'write> {
         &self,
         subject: &P::Subject,
     ) -> Result<bool, DbError> {
-        crate::pending::retry::<P>(self.files.database, subject)
+        crate::pending::retry::<P>(self.files.database, self.files.call, subject)
     }
 
     /// Clear the subject's pending record.

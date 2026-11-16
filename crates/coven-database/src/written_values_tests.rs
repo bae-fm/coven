@@ -64,13 +64,13 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         // Save only the parent's input metadata for the reset fixture. The
         // production recompute below owns all changes to the child.
         let parent = crate::tests::store_row("parents", "parent");
-        let cells = b.inspect_writer(|db| db.query("SELECT c.column_id,c.row_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
+        let cells = b.inspect_writer(|db, _| db.query("SELECT c.column_id,c.row_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
         sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
         b.receive(records(&a).remove(1).into()).await.unwrap();
         assert_eq!(reference(&b, lost).await, if lost { Some("parent".into()) } else { None });
-        b.inspect_writer_schema(|db, schema| {
+        b.inspect_writer_schema(|db, call, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
-            let merge = crate::merge_store::MergeStore::new(db, &app);
+            let merge = crate::merge_store::MergeStore::new(db, call, &app);
             let child = crate::tests::store_row("children", "child");
             let state = merge.row(&child).unwrap().state;
             let written = if lost {
@@ -94,19 +94,20 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         }
         b.close().await.unwrap();
         let b = open(&b_store, 2).await;
-        b.inspect_writer_schema(|db, schema| {
+        b.inspect_writer_schema(|db, call, schema| {
             db.transaction(|db| {
                 let cells: Vec<_> =
                     cells.iter().map(|(column, _, write)| (*column, *write)).collect();
                 crate::write_commit::tests::restore_first_generation(db, &parent, &cells)?;
-                db.materialize(|db| {
-                    db.internal_execute("INSERT INTO parents VALUES('parent')", [])?;
+                crate::store_call::materialize(db, |db| {
+                    db.execute("INSERT INTO parents VALUES('parent')", [])?;
                     Ok(())
                 })?;
                 let app = crate::write_rows::AppView::after(db, schema);
-                let store = crate::merge_store::MergeStore::new(db, &app);
+                let store = crate::merge_store::MergeStore::new(db, call, &app);
                 crate::write_apply::WriteApply::new(
                     db,
+                    call,
                     schema,
                     &store,
                     &app,
@@ -209,7 +210,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         (&removed.table, &removed.key, &removed.lost)
     );
     assert!(matches!(retained[0].target, crate::lost::LossTarget::Acknowledgements(_)));
-    a.inspect_writer_schema(|db, schema| {
+    a.inspect_writer_schema(|db, call, schema| {
         db.for_each::<_, crate::DbError>(
             "SELECT replacement_kind,value FROM _coven_lost WHERE frozen=1",
             [],
@@ -235,7 +236,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         )
         .unwrap();
         let app = crate::write_rows::AppView::after(db, schema);
-        let merge = crate::merge_store::MergeStore::new(db, &app);
+        let merge = crate::merge_store::MergeStore::new(db, call, &app);
         let live = crate::tests::store_row("children", "live");
         assert_eq!(
             merge.row(&live).unwrap().state.cells()["root"].value.value,
@@ -282,7 +283,7 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
         crate::Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop, tables()),
     ]).open().await.unwrap();
     assert_eq!(reference(&b, true).await, Some("parent".into()));
-    b.inspect_writer(|db| {
+    b.inspect_writer(|db, _| {
         let bytes: Vec<u8> = db.query_row("SELECT l.value FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE c.column_name='parent'", [], |r| r.get(0)).unwrap();
         let lost = coven_format::merge_fields::decode_column_value(&bytes).unwrap();
         assert!(lost.parents.is_empty());
@@ -387,7 +388,7 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
             };
             assert!(!lost(column), "{case} {order:?}");
             assert!(lost(input), "{case} {order:?}");
-            let displayed: String = receiver.inspect_writer(|db| {
+            let displayed: String = receiver.inspect_writer(|db, _| {
                 db.query_row(&format!("SELECT {column} FROM children"), [], |r| r.get(0)).unwrap()
             });
             assert_eq!(displayed, shown, "{case} {order:?}");

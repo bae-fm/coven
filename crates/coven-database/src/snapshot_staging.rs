@@ -10,6 +10,7 @@ use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{encoded, sql_value};
 use crate::write_metadata::MetadataFailure;
 use crate::write_schema::WriteSchema;
@@ -158,7 +159,7 @@ impl InputDatabase {
     fn begin_staging(&self, schema: &WriteSchema) -> Result<(StagedTables, Inserts), DbError> {
         let id = self.stagings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let layout = SnapshotLayout::new(schema);
-        let tables = self.write(|db| create_staged(db, &layout, id))?;
+        let tables = self.write(|db, _| create_staged(db, &layout, id))?;
         Ok((StagedTables { id, tables }, Inserts::new(layout, id)))
     }
 
@@ -173,7 +174,7 @@ impl InputDatabase {
 
     /// Remove a staging's records.
     fn remove_staging(&self, staging: &StagedTables) -> Result<(), DbError> {
-        super::with_locked(&self.writer, |writer| writer.transaction(|db| remove(db, staging)))
+        self.with_writer(|writer, _| writer.transaction(|db| remove(db, staging)))
     }
 
     /// Run one load or file check over `stagings`, the last phase of each:
@@ -188,7 +189,7 @@ impl InputDatabase {
             &mut S,
         ) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        super::with_locked(&self.writer, |writer| {
+        self.with_writer(|writer, _| {
             #[cfg(any(test, feature = "test-utils"))]
             if let Some(made) = coven_foundation::locks::lock_unpoisoned(&self.damage_staged).take()
             {
@@ -373,7 +374,7 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn input_temp_store(&self) -> Result<u8, DbError> {
         self.call(|inner| {
-            super::with_locked(&inner.inputs.writer, |writer| {
+            inner.inputs.with_writer(|writer, _| {
                 writer.query_row("PRAGMA temp_store", [], |row| row.get(0))
             })
         })
@@ -414,7 +415,7 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn staged_snapshot_records(&self) -> Result<u64, DbError> {
         self.call(|inner| {
-            super::with_locked(&inner.inputs.writer, |writer| {
+            inner.inputs.with_writer(|writer, _| {
                 let tables = writer.query(
                     "SELECT name FROM temp.sqlite_schema WHERE type='table' AND name GLOB '_coven_staged_*'",
                     [],
@@ -475,9 +476,10 @@ impl SnapshotStaging {
             .database
             .call(move |inner| {
                 let started = inner.clock.elapsed();
-                inner.inputs.write(|db| {
+                inner.inputs.write(|db, call| {
                     stage(
                         db,
+                        call,
                         &inner.access.write_schema,
                         &expected,
                         staging,
@@ -515,9 +517,9 @@ impl SnapshotStaging {
             .call(move |inner| {
                 #[cfg(any(test, feature = "test-utils"))]
                 if let Some(made) = inner.inputs.next_finish_damage() {
-                    inner.inputs.write(|db| damage::damage(db, staging, made))?;
+                    inner.inputs.write(|db, _| damage::damage(db, staging, made))?;
                 }
-                inner.inputs.write(|db| {
+                inner.inputs.write(|db, _| {
                     state.decoder.finish().map_err(SnapshotError::Format)?;
                     let header = state
                         .decoder
@@ -580,6 +582,11 @@ impl SnapshotStaging {
 
 fn stage(
     db: &DatabaseConnection,
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        expect(unused_variables, reason = "only tests count coven's work")
+    )]
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     expected: &SnapshotId,
     staging: i64,
@@ -588,7 +595,7 @@ fn stage(
 ) -> Result<(), DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     if state.records == 0 {
-        db.record_work(|work| work.snapshot_reads += 1);
+        call.record_work(|work| work.snapshot_reads += 1);
     }
     let metadata = SnapshotMetadata::staged(db, staging);
     let StagingState { decoder, inserts, records, columns, part, refusal } = state;
@@ -644,10 +651,7 @@ impl RecordStaging<'_> {
         match &record {
             SnapshotRecord::Write(_) => return Ok(Ok(())),
             SnapshotRecord::Column(column) => {
-                self.db.internal_execute(
-                    &self.inserts.columns,
-                    params![column.table, column.column],
-                )?;
+                self.db.execute(&self.inserts.columns, params![column.table, column.column])?;
                 columns.insert((column.table.clone(), column.column.clone()));
                 return Ok(Ok(()));
             }
@@ -657,7 +661,7 @@ impl RecordStaging<'_> {
                 if let Err(refused) = self.schema.row_table(&creation.row) {
                     return Ok(Err(refused));
                 }
-                self.db.internal_execute(
+                self.db.execute(
                     &self.inserts.creations,
                     params![
                         creation.row.table,
@@ -678,8 +682,7 @@ impl RecordStaging<'_> {
         }
         let section = record.section();
         let evidence = section == section::EVIDENCE;
-        self.db
-            .internal_execute(&self.inserts.records, params![section as i64, evidence, frame])?;
+        self.db.execute(&self.inserts.records, params![section as i64, evidence, frame])?;
         Ok(Ok(()))
     }
 
@@ -715,12 +718,12 @@ impl RecordStaging<'_> {
         put_parents(layout, &mut values, |j| {
             state.cells().get(&layout.columns[j]).map(|cell| &cell.value)
         });
-        self.db.internal_execute(&self.inserts.rows[at], params_from_iter(values))?;
+        self.db.execute(&self.inserts.rows[at], params_from_iter(values))?;
         for (earlier, write) in state.generations() {
             if *earlier == generation {
                 continue;
             }
-            self.db.internal_execute(
+            self.db.execute(
                 &self.inserts.generations,
                 params![
                     row.table,
@@ -760,7 +763,7 @@ impl RecordStaging<'_> {
         let row = change.record.row();
         let audience = &row.audience;
         if !part.staged {
-            self.db.internal_execute(
+            self.db.execute(
                 &self.inserts.parts,
                 params![
                     part.write,
@@ -774,7 +777,7 @@ impl RecordStaging<'_> {
         if !form.conforms(&change.record) {
             return Ok(Err(invalid("kept change holds its columns unlike its schema")));
         }
-        self.db.internal_execute(
+        self.db.execute(
             &self.inserts.authored,
             params![
                 part.write,

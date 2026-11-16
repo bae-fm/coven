@@ -1,3 +1,4 @@
+use crate::sqlite::DatabaseConnection;
 use crate::{tests::TestStore, Database, DbError};
 use crate::{Lost, LostCell, RemovalRule, Replacement, WriteId};
 use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
@@ -32,8 +33,8 @@ fn insert(
     kind: &str,
     replacement: Vec<u8>,
 ) {
-    db.commit_writer(|sql| {
-        sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
+    db.commit_writer(|sql, _| {
+        sql.execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
             (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, matches!(kind, "excluded" | "dependency" | "unauthorized"))).unwrap();
     });
 }
@@ -42,8 +43,8 @@ fn insert(
 async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let title =
-        db.commit_writer(|sql| crate::row_queries::frozen_column(sql, "notes", "title").unwrap());
+    let title = db
+        .commit_writer(|sql, _| crate::row_queries::frozen_column(sql, "notes", "title").unwrap());
     insert(
         &db,
         Some(title),
@@ -242,12 +243,9 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
             .expect("the live query answers"),
         Err(DbError::DamagedDatabase)
     ));
-    db.commit_writer(|sql| {
-        sql.internal_execute(
-            "UPDATE _coven_lost SET set_by=?1",
-            [encode_setters(&setters).unwrap()],
-        )
-        .unwrap()
+    db.commit_writer(|sql, _| {
+        sql.execute("UPDATE _coven_lost SET set_by=?1", [encode_setters(&setters).unwrap()])
+            .unwrap()
     });
     assert_eq!(
         tokio::time::timeout(HANG_GUARD, query.next_inline())
@@ -258,12 +256,12 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
             .len(),
         1
     );
-    db.commit_writer(|sql| sql.batch("UPDATE _coven_lost SET value=x'ff'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE _coven_lost SET value=x'ff'").unwrap());
     assert!(matches!(
         query.next_inline().await.expect("the live query answers"),
         Err(DbError::DamagedDatabase)
     ));
-    db.commit_writer(|sql| sql.batch("DELETE FROM _coven_lost").unwrap());
+    db.commit_writer(|sql, _| sql.batch("DELETE FROM _coven_lost").unwrap());
     assert!(query.next_inline().await.expect("the live query answers").unwrap().is_empty());
     db.close().await.unwrap();
 }
@@ -272,7 +270,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
 async fn wrong_column_table_is_a_damaged_database() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE notes(title)").await.unwrap();
-    let column = db.commit_writer(|sql| {
+    let column = db.commit_writer(|sql, _| {
         crate::row_queries::frozen_column(sql, "other_table", "title").unwrap()
     });
     insert(
@@ -299,12 +297,12 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
     )]);
     let setters = BTreeMap::from([("title".into(), write)]);
     for cause in [1, u32::MAX] {
-        db.inspect_writer(|sql| {
-            sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
+        db.inspect_writer(|sql, _| {
+            sql.execute("INSERT INTO _coven_lost(table_name,key,audience,generation,value,set_by,replacement_kind,replaced_by,frozen) VALUES (?1,?2,?3,?4,?5,?6,'excluded',?7,1)",
                 ("notes", &key, "store", 0u64.to_be_bytes().to_vec(), encode_columns(&values).unwrap(), encode_setters(&setters).unwrap(), encode_exclusion(write, cause).unwrap())).unwrap();
             let stored = sql.query_row("SELECT replaced_by FROM _coven_lost WHERE id=last_insert_rowid()", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
             assert_eq!(decode_exclusion(&stored).unwrap().1, cause);
-            assert!(sql.internal_execute("UPDATE _coven_lost SET frozen=0 WHERE id=last_insert_rowid()", []).is_err());
+            assert!(sql.execute("UPDATE _coven_lost SET frozen=0 WHERE id=last_insert_rowid()", []).is_err());
             assert_eq!(sql.query_row("SELECT count(*) FROM _coven_rows", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         });
     }
@@ -335,19 +333,16 @@ async fn a_second_rules_loss_for_one_row_is_damaged_database() {
         audience: coven_merge::Audience::Store,
     };
     assert!(matches!(
-        db.inspect_writer(|sql| crate::loss_record::removed(sql, &row, 0)),
+        db.inspect_writer(|sql, _| crate::loss_record::removed(sql, &row, 0)),
         Err(DbError::DamagedDatabase)
     ));
 }
 
 /// Lose the record of every row removal rules took out, as a damaged
 /// database would: the merge row stays present with no values anywhere.
-pub(crate) fn lose_removed_rows(db: &crate::sqlite::DatabaseConnection) {
-    db.internal_execute(
-        "DELETE FROM _coven_lost WHERE column_id IS NULL AND replacement_kind='rules'",
-        [],
-    )
-    .unwrap();
+pub(crate) fn lose_removed_rows(db: &DatabaseConnection) {
+    db.execute("DELETE FROM _coven_lost WHERE column_id IS NULL AND replacement_kind='rules'", [])
+        .unwrap();
 }
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`

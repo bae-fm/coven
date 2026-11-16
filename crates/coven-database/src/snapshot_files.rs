@@ -30,7 +30,7 @@ pub(crate) fn protect(
         let record = crate::file_table::is_files(&table.table);
         let columns = schema.file_columns(&table.table);
         if record || !columns.is_empty() {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO temp._coven_install_protected(table_name,key)
                  SELECT c.table_name,c.key FROM (
                    SELECT table_name,key FROM temp._coven_install_changed WHERE table_name=?1
@@ -85,7 +85,7 @@ fn references(db: &DatabaseConnection, table: &TableLayout, column: &str) -> Res
     let Some(j) = table.columns.iter().position(|name| name == column) else {
         return Ok(());
     };
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_references(file,table_name,key,column_name)
              SELECT _coven_file_id(i.{column}),?1,i.{key},?2
@@ -119,7 +119,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
     let key = table.column("key");
     let installed = table.installed();
     let present = table.column("present");
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_stored(device,object,table_name,key)
              SELECT _coven_stored_device(i.{column}),_coven_stored_object(i.{column}),?1,i.{key}
@@ -132,7 +132,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
         ),
         [&table.table],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_row_file_refs WHERE (device,object,table_name,key) IN (
            SELECT r.device,r.object,r.table_name,r.key FROM temp._coven_install_protected p
            CROSS JOIN _coven_row_file_refs r ON r.table_name=p.table_name AND r.key=p.key
@@ -140,7 +140,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
              WHERE s.device=r.device AND s.object=r.object AND s.table_name=r.table_name AND s.key=r.key))",
         [&table.table],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_row_file_refs(device,object,table_name,key)
          SELECT device,object,table_name,key FROM temp._coven_install_stored WHERE table_name=?1
          ON CONFLICT DO NOTHING",
@@ -148,7 +148,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
     )?;
     // The records with something of their own here to settle once their
     // stored files are up to date, with the stored bytes each named before.
-    db.internal_execute(
+    db.execute(
         "INSERT INTO temp._coven_install_records(file,namespace,object_path)
          SELECT _coven_file_of_key(p.key),s.namespace,s.object_path FROM temp._coven_install_protected p
          LEFT JOIN _coven_stored_files s ON s.file=_coven_file_of_key(p.key)
@@ -159,7 +159,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
            OR EXISTS(SELECT 1 FROM _coven_device_files d WHERE d.file=_coven_file_of_key(p.key)))",
         [&table.table],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_stored_files(file,namespace,device,object,object_path,hash)
          SELECT f.id,f.namespace,_coven_stored_device(f.coordinates),_coven_stored_object(f.coordinates),
            _coven_stored_object_path(f.coordinates),f.hash
@@ -169,7 +169,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
          WHERE namespace!=excluded.namespace OR device!=excluded.device OR object!=excluded.object OR hash!=excluded.hash",
         [&table.table],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_stored_files WHERE file IN (
            SELECT _coven_file_of_key(p.key) FROM temp._coven_install_protected p WHERE p.table_name=?1
            AND NOT EXISTS(SELECT 1 FROM main.coven_files f WHERE f.id=_coven_file_of_key(p.key)
@@ -196,7 +196,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
             crate::file_protection::settle_record(db, file, cached, shown.as_ref(), kept)
         },
     )?;
-    db.internal_execute("DELETE FROM temp._coven_install_records", [])?;
+    db.execute("DELETE FROM temp._coven_install_records", [])?;
     Ok(())
 }
 
@@ -204,7 +204,7 @@ fn records(db: &DatabaseConnection, table: &TableLayout) -> Result<(), DbError> 
 /// hold now. A file whose last reference went while this device still has
 /// its record waits for this device's own write to delete it (§17.2).
 fn released(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO temp._coven_install_released(file)
          SELECT r.file FROM temp._coven_install_protected p
          CROSS JOIN _coven_file_references r ON r.table_name=p.table_name AND r.key=p.key
@@ -213,7 +213,7 @@ fn released(db: &DatabaseConnection) -> Result<(), DbError> {
          ON CONFLICT DO NOTHING",
         [],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_file_references WHERE (file,table_name,key,column_name) IN (
            SELECT r.file,r.table_name,r.key,r.column_name FROM temp._coven_install_protected p
            CROSS JOIN _coven_file_references r ON r.table_name=p.table_name AND r.key=p.key
@@ -221,13 +221,13 @@ fn released(db: &DatabaseConnection) -> Result<(), DbError> {
              WHERE d.file=r.file AND d.table_name=r.table_name AND d.key=r.key AND d.column_name=r.column_name))",
         [],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_file_references(file,table_name,key,column_name)
          SELECT file,table_name,key,column_name FROM temp._coven_install_references WHERE true
          ON CONFLICT DO NOTHING",
         [],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_unreferenced_files(file)
          SELECT d.file FROM temp._coven_install_released d
          WHERE NOT EXISTS(SELECT 1 FROM _coven_file_references r WHERE r.file=d.file)

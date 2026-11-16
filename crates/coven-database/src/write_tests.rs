@@ -8,7 +8,7 @@ use crate::{Database, DbError, RowIdentity, SyncedTable};
 /// The queue's original records, exactly as they upload.
 pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
     database
-        .inspect_writer(|db| {
+        .inspect_writer(|db, _| {
             db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
                 r.get::<_, Vec<u8>>(0)
             })
@@ -29,7 +29,7 @@ pub(crate) async fn sql(database: &Database, sql: &'static str) -> Result<(), Db
 }
 
 pub(crate) fn count(database: &Database, table: &str) -> i64 {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
 }
@@ -135,7 +135,7 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     assert!(matches!(rows[1].change.operation, Operation::Delete));
     assert_eq!(rows[1].old["id"], Value::Text("errands".into()));
     assert_eq!(count(&database, "local_rows"), 1);
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let setters: Vec<(String, Vec<u8>)> = db.query("SELECT c.column_name,w.number FROM _coven_cells x JOIN _coven_columns c ON c.id=x.column_id JOIN _coven_writes w ON w.id=x.write_id ORDER BY c.column_name", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(setters, vec![("body".into(), 1u64.to_be_bytes().to_vec()), ("id".into(), 1u64.to_be_bytes().to_vec()), ("title".into(), 3u64.to_be_bytes().to_vec())]);
     });
@@ -176,7 +176,7 @@ async fn hardware_store_note_delete_and_readd_advance_generations() {
         writes.iter().map(|w| w.parts[0].rows[0].change.generation).collect::<Vec<_>>(),
         [0, 1, 2, 3]
     );
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let generations = db.query("SELECT generation FROM _coven_rows ORDER BY generation", [], |r| r.get::<_, Vec<u8>>(0)).unwrap();
         assert_eq!(generations, [1u64,2,3].map(|g| g.to_be_bytes().to_vec()));
         assert_eq!(db.query_row("SELECT count(*) FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.generation=?1", [3u64.to_be_bytes().as_slice()], |r| r.get::<_, i64>(0)).unwrap(), 3);
@@ -303,7 +303,7 @@ async fn body_edit_records_shared_edited_at_but_keeps_the_search_index_local() {
     );
     assert_eq!(columns["edited_at"].value, Value::Text("2026-10-02 15:00".into()));
     assert!(rows[0].old.is_empty());
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         assert_eq!(
             db.query_row("SELECT title FROM title_index", [], |r| r.get::<_, String>(0)).unwrap(),
             "Shopping"
@@ -491,7 +491,7 @@ async fn generated_columns_never_sync() {
         );
         deliver(&ana, &ben).await;
         for db in [&ana, &ben] {
-            let found: Option<String> = db.inspect_writer(|db| {
+            let found: Option<String> = db.inspect_writer(|db, _| {
                 db.query("SELECT sort || ' ' || shout FROM albums", [], |r| r.get(0)).unwrap().pop()
             });
             assert_eq!(found.as_deref(), shown, "{statement}");
@@ -539,7 +539,7 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
 }
 
 fn assert_indexed(database: &Database) {
-    let statements = database.inspect_writer(|db| db.profiled_statements());
+    let statements = database.inspect_writer(|db, _| db.profiled_statements());
     assert!(!statements.is_empty(), "the whole write must be traced");
     let mut scans = std::collections::BTreeMap::<&str, i64>::new();
     for statement in &statements {
@@ -610,7 +610,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         .unwrap();
     assert_indexed(&db);
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row(
                 "SELECT count(*) FROM notes WHERE id='00000000-0000-4000-8000-000000000002'",
                 [],
@@ -620,7 +620,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         1
     );
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row(
                 "SELECT count(*) FROM notes WHERE id='00000000-0000-4000-8000-000000000003'",
                 [],
@@ -666,7 +666,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     // Each play follows another, so both measured writes do the same work.
     play(2).await.unwrap();
     play(3).await.unwrap();
-    let alone = db.inspect_writer(|db| db.profiled_statements()).len();
+    let alone = db.inspect_writer(|db, _| db.profiled_statements()).len();
     let mut statistics = db.report_statistics_runs();
     // The play's track and person gain other children. Their removal cannot
     // change when the play's position does, so the write reads none of them.
@@ -692,7 +692,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
         .expect("the store stays open");
     play(4).await.unwrap();
     play(5).await.unwrap();
-    assert_eq!(db.inspect_writer(|db| db.profiled_statements()).len(), alone);
+    assert_eq!(db.inspect_writer(|db, _| db.profiled_statements()).len(), alone);
     db.close().await.unwrap();
 }
 
@@ -711,7 +711,7 @@ async fn a_write_reuses_the_statements_earlier_writes_prepared() {
     // app's statement and SQLite's own transaction control and session
     // queries may be; coven's statements were parsed by the earlier writes.
     let parsed: Vec<_> = db
-        .inspect_writer(|db| db.profiled_statements())
+        .inspect_writer(|db, _| db.profiled_statements())
         .into_iter()
         .filter(|statement| statement.runs == 1)
         .map(|statement| statement.sql)

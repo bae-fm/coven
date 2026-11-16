@@ -146,7 +146,7 @@ async fn a_write_by_this_devices_member_keeps_no_evidence() {
         db.receive_stream(stream(write), || Ok(())).await.unwrap();
     }
     let kept = |table: &str, write: &WriteRecord| {
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             sql.query_row(
                 &format!("SELECT count(*) FROM {table} WHERE write_id=?1"),
                 [merge_fields::encode_write_id(&write.header.position).unwrap()],
@@ -397,8 +397,8 @@ async fn retained_openings_match_the_cell_proof_model() {
     let snapshot = frames(&db, Audience::Store).await;
     let carried = evidence(&snapshot);
     // The cells the row still shows from the creating write, by the merge.
-    let shown: Vec<(String, Value)> = db.inspect_writer_schema(|c, schema| {
-        let store = crate::merge_store::MergeStore::from_schema(c, &schema.schema);
+    let shown: Vec<(String, Value)> = db.inspect_writer_schema(|c, call, schema| {
+        let store = crate::merge_store::MergeStore::from_schema(c, call, &schema.schema);
         let state = store.row(&row()).unwrap().state;
         state
             .cells()

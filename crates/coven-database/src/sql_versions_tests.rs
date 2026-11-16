@@ -61,7 +61,7 @@ async fn open(
 
 /// The REINDEX statements the writer ran as the store opened.
 fn reindexed(database: &Database) -> Vec<String> {
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         writer
             .profiled_statements()
             .into_iter()
@@ -110,12 +110,12 @@ async fn a_new_collation_version_rebuilds_its_indexes() {
     let database = open(&store, ORDERED_WORDS, ordered(2)).await.unwrap();
     assert_eq!(reindexed(&database), ["REINDEX \"ordered\""]);
     let expected = ["bananas", "cherries", "dates"];
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         assert!(plan(writer, AFTER_B).contains("INDEX words_ordered"));
         assert_eq!(rows(writer, AFTER_B), expected);
         assert_eq!(integrity(writer), ["ok"]);
     });
-    database.inspect_readers(|reader| assert_eq!(rows(reader, AFTER_B), expected));
+    database.inspect_readers(|reader, _| assert_eq!(rows(reader, AFTER_B), expected));
     database.close().await.unwrap();
 
     // The new version is recorded: the next open rebuilds nothing.
@@ -138,7 +138,7 @@ async fn an_unchanged_version_rebuilds_nothing() {
         SqlFunctions::default().collation("ordered", 1, |left: &str, right: &str| left.cmp(right));
     let database = open(&store, ORDERED_WORDS, forwards_at_one).await.unwrap();
     assert!(reindexed(&database).is_empty());
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         assert_ne!(rows(writer, AFTER_B), ["bananas", "cherries", "dates"]);
         assert_ne!(integrity(writer), ["ok"]);
     });
@@ -164,7 +164,7 @@ async fn a_new_function_version_rebuilds_exactly_the_indexes_that_call_it() {
     let mut rebuilt = reindexed(&database);
     rebuilt.sort();
     assert_eq!(rebuilt, ["REINDEX main.\"words_folded\"", "REINDEX main.\"words_matching\""]);
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         assert!(plan(writer, FOLDED_APPLES).contains("INDEX words_folded"));
         assert_eq!(rows(writer, FOLDED_APPLES), ["apples"]);
         // Version 2 matches "an" anywhere: "bananas" now, not "apples".
@@ -302,7 +302,7 @@ const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL, score REAL NO
 
 /// The SQLite library the store records as the one that built its indexes.
 fn recorded_library(database: &Database) -> Vec<i64> {
-    database.inspect_writer(|writer| recorded_library_in(writer))
+    database.inspect_writer(|writer, _| recorded_library_in(writer))
 }
 
 /// [`recorded_library`] as `connection` reads it.
@@ -332,8 +332,9 @@ fn a_new_database_records_the_sqlite_that_created_it() {
             None,
         )
         .unwrap();
-    connection.prepare_internal_schema().unwrap();
-    assert_eq!(recorded_library_in(&connection), [i64::from(rusqlite::version_number())]);
+    let connection = &mut connection;
+    crate::schema_preparation::prepare_internal_schema(connection).unwrap();
+    assert_eq!(recorded_library_in(connection), [i64::from(rusqlite::version_number())]);
 }
 
 /// Ana's app indexes each score as text. SQLite 3.53 writes a third as
@@ -352,12 +353,9 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
     sql(&database, "INSERT INTO words(word,score) VALUES ('apples',1.0/3),('bananas',2.5)")
         .await
         .unwrap();
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         writer
-            .internal_execute(
-                "UPDATE _coven_sql_versions SET version=3052000 WHERE kind='library'",
-                [],
-            )
+            .execute("UPDATE _coven_sql_versions SET version=3052000 WHERE kind='library'", [])
             .unwrap();
     });
     database.close().await.unwrap();
@@ -372,7 +370,7 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
         ]
     );
     assert_eq!(recorded_library(&database), [library]);
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         let third = "SELECT word FROM words INDEXED BY words_score_text WHERE CAST(score AS TEXT) = '0.33333333333333332'";
         assert_eq!(rows(writer, third), ["apples"]);
         assert_eq!(integrity(writer), ["ok"]);

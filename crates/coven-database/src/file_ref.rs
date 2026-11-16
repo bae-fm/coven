@@ -2,10 +2,10 @@
 //! and place (§17.2, E8). A file never changes its bytes, so a reference
 //! taken earlier still reads what it named.
 
+use crate::sqlite::DatabaseConnection;
 use crate::{
     file_location::{FileLocation, Place},
     file_table::Record,
-    sqlite::DatabaseConnection,
     DbError,
 };
 use coven_crypto::ContentHash;

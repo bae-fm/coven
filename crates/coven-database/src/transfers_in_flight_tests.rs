@@ -153,7 +153,7 @@ async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::
         .open()
         .await
         .unwrap();
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer
             .batch(&format!(
                 "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{files})

@@ -1,8 +1,8 @@
 //! Original authored changes and their admission, independent of dismissible losses.
 
-use crate::{
-    merge_store::MergeStore, sqlite::DatabaseConnection, write_encoding::counter, DbError,
-};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{merge_store::MergeStore, write_encoding::counter, DbError};
 use coven_format::{
     merge_fields,
     snapshot_rows::{
@@ -85,6 +85,7 @@ fn standing<T>(
 /// heads: never a current winner or an equal scalar.
 pub(crate) fn source(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     source: &ChangeId,
 ) -> Result<Standing<Original>, DbError> {
@@ -104,7 +105,8 @@ pub(crate) fn source(
         .pop();
     Ok(match standing(db, header, source, held)? {
         Standing::Counts(record) => {
-            let part = db.authored_part(&write, audience)?.ok_or(DbError::DamagedDatabase)?;
+            let part = crate::transaction_constants::authored_part(db, call, &write, audience)?
+                .ok_or(DbError::DamagedDatabase)?;
             Standing::Counts(Original {
                 header: merge_fields::decode_write_header(&part)?,
                 record: KeptRecord::decode(&record)?,
@@ -120,10 +122,11 @@ pub(crate) fn source(
 /// no net change set no generation or cell, so it is never a source.
 pub(crate) fn counting(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     named: &ChangeId,
 ) -> Result<Option<Evidence>, DbError> {
-    match source(db, header, named)? {
+    match source(db, call, header, named)? {
         Standing::Counts(Original { header, record: KeptRecord::Change(original) }) => {
             Ok(Some(Evidence { header, original }))
         }
@@ -140,17 +143,27 @@ pub(crate) fn counting(
 /// holds the part. Renames resolve through the recorded schema identities.
 pub(crate) fn kept_part(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     write: WriteId,
     row: &RowId,
 ) -> Result<Option<(WriteHeader, String)>, DbError> {
-    let Some(bytes) = db.authored_part(&merge_fields::encode_write_id(&write)?, &row.audience)?
+    let Some(bytes) = crate::transaction_constants::authored_part(
+        db,
+        call,
+        &merge_fields::encode_write_id(&write)?,
+        &row.audience,
+    )?
     else {
         return Ok(None);
     };
     let header = merge_fields::decode_write_header(&bytes)?;
-    let table =
-        crate::source_names::table(db, db.schema_version()?, &row.table, header.schema_version)?
-            .ok_or(DbError::DamagedDatabase)?;
+    let table = crate::source_names::table(
+        db,
+        crate::transaction_constants::schema_version(db, call)?,
+        &row.table,
+        header.schema_version,
+    )?
+    .ok_or(DbError::DamagedDatabase)?;
     Ok(Some((header, table)))
 }
 
@@ -159,6 +172,7 @@ pub(crate) fn kept_part(
 /// recorded schema identities.
 struct PreWrite<'a> {
     db: &'a DatabaseConnection,
+    call: &'a StoreCall<'a>,
     row: RowId,
     state: coven_merge::RowState<Value>,
     version: u32,
@@ -167,22 +181,30 @@ struct PreWrite<'a> {
 impl<'a> PreWrite<'a> {
     fn new(
         db: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         store: &MergeStore<'_>,
         row: RowId,
     ) -> Result<Self, DbError> {
-        Self::over(db, store.row(&row)?.state)
+        Self::over(db, call, store.row(&row)?.state)
     }
 
     /// The pre-write merge state `state`, of its own row.
     fn over(
         db: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         state: coven_merge::RowState<Value>,
     ) -> Result<Self, DbError> {
-        Ok(Self { row: state.row().clone(), state, version: db.schema_version()?, db })
+        Ok(Self {
+            row: state.row().clone(),
+            call,
+            state,
+            version: crate::transaction_constants::schema_version(db, call)?,
+            db,
+        })
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
-        let Some((header, table)) = kept_part(self.db, write, &self.row)? else {
+        let Some((header, table)) = kept_part(self.db, self.call, write, &self.row)? else {
             return Err(DbError::MissingWriteSources(vec![ChangeId {
                 write,
                 row: self.row.clone(),
@@ -229,16 +251,18 @@ impl<'a> PreWrite<'a> {
 /// reference's NULL. An insert or update carries no replaced value.
 pub(crate) fn authored(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     row: RowId,
     change: Change<Value>,
 ) -> Result<RowChange, DbError> {
-    authored_over(db, store.row(&row)?.state, change)
+    authored_over(db, call, store.row(&row)?.state, change)
 }
 
 /// [`authored`] over the pre-write merge state `state`, of its own row.
 pub(crate) fn authored_over(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     state: coven_merge::RowState<Value>,
     change: Change<Value>,
 ) -> Result<RowChange, DbError> {
@@ -251,7 +275,7 @@ pub(crate) fn authored_over(
             .collect(),
         Operation::Insert(_) | Operation::Update(_) => BTreeMap::new(),
     };
-    let pre = PreWrite::over(db, state)?;
+    let pre = PreWrite::over(db, call, state)?;
     let mut setters = BTreeMap::new();
     for column in pre.cells() {
         let replaces = match &change.operation {
@@ -279,6 +303,7 @@ pub(crate) fn authored_over(
 /// incarnation ended. Cells this write itself set are not sources.
 pub(crate) fn executed(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     row: &RowId,
     steps: Vec<coven_format::write::Step>,
@@ -287,7 +312,7 @@ pub(crate) fn executed(
     let Some(first) = steps.first() else {
         return Ok(Default::default());
     };
-    let pre = PreWrite::new(db, store, row.clone())?;
+    let pre = PreWrite::new(db, call, store, row.clone())?;
     let mut remaining: std::collections::BTreeSet<String> = pre.cells().cloned().collect();
     let mut replaced = std::collections::BTreeSet::new();
     for step in &steps {
@@ -322,22 +347,31 @@ pub(crate) fn executed(
 /// admission is retained but does not establish validity.
 pub(crate) fn validate(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
     if let PartRecord::Change(row) = record {
         validate_past(db, header, &row.sources)?;
         let incarnation = row.change.incarnation().map_err(coven_format::Error::Merge)?;
-        roles(db, header, &row.row, row.change.generation, incarnation, &row.sources)?;
+        roles(db, call, header, &row.row, row.change.generation, incarnation, &row.sources)?;
         if let Some(creator) = &row.creator {
-            creation(db, header, &row.row, creator)?;
+            creation(db, call, header, &row.row, creator)?;
         }
     }
     let execution = record.execution();
     validate_past(db, header, &execution.sources)?;
     if let Some(first) = execution.steps.first() {
         let incarnation = first.change.incarnation().map_err(coven_format::Error::Merge)?;
-        roles(db, header, record.row(), first.change.generation, incarnation, &execution.sources)?;
+        roles(
+            db,
+            call,
+            header,
+            record.row(),
+            first.change.generation,
+            incarnation,
+            &execution.sources,
+        )?;
     }
     Ok(())
 }
@@ -393,11 +427,13 @@ pub(crate) fn validate_past(
 /// device could not read, leave the authenticated claim as written.
 fn creation(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
     creator: &ChangeId,
 ) -> Result<(), DbError> {
-    let Standing::Counts(Original { header: original, record }) = source(db, header, creator)?
+    let Standing::Counts(Original { header: original, record }) =
+        source(db, call, header, creator)?
     else {
         return Ok(());
     };
@@ -425,6 +461,7 @@ fn creation(
 /// that established that generation, or set that cell in this incarnation.
 fn roles(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
     generation: u64,
@@ -437,7 +474,7 @@ fn roles(
         if source.row.key != row.key || source.row.audience != row.audience {
             return Err(invalid("source row identity"));
         }
-        let Some(evidence) = counting(db, header, source)? else {
+        let Some(evidence) = counting(db, call, header, source)? else {
             return Ok(None);
         };
         if evidence.header.timestamp >= header.timestamp {
@@ -499,21 +536,23 @@ fn roles(
 
 fn part(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let bytes = merge_fields::encode_write_header(header)?;
-    if let Some(original) = db.authored_part(&write, audience)? {
+    if let Some(original) = crate::transaction_constants::authored_part(db, call, &write, audience)?
+    {
         if original != bytes {
             return Err(invalid("original source header changed"));
         }
     } else {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_authored_parts VALUES(?1,?2,?3)",
             params![write, audience, bytes],
         )?;
-        db.authored_part_changed(&write, audience, Some(bytes));
+        call.authored_part_changed(&write, audience, Some(bytes));
     }
     Ok(())
 }
@@ -558,14 +597,15 @@ impl<'a> KeptForm<'a> {
 /// within the write is refused by the table's key.
 pub(crate) fn retain_authored(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     form: &KeptForm<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
     let row = record.row();
-    part(db, header, &row.audience)?;
+    part(db, call, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5)",
         params![write, &row.audience, row.table, row.key, form.keep(record)?],
     )?;
@@ -578,12 +618,13 @@ pub(crate) fn retain_authored(
 /// that stages a slot again keeps again a record this device forgot.
 pub(crate) fn retain(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     form: &KeptForm<'_>,
     header: &WriteHeader,
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
     let row = record.row();
-    part(db, header, &row.audience)?;
+    part(db, call, header, &row.audience)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = &row.audience;
     let kept = form.keep(record)?;
@@ -591,7 +632,7 @@ pub(crate) fn retain(
     if original.as_ref().is_some_and(|original| *original != kept) {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute("INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,kept])?;
+    db.execute("INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,kept])?;
     crate::download_stage::stage_record(db, header, record)
 }
 
@@ -606,24 +647,24 @@ pub(crate) fn install(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_authored_parts(write_id,audience,header)
          SELECT write_id,audience,header FROM temp._coven_install_parts s WHERE s.audience=?1
          AND NOT EXISTS(SELECT 1 FROM _coven_authored_parts p WHERE p.write_id=s.write_id AND p.audience=s.audience)",
         params![audience],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record,stop)
          SELECT write_id,audience,table_name,key,record,stop FROM temp._coven_install_authored WHERE audience=?1
          ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET stop=excluded.stop",
         params![audience],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_authored_admissions WHERE (write_id,audience,table_name,key) IN
          (SELECT write_id,audience,table_name,key FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NULL)",
         params![audience],
     )?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_authored_admissions(write_id,audience,table_name,key,admission)
          SELECT write_id,audience,table_name,key,admission FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NOT NULL
          ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
@@ -637,25 +678,26 @@ pub(crate) fn install(
 /// NULL means unjudged; receiving covered bytes alone never judges them.
 pub(crate) fn admit(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     header: &WriteHeader,
     row: &RowId,
     verdict: &ChangeVerdict,
 ) -> Result<(), DbError> {
     let write = merge_fields::encode_write_id(&header.position)?;
     let audience = &row.audience;
-    let original =
-        db.authored_part(&write, audience)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let original = crate::transaction_constants::authored_part(db, call, &write, audience)?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let original = merge_fields::decode_write_header(&original)?;
     let table =
         crate::source_names::table(db, header.schema_version, &row.table, original.schema_version)?
             .ok_or(DbError::DamagedDatabase)?;
     match stored_verdict(verdict)? {
-        Some(admission) => db.internal_execute(
+        Some(admission) => db.execute(
             "INSERT INTO _coven_authored_admissions VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
             params![write, audience, table, row.key, admission],
         )?,
-        None => db.internal_execute(
+        None => db.execute(
             "DELETE FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
             params![write, audience, table, row.key],
         )?,
@@ -772,12 +814,13 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
 /// number, whatever this device has forgotten of them (§16.7).
 pub(crate) fn forget_own_migration(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     audience: &coven_merge::Audience,
     covers: impl Fn(WriteId) -> Result<bool, DbError>,
     version: u32,
     carried: impl Fn(&[u8], &coven_merge::Audience, &str, &[u8]) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
-    let own = db
+    let own = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     let first = merge_fields::encode_write_id(&WriteId { device: own, number: 1 })?;
@@ -799,19 +842,19 @@ pub(crate) fn forget_own_migration(
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )? {
             if !carried(&write_id, audience, &table, &key)? {
-                db.internal_execute(
+                db.execute(
                     "DELETE FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
                     params![write_id, audience, table, key],
                 )?;
                 crate::migration_run::forget_record(db, &write_id, audience, &table, &key)?;
             }
         }
-        db.internal_execute(
+        db.execute(
             "DELETE FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2
              AND NOT EXISTS(SELECT 1 FROM _coven_authored_changes c WHERE c.write_id=?1 AND c.audience=?2)",
             params![write_id, audience],
         )?;
-        db.forget_authored_part(&write_id, audience);
+        call.forget_authored_part(&write_id, audience);
     }
     Ok(())
 }

@@ -87,7 +87,7 @@ async fn compare(
     for d in 1..=2 {
         TestStore::register(&db, DeviceId(d), d as u8);
     }
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.transaction(|db| {
             let mut state = crate::store_state_tables::read(db)?;
             for member in state.members.values_mut() {
@@ -247,7 +247,7 @@ async fn compare(
 }
 
 fn project(db: &Database, claims: &BTreeMap<coven_merge::WriteId, (u64, u64)>) -> Value {
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let winners = c
             .query("SELECT a,id FROM rows ORDER BY a", [], |r| {
                 Ok(json!([
@@ -432,7 +432,7 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
             ("_coven_written_values", format!("SELECT {ROW},v.column_id,v.value FROM _coven_written_values v JOIN _coven_rows r ON r.id=v.row_id ORDER BY 1,2,3,4,5")),
             ("_coven_lost", "SELECT table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by FROM _coven_lost ORDER BY 1,2,3,4,5,7,9".to_owned()),
         ];
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             statements
                 .into_iter()
                 .map(|(table, sql)| {
@@ -499,7 +499,7 @@ async fn applying_a_slot_leaves_the_temporary_tables_as_they_were() {
         )
         .await
         .unwrap();
-        versions.push(db.inspect_writer(|writer| {
+        versions.push(db.inspect_writer(|writer, _| {
             writer.query_row("PRAGMA temp.schema_version", [], |r| r.get::<_, i64>(0)).unwrap()
         }));
     }
@@ -541,7 +541,7 @@ async fn a_unique_claim_counted_beside_an_unreached_row_leaves_nothing_taken_out
     crate::write::tests::sql(&db, "UPDATE users SET email='x@' WHERE id='a'").await.unwrap();
     crate::write::tests::sql(&db, "UPDATE users SET email='a@' WHERE id='p'").await.unwrap();
     let users = |db: &Database| -> Vec<(String, String, String)> {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT id,email,name FROM users ORDER BY id", [], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
@@ -558,7 +558,7 @@ async fn a_unique_claim_counted_beside_an_unreached_row_leaves_nothing_taken_out
         ]
     );
     assert!(db.lost_values().await.unwrap().is_empty(), "{:?}", db.lost_values().await);
-    let taken_out: i64 = db.inspect_writer(|db| {
+    let taken_out: i64 = db.inspect_writer(|db, _| {
         db.query_row("SELECT count(*) FROM _coven_lost WHERE replacement_kind='rules'", [], |r| {
             r.get(0)
         })
@@ -693,7 +693,7 @@ async fn an_ordinary_announcement_forgets_the_slot_sizes_it_covers() {
         )
     };
     let counted = || {
-        db.inspect_writer(|c| {
+        db.inspect_writer(|c, _| {
             ["_coven_write_slots", "_coven_write_slot_audiences"].map(|table| {
                 c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
                     .unwrap()

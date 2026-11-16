@@ -178,7 +178,7 @@ async fn coven_key_encodes_a_rows_key_and_an_index_can_hold_it() {
     // format.md D3's example key.
     assert_eq!(two, [0x13, 0x04, 0x34, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0x20, 0x61, 0, 0]);
     sql(&db, "INSERT INTO notes VALUES('a','apples')").await.unwrap();
-    db.inspect_readers(|reader| {
+    db.inspect_readers(|reader, _| {
         let plan: Vec<String> = reader
             .query(
                 "EXPLAIN QUERY PLAN SELECT title FROM notes WHERE coven_key(id)=coven_key('a')",

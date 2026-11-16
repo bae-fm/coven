@@ -5,7 +5,8 @@
 //! or is cancelled switches none. Each moving or failed move lists its
 //! files, for the app to see in `coven_moves`.
 
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use coven_foundation::id_source::FileId;
 
 /// One move's identity on this device, never reused (§17.3, E3).
@@ -122,7 +123,7 @@ pub(crate) fn list_all(db: &DatabaseConnection, files: &[(MoveId, FileId)]) -> R
 /// The new file `to` over `from`'s bytes, now waiting for the upload `from`
 /// waits for, joins that upload's move (§17.2, §17.3).
 pub(crate) fn join(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_move_files(move,file)
          SELECT u.move,?2 FROM _coven_upload_files AS l
          JOIN _coven_file_uploads AS u ON u.id=l.upload WHERE l.file=?1",
@@ -133,7 +134,7 @@ pub(crate) fn join(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<
 
 /// `file`'s record is gone from this device: no move lists it.
 pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_move_files WHERE file=?1", [file])?;
+    db.execute("DELETE FROM _coven_move_files WHERE file=?1", [file])?;
     Ok(())
 }
 
@@ -142,11 +143,11 @@ pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbErro
 fn set(db: &DatabaseConnection, id: MoveId, state: MoveState) -> Result<(), DbError> {
     match state {
         MoveState::Cancelled | MoveState::Finished => {
-            db.internal_execute("DELETE FROM _coven_move_files WHERE move=?1", [id])?;
+            db.execute("DELETE FROM _coven_move_files WHERE move=?1", [id])?;
         }
         MoveState::Moving | MoveState::Failed => {}
     }
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_moves SET state=?2 WHERE id=?1",
         rusqlite::params![id, state.text()],
     )?;

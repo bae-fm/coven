@@ -207,7 +207,7 @@ async fn an_attempted_write_arriving_after_the_raise_converts_like_an_untried_on
             crate::upload::tests::attempt(&source, 9).await.unwrap();
         }
         let queued = |db: &Database| {
-            db.inspect_writer(|db| {
+            db.inspect_writer(|db, _| {
                 db.query(
                     "SELECT u.record,k.sealing_keys FROM _coven_uploads u
                      LEFT JOIN _coven_upload_keys k USING(device,number) ORDER BY u.number",

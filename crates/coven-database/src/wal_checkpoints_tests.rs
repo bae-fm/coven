@@ -109,7 +109,7 @@ const THRESHOLD: u32 = 100;
 async fn checkpointed<T>(db: &crate::Database, told: &mut UnboundedReceiver<T>) -> T {
     loop {
         add(db).await;
-        let past = db.inspect_writer(|writer| {
+        let past = db.inspect_writer(|writer, _| {
             let past = not_copied(writer) >= THRESHOLD;
             while told.try_recv().is_ok() {}
             past
@@ -131,7 +131,7 @@ async fn checkpointed<T>(db: &crate::Database, told: &mut UnboundedReceiver<T>) 
 async fn coven_checkpoints_the_wal_past_its_threshold() {
     let store = TestStore::new();
     let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         let pages: i64 = writer.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0)).unwrap();
         assert_eq!(pages, 0, "the writer never checkpoints as it commits");
     });
@@ -204,7 +204,7 @@ async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writ
     // no more, so the first pass copies them all.
     loop {
         add(&db).await;
-        if db.inspect_writer(|writer| not_copied(writer)) >= THRESHOLD {
+        if db.inspect_writer(|writer, _| not_copied(writer)) >= THRESHOLD {
             break;
         }
     }

@@ -39,10 +39,11 @@ fn scan_candidates(store: &TestStore) -> crate::DatabaseBuilder {
 /// next read.
 fn readers_candidate_plans(db: &crate::Database) -> Vec<String> {
     let plans = std::sync::Mutex::new(Vec::new());
-    db.inspect_readers(|reader| {
+    db.inspect_readers(|reader, call| {
+        let _constants = crate::transaction_constants::keep_constants(reader, call);
         let plan = reader
-            .read_snapshot(|sql| {
-                Ok::<_, crate::DbError>(sql.query(
+            .read_snapshot(|reader| {
+                Ok::<_, crate::DbError>(crate::SqlReadContext::new(reader).query(
                     "EXPLAIN QUERY PLAN SELECT path, kind FROM candidates \
                      WHERE root=?1 AND file_root=?2 ORDER BY path",
                     ["root", "folder 7"],
@@ -85,7 +86,7 @@ async fn a_table_that_fills_in_one_session_gets_statistics_before_close() {
         .await
         .expect("the candidates' statistics are gathered")
         .expect("the store stays open");
-    let counted: Option<String> = db.inspect_writer(|writer| {
+    let counted: Option<String> = db.inspect_writer(|writer, _| {
         writer
             .query("SELECT stat FROM sqlite_stat1 WHERE idx='candidates_file_root'", [], |r| {
                 r.get(0)

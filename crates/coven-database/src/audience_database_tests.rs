@@ -189,7 +189,7 @@ async fn a_synced_row_with_no_merge_record_fails_naming_its_table() {
     let store = TestStore::new();
     library(&store, &[gifts()]).await;
     let db = store.builder(tables(), vec![initial()]).open().await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         crate::write_commit::tests::plant_unrecorded_rows(writer, "shared").unwrap();
     });
     db.close().await.unwrap();

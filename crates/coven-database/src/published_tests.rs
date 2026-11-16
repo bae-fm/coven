@@ -70,7 +70,7 @@ async fn count_own(database: &crate::Database) {
 }
 
 fn published(database: &crate::Database, table: &str) -> i64 {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.query_row(
             "SELECT count(*) FROM _coven_published_rows WHERE table_name=?1",
             [table],
@@ -186,18 +186,18 @@ async fn slots_beside_unsent_rows_put_back_only_the_rows_they_reach() {
 fn counted_state(database: &crate::Database, id: &str) -> Option<coven_merge::RowState<Value>> {
     let key = crate::tests::text_key(id);
     let album = |row: &coven_merge::RowId| row.table == "albums" && row.key == key;
-    database.inspect_writer_schema(|db, schema| {
+    database.inspect_writer_schema(|db, call, schema| {
         let mut state = None;
-        crate::snapshot_view::rows(db, schema, &Audience::Store, |row| {
+        crate::snapshot_view::rows(db, call, schema, &Audience::Store, |row| {
             if album(row.state.row()) {
                 state = Some(row.state);
             }
             Ok::<_, DbError>(())
         })
         .unwrap();
-        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+        let removed = crate::published::removals(db, call, &schema.schema, &schema.rules).unwrap();
         let mut taken_out = false;
-        crate::snapshot_view::losses(db, &removed, &Audience::Store, |loss| {
+        crate::snapshot_view::losses(db, call, &removed, &Audience::Store, |loss| {
             taken_out |=
                 album(&loss.row) && matches!(loss.cause, coven_format::loss::LossCause::Rules(_));
             Ok::<_, DbError>(())
@@ -252,7 +252,7 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
         .await;
     assert!(counted_visible(&db, "first"));
     let shown: Vec<String> =
-        db.inspect_writer(|db| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
+        db.inspect_writer(|db, _| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
     assert_eq!(shown, ["first"]);
     db.close().await.unwrap();
 }
@@ -290,7 +290,7 @@ async fn migrate_counted_album(
 async fn rename_ana(database: &crate::Database) {
     let name = [("name", Value::Text("Ana B".into()))];
     crate::tests::remote_update_beside_queue(database, "artists", "ana", &name).await;
-    let waiting = database.inspect_writer(|db| crate::queued_writes::present(db).unwrap());
+    let waiting = database.inspect_writer(|db, _| crate::queued_writes::present(db).unwrap());
     assert!(waiting, "the migration's write still waits for its slot");
 }
 
@@ -308,7 +308,7 @@ async fn a_migrations_cascading_delete_keeps_the_childrens_counted_state() {
     )
     .await;
     let shown: Vec<String> =
-        db.inspect_writer(|db| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
+        db.inspect_writer(|db, _| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
     assert!(shown.is_empty(), "the cascade deleted the album");
     assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
     // A slot puts the counted state back, applies over it, and folds the
@@ -316,7 +316,7 @@ async fn a_migrations_cascading_delete_keeps_the_childrens_counted_state() {
     rename_ana(&db).await;
     assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
     let shown: Vec<String> =
-        db.inspect_writer(|db| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
+        db.inspect_writer(|db, _| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
     assert!(shown.is_empty(), "the migration's write deletes the album again");
     db.close().await.unwrap();
 }
@@ -337,14 +337,14 @@ async fn a_migrations_dropped_parent_keeps_the_childrens_counted_state() {
          ALTER TABLE artists_new RENAME TO artists",
     )
     .await;
-    let artist: Option<String> = db.inspect_writer(|db| {
+    let artist: Option<String> = db.inspect_writer(|db, _| {
         db.query_row("SELECT artist FROM albums WHERE id='first'", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(artist, None, "dropping the parent table set the reference to NULL");
     assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
     rename_ana(&db).await;
     assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
-    let artist: Option<String> = db.inspect_writer(|db| {
+    let artist: Option<String> = db.inspect_writer(|db, _| {
         db.query_row("SELECT artist FROM albums WHERE id='first'", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(artist, None, "the migration's write sets the reference to NULL again");
@@ -393,10 +393,10 @@ async fn a_kept_row_shows_under_the_rules_a_migration_leaves() {
 
 /// The counted losses a snapshot of the store reads.
 fn counted_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
-    database.inspect_writer_schema(|db, schema| {
-        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+    database.inspect_writer_schema(|db, call, schema| {
+        let removed = crate::published::removals(db, call, &schema.schema, &schema.rules).unwrap();
         let mut losses = Vec::new();
-        crate::snapshot_view::losses(db, &removed, &Audience::Store, |loss| {
+        crate::snapshot_view::losses(db, call, &removed, &Audience::Store, |loss| {
             losses.push(loss);
             Ok::<_, DbError>(())
         })
@@ -415,7 +415,7 @@ fn lost_title(loss: &coven_format::loss::Loss) -> &Value {
 
 /// The losses the app shows.
 fn app_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let mut losses = Vec::new();
         crate::loss_record::visit(db, &Audience::Store, |loss| {
             losses.push(loss);
@@ -704,7 +704,7 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
     let db = store.builder(synced(&["albums", "notes"]), migrations).open().await.unwrap();
     crate::tests::remote_write_beside_queue(&db, album_insert("first", "Ben's")).await;
     let shown = |db: &crate::Database| -> Vec<(String, String)> {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT id,title FROM albums", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
         })
     };
@@ -720,7 +720,7 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
 
 /// The notes the app shows, by id, with their titles.
 fn note_titles(database: &crate::Database) -> Vec<(String, String)> {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.query("SELECT id,title FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
     })
@@ -800,7 +800,7 @@ async fn a_refused_queued_write_comes_off_its_rows() {
         [("counted".to_owned(), "Later".to_owned()), ("x".to_owned(), "Ana".to_owned())]
     );
     db.receive(queued.into()).await.unwrap();
-    let refused: bool = db.inspect_writer(|db| {
+    let refused: bool = db.inspect_writer(|db, _| {
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_refusals)", [], |r| r.get(0))
             .unwrap()
     });
@@ -852,7 +852,7 @@ async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
         .unwrap();
     sql(&db, "DELETE FROM artists WHERE id='prince'").await.unwrap();
     let albums = |db: &crate::Database| -> Vec<String> {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT id FROM albums ORDER BY id", [], |r| r.get(0)).unwrap()
         })
     };
@@ -867,7 +867,7 @@ async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
 /// The kept record of `table` row `id`, as stored.
 fn kept_record(database: &crate::Database, table: &str, id: &str) -> Option<Vec<u8>> {
     let key = crate::tests::text_key(id);
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         db.query(
             "SELECT record FROM _coven_published_rows WHERE table_name=?1 AND key=?2",
             rusqlite::params![table, key],
@@ -900,15 +900,15 @@ async fn a_write_beside_a_kept_row_keeps_the_first_capture_and_the_new_rows_empt
         .unwrap();
     assert_eq!(kept_record(&db, "notes", "a"), Some(first));
     let new_row = db
-        .inspect_writer(|db| {
+        .inspect_writer(|db, _| {
             crate::published::kept_state(db, &crate::tests::store_row("notes", "b")).unwrap()
         })
         .expect("the new row is kept");
     assert_eq!(new_row.generation(), 0);
     assert!(new_row.cells().is_empty());
     assert_eq!(published(&db, "notes"), 2);
-    let put_back = db.inspect_writer_schema(|db, schema| {
-        db.transaction(|db| crate::published::restore(db, schema)).unwrap()
+    let put_back = db.inspect_writer_schema(|db, call, schema| {
+        db.transaction(|db| crate::published::restore(db, call, schema)).unwrap()
     });
     assert_eq!(
         put_back,
@@ -931,7 +931,7 @@ async fn a_write_keeps_its_rows_aside_a_chunk_at_a_time() {
     let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('counted','Ben')").await.unwrap();
     count_own(&db).await;
-    let before = db.inspect_writer(|writer| writer.profiled_statements()).len();
+    let before = db.inspect_writer(|writer, _| writer.profiled_statements()).len();
     sql(
         &db,
         "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<499)
@@ -940,7 +940,7 @@ async fn a_write_keeps_its_rows_aside_a_chunk_at_a_time() {
     .await
     .unwrap();
     let kept = db
-        .inspect_writer(|writer| writer.profiled_statements())
+        .inspect_writer(|writer, _| writer.profiled_statements())
         .into_iter()
         .skip(before)
         .filter(|statement| statement.sql.contains("_coven_published"))

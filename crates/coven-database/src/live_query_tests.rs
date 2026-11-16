@@ -49,7 +49,7 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
 async fn run_changed_runs_once_for_a_change_and_returns_none_for_a_skipped_write() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) > 0 FROM notes", [], |r| r.get::<_, bool>(0))?)
     });
@@ -58,14 +58,14 @@ async fn run_changed_runs_once_for_a_change_and_returns_none_for_a_skipped_write
     assert!(query.run_changed().is_none());
     assert_eq!(query.runs().runs(), 1);
     // A second row changes what the query read, and not its result.
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
     assert!(query.is_marked_for_rerun());
     assert!(query.run_changed().is_none());
     assert_eq!((query.runs().runs(), query.runs().equal()), (2, 1));
     assert!(!query.is_marked_for_rerun());
     assert!(query.run_changed().is_none());
     assert_eq!(query.runs().runs(), 2);
-    db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
+    db.commit_writer(|sql, _| sql.batch("DELETE FROM notes").unwrap());
     assert!(!query.run_changed().unwrap().unwrap());
     db.close().await.unwrap();
     assert!(matches!(query.run_changed().unwrap(), Err(DbError::StoreClosed)));
@@ -86,7 +86,7 @@ async fn resolved(changed: &mut (impl Future<Output = ()> + Unpin)) -> bool {
 async fn changed_resolves_for_a_first_run_a_relevant_commit_a_request_and_the_end() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
         db.subscribe_reconfigurable(1, |request, sql| {
             Ok(sql.query("SELECT id FROM notes WHERE title='Plan' AND ?1 > 0", [request], |r| {
@@ -99,9 +99,9 @@ async fn changed_resolves_for_a_first_run_a_relevant_commit_a_request_and_the_en
 
     let mut idle = Box::pin(query.changed());
     assert!(!resolved(&mut idle).await);
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
     assert!(!resolved(&mut idle).await);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
     idle.await;
     assert_eq!(query.next_inline().await.unwrap().result.unwrap(), ["a", "b"]);
 
@@ -137,7 +137,7 @@ async fn next_blocking_parks_its_thread_until_a_commit_changes_what_the_query_re
         (first, second)
     });
     parked.recv_timeout(HANG_GUARD).unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let (first, second) = following.join().unwrap();
     assert!(first.unwrap().unwrap().is_empty());
     assert_eq!(second.unwrap().unwrap(), ["a"]);
@@ -164,7 +164,7 @@ async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 's
 async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         sql.batch("INSERT INTO notes VALUES ('a','Plan',''),('b','Other','')").unwrap()
     });
     let calls = Arc::new(AtomicUsize::new(0));
@@ -183,14 +183,16 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
         Ok(values)
     });
     assert_eq!(next_result(&mut query).await.unwrap(), ["a"]);
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET title='Other again' WHERE id='b'").unwrap());
+    db.commit_writer(|sql, _| {
+        sql.batch("UPDATE notes SET title='Other again' WHERE id='b'").unwrap()
+    });
     assert!(query.is_marked_for_rerun());
     assert_eq!(
         next_after_equal_run(&mut query, equal_finished, || {
-            db.commit_writer(|sql| {
+            db.commit_writer(|sql, _| {
                 sql.batch("UPDATE notes SET title='Plan' WHERE id='b'").unwrap()
             });
         })
@@ -199,14 +201,14 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
         ["a", "b"]
     );
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET title=title").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET title=title").unwrap());
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('c','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('c','Plan','')").unwrap());
     assert!(query.is_marked_for_rerun());
     assert_eq!(next_result(&mut query).await.unwrap(), ["a", "b", "c"]);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
-    db.commit_writer(|sql| sql.batch("DELETE FROM notes WHERE id='a'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("DELETE FROM notes WHERE id='a'").unwrap());
     assert!(query.is_marked_for_rerun());
     assert_eq!(next_result(&mut query).await.unwrap(), ["b", "c"]);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -225,9 +227,9 @@ async fn row_count_ignores_updates_and_rollback_journals_do_not_publish() {
         Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
     });
     assert_eq!(next_result(&mut query).await.unwrap(), 0);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','a',''); SAVEPOINT s; INSERT INTO notes VALUES ('b','b',''); ROLLBACK TO s").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','a',''); SAVEPOINT s; INSERT INTO notes VALUES ('b','b',''); ROLLBACK TO s").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), 1);
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         let error = sql.transaction::<()>(|sql| {
             sql.batch("INSERT INTO notes VALUES ('c','c','')")?;
             Err(DbError::TransactionEnded)
@@ -276,7 +278,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
     });
     entry.recv_timeout(HANG_GUARD).unwrap();
     // process starts only after the snapshot and pool lease have ended.
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     release.send(()).unwrap();
     let (mut query, value) = task.await.unwrap();
     assert_eq!(value, 0);
@@ -293,7 +295,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
 async fn a_write_outside_the_scope_during_a_rerun_does_not_run_it_again() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let hold = Arc::new(Mutex::new(None::<(mpsc::Sender<()>, mpsc::Receiver<()>)>));
     let held = Arc::clone(&hold);
     let mut query: LiveQuery<_, DbError> = db.subscribe(move |sql| {
@@ -312,7 +314,7 @@ async fn a_write_outside_the_scope_during_a_rerun_does_not_run_it_again() {
         let (entered, entry) = mpsc::channel();
         let (release, released) = mpsc::channel();
         *hold.lock().unwrap() = Some((entered, released));
-        db.commit_writer(|sql| {
+        db.commit_writer(|sql, _| {
             sql.batch(&format!("INSERT INTO notes VALUES ('{id}','Plan','')")).unwrap()
         });
         assert!(query.is_marked_for_rerun());
@@ -321,7 +323,7 @@ async fn a_write_outside_the_scope_during_a_rerun_does_not_run_it_again() {
             (query, ids)
         });
         entry.recv_timeout(HANG_GUARD).unwrap();
-        db.commit_writer(|sql| {
+        db.commit_writer(|sql, _| {
             sql.batch(&format!("INSERT INTO notes VALUES ('other {id}','Other','')")).unwrap()
         });
         release.send(()).unwrap();
@@ -347,11 +349,11 @@ async fn errors_are_results_and_a_later_commit_can_recover() {
         next_result(&mut query).await,
         Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
     ));
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
-    db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
+    db.commit_writer(|sql, _| sql.batch("DELETE FROM notes").unwrap());
     assert!(next_result(&mut query).await.is_err());
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
     db.close().await.unwrap();
 }
@@ -360,7 +362,7 @@ async fn errors_are_results_and_a_later_commit_can_recover() {
 async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','same','same')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','same','same')").unwrap());
     let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
         db.subscribe_reconfigurable(false, |body, sql| {
             Ok(sql.query_row(
@@ -387,9 +389,9 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
         ),
         (true, LiveQueryRevision(1), LiveQueryCause::Request, "same".into())
     );
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET title='ignored'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET title='ignored'").unwrap());
     assert!(!query.is_marked_for_rerun());
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET body='new'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET body='new'").unwrap());
     assert!(query.is_marked_for_rerun());
     assert_eq!(requests.set(false).unwrap(), LiveQueryRevision(2));
     assert_eq!(requests.clone().set(true).unwrap(), LiveQueryRevision(3));
@@ -450,7 +452,7 @@ async fn requests_set_during_a_run_wait_for_it_and_the_latest_answers_next() {
 async fn process_compares_processed_results() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let (equal_run, equal_finished) = tokio::sync::oneshot::channel();
@@ -466,11 +468,11 @@ async fn process_compares_processed_results() {
             Ok(value.len())
         });
     assert_eq!(next_result(&mut query).await.unwrap(), 4);
-    db.commit_writer(|sql| sql.batch("UPDATE notes SET title='Test'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE notes SET title='Test'").unwrap());
     assert!(query.is_marked_for_rerun());
     assert_eq!(
         next_after_equal_run(&mut query, equal_finished, || {
-            db.commit_writer(|sql| sql.batch("UPDATE notes SET title='Changed'").unwrap());
+            db.commit_writer(|sql, _| sql.batch("UPDATE notes SET title='Changed'").unwrap());
         })
         .await
         .unwrap(),
@@ -485,7 +487,7 @@ async fn process_compares_processed_results() {
 async fn joins_views_generated_columns_collations_and_local_tables_are_observed() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE local(value TEXT COLLATE NOCASE, extra INTEGER, upper_value TEXT AS (upper(value))); CREATE TABLE keyed(id TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID; CREATE VIEW joined AS SELECT local.value, local.upper_value, keyed.value AS other FROM local JOIN keyed ON local.value=keyed.id").await.unwrap();
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         sql.batch(
             "INSERT INTO local(value,extra) VALUES ('a',0); INSERT INTO keyed VALUES ('a',x'01')",
         )
@@ -497,15 +499,15 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
         })?)
     });
     assert_eq!(next_result(&mut query).await.unwrap(), [("a".into(), "A".into(), vec![1])]);
-    db.commit_writer(|sql| sql.batch("UPDATE local SET value='A'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE local SET value='A'").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![1])]);
-    db.commit_writer(|sql| sql.batch("UPDATE keyed SET value=x'02'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE keyed SET value=x'02'").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![2])]);
     let mut generated: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT upper_value FROM local", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(next_result(&mut generated).await.unwrap(), "A");
-    db.commit_writer(|sql| sql.batch("UPDATE local SET value='b'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE local SET value='b'").unwrap());
     assert_eq!(next_result(&mut generated).await.unwrap(), "B");
     assert!(next_result(&mut query).await.unwrap().is_empty());
     db.close().await.unwrap();
@@ -515,7 +517,7 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
 async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent REFERENCES parent ON DELETE CASCADE, title); CREATE TABLE audit(value); CREATE TRIGGER record_change AFTER UPDATE OF title ON child BEGIN INSERT INTO audit VALUES (new.title); END;").await.unwrap();
-    db.commit_writer(|sql| {
+    db.commit_writer(|sql, _| {
         sql.batch("INSERT INTO parent VALUES (1); INSERT INTO child VALUES (1,'one')").unwrap()
     });
     let calls = Arc::new(AtomicUsize::new(0));
@@ -534,7 +536,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     });
     assert_eq!(next_result(&mut children).await.unwrap(), 1);
     assert!(next_result(&mut audit).await.unwrap().is_empty());
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.transaction(|sql| {
             sql.app_execute("UPDATE child SET title='two'", [])?;
             Ok(())
@@ -547,7 +549,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     assert_eq!(next_result(&mut audit).await.unwrap(), ["two"]);
     assert_eq!(
         next_after_equal_run(&mut children, equal_finished, || {
-            db.commit_writer(|sql| sql.batch("DELETE FROM parent").unwrap());
+            db.commit_writer(|sql, _| sql.batch("DELETE FROM parent").unwrap());
         })
         .await
         .unwrap(),
@@ -569,9 +571,9 @@ async fn virtual_table_queries_observe_updates() {
         })?)
     });
     assert!(next_result(&mut query).await.unwrap().is_empty());
-    db.commit_writer(|sql| sql.batch("INSERT INTO search VALUES ('plan','body')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO search VALUES ('plan','body')").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), ["plan"]);
-    db.commit_writer(|sql| sql.batch("UPDATE search SET title='changed'").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE search SET title='changed'").unwrap());
     assert!(next_result(&mut query).await.unwrap().is_empty());
     db.close().await.unwrap();
 }
@@ -609,12 +611,9 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
     for run in 1..=3 {
         // FTS5 writes the new body to its shadow tables; defensive mode
         // refuses writing them directly (§4).
-        db.commit_writer(|writer| {
+        db.commit_writer(|writer, _| {
             writer
-                .internal_execute(
-                    "UPDATE search SET body=?1 WHERE rowid=1",
-                    [format!("body {run}")],
-                )
+                .execute("UPDATE search SET body=?1 WHERE rowid=1", [format!("body {run}")])
                 .unwrap();
         });
         // The unchanged title still reruns when another shadow column changes;
@@ -875,7 +874,7 @@ async fn a_failed_handles_query_reports_once_then_ends() {
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let mut query = db.subscribe(count_notes);
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
-    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
     assert!(db
         .write(|sql| -> Result<(), DbError> {
             sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
@@ -900,7 +899,7 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
         Ok(count)
     });
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
     let ended = query.next_inline().await;
     assert!(
         matches!(
@@ -910,7 +909,7 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
         ),
         "{ended:?}"
     );
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
     assert!(query.next_inline().await.is_none());
     db.close().await.unwrap();
 }
@@ -928,10 +927,10 @@ async fn a_live_query_delivers_its_closures_own_error_and_goes_on() {
         count => Ok(count),
     });
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
     let refused = query.next_inline().await;
     assert!(matches!(refused, Some(Err(AppError::Refused("one note")))), "{refused:?}");
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 2);
     db.close().await.unwrap();
 }
@@ -949,7 +948,7 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
         Ok::<_, AppError>(count)
     });
     assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
     let ended = query.next_inline().await;
     assert!(
         matches!(
@@ -959,7 +958,7 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
         ),
         "{ended:?}"
     );
-    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
     assert!(query.next_inline().await.is_none());
     db.close().await.unwrap();
 }

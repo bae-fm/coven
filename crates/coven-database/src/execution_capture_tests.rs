@@ -51,7 +51,7 @@ pub(crate) struct Classified {
 impl Classified {
     /// The last write the device queued or refused.
     pub(crate) fn last(db: &Database) -> Self {
-        let (record, judgement) = db.inspect_writer(|c| c.take_judged().unwrap());
+        let (record, judgement) = db.inspect_writer(|_, call| call.take_judged().unwrap());
         let steps = record
             .parts
             .iter()
@@ -423,7 +423,8 @@ pub(crate) mod lean {
             sql(&db, seed).await.unwrap();
             sql(&db, case).await.unwrap();
             let operations = Classified::last(&db);
-            let (input, count) = db.inspect_writer_schema(|_, schema| input(schema, &operations));
+            let (input, count) =
+                db.inspect_writer_schema(|_, _, schema| input(schema, &operations));
             assert!(count > 0, "{case} causes foreign-key actions");
             let result = run_lean(&runner, &input);
             let derived = input["derived"].as_array().unwrap();
@@ -661,7 +662,7 @@ mod write_cost {
         db.write(write).await.unwrap();
         let elapsed = started.elapsed();
         let cpu = (cpu() - cpu_started) / rows as f64;
-        let statements = db.inspect_writer(|writer| writer.profiled_statements());
+        let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
         let fullscan: i64 = statements.iter().map(|s| i64::from(s.fullscan_steps)).sum();
         crate::test_utils::report_time(&format!("write_cost/{label}"), elapsed);
         crate::test_utils::report_cost(

@@ -42,13 +42,13 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
             coven_format::key::encode_key(&[Value::Text("c".into()), Value::Text("0".into())])
                 .unwrap();
     }
-    db.inspect_writer_schema(|db,schema| {
+    db.inspect_writer_schema(|db, call,schema| {
         db.transaction(|db| {
             let app = crate::write_rows::AppView::after(db,schema);
-            let store = super::MergeStore::new(db,&app);
+            let store = super::MergeStore::new(db, call,&app);
             let updates = store.apply(&incoming)?;
-            crate::write_commit::commit(db,&incoming,&store,&updates)?;
-            db.internal_execute("UPDATE children SET a='c',b='0'",[])?;
+            crate::write_commit::commit(db, call,&incoming,&store,&updates)?;
+            db.execute("UPDATE children SET a='c',b='0'",[])?;
             Ok(())
         }).unwrap();
         let value = db.query_row("SELECT value FROM _coven_lost WHERE table_name='children' AND column_id=(SELECT id FROM _coven_columns WHERE table_name='children' AND column_name='a')",[],|r| Ok(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
@@ -73,7 +73,7 @@ async fn the_newest_write_read_is_found_from_the_newest_down() {
         .open()
         .await
         .unwrap();
-    let plan = db.inspect_writer(|writer| {
+    let plan = db.inspect_writer(|writer, _| {
         writer
             .query(
                 &format!("EXPLAIN QUERY PLAN {}", super::newest_read()),
@@ -125,16 +125,16 @@ async fn keys_read_together_match_keys_read_one_by_one() {
     let Operation::Insert(columns) = &mut other.change.operation else { panic!("insert") };
     columns.get_mut("audience").unwrap().value = Value::Text("store".into());
     crate::tests::remote_write(&db, other).await;
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         let mut keys: Vec<(String, Vec<u8>)> =
             db.query("SELECT DISTINCT table_name,key FROM _coven_rows", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })?;
         keys.push(("notes".into(), b"absent".to_vec()));
         let app = crate::write_rows::AppView::after(db, schema);
-        let together = super::MergeStore::new(db, &app);
+        let together = super::MergeStore::new(db, call, &app);
         together.load_key_rows(keys.iter().map(|(t, k)| (t.as_str(), k.as_slice())))?;
-        let apart = super::MergeStore::new(db, &app);
+        let apart = super::MergeStore::new(db, call, &app);
         let mut two = false;
         for (table, key) in &keys {
             let rows = together.key_rows(table, key)?;
@@ -170,7 +170,7 @@ async fn reading_a_writes_keys_searches_the_key_index_and_scans_no_merge_rows() 
     .await
     .unwrap();
     let plan: Vec<String> = db
-        .inspect_writer_schema(|db, _| {
+        .inspect_writer_schema(|db, _, _| {
             db.query(
                 &format!("EXPLAIN QUERY PLAN {}", super::key_rows_sql(super::KEY_CHUNK)),
                 rusqlite::params_from_iter(vec![

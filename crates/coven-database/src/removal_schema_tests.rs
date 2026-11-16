@@ -36,7 +36,7 @@ async fn unnamed_check_identity_keeps_the_full_expression() {
                 panic!("expected SQLite CHECK failure: {error:?}")
             };
             let reported = message.strip_prefix("CHECK constraint failed: ").unwrap();
-            db.inspect_writer_schema(|_, schema| {
+            db.inspect_writer_schema(|_, _, schema| {
                 let (identity, evaluation) = &schema.rules["notes"].checks[0];
                 assert_eq!(identity, expression.trim_ascii());
                 assert!(!reported.is_empty());
@@ -71,7 +71,7 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
         )
         .await
         .unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         let rules = &schema.rules["notes"];
         assert_eq!(
             rules.checks,
@@ -105,7 +105,7 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
         );
     });
     sql(&db, "INSERT INTO notes(id,title,body,active) VALUES('1','Title','body',1)").await.unwrap();
-    db.inspect_writer_schema(|writer, schema| {
+    db.inspect_writer_schema(|writer, _, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
         let values =
             app.row(&("notes".into(), crate::tests::text_key("1"))).unwrap().unwrap().values;
@@ -132,7 +132,7 @@ async fn adjacent_table_constraints_and_sqlite_expression_spellings_keep_their_s
         )
         .await
         .unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         assert_eq!(
             schema.rules["notes"].checks,
             vec![
@@ -153,7 +153,7 @@ async fn adjacent_table_constraints_and_sqlite_expression_spellings_keep_their_s
 async fn distinct_unique_terms_survive_sqlite_sharing_their_physical_index() {
     let fixture = TestStore::new();
     let db=fixture.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,UNIQUE(title COLLATE BINARY))").await.unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         assert_eq!(schema.table("notes").indices.iter().filter(|i| !i.primary).count(), 1);
         let unique: std::collections::BTreeSet<_> =
             schema.rules["notes"].unique.iter().map(|u| u.identity.clone()).collect();
@@ -170,7 +170,7 @@ async fn distinct_unique_terms_survive_sqlite_sharing_their_physical_index() {
 async fn index_boolean_literals_are_not_column_names() {
     let fixture = TestStore::new();
     let db=fixture.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE UNIQUE INDEX constant ON notes(TRUE)").await.unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         assert_eq!(schema.rules["notes"].unique[0].identity, UniqueConstraint::from(["TRUE"]));
         assert!(schema.rules["notes"].unique[0].dependencies.is_empty());
     });
@@ -181,7 +181,7 @@ async fn index_boolean_literals_are_not_column_names() {
 async fn parenthesized_unique_columns_keep_their_expression_text() {
     let fixture = TestStore::new();
     let db=fixture.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,UNIQUE((title) COLLATE BINARY))").await.unwrap();
-    db.inspect_writer_schema(|_, schema| {
+    db.inspect_writer_schema(|_, _, schema| {
         assert_eq!(
             schema.rules["notes"].unique[0].identity,
             UniqueConstraint::from(["(title) COLLATE BINARY"])
@@ -312,9 +312,9 @@ async fn unnamed_check_sqlite_differential() {
         .unwrap();
     sql(&db, "INSERT INTO notes VALUES('row',5)").await.unwrap();
     let record = crate::write::tests::records(&db).remove(0);
-    db.inspect_writer_schema(|writer, schema| {
+    db.inspect_writer_schema(|writer, call, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
-        let store = crate::merge_store::MergeStore::new(writer, &app);
+        let store = crate::merge_store::MergeStore::new(writer, call, &app);
         let state = store.row(&record.parts[0].rows[0].row).unwrap().state;
         let mut values: crate::write_rows::AppValues =
             state.cells().iter().map(|(c, v)| (c.clone(), v.value.value.clone())).collect();
@@ -344,12 +344,12 @@ async fn unnamed_check_sqlite_differential() {
             .failed_checks;
             let mut expected = BTreeSet::new();
             for (i, expression) in expressions.iter().enumerate() {
-                match writer.internal_execute(
+                match writer.execute(
                     &format!("INSERT INTO oracle{i} VALUES(?1)"),
                     [crate::write_encoding::sql_value(&value)],
                 ) {
                     Ok(_) => {
-                        writer.internal_execute(&format!("DELETE FROM oracle{i}"), []).unwrap();
+                        writer.execute(&format!("DELETE FROM oracle{i}"), []).unwrap();
                     }
                     Err(crate::DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
                         if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>

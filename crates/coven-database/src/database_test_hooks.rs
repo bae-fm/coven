@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 
 /// The removal of a snapshot staging its caller abandoned.
 pub(crate) type StagingRemoval = coven_foundation::task::CompletingTask<Result<(), DbError>>;
@@ -82,32 +83,49 @@ impl Database {
         inner.as_ref().unwrap().access.readers.observe_next_wait()
     }
 
-    pub(crate) fn commit_writer<T>(&self, run: impl FnOnce(&DatabaseConnection) -> T) -> T {
-        self.inspect_writer(|writer| writer.transaction(|writer| Ok(run(writer))).unwrap())
+    pub(crate) fn commit_writer<T>(
+        &self,
+        run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> T,
+    ) -> T {
+        self.inspect_writer(|writer, call| {
+            writer.transaction(|writer| Ok(run(writer, call))).unwrap()
+        })
     }
 
     pub(crate) fn inspect_writer_schema<T>(
         &self,
-        inspect: impl FnOnce(&mut DatabaseConnection, &crate::write_schema::WriteSchema) -> T,
+        inspect: impl FnOnce(
+            &mut DatabaseConnection,
+            &StoreCall<'_>,
+            &crate::write_schema::WriteSchema,
+        ) -> T,
     ) -> T {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let mut writer = inner.access.writer.lock().unwrap();
-        inspect(&mut writer, &inner.access.write_schema)
+        let access = &inner.access;
+        let mut writer = access.writer.lock().unwrap();
+        let device = writer.observes_commits().then_some(access.device);
+        {
+            let call = &crate::store_call::StoreCall::new(device, &access.tests);
+            let writer = &mut writer;
+            inspect(writer, call, &access.write_schema)
+        }
     }
 
     pub(crate) fn inspect_writer<T>(
         &self,
-        inspect: impl FnOnce(&mut DatabaseConnection) -> T,
+        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
     ) -> T {
         let inner = self.inner.read().unwrap();
-        let mut writer = inner.as_ref().unwrap().access.writer.lock().unwrap();
-        inspect(&mut writer)
+        inner.as_ref().unwrap().access.inspect_writer(inspect)
     }
 
-    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection)) {
+    pub(crate) fn inspect_readers(
+        &self,
+        inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>),
+    ) {
         let inner = self.inner.read().unwrap();
-        inner.as_ref().unwrap().access.readers.inspect_each(inspect);
+        inner.as_ref().unwrap().access.inspect_readers(inspect);
     }
 
     /// Every connection the store holds open, one at a time, each under its
@@ -186,17 +204,38 @@ impl Database {
 }
 
 impl Database<ReadOnly> {
-    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection)) {
+    pub(crate) fn inspect_readers(
+        &self,
+        inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>),
+    ) {
         let inner = self.inner.read().unwrap();
-        inner.as_ref().unwrap().readers.inspect_each(inspect);
+        inner.as_ref().unwrap().inspect_readers(inspect);
     }
 
     pub(crate) fn inspect_writer<T>(
         &self,
-        inspect: impl FnOnce(&mut DatabaseConnection) -> T,
+        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
     ) -> T {
         let inner = self.inner.read().unwrap();
-        let mut writer = inner.as_ref().unwrap().writer.lock().unwrap();
-        inspect(&mut writer)
+        inner.as_ref().unwrap().inspect_writer(inspect)
+    }
+}
+
+impl<L> DatabaseAccess<L> {
+    /// Run `inspect` on the writer, as a call on it would see it.
+    fn inspect_writer<T>(
+        &self,
+        inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
+    ) -> T {
+        let mut writer = self.writer.lock().unwrap();
+        let device = writer.observes_commits().then_some(self.device);
+        inspect(&mut writer, &crate::store_call::StoreCall::new(device, &self.tests))
+    }
+
+    /// Run `inspect` on each reader in turn, as a call on it would see it.
+    fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>)) {
+        self.readers.inspect_each(|reader| {
+            inspect(reader, &crate::store_call::StoreCall::new(None, &self.tests));
+        });
     }
 }

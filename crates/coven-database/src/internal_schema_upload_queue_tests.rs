@@ -26,7 +26,7 @@ async fn open(store: &TestStore, schema: &'static str) -> crate::Database {
 
 /// Whether `coven_upload_queue` holds exactly the files `coven_uploads` lists.
 fn agrees(db: &crate::Database) -> bool {
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .query_row(
                 "SELECT NOT EXISTS(SELECT file,position FROM coven_upload_queue
@@ -178,7 +178,7 @@ async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std
         )
         .await
         .unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .batch(&format!(
                 "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{files})
@@ -200,7 +200,7 @@ async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std
         }
     });
     let started = std::time::Instant::now();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         // One write staged every track for the cloud: one move, and one
         // upload of coven's copy of each track's bytes.
         writer.batch("BEGIN").unwrap();

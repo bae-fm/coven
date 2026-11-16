@@ -273,7 +273,7 @@ async fn a_stored_claim_that_does_not_decode_is_damaged_database() {
             })
             .await
             .unwrap();
-        database.inspect_writer(|db| {
+        database.inspect_writer(|db, _| {
             db.batch(&format!(
                 "PRAGMA ignore_check_constraints=ON; {broken}; PRAGMA ignore_check_constraints=OFF;"
             ))

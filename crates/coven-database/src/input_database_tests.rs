@@ -1,4 +1,6 @@
 use super::*;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::tests::TestStore;
 use coven_format::{path::ObjectPath, value::Slot};
 use coven_foundation::clock::HANG_GUARD;
@@ -135,10 +137,11 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
 async fn input_connections_take_covens_checkpoint_sync() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let syncs = |connection: &DatabaseConnection| -> Result<(bool, bool), DbError> {
-        let settings = connection.sqlite_settings()?;
-        Ok((settings.fullfsync, settings.checkpoint_fullfsync))
-    };
+    let syncs =
+        |connection: &DatabaseConnection, _: &StoreCall<'_>| -> Result<(bool, bool), DbError> {
+            let settings = connection.sqlite_settings()?;
+            Ok((settings.fullfsync, settings.checkpoint_fullfsync))
+        };
     // Coven's own checkpoint sync on macOS and iOS (§3); SQLite's off elsewhere.
     let expected = (false, cfg!(any(target_os = "macos", target_os = "ios")));
     let read = db.call(move |inner| inner.inputs.read(syncs)).await.unwrap();
@@ -153,12 +156,14 @@ async fn a_failed_range_commit_preserves_prior_ranges_and_budget() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "write", 1, false).await;
     input.keep_range(0, vec![1, 2]).await.unwrap();
-    db.call(|inner| inner.inputs.write(|db| db.batch("CREATE TRIGGER refuse_input AFTER INSERT ON _coven_input_ranges BEGIN SELECT RAISE(ABORT,'input failed'); END"))).await.unwrap();
+    db.call(|inner| inner.inputs.write(|db, _| db.batch("CREATE TRIGGER refuse_input AFTER INSERT ON _coven_input_ranges BEGIN SELECT RAISE(ABORT,'input failed'); END"))).await.unwrap();
     let before = db.input_budget().await.unwrap();
     assert!(input.keep_range(2, vec![3, 4]).await.is_err());
     assert_eq!(db.input_budget().await.unwrap(), before);
     assert_eq!(input.ranges(0, 4).await.unwrap()[0].bytes, [1, 2]);
-    db.call(|inner| inner.inputs.write(|db| db.batch("DROP TRIGGER refuse_input"))).await.unwrap();
+    db.call(|inner| inner.inputs.write(|db, _| db.batch("DROP TRIGGER refuse_input")))
+        .await
+        .unwrap();
     input.keep_range(2, vec![3, 4]).await.unwrap();
     assert_eq!(db.input_budget().await.unwrap().retained, 4);
 }
@@ -199,9 +204,9 @@ async fn range_queries_seek_past_preceding_chunks_and_preserve_gaps() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let input = input(&db, "write", 1, false).await;
-    input.write(|db,id| {
+    input.write(|db, _,id| {
         for start in (0..10_000).step_by(2) {
-            db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,X'01')", (id,start,start+1))?;
+            db.execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,X'01')", (id,start,start+1))?;
         }
         let plans = db.query(&format!("EXPLAIN QUERY PLAN {RANGES}"), (id,9998,10000), |r| r.get::<_,String>(3))?;
         assert!(plans.iter().any(|plan| plan.contains("object=? AND start>? AND start<?")), "{plans:?}");

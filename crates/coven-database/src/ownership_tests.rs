@@ -14,7 +14,7 @@ fn row(n: usize) -> RowId {
 }
 
 fn selected(db: &Database, row: &RowId) -> Option<Creation> {
-    db.inspect_writer(|c| creation(c, row).unwrap())
+    db.inspect_writer(|c, _| creation(c, row).unwrap())
 }
 
 fn own(write: WriteId, row: RowId) -> Creation {
@@ -164,7 +164,7 @@ async fn a_queued_creation_yields_to_a_published_owner() {
 
     db.receive(theirs.clone().into()).await.unwrap();
     assert_eq!(selected(&db, &row(0)), Some(own(theirs.header.position, row(0))));
-    let shown: (String, String) = db.inspect_writer(|c| {
+    let shown: (String, String) = db.inspect_writer(|c, _| {
         c.query_row("SELECT a,b FROM rows WHERE id='0'", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
     });
@@ -211,7 +211,7 @@ async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
         .unwrap();
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES('a','one'),('b','one')").await.unwrap();
     let creations = |db: &Database| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.query("SELECT key,write_id FROM _coven_creations ORDER BY key", [], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
             })
@@ -222,7 +222,7 @@ async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
     assert_eq!(first.len(), 2);
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES('c','two')").await.unwrap();
     crate::write::tests::sql(&db, "UPDATE notes SET title='three'").await.unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("SELECT write_id,creator FROM _coven_creations"), 0);
     assert_eq!(runs("SELECT (SELECT record FROM _coven_authored_changes"), 0);

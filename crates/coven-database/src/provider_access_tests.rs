@@ -31,7 +31,7 @@ async fn a_stored_access_record_with_a_target_but_no_request_is_damaged_database
     )
     .await
     .unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch(
             "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;
              UPDATE _coven_provider_access SET operation=NULL,target=1;

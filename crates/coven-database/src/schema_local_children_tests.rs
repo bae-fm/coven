@@ -67,7 +67,7 @@ async fn local_keys_into_values_coven_updates_must_follow_them() {
         );
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|writer| writer.batch(&schema).unwrap());
+        db.inspect_writer(|writer, _| writer.batch(&schema).unwrap());
         db.close().await.unwrap();
         check(store.builder(vec![shared("parents")], vec![]).open().await);
     }
@@ -81,7 +81,7 @@ async fn a_local_key_that_does_not_follow_stops_every_apply() {
     let store = TestStore::new();
     let db = store.schema(vec![shared("parents")], PARENTS).await.unwrap();
     crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','a')").await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .batch("CREATE TABLE pins(code TEXT REFERENCES parents(code) ON DELETE CASCADE); INSERT INTO pins VALUES('a')")
             .unwrap()

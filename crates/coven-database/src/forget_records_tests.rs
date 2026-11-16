@@ -129,7 +129,7 @@ async fn try_land(
 /// evidence.
 fn kept(db: &Database, write: WriteId) -> [i64; 5] {
     let id = merge_fields::encode_write_id(&write).unwrap();
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         [
             "_coven_authored_changes",
             "_coven_authored_admissions",
@@ -148,7 +148,7 @@ fn kept(db: &Database, write: WriteId) -> [i64; 5] {
 
 /// The writes whose kept changes a snapshot of the store carries.
 fn snapshot_changes(db: &Database) -> Vec<WriteId> {
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let mut writes = Vec::new();
         let mut part = None;
         crate::write_sources::visit_evidence::<DbError>(c, &Audience::Store, |record| {
@@ -195,7 +195,7 @@ async fn an_edit_every_writer_wrote_past_is_forgotten() {
 /// The verdict this device gave the change of `write`.
 fn verdict(db: &Database, write: WriteId) -> ChangeVerdict {
     let id = merge_fields::encode_write_id(&write).unwrap();
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let admission: Vec<u8> = c
             .query_row(
                 "SELECT admission FROM _coven_authored_admissions WHERE write_id=?1",
@@ -257,7 +257,7 @@ async fn with_no_other_writer_each_slot_forgets_what_stopped_in_it() {
 /// Whether this device keeps `write`'s applied-write entry, and its
 /// plaintext header.
 fn entry(db: &Database, write: WriteId) -> (bool, bool) {
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         (
             crate::write_metadata::stored_write(c, write).unwrap().is_some(),
             crate::write_headers::read(c, write).unwrap().is_some(),

@@ -1,10 +1,10 @@
 //! SQLite's actual schema, declaration checks, and per-migration comparison.
 
+use crate::sqlite::DatabaseConnection;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
 use crate::schema_sql::{guarded_trigger, table_parts};
-use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
 use sqlive::sql::{identifier, tokens};
 use sqlive::Affinity;

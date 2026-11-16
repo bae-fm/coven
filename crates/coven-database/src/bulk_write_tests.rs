@@ -72,7 +72,7 @@ async fn clearing_a_local_table_takes_one_step() {
     assert_eq!(crate::write::tests::count(&db, "queue"), ROWS);
     bulk(&db, "DELETE FROM queue".into()).await.unwrap();
     assert_eq!(crate::write::tests::count(&db, "queue"), 0);
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let clear = statements
         .iter()
         .find(|statement| statement.sql == "DELETE FROM queue")

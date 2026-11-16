@@ -4,7 +4,9 @@
 
 use crate::file_location::Place;
 use crate::file_table::{self, COORDINATES};
-use crate::{sqlite::DatabaseConnection, write_rows::AppKey, write_schema::WriteSchema, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{write_rows::AppKey, write_schema::WriteSchema, DbError};
 use coven_format::{
     file_reference::FileReference,
     loss::{Loss, LossValues},
@@ -139,12 +141,12 @@ pub(crate) fn retain_loss(
     let mut paths = BTreeSet::new();
     loss(record, &mut paths);
     for (device, object) in &paths {
-        db.internal_execute("INSERT INTO _coven_row_file_refs(device,object,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.row.table,record.row.key])?;
+        db.execute("INSERT INTO _coven_row_file_refs(device,object,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.row.table,record.row.key])?;
     }
     let mut files = BTreeSet::new();
     loss_files(schema, record, |_, _| true, &mut files);
     for (file, column) in files {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_file_references(file,table_name,key,column_name)
              VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",
             params![file, record.row.table, record.row.key, column],
@@ -161,12 +163,13 @@ pub(crate) fn retain_loss(
 /// not read back from the store.
 pub(crate) fn refresh(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
     merged: &Merged,
 ) -> Result<BTreeSet<FileId>, DbError> {
     if file_table::is_files(&key.0) {
-        refresh_record(db, schema, key)?;
+        refresh_record(db, call, schema, key)?;
         return Ok(BTreeSet::new());
     }
     if schema.file_columns(&key.0).is_empty()
@@ -178,7 +181,7 @@ pub(crate) fn refresh(
     {
         return Ok(BTreeSet::new());
     }
-    let files = row_files(db, schema, key, merged)?;
+    let files = row_files(db, call, schema, key, merged)?;
     let previous: BTreeSet<(FileId, String)> = db
         .query(
             "SELECT file,column_name FROM _coven_file_references WHERE table_name=?1 AND key=?2",
@@ -189,7 +192,7 @@ pub(crate) fn refresh(
         .collect();
     let mut released = BTreeSet::new();
     for (file, column) in previous.difference(&files) {
-        db.internal_execute(
+        db.execute(
             "DELETE FROM _coven_file_references
              WHERE file=?1 AND table_name=?2 AND key=?3 AND column_name=?4",
             params![file, key.0, key.1, column],
@@ -199,7 +202,7 @@ pub(crate) fn refresh(
         }
     }
     for (file, column) in files.difference(&previous) {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_file_references(file,table_name,key,column_name)
              VALUES(?1,?2,?3,?4)",
             params![file, key.0, key.1, column],
@@ -215,16 +218,17 @@ pub(crate) fn refresh(
 /// two devices each removed one of its references, neither seeing the other.
 pub(crate) fn refresh_received(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
 ) -> Result<(), DbError> {
-    await_own_write(db, refresh(db, schema, key, &Merged::new())?)
+    await_own_write(db, refresh(db, call, schema, key, &Merged::new())?)
 }
 
 /// A file referenced again, or whose record is gone, no longer waits for
 /// its record's delete.
 pub(crate) fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_unreferenced_files WHERE EXISTS(
              SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file)
          OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)",
@@ -241,7 +245,7 @@ pub(crate) fn rename_reference_column(
     old: &str,
     new: &str,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_file_references SET column_name=?3 WHERE table_name=?1 AND column_name=?2",
         params![table, old, new],
     )?;
@@ -255,7 +259,7 @@ pub(crate) fn rename_reference_table(
     old: &str,
     new: &str,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_file_references SET table_name=?2 WHERE table_name=?1",
         params![old, new],
     )?;
@@ -271,7 +275,7 @@ pub(crate) fn await_own_write(
 ) -> Result<(), DbError> {
     for file in released {
         if file_table::Record::read(db, file)?.is_some() {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_unreferenced_files(file) VALUES(?1) ON CONFLICT DO NOTHING",
                 [file],
             )?;
@@ -286,6 +290,7 @@ pub(crate) fn await_own_write(
 /// after the write; the others are read.
 pub(crate) fn row_files(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
     merged: &Merged,
@@ -308,7 +313,7 @@ pub(crate) fn row_files(
         )?;
         if !unmerged.is_empty() {
             let visible = crate::write_rows::AppView::after(db, schema).without_row_cache();
-            let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
+            let store = crate::merge_store::MergeStore::new(db, call, &visible).without_row_cache();
             for row in &unmerged {
                 // Its live lost values are among the loss records below.
                 let state = store.row_without_losses(row)?.state;
@@ -333,13 +338,14 @@ pub(crate) fn row_files(
 /// back (§15.9), has its original forgotten (§17.2).
 fn refresh_record(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     key: &AppKey,
 ) -> Result<(), DbError> {
     let mut references = BTreeSet::new();
     let visible = crate::write_rows::AppView::after(db, schema);
     let displayed = visible.row(key)?;
-    let store = crate::merge_store::MergeStore::new(db, &visible);
+    let store = crate::merge_store::MergeStore::new(db, call, &visible);
     let deleted = crate::store_state_tables::deleted_circles(db)?;
     let mut kept = false;
     db.for_each(
@@ -375,13 +381,13 @@ fn refresh_record(
         .into_iter()
         .collect();
     for (device, object) in previous.difference(&references) {
-        db.internal_execute(
+        db.execute(
             "DELETE FROM _coven_row_file_refs WHERE device=?1 AND object=?2 AND table_name=?3 AND key=?4",
             params![device, object, key.0, key.1],
         )?;
     }
     for (device, object) in references.difference(&previous) {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_row_file_refs(device,object,table_name,key) VALUES(?1,?2,?3,?4)",
             params![device, object, key.0, key.1],
         )?;
@@ -395,7 +401,7 @@ fn refresh_record(
             hash: Some(hash),
             namespace,
             ..
-        }) => db.internal_execute(
+        }) => db.execute(
             "INSERT INTO _coven_stored_files(file,namespace,device,object,object_path,hash) VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(file) DO UPDATE SET namespace=excluded.namespace,device=excluded.device,object=excluded.object,object_path=excluded.object_path,hash=excluded.hash
              WHERE namespace!=excluded.namespace OR device!=excluded.device OR object!=excluded.object OR hash!=excluded.hash",
@@ -408,7 +414,7 @@ fn refresh_record(
                 hash.as_bytes().as_slice()
             ],
         )?,
-        _ => db.internal_execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
+        _ => db.execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
     };
     settle_record(db, id, cached, shown.as_ref(), kept)
 }
@@ -504,16 +510,17 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
 /// affected row's file references inside that migration.
 pub(crate) fn migrate(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     tables: &[crate::SyncedTable],
 ) -> Result<BTreeSet<FileId>, DbError> {
-    let schema = WriteSchema::read(db, tables.to_vec())?;
+    let schema = WriteSchema::read(db, call, tables.to_vec())?;
     let mut released = BTreeSet::new();
     let keys = db.query("SELECT DISTINCT table_name,key FROM _coven_file_references", [], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
     })?;
     let mut refreshed = BTreeSet::new();
     for key in keys {
-        released.extend(refresh(db, &schema, &key, &Merged::new())?);
+        released.extend(refresh(db, call, &schema, &key, &Merged::new())?);
         refreshed.insert(key);
     }
     for declaration in tables.iter().filter(|table| !table.files.is_empty()) {
@@ -525,7 +532,7 @@ pub(crate) fn migrate(
         for key in keys {
             let key = (declaration.name.clone(), key);
             if refreshed.insert(key.clone()) {
-                released.extend(refresh(db, &schema, &key, &Merged::new())?);
+                released.extend(refresh(db, call, &schema, &key, &Merged::new())?);
             }
         }
     }
@@ -587,7 +594,7 @@ pub(crate) fn queued(
         }
     }
     for (device, object) in references {
-        db.internal_execute("INSERT INTO _coven_queued_file_refs(device,object,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.header.position.device,record.header.position.number.to_be_bytes()])?;
+        db.execute("INSERT INTO _coven_queued_file_refs(device,object,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,object,record.header.position.device,record.header.position.number.to_be_bytes()])?;
     }
     Ok(())
 }

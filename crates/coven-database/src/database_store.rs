@@ -10,7 +10,7 @@ impl Database {
     /// name.
     pub async fn initialize_store_name(&self, name: String) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     crate::store_state_tables::name_before_creation(
                         db,
@@ -34,7 +34,7 @@ impl Database {
         named_at: coven_merge::Slot,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     crate::store_state_tables::name_before_creation(
                         db,

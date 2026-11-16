@@ -18,7 +18,7 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
     runtime.block_on(async {
         let store = TestStore::new();
         let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-        db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+        db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
         let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
         let query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
             ran.send(()).unwrap();
@@ -28,7 +28,7 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
         assert!(first.unwrap().unwrap());
         runs.recv().await.unwrap();
         let answer = tokio::spawn(crate::next_result(query));
-        db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
+        db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
         // The run that finds an equal result has started.
         runs.recv().await.unwrap();
         // Blocking work queued behind that run starts once it ends, which a
@@ -38,7 +38,7 @@ fn next_result_after_a_skipped_write_waits_without_holding_a_pool_thread() {
             .expect("the pool's one thread is free")
             .unwrap();
         assert!(!answer.is_finished(), "next_result returned an equal result");
-        db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
+        db.commit_writer(|sql, _| sql.batch("DELETE FROM notes").unwrap());
         let (_query, second) = answer.await.unwrap();
         assert!(!second.unwrap().unwrap());
         db.close().await.unwrap();

@@ -3,11 +3,12 @@
 //! becoming the original this device records.
 
 use super::FileWrite;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     file_hashes::FileHashes,
     file_location::{FileLocation, Place},
     file_table::Record,
-    sqlite::DatabaseConnection,
     write_schema::WriteSchema,
     DbError, Provenance,
 };
@@ -38,6 +39,7 @@ pub struct DeviceOnlyCopy {
 /// admin gets no exception, as with any row (§9.6).
 pub(crate) fn permitted(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     device: DeviceId,
     file: FileId,
@@ -48,7 +50,13 @@ pub(crate) fn permitted(
         return Err(DbError::NotInCloud { file });
     }
     crate::write_commit::check_membership(db, device, &record.audience)?;
-    let mut owners = crate::judge::Owners::new(db, schema, device, db.schema_version()?)?;
+    let mut owners = crate::judge::Owners::new(
+        db,
+        call,
+        schema,
+        device,
+        crate::transaction_constants::schema_version(db, call)?,
+    )?;
     for (table, key) in db.query(
         "SELECT DISTINCT table_name,key FROM _coven_file_references WHERE file=?1
          ORDER BY table_name,key",
@@ -88,7 +96,7 @@ impl FileWrite<'_> {
     fn make_device_only(&self, copies: Vec<DeviceOnlyCopy>) -> Result<(), DbError> {
         let db = self.database;
         for copy in copies {
-            let record = permitted(db, self.files.schema, self.files.device, copy.file)?;
+            let record = permitted(db, self.call, self.files.schema, self.files.device, copy.file)?;
             if record.place != Place::Cloud(copy.location.clone()) {
                 return Err(DbError::NotInCloud { file: copy.file });
             }

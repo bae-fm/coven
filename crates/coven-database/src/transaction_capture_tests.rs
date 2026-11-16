@@ -39,13 +39,13 @@ async fn a_captured_transaction_records_analyzes_statistics() {
         .await
         .unwrap();
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','a'),('2','b')").await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         let _internal = writer.authorization.internal();
         writer.batch("ANALYZE notes").unwrap();
     });
     // More rows, so analyzing again changes the statistics.
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')").await.unwrap();
-    let recorded = db.inspect_writer(|writer| {
+    let recorded = db.inspect_writer(|writer, _| {
         let mut transaction = WriteTransaction::begin(writer, false).unwrap();
         let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
         let changeset = transaction.within(|writer| {
@@ -79,7 +79,7 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
         .open()
         .await
         .unwrap();
-    let recorded = db.inspect_writer(|writer| {
+    let recorded = db.inspect_writer(|writer, _| {
         let mut transaction = WriteTransaction::begin(writer, false).unwrap();
         let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
         let changeset = transaction.within(|writer| {

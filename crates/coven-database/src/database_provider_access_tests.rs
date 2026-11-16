@@ -65,7 +65,7 @@ async fn operation_intention_journal_and_pending_roll_back_together() {
     for table in ["_coven_provider_access", "_coven_operations", "_coven_pending"] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|sql|sql.batch(&format!("CREATE TEMP TRIGGER refuse_access BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'access failed'); END;")).unwrap());
+        db.inspect_writer(|sql, _|sql.batch(&format!("CREATE TEMP TRIGGER refuse_access BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'access failed'); END;")).unwrap());
         assert!(db
             .start_operation_with_access::<Record>(change(false).operation, vec![change(false)])
             .await
@@ -129,7 +129,7 @@ async fn obsolete_completion_and_its_correction_are_one_commit() {
         let before = db.provider_access("account@example.com".into()).await.unwrap().unwrap();
         let pending = db.pending::<Record>().await.unwrap();
         let statement = if failed_table == "_coven_pending" { "INSERT" } else { "UPDATE" };
-        db.inspect_writer(|sql|sql.batch(&format!("CREATE TEMP TRIGGER refuse_access BEFORE {statement} ON {failed_table} BEGIN SELECT RAISE(ABORT,'confirmation failed'); END;")).unwrap());
+        db.inspect_writer(|sql, _|sql.batch(&format!("CREATE TEMP TRIGGER refuse_access BEFORE {statement} ON {failed_table} BEGIN SELECT RAISE(ABORT,'confirmation failed'); END;")).unwrap());
         assert!(db
             .complete_provider_request::<Record>("account@example.com".into(), id, false, None)
             .await

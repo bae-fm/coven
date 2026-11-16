@@ -1,6 +1,7 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
-use crate::{database, sqlite::DatabaseConnection, Database, DbError, LostValue, Mode, Writer};
+use crate::sqlite::DatabaseConnection;
+use crate::{database, Database, DbError, LostValue, Mode, Writer};
 use coven_foundation::task::CarriesBug;
 use rusqlite::{Params, Row};
 use std::{
@@ -70,7 +71,7 @@ impl<'connection> SqlReadContext<'connection> {
     }
 
     pub(crate) fn lost_values(&self) -> Result<Vec<LostValue>, DbError> {
-        self.database.lost_values()
+        crate::store_call::lost_values(self.database)
     }
 
     pub(crate) fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {

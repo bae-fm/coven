@@ -3,8 +3,10 @@
 //! A capture fixes eligibility through its marker. Snapshot bytes are made from
 //! the counted base only after that prefix has acquired slots; later local
 //! originals remain outside it.
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, counter};
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{admin::SnapshotId, snapshot::SnapshotHeader};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
@@ -30,7 +32,7 @@ pub(crate) fn capture(
     version: u32,
 ) -> Result<bool, DbError> {
     let state = crate::store_state_tables::read(db)?;
-    db.internal_execute("DELETE FROM _coven_raise_captures", [])?;
+    db.execute("DELETE FROM _coven_raise_captures", [])?;
     let Some(member) = state
         .store
         .as_ref()
@@ -46,7 +48,7 @@ pub(crate) fn capture(
         if rebuilding.contains_key(&selected) {
             continue;
         }
-        db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![&selected,version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
+        db.execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![&selected,version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     Ok(true)
 }
@@ -58,12 +60,13 @@ pub(crate) fn capture(
 /// that migration queued (§18.3).
 pub(crate) fn capture_created(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
 ) -> Result<(), DbError> {
     if breaking_version(db)? == 0 || !provisional(db)?.is_empty() {
         return Ok(());
     }
-    let device = db
+    let device = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     let queued = db.query(
@@ -77,7 +80,7 @@ pub(crate) fn capture_created(
             .ok_or(DbError::Invariant { what: "a queued write has its header" })?
             .header;
         if header.disposition == coven_format::write::WriteDisposition::Migration {
-            capture(db, schema, marker, db.schema_version()?)?;
+            capture(db, schema, marker, crate::transaction_constants::schema_version(db, call)?)?;
             return Ok(());
         }
     }
@@ -94,12 +97,13 @@ pub(crate) fn capture_created(
 /// (§15.5, §18.3).
 pub(crate) fn capture_made(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     circle: coven_foundation::id_source::CircleId,
     state: &crate::StoreState,
     operation: Option<&crate::migration::MigrationOperation>,
 ) -> Result<(), DbError> {
     let audience = Audience::Circle(circle);
-    let device = db
+    let device = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     let made = state
@@ -115,7 +119,7 @@ pub(crate) fn capture_made(
         Some(through) => through,
         None => crate::write_metadata::newest_number(db, device)?.unwrap_or(0),
     };
-    capture_circle(db, &audience, through, operation)
+    capture_circle(db, call, &audience, through, operation)
 }
 
 /// Capture `audience` through the device's write number `through` at the
@@ -123,15 +127,16 @@ pub(crate) fn capture_made(
 /// capture if the migration's has finished.
 fn capture_circle(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     audience: &Audience,
     through: u64,
     operation: Option<&crate::migration::MigrationOperation>,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",
         params![
             audience,
-            db.schema_version()?,
+            crate::transaction_constants::schema_version(db, call)?,
             through.to_be_bytes(),
             crate::sequence::applied(db)?.to_be_bytes()
         ],
@@ -140,7 +145,7 @@ fn capture_circle(
     // publish captures while one is open.
     if let Some(operation) = operation {
         if crate::operation::of_kind(db, crate::operation_kind::SCHEMA_RAISE)?.is_empty() {
-            journal(db, operation, db.schema_version()?)?;
+            journal(db, operation, crate::transaction_constants::schema_version(db, call)?)?;
         }
     }
     Ok(())
@@ -152,11 +157,12 @@ fn capture_circle(
 /// §18.4).
 pub(crate) fn capture_rebuilt(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     audience: &Audience,
     marker: WriteId,
     operation: Option<&crate::migration::MigrationOperation>,
 ) -> Result<(), DbError> {
-    capture_circle(db, audience, marker.number, operation)
+    capture_circle(db, call, audience, marker.number, operation)
 }
 
 /// Journal the operation through which passes publish this installation's
@@ -186,7 +192,7 @@ pub(crate) fn raise_to(
     // A capture is made through one of this device's writes, which stays.
     let newest = crate::write_metadata::newest_number(db, device)?
         .ok_or(DbError::Invariant { what: "a raise capture's device has a write" })?;
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
         params![version, newest.to_be_bytes(), crate::sequence::applied(db)?.to_be_bytes()],
     )?;
@@ -197,7 +203,7 @@ pub(crate) fn raise_to(
 /// prefix now runs through it, so no raise goes out ahead of it (§18.4).
 pub(crate) fn follow(db: &DatabaseConnection, marker: WriteId) -> Result<(), DbError> {
     for capture in captures(db, marker.device)? {
-        db.internal_execute(
+        db.execute(
             "UPDATE _coven_raise_captures SET through=?1 WHERE audience=?2 AND version=?3",
             params![marker.number.to_be_bytes(), capture.audience, capture.version],
         )?;
@@ -212,7 +218,7 @@ pub(crate) fn prepare(
     selected: &Audience,
     version: u32,
 ) -> Result<Option<RaiseCapture>, DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_raise_captures SET covers=?1 WHERE audience=?2 AND version=?3",
         params![crate::sequence::applied(db)?.to_be_bytes(), selected, version],
     )?;
@@ -255,6 +261,7 @@ pub(crate) fn captures(
 
 pub(crate) fn write<E>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     id: SnapshotId,
     version: u32,
@@ -271,7 +278,7 @@ pub(crate) fn write<E>(
     if capture.covers != crate::sequence::applied(db)? {
         return Err(DbError::CaptureChanged.into());
     }
-    crate::snapshot_write::write(db, schema, id, begin, emit)
+    crate::snapshot_write::write(db, call, schema, id, begin, emit)
 }
 
 /// The version of the newest breaking migration this installation ran, zero
@@ -284,10 +291,7 @@ pub(crate) fn breaking_version(db: &DatabaseConnection) -> Result<u32, DbError> 
 /// Read received writes from schema version `minimum` on, the version a
 /// breaking migration requires (§18.5).
 pub(crate) fn require(db: &DatabaseConnection, minimum: u32) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
-        [minimum],
-    )?;
+    db.execute("UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1", [minimum])?;
     Ok(())
 }
 
@@ -298,7 +302,7 @@ pub(crate) fn loaded(
     audience: &Audience,
     version: u32,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
         params![audience, version],
     )?;
@@ -307,7 +311,7 @@ pub(crate) fn loaded(
 
 /// Every capture of `audience`: a rebuild of it replaces them.
 pub(crate) fn supersede(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_raise_captures WHERE audience=?1", [audience])?;
+    db.execute("DELETE FROM _coven_raise_captures WHERE audience=?1", [audience])?;
     Ok(())
 }
 
@@ -316,7 +320,7 @@ pub(crate) fn discard(
     audience: &Audience,
     version: u32,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version=?2",
         params![audience, version],
     )?;

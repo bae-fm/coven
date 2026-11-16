@@ -4,6 +4,7 @@
 //! generated column has no cell, so it never has a written value.
 
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
 use crate::DbError;
@@ -27,6 +28,7 @@ pub(crate) fn load(database: &DatabaseConnection, row: i64) -> Result<AppValues,
 /// generation (see [`crate::write_commit::StoredGeneration`]) has none to clear.
 pub(crate) fn store(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     row: i64,
     fresh: bool,
     state: &RowState<Value>,
@@ -38,8 +40,9 @@ pub(crate) fn store(
     for (name, cell) in state.cells() {
         let shown = displayed.and_then(|values| values.get(name));
         if shown.is_some_and(|shown| *shown != cell.value.value) {
-            let column = database.column_id(&state.row().table, name)?;
-            database.internal_execute(
+            let column =
+                crate::transaction_constants::column_id(database, call, &state.row().table, name)?;
+            database.execute(
                 "INSERT INTO _coven_written_values(column_id,row_id,value) VALUES(?1,?2,?3)
                  ON CONFLICT(column_id,row_id) DO UPDATE SET value=excluded.value
                  WHERE value IS NOT excluded.value OR typeof(value)<>typeof(excluded.value)",
@@ -52,7 +55,7 @@ pub(crate) fn store(
         return Ok(());
     }
     let others = vec!["?"; kept.len()].join(",");
-    database.internal_execute(
+    database.execute(
         &format!(
             "DELETE FROM _coven_written_values WHERE row_id=? AND column_id NOT IN ({others})"
         ),

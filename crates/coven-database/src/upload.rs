@@ -241,7 +241,7 @@ fn plaintext<'a>(
     rowid: i64,
     write: WriteId,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
-    let mut bytes = database.upload_plaintext(rowid)?;
+    let mut bytes = crate::store_call::upload_plaintext(database, rowid)?;
     let prefix = bytes.read(0, coven_format::FRAME_PREFIX_LEN)?;
     let length = encoded(coven_format::frame_length(&prefix))?;
     let header_frame = bytes.read(0, length)?;
@@ -268,11 +268,11 @@ pub(crate) fn read<R, E>(
         .map_err(UploadReadError::Consumer)
 }
 
-fn read_plaintext(
-    database: &DatabaseConnection,
+fn read_plaintext<'a>(
+    database: &'a DatabaseConnection,
     rowid: i64,
     write: WriteId,
-) -> Result<UploadPlaintext<'_>, DbError> {
+) -> Result<UploadPlaintext<'a>, DbError> {
     let (header, header_frame, bytes) = plaintext(database, rowid, write)?;
     let parts = UploadParts { bytes, headers: header.parts.clone().into_iter() };
     Ok(UploadPlaintext { header, header_frame, parts })
@@ -327,7 +327,7 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
 
 /// Fix the keys a queued write is sealed with, at its first attempt.
 fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_upload_keys(device,number,sealing_keys) VALUES(?1,?2,?3)",
         params![write.device, write.number.to_be_bytes(), keys],
     )?;
@@ -356,12 +356,12 @@ pub(crate) fn queue<'a>(
     dismissed: impl IntoIterator<Item = &'a coven_merge::RowId>,
 ) -> Result<(), DbError> {
     let number = write.number.to_be_bytes();
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_uploads(device,number,record) VALUES(?1,?2,?3)",
         params![write.device, number.as_slice(), record],
     )?;
     for row in dismissed {
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_queued_dismissals(device,number,table_name,key,audience) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
             params![write.device, number.as_slice(), row.table, row.key, &row.audience],
         )?;
@@ -387,7 +387,7 @@ pub(crate) fn forget_claimed(
     device: DeviceId,
     claim: u64,
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "DELETE FROM _coven_uploads WHERE device=?1 AND number IN
          (SELECT number FROM _coven_upload_claims WHERE device=?1 AND claim=?2)",
         params![device, claim.to_be_bytes().as_slice()],
@@ -435,6 +435,7 @@ pub(crate) fn each_plaintext(
 #[cfg(test)]
 pub(crate) fn prepare(
     database: &mut DatabaseConnection,
+    call: &crate::store_call::StoreCall<'_>,
     log: &crate::StoreState,
     select: impl FnOnce(
         &crate::StoreState,
@@ -450,7 +451,8 @@ pub(crate) fn prepare(
             return Ok(Some(entry.write));
         }
         let (header, _, _) = plaintext(database, entry.rowid, entry.write)?;
-        let keys = select(log, database.schema_version()?, &header)?;
+        let keys =
+            select(log, crate::transaction_constants::schema_version(database, call)?, &header)?;
         if keys.part_keys.len() != header.parts.len() {
             return Err(DbError::Invariant { what: "sealing selects one key per write part" });
         }

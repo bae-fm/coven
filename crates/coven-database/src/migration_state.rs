@@ -3,6 +3,7 @@
 use crate::migration_names::MigrationMatch;
 use crate::schema::Schema;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -12,6 +13,7 @@ use std::collections::BTreeSet;
 
 pub(crate) fn carry(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &Schema,
     names: &MigrationMatch,
     after: &WriteSchema,
@@ -42,10 +44,10 @@ pub(crate) fn carry(
                 [&table.name],
                 |r| r.get::<_, i64>(0),
             )?;
-            freeze(db, losses)?;
+            freeze(db, call, losses)?;
         }
     }
-    columns(db, names)?;
+    columns(db, call, names)?;
     references(db, names, after, &mut refresh)?;
     constraints(db, before, names, after)?;
     // Stage names so swaps and a rename onto a dropped table cannot collide.
@@ -63,7 +65,11 @@ pub(crate) fn carry(
 /// Lean `Migration.freezeDropped`: a loss whose table or column goes keeps its
 /// written values, setters, old names and original cause, without live
 /// parent links; it no longer follows merge or removal rules (§18.7, D7).
-pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbError> {
+pub(crate) fn freeze(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    ids: Vec<i64>,
+) -> Result<(), DbError> {
     for id in ids {
         let loss = db.query_row(
             &format!("{} WHERE l.id=?1", crate::loss_record::SELECT),
@@ -71,11 +77,11 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
             crate::loss_record::read,
         )?;
         let loss = loss.freeze();
-        db.internal_execute(
+        db.execute(
             "INSERT INTO temp._coven_migration_frozen(audience,record) VALUES(?1,?2)",
             params![&loss.row.audience, encoded(merge_fields::encode_loss(&loss))?],
         )?;
-        crate::loss_record::put(db, &loss, Some(id))?;
+        crate::loss_record::put(db, call, &loss, Some(id))?;
     }
     Ok(())
 }
@@ -87,7 +93,11 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
     crate::loss_record::rename_table(db, old, new)
 }
 
-fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
+fn columns(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    names: &MigrationMatch,
+) -> Result<(), DbError> {
     let columns =
         db.query("SELECT id,table_name,column_name FROM _coven_columns WHERE synced=1", [], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
@@ -117,7 +127,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
                 [id],
                 |r| r.get::<_, i64>(0),
             )?;
-            freeze(db, losses)?;
+            freeze(db, call, losses)?;
             crate::row_queries::drop_column(db, id)?;
             continue;
         };
@@ -291,6 +301,7 @@ fn constraints(
 
 pub(crate) fn refresh(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     tables: &BTreeSet<String>,
 ) -> Result<(), DbError> {
@@ -304,9 +315,9 @@ pub(crate) fn refresh(
                 // Each row gets its own cache. Renaming a table must not retain all
                 // of that table's merge state until the migration finishes.
                 let visible = crate::write_rows::AppView::after(db, schema);
-                let store = crate::merge_store::MergeStore::new(db, &visible);
+                let store = crate::merge_store::MergeStore::new(db, call, &visible);
                 crate::write_apply::WriteApply::new(
-                    db, schema, &store, &visible, &visible, &deleted,
+                    db, call, schema, &store, &visible, &visible, &deleted,
                 )
                 .keeping_recomputed()
                 .apply(None, [row].into())?;

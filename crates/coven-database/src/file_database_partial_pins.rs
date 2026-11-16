@@ -5,7 +5,8 @@
 //! or when the stored bytes they are of leave this device.
 
 use super::{cache, BytesWriting, CacheReservation, FileDatabase};
-use crate::{sqlite::DatabaseConnection, DbError, FileRef};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
 
 impl FileDatabase {
@@ -26,8 +27,10 @@ impl FileDatabase {
             let file = file.clone();
             database
                 .call(move |inner| {
-                    let found = inner.access.with_writer(|writer| {
-                        writer.read_with_constants(|| partial(writer, &file))
+                    let found = inner.access.with_writer(|writer, call| {
+                        crate::transaction_constants::read_with_constants(writer, call, || {
+                            partial(writer, &file)
+                        })
                     })?;
                     let Some((path, size)) = found else {
                         return Ok(None);
@@ -74,7 +77,7 @@ impl FileDatabase {
             actual: size,
             maximum: i64::MAX as u64,
         })?;
-        self.run(move |db, _, _, _| db.transaction(|db| record(db, &file, &name, size, kept)))
+        self.run(move |db, _, _, _, _| db.transaction(|db| record(db, &file, &name, size, kept)))
             .await?;
         reservation.partial = true;
         Ok(())
@@ -89,7 +92,7 @@ impl FileDatabase {
         file: &FileRef,
     ) -> Result<Option<(FileName, u64)>, DbError> {
         let file = file.clone();
-        let found = self.read(move |db| partial(db, &file)).await?;
+        let found = self.read(move |db, _| partial(db, &file)).await?;
         found
             .map(|(path, size)| {
                 Ok((FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?, size))
@@ -102,7 +105,7 @@ impl FileDatabase {
     pub async fn discard_pin_download(&self, file: &FileRef) -> Result<(), DbError> {
         let file = file.clone();
         let chosen = self
-            .run(move |db, _, _, _| {
+            .run(move |db, _, _, _, _| {
                 let object = cache::object_path_of(&file)?;
                 let paths = remove(db, file.namespace(), &object)?;
                 Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
@@ -143,7 +146,7 @@ fn record(
     }
     let object = cache::object_path_of(file)?;
     if kept {
-        let updated = db.internal_execute(
+        let updated = db.execute(
             "UPDATE _coven_cache_partials SET size=?4
              WHERE namespace=?1 AND object_path=?2 AND path=?3",
             rusqlite::params![file.namespace(), object, name.as_str(), size],
@@ -152,7 +155,7 @@ fn record(
     }
     // The reservation's cleanup record goes before the row names its bytes.
     crate::file_removals::keep(db, "cache", name.as_str())?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_cache_partials(namespace,object_path,path,size) VALUES(?1,?2,?3,?4)",
         rusqlite::params![file.namespace(), object, name.as_str(), size],
     )?;

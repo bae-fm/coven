@@ -58,7 +58,7 @@ async fn the_upload_read_does_not_scan_the_queue() {
     let store = TestStore::new();
     let db = open(&store).await;
     stage(&db, "covers", "a", vec![1]).await;
-    let plan: Vec<String> = db.inspect_writer(|sql| {
+    let plan: Vec<String> = db.inspect_writer(|sql, _| {
         sql.query(&format!("EXPLAIN QUERY PLAN {}", super::UPLOADS), [], |r| r.get(3)).unwrap()
     });
     let scans: Vec<&str> = plan
@@ -196,7 +196,7 @@ async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
         crate::TransferProgress { bytes_transferred: 0, bytes_total: 1 },
     );
     let record = upload_record(&queue[4]);
-    db.inspect_writer(|sql| crate::pending::save(sql, &record).unwrap());
+    db.inspect_writer(|sql, _| crate::pending::save(sql, &record).unwrap());
     let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
     let listed: Vec<_> = facts
         .uploads
@@ -213,7 +213,7 @@ async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
         not_before: std::time::UNIX_EPOCH + std::time::Duration::from_secs(9),
         wait: std::time::Duration::from_secs(2),
     };
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         for upload in [&queue[1], &queue[3]] {
             crate::retry::save(sql, crate::RetrySubject::Upload(upload.id), &wait).unwrap();
         }
@@ -247,7 +247,7 @@ async fn a_trailing_upload_and_the_records_about_it_leave_the_facts() {
     let own = upload_record(&uploads[0]);
     let moving = Record::Move(uploads[0].of);
     for record in [&own, &moving] {
-        db.inspect_writer(|sql| crate::pending::save(sql, record).unwrap());
+        db.inspect_writer(|sql, _| crate::pending::save(sql, record).unwrap());
     }
     let sending = &uploads[1];
     let _attempt = db.uploads_in_flight().start(
@@ -290,7 +290,7 @@ async fn a_bound_upload_and_its_records_stay_in_the_facts_beside_a_trailing_one(
         Record::Move(bound.of),
     ];
     for record in &records {
-        db.inspect_writer(|sql| crate::pending::save(sql, record).unwrap());
+        db.inspect_writer(|sql, _| crate::pending::save(sql, record).unwrap());
     }
     let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
     assert_eq!(facts.records, [records[2].clone(), records[3].clone()]);
@@ -330,13 +330,13 @@ async fn the_facts_hold_the_sync_scopes_backoff() {
         not_before: std::time::UNIX_EPOCH + std::time::Duration::from_secs(9),
         wait: std::time::Duration::from_secs(2),
     };
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         crate::retry::save(sql, crate::RetrySubject::Upload(1), &wait).unwrap();
     });
     let upload = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
     assert_eq!(upload.pass_retry, None);
     assert_eq!(upload.uploads[0].retry_at, Some(wait.not_before));
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         crate::retry::save(sql, crate::RetrySubject::Sync, &wait).unwrap();
     });
     let pass = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();

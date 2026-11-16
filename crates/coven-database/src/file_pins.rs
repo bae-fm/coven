@@ -4,7 +4,8 @@
 //! until the cache copy is made from it; a user's original is never read for
 //! the cache, so its request downloads from storage.
 
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use coven_foundation::{files::StagedName, id_source::FileId};
 use rusqlite::params;
 
@@ -25,7 +26,7 @@ pub struct PinRequest {
 
 /// Ask this device to keep `file` whole, from coven's copy when it has one.
 pub(crate) fn request(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_pin_requests(file,copy)
          SELECT ?1,(SELECT path FROM _coven_device_files WHERE file=?1)
          ON CONFLICT DO NOTHING",
@@ -80,7 +81,7 @@ pub(crate) fn drop_copy(db: &DatabaseConnection, id: i64) -> Result<(), DbError>
     let Some(copy) = copy else {
         return Ok(());
     };
-    db.internal_execute("UPDATE _coven_pin_requests SET copy=NULL WHERE id=?1", [id])?;
+    db.execute("UPDATE _coven_pin_requests SET copy=NULL WHERE id=?1", [id])?;
     crate::file_queue::release_copy(db, &copy)
 }
 

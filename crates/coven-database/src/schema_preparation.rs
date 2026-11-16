@@ -1,0 +1,182 @@
+//! Preparing the store's schema as a connection opens: coven's internal
+//! tables, then the app's rebuilt indexes and migrations.
+
+use crate::internal_schema;
+use crate::migration::validate_versions;
+use crate::schema::Schema;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{
+    CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
+    SyncedTable,
+};
+
+/// Migrate local tables before app migrations or recovery's waiting work.
+/// Read-only connections require the supported internal version already.
+pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<(), OpenError> {
+    let internal: i32 = sql.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    let internal = internal as u32;
+    if internal > internal_schema::VERSION {
+        return Err(CovenMigrationError::SchemaTooNew {
+            current: internal,
+            supported: internal_schema::VERSION,
+        }
+        .into());
+    }
+    if internal < internal_schema::VERSION {
+        if sql.read_only()? {
+            return Err(CovenMigrationError::ReadOnly.into());
+        }
+        // Only the current greenfield schema is supported. An uninitialized
+        // database is version zero; an unknown newer schema is never rewritten.
+        sql.transaction(|db| {
+            db.batch(&internal_schema::initial_schema())?;
+            crate::sql_versions::record_library(db)?;
+            db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))
+        })
+        .map_err(|source| CovenMigrationError::Failed { source: Box::new(source) })?;
+    }
+    Ok(())
+}
+
+/// Prepare the app's schema: on a writable connection, rebuild what a
+/// new version of SQLite or of the app's collations and functions
+/// changes, then migrate, reporting both steps to `progress`; on a
+/// read-only one, require the app's versions rebuilt and the migrations
+/// done, which reports nothing.
+pub(crate) fn prepare_schema(
+    sql: &mut DatabaseConnection,
+    call: &StoreCall<'_>,
+    tables: &[SyncedTable],
+    migrations: &[Migration],
+    versions: &[crate::sql_versions::SqlVersion],
+    author: Option<crate::migration_run::MigrationOrigin>,
+    operation: Option<&crate::migration::MigrationOperation>,
+    audiences: Option<&crate::audience_database::Stage<'_>>,
+    progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
+) -> Result<Vec<MigrationOutcome>, OpenError> {
+    let read_only = author.is_none();
+    let supported = validate_versions(migrations)?;
+    prepare_internal_schema(sql)?;
+    // Before the app's migrations, whose statements use the indexes.
+    if read_only {
+        crate::sql_versions::require_built(sql, versions)?;
+    } else {
+        crate::sql_versions::rebuild(sql, tables, versions, progress)?;
+    }
+    let current = crate::transaction_constants::schema_version(sql, call)?;
+    if current > supported {
+        return Err(MigrationError::SchemaTooNew { current, supported }.into());
+    }
+    // App declarations are inputs even when their SQL ran on an earlier open.
+    // Every breaking step retained its schema; other committed steps did not.
+    for migration in migrations.iter().filter(|m| m.version <= current) {
+        let breaking = sql.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_conversion_schemas WHERE version=?1)",
+            [migration.version],
+            |r| r.get(0),
+        )?;
+        migration.check_kind(breaking)?;
+    }
+    if read_only || current == supported {
+        let db = &*sql;
+        let schema = Schema::read(db, &crate::file_table::declared(tables))?;
+        schema.validate(tables)?;
+        crate::schema::validate_local_keys(db, &schema, tables)?;
+        crate::sqlite::check_followed_triggers(db)?;
+        if let Some(table) = crate::row_queries::owner_declaration_changed(db, &schema, tables)? {
+            return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+        }
+        if let Some(table) = crate::file_table::changed(db, &schema, tables)? {
+            return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into());
+        }
+        if !read_only {
+            sql.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
+        }
+        sql.refresh_changed_rowids()?;
+        return Ok(Vec::new());
+    }
+    let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
+    let publishes = author.is_some();
+    let device = author.as_ref().map(|origin| origin.0);
+    progress.begin(
+        crate::OpenStep::Migrating,
+        migrations.iter().filter(|m| m.version > current).count() as u64,
+    );
+    // A run with a breaking migration is checked against what each
+    // audience alone would make of it, from the rows as they are now (§18.3).
+    let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > current).collect();
+    let mut staged = None;
+    if let Some(stage) = audiences.filter(|_| {
+        pending.iter().any(|m| matches!(m.kind, crate::migration::MigrationKind::Breaking(_)))
+    }) {
+        let first = pending[0];
+        let before = stage(sql, call);
+        staged = Some(before.map_err(|source| MigrationError::Failed {
+            version: first.version,
+            name: first.name,
+            source: Box::new(source),
+        })?);
+    }
+    let result = sql.with_profile(|db| {
+        db.transaction(|db| {
+            let crate::migration_run::MigrationRun { outcomes, marker } =
+                crate::migration_run::run(
+                    db,
+                    call,
+                    tables,
+                    migrations,
+                    current,
+                    supported,
+                    author.expect("writable migration"),
+                    &mut at,
+                    progress,
+                )?;
+            if let Some(staged) = staged.as_mut() {
+                crate::audience_database::verify(staged, db, call, &pending, tables)?;
+            }
+            let breaking = outcomes
+                .iter()
+                .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
+                .map(|outcome| outcome.version)
+                .max();
+            let raises = if let Some(minimum) = breaking {
+                // The raise snapshots are captured through the marker before any
+                // later app write; with no store there is no shared version to
+                // raise, and an installation that loads its store has no marker.
+                let schema = crate::write_schema::WriteSchema::read(db, call, tables.to_vec())?;
+                // A circle still waiting for its rebuild is rebuilt to this
+                // migration's version, under this migration's write.
+                if let Some(marker) = marker {
+                    crate::reload_gate::follow(db, marker)?;
+                }
+                if let Some(marker) = marker {
+                    crate::raise_capture::capture(db, &schema, marker, supported)?;
+                }
+                crate::raise_capture::require(db, minimum)?;
+                true
+            } else {
+                // Only additions: a raise still waiting to publish moves to
+                // this version, captured again at it (§18.5).
+                let device = device.expect("writable migration");
+                crate::raise_capture::raise_to(db, tables, device, supported)?
+            };
+            if raises {
+                if let Some(operation) = operation.filter(|_| publishes) {
+                    crate::raise_capture::journal(db, operation, supported)?;
+                }
+            }
+            crate::row_queries::register_schema(
+                db,
+                &Schema::read(db, &crate::file_table::declared(tables))?,
+                tables,
+            )?;
+            db.refresh_hidden_rowids()?;
+            Ok(outcomes)
+        })
+    });
+    result.map_err(|source| {
+        MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
+            .into()
+    })
+}

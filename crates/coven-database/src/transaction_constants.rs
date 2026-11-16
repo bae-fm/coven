@@ -6,15 +6,16 @@
 //! write's own authored parts too, and changes them only where the write
 //! records them (write_sources.rs).
 
-use super::schema_cookie::CookieScope;
-use super::DatabaseConnection;
+use crate::sqlite::CookieScope;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_merge::Audience;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 #[derive(Default)]
-pub(super) struct TransactionConstants {
+pub(crate) struct TransactionConstants {
     active: Cell<bool>,
     schema_version: Cell<Option<u32>>,
     columns: RefCell<HashMap<(String, String), i64>>,
@@ -43,11 +44,11 @@ impl Drop for ConstantScope<'_> {
 
 impl TransactionConstants {
     /// Keep each constant once read, until [`Self::forget`].
-    pub(super) fn keep(&self) {
+    fn keep(&self) {
         self.active.set(true);
     }
 
-    pub(super) fn forget(&self) {
+    fn forget(&self) {
         self.active.set(false);
         self.schema_version.set(None);
         self.columns.borrow_mut().clear();
@@ -56,109 +57,7 @@ impl TransactionConstants {
     }
 }
 
-impl DatabaseConnection {
-    /// Read each constant once until the returned scope drops. The caller's
-    /// transaction runs no migration and no DDL.
-    pub(crate) fn keep_constants(&self) -> ConstantScope<'_> {
-        self.constants.keep();
-        ConstantScope { constants: &self.constants, _cookie: self.keep_schema_cookie() }
-    }
-
-    /// Run `read` in one snapshot, as [`Self::read_transaction`] does, and
-    /// read each constant once. A read runs no migration and no DDL.
-    pub(crate) fn read_with_constants<R, E: From<DbError>>(
-        &self,
-        read: impl FnOnce() -> Result<R, E>,
-    ) -> Result<R, E> {
-        let _constants = self.keep_constants();
-        self.read_transaction(read)
-    }
-
-    /// The app schema version the store is at.
-    pub(crate) fn schema_version(&self) -> Result<u32, DbError> {
-        if let Some(version) = self.constants.schema_version.get() {
-            return Ok(version);
-        }
-        #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.constant_reads += 1);
-        let version =
-            self.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0).map(|v| v as u32))?;
-        if self.constants.active.get() {
-            self.constants.schema_version.set(Some(version));
-        }
-        Ok(version)
-    }
-
-    /// The registered id of a synced column. Preparing the schema registers
-    /// every one, so a cell or live loss can only name a registered column
-    /// (Appendix B.1).
-    pub(crate) fn column_id(&self, table: &str, column: &str) -> Result<i64, DbError> {
-        let key = (table.to_owned(), column.to_owned());
-        if let Some(id) = self.constants.columns.borrow().get(&key) {
-            return Ok(*id);
-        }
-        #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.constant_reads += 1);
-        let id: Option<i64> = self.query_row(
-            "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
-            rusqlite::params![table, column],
-            |r| r.get(0),
-        )?;
-        let id = id.unwrap_or_else(|| panic!("column {column} of {table} was never registered"));
-        if self.constants.active.get() {
-            self.constants.columns.borrow_mut().insert(key, id);
-        }
-        Ok(id)
-    }
-
-    /// The registered id of a synced table's foreign key, by its encoded
-    /// identity, or none when it was never registered.
-    pub(crate) fn foreign_key_id(
-        &self,
-        table: &str,
-        identity: &[u8],
-    ) -> Result<Option<i64>, DbError> {
-        let key = (table.to_owned(), identity.to_vec());
-        if let Some(id) = self.constants.foreign_keys.borrow().get(&key) {
-            return Ok(Some(*id));
-        }
-        #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.constant_reads += 1);
-        let id: Option<i64> = self.query_row(
-            "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
-            rusqlite::params![table, identity],
-            |r| r.get(0),
-        )?;
-        if let Some(id) = id.filter(|_| self.constants.active.get()) {
-            self.constants.foreign_keys.borrow_mut().insert(key, id);
-        }
-        Ok(id)
-    }
-
-    /// The authored part of `write` in `audience`, as `_coven_authored_parts`
-    /// holds it.
-    pub(crate) fn authored_part(
-        &self,
-        write: &[u8],
-        audience: &Audience,
-    ) -> Result<Option<AuthoredPart>, DbError> {
-        let key = (write.to_vec(), audience.clone());
-        if let Some(part) = self.constants.parts.borrow().get(&key) {
-            return Ok(part.clone());
-        }
-        let part = self
-            .query(
-                "SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
-                rusqlite::params![write, audience],
-                |r| r.get::<_, Vec<u8>>(0),
-            )?
-            .pop();
-        if self.constants.active.get() {
-            self.constants.parts.borrow_mut().insert(key, part.clone());
-        }
-        Ok(part)
-    }
-
+impl StoreCall<'_> {
     /// The authored part now holds `part`, or none.
     pub(crate) fn authored_part_changed(
         &self,
@@ -166,15 +65,133 @@ impl DatabaseConnection {
         audience: &Audience,
         part: Option<AuthoredPart>,
     ) {
-        if self.constants.active.get() {
-            self.constants.parts.borrow_mut().insert((write.to_vec(), audience.clone()), part);
+        if self.constants().active.get() {
+            self.constants().parts.borrow_mut().insert((write.to_vec(), audience.clone()), part);
         }
     }
 
     /// The authored part may have changed: read it afresh next time.
     pub(crate) fn forget_authored_part(&self, write: &[u8], audience: &Audience) {
-        self.constants.parts.borrow_mut().remove(&(write.to_vec(), audience.clone()));
+        self.constants().parts.borrow_mut().remove(&(write.to_vec(), audience.clone()));
     }
+}
+
+/// Read each constant once until the returned scope drops. The caller's
+/// transaction on `sql` runs no migration and no DDL.
+pub(crate) fn keep_constants<'s>(
+    sql: &'s DatabaseConnection,
+    call: &'s StoreCall<'_>,
+) -> ConstantScope<'s> {
+    let constants = call.constants();
+    constants.keep();
+    ConstantScope { constants, _cookie: sql.keep_schema_cookie() }
+}
+
+/// Run `read` in one snapshot, as `DatabaseConnection::read_transaction`
+/// does, and read each constant once. A read runs no migration and no
+/// DDL.
+pub(crate) fn read_with_constants<R, E: From<DbError>>(
+    sql: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    read: impl FnOnce() -> Result<R, E>,
+) -> Result<R, E> {
+    let _constants = keep_constants(sql, call);
+    sql.read_transaction(read)
+}
+
+/// The app schema version the store is at.
+pub(crate) fn schema_version(
+    sql: &DatabaseConnection,
+    call: &StoreCall<'_>,
+) -> Result<u32, DbError> {
+    if let Some(version) = call.constants().schema_version.get() {
+        return Ok(version);
+    }
+    #[cfg(any(test, feature = "test-utils"))]
+    call.record_work(|work| work.constant_reads += 1);
+    let version =
+        sql.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0).map(|v| v as u32))?;
+    if call.constants().active.get() {
+        call.constants().schema_version.set(Some(version));
+    }
+    Ok(version)
+}
+
+/// The registered id of a synced column. Preparing the schema registers
+/// every one, so a cell or live loss can only name a registered column
+/// (Appendix B.1).
+pub(crate) fn column_id(
+    sql: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    table: &str,
+    column: &str,
+) -> Result<i64, DbError> {
+    let key = (table.to_owned(), column.to_owned());
+    if let Some(id) = call.constants().columns.borrow().get(&key) {
+        return Ok(*id);
+    }
+    #[cfg(any(test, feature = "test-utils"))]
+    call.record_work(|work| work.constant_reads += 1);
+    let id: Option<i64> = sql.query_row(
+        "SELECT (SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2)",
+        rusqlite::params![table, column],
+        |r| r.get(0),
+    )?;
+    let id = id.unwrap_or_else(|| panic!("column {column} of {table} was never registered"));
+    if call.constants().active.get() {
+        call.constants().columns.borrow_mut().insert(key, id);
+    }
+    Ok(id)
+}
+
+/// The registered id of a synced table's foreign key, by its encoded
+/// identity, or none when it was never registered.
+pub(crate) fn foreign_key_id(
+    sql: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    table: &str,
+    identity: &[u8],
+) -> Result<Option<i64>, DbError> {
+    let key = (table.to_owned(), identity.to_vec());
+    if let Some(id) = call.constants().foreign_keys.borrow().get(&key) {
+        return Ok(Some(*id));
+    }
+    #[cfg(any(test, feature = "test-utils"))]
+    call.record_work(|work| work.constant_reads += 1);
+    let id: Option<i64> = sql.query_row(
+        "SELECT (SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2)",
+        rusqlite::params![table, identity],
+        |r| r.get(0),
+    )?;
+    if let Some(id) = id.filter(|_| call.constants().active.get()) {
+        call.constants().foreign_keys.borrow_mut().insert(key, id);
+    }
+    Ok(id)
+}
+
+/// The authored part of `write` in `audience`, as `_coven_authored_parts`
+/// holds it.
+pub(crate) fn authored_part(
+    sql: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    write: &[u8],
+    audience: &Audience,
+) -> Result<Option<AuthoredPart>, DbError> {
+    let key = (write.to_vec(), audience.clone());
+    if let Some(part) = call.constants().parts.borrow().get(&key) {
+        return Ok(part.clone());
+    }
+    let part = sql
+        .query(
+            "SELECT header FROM _coven_authored_parts WHERE write_id=?1 AND audience=?2",
+            rusqlite::params![write, audience],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?
+        .pop();
+    if call.constants().active.get() {
+        call.constants().parts.borrow_mut().insert(key, part.clone());
+    }
+    Ok(part)
 }
 
 #[cfg(test)]

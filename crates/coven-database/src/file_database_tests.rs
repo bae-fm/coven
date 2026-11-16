@@ -27,8 +27,8 @@ async fn a_cache_reservation_refuses_a_name_the_cache_still_uses() {
         [("_coven_cache_writes(path)", "writing"), ("_coven_file_removals(area,path)", "removing")]
     {
         let values = if table.contains("area") { "('cache',?1)" } else { "(?1)" };
-        db.commit_writer(|db| {
-            db.internal_execute(&format!("INSERT INTO {table} VALUES{values}"), [name]).unwrap()
+        db.commit_writer(|db, _| {
+            db.execute(&format!("INSERT INTO {table} VALUES{values}"), [name]).unwrap()
         });
         assert!(
             matches!(
@@ -251,7 +251,7 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 1);
     assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
-    db.commit_writer(crate::file_queue::tests::lose_chunk_hashes);
+    db.commit_writer(|db, _| crate::file_queue::tests::lose_chunk_hashes(db));
     assert!(matches!(
         owner.upload_chunk_hash(&uploads[0].location, 0).await,
         Err(DbError::DamagedDatabase)
@@ -267,7 +267,7 @@ async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
     stage(&db, vec![5; 3], true).await.unwrap();
     assert_eq!(owner.uploads().await.unwrap().len(), 1);
     // A stored time no decoder accepts: decoding stored facts finds damage.
-    db.commit_writer(crate::file_queue::tests::damage_queued_times);
+    db.commit_writer(|db, _| crate::file_queue::tests::damage_queued_times(db));
     assert!(matches!(owner.uploads().await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
 }
@@ -280,7 +280,7 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
         let database = open(&store, provenance.clone()).await;
         let originals = tempfile::tempdir().unwrap();
         let owner = FileDatabase::new(database.clone());
-        database.inspect_writer(|sql| {
+        database.inspect_writer(|sql, _| {
             sql.fail_at(
                 "_coven_refuse_upload",
                 "BEFORE INSERT ON _coven_file_uploads",
@@ -297,7 +297,7 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
         assert_eq!(local_count(&database, "_coven_file_chunks"), 0);
         assert!(owned_paths(&store).is_empty());
         assert!(owner.uploads().await.unwrap().is_empty());
-        database.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_refuse_upload").unwrap());
+        database.inspect_writer(|sql, _| sql.batch("DROP TRIGGER _coven_refuse_upload").unwrap());
         let file = stage_kind(&database, &provenance, originals.path(), b"source".to_vec(), true)
             .await
             .unwrap();
@@ -362,7 +362,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     let cache = store.database_path().parent().unwrap().join("cache");
     assert!(!cache.join("overlap").exists());
     // A crash after the range's name was recorded and its bytes written.
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         super::cache::tests::writing(sql, "interrupted");
     });
     std::fs::write(cache.join("interrupted"), b"bytes").unwrap();
@@ -633,7 +633,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     let db = reopen().await;
     let file = stored(&db, vec![5; 3]).await;
     let abandoned = cache_path(&store, &FileName::new("abandoned").unwrap());
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         super::cache::tests::writing(sql, "abandoned");
     });
     std::fs::write(&abandoned, b"partial").unwrap();
@@ -799,7 +799,7 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
     let db = open_with(100).await.unwrap();
     assert_eq!(FileDatabase::new(db.clone()).budget("files").await.unwrap(), 50);
     // The cache holds its budget: the older entry goes once the total exceeds it.
-    let removed = db.inspect_writer(|sql| {
+    let removed = db.inspect_writer(|sql, _| {
         for (path, read) in [("old", 1), ("new", 2)] {
             super::cache::tests::cached(sql, path, path, 30, read).unwrap();
         }
@@ -817,7 +817,7 @@ async fn a_budget_and_its_eviction_go_with_their_write() {
     use crate::file_write::tests::local_count;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         for (path, read) in [("old", 1), ("new", 2)] {
             super::cache::tests::cached(sql, path, path, 30, read).unwrap();
         }
@@ -838,7 +838,7 @@ async fn a_budget_and_its_eviction_go_with_their_write() {
     .await
     .unwrap();
     assert_eq!(FileDatabase::new(db.clone()).budget("files").await.unwrap(), 30);
-    let left = db.inspect_writer(|sql| {
+    let left = db.inspect_writer(|sql, _| {
         sql.query("SELECT path FROM _coven_cache", [], |r| r.get::<_, String>(0)).unwrap()
     });
     assert_eq!(left, ["new"]);

@@ -9,7 +9,7 @@ impl FileDatabase {
     /// The files a switch to the cloud asked this device to keep whole, each
     /// with the copy its cache copy is made from and its wait (§17.8).
     pub async fn pin_requests(&self) -> Result<Vec<crate::PinRequest>, DbError> {
-        self.read(crate::file_pins::read).await
+        self.read(|db, _| crate::file_pins::read(db)).await
     }
     /// The file of request `id` left the stored bytes the request asked to
     /// keep: the request, its record and wait end, and the copy it kept goes
@@ -18,8 +18,10 @@ impl FileDatabase {
         self.database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
-                inner.with_files("end a pin request", |writer, _| {
-                    writer.state_transaction(|db| crate::file_pins::end_request(db, id).map(drop))
+                inner.with_files("end a pin request", |writer, _, _| {
+                    crate::store_call::state_transaction(writer, |db| {
+                        crate::file_pins::end_request(db, id).map(drop)
+                    })
                 })
             })
             .await
@@ -44,7 +46,7 @@ impl FileDatabase {
     pub async fn drop_pin_copy(&self, id: i64) -> Result<(), DbError> {
         self.database
             .call(move |inner| {
-                inner.with_files("drop a pin's copy", |writer, _| {
+                inner.with_files("drop a pin's copy", |writer, _, _| {
                     writer.transaction(|db| crate::file_pins::drop_copy(db, id))
                 })
             })
@@ -60,8 +62,8 @@ impl FileDatabase {
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         let (id, file) = (request.id, request.file);
-        self.run(move |db, _, _, _| {
-            db.state_transaction(|db| {
+        self.run(move |db, _, _, _, _| {
+            crate::store_call::state_transaction(db, |db| {
                 if record.pin_of() != Some(file) {
                     return Err(DbError::Invariant {
                         what: "a kept pin's failure is its own record",
@@ -96,7 +98,7 @@ impl FileDatabase {
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let copy = copy.as_str().to_owned();
-        self.read(move |db| {
+        self.read(move |db, _| {
             let index = i64::try_from(index)
                 .map_err(|_| DbError::Invariant { what: "a chunk index fits SQLite" })?;
             let hash = db

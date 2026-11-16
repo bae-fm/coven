@@ -255,7 +255,7 @@ async fn a_reference_to_a_row_changed_at_no_step_is_a_direct_change() {
         })
         .await
         .unwrap();
-    let (mut forged, _) = pair.ben.inspect_writer(|c| c.take_judged().unwrap());
+    let (mut forged, _) = pair.ben.inspect_writer(|_, call| call.take_judged().unwrap());
     let insert = records(&pair.ana).pop().unwrap();
     let setter = insert.parts.iter().flat_map(|part| &part.rows).find(|r| r.row.table == "reviews");
     let Operation::Insert(columns) = &setter.unwrap().change.operation else {

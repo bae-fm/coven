@@ -135,8 +135,8 @@ async fn the_table_refuses_a_cooldown_while_stopped_and_any_app_write() {
         .open()
         .await
         .unwrap();
-    let refused = db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE coven_retry_effect SET cooling_until=1 WHERE singleton=1", [])
+    let refused = db.commit_writer(|sql, _| {
+        sql.execute("UPDATE coven_retry_effect SET cooling_until=1 WHERE singleton=1", [])
     });
     assert!(matches!(refused, Err(DbError::Sqlite(_))), "{refused:?}");
     let error =

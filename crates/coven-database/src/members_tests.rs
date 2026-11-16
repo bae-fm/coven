@@ -26,7 +26,7 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
 /// removed and a replaced device, and removed member 3; circle 7 holds 1 and
 /// 2, and deleted circle 8 held 1.
 async fn fixture(db: &crate::Database) {
-    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     let mut state = db.store_state().await.unwrap();
     state.members = [
         store_member(1, MemberRole::Admin, false),
@@ -83,7 +83,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
     // Before this device's registration replays, nothing is listed as self.
     assert!(db.members().await.unwrap().is_empty());
     fixture(&db).await;
-    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     let members = db.members().await.unwrap();
     let mut expected = vec![
         MemberInfo {
@@ -197,7 +197,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     fixture(&db).await;
     let mut members = db.subscribe_members::<DbError>();
     assert_eq!(members.next_inline().await.expect("the live query answers").unwrap().len(), 2);
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         crate::store_state_tables::tests::damage(
             db,
             crate::store_state_tables::tests::MEMBER_DAMAGE[0],
@@ -224,12 +224,12 @@ async fn a_stored_member_fact_that_does_not_decode_is_damaged_database() {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         fixture(&db).await;
-        let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
-        db.inspect_writer(|sql| damage(sql, broken));
+        let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
+        db.inspect_writer(|sql, _| damage(sql, broken));
         assert!(matches!(db.members().await, Err(DbError::DamagedDatabase)), "{broken}");
         if broken.contains("member=") {
             assert!(matches!(
-                db.inspect_writer(|sql| crate::store_state_tables::device_member(sql, own)),
+                db.inspect_writer(|sql, _| crate::store_state_tables::device_member(sql, own)),
                 Err(DbError::DamagedDatabase)
             ));
         }
@@ -245,7 +245,7 @@ async fn a_stored_circle_or_slot_that_does_not_decode_is_damaged_database() {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         fixture(&db).await;
-        db.inspect_writer(|sql| damage(sql, broken));
+        db.inspect_writer(|sql, _| damage(sql, broken));
         let read = db.store_state().await;
         assert!(matches!(read, Err(DbError::DamagedDatabase)), "{broken}: {read:?}");
     }
@@ -256,7 +256,7 @@ async fn retired_local_registration_still_identifies_this_installation() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     fixture(&db).await;
-    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     for state in [DeviceState::Removed, DeviceState::Replaced] {
         let mut prefix = db.store_state().await.unwrap();
         prefix.devices.get_mut(&own).unwrap().state = state;
@@ -321,7 +321,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
         .expect("the live query answers")
         .unwrap();
     assert_eq!(next, expected);
-    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     let device = |id, owner, name: &str, state: &str| {
         (id, member(owner), name.to_owned(), state.to_owned(), id == own)
     };
@@ -455,7 +455,7 @@ async fn the_apps_sql_finds_a_circle_by_name_and_reads_its_members() {
 async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     let mut state = db.store_state().await.unwrap();
     state.members = [(
         member(1),

@@ -1,3 +1,5 @@
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
 use crate::{migration_names::MigrationMatch, DbError};
@@ -9,16 +11,16 @@ use std::collections::BTreeMap;
 /// metadata table moved away so reading a write's metadata fails in SQLite.
 /// `check` runs inside a savepoint that is rolled back afterwards.
 async fn unreadable_metadata(
-    check: impl FnOnce(&crate::sqlite::DatabaseConnection, &crate::write_schema::WriteSchema),
+    check: impl FnOnce(&DatabaseConnection, &StoreCall<'_>, &crate::write_schema::WriteSchema),
 ) {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
     sql(&database, "INSERT INTO notes(id,title) VALUES('a','A')").await.unwrap();
     crate::tests::remote_update(&database, "notes", "a", &[("title", Value::Text("B".into()))])
         .await;
-    database.inspect_writer_schema(|db, schema| {
+    database.inspect_writer_schema(|db, call, schema| {
         db.batch("SAVEPOINT unreadable").unwrap();
-        let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
+        let store = crate::merge_store::MergeStore::from_schema(db, call, &schema.schema);
         let rows = db
             .query(
                 "SELECT table_name,key,audience FROM _coven_rows",
@@ -26,9 +28,9 @@ async fn unreadable_metadata(
                 crate::row_queries::read_identity,
             )
             .unwrap();
-        crate::published::capture_rows(db, &store, &rows).unwrap();
+        crate::published::capture_rows(db, call, &store, &rows).unwrap();
         db.batch("ALTER TABLE _coven_writes RENAME TO _coven_writes_moved").unwrap();
-        check(db, schema);
+        check(db, call, schema);
         db.batch("ROLLBACK TO unreadable; RELEASE unreadable").unwrap();
     });
 }
@@ -39,10 +41,16 @@ fn is_sqlite_failure(error: &DbError) -> bool {
 
 #[tokio::test]
 async fn reading_the_snapshot_view_fails_with_the_metadata_read_error() {
-    unreadable_metadata(|db, schema| {
+    unreadable_metadata(|db, call, schema| {
         let error =
-            crate::snapshot_view::rows(db, schema, &Audience::Store, |_| Ok::<_, DbError>(()))
-                .unwrap_err();
+            crate::snapshot_view::rows(
+                db,
+                call,
+                schema,
+                &Audience::Store,
+                |_| Ok::<_, DbError>(()),
+            )
+            .unwrap_err();
         assert!(is_sqlite_failure(&error), "{error:?}");
     })
     .await;
@@ -50,7 +58,7 @@ async fn reading_the_snapshot_view_fails_with_the_metadata_read_error() {
 
 #[tokio::test]
 async fn carrying_published_rows_fails_with_the_metadata_read_error() {
-    unreadable_metadata(|db, schema| {
+    unreadable_metadata(|db, _, schema| {
         let names = MigrationMatch {
             tables: BTreeMap::from([("notes".to_owned(), "notes".to_owned())]),
             columns: ["id", "title", "body"]

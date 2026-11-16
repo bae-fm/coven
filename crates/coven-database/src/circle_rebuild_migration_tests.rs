@@ -133,10 +133,10 @@ fn written_by_another(
     read_through: u64,
     after: &WriteHeader,
 ) -> WriteRecord {
-    let row = db.inspect_writer_schema(|connection, schema| {
+    let row = db.inspect_writer_schema(|connection, call, schema| {
         let app = crate::write_rows::AppView::after(connection, schema);
-        let store = crate::merge_store::MergeStore::new(connection, &app);
-        crate::write_sources::authored(connection, &store, change.row, change.change).unwrap()
+        let store = crate::merge_store::MergeStore::new(connection, call, &app);
+        crate::write_sources::authored(connection, call, &store, change.row, change.change).unwrap()
     });
     let device = DeviceId(another);
     // Newer than the migration write that comes after `after`.

@@ -8,7 +8,7 @@ async fn sqlite_opens_the_database_by_its_plain_path() {
     let store = TestStore::new();
     let db = store.builder(Vec::new(), Vec::new()).open().await.unwrap();
     let mut file = String::new();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         file = writer
             .query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0))
             .unwrap();

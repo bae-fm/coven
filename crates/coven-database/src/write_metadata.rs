@@ -1,7 +1,7 @@
 //! Fallible SQL reads behind the merge decoder's immutable metadata oracle.
 use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    sqlite::DatabaseConnection,
     write_encoding::{counter, decoded, slot_counter},
     DbError,
 };

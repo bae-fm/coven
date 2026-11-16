@@ -2,6 +2,7 @@
 //! cloud together, in one write once every one is stored; a move survives
 //! reopening; a cancelled move switches nothing.
 
+use crate::sqlite::DatabaseConnection;
 use crate::{
     file_write::tests::{has_record, local_count, open},
     tests::TestStore,
@@ -33,7 +34,7 @@ async fn stage(db: &Database, rows: &[&'static str], place: Place) -> Vec<FileId
 }
 
 fn cloud(db: &Database, file: FileId) -> bool {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT coven_file_device(coordinates) IS NULL FROM main.coven_files WHERE id=?1",
             [file],
@@ -385,7 +386,7 @@ async fn a_moved_original_uploads_with_what_its_staging_recorded() {
     assert_eq!(upload.files, [file]);
     assert_eq!(upload.size, imported.len() as u64);
     assert_eq!(upload.content_hash, hash(&imported));
-    let (queued_time, queued_chunks) = db.inspect_writer(|sql| {
+    let (queued_time, queued_chunks) = db.inspect_writer(|sql, _| {
         let time = sql
             .query_row(
                 "SELECT modified_at FROM _coven_file_uploads WHERE id=?1",
@@ -435,7 +436,7 @@ async fn a_move_kept_here_asks_for_its_pins_in_the_switch() {
     assert!(asked[0].copy.is_some());
     // The plain file's copy went with its upload; the kept one's stays.
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
-    let copies: i64 = db.inspect_writer(|sql| {
+    let copies: i64 = db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT count(*) FROM _coven_file_removals WHERE path=?1",
             [asked[0].copy.as_ref().unwrap().as_str()],
@@ -699,8 +700,8 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 }
 
 /// Record move `id` as still moving.
-pub(crate) fn moving(db: &crate::sqlite::DatabaseConnection, id: i64) {
-    db.internal_execute("INSERT INTO _coven_moves(id,state) VALUES(?1,'moving')", [id]).unwrap();
+pub(crate) fn moving(db: &DatabaseConnection, id: i64) {
+    db.execute("INSERT INTO _coven_moves(id,state) VALUES(?1,'moving')", [id]).unwrap();
 }
 
 /// The scans this module's statements may make, with their reasons, for the

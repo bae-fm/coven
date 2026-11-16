@@ -1,6 +1,6 @@
 //! SQLite representation of committed membership and audience state.
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    sqlite::DatabaseConnection,
     store_state::*,
     write_encoding::{damaged, stored},
     DbError,
@@ -129,7 +129,7 @@ pub(crate) fn name_before_creation(
     named_at: Slot,
     joined: bool,
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,0,?4) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name,named_at=excluded.named_at,joined=excluded.joined WHERE created=0",
         params![store, name, named_at.get().to_be_bytes().as_slice(), joined],
     )?;
@@ -219,7 +219,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,1,0) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
+        database.execute("INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,1,0) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
     }
     for table in [
         "_coven_circle_deletions",
@@ -229,14 +229,14 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         "_coven_circles",
         "_coven_members",
     ] {
-        database.internal_execute(&format!("DELETE FROM {table}"), [])?;
+        database.execute(&format!("DELETE FROM {table}"), [])?;
     }
     for (id, member) in &state.members {
         let role = match member.role {
             MemberRole::Admin => "admin",
             MemberRole::Member => "member",
         };
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
@@ -255,14 +255,14 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         )?;
     }
     for keys in &state.bound_keys {
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_bound_keys(signing,sealing) VALUES(?1,?2)",
             params![keys.signing.as_bytes().as_slice(), keys.sealing.as_bytes().as_slice()],
         )?;
     }
     for (id, device) in &state.devices {
         crate::sequence::note_device(database, *id)?;
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
             params![
                 id,
@@ -277,19 +277,19 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         )?;
     }
     for (id, circle) in &state.circles {
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_circles(circle,name,base) VALUES(?1,?2,?3)",
             params![id, circle.name, circle.base],
         )?;
         for member in &circle.members {
-            database.internal_execute(
+            database.execute(
                 "INSERT INTO _coven_circle_members(circle,member) VALUES(?1,?2)",
                 (id, member),
             )?;
         }
     }
     for (circle, entry) in &state.circle_deletions {
-        database.internal_execute(
+        database.execute(
             "INSERT INTO _coven_circle_deletions(circle,slot) VALUES(?1,?2)",
             (circle, entry.get().to_be_bytes().as_slice()),
         )?;

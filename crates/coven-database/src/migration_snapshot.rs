@@ -4,6 +4,7 @@ use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::migration_names::MigrationMatch;
 use crate::schema::{Schema, TableSchema};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{key_columns, AppKey, AppRow, AppValues};
 use crate::{DbError, SyncedTable};
@@ -20,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// breaking statement, on the connection the run migrates.
 pub(crate) struct MigrationCapture<'c> {
     database: &'c DatabaseConnection,
+    call: &'c StoreCall<'c>,
     synced: BTreeSet<String>,
     snapshot: Option<MigrationSnapshot<'c>>,
     /// Tables the current step's statements write rows of, as SQLite
@@ -41,7 +43,11 @@ struct SnapshotTable {
 }
 
 impl<'c> MigrationCapture<'c> {
-    pub(crate) fn new(db: &'c DatabaseConnection, tables: &[SyncedTable]) -> Result<Self, DbError> {
+    pub(crate) fn new(
+        db: &'c DatabaseConnection,
+        call: &'c StoreCall<'c>,
+        tables: &[SyncedTable],
+    ) -> Result<Self, DbError> {
         // Column identities survive an empty table, and identify its old synced name
         // even when the app declares only the renamed, final schema.
         let mut synced: BTreeSet<String> = db
@@ -53,7 +59,7 @@ impl<'c> MigrationCapture<'c> {
             .into_iter()
             .collect();
         synced.extend(tables.iter().map(|t| t.name.to_ascii_lowercase()));
-        Ok(Self { database: db, synced, snapshot: None, targets: BTreeSet::new() })
+        Ok(Self { database: db, call, synced, snapshot: None, targets: BTreeSet::new() })
     }
 
     /// The synced tables, by their names before the run, lowercase.
@@ -150,7 +156,7 @@ impl<'c> MigrationCapture<'c> {
             let failed = |e| rusqlite::Error::UserFunctionError(Box::new(e));
             changes.extend(named);
             changes.retain(|table| self.synced.contains(table));
-            crate::published::before_migrating(db, before, &changes).map_err(failed)?;
+            crate::published::before_migrating(db, self.call, before, &changes).map_err(failed)?;
             if self.snapshot.is_none() {
                 self.snapshot =
                     Some(MigrationSnapshot::capture(db, before, &self.synced).map_err(failed)?);

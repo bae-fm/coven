@@ -26,7 +26,7 @@ async fn a_row_stores_its_cells_in_one_statement() {
     )
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("INSERT INTO _coven_cells"), 1);
     assert_eq!(runs("INSERT INTO _coven_rows"), 1);
@@ -38,7 +38,7 @@ async fn a_row_stores_its_cells_in_one_statement() {
     crate::write::tests::sql(&db, "UPDATE notes SET title='again' WHERE id<'note 2'")
         .await
         .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let updated = count(&db, "notes WHERE title='again'") as usize;
     let cleared =
         statements.iter().filter(|s| s.sql.contains(crate::written_values::tests::CLEARED)).count();
@@ -71,14 +71,14 @@ async fn a_write_upserts_its_references_in_one_statement() {
         .unwrap();
     sql(&db, "INSERT INTO notes VALUES('a','one'),('b','two'),('c','three')").await.unwrap();
     let upserts = |db: &Database| {
-        db.inspect_writer(|writer| writer.profiled_statements())
+        db.inspect_writer(|writer, _| writer.profiled_statements())
             .iter()
             .filter(|s| s.sql.contains("INSERT INTO _coven_references"))
             .count()
     };
     assert_eq!(upserts(&db), 0, "notes name no parent");
     let parents = |db: &Database| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer.query(
                 "SELECT r.key,f.parent_key FROM _coven_references f JOIN _coven_rows r ON r.id=f.row_id ORDER BY r.key",
                 [],
@@ -128,7 +128,7 @@ async fn stored_generations_tell_inserted_from_found() {
         .unwrap();
     let row = |n: u8| RowId { table: "notes".into(), key: vec![n], audience: Audience::Store };
     let (one, two, three) = (row(1), row(2), row(3));
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .transaction(|writer| {
                 let write = |n: u8| {

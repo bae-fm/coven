@@ -13,9 +13,9 @@ use std::{
 };
 
 async fn measured_load(source: &crate::Database, target: &crate::Database) -> usize {
-    let before = target.inspect_writer(|db| db.merge_loads().values().sum::<usize>());
+    let before = target.inspect_writer(|_, call| call.merge_loads().values().sum::<usize>());
     crate::snapshot_write::tests::assert_loaded_losses(source, target).await;
-    target.inspect_writer(|db| db.merge_loads().values().sum::<usize>()) - before
+    target.inspect_writer(|_, call| call.merge_loads().values().sum::<usize>()) - before
 }
 
 #[tokio::test]

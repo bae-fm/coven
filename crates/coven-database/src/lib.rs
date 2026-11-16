@@ -97,6 +97,7 @@ mod row_queries;
 mod schema;
 mod schema_error;
 mod schema_local_children;
+mod schema_preparation;
 mod schema_source;
 mod schema_sql;
 mod snapshot_conflicts;
@@ -118,7 +119,9 @@ mod sqlite;
 mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
+mod store_call;
 mod sync_facts;
+mod transaction_constants;
 pub use sqlite_settings::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,

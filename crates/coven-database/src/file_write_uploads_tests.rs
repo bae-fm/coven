@@ -251,7 +251,7 @@ async fn staging_an_original_on_this_device_only_records_its_hashes() {
         hasher.update(bytes);
         hasher.finish().as_bytes().to_vec()
     };
-    let (content, chunks, record) = db.inspect_writer(|sql| {
+    let (content, chunks, record) = db.inspect_writer(|sql, _| {
         let content = sql
             .query_row("SELECT hash FROM _coven_user_files WHERE file=?1", [file], |r| {
                 r.get::<_, Vec<u8>>(0)
@@ -677,7 +677,7 @@ async fn files_queued_together_each_keep_their_own_upload() {
             i64,
             i64,
             i64,
-        ) = db.inspect_writer(|sql| {
+        ) = db.inspect_writer(|sql, _| {
             sql.query_row(
                 "SELECT u.hash,u.size,
                     (SELECT count(*) FROM _coven_file_chunks c WHERE c.device=u.device AND c.object=u.object),

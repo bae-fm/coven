@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 impl DatabaseConnection {
     /// Read every table's hidden rowid again, as the connection opens and
     /// after a migration.
-    pub(super) fn refresh_hidden_rowids(&self) -> rusqlite::Result<()> {
+    pub(crate) fn refresh_hidden_rowids(&self) -> rusqlite::Result<()> {
         self.protect_rowids(None)
     }
 
@@ -17,7 +17,7 @@ impl DatabaseConnection {
     /// one. Each table is read once as it appears, not again after every
     /// later statement: a schema of hundreds of tables would read them all
     /// after each one.
-    pub(super) fn refresh_changed_rowids(&self) -> rusqlite::Result<()> {
+    pub(crate) fn refresh_changed_rowids(&self) -> rusqlite::Result<()> {
         match self.policy.take_changed_tables() {
             ChangedTables::None => Ok(()),
             ChangedTables::Named(tables) => self.protect_rowids(Some(&tables)),

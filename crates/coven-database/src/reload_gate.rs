@@ -1,5 +1,6 @@
 //! Write gates for audiences whose replacement data has not committed.
-use crate::{sqlite::DatabaseConnection, DbError, PendingValue};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, PendingValue};
 use coven_merge::Audience;
 use rusqlite::params;
 use std::collections::BTreeSet;
@@ -10,7 +11,7 @@ pub(crate) fn require_reload<P: PendingValue>(
 ) -> Result<(), DbError> {
     let record = P::reload(audience.clone());
     let subject = crate::pending::SubjectKey::of(record.subject())?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_data_reloads(audience,subject) VALUES(?1,?2)
          ON CONFLICT(audience) DO UPDATE SET subject=excluded.subject,marker=NULL",
         params![audience, subject],
@@ -27,7 +28,7 @@ pub(crate) fn require_rebuild<P: PendingValue>(
     marker: coven_merge::WriteId,
 ) -> Result<(), DbError> {
     require_reload::<P>(db, audience)?;
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_data_reloads SET marker=?2 WHERE audience=?1",
         params![audience, coven_format::merge_fields::encode_write_id(&marker)?],
     )?;
@@ -39,7 +40,7 @@ pub(crate) fn require_rebuild<P: PendingValue>(
 /// marker has read through every slot applied before it (§18.4).
 pub(crate) fn follow(db: &DatabaseConnection, marker: coven_merge::WriteId) -> Result<(), DbError> {
     for audience in rebuilding(db)?.into_keys() {
-        db.internal_execute(
+        db.execute(
             "UPDATE _coven_data_reloads SET marker=?2 WHERE audience=?1",
             params![audience, coven_format::merge_fields::encode_write_id(&marker)?],
         )?;
@@ -67,7 +68,7 @@ pub(crate) fn rebuilding(
 /// selected data has committed, so writes into it may proceed, or this device
 /// no longer reads it.
 pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    db.pending_change(|| {
+    crate::store_call::pending_change(db, || {
         let subject = db
             .query("SELECT subject FROM _coven_data_reloads WHERE audience=?1", [audience], |r| {
                 r.get::<_, crate::pending::SubjectKey>(0)
@@ -76,7 +77,7 @@ pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Resu
         if let Some(subject) = subject {
             crate::pending::clear_key(db, &subject)?;
         }
-        db.internal_execute("DELETE FROM _coven_data_reloads WHERE audience=?1", [audience])?;
+        db.execute("DELETE FROM _coven_data_reloads WHERE audience=?1", [audience])?;
         Ok(())
     })
 }

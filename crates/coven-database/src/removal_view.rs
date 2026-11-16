@@ -3,6 +3,8 @@ use crate::merge_store::MergeStore;
 use crate::removal_schema::TableRules;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::schema::{Schema, TableSchema};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, sql_value};
 use crate::write_rows::{column_list, column_name, read_row, row_id, row_key, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -61,7 +63,12 @@ impl Weight for EvaluatedRow {
 }
 
 pub(crate) struct DatabaseRemovalView<'a> {
-    database: &'a crate::sqlite::DatabaseConnection,
+    database: &'a DatabaseConnection,
+    #[cfg_attr(
+        not(any(test, feature = "test-utils")),
+        expect(dead_code, reason = "only tests count coven's work")
+    )]
+    call: &'a StoreCall<'a>,
     store: &'a MergeStore<'a>,
     schema: &'a Schema,
     /// Each synced table's removal rules, by table name.
@@ -86,7 +93,8 @@ enum States<'a> {
 
 impl<'a> DatabaseRemovalView<'a> {
     pub(crate) fn new(
-        database: &'a crate::sqlite::DatabaseConnection,
+        database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         store: &'a MergeStore<'a>,
         schema: &'a WriteSchema,
         app: &'a AppView<'a>,
@@ -104,6 +112,7 @@ impl<'a> DatabaseRemovalView<'a> {
         }
         Ok(Self {
             database,
+            call,
             store,
             schema: &schema.schema,
             rules: &schema.rules,
@@ -122,7 +131,8 @@ impl<'a> DatabaseRemovalView<'a> {
     /// reads its kept record. A reference only a kept record holds is no
     /// edge here, so a recompute touches every kept row.
     pub(crate) fn counted(
-        database: &'a crate::sqlite::DatabaseConnection,
+        database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         store: &'a MergeStore<'a>,
         schema: &'a Schema,
         rules: &'a BTreeMap<String, TableRules>,
@@ -130,6 +140,7 @@ impl<'a> DatabaseRemovalView<'a> {
     ) -> Self {
         Self {
             database,
+            call,
             store,
             schema,
             rules,
@@ -198,7 +209,7 @@ impl<'a> DatabaseRemovalView<'a> {
             return Ok(self.remember(id, row));
         }
         #[cfg(any(test, feature = "test-utils"))]
-        self.database.record_work(|work| work.evaluated_rows += 1);
+        self.call.record_work(|work| work.evaluated_rows += 1);
         let table = self.table(&id.table);
         let rules = &self.rules[&table.name];
         let mut values: AppValues =

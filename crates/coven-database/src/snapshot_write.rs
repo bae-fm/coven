@@ -1,7 +1,9 @@
 //! Audience snapshots stream the counted prefix from one pinned transaction.
 use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, decoded, slot_counter};
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{
     admin::SnapshotId,
     merge_fields,
@@ -41,6 +43,7 @@ impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
 /// reads its schema version (§16.3).
 pub(crate) fn write<E>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     id: SnapshotId,
     begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
@@ -48,17 +51,17 @@ pub(crate) fn write<E>(
 ) -> Result<u32, SnapshotWriteError<E>> {
     let covers = crate::sequence::applied(db)?;
     let audience = id.audience.clone();
-    let removed = crate::published::removals(db, &schema.schema, &schema.rules)?;
+    let removed = crate::published::removals(db, call, &schema.schema, &schema.rules)?;
     let mut counts = [0; SECTIONS];
     let mut columns = BTreeSet::new();
-    crate::snapshot_view::rows(db, schema, &audience, |row| {
+    crate::snapshot_view::rows(db, call, schema, &audience, |row| {
         counts[section::MERGE] += 1;
         columns.extend(
             row.state.cells().keys().map(|column| (row.state.row().table.clone(), column.clone())),
         );
         Ok::<_, DbError>(())
     })?;
-    crate::snapshot_view::losses(db, &removed, &audience, |loss| {
+    crate::snapshot_view::losses(db, call, &removed, &audience, |loss| {
         counts[section::LOSS] += 1;
         if let coven_format::loss::LossValues::Cell { column, .. } = &loss.values {
             columns.insert((loss.row.table.clone(), column.clone()));
@@ -81,6 +84,7 @@ pub(crate) fn write<E>(
     })?;
     let evidence = crate::authorship::evidence(
         db,
+        call,
         schema,
         &audience,
         crate::authorship::Author {
@@ -107,7 +111,7 @@ pub(crate) fn write<E>(
     let breaking = crate::raise_capture::breaking_version(db)?;
     let (mut encoder, header) = SnapshotEncoder::start(SnapshotHeader {
         id,
-        schema_version: db.schema_version()?,
+        schema_version: crate::transaction_constants::schema_version(db, call)?,
         covers,
         counts,
     })?;
@@ -118,8 +122,10 @@ pub(crate) fn write<E>(
     for (table, column) in columns {
         record(SnapshotRecord::Column(SyncedColumn { table, column }))?;
     }
-    crate::snapshot_view::rows(db, schema, &audience, |row| record(SnapshotRecord::Merge(row)))?;
-    crate::snapshot_view::losses(db, &removed, &audience, |loss| {
+    crate::snapshot_view::rows(db, call, schema, &audience, |row| {
+        record(SnapshotRecord::Merge(row))
+    })?;
+    crate::snapshot_view::losses(db, call, &removed, &audience, |loss| {
         record(SnapshotRecord::Loss(loss))
     })?;
     crate::write_sources::visit_evidence(db, &audience, |authored| {

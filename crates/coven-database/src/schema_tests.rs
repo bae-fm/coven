@@ -58,8 +58,8 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
                     matches!(database_error(error), DbError::Schema(found) if found == expected)
                 );
                 let db = store.builder(vec![], vec![]).open().await.unwrap();
-                db.inspect_writer(|writer| {
-                    assert_eq!(writer.schema_version().unwrap(), 0);
+                db.inspect_writer(|writer, call| {
+                    assert_eq!(crate::transaction_constants::schema_version(writer, call).unwrap(), 0);
                     assert_eq!(writer.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('Parent','Child')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                     writer.batch(&schema).unwrap();
                 });
@@ -107,7 +107,7 @@ async fn owner_tables_refuse_set_default_on_open_and_after_migrating() {
         .expect("SET DEFAULT must fail the migration");
     assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|writer| writer.batch(SCHEMA).unwrap());
+    db.inspect_writer(|writer, _| writer.batch(SCHEMA).unwrap());
     db.close().await.unwrap();
     let error = store
         .builder(tables(), vec![])
@@ -234,7 +234,7 @@ async fn opening_does_not_validate_existing_uuid_values() {
     let store = TestStore::new();
     let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)";
     let db = store.schema(notes_tables(), schema).await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer.batch("INSERT INTO notes VALUES('not a uuid')").unwrap();
     });
     db.close().await.unwrap();
@@ -253,12 +253,12 @@ async fn opening_does_not_validate_existing_uuid_values() {
 async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer.batch("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO notes(id,title) SELECT printf('00000000-0000-4000-8000-%012x',i),'title' FROM n").unwrap();
     });
     db.close().await.unwrap();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     assert!(!statements.is_empty(), "the open must be traced");
     for crate::sqlite::tests::ProfiledStatement { sql: statement, fullscan_steps: steps, .. } in
         statements
@@ -268,7 +268,7 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
         // analyzes again only a table SQLite keeps no statistics for, which
         // is an empty one: it reads no rows of it.
         let empty = |table: &str| {
-            db.inspect_writer(|writer| {
+            db.inspect_writer(|writer, _| {
                 writer
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
                     .unwrap()
@@ -374,7 +374,7 @@ async fn unguarded_shared_triggers_are_refused_on_open_and_after_migrating() {
         rejects(schema, tables(), expected.clone()).await;
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.inspect_writer(|db, _| db.batch(schema).unwrap());
         db.close().await.unwrap();
         for read_only in [false, true] {
             let builder = store.builder(tables(), vec![]);
@@ -469,7 +469,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
 async fn opening_an_existing_schema_refuses_an_impossible_local_action() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|db| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET NULL)").unwrap());
+    db.inspect_writer(|db, _| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET NULL)").unwrap());
     db.close().await.unwrap();
     for read_only in [false, true] {
         let builder = store.builder(vec![], vec![]);
@@ -528,7 +528,7 @@ async fn nullable_primary_keys_are_refused_on_open_and_after_migrating() {
             matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
         );
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.inspect_writer(|db, _| db.batch(schema).unwrap());
         db.close().await.unwrap();
         let error = store
             .builder(tables(), vec![])
@@ -560,7 +560,7 @@ async fn device_local_nullable_primary_keys_are_refused_on_open_and_after_migrat
             "{schema}"
         );
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.inspect_writer(|db, _| db.batch(schema).unwrap());
         db.close().await.unwrap();
         let error = store.builder(vec![], vec![]).open().await.err().expect("must fail open");
         assert!(
@@ -606,8 +606,8 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
             "{kind}"
         );
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|writer| {
-            assert_eq!(writer.schema_version().unwrap(), 0);
+        db.inspect_writer(|writer, call| {
+            assert_eq!(crate::transaction_constants::schema_version(writer, call).unwrap(), 0);
             assert_eq!(
                 writer
                     .query_row("SELECT count(*) FROM sqlite_schema WHERE name='notes'", [], |r| r
@@ -695,8 +695,8 @@ async fn nonprimary_references_fail_migration_and_both_open_modes() {
         };
         assert!(expected.to_string().contains("Child"));
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|writer| {
-            assert_eq!(writer.schema_version().unwrap(), 0);
+        db.inspect_writer(|writer, call| {
+            assert_eq!(crate::transaction_constants::schema_version(writer, call).unwrap(), 0);
             assert_eq!(
                 writer
                     .query_row(
@@ -834,8 +834,8 @@ async fn foreign_keys_on_generated_columns_are_refused() {
                     .expect("a migration may not add a generated reference");
                 assert!(refused(error), "{synced} {kind} {expression} {action}");
                 let db = store.builder(vec![], vec![]).open().await.unwrap();
-                db.inspect_writer(|db| {
-                    assert_eq!(db.schema_version().unwrap(), 0);
+                db.inspect_writer(|db, call| {
+                    assert_eq!(crate::transaction_constants::schema_version(db, call).unwrap(), 0);
                     db.batch(&schema).unwrap();
                 });
                 db.close().await.unwrap();
@@ -877,7 +877,7 @@ async fn app_tables_named_like_sqlites_own_are_read() {
         .open()
         .await
         .unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         let schema = crate::schema::Schema::read(sql, &[]).unwrap();
         let tables: Vec<_> = schema.tables.keys().cloned().collect();
         // Coven's files table syncs beside the app's.
@@ -909,7 +909,7 @@ async fn covens_views_are_not_app_objects() {
         .open()
         .await
         .unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         let schema = crate::schema::Schema::read(sql, &[]).unwrap();
         let views: Vec<_> = schema
             .objects

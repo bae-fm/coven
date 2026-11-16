@@ -68,13 +68,13 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     complete(&db).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(owned_paths(&store).is_empty());
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
+    db.inspect_writer(|sql, _| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
     db.write(|_| Ok(())).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
@@ -172,7 +172,7 @@ fn crashing_file_writer() {
             ))
             .unwrap();
     } else {
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             if phase == "committed" {
                 sql.crash_after_next_commit();
             } else {
@@ -187,7 +187,7 @@ fn crashing_file_writer() {
 /// Complete the only queued upload as confirmed storage would, whether a
 /// file still waits for it or not.
 async fn complete(db: &Database) -> Result<crate::UploadCompletion, DbError> {
-    let id = db.inspect_writer(|sql| {
+    let id = db.inspect_writer(|sql, _| {
         sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| r.get::<_, i64>(0)).unwrap()
     });
     FileDatabase::new(db.clone()).complete_upload(id, ()).await
@@ -195,7 +195,7 @@ async fn complete(db: &Database) -> Result<crate::UploadCompletion, DbError> {
 
 /// The size of the file row `7` references.
 fn file_size(db: &Database) -> i64 {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT f.size FROM files AS r JOIN main.coven_files AS f ON f.id=r.file WHERE r.id='7'",
             [],
@@ -295,7 +295,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let directory = store.database_path().parent().unwrap().join("files");
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     let error = db
@@ -311,7 +311,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     assert_eq!(local_count(&db, "files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(std::fs::read_dir(directory).unwrap().next().is_none());
-    db.inspect_writer(|sql| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
+    db.inspect_writer(|sql, _| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
     db.write(|_| Ok(())).await.unwrap();
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
@@ -322,7 +322,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
 async fn a_callback_error_keeps_a_failed_cleanup_beside_it() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     let error = db
@@ -350,7 +350,7 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
     let original = owned_paths(&store).remove(0);
-    db.inspect_writer(|sql| sql.refuse_transaction_end(true));
+    db.inspect_writer(|sql, _| sql.refuse_transaction_end(true));
     let error = db
         .write(|sql| {
             sql.execute("DELETE FROM files", [])?;
@@ -428,15 +428,15 @@ async fn a_referenced_path_cannot_be_recorded_for_removal() {
     stage(&db, b"original".to_vec(), true).await.unwrap();
     let path = owned_paths(&store).remove(0);
     let name = staged_name(&path);
-    let recorded = db.inspect_writer(|sql| {
+    let recorded = db.inspect_writer(|sql, _| {
         sql.transaction(|db| {
-            db.internal_execute("INSERT INTO _coven_file_removals(path) VALUES(?1)", [&name])
+            db.execute("INSERT INTO _coven_file_removals(path) VALUES(?1)", [&name])
         })
     });
     assert!(recorded.is_err(), "{recorded:?}");
-    let cached = db.inspect_writer(|sql| {
+    let cached = db.inspect_writer(|sql, _| {
         sql.transaction(|db| {
-            db.internal_execute(
+            db.execute(
                 "INSERT INTO _coven_file_removals(area,path) VALUES('cache','released')",
                 [],
             )?;

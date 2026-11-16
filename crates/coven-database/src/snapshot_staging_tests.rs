@@ -39,7 +39,7 @@ fn reload(
             })
             .collect(),
         slots: vec![],
-        state: db.inspect_writer(|db| crate::store_state_tables::read(db).unwrap()),
+        state: db.inspect_writer(|db, _| crate::store_state_tables::read(db).unwrap()),
         cutoffs: vec![],
         provider_access: Vec::new(),
         boundaries: vec![],

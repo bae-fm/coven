@@ -39,7 +39,7 @@ async fn the_followed_tables_are_made_as_a_store_holds_them() {
 
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let in_store: Followed = db.inspect_writer(|sql| {
+    let in_store: Followed = db.inspect_writer(|sql, _| {
         let mut objects = Vec::new();
         let mut rows = Vec::new();
         for followed in FOLLOWED {

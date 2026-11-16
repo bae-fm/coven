@@ -2,6 +2,7 @@
 use crate::merge_store::MergeStore;
 use crate::removal_view::DatabaseRemovalView;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -19,6 +20,7 @@ pub(crate) struct Applied {
 
 pub(crate) struct WriteApply<'a> {
     database: &'a DatabaseConnection,
+    call: &'a StoreCall<'a>,
     schema: &'a WriteSchema,
     store: &'a MergeStore<'a>,
     before: &'a AppView<'a>,
@@ -38,6 +40,7 @@ pub(crate) struct WriteApply<'a> {
 impl<'a> WriteApply<'a> {
     pub(crate) fn new(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         store: &'a MergeStore<'a>,
         before: &'a AppView<'a>,
@@ -46,6 +49,7 @@ impl<'a> WriteApply<'a> {
     ) -> Self {
         Self {
             database,
+            call,
             schema,
             store,
             before,
@@ -60,13 +64,17 @@ impl<'a> WriteApply<'a> {
     /// statements gave to SQLite to judge.
     pub(crate) fn local(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         store: &'a MergeStore<'a>,
         before: &'a AppView<'a>,
         visible: &'a AppView<'a>,
         deleted: &'a BTreeMap<CircleId, crate::Slot>,
     ) -> Self {
-        Self { app_judged: true, ..Self::new(database, schema, store, before, visible, deleted) }
+        Self {
+            app_judged: true,
+            ..Self::new(database, call, schema, store, before, visible, deleted)
+        }
     }
 
     /// Recompute as a migration's new rules do: the rows this reaches keep
@@ -93,6 +101,7 @@ impl<'a> WriteApply<'a> {
         if let Some(record) = record {
             crate::published::capture_rows(
                 self.database,
+                self.call,
                 self.store,
                 record.parts.iter().flat_map(|p| p.dismissals.iter().map(|d| &d.row)),
             )?;
@@ -110,6 +119,7 @@ impl<'a> WriteApply<'a> {
         let empty = BTreeMap::new();
         let old = DatabaseRemovalView::new(
             self.database,
+            self.call,
             self.store,
             self.schema,
             self.before,
@@ -119,6 +129,7 @@ impl<'a> WriteApply<'a> {
         )?;
         let new = DatabaseRemovalView::new(
             self.database,
+            self.call,
             self.store,
             self.schema,
             self.visible,
@@ -133,16 +144,20 @@ impl<'a> WriteApply<'a> {
             &unjudged,
             record.map(|record| record.header.position),
             || match record {
-                Some(record) => {
-                    crate::write_commit::commit(self.database, record, self.store, &updates)
-                }
+                Some(record) => crate::write_commit::commit(
+                    self.database,
+                    self.call,
+                    record,
+                    self.store,
+                    &updates,
+                ),
                 None => Ok(BTreeMap::new()),
             },
         )?;
         let mut affected: BTreeSet<_> =
             region.into_iter().chain(unjudged).map(|row| (row.table, row.key)).collect();
         if let Some(record) = record {
-            affected.extend(crate::dismissal::apply(self.database, record)?);
+            affected.extend(crate::dismissal::apply(self.database, self.call, record)?);
         }
         Ok(Applied { affected, merged: updates })
     }
@@ -157,6 +172,7 @@ impl<'a> WriteApply<'a> {
         let updates = BTreeMap::new();
         let new = DatabaseRemovalView::new(
             self.database,
+            self.call,
             self.store,
             self.schema,
             self.visible,
@@ -193,6 +209,7 @@ impl<'a> WriteApply<'a> {
         if write.is_some() || (self.keeps_recomputed && crate::published::exists(self.database)?) {
             crate::published::capture_rows(
                 self.database,
+                self.call,
                 self.store,
                 removal.region.iter().chain(unjudged),
             )?;
@@ -200,6 +217,7 @@ impl<'a> WriteApply<'a> {
         let stored = persist()?;
         crate::removal::materialize(
             self.database,
+            self.call,
             self.schema,
             self.visible,
             new,

@@ -1,6 +1,8 @@
 use super::*;
 use crate::read::tests::AppError;
+use crate::sqlite::DatabaseConnection;
 use crate::tests::next;
+use crate::{internal_schema, CovenMigrationError, Migration, SyncedTable};
 use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
@@ -32,14 +34,6 @@ impl DatabaseConnection {
             message.replace('\'', "''")
         ))
         .unwrap();
-    }
-
-    pub(crate) fn record_merge_load(&self, table: &str) {
-        *self.merge_loads.lock().unwrap().entry(table.into()).or_default() += 1;
-    }
-
-    pub(crate) fn merge_loads(&self) -> BTreeMap<String, usize> {
-        self.merge_loads.lock().unwrap().clone()
     }
 
     pub(crate) fn set_value_limit(&self, bytes: i32) -> i32 {
@@ -182,7 +176,7 @@ async fn internal_schema_migrates_on_open_and_preserves_app_data() {
     drop(raw);
     for _ in 0..2 {
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             assert_eq!(
                 sql.query_row("PRAGMA application_id", [], |r| r.get::<_, u32>(0)).unwrap(),
                 internal_schema::VERSION
@@ -282,7 +276,7 @@ async fn newer_internal_schema_is_refused_without_changes() {
 async fn bundled_sqlite_has_the_session_extension() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         assert!(sql.query_row("SELECT sqlite_compileoption_used('ENABLE_SESSION') AND sqlite_compileoption_used('ENABLE_PREUPDATE_HOOK')", [], |r| r.get::<_, bool>(0)).unwrap());
     });
     db.close().await.unwrap();
@@ -293,7 +287,7 @@ async fn bundled_sqlite_has_the_session_extension() {
 async fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         assert!(sql
             .query_row("SELECT sqlite_compileoption_used('STMTJRNL_SPILL=126976')", [], |r| r
                 .get::<_, bool>(0))
@@ -360,7 +354,7 @@ async fn native_cycle_deletes_commit_with_enforcement_and_transaction_deferral()
                     ),
                 )
                 .await;
-                db.inspect_writer(|writer| {
+                db.inspect_writer(|writer, _| {
                     writer
                         .transaction(|writer| {
                             writer.batch("PRAGMA defer_foreign_keys=ON")?;
@@ -369,8 +363,8 @@ async fn native_cycle_deletes_commit_with_enforcement_and_transaction_deferral()
                             assert!(writer
                                 .query_row("PRAGMA defer_foreign_keys", [], |r| r
                                     .get::<_, bool>(0))?);
-                            writer.internal_execute("DELETE FROM nodes WHERE id=?1", [first])?;
-                            writer.internal_execute("DELETE FROM nodes WHERE id=?1", [second])?;
+                            writer.execute("DELETE FROM nodes WHERE id=?1", [first])?;
+                            writer.execute("DELETE FROM nodes WHERE id=?1", [second])?;
                             Ok(())
                         })
                         .unwrap();
@@ -400,7 +394,7 @@ async fn materialization_takes_out_synced_cycles_with_foreign_keys_on() {
             assert_eq!(crate::write::tests::count(&db, "nodes"), 0, "{action} {timing}");
             assert_eq!(crate::write::tests::count(&db, "_coven_lost"), 2);
             assert_eq!(crate::write::tests::records(&db).len(), 1);
-            db.inspect_writer(|db| {
+            db.inspect_writer(|db, _| {
                 assert!(db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0)).unwrap());
                 assert!(db.query("PRAGMA foreign_key_check", [], |_| Ok(())).unwrap().is_empty());
             });
@@ -490,22 +484,22 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
     .await
     .unwrap();
     for moving in [false, true] {
-        db.inspect_writer_schema(|writer,schema| {
+        db.inspect_writer_schema(|writer, _,schema| {
             // The profile holds the update and its recording too, which run
             // none of the statements counted below.
             let changes=writer.with_profile(|writer| {
-                let mut transaction=super::write_transaction::WriteTransaction::begin(writer,false).unwrap();
+                let mut transaction=super::write_transaction::WriteTransaction::begin(writer, false).unwrap();
                 let recording=super::event_capture::EventCapture::begin(&mut transaction).unwrap();
-                transaction.within(|db| db.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[])).unwrap();
+                transaction.within(|db| db.execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[])).unwrap();
                 transaction.stop_observing_operations().unwrap();
                 let events=recording.events();
                 let captured=crate::write_capture::capture(schema,&events).unwrap();
-                transaction.within(|writer| {
+                transaction.within(|writer| crate::store_call::outside_store(|call| {
                     let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
                     let after=crate::write_rows::AppView::after(writer,schema);
-                    let stored=crate::merge_store::MergeStore::new(writer,&before);
-                    crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&Default::default())
-                })
+                    let stored=crate::merge_store::MergeStore::new(writer, call,&before);
+                    crate::write_record::changes(writer, call,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&Default::default())
+                }))
             });
             let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
@@ -531,7 +525,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
     let mut query: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
     assert!(next(&mut query).await.is_empty());
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         // Fail SQLite's own session lookup while taking its changeset, once
         // the transaction's own statements have run.
         let refusing = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -549,7 +543,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
             }))
             .unwrap();
         let result = writer.transaction(|writer| {
-            writer.internal_execute("INSERT INTO items VALUES(1,'rolled back')", [])?;
+            writer.execute("INSERT INTO items VALUES(1,'rolled back')", [])?;
             refusing.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         });
@@ -561,8 +555,8 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
         );
     });
     assert!(!query.is_marked_for_rerun());
-    db.commit_writer(|writer| {
-        writer.internal_execute("INSERT INTO items VALUES(1,'committed')", []).unwrap()
+    db.commit_writer(|writer, _| {
+        writer.execute("INSERT INTO items VALUES(1,'committed')", []).unwrap()
     });
     assert_eq!(next(&mut query).await, ["committed"]);
     db.close().await.unwrap();
@@ -579,13 +573,13 @@ async fn commit_failure_and_net_zero_transactions_do_not_publish() {
         Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
     assert!(next(&mut query).await.is_empty());
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         assert!(writer
             .transaction(|writer| writer.batch("INSERT INTO items VALUES(1,99,'invalid')"))
             .is_err());
     });
     assert!(!query.is_marked_for_rerun());
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("INSERT INTO items VALUES(1,NULL,'temporary'); DELETE FROM items").unwrap()
     });
     assert!(!query.is_marked_for_rerun());
@@ -643,11 +637,11 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
         Ok(sql.query_row("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
     assert!(query.next_inline().await.expect("the live query answers").is_err());
-    db.commit_writer(|writer| {
-        writer.internal_execute("INSERT INTO items VALUES(1,'execute')", []).unwrap()
+    db.commit_writer(|writer, _| {
+        writer.execute("INSERT INTO items VALUES(1,'execute')", []).unwrap()
     });
     assert_eq!(next(&mut query).await, "execute");
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer
             .query_row("UPDATE items SET value='query_row' RETURNING value", [], |r| {
                 r.get::<_, String>(0)
@@ -655,13 +649,13 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
             .unwrap()
     });
     assert_eq!(next(&mut query).await, "query_row");
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer
             .query("UPDATE items SET value='query' RETURNING value", [], |r| r.get::<_, String>(0))
             .unwrap()
     });
     assert_eq!(next(&mut query).await, "query");
-    db.commit_writer(|writer| writer.batch("UPDATE items SET value='batch'").unwrap());
+    db.commit_writer(|writer, _| writer.batch("UPDATE items SET value='batch'").unwrap());
     assert_eq!(next(&mut query).await, "batch");
     db.close().await.unwrap();
 }
@@ -689,7 +683,7 @@ async fn hook_tables_are_the_schemas_tables_with_no_primary_key() {
         )
         .await
         .unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         let shapes = writer.table_shapes().unwrap();
         let mut whole: Vec<&str> = shapes
             .iter()
@@ -731,12 +725,12 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
             Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), value))
         });
         assert_eq!(next(&mut query).await, (0, 10));
-        db.commit_writer(|writer| {
+        db.commit_writer(|writer, _| {
             writer.batch(&format!("UPDATE items SET extra=1 WHERE id={first}; UPDATE items SET value=21 WHERE id={second}; INSERT INTO hook_target VALUES('unrelated')")).unwrap();
         });
         assert!(!query.is_marked_for_rerun(), "{key}{suffix}");
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1, "{key}{suffix}");
-        db.commit_writer(|writer| {
+        db.commit_writer(|writer, _| {
             writer.batch(&format!("UPDATE items SET value=11 WHERE id={first}")).unwrap();
         });
         assert_eq!(next(&mut query).await, (1, 11));
@@ -755,7 +749,7 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
         Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), values))
     });
     assert_eq!(next(&mut query).await, (0, vec!["unchanged".into()]));
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         let result = writer.transaction::<()>(|writer| {
             writer.batch("UPDATE local SET extra=1")?;
             Err(DbError::TransactionEnded)
@@ -768,12 +762,12 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
         writer.transaction(|writer| writer.batch("INSERT INTO parent VALUES(1)")).unwrap();
     });
     assert!(!query.is_marked_for_rerun());
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("UPDATE local SET extra=2").unwrap();
     });
     // Hook changes invalidate every column even when the selected value stayed equal.
     assert_eq!(next(&mut query).await, (1, vec!["unchanged".into()]));
-    db.commit_writer(|writer| {
+    db.commit_writer(|writer, _| {
         writer.batch("DELETE FROM local").unwrap();
     });
     assert_eq!(next(&mut query).await, (2, vec![]));
@@ -789,7 +783,7 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
     // whatever the commit reads once. A first write reads the tables'
     // shapes, once for the schema.
     let metadata_reads = |updates: u8| {
-        db.inspect_writer(|writer| {
+        db.inspect_writer(|writer, _| {
             writer
                 .with_profile(|writer| {
                     writer.transaction(|writer| {
@@ -841,13 +835,13 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
             Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
         });
         assert!(next(&mut notes).await.is_empty());
-        db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+        db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
         // Neither transaction changes pending state; each fails after a change
         // that its refused ROLLBACK leaves on the writer.
         let error = if internal {
-            db.inspect_writer(|writer| {
+            db.inspect_writer(|writer, _| {
                 writer.transaction(|writer| {
-                    writer.internal_execute("INSERT INTO notes VALUES('n','held','')", [])?;
+                    writer.execute("INSERT INTO notes VALUES('n','held','')", [])?;
                     Err::<(), _>(DbError::StoreClosed)
                 })
             })
@@ -869,7 +863,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
             "{error:?}"
         );
         let held = |db: &crate::Database| {
-            db.inspect_writer(|writer| {
+            db.inspect_writer(|writer, _| {
                 writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
             })
             .unwrap()
@@ -900,7 +894,7 @@ async fn a_callback_error_whose_rollback_fails_keeps_both_and_fails_later_calls(
     let store = TestStore::new();
     let open = || store.builder(notes_tables(), notes_migrations()).open();
     let db = open().await.unwrap();
-    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    db.inspect_writer(|writer, _| writer.refuse_transaction_end(true));
     let error = db
         .write_as(|sql| {
             sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
@@ -931,7 +925,7 @@ async fn a_profile_inside_another_leaves_the_outer_tracing() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let statements: Vec<String> = db
-        .inspect_writer(|writer| writer.profiled_statements())
+        .inspect_writer(|writer, _| writer.profiled_statements())
         .into_iter()
         .map(|s| s.sql)
         .collect();
@@ -946,7 +940,7 @@ async fn a_profile_inside_another_leaves_the_outer_tracing() {
 async fn a_profile_ends_on_every_path_out_of_its_run() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         let failed = writer.with_profile(|writer| -> Result<(), DbError> {
             writer.batch("SELECT 'traced'")?;
             Err(DbError::StoreClosed)

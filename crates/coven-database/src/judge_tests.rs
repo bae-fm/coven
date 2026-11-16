@@ -133,11 +133,11 @@ pub(crate) async fn receive(to: &Database, record: &WriteRecord) -> crate::Apply
 
 /// The verdict a device recorded for one original change.
 pub(crate) fn verdict(db: &Database, record: &WriteRecord, row: &RowId) -> ChangeVerdict {
-    db.inspect_writer(|c| stored(c, &record.header, row).unwrap())
+    db.inspect_writer(|c, _| stored(c, &record.header, row).unwrap())
 }
 
 pub(crate) fn text(db: &Database, sql: &'static str) -> Option<String> {
-    db.inspect_writer(|c| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
+    db.inspect_writer(|c, _| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
 pub(crate) fn causes(record: &WriteRecord, rows: &[(&str, &str)]) -> Vec<ChangeId> {
@@ -345,7 +345,7 @@ async fn verdicts_agree_in_both_arrival_orders() {
         );
     }
     let state = |db: &Database| {
-        db.inspect_writer(|c| {
+        db.inspect_writer(|c, _| {
             c.query("SELECT id,body FROM reviews ORDER BY id", [], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })
@@ -843,7 +843,7 @@ impl Receipt for LoadedAlike {
         // every device does: it keeps evidence only for other members' writes.
         let device = to.local_device().unwrap();
         let member = to
-            .inspect_writer(|db| crate::store_state_tables::device_member(db, device))
+            .inspect_writer(|db, _| crate::store_state_tables::device_member(db, device))
             .unwrap()
             .expect("the device holding the history is registered");
         let id = coven_format::admin::SnapshotId { device, number: 1, audience: Audience::Store };

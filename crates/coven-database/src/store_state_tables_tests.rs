@@ -2,6 +2,7 @@
 //! the plan audit, damaging them as broken storage would, and the full scans
 //! their statements' plans may contain.
 
+use crate::sqlite::DatabaseConnection;
 /// Fill the membership and audience tables, thousands of rows each,
 /// from the rows of the plan audit's `fixture` table, inside its transaction
 /// (`internal_schema_scan_reasons_tests.rs`).
@@ -40,7 +41,7 @@ pub(crate) const CIRCLE_DAMAGE: [&str; 3] = [
 
 /// Damage the membership tables with one of [`MEMBER_DAMAGE`], as broken
 /// storage would, for tests of what reading members does.
-pub(crate) fn damage(db: &crate::sqlite::DatabaseConnection, damage: &str) {
+pub(crate) fn damage(db: &DatabaseConnection, damage: &str) {
     db.batch(&format!(
         "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; {damage};
          PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON;"

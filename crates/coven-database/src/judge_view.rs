@@ -19,6 +19,7 @@ use crate::judge::{Indexed, Place, StepIndex};
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -33,6 +34,7 @@ use std::collections::BTreeMap;
 /// connection judging the write reads its history from.
 pub(crate) struct Authoring<'a> {
     database: &'a DatabaseConnection,
+    call: &'a StoreCall<'a>,
     schema: &'a Schema,
     /// SQLite's column affinities of the current schema.
     current: Option<&'a BTreeMap<String, TableRules>>,
@@ -41,13 +43,14 @@ pub(crate) struct Authoring<'a> {
 impl<'a> Authoring<'a> {
     pub(crate) fn new(
         db: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         version: u32,
     ) -> Result<Self, DbError> {
         if let Some(before) = schema.retained_before(version) {
-            return Ok(Self { database: db, schema: before, current: None });
+            return Ok(Self { database: db, call, schema: before, current: None });
         }
-        Ok(Self { database: db, schema: &schema.schema, current: Some(&schema.rules) })
+        Ok(Self { database: db, call, schema: &schema.schema, current: Some(&schema.rules) })
     }
 
     pub(crate) fn table(&self, name: &str) -> Option<&TableSchema> {
@@ -101,7 +104,7 @@ impl<'a> ChildView<'a> {
     /// The cell's value at this moment, as far as it is kept, or none when
     /// it was never set.
     fn value(&self, column: &str) -> Result<Option<ColumnValue<KeptValue>>, DbError> {
-        let db = self.authoring.database;
+        let (db, call) = (self.authoring.database, self.authoring.call);
         if let Some(cell) = self.cells.get(column) {
             return Ok(Some(ColumnValue {
                 value: KeptValue::Value(cell.value.clone()),
@@ -122,7 +125,7 @@ impl<'a> ChildView<'a> {
         // A setter that doesn't count for this write has no value this
         // device may read; the change replacing it is lost with that setter
         // on every device alike (§9.5).
-        let Some(evidence) = crate::write_sources::counting(db, self.header, &setter.change)?
+        let Some(evidence) = crate::write_sources::counting(db, call, self.header, &setter.change)?
         else {
             return Ok(None);
         };

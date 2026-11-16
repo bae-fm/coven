@@ -2,10 +2,11 @@
 //! changes and deletes for them, and the uploads it queues, all in the
 //! write's own transaction.
 
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     file_location::{FileLocation, Place},
     file_table::{self, Record},
-    sqlite::DatabaseConnection,
     write_rows::{AppKey, AppValues, AppView},
     write_schema::WriteSchema,
     DbError,
@@ -230,6 +231,7 @@ enum FailedPart {
 /// A write's files on the connection its transaction runs on.
 pub(crate) struct FileWrite<'a> {
     database: &'a DatabaseConnection,
+    call: &'a StoreCall<'a>,
     files: &'a WriteFiles<'a>,
 }
 
@@ -287,8 +289,12 @@ impl<'a> WriteFiles<'a> {
 
 impl<'a> FileWrite<'a> {
     /// `files` on the connection of the transaction that writes them.
-    pub(crate) fn new(database: &'a DatabaseConnection, files: &'a WriteFiles<'a>) -> Self {
-        Self { database, files }
+    pub(crate) fn new(
+        database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
+        files: &'a WriteFiles<'a>,
+    ) -> Self {
+        Self { database, call, files }
     }
     /// Dismiss these lost values in this write (§8.4).
     pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
@@ -444,7 +450,8 @@ impl<'a> FileWrite<'a> {
             return Ok(Some(record));
         }
         let sequence = coven_format::write::Step::after(steps.values().flatten());
-        for (change, step) in references::deletions(db, store, &unreferenced, sequence)? {
+        for (change, step) in references::deletions(db, self.call, store, &unreferenced, sequence)?
+        {
             if changes.contains_key(&change.row) || steps.contains_key(&change.row) {
                 return Err(DbError::Invariant {
                     what: "a write deleting a file's record makes no other change to it",
@@ -636,7 +643,7 @@ impl<'a> FileWrite<'a> {
         let deleted = self.files.deleted.borrow();
         let Some(deleted) = deleted.as_ref() else {
             for key in &keys {
-                crate::file_protection::refresh_received(db, self.files.schema, key)?;
+                crate::file_protection::refresh_received(db, self.call, self.files.schema, key)?;
             }
             return crate::file_protection::settle_unreferenced(db);
         };
@@ -645,7 +652,13 @@ impl<'a> FileWrite<'a> {
         // references say whether it removed a file's last one.
         let mut released = BTreeSet::new();
         for key in &keys {
-            released.extend(crate::file_protection::refresh(db, self.files.schema, key, merged)?);
+            released.extend(crate::file_protection::refresh(
+                db,
+                self.call,
+                self.files.schema,
+                key,
+                merged,
+            )?);
         }
         for file in released {
             if !crate::file_protection::referenced(db, file)? && Record::read(db, file)?.is_some() {
@@ -673,7 +686,7 @@ impl<'a> FileWrite<'a> {
                 what: "a transaction applying received changes deletes no record of its own",
             });
         }
-        crate::file_protection::refresh_received(self.database, self.files.schema, key)
+        crate::file_protection::refresh_received(self.database, self.call, self.files.schema, key)
     }
 
     /// Settle the files the rows `retain_received` visited left unreferenced.

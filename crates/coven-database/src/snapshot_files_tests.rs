@@ -74,7 +74,7 @@ fn recorded(
 /// What the device's rows protect: each file reference, stored path,
 /// stored file, file waiting for its record's delete, original and upload.
 fn protection(db: &Database) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         everything(db)
             .into_iter()
             .filter(|(table, _)| {
@@ -95,25 +95,26 @@ fn protection(db: &Database) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
 /// Bringing every row's protection up to date one row at a time, from its
 /// whole merge state and losses, changes nothing an install left.
 fn assert_protection_settled(db: &Database) {
-    db.inspect_writer_schema(|writer, schema| {
-        writer
-            .discarded_write_transaction(|writer| {
-                let before = everything(writer);
-                let keys = writer.query(
-                    "SELECT table_name,key FROM _coven_rows WHERE table_name IN ('t','coven_files')
+    db.inspect_writer_schema(|writer, call, schema| {
+        let db = &*writer;
+        db.discarded_write_transaction(|_| {
+            let writer = &db;
+            let before = everything(writer);
+            let keys = writer.query(
+                "SELECT table_name,key FROM _coven_rows WHERE table_name IN ('t','coven_files')
                      UNION SELECT table_name,key FROM _coven_lost
                      UNION SELECT table_name,key FROM _coven_file_references
                      UNION SELECT table_name,key FROM _coven_row_file_refs",
-                    [],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
-                )?;
-                for key in keys {
-                    crate::file_protection::refresh_received(writer, schema, &key)?;
-                }
-                assert_eq!(everything(writer), before);
-                Ok::<_, crate::DbError>(())
-            })
-            .unwrap();
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )?;
+            for key in keys {
+                crate::file_protection::refresh_received(writer, call, schema, &key)?;
+            }
+            assert_eq!(everything(writer), before);
+            Ok::<_, crate::DbError>(())
+        })
+        .unwrap();
     });
 }
 
@@ -204,14 +205,14 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
     publish(&d, &[&a]).await;
     publish(&e, &[&a]).await;
     let unreferenced = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT file FROM _coven_unreferenced_files", [], |r| r.get::<_, String>(0))
                 .unwrap()
         })
     };
     assert_eq!(unreferenced(&a), [shared.0.to_string()]);
     let references = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query(
                 "SELECT file FROM _coven_file_references WHERE key=?1 ORDER BY file",
                 [crate::tests::text_key("five")],
@@ -221,7 +222,7 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
         })
     };
     assert_eq!(references(&c), [kept.0.to_string(), dropped.0.to_string()]);
-    c.inspect_writer(|db| crate::file_pins::request(db, dropped).unwrap());
+    c.inspect_writer(|db, _| crate::file_pins::request(db, dropped).unwrap());
     assert_eq!(count(&c, "_coven_pin_requests"), 1);
     let snapshot = frames(&a, Audience::Store).await;
     for (device, db, waiting) in [("new", &b, vec![]), ("earlier", &c, unreferenced(&a))] {

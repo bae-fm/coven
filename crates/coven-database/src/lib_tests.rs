@@ -89,7 +89,7 @@ impl TestStore {
         seed: u8,
     ) {
         let member = crate::tests::member(seed);
-        database.inspect_writer(|db| {
+        database.inspect_writer(|db, _| {
             db.transaction(|db| {
                 let mut state = crate::store_state_tables::read(db)?;
                 state.members.entry(member).or_insert(crate::store_state::StoreMember {
@@ -120,7 +120,7 @@ impl TestStore {
     ) {
         let device = self.directory.settings().unwrap().device_id;
         let member = crate::tests::member(1);
-        database.inspect_writer(|db| {
+        database.inspect_writer(|db, _| {
             db.transaction(|db| {
                 let mut state = crate::store_state_tables::read(db)?;
                 state.members.entry(member).or_insert(crate::store_state::StoreMember {
@@ -357,10 +357,10 @@ pub(crate) async fn remote_write_stamped_earlier(
     database: &crate::Database,
     row: coven_format::write::RowChange,
 ) {
-    let row = database.inspect_writer_schema(|db, schema| {
+    let row = database.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        let store = crate::merge_store::MergeStore::new(db, &app);
-        crate::write_sources::authored(db, &store, row.row, row.change).unwrap()
+        let store = crate::merge_store::MergeStore::new(db, call, &app);
+        crate::write_sources::authored(db, call, &store, row.row, row.change).unwrap()
     });
     assert_eq!(
         deliver_stamped(database, row, None, true, true).await.unwrap(),
@@ -388,10 +388,10 @@ async fn try_remote_write(
     schema_version: Option<u32>,
     count_queue: bool,
 ) -> Result<crate::ApplyOutcome, DbError> {
-    let row = database.inspect_writer_schema(|db, schema| {
+    let row = database.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        let store = crate::merge_store::MergeStore::new(db, &app);
-        crate::write_sources::authored(db, &store, row.row, row.change).unwrap()
+        let store = crate::merge_store::MergeStore::new(db, call, &app);
+        crate::write_sources::authored(db, call, &store, row.row, row.change).unwrap()
     });
     deliver(database, row, schema_version, count_queue).await
 }
@@ -408,21 +408,21 @@ pub(crate) async fn remote_update_concurrent_with_queue(
     let counted: Vec<_> = crate::write::tests::records(database)
         .into_iter()
         .filter(|record| {
-            database.inspect_writer(|db| {
+            database.inspect_writer(|db, _| {
                 crate::sequence::write_slot(db, record.header.position).unwrap().is_some()
             })
         })
         .collect();
     let row = change_from(&counted, table, id, changes);
-    let row = database.inspect_writer_schema(|db, schema| {
+    let row = database.inspect_writer_schema(|db, call, schema| {
         let state = match crate::published::kept_state(db, &row.row).unwrap() {
             Some(state) => state,
             None => {
                 let app = crate::write_rows::AppView::after(db, schema);
-                crate::merge_store::MergeStore::new(db, &app).row(&row.row).unwrap().state
+                crate::merge_store::MergeStore::new(db, call, &app).row(&row.row).unwrap().state
             }
         };
-        crate::write_sources::authored_over(db, state, row.change).unwrap()
+        crate::write_sources::authored_over(db, call, state, row.change).unwrap()
     });
     assert_eq!(deliver(database, row, None, false).await.unwrap(), crate::ApplyOutcome::Applied);
 }
@@ -486,7 +486,7 @@ async fn deliver_stamped(
 pub(crate) fn contents(
     database: &crate::Database,
 ) -> std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>> {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let tables = db
             .query(
                 // SQLite's statistics follow each open and close, not a write.
@@ -516,7 +516,7 @@ pub(crate) fn contents(
 
 /// Seed counted metadata for merge-unit fixtures.
 pub(crate) fn applied(database: &crate::Database, stamp: coven_merge::Timestamp, number: u64) {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let slot = crate::sequence::applied(db).unwrap() + 1;
         crate::write_commit::tests::record_write(
             db,

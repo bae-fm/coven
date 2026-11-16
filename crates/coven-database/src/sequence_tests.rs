@@ -105,7 +105,7 @@ pub(crate) async fn publish_with(
     let records: Vec<_> = records
         .into_iter()
         .filter(|record| {
-            db.inspect_writer(|db| {
+            db.inspect_writer(|db, _| {
                 crate::sequence::write_slot(db, record.header.position).unwrap().is_none()
             })
         })
@@ -157,7 +157,7 @@ impl Database {
         let number = write.header.header.position.number;
         let applied = self.applied_slot().await?;
         let existing = self
-            .inspect_writer(|db| crate::sequence::write_slot(db, write.header.header.position))
+            .inspect_writer(|db, _| crate::sequence::write_slot(db, write.header.header.position))
             .transpose();
         let slot = match existing {
             Some(Ok(slot)) => slot,
@@ -299,9 +299,9 @@ pub(crate) fn data(
     db: &Database,
     audience: coven_merge::Audience,
 ) -> (Vec<coven_merge::RowState<coven_format::value::Value>>, Vec<coven_format::loss::Loss>) {
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, call| {
         let schema=crate::schema::Schema::read(db,&[]).unwrap();
-        let store=crate::merge_store::MergeStore::from_schema(db,&schema);
+        let store=crate::merge_store::MergeStore::from_schema(db, call,&schema);
         let rows=db.query("SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 ORDER BY table_name,key",[&audience],crate::row_queries::read_identity).unwrap().into_iter().map(|row|store.row(&row).unwrap().state).collect();
         let mut losses=Vec::new();
         crate::loss_record::visit(db,&audience,|loss|{losses.push(loss);Ok::<_,DbError>(())}).unwrap();
@@ -328,7 +328,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
             crate::test_utils::stage_plaintext(db, id.clone(), prefix, input).await.unwrap();
         staged.push((id, covers, snapshot, author));
     }
-    let (applied, state, boundaries) = db.inspect_writer(|db| {
+    let (applied, state, boundaries) = db.inspect_writer(|db, _| {
         (
             crate::sequence::applied(db).unwrap(),
             crate::store_state_tables::read(db).unwrap(),

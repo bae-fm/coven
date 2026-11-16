@@ -352,8 +352,8 @@ mod memory {
     }
 
     fn state_digest(db: &Database) -> coven_crypto::ObjectDigest {
-        db.inspect_writer_schema(|db,schema| {
-            let store=crate::merge_store::MergeStore::from_schema(db,&schema.schema).without_row_cache();
+        db.inspect_writer_schema(|db, call,schema| {
+            let store=crate::merge_store::MergeStore::from_schema(db, call,&schema.schema).without_row_cache();
             let mut digest=coven_crypto::ObjectHasher::new();
             db.for_each("SELECT DISTINCT table_name,key,audience FROM _coven_rows ORDER BY table_name,key,audience",[],|r| {
                 let row=crate::row_queries::read_identity(r)?;
@@ -607,7 +607,7 @@ async fn compare(lean: bool) {
                             db.receive(writes[i].clone().into()).await.unwrap();
                         }
                     }
-                    let tuple = db.inspect_writer(|db| {
+                    let tuple = db.inspect_writer(|db, _| {
                         db.query_row("SELECT a,b FROM children", [], |r| {
                             Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))
                         })
@@ -615,9 +615,9 @@ async fn compare(lean: bool) {
                     });
                     assert_eq!(tuple, expected);
                     let child = &writes[1].parts[0].rows[0].row;
-                    db.inspect_writer_schema(|writer, schema| {
+                    db.inspect_writer_schema(|writer, call, schema| {
                         let app = crate::write_rows::AppView::after(writer, schema);
-                        let store = crate::merge_store::MergeStore::new(writer, &app);
+                        let store = crate::merge_store::MergeStore::new(writer, call, &app);
                         let state = store.row(child).unwrap().state;
                         for column in ["a", "b"] {
                             assert_eq!(state.cells()[column].write, writes[winner].header.position);
@@ -687,9 +687,9 @@ fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
             "past": if i == 0 { vec![] } else { vec![0] }, "changes": changes})
         })
         .collect();
-    let states = db.inspect_writer_schema(|writer, schema| {
+    let states = db.inspect_writer_schema(|writer, call, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
-        let store = crate::merge_store::MergeStore::new(writer, &app);
+        let store = crate::merge_store::MergeStore::new(writer, call, &app);
         rows.iter().map(|r| store.row(r).unwrap().state).collect::<Vec<_>>()
     });
     let input_rows: Vec<_> = states.iter().enumerate().map(|(i,state)| {

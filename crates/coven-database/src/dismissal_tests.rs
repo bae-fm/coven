@@ -272,12 +272,12 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
     a.receive(records(&b)[0].clone().into()).await.unwrap();
     let losses = a.lost_values().await.unwrap();
     let before = data(&a).await;
-    a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
+    a.inspect_writer(|sql, _| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
     assert!(matches!(a.dismiss_lost_values(&losses).await, Err(crate::DbError::Sqlite(_))));
     assert_eq!(a.lost_values().await.unwrap(), losses);
     assert_eq!(data(&a).await, before);
     assert_eq!(records(&a).len(), 1);
-    a.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
+    a.inspect_writer(|sql, _| sql.batch("DROP TRIGGER refuse").unwrap());
     a.dismiss_lost_values(&losses).await.unwrap();
     assert_eq!(records(&a)[1].header.position.number, 2);
     a.close().await.unwrap();
@@ -339,10 +339,12 @@ pub(crate) async fn cascade_deletions(
             .collect();
         assert_eq!(losses.len(), if select_all { 3 } else { 1 });
         let before = data(&a).await;
-        a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
+        a.inspect_writer(|sql, _| {
+            sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse")
+        });
         assert!(a.dismiss_lost_values(&losses).await.is_err());
         assert_eq!(data(&a).await, before);
-        a.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
+        a.inspect_writer(|sql, _| sql.batch("DROP TRIGGER refuse").unwrap());
         a.dismiss_lost_values(&losses).await.unwrap();
         let record = records(&a).pop().unwrap();
         assert_eq!(record.parts[0].rows.len(), 3);
@@ -364,9 +366,9 @@ pub(crate) async fn cascade_deletions(
             );
             assert!(db.lost_values().await.unwrap().is_empty());
             assert_eq!(count(db, "children"), 1);
-            db.inspect_writer_schema(|writer, schema| {
+            db.inspect_writer_schema(|writer, call, schema| {
                 let app = crate::write_rows::AppView::after(writer, schema);
-                let store = crate::merge_store::MergeStore::new(writer, &app);
+                let store = crate::merge_store::MergeStore::new(writer, call, &app);
                 for change in &record.parts[0].rows {
                     assert_eq!(store.row(&change.row).unwrap().state.generation(), 2);
                 }

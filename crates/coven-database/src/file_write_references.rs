@@ -2,11 +2,12 @@
 //! merge's own result for the write's rows, so the write itself deletes
 //! their records.
 
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     file_protection::{loss_files, state_files},
     file_table::Record,
     merge_store::MergeStore,
-    sqlite::DatabaseConnection,
     write_rows::AppKey,
     write_schema::WriteSchema,
     DbError,
@@ -84,6 +85,7 @@ pub(crate) fn unreferenced(
 /// files table, the first at step `sequence` and each next one after it.
 pub(crate) fn deletions(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     store: &MergeStore<'_>,
     files: &BTreeSet<FileId>,
     mut sequence: u32,
@@ -93,7 +95,7 @@ pub(crate) fn deletions(
         let record = Record::read(db, *file)?
             .ok_or(DbError::Invariant { what: "an unreferenced file to delete has its record" })?;
         let row = crate::file_table::row(*file, record.audience)?;
-        let change = crate::dismissal::deletion(db, store, &store.row(&row)?.state)?;
+        let change = crate::dismissal::deletion(db, call, store, &store.row(&row)?.state)?;
         let step = Step { sequence, change: change.change.clone(), half: Half::Whole };
         sequence = sequence
             .checked_add(1)

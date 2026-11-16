@@ -2,19 +2,19 @@
 //! snapshot, and checks whose scratch writes are discarded.
 
 use super::DatabaseConnection;
-use crate::{DbError, SqlReadContext};
+use crate::DbError;
 
 impl DatabaseConnection {
     /// A one-shot read of one snapshot. Nothing runs it again, so it records
     /// nothing of what it reads, and narrows nothing (§4).
     pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        F: FnOnce(&Self) -> Result<R, E>,
         E: From<DbError>,
     {
-        self.read_with_constants(|| {
+        self.read_transaction(|| {
             let _reading = self.authorization.reading();
-            read(SqlReadContext::new(self))
+            read(self)
         })
     }
 

@@ -93,7 +93,7 @@ async fn stored(db: &crate::Database, bytes: &[u8]) -> FileId {
 }
 
 fn record(db: &crate::Database, file: FileId) -> crate::file_table::Record {
-    db.inspect_writer(|sql| crate::file_table::Record::read(sql, file).unwrap()).unwrap()
+    db.inspect_writer(|sql, _| crate::file_table::Record::read(sql, file).unwrap()).unwrap()
 }
 
 /// The candidates of this device's own stored bytes nothing local protects.
@@ -298,7 +298,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     let mut expected = crate::FileHasher::new();
     expected.update(b"track");
     assert_eq!(
-        db.inspect_writer(|sql| crate::user_file::hashes(sql, track)).unwrap(),
+        db.inspect_writer(|sql, _| crate::user_file::hashes(sql, track)).unwrap(),
         Some(expected.finish())
     );
     assert_eq!(record(&db, copy).place, crate::file_location::Place::Cloud(location.clone()));
@@ -386,7 +386,7 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
         FilePlace::DeviceOnly { device: store.device() }
     );
     assert_eq!(db.user_file(copy).await.unwrap().map(|file| file.path), Some(original.clone()));
-    let (imported, shared) = db.inspect_writer(|sql| {
+    let (imported, shared) = db.inspect_writer(|sql, _| {
         (
             crate::user_file::hashes(sql, track).unwrap(),
             crate::user_file::hashes(sql, copy).unwrap(),
@@ -510,7 +510,7 @@ async fn a_new_file_over_a_file_the_same_write_stages_shares_its_upload() {
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     let write = records(&db).pop().unwrap().header.position.number;
     assert_eq!(
-        db.inspect_writer(|sql| crate::file_queue::first_held(sql).unwrap()),
+        db.inspect_writer(|sql, _| crate::file_queue::first_held(sql).unwrap()),
         Some(write),
         "the upload holds the write"
     );

@@ -12,6 +12,7 @@ use crate::connection_setup::Setup;
 use crate::migration_snapshot::{key_sql, MigrationCapture};
 use crate::schema::{Schema, TableSchema};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{column_list, key_columns, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -26,7 +27,8 @@ use std::sync::Arc;
 
 /// Stages the database for a run from the live connection, whose schema and
 /// rows it copies.
-pub(crate) type Stage<'a> = dyn Fn(&DatabaseConnection) -> Result<AudienceDatabase, DbError> + 'a;
+pub(crate) type Stage<'a> =
+    dyn Fn(&DatabaseConnection, &StoreCall<'_>) -> Result<AudienceDatabase, DbError> + 'a;
 
 /// The app's rows before a run, split by audience, in a database of their
 /// own: the store's in its tables, each circle's in staging tables until its
@@ -63,6 +65,7 @@ impl AudienceDatabase {
         tables: &[SyncedTable],
         whole: &Arc<sqlive::WholeViews>,
         live: &DatabaseConnection,
+        call: &StoreCall<'_>,
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
         let before = Schema::read(live, &crate::file_table::registered_columns(live)?)?;
@@ -89,7 +92,7 @@ impl AudienceDatabase {
         };
         let database = result.database.as_mut().expect("open");
         database.batch(&crate::internal_schema::initial_schema())?;
-        let synced = MigrationCapture::new(live, tables)?.synced().clone();
+        let synced = MigrationCapture::new(live, call, tables)?.synced().clone();
         let before_run = synced_before(live)?;
         let (mut circles, mut staged) = (BTreeSet::new(), Vec::new());
         database.transaction(|scratch| {
@@ -150,10 +153,11 @@ impl Drop for AudienceDatabase {
 pub(crate) fn verify(
     audiences: &mut AudienceDatabase,
     live: &DatabaseConnection,
+    call: &StoreCall<'_>,
     migrations: &[&Migration],
     tables: &[SyncedTable],
 ) -> Result<(), DbError> {
-    let schema = WriteSchema::read(live, tables.to_vec())?;
+    let schema = WriteSchema::read(live, call, tables.to_vec())?;
     let view = AppView::after(live, &schema);
     // Coven's files table is the one synced table no migration changes
     // (§18.7), so there is nothing in it to compare; its rows are copied so a
@@ -170,7 +174,9 @@ pub(crate) fn verify(
         std::iter::once(Audience::Store).chain(audiences.circles.iter().cloned()).collect();
     let staged = &audiences.staged;
     let triggers = &audiences.triggers;
-    let difference = audiences.database.as_mut().expect("open").transaction(|scratch| {
+    let database = audiences.database.as_mut().expect("open");
+    let difference = crate::store_call::outside_store(|scratch_call| {
+        database.transaction(|scratch| {
         for run in &runs {
             scratch.batch("SAVEPOINT reads_across")?;
             if *run != Audience::Store {
@@ -182,7 +188,7 @@ pub(crate) fn verify(
                 }
                 for stage in staged {
                     let columns = stage.columns.iter().map(|c| identifier(c)).collect::<Vec<_>>().join(",");
-                    scratch.internal_execute(
+                    scratch.execute(
                         &format!(
                             "INSERT INTO main.{t}({columns}) SELECT {columns} FROM temp.{s} WHERE coven_audience=?1",
                             t = identifier(&stage.table),
@@ -195,7 +201,7 @@ pub(crate) fn verify(
                     scratch.batch(sql)?;
                 }
             }
-            run_migrations(scratch, migrations, tables)?;
+            run_migrations(scratch, scratch_call, migrations, tables)?;
             let mut difference = None;
             // One table's rows at a time, so a large library holds no more
             // than its largest table.
@@ -213,6 +219,7 @@ pub(crate) fn verify(
             }
         }
         Ok(None)
+    })
     })?;
     match difference {
         Some((table, audience)) => Err(DbError::MigrationReadsAcross { table, audience }),
@@ -245,11 +252,12 @@ fn differing(
 
 fn run_migrations(
     scratch: &DatabaseConnection,
+    call: &StoreCall<'_>,
     migrations: &[&Migration],
     tables: &[SyncedTable],
 ) -> Result<(), DbError> {
     let mut before = Schema::read(scratch, &[])?;
-    let mut capture = MigrationCapture::new(scratch, tables)?;
+    let mut capture = MigrationCapture::new(scratch, call, tables)?;
     for migration in migrations {
         let context = MigrationContext::new(scratch, before, capture);
         scratch.migrating(|| migration.apply(&context))?;
@@ -342,7 +350,7 @@ fn copy_rows(
         };
         match audience {
             Audience::Store => {
-                scratch.internal_execute(&insert_store, params_from_iter(values))?;
+                scratch.execute(&insert_store, params_from_iter(values))?;
             }
             circle => {
                 if stage.is_none() {
@@ -359,7 +367,7 @@ fn copy_rows(
                 }
                 let mut parameters = vec![SqlValue::Text(circle.to_string())];
                 parameters.extend(values);
-                scratch.internal_execute(
+                scratch.execute(
                     stage.as_ref().expect("staging table made"),
                     params_from_iter(parameters),
                 )?;

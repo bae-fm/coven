@@ -10,6 +10,7 @@
 //! whole keeps them and can open any leaf again without the audience key.
 
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
@@ -70,7 +71,7 @@ pub(crate) fn retain_header(
     evidence: &HeaderEvidence,
 ) -> Result<(), DbError> {
     let roots = hash_bytes(&evidence.roots);
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_write_evidence(write_id,prefix,header,roots,signature) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id) DO NOTHING",
         params![
             encoded(merge_fields::encode_write_id(&write))?,
@@ -119,7 +120,7 @@ pub(crate) fn retain_leaves(
     hashes: &[[u8; 32]],
 ) -> Result<(), DbError> {
     let hashes = hash_bytes(hashes);
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_part_leaves(write_id,audience,hashes) VALUES(?1,?2,?3) ON CONFLICT(write_id,audience) DO NOTHING",
         params![
             encoded(merge_fields::encode_write_id(&write))?,
@@ -153,11 +154,11 @@ pub(crate) fn forget_part(
     audience: &Audience,
 ) -> Result<(), DbError> {
     let id = encoded(merge_fields::encode_write_id(&write))?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_part_leaves WHERE write_id=?1 AND audience=?2",
         params![id, audience],
     )?;
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_write_evidence WHERE write_id=?1
          AND NOT EXISTS(SELECT 1 FROM _coven_part_leaves WHERE write_id=?1)
          AND NOT EXISTS(SELECT 1 FROM _coven_part_proofs WHERE write_id=?1)",
@@ -224,8 +225,12 @@ fn by_another_member(
 /// writes (D7.5), and its member never changes, so its own member's writes
 /// never need them here. While this device's member is unknown it keeps
 /// every other device's evidence, as [`by_another_member`] reads `None`.
-pub(crate) fn keeps_evidence(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-    let device = db
+pub(crate) fn keeps_evidence(
+    db: &DatabaseConnection,
+    call: &StoreCall<'_>,
+    write: WriteId,
+) -> Result<bool, DbError> {
+    let device = call
         .local_device()
         .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
     by_another_member(
@@ -305,6 +310,7 @@ fn proves(
 /// own writes are its signer's.
 pub(crate) fn evidence(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,
     author: Author,
@@ -322,7 +328,7 @@ pub(crate) fn evidence(
         }
         Ok(())
     })?;
-    crate::snapshot_view::rows(db, schema, audience, |merged| {
+    crate::snapshot_view::rows(db, call, schema, audience, |merged| {
         let state = merged.state;
         let row = state.row();
         if crate::ownership::owner_table(schema, &row.table) && state.present() {
@@ -339,7 +345,7 @@ pub(crate) fn evidence(
         }
         Ok::<_, DbError>(())
     })?;
-    let current = db.schema_version()?;
+    let current = crate::transaction_constants::schema_version(db, call)?;
     let mut evidence = Vec::new();
     for (write, needs) in needs {
         let original = header(db, write)?.ok_or(missing(write))?;
@@ -497,12 +503,13 @@ pub(crate) fn authenticate(
 /// for another member's write ([`keeps_evidence`]).
 pub(crate) fn load(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     audience: &Audience,
     evidence: &WriteEvidence,
     verified: &AuthenticatedEvidence,
 ) -> Result<(), DbError> {
     crate::write_headers::retain(db, &verified.opened)?;
-    if !keeps_evidence(db, evidence.write)? {
+    if !keeps_evidence(db, call, evidence.write)? {
         return Ok(());
     }
     retain_header(
@@ -517,7 +524,7 @@ pub(crate) fn load(
     )?;
     if verified.part {
         let hashes = hash_bytes(&verified.hashes);
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_part_proofs(write_id,audience,proof,hashes) VALUES(?1,?2,?3,?4) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof,hashes=excluded.hashes",
             params![
                 encoded(merge_fields::encode_write_id(&evidence.write))?,
@@ -535,12 +542,13 @@ pub(crate) fn load(
 /// without that write's authenticated opening (§9.6, §16.2).
 pub(crate) fn check(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,
     author: Author,
     authenticated: &BTreeMap<WriteId, AuthenticatedEvidence>,
 ) -> Result<(), DbError> {
-    let current = db.schema_version()?;
+    let current = crate::transaction_constants::schema_version(db, call)?;
     let refused = || {
         crate::snapshot_error::invalid(
             "snapshot names another member's authorship without its write's evidence",
@@ -560,7 +568,7 @@ pub(crate) fn check(
     })?;
     // The loaded rows are still the snapshot's staged values.
     let loaded = BTreeSet::from([audience.clone()]);
-    let store = crate::merge_store::MergeStore::from_snapshot(db, &schema.schema, &loaded);
+    let store = crate::merge_store::MergeStore::from_snapshot(db, call, &schema.schema, &loaded);
     for declaration in schema.declarations.iter().filter(|d| d.owner_only) {
         let rows = db.query(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 AND table_name=?2",

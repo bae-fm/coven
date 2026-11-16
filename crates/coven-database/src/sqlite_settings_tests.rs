@@ -1,4 +1,5 @@
 use super::*;
+use crate::sqlite::DatabaseConnection;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
 use coven_foundation::id_source::{IdSource, UuidIds};
@@ -104,13 +105,13 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
         .await
         .unwrap();
     assert_eq!(database.sqlite_settings().await.unwrap(), in_effect());
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         assert_eq!(writer.sqlite_settings().unwrap(), never_as_it_commits(in_effect()));
         assert_fixed(writer);
         let synchronous: i64 = writer.query_row("PRAGMA synchronous", [], |r| r.get(0)).unwrap();
         assert_eq!(synchronous, 2, "FULL");
     });
-    database.inspect_readers(|reader| {
+    database.inspect_readers(|reader, _| {
         assert_eq!(reader.sqlite_settings().unwrap(), in_effect());
         assert_fixed(reader);
     });
@@ -122,11 +123,11 @@ async fn every_connection_takes_the_apps_settings_and_keeps_covens() {
         .await
         .unwrap();
     assert_eq!(reading.sqlite_settings().await.unwrap(), in_effect());
-    reading.inspect_writer(|writer| {
+    reading.inspect_writer(|writer, _| {
         assert_eq!(writer.sqlite_settings().unwrap(), in_effect());
         assert_fixed(writer);
     });
-    reading.inspect_readers(|reader| {
+    reading.inspect_readers(|reader, _| {
         assert_eq!(reader.sqlite_settings().unwrap(), in_effect());
         assert_fixed(reader);
     });
@@ -167,15 +168,15 @@ async fn unset_settings_keep_sqlites_defaults_except_covens_own() {
             auto_vacuum: AutoVacuum::Incremental,
         }
     );
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         assert_eq!(writer.sqlite_settings().unwrap(), never_as_it_commits(settings.clone()))
     });
-    database.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
+    database.inspect_readers(|reader, _| assert_eq!(reader.sqlite_settings().unwrap(), settings));
 
     let reading = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(reading.sqlite_settings().await.unwrap(), settings);
-    reading.inspect_writer(|writer| assert_eq!(writer.sqlite_settings().unwrap(), settings));
-    reading.inspect_readers(|reader| assert_eq!(reader.sqlite_settings().unwrap(), settings));
+    reading.inspect_writer(|writer, _| assert_eq!(writer.sqlite_settings().unwrap(), settings));
+    reading.inspect_readers(|reader, _| assert_eq!(reader.sqlite_settings().unwrap(), settings));
     reading.close().await.unwrap();
     database.close().await.unwrap();
 }
@@ -198,8 +199,8 @@ async fn the_apps_sync_choices_replace_covens() {
         .open()
         .await
         .unwrap();
-    database.inspect_writer(|writer| assert_eq!(syncs(writer), (true, false)));
-    database.inspect_readers(|reader| assert_eq!(syncs(reader), (true, false)));
+    database.inspect_writer(|writer, _| assert_eq!(syncs(writer), (true, false)));
+    database.inspect_readers(|reader, _| assert_eq!(syncs(reader), (true, false)));
 
     let reading = store
         .builder(notes_tables(), notes_migrations())
@@ -207,8 +208,8 @@ async fn the_apps_sync_choices_replace_covens() {
         .open_read_only()
         .await
         .unwrap();
-    reading.inspect_writer(|writer| assert_eq!(syncs(writer), (true, false)));
-    reading.inspect_readers(|reader| assert_eq!(syncs(reader), (true, false)));
+    reading.inspect_writer(|writer, _| assert_eq!(syncs(writer), (true, false)));
+    reading.inspect_readers(|reader, _| assert_eq!(syncs(reader), (true, false)));
     reading.close().await.unwrap();
     database.close().await.unwrap();
 }
@@ -415,11 +416,11 @@ async fn an_incremental_vacuum_gives_back_free_pages() {
         .await
         .unwrap();
     let free = || {
-        database.inspect_writer(|writer| {
+        database.inspect_writer(|writer, _| {
             writer.query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0)).unwrap()
         })
     };
-    database.inspect_writer(|writer| {
+    database.inspect_writer(|writer, _| {
         writer
             .batch(
                 "CREATE TABLE scratch(x); INSERT INTO scratch VALUES (zeroblob(100000)); DROP TABLE scratch;",
@@ -499,7 +500,7 @@ async fn opening_gathers_statistics_a_table_lacks() {
         .unwrap();
     assert_eq!(counted_titles(&store), None);
     let db = indexed_notes(&store).open().await.unwrap();
-    let counted: String = db.inspect_writer(|writer| {
+    let counted: String = db.inspect_writer(|writer, _| {
         writer
             .query_row("SELECT stat FROM sqlite_stat1 WHERE idx='notes_title'", [], |r| r.get(0))
             .unwrap()
@@ -507,7 +508,7 @@ async fn opening_gathers_statistics_a_table_lacks() {
     assert_eq!(counted, "200 29");
     // `PRAGMA optimize` gathers no samples, so the planner never evaluates a
     // constant expression against them while it plans.
-    let samples: i64 = db.inspect_writer(|writer| {
+    let samples: i64 = db.inspect_writer(|writer, _| {
         writer.query_row("SELECT count(*) FROM sqlite_stat4", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(samples, 0);
@@ -612,7 +613,7 @@ async fn gathering_statistics_on_a_library_sized_store() {
         )
     };
     let db = open().open().await.unwrap();
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         for table in tables {
             writer
                 .batch(&format!(
@@ -789,7 +790,7 @@ fn searched_notes(store: &TestStore) -> crate::DatabaseBuilder {
 /// mode refuses to prepare FTS5's own `DELETE` anywhere but inside FTS5, so
 /// this plans a read of the same range, whose `WHERE` SQLite plans alike.
 fn index_cleanup_plan(db: &crate::Database) -> String {
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .query(
                 "EXPLAIN QUERY PLAN SELECT id FROM note_search_data WHERE id>=?1 AND id<=?2",
@@ -804,7 +805,7 @@ fn index_cleanup_plan(db: &crate::Database) -> String {
 /// The rows `note_search_data` holds by the writer's statistics, if it has
 /// any.
 fn counted_index_pages(db: &crate::Database) -> Option<i64> {
-    db.inspect_writer(|writer| {
+    db.inspect_writer(|writer, _| {
         writer
             .query(
                 "SELECT stat FROM sqlite_stat1 WHERE tbl='note_search_data' \
@@ -896,7 +897,7 @@ async fn sql_that_could_damage_the_file_fails() {
         refused(crate::write::tests::sql(&db, statement).await);
     }
     // Writing through `note_search` itself still works, as the trigger did.
-    let found: i64 = db.inspect_writer(|writer| {
+    let found: i64 = db.inspect_writer(|writer, _| {
         writer
             .query_row(
                 "SELECT count(*) FROM note_search WHERE note_search MATCH 'notes'",

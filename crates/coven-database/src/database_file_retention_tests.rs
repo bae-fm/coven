@@ -331,7 +331,7 @@ async fn frozen_losses_keep_file_paths_after_the_apps_declaration_is_removed() {
     .contains(&(DeviceId(4), file)));
     // The published loss remains until the dismissal acquires a slot.
     db.dismiss_lost_values(&db.lost_values().await.unwrap()).await.unwrap();
-    let row_references: i64 = db.inspect_writer(|db| {
+    let row_references: i64 = db.inspect_writer(|db, _| {
         db.query_row(
             "SELECT count(*) FROM _coven_row_file_refs WHERE device=?1 AND object=?2",
             (DeviceId(4), file),
@@ -356,7 +356,7 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
     .await
     .unwrap();
     let expected = (DeviceId(3), ObjectId(uuid::Uuid::from_u128(8)));
-    let rows: i64 = db.inspect_writer(|db| {
+    let rows: i64 = db.inspect_writer(|db, _| {
         db.query_row("SELECT count(*) FROM coven_files", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(rows, 0);
@@ -427,7 +427,7 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
     let (db, file) =
         frozen_loss(&store, db, vec![files_table()], "CREATE INDEX t_file ON t(file)").await;
     let device = DeviceId(4);
-    let frozen: i64 = db.inspect_writer(|db| {
+    let frozen: i64 = db.inspect_writer(|db, _| {
         db.query_row("SELECT count(*) FROM _coven_lost WHERE frozen=1", [], |r| r.get(0)).unwrap()
     });
     // The excluded write's two row changes, each kept whole: the record and

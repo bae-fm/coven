@@ -1,7 +1,8 @@
 //! Members, devices and circles as the committed prefix has them (E9, E12).
 //! Each call and its live subscription run the same query.
 
-use crate::{sqlite::DatabaseConnection, store_state::DeviceState, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::{store_state::DeviceState, DbError};
 use coven_format::admin::{MemberPublicKeys, MemberRole};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 

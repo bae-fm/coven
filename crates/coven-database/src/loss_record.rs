@@ -1,6 +1,7 @@
 //! The common durable loss record and its snapshot projection.
 
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{counter, damaged, decoded, encoded};
 use crate::DbError;
 use coven_format::value::Value;
@@ -160,24 +161,27 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
 /// its paths and file references at once (`file_protection::retain_loss`).
 pub(crate) fn keep(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &crate::write_schema::WriteSchema,
     loss: &Loss,
 ) -> Result<(), DbError> {
-    put(database, loss, None)?;
+    put(database, call, loss, None)?;
     crate::file_protection::retain_loss(database, schema, loss)
 }
 
 /// Keep an existing local identity when freezing or dismissing part of a loss.
 pub(crate) fn put(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     loss: &Loss,
     id: Option<i64>,
 ) -> Result<(), DbError> {
-    put_table(database, loss, id, LossTable::Stored)
+    put_table(database, call, loss, id, LossTable::Stored)
 }
 
 pub(crate) fn put_table(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     loss: &Loss,
     id: Option<i64>,
     table: LossTable,
@@ -188,7 +192,7 @@ pub(crate) fn put_table(
             Some(if loss.frozen {
                 crate::row_queries::frozen_column(database, &loss.row.table, column)?
             } else {
-                database.column_id(&loss.row.table, column)?
+                crate::transaction_constants::column_id(database, call, &loss.row.table, column)?
             }),
             encoded(merge_fields::encode_column_value(&cell.value))?,
             encoded(merge_fields::encode_write_id(&cell.write))?,
@@ -236,7 +240,7 @@ pub(crate) fn put_table(
     } else {
         id
     };
-    database.internal_execute(
+    database.execute(
         statements.put,
         params![
             loss.row.table,
@@ -257,7 +261,7 @@ pub(crate) fn put_table(
 
 /// Delete the stored loss `id`.
 pub(crate) fn delete(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
+    database.execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
     Ok(())
 }
 
@@ -265,6 +269,7 @@ pub(crate) fn delete(database: &DatabaseConnection, id: i64) -> Result<(), DbErr
 /// when the row holds one, as a new loss otherwise.
 pub(crate) fn put_write_loss(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     row: &RowId,
     key: &LostKey,
     value: &LostValue<Value>,
@@ -274,13 +279,14 @@ pub(crate) fn put_write_loss(
     let setter = encoded(merge_fields::encode_write_id(&key.write))?;
     let replaced_by = encoded(merge_fields::encode_write_id(&value.replaced_by))?;
     if let Some(id) = id {
-        database.internal_execute(
+        database.execute(
             "UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4",
             params![bytes, setter, replaced_by, id],
         )?;
     } else {
-        let column = database.column_id(&row.table, &key.column)?;
-        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,&row.audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
+        let column =
+            crate::transaction_constants::column_id(database, call, &row.table, &key.column)?;
+        database.execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,&row.audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
     }
     Ok(())
 }
@@ -302,15 +308,15 @@ pub(crate) fn put_rules_loss(
     let setters = encoded(merge_fields::encode_setters(setters))?;
     let rules = encoded(merge_fields::encode_rules(rules))?;
     match id {
-        Some(id) => database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,id])?,
-        None => database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![row.table,row.key,&row.audience,generation.to_be_bytes().as_slice(),values,setters,rules])?,
+        Some(id) => database.execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,id])?,
+        None => database.execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![row.table,row.key,&row.audience,generation.to_be_bytes().as_slice(),values,setters,rules])?,
     };
     Ok(())
 }
 
 /// Delete every loss of `row`, frozen ones too.
 pub(crate) fn forget_row(database: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "DELETE FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
     )?;
@@ -322,7 +328,7 @@ pub(crate) fn forget_audience(
     database: &DatabaseConnection,
     audience: &Audience,
 ) -> Result<(), DbError> {
-    database.internal_execute("DELETE FROM _coven_lost WHERE audience=?1", [audience])?;
+    database.execute("DELETE FROM _coven_lost WHERE audience=?1", [audience])?;
     Ok(())
 }
 
@@ -334,7 +340,7 @@ pub(crate) fn rename_table(
     old: &str,
     new: &str,
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND frozen=0",
         params![old, new],
     )?;
@@ -364,7 +370,7 @@ pub(crate) fn rename_removed_values(
                 None => Some((column, value)),
             })
             .collect();
-        database.internal_execute(
+        database.execute(
             "UPDATE _coven_lost SET value=?2 WHERE id=?1",
             params![id, encoded(merge_fields::encode_columns(&renamed))?],
         )?;
@@ -378,7 +384,7 @@ pub(crate) fn move_column(
     old: i64,
     new: i64,
 ) -> Result<(), DbError> {
-    database.internal_execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'",params![old,new])?;
+    database.execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'",params![old,new])?;
     Ok(())
 }
 
@@ -394,7 +400,7 @@ pub(crate) fn carry_cell_values(
         let old = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
         let value = carry(old.clone());
         if value != old {
-            database.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
+            database.execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
         }
         Ok(())
     })

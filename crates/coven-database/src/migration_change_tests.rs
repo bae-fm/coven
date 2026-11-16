@@ -20,9 +20,9 @@ fn reference_tables() -> Vec<SyncedTable> {
 }
 
 fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
-    db.inspect_writer_schema(|db, schema| {
+    db.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
-        crate::merge_store::MergeStore::new(db, &app).row(row).unwrap().state
+        crate::merge_store::MergeStore::new(db, call, &app).row(row).unwrap().state
     })
 }
 

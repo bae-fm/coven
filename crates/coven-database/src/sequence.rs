@@ -1,8 +1,8 @@
 //! One committed store prefix, including claims whose contents were refused.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    sqlite::DatabaseConnection,
     write_encoding::{counter, slot_counter},
     DbError,
 };
@@ -19,7 +19,7 @@ pub(crate) fn applied(db: &DatabaseConnection) -> Result<u64, DbError> {
 }
 
 pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_sequence SET applied=?1 WHERE singleton=1",
         [slot.to_be_bytes().as_slice()],
     )?;
@@ -42,7 +42,7 @@ pub(crate) fn note_record(
     claim: &LastClaim,
     through: u64,
 ) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,?2,?3,?4) ON CONFLICT(device) DO UPDATE SET number=excluded.number,digest=excluded.digest,through=excluded.through WHERE excluded.through>=through AND excluded.number>=number",
+    db.execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,?2,?3,?4) ON CONFLICT(device) DO UPDATE SET number=excluded.number,digest=excluded.digest,through=excluded.through WHERE excluded.through>=through AND excluded.number>=number",
         params![claim.device,claim.number.to_be_bytes(),claim.digest,through.to_be_bytes()])?;
     Ok(())
 }
@@ -50,7 +50,7 @@ pub(crate) fn note_record(
 /// A device the store's state names starts with no claim: number zero,
 /// through slot zero. A device with a claim keeps it.
 pub(crate) fn note_device(db: &DatabaseConnection, device: DeviceId) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,zeroblob(8),NULL,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[device])?;
+    db.execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,zeroblob(8),NULL,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[device])?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ pub(crate) fn cutoff(
         }
         _ => return Ok(()),
     };
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_cutoffs(slot,device,member,signing) VALUES(?1,?2,?3,?4)",
         params![slot.get().to_be_bytes().as_slice(), device, member, signing],
     )?;
@@ -114,7 +114,7 @@ pub(crate) fn replace_cutoffs(
     db: &DatabaseConnection,
     cutoffs: Vec<(Slot, StoreChange)>,
 ) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_cutoffs", [])?;
+    db.execute("DELETE FROM _coven_cutoffs", [])?;
     for (slot, change) in cutoffs {
         cutoff(db, slot, &change)?;
     }

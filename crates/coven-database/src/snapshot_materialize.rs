@@ -27,14 +27,14 @@ pub(crate) fn materialize(
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
     for row in region {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO temp._coven_install_region(table_name,key,audience) VALUES(?1,?2,?3)",
             params![row.table, row.key, &row.audience],
         )?;
     }
     let layout = SnapshotLayout::new(schema);
     let order = crate::snapshot_conflicts::parents_first(schema);
-    db.materialize(|db| {
+    crate::store_call::materialize(db, |db| {
         let mut deferred = Deferral::new(db);
         for name in &order {
             insert(db, schema, layout.table(name), &mut deferred)?;
@@ -94,7 +94,7 @@ fn insert(
     if count == 0 {
         return Ok(());
     }
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_changed(table_name,key,kind) SELECT ?1,i.{},'insert' {new}",
             table.column("key")
@@ -103,7 +103,7 @@ fn insert(
     )?;
     deferred.before_change()?;
     let columns = written_columns(table);
-    let inserted = db.internal_execute(
+    let inserted = db.execute(
         &format!(
             "INSERT INTO {schema_table}({}) SELECT {} {new} ORDER BY i.{}",
             columns.join(","),
@@ -138,7 +138,7 @@ fn update(
             )
         })
         .collect();
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_changed(table_name,key,kind)
              SELECT ?1,i.{},'update' FROM {} AS i JOIN {app} AS a ON {} WHERE {} AND ({})",
@@ -191,7 +191,7 @@ fn update(
                     key_columns(schema_table).iter().map(|column| sql_value(&before[&column.name])),
                 )
                 .collect::<Vec<_>>();
-            let changed_rows = db.internal_execute(
+            let changed_rows = db.execute(
                 &format!(
                     "UPDATE {app} SET {} WHERE {}",
                     changed
@@ -217,7 +217,7 @@ fn delete(
     deferred: &mut Deferral<'_>,
 ) -> Result<(), DbError> {
     let schema_table = schema.table(&table.table);
-    db.internal_execute(
+    db.execute(
         &format!(
             "INSERT INTO temp._coven_install_changed(table_name,key,kind)
              SELECT b.table_name,b.key,'delete' FROM temp._coven_install_before b WHERE b.table_name=?1 AND b.shown=1
@@ -239,7 +239,7 @@ fn delete(
                 return Ok(());
             }
             deferred.before_change()?;
-            let changed = db.internal_execute(
+            let changed = db.execute(
                 &format!(
                     "DELETE FROM main.{} WHERE {}",
                     identifier(&table.table),

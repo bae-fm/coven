@@ -113,9 +113,9 @@ pub(crate) fn register(
     schema: &crate::schema::Schema,
     tables: &[SyncedTable],
 ) -> Result<(), DbError> {
-    db.internal_execute("DELETE FROM _coven_file_columns", [])?;
+    db.execute("DELETE FROM _coven_file_columns", [])?;
     for (table, column, write_once) in spelled(schema, tables) {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_file_columns(table_name,column_name,write_once) VALUES(?1,?2,?3)",
             params![table, column, write_once],
         )?;
@@ -305,7 +305,7 @@ impl Record {
 /// that makes it.
 pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbError> {
     let size = crate::sqlite::integer("file size", record.size)?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
          VALUES(?1,?2,?3,?4,?5,?6)",
         params![
@@ -327,7 +327,7 @@ pub(crate) fn store(
     location: &crate::FileLocation,
     hash: ContentHash,
 ) -> Result<(), DbError> {
-    changed_once(db.internal_execute(
+    changed_once(db.execute(
         "UPDATE main.coven_files SET coordinates=?2,hash=?3 WHERE id=?1",
         params![file, location.text(), hash.as_bytes().as_slice()],
     )?)
@@ -339,7 +339,7 @@ pub(crate) fn device_only(
     file: FileId,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<(), DbError> {
-    changed_once(db.internal_execute(
+    changed_once(db.execute(
         "UPDATE main.coven_files SET coordinates=?2,hash=NULL WHERE id=?1",
         params![file, sql_value(&Place::DeviceOnly(device).value())],
     )?)
@@ -348,7 +348,7 @@ pub(crate) fn device_only(
 /// Delete a file's record, as coven's own statement in the write that
 /// removes its last reference (§17.2).
 pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-    changed_once(db.internal_execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
+    changed_once(db.execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
 }
 
 #[cfg(test)]

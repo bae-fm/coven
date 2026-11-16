@@ -3,6 +3,7 @@
 //! §9.6, §14.1, §18.6, §19.4). The original changes keep their kept
 //! records (format.md D7.3); only this interpretation reaches the merge.
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
@@ -44,6 +45,7 @@ enum Interpretation {
 /// judged with.
 pub(crate) struct Interpreter<'a> {
     database: &'a DatabaseConnection,
+    call: &'a StoreCall<'a>,
     schema: &'a WriteSchema,
     header: WriteHeader,
     parts: BTreeMap<Audience, PartAdmission>,
@@ -56,6 +58,7 @@ impl<'a> Interpreter<'a> {
     /// holds keep the verdicts already recorded for them.
     pub(crate) fn new(
         database: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         header: &WriteHeader,
         audiences: &[Audience],
@@ -63,6 +66,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Self, DbError> {
         let mut interpreter = Self {
             database,
+            call,
             schema,
             header: header.clone(),
             parts: BTreeMap::new(),
@@ -129,7 +133,8 @@ impl<'a> Interpreter<'a> {
         // about its changes (§9.6).
         let mut sources = BTreeMap::new();
         let mut fixed = BTreeMap::new();
-        let authoring = crate::judge_view::Authoring::new(database, schema, header.schema_version)?;
+        let authoring =
+            crate::judge_view::Authoring::new(database, call, schema, header.schema_version)?;
         crate::judge::visit_write(database, header, |record| {
             let row = record.row().clone();
             // A record whose values could merge or be kept as lost names no
@@ -146,7 +151,7 @@ impl<'a> Interpreter<'a> {
             match interpreter.parts.get(&row.audience) {
                 Some(PartAdmission::Judged(_)) => {
                     if let OriginalRow::Change(change) = &record {
-                        crate::ownership::offer_change(database, header, change)?;
+                        crate::ownership::offer_change(database, call, header, change)?;
                     }
                     sources.insert(row, provenance(&record));
                 }
@@ -171,6 +176,7 @@ impl<'a> Interpreter<'a> {
         }
         let judgement = crate::judge::judge(
             database,
+            call,
             schema,
             crate::judge::Originals::Staged { database, header },
         )?;
@@ -197,6 +203,7 @@ impl<'a> Interpreter<'a> {
                 for row in part.records() {
                     crate::write_sources::admit(
                         database,
+                        self.call,
                         header,
                         row.row(),
                         &ChangeVerdict::Refused,
@@ -208,6 +215,7 @@ impl<'a> Interpreter<'a> {
                 for row in part.records() {
                     crate::write_sources::admit(
                         database,
+                        self.call,
                         header,
                         row.row(),
                         &ChangeVerdict::Ignored(*entry),
@@ -220,6 +228,7 @@ impl<'a> Interpreter<'a> {
                 for execution in &part.executions {
                     crate::write_sources::admit(
                         database,
+                        self.call,
                         header,
                         &execution.row,
                         &ChangeVerdict::Excluded(*version),
@@ -228,12 +237,14 @@ impl<'a> Interpreter<'a> {
                 for change in &part.rows {
                     crate::write_sources::admit(
                         database,
+                        self.call,
                         header,
                         &change.row,
                         &ChangeVerdict::Excluded(*version),
                     )?;
                     freeze(
                         database,
+                        self.call,
                         schema,
                         header,
                         change,
@@ -250,6 +261,7 @@ impl<'a> Interpreter<'a> {
                 for execution in &part.executions {
                     crate::write_sources::admit(
                         database,
+                        self.call,
                         header,
                         &execution.row,
                         self.verdict(&execution.row)?,
@@ -261,7 +273,7 @@ impl<'a> Interpreter<'a> {
                 let mut applied = Vec::new();
                 for change in std::mem::take(&mut part.rows) {
                     let verdict = self.verdict(&change.row)?;
-                    crate::write_sources::admit(database, header, &change.row, verdict)?;
+                    crate::write_sources::admit(database, self.call, header, &change.row, verdict)?;
                     let cause = match verdict {
                         ChangeVerdict::NotAuthorized(reason) => LossCause::NotAuthorized {
                             write: header.position,
@@ -281,7 +293,7 @@ impl<'a> Interpreter<'a> {
                             })
                         }
                     };
-                    freeze(database, schema, header, &change, cause)?;
+                    freeze(database, self.call, schema, header, &change, cause)?;
                 }
                 part.rows = applied;
                 match converts {
@@ -406,6 +418,7 @@ fn verdicts(
 /// new values for an insert or update, old scalar values for a delete.
 fn freeze(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
     change: &RowChange,
@@ -434,5 +447,5 @@ fn freeze(
         cause,
     }
     .freeze();
-    crate::loss_record::keep(database, schema, &loss)
+    crate::loss_record::keep(database, call, schema, &loss)
 }

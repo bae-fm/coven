@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn write(db: &Database, sql: &str) {
-    db.commit_writer(|db| db.batch(sql).unwrap());
+    db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
 const MUSIC: &str = "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album TEXT, year INTEGER);
@@ -705,7 +705,9 @@ async fn a_streamed_transaction_looks_up_joined_rows() {
         db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let stream = |sql: &'static str| {
-        db.inspect_writer(|writer| writer.stream_transaction(|writer| writer.batch(sql)).unwrap())
+        db.inspect_writer(|writer, _| {
+            writer.stream_transaction(|writer| writer.batch(sql)).unwrap()
+        })
     };
     stream("UPDATE tracks SET title = 'quatre' WHERE id = 4");
     assert!(!query.is_marked_for_rerun());

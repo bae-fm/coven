@@ -43,7 +43,7 @@ pub(crate) fn rebuild_folder(store: &TestStore) -> std::path::PathBuf {
 }
 
 fn schema_of(rebuild: &RebuildDatabase, table: &'static str) -> String {
-    rebuild.database.as_ref().unwrap().inspect_writer(|db| {
+    rebuild.database.as_ref().unwrap().inspect_writer(|db, _| {
         db.query_row("SELECT sql FROM main.sqlite_schema WHERE name=?1", [table], |r| r.get(0))
             .unwrap()
     })
@@ -194,7 +194,7 @@ async fn a_starts_from_naming_a_missing_table_fails_the_open_and_leaves_no_folde
 }
 
 fn pin_ids(rebuild: &RebuildDatabase) -> Vec<String> {
-    rebuild.database.as_ref().unwrap().inspect_writer(|db| {
+    rebuild.database.as_ref().unwrap().inspect_writer(|db, _| {
         db.query("SELECT id FROM pins ORDER BY id", [], |r| r.get::<_, String>(0)).unwrap()
     })
 }

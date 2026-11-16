@@ -5,6 +5,7 @@
 use crate::merge_store::MergeStore;
 use crate::migration_names::MigrationMatch;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::loss::{Loss, LossCause, LossValues};
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// for the migration run on this connection.
 pub(crate) struct Hidden<'c> {
     database: &'c DatabaseConnection,
+    call: &'c StoreCall<'c>,
     /// Merge state under the old identity and column names, by new identity.
     rows: BTreeMap<RowId, (RowId, RowState<Value>)>,
 }
@@ -27,10 +29,11 @@ impl<'c> Hidden<'c> {
     /// table's (`migration_state::carry`).
     pub(crate) fn before(
         db: &'c DatabaseConnection,
+        call: &'c StoreCall<'c>,
         before: &crate::schema::Schema,
         names: &MigrationMatch,
     ) -> Result<Self, DbError> {
-        let store = MergeStore::from_schema(db, before);
+        let store = MergeStore::from_schema(db, call, before);
         let mut rows = BTreeMap::new();
         for row in db.query(
             "SELECT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'",
@@ -47,7 +50,7 @@ impl<'c> Hidden<'c> {
             };
             rows.insert(new, (row, state));
         }
-        Ok(Self { database: db, rows })
+        Ok(Self { database: db, call, rows })
     }
 
     /// Rows hidden by the counted removal rules before migration.
@@ -69,6 +72,7 @@ impl<'c> Hidden<'c> {
         }
         crate::write_sources::authored(
             self.database,
+            self.call,
             store,
             row.clone(),
             Change { generation, operation: Operation::Delete },
@@ -101,7 +105,7 @@ impl<'c> Hidden<'c> {
         .freeze();
         let db = self.database;
         crate::migration_run::keep_loss(db, migration, &loss)?;
-        crate::loss_record::keep(db, schema, &loss)
+        crate::loss_record::keep(db, self.call, schema, &loss)
     }
 }
 

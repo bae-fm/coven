@@ -4,6 +4,7 @@ use crate::migration_names::{MigrationEffects, MigrationMatch, MigrationNames};
 use crate::migration_snapshot::MigrationCapture;
 use crate::schema::Schema;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_rows::AppView;
 use crate::{DbError, Migration, MigrationChange, MigrationContext, MigrationOutcome, SyncedTable};
 use coven_format::write::WriteDisposition;
@@ -52,6 +53,7 @@ struct MigrationStep<'a> {
 
 pub(crate) fn run<'a>(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     tables: &[SyncedTable],
     migrations: &'a [Migration],
     current: u32,
@@ -75,8 +77,8 @@ pub(crate) fn run<'a>(
     }
     let mut files = crate::file_table::registered_columns(database)?;
     let mut before = Schema::read(database, &files)?;
-    let removed = crate::published::removal_losses_before_migrating(database, &before)?;
-    let mut capture = MigrationCapture::new(database, tables)?;
+    let removed = crate::published::removal_losses_before_migrating(database, call, &before)?;
+    let mut capture = MigrationCapture::new(database, call, tables)?;
     // Changing an existing table's owner declaration or file references is
     // breaking (§18.1): the raise captures the state before any statement
     // runs.
@@ -122,7 +124,7 @@ pub(crate) fn run<'a>(
     let before = Schema::read(database, &crate::file_table::declared(tables))?;
     before.validate(tables)?;
     crate::schema::validate_local_keys(database, &before, tables)?;
-    database.check_followed_triggers()?;
+    crate::sqlite::check_followed_triggers(database)?;
     let final_schema = before;
     let mut synced: BTreeSet<_> = tables.iter().map(|t| t.name.to_ascii_lowercase()).collect();
     let mut outcomes = Vec::new();
@@ -223,6 +225,7 @@ pub(crate) fn run<'a>(
         if let Some(given) = given {
             marker = Some(finish(
                 database,
+                call,
                 tables,
                 &steps[0].before,
                 &names,
@@ -237,7 +240,7 @@ pub(crate) fn run<'a>(
     }
     if marker.is_none() && !steps.is_empty() {
         // Added columns can change generated values and removal predicates.
-        let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
+        let schema = crate::write_schema::WriteSchema::read(database, call, tables.to_vec())?;
         let changed = steps[0].before.changed_tables(&final_schema);
         let refresh: BTreeSet<String> = schema
             .declarations
@@ -247,7 +250,7 @@ pub(crate) fn run<'a>(
             .collect();
         if !refresh.is_empty() {
             crate::write_schema::with_evaluators(database, &schema, || {
-                crate::migration_state::refresh(database, &schema, &refresh)
+                crate::migration_state::refresh(database, call, &schema, &refresh)
             })?;
         }
     }
@@ -255,7 +258,7 @@ pub(crate) fn run<'a>(
     // device's next write of its own to delete its record (§17.2).
     crate::file_protection::await_own_write(
         database,
-        crate::file_protection::migrate(database, tables)?,
+        crate::file_protection::migrate(database, call, tables)?,
     )?;
     Ok(MigrationRun { outcomes, marker })
 }
@@ -331,6 +334,7 @@ fn check_starts_from(
 
 fn finish(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     tables: &[SyncedTable],
     initial_schema: &Schema,
     names: &MigrationMatch,
@@ -341,12 +345,14 @@ fn finish(
     (device, now): (DeviceId, SystemTime),
     given: Option<coven_format::write::WriteHeader>,
 ) -> Result<coven_merge::WriteId, DbError> {
-    let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
+    let schema = crate::write_schema::WriteSchema::read(database, call, tables.to_vec())?;
     crate::write_schema::with_evaluators(database, &schema, || {
         database.batch("CREATE TEMP TABLE _coven_migration_frozen(audience TEXT NOT NULL,record BLOB NOT NULL)")?;
         let counted_frozen = crate::published_migration::carry(database, names, &schema, removed)?;
-        let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
-        let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
+        let hidden =
+            crate::migration_hidden::Hidden::before(database, call, initial_schema, names)?;
+        let refresh =
+            crate::migration_state::carry(database, call, initial_schema, names, &schema)?;
         crate::migration_files::carry(database, names)?;
         crate::row_queries::register_schema(database, &schema.schema, tables)?;
         snapshot.rename(baseline_names)?;
@@ -361,7 +367,7 @@ fn finish(
                 }
             }
         }
-        let store = crate::merge_store::MergeStore::new(database, &before);
+        let store = crate::merge_store::MergeStore::new(database, call, &before);
         crate::migration_references::changes(
             database,
             &schema,
@@ -373,6 +379,7 @@ fn finish(
         let deleted = crate::store_state_tables::deleted_circles(database)?;
         let mut changes = crate::write_record::changes(
             database,
+            call,
             &schema,
             &before,
             &visible,
@@ -402,7 +409,7 @@ fn finish(
         }
         let mut record = match given {
             Some(header) => crate::write_record::changed_under(header, changes),
-            None => crate::write_record::changed(database, device, now, changes)?,
+            None => crate::write_record::changed(database, call, device, now, changes)?,
         };
         for row in &deletes {
             hidden.freeze(
@@ -413,21 +420,24 @@ fn finish(
                 record.header.schema_version,
             )?;
         }
-        crate::write_apply::WriteApply::new(database, &schema, &store, &before, &visible, &deleted)
-            .apply(Some(&record), BTreeSet::new())?;
+        crate::write_apply::WriteApply::new(
+            database, call, &schema, &store, &before, &visible, &deleted,
+        )
+        .apply(Some(&record), BTreeSet::new())?;
         record.header.disposition = WriteDisposition::Migration;
         // Migration row changes belong to the published snapshot, but remain
         // original source evidence for writes authored after the migration.
         let form = crate::write_sources::KeptForm::new(&schema, record.header.schema_version);
         for part in &record.parts {
-            crate::ownership::offer_part(database, &record.header, part)?;
+            crate::ownership::offer_part(database, call, &record.header, part)?;
             let frames = crate::write_sources::encode_records(&record.header, part)?;
             for (row, bytes) in part.records().zip(&frames) {
-                crate::write_sources::validate(database, &record.header, row)?;
-                crate::write_sources::retain_authored(database, &form, &record.header, row)?;
+                crate::write_sources::validate(database, call, &record.header, row)?;
+                crate::write_sources::retain_authored(database, call, &form, &record.header, row)?;
                 retain_record(database, &record.header, row, bytes)?;
                 crate::write_sources::admit(
                     database,
+                    call,
                     &record.header,
                     row.row(),
                     &coven_format::snapshot_rows::ChangeVerdict::Applied,
@@ -435,19 +445,19 @@ fn finish(
             }
         }
         record.parts.clear();
-        crate::write_commit::queue(database, &schema, &record, Default::default())?;
-        crate::migration_state::refresh(database, &schema, &refresh)?;
+        crate::write_commit::queue(database, call, &schema, &record, Default::default())?;
+        crate::migration_state::refresh(database, call, &schema, &refresh)?;
         crate::captured_changes::capture(
             database,
             record.header.position,
             record.header.schema_version,
         )?;
-        database.internal_execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
+        database.execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
         // What this run froze of the kept state, over the counted prefix:
         // the migration write's own freezes, over the whole prefix, replace
         // them wherever its losses are put (§18.5).
         for loss in &counted_frozen {
-            database.internal_execute(
+            database.execute(
                 "INSERT INTO _coven_migration_counted_losses(write_id,audience,record) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
                 rusqlite::params![
                     coven_format::merge_fields::encode_write_id(&record.header.position)?,
@@ -469,7 +479,7 @@ pub(crate) fn keep_loss(
     migration: coven_merge::WriteId,
     loss: &coven_format::loss::Loss,
 ) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
         rusqlite::params![
             coven_format::merge_fields::encode_write_id(&migration)?,
@@ -487,7 +497,7 @@ pub(crate) fn forget_audience(
     audience: &coven_merge::Audience,
 ) -> Result<(), DbError> {
     for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
-        db.internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [audience])?;
+        db.execute(&format!("DELETE FROM {table} WHERE audience=?1"), [audience])?;
     }
     Ok(())
 }
@@ -501,7 +511,7 @@ fn retain_record(
     bytes: &[u8],
 ) -> Result<(), DbError> {
     let row = record.row();
-    database.internal_execute(
+    database.execute(
         "INSERT INTO _coven_migration_records VALUES(?1,?2,?3,?4,?5)",
         rusqlite::params![
             coven_format::merge_fields::encode_write_id(&header.position)?,
@@ -523,7 +533,7 @@ pub(crate) fn forget_record(
     table: &str,
     key: &[u8],
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "DELETE FROM _coven_migration_records WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
         rusqlite::params![write, audience, table, key],
     )?;

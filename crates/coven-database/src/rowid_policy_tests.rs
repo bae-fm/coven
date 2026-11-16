@@ -11,7 +11,7 @@ async fn reading_steps(tables: usize) -> i64 {
             format!("CREATE TABLE t{i}(id TEXT PRIMARY KEY, v); CREATE INDEX t{i}_v ON t{i}(v);")
         })
         .collect();
-    let steps = db.inspect_writer(|writer| {
+    let steps = db.inspect_writer(|writer, _| {
         writer.batch("BEGIN").unwrap();
         writer.with_profile(|writer| writer.app_batch(&sql)).unwrap();
         writer.batch("ROLLBACK").unwrap();

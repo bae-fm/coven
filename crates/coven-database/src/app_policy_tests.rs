@@ -617,10 +617,11 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             .unwrap(),
             (1, 2, 3)
         );
-        db.commit_writer(|sql| {
-            let error = sql
-                .materialize(|sql| Ok(sql.app_execute("UPDATE items SET oid=8", [])?))
-                .unwrap_err();
+        db.commit_writer(|sql, _| {
+            let error = crate::store_call::materialize(sql, |sql| {
+                Ok(sql.app_execute("UPDATE items SET oid=8", [])?)
+            })
+            .unwrap_err();
             assert!(matches!(
                 error,
                 DbError::StatementForbidden { operation: "changing a hidden rowid" }

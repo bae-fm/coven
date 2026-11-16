@@ -67,7 +67,7 @@ async fn a_later_failure_rolls_back_every_pending_migration_and_version() {
     ));
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         assert_eq!(
             sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0)).unwrap(),
             0

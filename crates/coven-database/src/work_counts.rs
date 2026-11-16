@@ -1,4 +1,6 @@
-//! Test-only accounting shared by a database's writer and readers.
+//! Test-only accounting shared by a database's writer and readers. The
+//! connections count the work SQLite does for them, and coven counts its own
+//! work beside it; a test reads the two together.
 
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
@@ -37,22 +39,72 @@ pub struct WorkCounts {
     pub lookup_steps: usize,
 }
 
+/// The work a connection counts: its commits, its reads of the schema
+/// cookie, and the steps of the statements it runs for the app and for live
+/// queries' lookups.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ConnectionWork {
+    pub(crate) commits: usize,
+    pub(crate) cookie_reads: usize,
+    pub(crate) app_read_steps: usize,
+    pub(crate) app_read_statements: usize,
+    pub(crate) app_write_steps: usize,
+    pub(crate) lookup_steps: usize,
+}
+
+/// The work coven counts beside its connections'.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StoreWork {
+    pub(crate) writer_holds: usize,
+    pub(crate) snapshot_reads: usize,
+    pub(crate) published_rows: usize,
+    pub(crate) evaluated_rows: usize,
+    /// Reads of the schema version and of synced columns' and foreign
+    /// keys' registered ids.
+    pub(crate) constant_reads: usize,
+}
+
 /// Injected counter; clones observe the same database, never other test databases.
 #[derive(Clone)]
-pub struct WorkCounter(Arc<Mutex<WorkCounts>>);
+pub struct WorkCounter {
+    connections: Arc<Mutex<ConnectionWork>>,
+    store: Arc<Mutex<StoreWork>>,
+}
 
 impl WorkCounter {
     /// A counter no database has counted on yet, for a test to give one.
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(WorkCounts::default())))
+        Self {
+            connections: Arc::new(Mutex::new(ConnectionWork::default())),
+            store: Arc::new(Mutex::new(StoreWork::default())),
+        }
     }
 
     /// Start another measurement after the preceding work has completed.
     pub fn take(&self) -> WorkCounts {
-        std::mem::take(&mut lock_unpoisoned(&self.0))
+        let connections = std::mem::take(&mut *lock_unpoisoned(&self.connections));
+        let store = std::mem::take(&mut *lock_unpoisoned(&self.store));
+        WorkCounts {
+            writer_holds: store.writer_holds,
+            commits: connections.commits,
+            snapshot_reads: store.snapshot_reads,
+            published_rows: store.published_rows,
+            evaluated_rows: store.evaluated_rows,
+            constant_reads: store.constant_reads + connections.cookie_reads,
+            app_read_steps: connections.app_read_steps,
+            app_read_statements: connections.app_read_statements,
+            app_write_steps: connections.app_write_steps,
+            lookup_steps: connections.lookup_steps,
+        }
     }
 
-    pub(crate) fn record(&self, update: impl FnOnce(&mut WorkCounts)) {
-        update(&mut lock_unpoisoned(&self.0));
+    /// Count work a connection did.
+    pub(crate) fn record_connection(&self, update: impl FnOnce(&mut ConnectionWork)) {
+        update(&mut lock_unpoisoned(&self.connections));
+    }
+
+    /// Count work coven did beside its connections.
+    pub(crate) fn record(&self, update: impl FnOnce(&mut StoreWork)) {
+        update(&mut lock_unpoisoned(&self.store));
     }
 }

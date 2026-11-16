@@ -132,7 +132,7 @@ async fn a_row_is_evaluated_once_and_only_when_evaluating_changes_something() {
             .unwrap();
         sql(&db, insert).await.unwrap();
         sql(&db, "UPDATE notes SET title=title||'x'").await.unwrap();
-        let statements = db.inspect_writer(|writer| writer.profiled_statements());
+        let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
         let evaluations = statements.iter().filter(|s| staged(&s.sql)).count();
         assert_eq!(evaluations, expected, "{schema}");
         assert_eq!(count(&db, "notes"), 2);

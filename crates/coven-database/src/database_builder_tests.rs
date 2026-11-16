@@ -237,8 +237,8 @@ async fn a_connection_that_wont_close_fails_close_after_every_one_was_tried() {
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     crate::write::tests::sql(&database, ONE_NOTE).await.unwrap();
-    database.inspect_readers(|reader| reader.leave_statement_open());
-    database.inspect_writer(|writer| writer.leave_statement_open());
+    database.inspect_readers(|reader, _| reader.leave_statement_open());
+    database.inspect_writer(|writer, _| writer.leave_statement_open());
     let error = database.close().await.unwrap_err();
     let DbError::Closing { failures } = error else { panic!("closing failed, not {error:?}") };
     assert_eq!(failures.len(), 5, "{failures:?}");

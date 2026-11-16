@@ -15,7 +15,7 @@ impl Database {
         provider_access: Vec<ProviderAccessChange>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     if crate::device_reset::read(db)? == Some(reset) {
                         return Ok(());

@@ -30,7 +30,7 @@ type Removed = (String, Vec<u8>, String, BTreeSet<Rule>);
 
 /// What a device shows of `tables`, and which rows its rules took out.
 fn state(database: &Database, tables: &[&str]) -> (Vec<String>, Vec<Removed>) {
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, _| {
         let mut shown = Vec::new();
         for table in tables {
             for id in db

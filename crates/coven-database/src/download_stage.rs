@@ -1,8 +1,10 @@
 //! Stage a write's merged values in SQLite before changing app-visible rows.
 use crate::merge_store::MergeStore;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::{decoded, encoded};
 use crate::write_rows::AppView;
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{
     dismissal::WriteFrame,
     merge_fields,
@@ -44,7 +46,7 @@ pub(crate) fn begin(database: &DatabaseConnection) -> Result<(), DbError> {
 /// The reload replaces `audience` with the snapshot it installed: the rows
 /// no write stages are read from the install tables until it commits.
 pub(crate) fn replace(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "INSERT INTO temp._coven_download_replaced(audience) VALUES(?1) ON CONFLICT DO NOTHING",
         [audience],
     )?;
@@ -108,6 +110,7 @@ pub(crate) fn ignored(
 
 pub(crate) fn frame(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     form: &crate::write_sources::KeptForm<'_>,
     header: &WriteHeader,
     ignored: bool,
@@ -121,7 +124,7 @@ pub(crate) fn frame(
                 return Ok(());
             }
             crate::dismissal::validate_past(database, header, dismissal)?;
-            database.internal_execute(
+            database.execute(
                 "INSERT INTO temp._coven_download_dismissals(record) VALUES(?1)",
                 [encoded(dismissal.encode())?],
             )?;
@@ -129,9 +132,9 @@ pub(crate) fn frame(
         }
     };
     if !ignored {
-        crate::write_sources::validate(database, header, record)?;
+        crate::write_sources::validate(database, call, header, record)?;
     }
-    crate::write_sources::retain(database, form, header, record)
+    crate::write_sources::retain(database, call, form, header, record)
 }
 
 /// Stage one received record whole until its write is judged and applied:
@@ -142,7 +145,7 @@ pub(crate) fn stage_record(
     record: PartRecord<'_>,
 ) -> Result<(), DbError> {
     let row = record.row();
-    database.internal_execute(
+    database.execute(
         "INSERT INTO temp._coven_received_records(write_id,audience,table_name,key,record) VALUES(?1,?2,?3,?4,?5)",
         params![
             merge_fields::encode_write_id(&header.position)?,
@@ -157,7 +160,7 @@ pub(crate) fn stage_record(
 
 /// Release a received write's staged records once it is applied or consumed.
 pub(crate) fn release(database: &DatabaseConnection, header: &WriteHeader) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "DELETE FROM temp._coven_received_records WHERE write_id=?1",
         [merge_fields::encode_write_id(&header.position)?],
     )?;
@@ -191,6 +194,7 @@ pub(crate) fn records_table(header: &WriteHeader) -> &'static str {
 /// and marks nothing: what it replaces is current still in the counted state.
 pub(crate) fn stage(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
     opened: &[Audience],
@@ -218,7 +222,7 @@ pub(crate) fn stage(
         .collect();
     let opened = &audiences;
     let interpreter =
-        crate::interpretation::Interpreter::new(database, schema, header, opened, ahead)?;
+        crate::interpretation::Interpreter::new(database, call, schema, header, opened, ahead)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     for audience in opened {
         // One record at a time, past the last: admitting it updates its row.
@@ -268,13 +272,14 @@ pub(crate) fn stage(
                 continue;
             };
             let record = WriteRecord { header: header.clone(), parts: vec![part] };
-            let store = MergeStore::from_staged(database, &schema.schema);
+            let store = MergeStore::from_staged(database, call, &schema.schema);
             let updates = store.apply(&record)?;
             if let Some(slot) = slot {
                 for (row, update) in &updates {
                     let before = store.row(row)?.state;
                     crate::forget_records::stopped(
                         database,
+                        call,
                         header.position,
                         &before,
                         &update.state,
@@ -283,7 +288,7 @@ pub(crate) fn stage(
                     crate::forget_entries::changed(database, &before, &update.state)?;
                 }
             }
-            crate::write_commit::commit(database, &record, &store, &updates)?;
+            crate::write_commit::commit(database, call, &record, &store, &updates)?;
             if let Some(slot) = slot {
                 if !crate::forget_records::applied(
                     header.position,
@@ -304,7 +309,7 @@ pub(crate) fn stage(
             }
         }
     }
-    crate::captured_changes::losses(database, schema, header)?;
+    crate::captured_changes::losses(database, call, schema, header)?;
     let dismissals = database.query(
         "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
         [],
@@ -328,11 +333,12 @@ pub(crate) fn stage(
     // device's own write to delete its record (§17.2).
     for key in crate::dismissal::apply(
         database,
+        call,
         &WriteRecord { header: header.clone(), parts: parts.into_values().collect() },
     )? {
-        crate::file_protection::refresh_received(database, schema, &key)?;
+        crate::file_protection::refresh_received(database, call, schema, &key)?;
     }
-    database.internal_execute("DELETE FROM temp._coven_download_dismissals", [])?;
+    database.execute("DELETE FROM temp._coven_download_dismissals", [])?;
     Ok(())
 }
 
@@ -341,7 +347,7 @@ pub(crate) fn put_values(
     row: &RowId,
     state: &coven_merge::RowState<coven_format::value::Value>,
 ) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         "DELETE FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
         params![row.table, row.key, &row.audience],
     )?;
@@ -362,7 +368,7 @@ pub(crate) fn retain_values(
     } else {
         None
     };
-    database.internal_execute("INSERT INTO temp._coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,&row.audience,columns])?;
+    database.execute("INSERT INTO temp._coven_download_rows(table_name,key,audience,columns) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![row.table,row.key,&row.audience,columns])?;
     Ok(())
 }
 
@@ -378,13 +384,15 @@ pub(crate) fn staged_rows(database: &DatabaseConnection) -> Result<Vec<RowId>, D
 /// Install app rows once after the counted and queued folds have completed.
 pub(crate) fn materialize(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &DatabaseConnection,
+    before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
     touched: BTreeSet<RowId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
-    let region = rules(database, before, schema, deleted, touched)?;
+    let region = rules(database, call, before, before_call, schema, deleted, touched)?;
     files.retain_rows(
         region.into_iter().map(|row| (row.table, row.key)).collect(),
         &crate::file_protection::Merged::new(),
@@ -397,20 +405,29 @@ pub(crate) fn materialize(
 /// app rows of that region. Returns the region.
 pub(crate) fn rules(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     before: &DatabaseConnection,
+    before_call: &StoreCall<'_>,
     schema: &WriteSchema,
     deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
     mut touched: BTreeSet<RowId>,
 ) -> Result<BTreeSet<RowId>, DbError> {
     touched.extend(database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?);
     let prior = AppView::after(before, schema).without_row_cache();
-    let old_store = MergeStore::from_schema(before, &schema.schema).with_recent_rows();
+    let old_store = MergeStore::from_schema(before, before_call, &schema.schema).with_recent_rows();
     let empty = BTreeMap::new();
     let old = crate::removal_view::DatabaseRemovalView::new(
-        before, &old_store, schema, &prior, &empty, deleted, None,
+        before,
+        before_call,
+        &old_store,
+        schema,
+        &prior,
+        &empty,
+        deleted,
+        None,
     )?;
-    let current = MergeStore::from_staged(database, &schema.schema).with_recent_rows();
-    crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
+    let current = MergeStore::from_staged(database, call, &schema.schema).with_recent_rows();
+    crate::write_apply::WriteApply::new(database, call, schema, &current, &prior, &prior, deleted)
         .replace(&old, touched)
 }
 
@@ -429,19 +446,20 @@ pub(crate) fn finish(database: &DatabaseConnection) -> Result<(), DbError> {
 /// queue leaves (§6.2).
 pub(crate) fn count(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     touched: BTreeSet<RowId>,
 ) -> Result<(), DbError> {
     let app = AppView::after(database, schema).without_row_cache();
-    let store = MergeStore::from_staged(database, &schema.schema).with_recent_rows();
+    let store = MergeStore::from_staged(database, call, &schema.schema).with_recent_rows();
     let empty = BTreeMap::new();
     let deleted = crate::store_state_tables::deleted_circles(database)?;
     let view = crate::removal_view::DatabaseRemovalView::new(
-        database, &store, schema, &app, &empty, &deleted, None,
+        database, call, &store, schema, &app, &empty, &deleted, None,
     )?;
     view.prime(touched.iter().cloned())?;
     let result =
         coven_merge::recompute(&view, &view, touched).map_err(|e| e.into_db_error(None))?;
     store.retain_materialization_values(&result.region)?;
-    crate::removal::record(database, &view, &result, &BTreeMap::new())
+    crate::removal::record(database, call, &view, &result, &BTreeMap::new())
 }

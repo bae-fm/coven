@@ -2,25 +2,27 @@
 
 use super::{Database, Mode};
 use crate::internal_schema::retry_effect::{self, RetryState};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_foundation::task::CarriesBug;
 
 impl Database {
     /// Transfer metadata of the current durable claim attempt.
     pub async fn claim_upload(&self) -> Result<crate::ClaimUpload, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::claim::upload)).await
+        self.call(|inner| inner.access.with_committed(|db, _| crate::claim::upload(db))).await
     }
     /// A bounded range of the current attempt, used by a recorded upload.
     pub async fn claim_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, DbError> {
         self.call(move |inner| {
-            inner.access.with_committed(|db| crate::claim::range(db, offset, length))
+            inner.access.with_committed(|db, _| crate::claim::range(db, offset, length))
         })
         .await
     }
     /// Save provider-confirmed progress before the next part is sent.
     pub async fn save_claim_upload(&self, session: Vec<u8>) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.stream_transaction(|db| crate::claim::save_upload(db, session))
             })
         })
@@ -42,7 +44,7 @@ impl Database {
             + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 crate::upload::prepare_batch(writer, inner.access.device, through, select)
             })
         })
@@ -63,7 +65,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_committed(|reader| crate::upload::read_batch(reader, prepared, consume))
+                .with_committed(|reader, _| crate::upload::read_batch(reader, prepared, consume))
         })
         .await
     }
@@ -84,10 +86,11 @@ impl Database {
             inner.inputs.prepare(|inputs| {
                 let write = write.prepare(inputs)?;
                 authenticate()?;
-                inner.access.with_writer(|writer| {
+                inner.access.with_writer(|writer, call| {
                     writer.stream_transaction(|db| {
                         crate::download_stream::retain_sources(
                             db,
+                            call,
                             &inner.access.write_schema,
                             write,
                         )
@@ -125,27 +128,33 @@ impl Database {
                 let incoming = incoming.prepare(inputs)?;
                 let prepared = inner.clock.elapsed();
                 let reader = inner.access.readers.acquire_reader();
-                let applied = inner.with_files("apply a slot", |writer, files| {
-                    reader.with_reader(|reader| {
-                        reader.read_with_constants(|| {
-                            crate::write_schema::prepare_evaluators(
-                                reader,
-                                &inner.access.write_schema,
-                            )?;
-                            reader.schema_version()?;
-                            crate::sequence_apply::apply::<P>(
-                                writer,
-                                reader,
-                                &inner.access.write_schema,
-                                incoming,
-                                &writers,
-                                files,
-                                inner.raise_operation.as_deref(),
-                                inner.joining_write.as_deref(),
-                                inner.clock.now(),
-                                authenticate,
-                            )
-                        })
+                let applied = inner.with_files("apply a slot", |writer, call, files| {
+                    inner.access.with_leased(&reader, |reader, reader_call| {
+                        crate::transaction_constants::read_with_constants(
+                            reader,
+                            reader_call,
+                            || {
+                                crate::write_schema::prepare_evaluators(
+                                    reader,
+                                    &inner.access.write_schema,
+                                )?;
+                                crate::transaction_constants::schema_version(reader, reader_call)?;
+                                crate::sequence_apply::apply::<P>(
+                                    writer,
+                                    call,
+                                    reader,
+                                    reader_call,
+                                    &inner.access.write_schema,
+                                    incoming,
+                                    &writers,
+                                    files,
+                                    inner.raise_operation.as_deref(),
+                                    inner.joining_write.as_deref(),
+                                    inner.clock.now(),
+                                    authenticate,
+                                )
+                            },
+                        )
                     })
                 });
                 tracing::debug!(
@@ -175,9 +184,9 @@ impl Database {
             + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, call| {
                 let state = crate::store_state_tables::read(db)?;
-                crate::upload::prepare(db, &state, select)
+                crate::upload::prepare(db, call, &state, select)
             })
         })
         .await
@@ -189,7 +198,7 @@ impl Database {
     pub async fn sendable_through(&self) -> Result<Option<u64>, DbError> {
         self.call(|inner| {
             let device = inner.access.device;
-            inner.access.with_committed(|db| crate::upload::sendable_through(db, device))
+            inner.access.with_committed(|db, _| crate::upload::sendable_through(db, device))
         })
         .await
     }
@@ -201,14 +210,8 @@ impl Database {
         &self,
         id: coven_merge::WriteId,
     ) -> Result<Option<coven_format::write_stream::WriteHeaderFrame>, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| crate::write_headers::read(db, id))
-        })
-        .await
+        self.call(move |inner| inner.access.with_reader(|db, _| crate::write_headers::read(db, id)))
+            .await
     }
 
     /// Audiences whose counted administrative effects require replacement data.
@@ -217,11 +220,7 @@ impl Database {
         &self,
     ) -> Result<std::collections::BTreeSet<coven_merge::Audience>, DbError> {
         self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(crate::reload_gate::reloading_audiences)
+            inner.access.with_reader(|db, _| crate::reload_gate::reloading_audiences(db))
         })
         .await
     }
@@ -234,10 +233,8 @@ impl Database {
         &self,
     ) -> Result<std::collections::BTreeMap<coven_merge::Audience, coven_merge::WriteId>, DbError>
     {
-        self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(crate::reload_gate::rebuilding)
-        })
-        .await
+        self.call(move |inner| inner.access.with_reader(|db, _| crate::reload_gate::rebuilding(db)))
+            .await
     }
 
     /// The header of one of this device's writes the store holds, with the
@@ -249,7 +246,7 @@ impl Database {
     ) -> Result<Option<(coven_format::write::WriteHeader, Option<coven_merge::Slot>)>, DbError>
     {
         self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(|db| {
+            inner.access.with_reader(|db, _| {
                 let Some(frame) = crate::write_headers::read(db, write)? else {
                     return Ok(None);
                 };
@@ -266,10 +263,11 @@ impl Database {
     /// slot is gone (§18.3).
     pub async fn restart_rebuilds(&self) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, call| {
                 writer.transaction(|writer| {
                     crate::rebuild_wait::restart(
                         writer,
+                        call,
                         &inner.access.write_schema,
                         inner.clock.now(),
                     )
@@ -361,7 +359,7 @@ impl Database {
         location: crate::RecordedLocation<String>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
-        self.save_sync_status(move |db| {
+        self.save_sync_status(move |db, _| {
             crate::internal_schema::sync_status::save_location(db, &location, finished, true)
         })
         .await
@@ -376,7 +374,7 @@ impl Database {
         location: crate::RecordedLocation<String>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
-        self.save_sync_status(move |db| {
+        self.save_sync_status(move |db, _| {
             crate::internal_schema::sync_status::save_location(db, &location, finished, false)
         })
         .await
@@ -386,8 +384,10 @@ impl Database {
     /// hadn't, or one it claimed. A failure fails this handle, as
     /// `record_opened`'s does.
     pub async fn record_moved(&self, moved: crate::PassMove) -> Result<(), DbError> {
-        self.save_sync_status(move |db| crate::internal_schema::sync_status::save_moved(db, moved))
-            .await
+        self.save_sync_status(move |db, _| {
+            crate::internal_schema::sync_status::save_moved(db, moved)
+        })
+        .await
     }
 
     /// Record how the last pass ended, as sync encodes it, when sync failed
@@ -395,7 +395,7 @@ impl Database {
     /// of the loop's, in a pass or outside one; and that nothing moves. A
     /// failure fails this handle, as `record_opened`'s does.
     pub async fn record_last_pass(&self, last_pass: Vec<u8>) -> Result<(), DbError> {
-        self.save_sync_status(move |db| {
+        self.save_sync_status(move |db, _| {
             crate::internal_schema::sync_status::save_last_pass(db, &last_pass)
         })
         .await
@@ -406,7 +406,7 @@ impl Database {
     /// ended, and that nothing moves: from here no pass writes the row. A
     /// failure fails this handle, as `record_opened`'s does.
     pub async fn record_halt(&self, last_pass: Vec<u8>) -> Result<(), DbError> {
-        self.save_sync_status(move |db| {
+        self.save_sync_status(move |db, _| {
             crate::internal_schema::sync_status::save_halt(db, &last_pass)
         })
         .await
@@ -421,7 +421,7 @@ impl Database {
         last_pass: Vec<u8>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
-        self.save_sync_status(move |db| {
+        self.save_sync_status(move |db, _| {
             crate::internal_schema::sync_status::save_pass_end(db, &last_pass, finished)
         })
         .await
@@ -430,10 +430,14 @@ impl Database {
     /// Write `coven_sync_status` in the step that changes it, on the writer.
     async fn save_sync_status(
         &self,
-        save: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<(), DbError> + Send + 'static,
+        save: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<(), DbError> + Send + 'static,
     ) -> Result<(), DbError> {
-        self.call(move |inner| inner.access.with_writer(|writer| writer.state_transaction(save)))
-            .await
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, call| {
+                crate::store_call::state_transaction(writer, |db| save(db, call))
+            })
+        })
+        .await
     }
 
     /// Change what decides the person's retry, `coven_retry_effect`'s row,
@@ -467,11 +471,11 @@ impl Database {
         &self,
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
         then: impl FnOnce(RetryState) -> T + Send + 'static,
-        also: fn(&crate::sqlite::DatabaseConnection) -> Result<(), DbError>,
+        also: fn(&DatabaseConnection) -> Result<(), DbError>,
     ) -> Result<T, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                let state = writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                let state = crate::store_call::state_transaction(writer, |db| {
                     let state = retry_effect::stored(change(retry_effect::read(db)?))?;
                     retry_effect::save(db, state)?;
                     also(db)?;
@@ -492,8 +496,8 @@ impl Database {
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
                     crate::retry::save(db, crate::RetrySubject::Provider, &wait)?;
                     let state = retry_effect::stored(change(retry_effect::read(db)?))?;
                     retry_effect::save(db, state)
@@ -506,13 +510,13 @@ impl Database {
     /// Record one local first unmet condition, replacing its previous reason.
     pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 if let Some(id) = record.operation() {
                     if crate::operation::find(writer, id)?.is_none() {
                         return Err(DbError::OperationChanged(id));
                     }
                 }
-                writer.state_transaction(|db| crate::pending::save(db, &record))
+                crate::store_call::state_transaction(writer, |db| crate::pending::save(db, &record))
             })
         })
         .await
@@ -524,7 +528,13 @@ impl Database {
         &self,
         subject: S,
     ) -> Result<(), DbError> {
-        self.clear_pending_checked(subject, crate::pending::recorded, |_| Ok(())).await.map(drop)
+        self.clear_pending_checked(
+            subject,
+            |db, _, a0| crate::pending::recorded(db, a0),
+            |_, _| Ok(()),
+        )
+        .await
+        .map(drop)
     }
 
     /// Settle only the condition the consumer actually checked, using the
@@ -539,10 +549,10 @@ impl Database {
     {
         self.clear_pending_checked(
             subject,
-            move |db, subject| {
+            move |db, _, subject| {
                 Ok(crate::pending::find::<P>(db, subject)?.is_some_and(|record| checked(&record)))
             },
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
         .await
         .map(drop)
@@ -562,10 +572,10 @@ impl Database {
     {
         self.clear_pending_checked(
             subject,
-            move |db, subject| {
+            move |db, _, subject| {
                 Ok(crate::pending::find::<P>(db, subject)?.is_some_and(|record| checked(&record)))
             },
-            move |db| {
+            move |db, _| {
                 let retry = crate::file_queue::upload_id(db, object.0, object.1)?
                     .map(crate::RetrySubject::Upload);
                 if let Some(retry) = retry {
@@ -582,26 +592,25 @@ impl Database {
         &self,
         subject: S,
         checked: F,
-        settled: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<T, DbError> + Send + 'static,
+        settled: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<T, DbError> + Send + 'static,
     ) -> Result<Option<T>, DbError>
     where
         S: serde::Serialize + Send + 'static,
         T: Send + 'static,
-        F: Fn(&crate::sqlite::DatabaseConnection, &S) -> Result<bool, DbError> + Send + 'static,
+        F: Fn(&DatabaseConnection, &StoreCall<'_>, &S) -> Result<bool, DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            let should_clear =
-                inner.access.readers.acquire_reader().with_reader(|db| checked(db, &subject))?;
+            let should_clear = inner.access.with_reader(|db, call| checked(db, call, &subject))?;
             if !should_clear {
                 return Ok(None);
             }
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
+            inner.access.with_writer(|writer, call| {
+                crate::store_call::state_transaction(writer, |db| {
                     // Another writer may have replaced this condition since
                     // the committed read; deletion checks that current record.
-                    if checked(db, &subject)? {
+                    if checked(db, call, &subject)? {
                         crate::pending::clear(db, &subject)?;
-                        return settled(db).map(Some);
+                        return settled(db, call).map(Some);
                     }
                     Ok(None)
                 })
@@ -636,7 +645,7 @@ impl Database {
             let encode = |r: &P| serde_json::to_vec(r).map_err(DbError::StateEncoding);
             let next = records.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()?;
             // The usual unchanged scan reads its class without taking the writer.
-            let unchanged = inner.access.readers.acquire_reader().with_reader(|reader| {
+            let unchanged = inner.access.with_reader(|reader, _| {
                 let current = crate::pending::read::<P>(reader)?
                     .into_iter()
                     .filter(|r| scanned(r))
@@ -647,13 +656,13 @@ impl Database {
             if unchanged {
                 return Ok(());
             }
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 let previous: Vec<_> =
                     crate::pending::read::<P>(writer)?.into_iter().filter(|r| scanned(r)).collect();
                 if previous.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()? == next {
                     return Ok(());
                 }
-                writer.state_transaction(|db| {
+                crate::store_call::state_transaction(writer, |db| {
                     for record in &previous {
                         if !identities.contains(record.subject()) {
                             crate::pending::clear(db, record.subject())?;
@@ -678,7 +687,9 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| crate::pending::retry::<P>(writer, &subject))
+            inner
+                .access
+                .with_writer(|writer, call| crate::pending::retry::<P>(writer, call, &subject))
         })
         .await
     }
@@ -688,8 +699,10 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn set_pending_build(&self, build: u128) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| crate::pending::set_build(db, build))
+            inner.access.with_writer(|writer, _| {
+                crate::store_call::state_transaction(writer, |db| {
+                    crate::pending::set_build(db, build)
+                })
             })
         })
         .await
@@ -709,9 +722,10 @@ impl Database {
         E: CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_with_constants(|| crate::upload::read(reader, consume))
+            inner.access.with_reader(|reader, call| {
+                crate::transaction_constants::read_with_constants(reader, call, || {
+                    crate::upload::read(reader, consume)
+                })
             })
         })
         .await
@@ -727,9 +741,10 @@ impl Database {
         DbError,
     > {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_with_constants(|| crate::upload::oldest_keys(reader))
+            inner.access.with_reader(|reader, call| {
+                crate::transaction_constants::read_with_constants(reader, call, || {
+                    crate::upload::oldest_keys(reader)
+                })
             })
         })
         .await
@@ -760,7 +775,7 @@ impl Database {
                     Some("injected applied slot read failure".into()),
                 )));
             }
-            inner.access.with_committed(crate::sequence::applied)
+            inner.access.with_committed(|db, _| crate::sequence::applied(db))
         })
         .await
     }
@@ -779,13 +794,13 @@ impl Database {
     /// Claim numbers and complete-slot digests recorded by every consumed slot, including refusals.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn last_claims(&self) -> Result<Vec<coven_format::snapshot::LastClaim>, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::sequence::claims)).await
+        self.call(|inner| inner.access.with_committed(|db, _| crate::sequence::claims(db))).await
     }
 
     /// Original administrative, copy and announcement evidence retained by snapshots.
     pub async fn original_slots(&self) -> Result<Vec<coven_format::floor::OriginalSlot>, DbError> {
         self.call(|inner| {
-            inner.access.with_committed(|db| {
+            inner.access.with_committed(|db, _| {
                 db.query("SELECT slot,record FROM _coven_slot_records ORDER BY slot", [], |row| {
                     Ok(coven_format::floor::OriginalSlot {
                         slot: crate::write_encoding::slot_counter(row.get(0)?)?,
@@ -801,7 +816,7 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn claim_counter(&self) -> Result<u64, DbError> {
         self.call(|inner| {
-            inner.access.with_committed(|db| crate::claim::reserved(db, inner.access.device))
+            inner.access.with_committed(|db, _| crate::claim::reserved(db, inner.access.device))
         })
         .await
     }
@@ -816,7 +831,7 @@ impl Database {
         self.call(move |inner| {
             inner
                 .access
-                .with_committed(|db| crate::claim::attempted_digest(db, number, &path, &digest))
+                .with_committed(|db, _| crate::claim::attempted_digest(db, number, &path, &digest))
         })
         .await
     }
@@ -824,7 +839,7 @@ impl Database {
     /// The active claim and every durable attempted path. `claim_range`
     /// reads the current attempt's exact bytes.
     pub async fn current_claim(&self) -> Result<Option<crate::Claim>, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::claim::current)).await
+        self.call(|inner| inner.access.with_committed(|db, _| crate::claim::current(db))).await
     }
 
     /// Seal and stage outside the application writer, then atomically reserve
@@ -843,12 +858,12 @@ impl Database {
         self.call(move |inner| {
             let number = inner
                 .access
-                .with_committed(|db| crate::claim::reserved(db, inner.access.device))?
+                .with_committed(|db, _| crate::claim::reserved(db, inner.access.device))?
                 .checked_add(1)
                 .ok_or(DbError::ClaimNumberExhausted)?;
             let attempt = seal(number)?;
             Ok(inner.inputs.prepare_claim(attempt, |prepared| {
-                inner.access.with_writer(|writer| {
+                inner.access.with_writer(|writer, _| {
                     writer.stream_transaction(|db| {
                         crate::claim::begin(db, inner.access.device, work, number, prepared)
                     })
@@ -867,8 +882,10 @@ impl Database {
         F: FnOnce(crate::ClaimBytes<'_>) -> Result<T, E> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(|db| {
-                db.read_with_constants(|| crate::claim::read_attempt(db, consume))
+            inner.access.with_reader(|db, call| {
+                crate::transaction_constants::read_with_constants(db, call, || {
+                    crate::claim::read_attempt(db, consume)
+                })
             })
         })
         .await
@@ -881,7 +898,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.inputs.prepare_claim(attempt, |prepared| {
-                inner.access.with_writer(|writer| {
+                inner.access.with_writer(|writer, _| {
                     writer.stream_transaction(|db| crate::claim::retry(db, prepared))
                 })
             })
@@ -895,7 +912,7 @@ impl Database {
         read: crate::ClaimRead,
     ) -> Result<crate::ClaimSettlement, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.stream_transaction(|db| crate::claim::settle(db, read))
             })
         })
@@ -908,7 +925,7 @@ impl Database {
         operation: Option<crate::OperationUpdate>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
+            inner.access.with_writer(|writer, _| {
                 writer.stream_transaction(|db| {
                     crate::claim::finish(db)?;
                     if let Some(update) = operation {
@@ -927,8 +944,10 @@ impl Database {
         &self,
         path: coven_format::path::ObjectPath,
     ) -> Result<bool, DbError> {
-        self.call(move |inner| inner.access.with_committed(|db| crate::claim::attempted(db, &path)))
-            .await
+        self.call(move |inner| {
+            inner.access.with_committed(|db, _| crate::claim::attempted(db, &path))
+        })
+        .await
     }
 }
 
@@ -938,6 +957,9 @@ mod device;
 impl<M: Mode> Database<M> {
     /// Membership and audience state of the committed sequence prefix.
     pub async fn store_state(&self) -> Result<crate::StoreState, DbError> {
-        self.call(|open| M::access(open).with_committed(crate::store_state_tables::read)).await
+        self.call(|open| {
+            M::access(open).with_committed(|db, _| crate::store_state_tables::read(db))
+        })
+        .await
     }
 }

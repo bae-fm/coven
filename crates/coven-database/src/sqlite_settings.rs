@@ -595,7 +595,7 @@ impl DatabaseConnection {
         if !analyzed {
             return Ok(());
         }
-        self.internal_execute(
+        self.execute(
             "DELETE FROM sqlite_stat1 WHERE tbl IN (SELECT tbl FROM sqlite_stat1
              GROUP BY tbl HAVING max(CAST(stat AS INTEGER)) < ?1)",
             [SMALL_TABLE],

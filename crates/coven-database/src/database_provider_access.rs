@@ -12,7 +12,7 @@ impl crate::Database {
         &self,
         account: String,
     ) -> Result<Option<ProviderAccess>, DbError> {
-        self.call(move |inner| inner.access.with_writer(|db| read(db, &account))).await
+        self.call(move |inner| inner.access.with_writer(|db, _| read(db, &account))).await
     }
 
     /// Record a new invitation and its account intention atomically.
@@ -22,7 +22,7 @@ impl crate::Database {
         changes: Vec<ProviderAccessChange>,
     ) -> Result<OperationId, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     let id = crate::operation::insert(db, &operation)?;
                     adopt::<P>(db, &changes)?;
@@ -43,7 +43,7 @@ impl crate::Database {
         child: Option<(OperationId, crate::OperationOutcome)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     crate::operation::advance(db, &update)?;
                     if let Some((child, outcome)) = &child {
@@ -63,7 +63,7 @@ impl crate::Database {
         changes: Vec<ProviderAccessChange>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| db.transaction(|db| retake::<P>(db, &changes)))
+            inner.access.with_writer(|db, _| db.transaction(|db| retake::<P>(db, &changes)))
         })
         .await
     }
@@ -76,7 +76,7 @@ impl crate::Database {
         id: OperationId,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(id))?;
                     if state.request.as_ref().map(|r| r.operation) != Some(id) {
@@ -118,7 +118,7 @@ impl crate::Database {
             data,
         };
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(update.id))?;
                     let request = state.request.ok_or(DbError::OperationChanged(update.id))?;
@@ -158,7 +158,7 @@ impl crate::Database {
         grant: OperationId,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     crate::operation::advance(db, &update)?;
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(grant))?;
@@ -185,7 +185,7 @@ impl crate::Database {
         invitation: Option<SecretBytes>,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|db| {
+            inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(id))?;
                     if state.request

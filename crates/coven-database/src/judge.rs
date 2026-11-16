@@ -23,6 +23,7 @@
 
 use crate::judge_view::{Authoring, ChildView};
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::loss::AuthorizationFailure;
@@ -236,11 +237,12 @@ impl Originals<'_> {
 /// Judge every row change of the write's parts this device holds.
 pub(crate) fn judge(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     originals: Originals<'_>,
 ) -> Result<Judgement, DbError> {
     let header = originals.header();
-    let authoring = Authoring::new(db, schema, header.schema_version)?;
+    let authoring = Authoring::new(db, call, schema, header.schema_version)?;
     let index = StepIndex::of(&originals)?;
     let mut actions = BTreeMap::new();
     let mut shapes = BTreeMap::new();
@@ -308,7 +310,7 @@ pub(crate) fn judge(
         .flat_map(|(row, sequence)| chain(row, *sequence))
         .map(|(row, _)| row)
         .collect();
-    let mut owners = Owners::new(db, schema, header.position.device, header.schema_version)?;
+    let mut owners = Owners::new(db, call, schema, header.position.device, header.schema_version)?;
     let mut rows = BTreeMap::new();
     for (row, shape) in &shapes {
         let derived: Vec<u32> = shape
@@ -466,6 +468,7 @@ pub(crate) struct Owners<'a> {
 impl<'a> Owners<'a> {
     pub(crate) fn new(
         db: &'a DatabaseConnection,
+        call: &'a StoreCall<'a>,
         schema: &'a WriteSchema,
         device: DeviceId,
         version: u32,
@@ -474,7 +477,7 @@ impl<'a> Owners<'a> {
             database: db,
             schema,
             version,
-            current: db.schema_version()?,
+            current: crate::transaction_constants::schema_version(db, call)?,
             device,
             member: crate::store_state_tables::device_member(db, device)?,
             known: BTreeMap::new(),

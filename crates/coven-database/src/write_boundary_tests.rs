@@ -91,7 +91,7 @@ impl crate::Database {
         audience: Audience,
         included: u64,
     ) -> Result<bool, DbError> {
-        self.inspect_writer(|db| {
+        self.inspect_writer(|db, _| {
             db.transaction(|db| {
                 let boundary =
                     Boundary::load_selected(db)?.into_iter().find(|b| b.entry() == entry).unwrap();
@@ -136,7 +136,7 @@ async fn coverage_survives_restart_and_rejects_replacement() {
     assert!(db.coverage_fixture(slot(1), Audience::Store, 1).is_err());
     db.close().await.unwrap();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    let boundaries = db.inspect_writer(|db| super::WriteBoundary::load(db)).unwrap();
+    let boundaries = db.inspect_writer(|db, _| super::WriteBoundary::load(db)).unwrap();
     assert_eq!(boundaries.len(), 1);
     assert_eq!(boundaries[0].rule, super::BoundaryRule::Reset(slot(1)));
     assert_eq!(boundaries[0].included, 0);
@@ -271,7 +271,7 @@ async fn a_stored_boundary_of_no_known_kind_is_damaged_database() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     assert!(db.install_reset_fixture(slot(1), Audience::Store, 0).await.unwrap());
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         sql.batch(
             "PRAGMA ignore_check_constraints=ON; UPDATE _coven_boundaries SET kind='lost';
              PRAGMA ignore_check_constraints=OFF;",

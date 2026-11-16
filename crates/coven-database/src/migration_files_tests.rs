@@ -68,7 +68,7 @@ async fn file_references_follow_a_rename() {
         assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { .. }));
         complete_uploads(&db).await;
         assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::Cloud { .. }));
-        let named: String = db.inspect_writer(|sql| {
+        let named: String = db.inspect_writer(|sql, _| {
             sql.query_row(&format!("SELECT {column} FROM {table} WHERE id='7'"), [], |r| r.get(0))
                 .unwrap()
         });
@@ -118,7 +118,7 @@ async fn a_migration_leaves_file_records_and_references_with_their_writes() {
         .await
         .unwrap();
     let marker = crate::write::tests::records(&db)[1].header.position;
-    let set: i64 = db.inspect_writer(|sql| {
+    let set: i64 = db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT (SELECT count(*) FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id
                      WHERE w.number=?1)

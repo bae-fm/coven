@@ -29,39 +29,29 @@ mod stream_capture;
 pub(crate) mod table_shapes;
 #[path = "transaction_capture.rs"]
 mod transaction_capture;
-#[path = "transaction_constants.rs"]
-mod transaction_constants;
 #[path = "write_transaction.rs"]
 mod write_transaction;
 #[path = "write_with.rs"]
 mod write_with;
 use app_statements::StepsOf;
+pub(crate) use app_triggers::check_followed_triggers;
 pub(crate) use event_capture::Operation;
+pub(crate) use schema_cookie::CookieScope;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
 
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-
-use coven_foundation::id_source::DeviceId;
 
 use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
 
 use crate::app_policy::CovenPolicy;
 use crate::authorization::SqlAuthorization;
 use crate::connection_setup::Setup;
-use crate::internal_schema;
-use crate::migration::validate_versions;
 use crate::observation::CommitObserver;
-use crate::schema::Schema;
 use crate::store_failure::StoreFailure;
-use crate::{
-    CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
-    SyncedTable,
-};
+use crate::DbError;
 
 /// Statements kept prepared per connection, coven's and the app's: a local
 /// write runs about a hundred distinct ones of coven's, which a smaller cache
@@ -89,7 +79,6 @@ pub(crate) struct DatabaseConnection {
     /// Stops a lookup that runs too long (`live_judging.rs`).
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
-    constants: transaction_constants::TransactionConstants,
     /// The schema cookie while a transaction that runs no DDL holds it.
     cookie: schema_cookie::SchemaCookie,
     /// The open handle this connection serves: it receives the commits and
@@ -114,12 +103,6 @@ pub(crate) struct DatabaseConnection {
     /// migration's inside the open's, leaves the outer one tracing.
     #[cfg(test)]
     profiles: std::cell::Cell<usize>,
-    #[cfg(test)]
-    merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
-    /// Each queued write's record and judgement, also of a refused one, for
-    /// tests of its classification.
-    #[cfg(test)]
-    judged: std::cell::RefCell<Vec<(coven_format::write::WriteRecord, crate::judge::Judgement)>>,
     /// Panic in the next call of a write transaction's hook, as a bug in
     /// what it captures would.
     #[cfg(test)]
@@ -127,7 +110,6 @@ pub(crate) struct DatabaseConnection {
 }
 
 struct WriterObservation {
-    device: DeviceId,
     /// The tables whose operations a write keeps whole, lowercase.
     recorded: Arc<BTreeSet<String>>,
 }
@@ -138,31 +120,15 @@ impl DatabaseConnection {
         *self.work.borrow_mut() = Some(counter);
     }
 
-    /// The last queued write's record and judgement, also of a refused one.
-    #[cfg(test)]
-    pub(crate) fn take_judged(
-        &self,
-    ) -> Option<(coven_format::write::WriteRecord, crate::judge::Judgement)> {
-        self.judged.borrow_mut().pop()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn judged(
-        &self,
-        judged: (coven_format::write::WriteRecord, crate::judge::Judgement),
-    ) {
-        self.judged.borrow_mut().push(judged);
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn test_record_statements(&self, log: crate::test_utils::StatementLog) {
         *self.statement_log.borrow_mut() = Some(log);
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::WorkCounts)) {
+    pub(crate) fn record_work(&self, update: impl FnOnce(&mut crate::test_utils::ConnectionWork)) {
         if let Some(counter) = self.work.borrow().as_ref() {
-            counter.record(update);
+            counter.record_connection(update);
         }
     }
 
@@ -211,7 +177,6 @@ impl DatabaseConnection {
             policy,
             lookups,
             app_statements: app_statements::AppStatements::default(),
-            constants: transaction_constants::TransactionConstants::default(),
             cookie: schema_cookie::SchemaCookie::default(),
             handle: None,
             observation: None,
@@ -226,186 +191,11 @@ impl DatabaseConnection {
             #[cfg(test)]
             profiles: std::cell::Cell::new(0),
             #[cfg(test)]
-            merge_loads: std::sync::Mutex::new(BTreeMap::new()),
-            #[cfg(test)]
-            judged: std::cell::RefCell::new(Vec::new()),
-            #[cfg(test)]
             hook_panics: Arc::default(),
         };
         db.configure(settings, read_only)?;
         db.refresh_hidden_rowids()?;
         Ok(db)
-    }
-
-    /// Migrate local tables before app migrations or recovery's waiting work.
-    /// Read-only connections require the supported internal version already.
-    pub(crate) fn prepare_internal_schema(&mut self) -> Result<(), OpenError> {
-        let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-        let internal = internal as u32;
-        if internal > internal_schema::VERSION {
-            return Err(CovenMigrationError::SchemaTooNew {
-                current: internal,
-                supported: internal_schema::VERSION,
-            }
-            .into());
-        }
-        if internal < internal_schema::VERSION {
-            if self.connection.is_readonly(rusqlite::MAIN_DB)? {
-                return Err(CovenMigrationError::ReadOnly.into());
-            }
-            // Only the current greenfield schema is supported. An uninitialized
-            // database is version zero; an unknown newer schema is never rewritten.
-            self.transaction(|db| {
-                db.batch(&internal_schema::initial_schema())?;
-                crate::sql_versions::record_library(db)?;
-                db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))
-            })
-            .map_err(|source| CovenMigrationError::Failed { source: Box::new(source) })?;
-        }
-        Ok(())
-    }
-
-    /// Prepare the app's schema: on a writable connection, rebuild what a
-    /// new version of SQLite or of the app's collations and functions
-    /// changes, then migrate, reporting both steps to `progress`; on a
-    /// read-only one, require the app's versions rebuilt and the migrations
-    /// done, which reports nothing.
-    pub(crate) fn prepare_schema(
-        &mut self,
-        tables: &[SyncedTable],
-        migrations: &[Migration],
-        versions: &[crate::sql_versions::SqlVersion],
-        author: Option<crate::migration_run::MigrationOrigin>,
-        operation: Option<&crate::migration::MigrationOperation>,
-        audiences: Option<&crate::audience_database::Stage<'_>>,
-        progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
-    ) -> Result<Vec<MigrationOutcome>, OpenError> {
-        let read_only = author.is_none();
-        let supported = validate_versions(migrations)?;
-        self.prepare_internal_schema()?;
-        // Before the app's migrations, whose statements use the indexes.
-        if read_only {
-            crate::sql_versions::require_built(self, versions)?;
-        } else {
-            crate::sql_versions::rebuild(self, tables, versions, progress)?;
-        }
-        let current = self.schema_version()?;
-        if current > supported {
-            return Err(MigrationError::SchemaTooNew { current, supported }.into());
-        }
-        // App declarations are inputs even when their SQL ran on an earlier open.
-        // Every breaking step retained its schema; other committed steps did not.
-        for migration in migrations.iter().filter(|m| m.version <= current) {
-            let breaking = self.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_conversion_schemas WHERE version=?1)",
-                [migration.version],
-                |r| r.get(0),
-            )?;
-            migration.check_kind(breaking)?;
-        }
-        if read_only || current == supported {
-            let schema = Schema::read(self, &crate::file_table::declared(tables))?;
-            schema.validate(tables)?;
-            crate::schema::validate_local_keys(self, &schema, tables)?;
-            self.check_followed_triggers()?;
-            if let Some(table) =
-                crate::row_queries::owner_declaration_changed(self, &schema, tables)?
-            {
-                return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
-            }
-            if let Some(table) = crate::file_table::changed(self, &schema, tables)? {
-                return Err(
-                    DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into()
-                );
-            }
-            if !read_only {
-                self.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
-            }
-            self.refresh_changed_rowids()?;
-            return Ok(Vec::new());
-        }
-        let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
-        let publishes = author.is_some();
-        let device = author.as_ref().map(|origin| origin.0);
-        progress.begin(
-            crate::OpenStep::Migrating,
-            migrations.iter().filter(|m| m.version > current).count() as u64,
-        );
-        // A run with a breaking migration is checked against what each
-        // audience alone would make of it, from the rows as they are now (§18.3).
-        let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > current).collect();
-        let mut staged = None;
-        if let Some(stage) = audiences.filter(|_| {
-            pending.iter().any(|m| matches!(m.kind, crate::migration::MigrationKind::Breaking(_)))
-        }) {
-            let first = pending[0];
-            let before = stage(self);
-            staged = Some(before.map_err(|source| MigrationError::Failed {
-                version: first.version,
-                name: first.name,
-                source: Box::new(source),
-            })?);
-        }
-        let result = self.with_profile(|db| {
-            db.transaction(|db| {
-                let crate::migration_run::MigrationRun { outcomes, marker } =
-                    crate::migration_run::run(
-                        db,
-                        tables,
-                        migrations,
-                        current,
-                        supported,
-                        author.expect("writable migration"),
-                        &mut at,
-                        progress,
-                    )?;
-                if let Some(staged) = staged.as_mut() {
-                    crate::audience_database::verify(staged, db, &pending, tables)?;
-                }
-                let breaking = outcomes
-                    .iter()
-                    .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
-                    .map(|outcome| outcome.version)
-                    .max();
-                let raises = if let Some(minimum) = breaking {
-                    // The raise snapshots are captured through the marker before any
-                    // later app write; with no store there is no shared version to
-                    // raise, and an installation that loads its store has no marker.
-                    let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
-                    // A circle still waiting for its rebuild is rebuilt to this
-                    // migration's version, under this migration's write.
-                    if let Some(marker) = marker {
-                        crate::reload_gate::follow(db, marker)?;
-                    }
-                    if let Some(marker) = marker {
-                        crate::raise_capture::capture(db, &schema, marker, supported)?;
-                    }
-                    crate::raise_capture::require(db, minimum)?;
-                    true
-                } else {
-                    // Only additions: a raise still waiting to publish moves to
-                    // this version, captured again at it (§18.5).
-                    let device = device.expect("writable migration");
-                    crate::raise_capture::raise_to(db, tables, device, supported)?
-                };
-                if raises {
-                    if let Some(operation) = operation.filter(|_| publishes) {
-                        crate::raise_capture::journal(db, operation, supported)?;
-                    }
-                }
-                crate::row_queries::register_schema(
-                    db,
-                    &Schema::read(db, &crate::file_table::declared(tables))?,
-                    tables,
-                )?;
-                db.refresh_hidden_rowids()?;
-                Ok(outcomes)
-            })
-        });
-        result.map_err(|source| {
-            MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
-                .into()
-        })
     }
 
     /// The most arguments an SQL function call can pass on this connection.
@@ -414,28 +204,47 @@ impl DatabaseConnection {
         Ok(self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
     }
 
-    /// Refuse a queued value before allocating it, using this connection's limit.
-    pub(crate) fn check_value_length(
-        &self,
-        field: &'static str,
-        length: u64,
-    ) -> Result<usize, DbError> {
-        let maximum = self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)? as u64;
-        if length > maximum {
-            return Err(DbError::TooLarge { field, actual: length, maximum });
-        }
-        Ok(length as usize)
+    /// The most bytes a string or BLOB can hold on this connection.
+    pub(crate) fn length_limit(&self) -> rusqlite::Result<i32> {
+        self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH)
     }
 
-    pub(crate) fn upload_plaintext(&self, rowid: i64) -> Result<crate::UploadBytes<'_>, DbError> {
+    /// Open the BLOB in `column` of the row `rowid` of the main schema's
+    /// `table`, for reading only when `read_only`.
+    pub(crate) fn open_blob(
+        &self,
+        table: &str,
+        column: &str,
+        rowid: i64,
+        read_only: bool,
+    ) -> rusqlite::Result<rusqlite::blob::Blob<'_>> {
         let _scope = self.authorization.internal();
-        Ok(crate::UploadBytes::new(self.connection.blob_open(
-            rusqlite::MAIN_DB,
-            "_coven_uploads",
-            "record",
-            rowid,
-            true,
-        )?))
+        self.connection.blob_open(rusqlite::MAIN_DB, table, column, rowid, read_only)
+    }
+
+    /// Fail the handle this connection serves with `failure`, so every later
+    /// call and live query reports it. A connection that serves no handle
+    /// yet fails nothing.
+    pub(crate) fn fail_handle(&self, failure: StoreFailure) {
+        if let Some(handle) = &self.handle {
+            handle.fail(crate::observation::HandleFailure::Host(failure));
+        }
+    }
+
+    /// Mark the SQL that runs until the returned scope drops as applying
+    /// merged rows, for coven's policy.
+    pub(crate) fn applying(&self) -> crate::app_policy::ApplyingSql<'_> {
+        self.policy.applying()
+    }
+
+    /// Whether SQLite opened the main database for reading only.
+    pub(crate) fn read_only(&self) -> rusqlite::Result<bool> {
+        self.connection.is_readonly(rusqlite::MAIN_DB)
+    }
+
+    /// Whether this connection is a writer that observes its commits.
+    pub(crate) fn observes_commits(&self) -> bool {
+        self.observation.is_some()
     }
 
     /// Run `run` on this connection. Tests trace its statements, ending the
@@ -458,44 +267,14 @@ impl DatabaseConnection {
         }
     }
 
-    pub(crate) fn state_transaction<T>(
-        &mut self,
-        run: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        self.transaction(run).map_err(|error| self.pending_failure(error))
-    }
-
-    pub(crate) fn local_device(&self) -> Option<DeviceId> {
-        self.observation.as_ref().map(|o| o.device)
-    }
-
-    pub(crate) fn pending_change<T>(
-        &self,
-        run: impl FnOnce() -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        run().map_err(|error| self.pending_failure(error))
-    }
-
     /// Fail the handle when removing a transaction's `hook` failed: what the
     /// connection would call next is unknown. Removal never panics, since it
     /// runs as a transaction drops, perhaps during an unwind.
     pub(crate) fn removed_hook(&self, hook: &'static str, removed: rusqlite::Result<()>) {
         if let Err(error) = removed {
             tracing::error!(hook, %error, "removing a transaction's hook failed");
-            let _failed = self.pending_failure(error.into());
+            self.fail_handle(StoreFailure::State(Arc::new(error.into())));
         }
-    }
-
-    fn pending_failure(&self, error: DbError) -> DbError {
-        if matches!(error, DbError::StatePersistence(_)) {
-            return error;
-        }
-        let error = Arc::new(error);
-        if let Some(handle) = &self.handle {
-            handle
-                .fail(crate::observation::HandleFailure::Host(StoreFailure::State(error.clone())));
-        }
-        DbError::StatePersistence(error)
     }
 
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
@@ -520,21 +299,7 @@ impl DatabaseConnection {
         Ok(reads.reads())
     }
 
-    /// Mark ordinary materialization SQL so shared triggers stay suppressed.
-    /// SQLite retains ownership of foreign keys, actions and deferred checks.
-    pub(crate) fn materialize<T>(
-        &self,
-        run: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        let _scope = self.policy.applying();
-        run(self)
-    }
-
-    pub(crate) fn internal_execute<P: Params>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> Result<usize, DbError> {
+    pub(crate) fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize, DbError> {
         let _scope = self.authorization.internal();
         let changed =
             self.with_statement(sql, |statement| statement.execute(params).map_err(DbError::from))?;
@@ -799,24 +564,10 @@ impl DatabaseConnection {
 
     /// Serve the handle as its writer, capturing each commit's row changes and
     /// keeping a write's operations on the `recorded` tables whole.
-    pub(crate) fn observe_commits(
-        &mut self,
-        handle: CommitObserver,
-        device: DeviceId,
-        recorded: BTreeSet<String>,
-    ) {
+    pub(crate) fn observe_commits(&mut self, handle: CommitObserver, recorded: BTreeSet<String>) {
         assert!(self.observation.is_none(), "commit observation installed once");
         self.serve(handle);
-        self.observation = Some(WriterObservation { device, recorded: Arc::new(recorded) });
-    }
-
-    pub(crate) fn lost_values(&self) -> Result<Vec<crate::LostValue>, DbError> {
-        let records = self.query(
-            &format!("{} ORDER BY l.id", crate::loss_record::SELECT),
-            [],
-            crate::loss_record::read,
-        )?;
-        records.into_iter().map(crate::LostValue::from_record).collect()
+        self.observation = Some(WriterObservation { recorded: Arc::new(recorded) });
     }
 
     /// The scope in which the app's write SQL runs.

@@ -2,17 +2,19 @@
 //! that completes one, and the app's pause of them (§17.3, §17.9).
 
 use super::{FileWrite, StagedFile, StagedSource};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::{
     file_location::{FileLocation, Place},
     file_table::Record,
-    sqlite::DatabaseConnection,
     DbError,
 };
 use coven_foundation::id_source::{FileId, ObjectId};
 
 /// What the transaction completing an upload does once its write applied:
 /// clear the upload's pending record (§17.9).
-pub(crate) type AfterCompletion = Box<dyn FnOnce(&DatabaseConnection) -> Result<(), DbError>>;
+pub(crate) type AfterCompletion =
+    Box<dyn FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<(), DbError>>;
 
 /// What a write retires once it applied: the uploads whose files it
 /// switched, and those no file waits for; and whether it completes a bound
@@ -135,7 +137,7 @@ impl FileWrite<'_> {
                 continue;
             }
             let subject = crate::pending::SubjectKey::of(&subject(&location))?;
-            completion.after.push(Box::new(move |db| crate::pending::clear_key(db, &subject)));
+            completion.after.push(Box::new(move |db, _| crate::pending::clear_key(db, &subject)));
             completion.retired.push(id);
             retired.push(id);
         }
@@ -237,7 +239,7 @@ impl FileWrite<'_> {
             crate::file_queue::retire(self.database, upload)?;
         }
         for after in completion.after {
-            after(self.database)?;
+            after(self.database, self.call)?;
         }
         Ok(())
     }

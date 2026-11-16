@@ -8,14 +8,14 @@ use std::time::UNIX_EPOCH;
 async fn exhausted_write_numbers_return_an_error_before_timestamp_exhaustion() {
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
-    database.inspect_writer(|db| {
+    database.inspect_writer(|db, call| {
         let device = DeviceId(41);
         // Starting at timestamp zero permits one more timestamp than the
         // positive write-number representation has identities.
         let latest = Timestamp::new(Timestamp::MAX_MILLISECONDS, u16::MAX - 1, device).unwrap();
         let timestamp = coven_format::merge_fields::encode_timestamp(&latest).unwrap();
         crate::write_commit::tests::record_write(db, &timestamp, u64::MAX, 0, None);
-        let error = changed(db, device, UNIX_EPOCH, BTreeMap::new()).unwrap_err();
+        let error = changed(db, call, device, UNIX_EPOCH, BTreeMap::new()).unwrap_err();
         assert!(matches!(error, DbError::WriteNumberExhausted));
     });
     database.close().await.unwrap();
@@ -48,7 +48,7 @@ async fn an_inserted_row_is_read_once() {
     })
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let reads = statements
         .iter()
         .filter(|s| s.sql.starts_with("SELECT \"id\",\"parent\" FROM main.\"children\""))
@@ -105,7 +105,8 @@ async fn recording_a_writes_rows_prepares_no_statement_again_per_row() {
         })
         .await
         .unwrap();
-        prepared_again.push(reprepares(&db.inspect_writer(|writer| writer.profiled_statements())));
+        prepared_again
+            .push(reprepares(&db.inspect_writer(|writer, _| writer.profiled_statements())));
     }
     assert_eq!(prepared_again[2], prepared_again[1]);
     db.close().await.unwrap();
@@ -150,7 +151,7 @@ async fn a_reference_of_its_parents_type_is_not_staged() {
     })
     .await
     .unwrap();
-    let statements = db.inspect_writer(|writer| writer.profiled_statements());
+    let statements = db.inspect_writer(|writer, _| writer.profiled_statements());
     let staged = statements.iter().filter(|s| s.sql.contains("_coven_affinity_")).count();
     assert_eq!(staged, 0);
     db.close().await.unwrap();

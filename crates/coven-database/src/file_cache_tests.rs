@@ -1,13 +1,14 @@
+use crate::sqlite::DatabaseConnection;
 /// Record a cache entry of `size` bytes at `path`, for chunk 0 of the stored
 /// object at `object_path` in the `files` namespace, last read at `read`.
 pub(crate) fn cached(
-    db: &crate::sqlite::DatabaseConnection,
+    db: &DatabaseConnection,
     object_path: &str,
     path: &str,
     size: i64,
     read: i64,
 ) -> Result<usize, crate::DbError> {
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_cache(namespace,object_path,chunk,path,size,last_read)
          VALUES('files',?1,0,?2,?3,?4)",
         (object_path, path, size, read),
@@ -16,13 +17,8 @@ pub(crate) fn cached(
 
 /// Record a partial download of `size` bytes at `path`, as a stopped pin
 /// leaves it.
-pub(crate) fn partial(
-    db: &crate::sqlite::DatabaseConnection,
-    object_path: &str,
-    path: &str,
-    size: i64,
-) {
-    db.internal_execute(
+pub(crate) fn partial(db: &DatabaseConnection, object_path: &str, path: &str, size: i64) {
+    db.execute(
         "INSERT INTO _coven_cache_partials(namespace,object_path,path,size) VALUES('files',?1,?2,?3)",
         (object_path, path, size),
     )
@@ -31,8 +27,8 @@ pub(crate) fn partial(
 
 /// Record a cache range at `path` as being written, as a crash mid-write
 /// leaves it.
-pub(crate) fn writing(db: &crate::sqlite::DatabaseConnection, path: &str) {
-    db.internal_execute("INSERT INTO _coven_cache_writes(path) VALUES(?1)", [path]).unwrap();
+pub(crate) fn writing(db: &DatabaseConnection, path: &str) {
+    db.execute("INSERT INTO _coven_cache_writes(path) VALUES(?1)", [path]).unwrap();
 }
 
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
@@ -79,7 +75,7 @@ pub(crate) async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
 /// chunks and headers, and of its whole copies, read from the entries
 /// themselves.
 fn counters(db: &Database) -> (i64, i64) {
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         let recorded = (
             super::cached(sql, "files").unwrap(),
             sql.query_row(
@@ -134,7 +130,7 @@ async fn cache_counters_follow_their_records() {
 async fn an_undeclared_namespace_has_no_cached_count() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    db.inspect_writer(|sql| {
+    db.inspect_writer(|sql, _| {
         assert!(matches!(
             super::cached(sql, "missing"),
             Err(DbError::UndeclaredNamespace { namespace }) if namespace == "missing"
@@ -196,7 +192,7 @@ async fn a_pinned_copy_over_the_budget_crowds_out_no_cached_bytes() {
     owner.cache_range(&other, 0, 1, FileName::new("first").unwrap(), vec![2; 30]).await.unwrap();
     owner.trim_cache("files").await.unwrap();
     let names = |db: &Database| {
-        db.inspect_writer(|sql| {
+        db.inspect_writer(|sql, _| {
             sql.query("SELECT path FROM _coven_cache ORDER BY path", [], |r| r.get::<_, String>(0))
                 .unwrap()
         })
@@ -289,7 +285,7 @@ async fn clearing_a_namespace_removes_only_its_unpinned_entries() {
     assert!(matches!(failed, Err(DbError::Invariant { .. })));
     assert_eq!(local_count(&db, "_coven_cache"), 4);
     db.write(|sql| sql.clear_cache("files")).await.unwrap();
-    let left = db.inspect_writer(|sql| {
+    let left = db.inspect_writer(|sql, _| {
         sql.query("SELECT path FROM _coven_cache ORDER BY path", [], |r| r.get::<_, String>(0))
             .unwrap()
     });
@@ -332,7 +328,7 @@ async fn cache_bytes_are_the_counters_in_declaration_order() {
     );
     assert_eq!(empty.pinning, 0);
     owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
-    db.inspect_writer(|sql| partial(sql, "partial_object", "partial_file", 4096));
+    db.inspect_writer(|sql, _| partial(sql, "partial_object", "partial_file", 4096));
     let measured = db.cache_bytes().await.unwrap();
     let (cached, pinned) = counters(&db);
     assert_eq!(
@@ -375,7 +371,7 @@ async fn the_budgets_query_runs_only_for_counter_and_budget_changes() {
     assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, header.len() as u64);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), Some(header));
     assert!(quiet(&mut budgets), "a read's recency starts no run");
-    db.inspect_writer(|sql| partial(sql, "partial_object", "partial_file", 4096));
+    db.inspect_writer(|sql, _| partial(sql, "partial_object", "partial_file", 4096));
     db.write(|_| Ok(())).await.unwrap();
     assert!(quiet(&mut budgets), "a partial download starts no run");
     db.close().await.unwrap();

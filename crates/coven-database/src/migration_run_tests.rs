@@ -33,7 +33,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
             migrations.push(Migration::breaking(3, "rename and backfill", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(name)", crate::OldWrites::Drop, Vec::new()));
         }
         let db = fixture.builder(tables(), migrations).open().await.unwrap();
-        let loads = db.inspect_writer(|db| db.merge_loads());
+        let loads = db.inspect_writer(|_, call| call.merge_loads());
         assert!(!loads.contains_key("library"), "untouched merge records were loaded: {loads:?}");
         if breaking {
             assert!(
@@ -49,7 +49,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
                 "an addition read another table's merge state: {loads:?}"
             );
         }
-        let statements = db.inspect_writer(|db| db.profiled_statements());
+        let statements = db.inspect_writer(|db, _| db.profiled_statements());
         assert!(
             !statements.iter().any(|statement| statement.sql.contains("FROM main.\"local_cache\"")),
             "local rows must never be snapshotted"
@@ -79,7 +79,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
 
 fn setters(db: &Database, table: &str, key: &str) -> BTreeMap<String, u64> {
     let key = crate::tests::text_key(key);
-    db.inspect_writer(|db| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
+    db.inspect_writer(|db, _| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
 }
 
 async fn seeded(store: &TestStore) -> Database {
@@ -137,7 +137,7 @@ async fn drops_rebuilds_and_drop_recreate_preserve_only_matching_cells() {
         let db = store.builder(notes(), sequence(vec![Migration::breaking(2, "change", migration, crate::OldWrites::Drop, notes())])).open().await.unwrap();
         assert_eq!(setters(&db,"notes","n"), [("id".into(),1),("title".into(),2)].into(), "{migration}");
         assert_eq!(records(&db).last().unwrap().header.disposition, WriteDisposition::Migration);
-        assert_eq!(db.inspect_writer(|db| db.query_row("SELECT count(*) FROM _coven_columns WHERE column_name='body'",[],|r|r.get::<_,i64>(0)).unwrap()),0);
+        assert_eq!(db.inspect_writer(|db, _| db.query_row("SELECT count(*) FROM _coven_columns WHERE column_name='body'",[],|r|r.get::<_,i64>(0)).unwrap()),0);
         db.close().await.unwrap();
     }
 }
@@ -247,7 +247,7 @@ async fn explicit_rename_chains_override_names_through_every_context_method() {
             .unwrap();
         assert_eq!(setters(&db, "b", "n"), [("id".into(), 1), ("y".into(), 2)].into());
         assert_eq!(
-            db.inspect_writer(|db| db
+            db.inspect_writer(|db, _| db
                 .query_row("SELECT count(*) FROM _coven_rows WHERE table_name<>'b'", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap()),
@@ -422,7 +422,7 @@ async fn renames_keep_reference_generations_and_a_migration_insert_uses_the_merg
     assert_eq!(setters(&db, "children", "c")["root"], 1);
     assert_eq!(setters(&db, "children", "new")["root"], 2);
     assert_eq!(count(&db, "_coven_references"), 2);
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         let references = db.query("SELECT f.identity,v.parent_table,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id",[],|r|Ok((coven_format::merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(0)?).unwrap(),r.get::<_,String>(1)?,crate::write_encoding::counter(r.get(2)?)?))).unwrap();
         for (key,table,generation) in references {
             assert_eq!(key,coven_merge::ForeignKey::new(["root"],"roots",["key"]));
@@ -528,7 +528,7 @@ async fn new_foreign_keys_set_existing_cells_and_name_the_new_parent_generation(
     }
     assert_eq!(setters(&db, "parents", "p")["id"], 2);
     assert_eq!(
-        db.inspect_writer(|db| db
+        db.inspect_writer(|db, _| db
             .query_row("SELECT parent_generation FROM _coven_references", [], |r| {
                 crate::write_encoding::counter(r.get(0)?)
             })
@@ -571,7 +571,7 @@ async fn changing_primary_key_arity_deletes_old_rows_and_inserts_new_ones() {
     seeded(&store).await.close().await.unwrap();
     let db = store.builder(vec![SyncedTable::new("notes",RowIdentity::SharedKey).key_columns(["id","part"])],sequence(vec![Migration::breaking(2, "key", "CREATE TABLE rebuilt(id TEXT NOT NULL,part INT NOT NULL,title TEXT NOT NULL,body TEXT,PRIMARY KEY(id,part)); INSERT INTO rebuilt SELECT id,1,title,body FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop, notes())])).open().await.unwrap();
     assert_eq!(count(&db, "notes"), 2);
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         let numbers = db
             .query(
                 "SELECT w.number FROM _coven_cells c JOIN _coven_writes w ON w.id=c.write_id",
@@ -710,7 +710,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     let remote = downloaded_update(original, "b", timestamp, &[("x", "x"), ("y", "y")]);
     db.receive(remote.into()).await.unwrap();
     assert_eq!(count(&db, "_coven_constraints"), 2);
-    let original = db.inspect_writer(|db| {
+    let original = db.inspect_writer(|db, _| {
         db.query_row(
             "SELECT id FROM _coven_constraints WHERE identity=?1",
             [coven_format::merge_fields::encode_unique_constraint(&["x"].into()).unwrap()],
@@ -731,7 +731,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
         (&lost[0].table, &lost[0].key, &lost[0].lost)
     );
     assert_eq!(count(&db, "_coven_constraints"), 1);
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         let (id, identity) = db
             .query_row("SELECT id,identity FROM _coven_constraints", [], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))

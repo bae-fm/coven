@@ -41,7 +41,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     .unwrap();
     let original = records(&db).remove(0);
     sql(&db, "INSERT INTO notes VALUES('later','title','body')").await.unwrap();
-    db.inspect_writer(|db| db.internal_execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
+    db.inspect_writer(|db, _| db.execute("UPDATE _coven_uploads SET record=x'' WHERE rowid=(SELECT max(rowid) FROM _coven_uploads)", []).unwrap());
     let streamed = db
         .read_oldest_upload(|upload| {
             let UploadPlaintext { header, header_frame, parts } = upload;
@@ -109,7 +109,7 @@ async fn a_landed_claim_gives_back_free_pages_past_four_mebibytes() {
     let first = records(&db)[0].header.position;
     landed(&db, first).await;
     db.finish_claim(None).await.unwrap();
-    let (vacuum, free_bytes): (i64, i64) = db.inspect_writer(|db| {
+    let (vacuum, free_bytes): (i64, i64) = db.inspect_writer(|db, _| {
         let pragma = |name: &str| -> i64 {
             db.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0)).unwrap()
         };
@@ -128,7 +128,7 @@ async fn only_confirmed_claims_remove_their_batch_atomically() {
     let first = records(&db)[0].header.position;
     landed(&db, first).await;
     sql(&db, "INSERT INTO notes VALUES('2','title','body')").await.unwrap();
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.fail_at("_coven_fail", "AFTER DELETE ON _coven_uploads", "failed removal")
     });
     assert!(db.finish_claim(None).await.is_err());
@@ -137,7 +137,7 @@ async fn only_confirmed_claims_remove_their_batch_atomically() {
         db.current_claim().await.unwrap().unwrap().settlement,
         crate::ClaimSettlement::Landed
     );
-    db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
+    db.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_fail").unwrap());
     db.finish_claim(None).await.unwrap();
     assert_eq!(count(&db, "_coven_uploads"), 1);
     assert_eq!(selected(&db).await.0.number, first.number + 1);
@@ -152,13 +152,13 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     let original = records(&db);
     let id = original[0].header.position;
-    db.inspect_writer(|db| {
+    db.inspect_writer(|db, _| {
         db.fail_at("_coven_fail", "AFTER INSERT ON _coven_upload_keys", "failed keys")
     });
     assert!(matches!(attempt(&db, 19).await, Err(DbError::Sqlite(_))));
     assert_eq!(selected(&db).await, (id, None));
     assert_eq!(records(&db), original);
-    db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
+    db.inspect_writer(|db, _| db.batch("DROP TRIGGER _coven_fail").unwrap());
     assert!(matches!(
         db.prepare_upload(|_, _, _| Err(DbError::StoreClosed)).await,
         Err(DbError::StoreClosed)
@@ -484,7 +484,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 
 /// Empty `db`'s upload queue, as though every write in it were sent.
 pub(crate) fn empty_queue(db: &crate::Database) {
-    db.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+    db.inspect_writer(|db, _| db.execute("DELETE FROM _coven_uploads", []).unwrap());
 }
 
 /// The app's SQL can't write the upload queue, in a migration or in a

@@ -1,6 +1,8 @@
 //! Snapshot projection of counted rows, independent of queued local originals.
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_encoding::decoded;
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::{authorship::Creation, loss::Loss, merge_fields, snapshot_rows::MergeRow};
 use coven_merge::{Audience, RowId, Rule};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,11 +10,13 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Each counted row of `audience`.
 pub(crate) fn rows<E: From<DbError>>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     audience: &Audience,
     mut visit: impl FnMut(MergeRow) -> Result<(), E>,
 ) -> Result<(), E> {
-    let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema).without_row_cache();
+    let store =
+        crate::merge_store::MergeStore::from_schema(db, call, &schema.schema).without_row_cache();
     db.for_each("SELECT table_name,key FROM _coven_rows WHERE audience=?1 UNION SELECT table_name,key FROM _coven_published_rows WHERE audience=?1 ORDER BY table_name,key",[audience],|r| {
         let id=RowId {table:r.get(0).map_err(DbError::from)?,key:r.get(1).map_err(DbError::from)?,audience:audience.clone()};
         let state=match crate::published::kept_state(db,&id)? {
@@ -28,6 +32,7 @@ pub(crate) fn rows<E: From<DbError>>(
 /// of the kept rows `removed` takes out (`published::removals`).
 pub(crate) fn losses<E: From<DbError>>(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     removed: &BTreeMap<RowId, BTreeSet<Rule>>,
     audience: &Audience,
     mut visit: impl FnMut(Loss) -> Result<(), E>,
@@ -38,7 +43,7 @@ pub(crate) fn losses<E: From<DbError>>(
         generation BLOB NOT NULL,column_id INTEGER,value BLOB NOT NULL,set_by BLOB NOT NULL,
         frozen INTEGER NOT NULL,replacement_kind TEXT NOT NULL,replaced_by BLOB NOT NULL);",
     )?;
-    db.internal_execute("INSERT INTO temp._coven_snapshot_losses SELECT * FROM _coven_lost l WHERE l.audience=?1 AND NOT EXISTS(SELECT 1 FROM _coven_published_rows p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_losses p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_dropped p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience)",[audience])?;
+    db.execute("INSERT INTO temp._coven_snapshot_losses SELECT * FROM _coven_lost l WHERE l.audience=?1 AND NOT EXISTS(SELECT 1 FROM _coven_published_rows p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_losses p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_dropped p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience)",[audience])?;
     db.for_each(
         "SELECT record FROM _coven_published_losses WHERE audience=?1 ORDER BY id",
         [audience],
@@ -46,6 +51,7 @@ pub(crate) fn losses<E: From<DbError>>(
             let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
             crate::loss_record::put_table(
                 db,
+                call,
                 &loss,
                 None,
                 crate::loss_record::LossTable::SnapshotView,
@@ -58,6 +64,7 @@ pub(crate) fn losses<E: From<DbError>>(
         let loss = coven_format::loss::Loss::removed(&state, rules.clone());
         crate::loss_record::put_table(
             db,
+            call,
             &loss,
             None,
             crate::loss_record::LossTable::SnapshotView,

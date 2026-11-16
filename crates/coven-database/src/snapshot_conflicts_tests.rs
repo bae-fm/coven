@@ -118,13 +118,13 @@ async fn judged_by_the_rows_this_device_has(other_circle: u128) {
     publish(&gifts, &[&both, &gifts]).await;
     let key = crate::tests::text_key(KEY);
     let shown = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT audience FROM notes WHERE id=?1", [KEY], |r| r.get::<_, String>(0))
                 .unwrap()
         })
     };
     let removed = |db: &Database| {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query_row(
                 "SELECT count(*) FROM _coven_lost WHERE key=?1 AND audience=?2 AND replacement_kind='rules'",
                 rusqlite::params![key, GIFTS.to_string()],
@@ -224,7 +224,7 @@ async fn reloading_a_parent_audience_takes_out_a_child_whose_parent_was_remade()
     .unwrap();
     assert_eq!(count(&c, "notes"), 0);
     assert_eq!(
-        c.inspect_writer(|db| db
+        c.inspect_writer(|db, _| db
             .query_row(
                 "SELECT count(*) FROM _coven_lost WHERE table_name='notes' AND replacement_kind='rules'",
                 [],
@@ -266,7 +266,7 @@ async fn a_deleted_circles_snapshot_rows_are_taken_out() {
     )
     .await
     .unwrap();
-    let shown = c.inspect_writer(|db| {
+    let shown = c.inspect_writer(|db, _| {
         db.query_row("SELECT count(*) FROM notes WHERE audience<>'store'", [], |r| {
             r.get::<_, i64>(0)
         })
@@ -337,7 +337,7 @@ async fn a_table_referencing_itself_installs_parents_first() {
     load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(snapshot.concat()))
         .await
         .unwrap();
-    let order = c.inspect_writer(|db| {
+    let order = c.inspect_writer(|db, _| {
         db.query("SELECT row FROM changes ORDER BY id", [], |r| r.get::<_, String>(0)).unwrap()
     });
     assert_eq!(order, ["z", "m", "a"]);

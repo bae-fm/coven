@@ -1,8 +1,8 @@
 //! Durable identity and exact attempted bytes for one sequence claim (§5.1).
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::sqlite::DatabaseConnection;
 use crate::{
-    sqlite::DatabaseConnection,
     write_encoding::{counter, damaged},
     DbError, OperationId,
 };
@@ -139,14 +139,14 @@ pub(crate) fn begin<R: Read>(
         ClaimWork::Writes(through) => (Some(through.to_be_bytes().to_vec()), None),
         ClaimWork::Operation(operation) => (None, Some(operation.0)),
     };
-    db.internal_execute("INSERT INTO _coven_claim_counters(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",
+    db.execute("INSERT INTO _coven_claim_counters(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",
         params![device,number.to_be_bytes().as_slice()])?;
-    db.internal_execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,singleton) VALUES(?1,?2,?3,?4,'unknown',1)",
+    db.execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,singleton) VALUES(?1,?2,?3,?4,'unknown',1)",
         params![device,number.to_be_bytes().as_slice(),through,operation])?;
     let path = prepared.attempt.path.clone();
     append(db, device, number, prepared)?;
     if let ClaimWork::Writes(through) = work {
-        db.internal_execute(
+        db.execute(
             "INSERT INTO _coven_upload_claims(device,number,claim)
              SELECT device,number,?1 FROM _coven_uploads WHERE device=?2 AND number<=?3
              ON CONFLICT(device,number) DO UPDATE SET claim=excluded.claim",
@@ -165,7 +165,7 @@ fn append(
     let crate::claim_preparation::PreparedClaim { mut attempt, digest, size } = prepared;
     let ordinal: i64 = db.query_row("SELECT coalesce(max(attempt),0)+1 FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
         params![device,number.to_be_bytes()], |r|r.get(0))?;
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_claim_attempts(device,number,attempt,path) VALUES(?1,?2,?3,?4)",
         params![device, number.to_be_bytes(), ordinal, attempt.path.as_str()],
     )?;
@@ -174,10 +174,10 @@ fn append(
         if bytes.is_empty() {
             break;
         }
-        db.internal_execute("INSERT INTO _coven_claim_chunks(device,number,attempt,chunk,bytes) VALUES(?1,?2,?3,?4,?5)",
+        db.execute("INSERT INTO _coven_claim_chunks(device,number,attempt,chunk,bytes) VALUES(?1,?2,?3,?4,?5)",
             params![device,number.to_be_bytes(),ordinal,chunk,bytes])?;
     }
-    db.internal_execute(
+    db.execute(
         "UPDATE _coven_claim_attempts SET digest=?4,size=?5 WHERE device=?1 AND number=?2 AND attempt=?3",
         params![
             device,
@@ -280,10 +280,7 @@ pub(crate) fn retry(
         return Err(DbError::ClaimUnsettled);
     }
     append(db, claim.device, claim.number, attempt)?;
-    db.internal_execute(
-        "UPDATE _coven_claim_journal SET settlement='unknown' WHERE singleton=1",
-        [],
-    )?;
+    db.execute("UPDATE _coven_claim_journal SET settlement='unknown' WHERE singleton=1", [])?;
     Ok(())
 }
 
@@ -331,7 +328,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
             }
         }
     };
-    db.internal_execute("UPDATE _coven_claim_journal SET settlement=?1 WHERE singleton=1", [name])?;
+    db.execute("UPDATE _coven_claim_journal SET settlement=?1 WHERE singleton=1", [name])?;
     Ok(result)
 }
 
@@ -376,7 +373,7 @@ pub(crate) fn held_by(db: &DatabaseConnection, id: OperationId) -> Result<bool, 
 /// it: this device has stopped for good, and no attempt of it can count.
 pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
     if held_by(db, id)? {
-        db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
+        db.execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
     }
     Ok(())
 }
@@ -404,7 +401,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
         }
         _ => (),
     }
-    db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
+    db.execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
     if writes_landed {
         db.give_back_free_pages()?;
     }
@@ -447,7 +444,7 @@ pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
 
 pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
-    db.internal_execute("UPDATE _coven_claim_attempts SET session=?3 WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2)",
+    db.execute("UPDATE _coven_claim_attempts SET session=?3 WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2)",
         params![claim.device, claim.number.to_be_bytes(), session])?;
     Ok(())
 }

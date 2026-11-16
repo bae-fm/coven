@@ -4,6 +4,7 @@ use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{Audience, RowState, WriteId};
@@ -16,7 +17,7 @@ use std::collections::BTreeSet;
 /// `_coven_install_lost` the keys whose lost values it deletes, whose
 /// protection the install brings up to date once its rows are in.
 pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    database.internal_execute(
+    database.execute(
         &format!(
             "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
              SELECT r.table_name,r.key,r.audience,
@@ -25,7 +26,7 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
         ),
         [&audience],
     )?;
-    database.internal_execute(
+    database.execute(
         "INSERT INTO temp._coven_install_lost(table_name,key)
          SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1 ON CONFLICT DO NOTHING",
         [&audience],
@@ -44,6 +45,7 @@ pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError
 /// Validate live losses against the merged row before storing the common record.
 pub(crate) fn loss(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     loss: coven_format::loss::Loss,
     metadata: &crate::snapshot_metadata::SnapshotMetadata<'_>,
@@ -54,8 +56,12 @@ pub(crate) fn loss(
         // Loss records are ordered by row; keep only this row's immutable state.
         if cached.as_ref().is_none_or(|state| state.row() != &loss.row) {
             let audiences = BTreeSet::from([loss.row.audience.clone()]);
-            let store =
-                crate::merge_store::MergeStore::from_snapshot(database, &schema.schema, &audiences);
+            let store = crate::merge_store::MergeStore::from_snapshot(
+                database,
+                call,
+                &schema.schema,
+                &audiences,
+            );
             *cached = Some(store.row_without_losses(&loss.row)?.state);
         }
         let state = cached.as_ref().expect("loaded the loss's row");
@@ -90,7 +96,7 @@ pub(crate) fn loss(
             _ => return Err(invalid("active loss disagrees with merge state")),
         }
     }
-    crate::loss_record::keep(database, schema, &loss)
+    crate::loss_record::keep(database, call, schema, &loss)
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {

@@ -10,7 +10,8 @@
 //! app's own reads and pins keep none: only its next call tries again
 //! (§17.7).
 
-use crate::{sqlite::DatabaseConnection, DbError, OperationId};
+use crate::sqlite::DatabaseConnection;
+use crate::{DbError, OperationId};
 use std::time::{Duration, SystemTime};
 
 /// The work a persisted wait delays.
@@ -226,7 +227,7 @@ pub(crate) fn save(
 ) -> Result<(), DbError> {
     clear(db, subject)?;
     let key = key(subject);
-    db.internal_execute(
+    db.execute(
         key.statements().insert,
         rusqlite::params![
             key.value(),
@@ -270,7 +271,7 @@ pub(crate) fn end(
     now: SystemTime,
 ) -> Result<(), DbError> {
     let key = key(subject);
-    db.internal_execute(
+    db.execute(
         key.statements().end,
         rusqlite::params![key.value(), crate::user_file::encode_time(now)],
     )?;
@@ -279,7 +280,7 @@ pub(crate) fn end(
 
 pub(crate) fn clear(db: &DatabaseConnection, subject: RetrySubject) -> Result<(), DbError> {
     let key = key(subject);
-    db.internal_execute(key.statements().delete, [key.value()])?;
+    db.execute(key.statements().delete, [key.value()])?;
     Ok(())
 }
 

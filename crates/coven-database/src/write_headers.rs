@@ -1,6 +1,7 @@
 //! Checked plaintext headers remain available after queued or received bodies leave.
 
-use crate::{sqlite::DatabaseConnection, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::DbError;
 use coven_format::write_stream::WriteHeaderFrame;
 use coven_merge::WriteId;
 use rusqlite::params;
@@ -18,7 +19,7 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
         }
         return Ok(());
     }
-    db.internal_execute(
+    db.execute(
         "INSERT INTO _coven_write_headers(device,number,header) VALUES(?1,?2,?3)",
         params![id.device, id.number.to_be_bytes(), bytes],
     )?;
@@ -27,7 +28,7 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
 
 /// Delete `id`'s plaintext header, with its applied-write entry (§16.7).
 pub(crate) fn forget(db: &DatabaseConnection, id: WriteId) -> Result<(), DbError> {
-    db.internal_execute(
+    db.execute(
         "DELETE FROM _coven_write_headers WHERE device=?1 AND number=?2",
         params![id.device, id.number.to_be_bytes()],
     )?;

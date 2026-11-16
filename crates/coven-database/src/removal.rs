@@ -3,6 +3,7 @@ use crate::removal_view::DatabaseRemovalView;
 use crate::schema::TableSchema;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::write_commit::StoredGeneration;
 use crate::write_encoding::sql_value;
 use crate::write_rows::{key_columns, AppValues, AppView};
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// transaction just stored.
 pub(crate) fn materialize(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     visible: &AppView<'_>,
     view: &DatabaseRemovalView<'_>,
@@ -97,7 +99,7 @@ pub(crate) fn materialize(
         }
     }
     let ordered = dependency_order(actions, &dependencies, &parents);
-    database.materialize(|database| {
+    crate::store_call::materialize(database, |database| {
         let mut deferred = Deferral::new(database);
         for id in ordered {
             let table = schema.table(&id.table);
@@ -122,7 +124,7 @@ pub(crate) fn materialize(
                 put(database, table, &id, &values, visible, &mut deferred)?;
             }
         }
-        record(database, view, result, stored)
+        record(database, call, view, result, stored)
     })
 }
 
@@ -159,6 +161,7 @@ impl<'a> Deferral<'a> {
 /// stored that generation, and the id its prior record holds otherwise.
 pub(crate) fn record(
     database: &DatabaseConnection,
+    call: &StoreCall<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
     stored: &BTreeMap<RowId, StoredGeneration>,
@@ -186,6 +189,7 @@ pub(crate) fn record(
         };
         crate::written_values::store(
             database,
+            call,
             row_ordinal,
             fresh,
             &state,

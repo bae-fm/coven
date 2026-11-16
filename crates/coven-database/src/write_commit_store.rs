@@ -70,7 +70,7 @@ pub(super) fn store_references(
                 rusqlite::types::Value::Blob(parent.generation.to_be_bytes().to_vec()),
             ]
         });
-        database.internal_execute(
+        database.execute(
             &format!("INSERT INTO _coven_references(row_id,column_id,foreign_key_id,parent_table,parent_key,parent_audience,parent_generation) VALUES{values} ON CONFLICT(row_id,column_id,foreign_key_id) DO UPDATE SET parent_table=excluded.parent_table,parent_key=excluded.parent_key,parent_audience=excluded.parent_audience,parent_generation=excluded.parent_generation"),
             rusqlite::params_from_iter(parameters),
         )?;
@@ -93,7 +93,7 @@ pub(super) fn store_cells(
 ) -> Result<(), DbError> {
     for chunk in cells.chunks(10_000) {
         let values = vec!["(?,?,?)"; chunk.len()].join(",");
-        database.internal_execute(
+        database.execute(
             &format!("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id"),
             rusqlite::params_from_iter(chunk.iter().flat_map(|(column, row, write)| [*column, *row, *write])),
         )?;

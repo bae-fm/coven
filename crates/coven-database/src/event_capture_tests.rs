@@ -32,7 +32,7 @@ async fn operations_keep_their_order() {
     )
     .await
     .unwrap();
-    let events = db.inspect_writer(|c| {
+    let events = db.inspect_writer(|c, _| {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         let capture = EventCapture::begin(&mut transaction).unwrap();
         transaction
@@ -56,7 +56,7 @@ async fn operations_keep_their_order() {
     assert!(events[1].new.is_empty());
     assert_eq!(events[2].old, [text("d"), text("p")]);
     // Removing the hook leaves later statements unobserved.
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         let capture = EventCapture::begin(&mut transaction).unwrap();
         transaction.stop_observing_operations().unwrap();
@@ -72,7 +72,7 @@ async fn operations_keep_their_order() {
 async fn a_local_tables_rows_are_not_copied() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
-    let events = db.inspect_writer(|c| {
+    let events = db.inspect_writer(|c, _| {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         let capture = EventCapture::begin(&mut transaction).unwrap();
         transaction
@@ -196,7 +196,7 @@ async fn a_virtual_generated_column_is_recorded_absent() {
         .await
         .unwrap();
     crate::write::tests::sql(&db, "INSERT INTO parent(id,n) VALUES('p',1)").await.unwrap();
-    let events = db.inspect_writer(|c| {
+    let events = db.inspect_writer(|c, _| {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         let capture = EventCapture::begin(&mut transaction).unwrap();
         transaction.within(|db| db.batch("UPDATE parent SET n=2")).unwrap();
@@ -215,7 +215,7 @@ async fn a_virtual_generated_column_is_recorded_absent() {
 async fn a_failing_hook_rolls_its_transaction_back() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
-    db.inspect_writer(|c| {
+    db.inspect_writer(|c, _| {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         transaction
             .observe_operations(|_, _, _, _| {
@@ -226,7 +226,7 @@ async fn a_failing_hook_rolls_its_transaction_back() {
         let committed = transaction.commit(Ok::<_, DbError>(((), Vec::new())));
         assert!(matches!(committed, Err(DbError::Invariant { .. })), "{committed:?}");
     });
-    let count = db.inspect_writer(|c| {
+    let count = db.inspect_writer(|c, _| {
         c.query_row("SELECT count(*) FROM parent", [], |r| r.get::<_, i64>(0)).unwrap()
     });
     assert_eq!(count, 0);

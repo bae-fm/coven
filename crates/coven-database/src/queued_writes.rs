@@ -1,7 +1,9 @@
 //! Reapply eligible original queue records once over counted state.
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
+use crate::{write_schema::WriteSchema, DbError};
 use coven_format::write::WriteHeader;
 use coven_merge::{RowId, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +19,7 @@ pub(crate) enum Refold<'a> {
 
 pub(crate) fn stage(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     refold: Refold<'_>,
 ) -> Result<(), DbError> {
@@ -45,20 +48,24 @@ pub(crate) fn stage(
                     chunk.copy_from_slice(&bytes);
                     Ok(())
                 },
-                |frame| crate::download_stage::frame(db, &form, &header.header, ignored, frame),
+                |frame| {
+                    crate::download_stage::frame(db, call, &form, &header.header, ignored, frame)
+                },
             )?;
             opened.push(audience);
         }
         let dismissed = crate::upload::dismissed(db, header.header.position)?;
-        let rows = rows(db, schema, &header.header, dismissed)?;
+        let rows = rows(db, call, schema, &header.header, dismissed)?;
         crate::published::capture_rows(
             db,
-            &crate::merge_store::MergeStore::from_staged(db, &schema.schema),
+            call,
+            &crate::merge_store::MergeStore::from_staged(db, call, &schema.schema),
             &rows.present,
         )?;
         crate::published::capture_dropped(db, &rows.dropped)?;
         crate::download_stage::stage(
             db,
+            call,
             schema,
             &header.header,
             &opened,
@@ -95,11 +102,12 @@ pub(crate) struct WriteRows {
 /// of a row it doesn't change or whose table it dropped among them.
 pub(crate) fn rows(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
     dismissed: Vec<RowId>,
 ) -> Result<WriteRows, DbError> {
-    let current = db.schema_version()?;
+    let current = crate::transaction_constants::schema_version(db, call)?;
     let mut present = Vec::new();
     for row in db.query(
         "SELECT table_name,key,audience FROM _coven_authored_changes WHERE write_id=?1",
@@ -149,14 +157,18 @@ struct Queue {
 }
 
 impl Queue {
-    fn read(db: &DatabaseConnection, schema: &WriteSchema) -> Result<Self, DbError> {
+    fn read(
+        db: &DatabaseConnection,
+        call: &StoreCall<'_>,
+        schema: &WriteSchema,
+    ) -> Result<Self, DbError> {
         let mut writes: Vec<(WriteId, Vec<RowId>)> = Vec::new();
         crate::upload::each_plaintext(db, |header, _| {
             if !folded(db, &header.header)? {
                 return Ok(());
             }
             let dismissed = crate::upload::dismissed(db, header.header.position)?;
-            let rows = rows(db, schema, &header.header, dismissed)?;
+            let rows = rows(db, call, schema, &header.header, dismissed)?;
             writes.push((
                 header.header.position,
                 rows.present.into_iter().chain(rows.dropped).collect(),
@@ -197,12 +209,13 @@ impl Reach {
 /// put back holds the counted state from before the slot.
 pub(crate) fn put_back(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     header: &WriteHeader,
     reach: &mut Reach,
     dismissed: Vec<RowId>,
 ) -> Result<(), DbError> {
-    let rows = rows(db, schema, header, dismissed)?;
+    let rows = rows(db, call, schema, header, dismissed)?;
     let mut pending: Vec<RowId> = rows
         .present
         .into_iter()
@@ -214,7 +227,7 @@ pub(crate) fn put_back(
     }
     let queue = match &mut reach.queue {
         Some(queue) => queue,
-        None => reach.queue.insert(Queue::read(db, schema)?),
+        None => reach.queue.insert(Queue::read(db, call, schema)?),
     };
     let mut reached = pending.clone();
     while let Some(row) = pending.pop() {
@@ -230,7 +243,7 @@ pub(crate) fn put_back(
             }
         }
     }
-    reach.restored.extend(crate::published::restore_rows(db, schema, &reached)?);
+    reach.restored.extend(crate::published::restore_rows(db, call, schema, &reached)?);
     Ok(())
 }
 
@@ -250,6 +263,7 @@ pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
 /// reached it, so what it kept is the counted state.
 pub(crate) fn overlay(
     db: &DatabaseConnection,
+    call: &StoreCall<'_>,
     schema: &WriteSchema,
     touched: &mut BTreeSet<RowId>,
     refold: Refold<'_>,
@@ -257,10 +271,10 @@ pub(crate) fn overlay(
     if present(db)? {
         let mut reached = touched.clone();
         reached.extend(crate::download_stage::staged_rows(db)?);
-        crate::download_stage::count(db, schema, reached)?;
-        stage(db, schema, refold)
+        crate::download_stage::count(db, call, schema, reached)?;
+        stage(db, call, schema, refold)
     } else {
-        touched.extend(crate::published::restore(db, schema)?);
+        touched.extend(crate::published::restore(db, call, schema)?);
         Ok(())
     }
 }

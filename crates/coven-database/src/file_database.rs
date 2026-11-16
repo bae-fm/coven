@@ -2,11 +2,10 @@
 
 use super::{Database, DatabaseAccess, DatabaseInner, Mode, Writer};
 use crate::internal_schema::CACHE_NAME_USED_SQL;
+use crate::sqlite::DatabaseConnection;
+use crate::store_call::StoreCall;
 use crate::DatabaseChanges;
-use crate::{
-    file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
-    FileUpload,
-};
+use crate::{file_queue, file_ref, write_schema::WriteSchema, DbError, FileRef, FileUpload};
 use coven_crypto::SecretBytes;
 use coven_foundation::task::CarriesBug;
 use coven_foundation::{
@@ -77,15 +76,21 @@ impl<M: Mode> FileDatabase<M> {
     /// or a read-only handle's cache connection.
     async fn run<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
-        run: impl FnOnce(&mut DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
+        run: impl FnOnce(
+                &mut DatabaseConnection,
+                &StoreCall<'_>,
+                &WriteSchema,
+                &StoreDir,
+                DeviceId,
+            ) -> Result<T, E>
             + Send
             + 'static,
     ) -> Result<T, E> {
         self.database
             .call(move |open| {
                 let access = M::access(open);
-                access.with_writer(|writer| {
-                    run(writer, &access.write_schema, &access.directory, access.device)
+                access.with_writer(|writer, call| {
+                    run(writer, call, &access.write_schema, &access.directory, access.device)
                 })
             })
             .await
@@ -161,7 +166,7 @@ impl<M: Mode> FileDatabase<M> {
     pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {
         let namespace = namespace.to_owned();
         let chosen = self
-            .run(move |db, _, _, _| {
+            .run(move |db, _, _, _, _| {
                 let paths = cache::trim(db, &namespace)?;
                 Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
             })
@@ -174,7 +179,7 @@ impl<M: Mode> FileDatabase<M> {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
         let file = file.clone();
-        self.run(move |db, _, _, device| {
+        self.run(move |db, _, _, _, device| {
             Ok(file.size() - crate::cache_progress::covered(db, &file, device)?)
         })
         .await
@@ -182,7 +187,7 @@ impl<M: Mode> FileDatabase<M> {
     /// The namespace's budget, declared or since set.
     pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
         let namespace = namespace.to_owned();
-        self.run(move |db, _, _, _| cache::budget(db, &namespace)).await
+        self.run(move |db, _, _, _, _| cache::budget(db, &namespace)).await
     }
 }
 
@@ -203,7 +208,7 @@ impl FileDatabase {
     /// read-only decisions never take the writer (§21.2).
     async fn read<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
-        read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
+        read: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<T, E> + Send + 'static,
     ) -> Result<T, E> {
         self.database.call(move |inner| inner.access.with_committed(read)).await
     }
@@ -221,8 +226,8 @@ impl FileDatabase {
         P::Subject: Send,
     {
         let file = file.clone();
-        self.run(move |db, _, _, device| {
-            db.read_with_constants(|| {
+        self.run(move |db, call, _, _, device| {
+            crate::transaction_constants::read_with_constants(db, call, || {
                 if file.place() != (crate::FilePlace::DeviceOnly { device }) {
                     return Ok(None);
                 }
@@ -253,8 +258,8 @@ impl FileDatabase {
         upload: i64,
         record: P,
     ) -> Result<(), DbError> {
-        self.run(move |db, _, _, _| {
-            db.state_transaction(|db| {
+        self.run(move |db, _, _, _, _| {
+            crate::store_call::state_transaction(db, |db| {
                 let Some(of) = record.move_of() else {
                     return Err(DbError::Invariant {
                         what: "a failed move's record names the move",
@@ -288,8 +293,8 @@ impl FileDatabase {
     where
         P::Subject: Send + 'static,
     {
-        self.run(move |db, _, _, _| {
-            db.state_transaction(|db| {
+        self.run(move |db, _, _, _, _| {
+            crate::store_call::state_transaction(db, |db| {
                 let original: Option<Option<Vec<u8>>> = db
                     .query("SELECT original FROM _coven_file_uploads WHERE id=?1", [upload], |r| {
                         r.get(0)
@@ -325,9 +330,9 @@ impl FileDatabase {
         let database = &self.database;
         let work = database
             .call(move |inner| {
-                inner
-                    .access
-                    .with_committed(|db| Ok::<_, DbError>(!file_queue::retirable(db)?.is_empty()))
+                inner.access.with_committed(|db, _| {
+                    Ok::<_, DbError>(!file_queue::retirable(db)?.is_empty())
+                })
             })
             .await?;
         if !work {
@@ -338,8 +343,10 @@ impl FileDatabase {
                 // The released copies go once the writer is free (§21.2). A
                 // move whose last waiting upload retires switches its files
                 // in this write (§17.3).
-                inner.with_files("retire uploads", |writer, files| {
-                    writer.local_write(
+                inner.with_files("retire uploads", |writer, call, files| {
+                    crate::local_write::local_write(
+                        writer,
+                        call,
                         &inner.access.write_schema,
                         inner.access.device,
                         inner.clock.now(),
@@ -398,8 +405,8 @@ impl FileDatabase {
         P: crate::PendingValue,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
-        self.run(move |db, _, _, _| {
-            db.state_transaction(|db| {
+        self.run(move |db, _, _, _, _| {
+            crate::store_call::state_transaction(db, |db| {
                 let Some(id) = file_queue::upload_of(db, file)? else {
                     return Ok(Ok(None));
                 };
@@ -420,31 +427,31 @@ impl FileDatabase {
 
     /// Durable queue: each upload some file still waits for.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
-        self.read(file_queue::read).await
+        self.read(|db, _| file_queue::read(db)).await
     }
     /// Every queued upload, those no file waits for included.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn all_uploads(&self) -> Result<Vec<FileUpload>, DbError> {
-        self.read(file_queue::read_all).await
+        self.read(|db, _| file_queue::read_all(db)).await
     }
     /// The queue ids of the bound uploads, which the pause leaves running
     /// (§17.4).
     pub async fn bound_uploads(&self) -> Result<std::collections::BTreeSet<i64>, DbError> {
-        self.read(file_queue::bound).await
+        self.read(|db, _| file_queue::bound(db)).await
     }
     /// Whether the app paused uploads, as persisted (E7).
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
-        self.read(file_queue::paused).await
+        self.read(|db, _| file_queue::paused(db)).await
     }
     /// Whether a self-replacement pauses this device's writes, which holds
     /// a trailing upload's completion until it ends (§12.3, §17.4).
     pub async fn writes_paused(&self) -> Result<bool, DbError> {
-        self.read(crate::operation::writes_paused).await
+        self.read(|db, _| crate::operation::writes_paused(db)).await
     }
     /// Whether the app moves files only on unmetered networks, as persisted
     /// (E7).
     pub async fn unmetered_only(&self) -> Result<bool, DbError> {
-        self.read(file_queue::unmetered_only).await
+        self.read(|db, _| file_queue::unmetered_only(db)).await
     }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
@@ -453,8 +460,8 @@ impl FileDatabase {
         &self,
         subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
     ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
-        self.run(move |db, _, _, _| {
-            db.read_with_constants(|| {
+        self.run(move |db, call, _, _, _| {
+            crate::transaction_constants::read_with_constants(db, call, || {
                 file_queue::read(db)?
                     .into_iter()
                     // A stored upload only waits for the rest of its move.
@@ -475,8 +482,8 @@ impl FileDatabase {
         &self,
         subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
     ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
-        self.run(move |db, _, _, _| {
-            db.read_with_constants(|| {
+        self.run(move |db, call, _, _, _| {
+            crate::transaction_constants::read_with_constants(db, call, || {
                 file_queue::abandoned(db)?
                     .into_iter()
                     .map(|upload| {
@@ -493,8 +500,10 @@ impl FileDatabase {
     /// One a file waits for again keeps its record, and its next attempt
     /// finds the session gone and starts another.
     pub async fn forget_session(&self, id: i64) -> Result<(), DbError> {
-        self.run(move |db, _, _, _| db.transaction(|db| crate::file_queue::forget_session(db, id)))
-            .await
+        self.run(move |db, _, _, _, _| {
+            db.transaction(|db| crate::file_queue::forget_session(db, id))
+        })
+        .await
     }
     /// Record a failed attempt as this device's pending record about its file,
     /// with its retry wait or none when it waits for a prerequisite or the app,
@@ -505,7 +514,7 @@ impl FileDatabase {
         record: P,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
-        self.run(move |db, _, _, _| {
+        self.run(move |db, _, _, _, _| {
             db.transaction(|db| {
                 if !db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1)",
@@ -534,7 +543,7 @@ impl FileDatabase {
         index: u64,
     ) -> Result<coven_crypto::ContentHash, DbError> {
         let location = location.clone();
-        self.read(move |db| file_queue::chunk_hash(db, &location, index)).await
+        self.read(move |db, _| file_queue::chunk_hash(db, &location, index)).await
     }
     /// Open the source an upload sends, from the facts its queue entry fixed
     /// at staging; later row changes cannot replace them. `None` means the
@@ -572,7 +581,7 @@ impl FileDatabase {
         };
         let confirmed = count(progress.bytes_confirmed)?;
         let total = count(progress.bytes_total)?;
-        self.run(move |db, _, _, _| {
+        self.run(move |db, _, _, _, _| {
             db.transaction(|db| {
                 changed(crate::file_queue::record_session(
                     db,
@@ -614,7 +623,7 @@ impl FileDatabase {
         let file = file.clone();
         database
             .call(move |inner| {
-                inner.access.with_writer(|writer| {
+                inner.access.with_writer(|writer, _| {
                     writer.transaction(|db| {
                         if db.query_row(
                             &format!("SELECT {CACHE_NAME_USED_SQL}"),
@@ -726,8 +735,10 @@ fn complete(
     id: i64,
     subject: crate::pending::SubjectKey,
 ) -> Result<crate::UploadCompletion, DbError> {
-    inner.with_files("complete an upload", |writer, files| {
-        writer.local_write(
+    inner.with_files("complete an upload", |writer, call, files| {
+        crate::local_write::local_write(
+            writer,
+            call,
             &inner.access.write_schema,
             inner.access.device,
             inner.clock.now(),
@@ -735,7 +746,7 @@ fn complete(
             |files| {
                 files.complete_upload(
                     id,
-                    Box::new(move |db| crate::pending::clear_key(db, &subject)),
+                    Box::new(move |db, _| crate::pending::clear_key(db, &subject)),
                 )
             },
         )
@@ -750,7 +761,7 @@ fn open_upload_source<L>(
     size: u64,
     place: coven_foundation::files::LeasePlace,
 ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-    let source = access.with_writer(|db| file_ref::queued_source(db, upload))?;
+    let source = access.with_writer(|db, _| file_ref::queued_source(db, upload))?;
     source
         .map(|source| {
             file_ref::open_source(&access.directory, &object.to_string(), size, source, place)
@@ -765,7 +776,7 @@ impl Database {
     /// leaves its files for a later call.
     pub async fn settle_files(&self) -> Result<(), DbError> {
         self.call(move |inner| {
-            let waiting = inner.access.with_committed(|db| {
+            let waiting = inner.access.with_committed(|db, _| {
                 db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM _coven_unreferenced_files)
                         AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)",
@@ -776,8 +787,10 @@ impl Database {
             if !waiting {
                 return Ok(());
             }
-            inner.with_files("settle files", |writer, files| {
-                writer.local_write(
+            inner.with_files("settle files", |writer, call, files| {
+                crate::local_write::local_write(
+                    writer,
+                    call,
                     &inner.access.write_schema,
                     inner.access.device,
                     inner.clock.now(),

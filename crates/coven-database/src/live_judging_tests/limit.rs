@@ -191,7 +191,7 @@ async fn an_offset_an_unreturned_column_or_an_expression_narrows_nothing_more() 
         "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE LIMIT 2",
     ] {
         follows(&db, sql, vec![], &[("INSERT INTO notes VALUES (7,'z','')", true)]).await;
-        db.commit_writer(|db| db.batch("DELETE FROM notes WHERE id = 7").unwrap());
+        db.commit_writer(|db, _| db.batch("DELETE FROM notes WHERE id = 7").unwrap());
     }
     db.close().await.unwrap();
 }

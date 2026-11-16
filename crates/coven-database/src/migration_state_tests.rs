@@ -36,8 +36,8 @@ pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteR
     write
 }
 fn generations(db: &Database, row: &RowId) -> Vec<(u64, coven_merge::WriteId)> {
-    db.inspect_writer_schema(|db, schema| {
-        let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
+    db.inspect_writer_schema(|db, call, schema| {
+        let store = crate::merge_store::MergeStore::from_schema(db, call, &schema.schema);
         Ok::<_, crate::DbError>(
             store.row(row)?.state.generations().iter().map(|(g, w)| (*g, *w)).collect(),
         )
@@ -212,7 +212,7 @@ mod queued {
     use std::sync::Arc;
 
     fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
-        db.inspect_writer(|db| {
+        db.inspect_writer(|db, _| {
             db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| r.get(0)).unwrap()
         })
     }
@@ -220,9 +220,9 @@ mod queued {
         Migration::addition(1, "notes", NOTES)
     }
     fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
-        db.inspect_writer_schema(|db, schema| {
+        db.inspect_writer_schema(|db, call, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
-            crate::merge_store::MergeStore::new(db, &app).row(row).unwrap().state
+            crate::merge_store::MergeStore::new(db, call, &app).row(row).unwrap().state
         })
     }
 
