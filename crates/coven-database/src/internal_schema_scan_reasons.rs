@@ -282,7 +282,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
                 "a reload visits every row the rules take out, through the index of rules losses: its snapshots' authors took some out, and a replaced row can bring back any other",
             )
         }
-        ("store_call.rs", "{} ORDER BY l.id", "l") => {
+        ("loss_record.rs", "{SELECT} ORDER BY l.id", "l") => {
             Some("the public losses reader returns all losses")
         }
         (
