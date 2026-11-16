@@ -212,26 +212,38 @@ pub(crate) fn compare(left: &Value, right: &Value) -> Option<Ordering> {
             Value::Blob(_) => 3,
         }
     }
-    fn number(value: &Value) -> Vec<u8> {
-        let value = match value {
-            Value::Integer(value) => coven_format::value::Value::Integer(*value),
-            Value::Real(value) => {
-                coven_format::value::Value::Real(if *value == 0.0 { 0 } else { value.to_bits() })
-            }
-            _ => unreachable!("numeric comparison"),
-        };
-        coven_format::key::encode_key(&[value])
-            .expect("one SQLite number has a canonical key encoding")
-    }
     match (left, right) {
         (Value::Null, _) | (_, Value::Null) => None,
         (Value::Text(left), Value::Text(right)) => Some(left.cmp(right)),
         (Value::Blob(left), Value::Blob(right)) => Some(left.cmp(right)),
-        (Value::Integer(_) | Value::Real(_), Value::Integer(_) | Value::Real(_)) => {
-            Some(number(left).cmp(&number(right)))
+        (Value::Integer(left), Value::Integer(right)) => Some(left.cmp(right)),
+        (Value::Real(left), Value::Real(right)) => Some(compare_reals(*left, *right)),
+        (Value::Integer(left), Value::Real(right)) => Some(compare_integer_real(*left, *right)),
+        (Value::Real(left), Value::Integer(right)) => {
+            Some(compare_integer_real(*right, *left).reverse())
         }
         _ => Some(rank(left).cmp(&rank(right))),
     }
+}
+
+/// SQLite stores no NaN, and -0.0 equals 0.0.
+fn compare_reals(left: f64, right: f64) -> Ordering {
+    left.partial_cmp(&right).expect("SQLite stores no NaN")
+}
+
+/// An integer against a real, exactly as SQLite's `sqlite3IntFloatCompare`
+/// does: converting the integer to `f64` would round it.
+fn compare_integer_real(integer: i64, real: f64) -> Ordering {
+    // 2^63 is the first real above every integer.
+    if real < -9_223_372_036_854_775_808.0 {
+        return Ordering::Greater;
+    }
+    if real >= 9_223_372_036_854_775_808.0 {
+        return Ordering::Less;
+    }
+    // The real's whole part is an integer in range; its fraction decides a tie.
+    let whole = real as i64;
+    integer.cmp(&whole).then_with(|| compare_reals(whole as f64, real))
 }
 
 #[cfg(test)]
