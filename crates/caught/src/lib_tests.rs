@@ -38,11 +38,11 @@ static HEARD: std::sync::Mutex<Vec<Heard>> = std::sync::Mutex::new(Vec::new());
 
 static HOOKED: std::sync::Once = std::sync::Once::new();
 
-/// Install the test binary's hook, once. It records each panic in [`HEARD`]
-/// and then runs the hook set before it. This crate's hook goes in before the
-/// first catch, in front of this one, so the first catch must not run before
-/// this: replacing a hook leaves a moment in which another test's panic finds
-/// neither hook. Each test that catches or begins a panic calls this first.
+/// Install the test binary's hook, once. The hook records each panic in
+/// [`HEARD`] and then runs the hook set before it. The first catch puts this
+/// crate's hook in front of the test hook, so no catch may run before this
+/// call: while one hook replaces another, a panic on another test's thread
+/// runs neither. Each test that catches or begins a panic calls this first.
 fn with_test_hook() {
     HOOKED.call_once(|| {
         let earlier = std::panic::take_hook();
