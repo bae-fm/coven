@@ -99,7 +99,7 @@ impl<P: Policy> HostSql<P> {
     /// ROLLBACK fails, this connection may still be inside the transaction: a
     /// writer would treat its uncommitted changes as committed and a reader
     /// would keep reading its old snapshot, so the handle refuses every later
-    /// call until the store is reopened (§4).
+    /// call until the database is reopened (§4).
     pub(super) fn roll_back(&self) -> rusqlite::Result<()> {
         if self.connection.is_autocommit() {
             return Ok(());

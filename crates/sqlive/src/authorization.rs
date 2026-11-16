@@ -286,7 +286,7 @@ impl<P: Policy> SqlAuthorization<P> {
         WriteSql(&self.state)
     }
 
-    /// A bulk write's SQL: a write's, refused any change to a synced table,
+    /// A bulk write's SQL: a write's, judged by the policy in the bulk scope,
     /// recording instead each table of `main` its statements change.
     pub(crate) fn bulk(&self) -> BulkSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);

@@ -1,6 +1,6 @@
 //! A FROM item of a statement's core, as the scope planner reads it: a
-//! table, a table function, one of coven's views, or a subquery, CTE or
-//! app view read as cores of its own (§4).
+//! table, a table function, a view read whole, or a subquery, CTE or app
+//! view read as cores of its own (§4).
 
 use crate::derived::{read_derived_item, Ctes, Derived};
 use crate::scope_plan::{Planner, Source};
@@ -9,10 +9,10 @@ use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{As, Name, QualifiedName, SelectTable};
 
-/// One of a FROM item's columns: its name, lowercase, when coven knows the
+/// One of a FROM item's columns: its name, lowercase, when sqlive knows the
 /// name SQLite gives it, and its affinity, or `None` when a condition on it
 /// can't narrow, as a generated column's, one whose collation isn't BINARY,
-/// or one of coven's views'.
+/// or a column of a view read whole.
 pub(crate) struct Column {
     pub(crate) name: Option<String>,
     pub(crate) affinity: Option<Affinity>,
@@ -22,7 +22,7 @@ pub(crate) struct Column {
 pub(crate) enum Columns {
     /// Every column, in order.
     Listed(Vec<Column>),
-    /// A table function's, which coven doesn't know.
+    /// A table function's, which sqlive doesn't know.
     Unknown,
 }
 
@@ -75,7 +75,7 @@ pub(crate) struct FromItem {
 }
 
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
-/// can name `ctes`; `None` when coven can't read its rows.
+/// can name `ctes`; `None` when sqlive can't read its rows.
 pub(crate) fn read_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -139,16 +139,17 @@ pub(crate) fn read_item<'a>(
                     planner.inlined.push(stored.to_ascii_lowercase());
                     return Ok(Some(item(source, columns, Some(derived))));
                 }
-                // A view coven can't read as cores of its own, as one with a
+                // A view sqlive can't read as cores of its own, as one with a
                 // recursive CTE, is read for its values alone, and its tables
-                // whole, as one of coven's are.
+                // whole, as a view read whole is.
                 planner.items.truncate(read.0);
                 planner.cores.truncate(read.1);
                 planner.edges.truncate(read.2);
                 planner.inlined.truncate(read.3);
             }
-            // An ordinary table, or a view read only for its values: one of
-            // coven's shows what memory holds as well as its tables.
+            // An ordinary table, or a view read only for its values: a view
+            // read whole can show what the host's memory holds as well as
+            // its tables.
             Ok(Some(item(
                 Source {
                     table: ordinary.then(|| stored.to_ascii_lowercase()),
@@ -184,7 +185,7 @@ pub(crate) fn read_item<'a>(
         SelectTable::Select(select, alias) => {
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
-                // Nothing can name it; this name is coven's own.
+                // Nothing can name it; this name is sqlive's own.
                 None => crate::sql::identifier("(subquery)"),
             };
             read_derived_item(
@@ -221,9 +222,8 @@ fn object(connection: &Connection, name: &Name<'_>) -> rusqlite::Result<Option<(
     Ok(found)
 }
 
-/// A table's or one of coven's views' columns, in order. A view's
-/// comparisons happen inside SQLite, so coven gives none of them an
-/// affinity to narrow by.
+/// A table's or a view's columns, in order. A view's comparisons happen
+/// inside SQLite, so sqlive gives none of them an affinity to narrow by.
 fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Result<Columns> {
     let mut metadata =
         connection.prepare_cached("SELECT name,type,hidden FROM pragma_table_xinfo(?1,'main')")?;

@@ -92,11 +92,11 @@ pub(crate) struct Sources {
 
 pub(crate) struct Source {
     /// The table whose rows this source reads, lowercase; `None` for a FROM
-    /// item coven reads only for its values, as a table function, one of
-    /// coven's views, or a subquery, CTE or view whose own tables are read
-    /// as sources of their own.
+    /// item sqlive reads only for its values, as a table function, a view
+    /// read whole, or a subquery, CTE or view whose own tables are read as
+    /// sources of their own.
     pub(crate) table: Option<String>,
-    /// The FROM item as coven's own SQL names it, with its qualifier;
+    /// The FROM item as sqlive's own SQL names it, with its qualifier;
     /// `None` for a table function of another source's columns, or a
     /// subquery or CTE inside another, whose rows exist only beside that
     /// source's and so can't be read alone.
@@ -123,7 +123,7 @@ pub(crate) enum PartnerValue {
     /// One of the partner's columns, lowercase, of the same affinity.
     Column(String),
     /// An expression over the partner's columns, as SQL, of no affinity
-    /// coven knows: a lookup gives the member column's to the value it
+    /// sqlive knows: a lookup gives the member column's to the value it
     /// compares.
     Expression(String),
 }
@@ -356,8 +356,8 @@ impl Planner<'_> {
     /// The edge `member_expr = other` gives, written in `core` with `other`
     /// first when `first`, when `member_expr` is a column of one of the
     /// core's sources and `other` reads columns of one other source only,
-    /// of this core or one it sits in, which coven can read alone; and when
-    /// SQLite compares them by BINARY, as coven does: the comparison takes
+    /// of this core or one it sits in, which sqlive can read alone; and when
+    /// SQLite compares them by BINARY, as sqlive does: the comparison takes
     /// the collation of a COLLATE in either side, else of the first side
     /// when that is a column. `other` holds no clock and no function the
     /// connection doesn't flag deterministic: a lookup evaluates it again, and
@@ -416,7 +416,7 @@ impl Planner<'_> {
         items[partner].source.from.as_ref()?;
         if first && is_name(stripped(other)) {
             let (_, partner_column) = self.resolve(core, stripped(other))?;
-            // A column coven gives an affinity compares by BINARY: a
+            // A column sqlive gives an affinity compares by BINARY: a
             // table's, or a subquery's that passes such a column on.
             items[partner].columns.affinity(&partner_column)?;
         }
@@ -429,7 +429,7 @@ impl Planner<'_> {
                     }
                     PartnerValue::Column(partner_column)
                 }
-                // A column coven gives no affinity, as a view's or a
+                // A column sqlive gives no affinity, as a view's or a
                 // function's: a lookup compares it as the statement does,
                 // with whatever affinity SQLite gives it.
                 None => PartnerValue::Expression(other.to_string()),
@@ -447,7 +447,7 @@ impl Planner<'_> {
 
     /// The item a column name written in `core` belongs to, and the column,
     /// lowercase, as SQLite resolves it: among the core's own items first,
-    /// then those of each core it sits in. `None` when coven can't be sure.
+    /// then those of each core it sits in. `None` when sqlive can't be sure.
     pub(crate) fn resolve(&self, core: usize, expr: &Expr<'_>) -> Option<(usize, String)> {
         let (qualifier, name) = match unparenthesized(expr) {
             Expr::Id(name) => (None, Name(name.0)),
@@ -483,7 +483,7 @@ impl Planner<'_> {
                     if let Some(first) = found.next() {
                         return found.next().is_none().then_some(first);
                     }
-                    // A column whose name coven doesn't know, a result
+                    // A column whose name sqlive doesn't know, a result
                     // column's name, or a rowid, which SQLite finds here
                     // before looking further out.
                     if items.clone().any(|(_, item)| !item.columns.complete())
@@ -790,7 +790,7 @@ fn read_condition<'a>(
             Part::Select(_) | Part::Table => return Ok(Narrowing::default()),
         };
         let Some((item, _)) = planner.resolve(core, name) else {
-            // A name coven can't place keeps the condition from narrowing.
+            // A name sqlive can't place keeps the condition from narrowing.
             return Ok(Narrowing::default());
         };
         if !referenced.contains(&item) {

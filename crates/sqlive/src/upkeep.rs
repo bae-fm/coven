@@ -1,21 +1,21 @@
-//! Coven's upkeep of a store's databases, off the commit path (§4). Each
-//! kind runs on a thread of the store's own, woken by the writer's commits,
+//! sqlive's upkeep of a database, off the commit path (§4). Each kind runs
+//! on a thread of the database's own, woken by the writer's commits,
 //! on a connection of its own: checkpointing a database's WAL
 //! (wal_checkpoints.rs), and gathering the query planner's statistics
 //! (planner_statistics.rs).
 //!
-//! The thread starts as the store opens and is stopped and joined as it
-//! closes, so it lives exactly as long as the store: no runtime shutting
-//! down while the store stays open can stop it.
+//! The thread starts as the database opens and is stopped and joined as it
+//! closes, so it lives exactly as long as the database: no runtime shutting
+//! down while the database stays open can stop it.
 //!
 //! A run that finds the database busy or locked waited out its busy
 //! timeout; the next wake tries again. Any other failure stops the upkeep
 //! for good, so the thread fails the handle with it: every later call and
-//! live query reports it until the store is reopened, rather than the store
-//! staying open without its upkeep. A panic in a run is a bug in coven: it
-//! goes to the store's bug sink and fails the handle the same way, as
-//! `crate::Error::HandleFailed` carrying it, so the thread never ends in a way no
-//! one hears of.
+//! live query reports it until the database is reopened, rather than the
+//! database staying open without its upkeep. A panic in a run is a bug in
+//! sqlive: it goes to the handle's bug sink and fails the handle the same
+//! way, as `crate::Error::HandleFailed` carrying it, so the thread never ends
+//! in a way no one hears of.
 
 use crate::authorization::{Policy, PolicyError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,16 +52,16 @@ impl Wake {
 }
 
 struct Shared<U> {
-    /// Set as the store closes, before the thread is woken to see it.
+    /// Set as the database closes, before the thread is woken to see it.
     closing: AtomicBool,
     upkeep: U,
 }
 
-/// A thread of the store's own running `U` at each wake. It stops as the
-/// store closes, before the writer.
+/// A thread of the database's own running `U` at each wake. It stops as the
+/// database closes, before the writer.
 pub(crate) struct UpkeepThread<U: Upkeep> {
     shared: Arc<Shared<U>>,
-    /// Taken as the thread stops: when the store closes, or as it drops
+    /// Taken as the thread stops: when the database closes, or as it drops
     /// when the open failed.
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -125,7 +125,7 @@ impl<U: Upkeep> UpkeepThread<U> {
     }
 }
 
-/// A store whose open failed after its upkeep started stops it too; its
+/// A database whose open failed after its upkeep started stops it too; its
 /// connection closes as the last of the upkeep goes.
 impl<U: Upkeep> Drop for UpkeepThread<U> {
     fn drop(&mut self) {
@@ -141,9 +141,10 @@ struct Serving<U: Upkeep> {
 }
 
 impl<U: Upkeep> Serving<U> {
-    /// Run at each wake until the store closes or a run fails. A panic is a
-    /// bug in coven: rather than leave the store open without its upkeep,
-    /// the handle fails with it, and the store's bug sink hears it (E15).
+    /// Run at each wake until the database closes or a run fails. A panic is
+    /// a bug in sqlive: rather than leave the database open without its
+    /// upkeep, the handle fails with it, and the handle's bug sink hears it
+    /// (E15).
     fn serve(self) {
         let served = caught::caught_sync(U::THREAD, || loop {
             std::thread::park();
@@ -163,7 +164,7 @@ impl<U: Upkeep> Serving<U> {
             }
         });
         if let Err(bug) = served {
-            tracing::error!(%bug, thread = U::THREAD, "coven's upkeep panicked, a bug; failing the handle");
+            tracing::error!(%bug, thread = U::THREAD, "sqlive's upkeep panicked, a bug; failing the handle");
             self.handle.fail_with_bug(bug);
         }
     }

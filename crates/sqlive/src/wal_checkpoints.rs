@@ -1,23 +1,23 @@
-//! Coven's own WAL checkpoints, off the commit path (§4).
+//! sqlive's own WAL checkpoints, off the commit path (§4).
 //!
 //! A checkpoint run inside a commit, as SQLite's automatic one is, makes the
 //! commit wait for it, `F_FULLFSYNC` included on macOS and iOS. While a live
 //! query keeps a reader's snapshot open nearly all the time, that checkpoint
 //! can't finish, so every later commit runs another and the WAL never starts
 //! over. So the writer never checkpoints as it commits. Each commit only
-//! wakes a thread of the store's own, which reads how many frames the WAL
+//! wakes a thread of the database's own, which reads how many frames the WAL
 //! holds past what was checkpointed and, past the threshold, checkpoints on a
 //! connection of its own: first copying what it can while writes go on and
 //! syncing the copy, again for the frames committed meanwhile while each
-//! pass leaves fewer, then, holding coven's writer so no write starts,
+//! pass leaves fewer, then, holding the writer so no write starts,
 //! copying the rest, syncing it and waiting briefly for the readers to leave
 //! the WAL, so the next commit writes it from its start.
 //!
-//! The thread is one of the store's upkeep (upkeep.rs). A checkpoint
+//! The thread is one of the database's upkeep (upkeep.rs). A checkpoint
 //! SQLite couldn't start, reading nothing of the WAL, because another
 //! connection was checkpointing it or committing to it right then, is tried
 //! again at the next wake, as one that finds the database busy is. Any
-//! other failure fails the handle rather than leave the store open while
+//! other failure fails the handle rather than leave the database open while
 //! its WAL grows without bound.
 
 use crate::authorization::{Policy, PolicyError};
@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// How long the checkpoint that lets the WAL start over waits for readers
-/// to leave it, while coven's writes wait: a reader that started before it
+/// to leave it, while the writer's writes wait: a reader that started before it
 /// finishes within this, and later ones read the database file alone. If one
 /// still holds on, the WAL starts over once it grows by the threshold again.
 const READER_WAIT: Duration = Duration::from_millis(100);
@@ -38,7 +38,7 @@ const READER_WAIT: Duration = Duration::from_millis(100);
 pub(crate) struct Checkpoints<P: Policy> {
     /// The checkpointer's own connection, held through each checkpoint.
     connection: Mutex<HostSql<P>>,
-    /// The writer, held only during a checkpoint, so the store's close can
+    /// The writer, held only during a checkpoint, so the database's close can
     /// take it back once the checkpointer stops.
     writer: Weak<Mutex<HostSql<P>>>,
     /// The frames not yet checkpointed past which a wake checkpoints.
@@ -58,9 +58,9 @@ pub(crate) struct Checkpoints<P: Policy> {
 #[cfg(any(test, feature = "test-utils"))]
 type Fault<P> = Box<dyn FnMut() -> Result<(), PolicyError<P>> + Send>;
 
-/// A database's checkpointer: a thread of the store's own, woken by the
+/// A database's checkpointer: a thread of the database's own, woken by the
 /// writer's commits, which runs each checkpoint on its own connection. It
-/// stops as the store closes, before the writer.
+/// stops as the database closes, before the writer.
 pub(crate) type WalCheckpointer<P> = UpkeepThread<Checkpoints<P>>;
 
 impl<P: Policy> UpkeepThread<Checkpoints<P>> {
@@ -124,7 +124,7 @@ impl<P: Policy> Checkpoints<P> {
     /// One wake's checkpoint, on the checkpointer's connection, once the WAL
     /// holds `threshold` frames not yet in the database file. A checkpoint
     /// the readers held up leaves the WAL copied but not started over; it is
-    /// tried again once the WAL grows by the threshold. A store whose open
+    /// tried again once the WAL grows by the threshold. A database whose open
     /// failed may let its writer go before its checkpointer stops; there is
     /// then nothing to checkpoint.
     fn checkpoint(&self) -> Result<(), PolicyError<P>> {
@@ -140,7 +140,7 @@ impl<P: Policy> Checkpoints<P> {
         if uncopied < self.threshold.get() {
             return Ok(());
         }
-        // Copy what no reader needs while coven's writes go on, and sync
+        // Copy what no reader needs while the writer's writes go on, and sync
         // it. SQLite syncs the database file only when a checkpoint
         // copies the whole WAL, and a commit made during the copy
         // leaves it short; without a sync of its own, the checkpoint that
@@ -167,7 +167,7 @@ impl<P: Policy> Checkpoints<P> {
                 _ => break,
             }
         }
-        // No write of coven's starts meanwhile, so the checkpoint takes
+        // No write on the writer starts meanwhile, so the checkpoint takes
         // SQLite's writer lock at once, copies and syncs the frames
         // committed since the last pass, and waits only for readers.
         let (restarted, held) = {

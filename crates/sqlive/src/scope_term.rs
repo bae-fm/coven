@@ -45,7 +45,7 @@ pub(crate) enum ScopeTerm {
         is: bool,
         operand: Operand,
     },
-    /// A condition on the columns of one row that coven asks SQLite to judge
+    /// A condition on the columns of one row that sqlive asks SQLite to judge
     /// (`scope_row.rs`).
     Row(Arc<RowTerm>),
     /// `column IS ?`: a NULL test when the run's value is NULL, an equality
@@ -61,7 +61,7 @@ pub(crate) enum ScopeTerm {
 
 impl ScopeTerm {
     /// The scope this run's values give, or `None` when a value would need a
-    /// conversion SQLite applies and coven doesn't.
+    /// conversion SQLite applies and sqlive doesn't.
     pub(crate) fn bind(&self, parameters: &[Value]) -> Option<RowScope> {
         match self {
             Self::Compare { column, affinity, operand, ordering, inclusive } => {

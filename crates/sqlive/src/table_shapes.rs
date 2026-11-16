@@ -1,4 +1,4 @@
-//! Each table of a connection's main schema as coven's change captures read
+//! Each table of a connection's main schema as sqlive's change captures read
 //! it: its columns, whether a key names its rows, and the virtual table a
 //! shadow table belongs to. A connection reads them once for each schema,
 //! which SQLite's schema cookie names, so no capture reads a table by the

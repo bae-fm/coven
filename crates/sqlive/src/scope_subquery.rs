@@ -65,7 +65,7 @@ impl Planner<'_> {
         }
         let (partner, partner_column) = self.resolve(subquery, returned)?;
         let items = &self.items;
-        // A source of the subquery's own, which coven can read alone.
+        // A source of the subquery's own, which sqlive can read alone.
         if items[partner].core != subquery || items[partner].source.from.is_none() {
             return None;
         }

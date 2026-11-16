@@ -1,5 +1,6 @@
-//! The SQLite settings an app may choose for its store's connections, the ones
-//! coven keeps fixed, and the WAL commands an app may run (§4, api.md E1).
+//! The SQLite settings an app may choose for a database's connections, the
+//! ones sqlive keeps fixed, and the WAL commands an app may run (§4, api.md
+//! E1).
 
 use crate::authorization::HostError;
 use crate::authorization::Policy;
@@ -9,19 +10,19 @@ use std::time::Duration;
 
 use crate::connection::HostSql;
 
-/// SQLite settings for every connection coven opens to the store's database:
-/// the writer and the readers of a writable handle, and every connection of a
+/// SQLite settings for every connection sqlive opens to a database: the
+/// writer and the readers of a writable handle, and every connection of a
 /// read-only one. A setting left `None` keeps SQLite's own default, except
-/// `checkpoint_fullfsync` on macOS and iOS, which coven turns on, and
-/// `auto_vacuum`, which is `Incremental`. Coven
-/// applies them as each connection opens, before any of its own statements.
+/// `checkpoint_fullfsync` on macOS and iOS, which sqlive turns on, and
+/// `auto_vacuum`, which is `Incremental`. sqlive applies them as each
+/// connection opens, before any of its own statements.
 ///
-/// The settings coven's guarantees rest on have no field here: the journal
+/// The settings sqlive's guarantees rest on have no field here: the journal
 /// mode, `synchronous`, the locking mode, foreign keys and the rest stay
 /// fixed (§4).
 ///
 /// ```compile_fail
-/// let _ = coven_database::SqliteSettings {
+/// let _ = sqlive::SqliteSettings {
 ///     journal_mode: None,
 ///     ..Default::default()
 /// };
@@ -44,7 +45,7 @@ pub struct SqliteSettings {
     /// it was built to map.
     pub mmap_size: Option<u64>,
     /// Where temporary tables and indices are kept (`PRAGMA temp_store`).
-    /// On Android, coven's SQLite is built to keep them in memory whatever
+    /// On Android, sqlive's SQLite is built to keep them in memory whatever
     /// this says.
     pub temp_store: Option<TempStore>,
     /// Helper threads one statement may use to sort (`PRAGMA threads`), at
@@ -52,9 +53,9 @@ pub struct SqliteSettings {
     pub threads: Option<u32>,
     /// The size SQLite truncates the WAL file to at the first commit after
     /// a checkpoint lets the WAL start over (`PRAGMA journal_size_limit`).
-    /// Unset is coven's 4 MiB.
+    /// Unset is sqlive's 4 MiB.
     pub journal_size_limit: Option<JournalSizeLimit>,
-    /// The WAL size at which coven checkpoints it, off the commit path; unset
+    /// The WAL size at which sqlive checkpoints it, off the commit path; unset
     /// is SQLite's 1000 pages (§4). The writer never checkpoints as it
     /// commits. A read-only handle's own commits, which only its cache
     /// makes, checkpoint as SQLite's `PRAGMA wal_autocheckpoint` does.
@@ -79,18 +80,19 @@ pub struct SqliteSettings {
     pub checkpoint_fullfsync: Option<bool>,
     /// How many rows of each index `ANALYZE` reads (`PRAGMA analysis_limit`).
     pub analysis_limit: Option<AnalysisLimit>,
-    /// The page size a store's database is created with (`PRAGMA
-    /// page_size`). It is fixed once the file has its first page: an
-    /// existing store keeps the size it was created with.
+    /// The page size a database is created with (`PRAGMA page_size`). It is
+    /// fixed once the file has its first page: an existing database keeps
+    /// the size it was created with.
     pub page_size: Option<PageSize>,
-    /// The auto-vacuum mode a store's database is created with (`PRAGMA
-    /// auto_vacuum`). Like the page size, an existing store keeps its own.
-    /// Unset is `Incremental`, and coven gives back free pages past 4 MiB
-    /// each time a claim lands (§4).
+    /// The auto-vacuum mode a database is created with (`PRAGMA
+    /// auto_vacuum`). Like the page size, an existing database keeps its
+    /// own. Unset is `Incremental`, and a host gives back free pages past
+    /// 4 MiB through `give_back_free_pages`, as coven does each time a claim
+    /// lands (§4).
     pub auto_vacuum: Option<AutoVacuum>,
 }
 
-/// The SQLite settings one connection to the store's database has in effect,
+/// The SQLite settings one connection to a database has in effect,
 /// as SQLite reports them. Every connection has the same, except that a
 /// writable handle's writer never checkpoints as it commits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +113,7 @@ pub struct SqliteSettingsInEffect {
     /// `PRAGMA journal_size_limit`.
     pub journal_size_limit: JournalSizeLimit,
     /// `PRAGMA wal_autocheckpoint`, which on a writable handle's readers is
-    /// the size at which coven checkpoints. Its writer's own is off: it
+    /// the size at which sqlive checkpoints. Its writer's own is off: it
     /// never checkpoints as it commits.
     pub wal_autocheckpoint: WalAutocheckpoint,
     /// `PRAGMA automatic_index`.
@@ -170,7 +172,7 @@ pub enum JournalSizeLimit {
     Bytes(u64),
 }
 
-/// When coven checkpoints the WAL by itself.
+/// When sqlive checkpoints the WAL by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalAutocheckpoint {
     /// Never: the WAL grows until the app checkpoints it.
@@ -307,7 +309,7 @@ impl PageSize {
     }
 }
 
-/// Coven's `checkpoint_fullfsync` where the app leaves it unset. On macOS and
+/// sqlive's `checkpoint_fullfsync` where the app leaves it unset. On macOS and
 /// iOS a plain `fsync` can leave writes in the drive's cache, in any order. A
 /// checkpoint copies the WAL into the database file and lets the next commit
 /// write the WAL over from its start, so each of its syncs flushes the drive's
@@ -319,29 +321,29 @@ const CHECKPOINT_FULLFSYNC: Option<bool> = Some(true);
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 const CHECKPOINT_FULLFSYNC: Option<bool> = None;
 
-/// Coven's `journal_size_limit` where the app leaves it unset: once a
+/// sqlive's `journal_size_limit` where the app leaves it unset: once a
 /// checkpoint lets the WAL start over, the file shrinks back to 4 MiB, about
-/// the 1000 pages of 4 KiB at which coven checkpoints by default, instead of
+/// the 1000 pages of 4 KiB at which sqlive checkpoints by default, instead of
 /// keeping the largest size it ever grew to.
 const JOURNAL_SIZE_LIMIT: JournalSizeLimit = JournalSizeLimit::Bytes(4 << 20);
 
-/// Coven's auto-vacuum mode where the app leaves it unset, so coven can give
-/// back the pages its own queue frees.
+/// sqlive's auto-vacuum mode where the app leaves it unset, so a host can
+/// give back the pages its own writes free.
 const AUTO_VACUUM: AutoVacuum = AutoVacuum::Incremental;
 
-/// The free pages coven leaves in the file for later writes to reuse, the
-/// same 4 MiB it lets the WAL file keep (`JOURNAL_SIZE_LIMIT`). A store's
-/// outgoing queue refills freed pages with its next writes, so vacuuming them
-/// at every landing would only move pages back and forth; the problem is the
-/// peak left behind.
+/// The free pages sqlive leaves in the file for later writes to reuse, the
+/// same 4 MiB it lets the WAL file keep (`JOURNAL_SIZE_LIMIT`). A coven
+/// store's outgoing queue refills freed pages with its next writes, so
+/// vacuuming them at every landing would only move pages back and forth; the
+/// problem is the peak left behind.
 const KEPT_FREE_BYTES: u64 = 4 << 20;
 
-/// The WAL size at which coven checkpoints where the app leaves it unset:
+/// The WAL size at which sqlive checkpoints where the app leaves it unset:
 /// SQLite's own automatic checkpoint size.
 pub const CHECKPOINT_PAGES: NonZeroU32 = NonZeroU32::new(1000).expect("nonzero");
 
 impl SqliteSettings {
-    /// The WAL size at which coven checkpoints it, or `None` if it never does.
+    /// The WAL size at which sqlive checkpoints it, or `None` if it never does.
     pub fn checkpoint_pages(&self) -> Option<NonZeroU32> {
         match self.wal_autocheckpoint {
             None => Some(CHECKPOINT_PAGES),
@@ -450,9 +452,9 @@ impl SqliteSettings {
 const SMALL_TABLE: i64 = 100;
 
 impl<P: Policy> HostSql<P> {
-    /// Set the settings coven fixes, then the app's choices, on a connection
+    /// Set the settings sqlive fixes, then the app's choices, on a connection
     /// that has run no statement yet. Changing `temp_store` drops temporary
-    /// objects, so this precedes coven's temporary triggers. A writable
+    /// objects, so this precedes the host's temporary triggers. A writable
     /// connection to an empty file also gets its creation settings, before
     /// anything writes the file.
     pub(crate) fn configure(
@@ -633,7 +635,7 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Gather the statistics as [`Self::optimize`] does, on a connection of
-    /// their own while the store stays open, and change the schema in the
+    /// their own while the database stays open, and change the schema in the
     /// same transaction: SQLite reads the statistics again only as it reads
     /// the schema, so every connection, the read-only readers among them,
     /// plans with the new ones from its next statement, this one included,

@@ -1,4 +1,4 @@
-//! The folder SQLite keeps temporary tables in, for every store this
+//! The folder SQLite keeps temporary tables in, for every database this
 //! process opens (§21.2).
 //!
 //! Temporary tables spill to files there once a connection's cache fills,
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// The folder an app names for SQLite's temporary tables (§21.2), outside
-/// coven's directories. The app creates it and names its path to
+/// the host's directories. The app creates it and names its path to
 /// `set_temporary_directory`.
 #[derive(Debug, PartialEq, Eq)]
 struct TemporaryFolder {
@@ -44,7 +44,7 @@ static TEMPORARY: Mutex<Temporary> = Mutex::new(Temporary { directory: None, ope
 /// Why the folder for temporary tables could not be named (E1).
 #[derive(Debug, thiserror::Error)]
 pub enum TemporaryDirectoryError {
-    /// A store's database opened in this process before the folder was named;
+    /// A database opened in this process before the folder was named;
     /// SQLite reads it without a lock, so it is named first.
     #[error("the temporary folder is named before any store opens")]
     AfterOpening,
@@ -63,8 +63,8 @@ pub enum TemporaryDirectoryError {
     },
 }
 
-/// Keep SQLite's temporary tables in `directory`, for every store this
-/// process opens from now on. Call it before opening any store.
+/// Keep SQLite's temporary tables in `directory`, for every database this
+/// process opens from now on. Call it before opening any database.
 pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError> {
     let mut temporary = lock_unpoisoned(&TEMPORARY);
     if let Some(named) = &temporary.directory {
@@ -97,7 +97,7 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
 /// Every connection opens after this: the folder can no longer change. It
 /// refuses a SQLite built to keep temporary tables in memory unless a
 /// connection asks for files (`SQLITE_TEMP_STORE=2`) or whatever it asks
-/// (`=3`, libsqlite3-sys's Android default): coven's own temporary tables,
+/// (`=3`, libsqlite3-sys's Android default): the host's own temporary tables,
 /// such as a streamed write's staged rows, would then hold all of it in
 /// memory. It refuses one built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`
 /// too: each connection would keep its unused pages apart, and releasing

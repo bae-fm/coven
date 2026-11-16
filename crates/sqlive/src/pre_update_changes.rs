@@ -1,7 +1,7 @@
 //! What row operations a pre-update hook reports mean to live queries
 //! (§4.1): a local write's on device-local tables, which never sync, and a
 //! streamed transaction's on any table, as applying another device's slot.
-//! Coven keeps of the rows only what wakes a live query: the table and the
+//! sqlive keeps of the rows only what wakes a live query: the table and the
 //! columns changed, and the changed rows' keys and the values a live query's
 //! scope tests, only where a waiting live query narrows that table.
 
@@ -121,8 +121,8 @@ pub(crate) struct PreUpdateChanges {
     /// every column.
     shadows: BTreeSet<usize>,
     /// Tables the transaction's shapes don't hold, lowercase: made since
-    /// they were read, as only a migration makes a synced table, so these
-    /// are device-local, and change whole.
+    /// they were read, as only a migration makes a table the host records,
+    /// so these are device-local, and change whole.
     unshaped: BTreeSet<String>,
     /// Tables a row was inserted into without an image of it: a read of
     /// insertions alone still learns of it.

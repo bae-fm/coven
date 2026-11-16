@@ -78,7 +78,8 @@ impl ReadCapture {
         // A read through one of the views read whole reads the view itself
         // too, even when the statement reads none of the view's columns, as
         // a count of its rows or an EXISTS doesn't: a view can change with
-        // no change to its tables, as `coven_sending` does (§4).
+        // no change to its tables, as one that calls a function of the
+        // host's state can (§4).
         if let Some(view) = whole {
             frame.columns.insert((view.to_ascii_lowercase(), String::new()));
         }
@@ -119,7 +120,7 @@ impl ReadCapture {
 
     /// Record `frame`'s tables, each read through the scope `scopes` gives
     /// it, or whole: a table read through a view or CTE the statement didn't
-    /// read as a source of its own, as one of coven's views, can be read in
+    /// read as a source of its own, as a view read whole, can be read in
     /// any row.
     fn finish(&mut self, frame: ReadFrame, scopes: &Scopes) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

@@ -120,7 +120,7 @@ pub struct ReconfigurableLiveQuery<Q, T, E> {
     bugs: BugSinkRef,
     current: Option<(Q, LiveQueryRevision)>,
     previous: Option<T>,
-    /// The store closed, its handle failed or a run's error carried a bug,
+    /// The database closed, its handle failed or a run's error carried a bug,
     /// as a panic's does, and a result said so: the query has ended, and
     /// answers nothing more.
     ended: bool,
@@ -334,7 +334,7 @@ where
         if cause == LiveQueryCause::Write && equal {
             return None;
         }
-        // A failure while the store is closed or the handle failed is the
+        // A failure while the database is closed or the handle failed is the
         // last result: answering again would only repeat it. So is a bug,
         // after which the query watches nothing more.
         let bug = result.as_ref().err().and_then(CarriesBug::bug).is_some();
@@ -345,8 +345,8 @@ where
         Some(ReconfigurableLiveQueryEvent { request, revision, cause, result })
     }
 
-    /// Whether the store closed, the handle failed or a run's error carried a
-    /// bug, and a result said so: the query answers nothing more.
+    /// Whether the database closed, the handle failed or a run's error
+    /// carried a bug, and a result said so: the query answers nothing more.
     pub fn has_ended(&self) -> bool {
         self.ended
     }
@@ -354,7 +354,7 @@ where
     /// Return the next result and its request, as `changed` waits for it:
     /// this thread parks until a commit or a request calls for a run, and
     /// then `run_changed` runs the query on it, again if a write-caused
-    /// result equals the last. Once the store is closed, or the handle fails
+    /// result equals the last. Once the database is closed, or the handle fails
     /// every call, one result reports why and every later call returns
     /// `None`. So does a run whose error carries a bug, as one that panicked
     /// does with `Error::Bug`: what it read is unknown, so no commit could
@@ -420,8 +420,8 @@ impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
         Some(self.inner.run_changed()?.result)
     }
 
-    /// Whether the store closed, the handle failed or a run's error carried a
-    /// bug, and a result said so: the query answers nothing more.
+    /// Whether the database closed, the handle failed or a run's error
+    /// carried a bug, and a result said so: the query answers nothing more.
     pub fn has_ended(&self) -> bool {
         self.inner.has_ended()
     }
@@ -430,7 +430,7 @@ impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
     /// changed. The call parks this thread until `changed` would resolve,
     /// then runs the query on it.
     /// Errors remain results and don't end the query, except the one
-    /// reporting that the store closed, the handle failed or a run's error
+    /// reporting that the database closed, the handle failed or a run's error
     /// carries a bug, as a panic's does: after it, `None`.
     pub fn next_blocking(&mut self) -> Option<Result<T, E>>
     where

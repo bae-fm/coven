@@ -29,8 +29,8 @@ pub(crate) struct Ctes<'a> {
 
 impl<'a> Ctes<'a> {
     /// These and `with`'s, or `None` when a name repeats, which SQLite
-    /// resolves by where each is and coven doesn't follow, or names one of
-    /// coven's views, which reads through the CTE couldn't be told from.
+    /// resolves by where each is and sqlive doesn't follow, or names a view
+    /// read whole, which reads through the CTE couldn't be told from.
     pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews) -> Option<Self> {
         let mut visible = self.visible.clone();
         for cte in with.ctes.iter() {
@@ -72,7 +72,7 @@ pub(crate) struct Derived {
 }
 
 /// Read `named` as a FROM item of a core that sits in `parent`: its source,
-/// its columns and its cores, or `None` when coven can't read its rows.
+/// its columns and its cores, or `None` when sqlive can't read its rows.
 pub(crate) fn read_derived_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -243,7 +243,7 @@ fn aggregates(planner: &Planner, select: &Select<'_>, body: &OneSelect<'_>) -> b
     })
 }
 
-/// A column a core outputs: its name as SQLite gives it, when coven knows
+/// A column a core outputs: its name as SQLite gives it, when sqlive knows
 /// it, and the source of the core's own and the column of it the output
 /// passes on unchanged, if it does.
 struct Output {
@@ -252,7 +252,7 @@ struct Output {
 }
 
 /// Each output column of the arm `core`, read from `body`, or `None` when a
-/// `*` spans columns coven doesn't know.
+/// `*` spans columns sqlive doesn't know.
 fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<Vec<Output>> {
     let OneSelect::Select { columns, .. } = body else {
         let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };

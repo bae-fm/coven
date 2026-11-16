@@ -1,14 +1,14 @@
-//! A condition on one table's row that coven's comparison handling can't
-//! read, judged by asking SQLite (§4).
+//! A condition on one table's row that sqlive's own comparisons can't read,
+//! judged by asking SQLite (§4).
 //!
 //! A WHERE or ON conjunct whose every name is a stored, BINARY column of one
 //! table of its own SELECT, and that holds no subquery, no clock and no
 //! function that isn't deterministic, narrows that table to the rows it holds
 //! for: a function of a column, a CASE, LIKE and GLOB, `<>`, a row value, a
-//! COLLATE. Coven compares none of this itself. A write asks SQLite whether
+//! COLLATE. sqlive compares none of this itself. A write asks SQLite whether
 //! the changed row's old and new values pass: a SELECT over a row of those
 //! values, each with its column's type, so the condition compares as it does
-//! in the table. A value coven can't give its column's type, one the write
+//! in the table. A value sqlive can't give its column's type, one the write
 //! didn't record, an error and a question past the lookups' step limit count
 //! as a match.
 //!
@@ -102,7 +102,7 @@ pub struct RowCondition {
 
 impl RowCondition {
     /// The SQL that asks whether the row `image` passes, and its parameters:
-    /// the run's, then the image's values. `None` when coven can't ask, which
+    /// the run's, then the image's values. `None` when sqlive can't ask, which
     /// counts as a match: the image lacks a column, or holds a value no
     /// cast would keep as it is in the column's type.
     pub(crate) fn question(&self, image: &RowImage) -> Option<(String, Vec<Value>)> {

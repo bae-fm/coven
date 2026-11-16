@@ -1,6 +1,6 @@
-//! The path SQLite opens a store's database by (§4).
+//! The path SQLite opens a database by (§4).
 //!
-//! On Windows a store's path is canonical, and a canonical Windows path is
+//! On Windows a database's path is canonical, and a canonical Windows path is
 //! verbatim: `\\?\D:\…`. SQLite takes any path that starts `\\` for a
 //! network share, and then locks the shared-memory file through one handle
 //! for every connection in the process, recording which connections hold
@@ -85,7 +85,7 @@ fn reads_alike(name: &std::ffi::OsStr) -> bool {
 /// spaces, names a Windows device: Windows opens the device for it, with any
 /// extension on some versions, and in any ASCII case. `¹`, `²` and `³` count
 /// as digits. coven-foundation decides the same for the names coven makes;
-/// sqlive depends on no coven crate, so it keeps its own.
+/// sqlive depends on no crate of coven's, so it keeps its own.
 #[cfg(windows)]
 fn windows_device(base: &str) -> bool {
     let base = base.to_ascii_uppercase();

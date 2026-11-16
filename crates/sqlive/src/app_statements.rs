@@ -1,4 +1,4 @@
-//! The app's statements, kept prepared per connection like coven's own.
+//! The app's statements, kept prepared per connection like the host's own.
 //!
 //! SQLite compiles into each statement every trigger it can fire, and the
 //! views those read, so preparing an app write can cost far more than running
@@ -174,7 +174,7 @@ pub(super) enum StepsOf {
     AppRead,
     /// The app's own statement run for its changes.
     AppWrite,
-    /// Coven's lookup judging whether a write reruns a live query (§4).
+    /// sqlive's lookup judging whether a write reruns a live query (§4).
     Lookup,
 }
 

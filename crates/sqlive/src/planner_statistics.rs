@@ -1,17 +1,17 @@
-//! The query planner's statistics while a store stays open (§4).
+//! The query planner's statistics while a database stays open (§4).
 //!
-//! Coven gathers the statistics as a writable store opens and as it closes
+//! sqlive gathers the statistics as a writable database opens and as it closes
 //! (`optimize`, sqlite_settings.rs). A table can fill from empty within one
 //! session, as a library's first scan fills its candidates, and SQLite
 //! would plan every statement on it without statistics until the next open.
 //! So each time the writer's commits have changed [`CHECKED_CHANGES`] rows
-//! since the last check, they wake a thread of the store's own (upkeep.rs),
+//! since the last check, they wake a thread of the database's own (upkeep.rs),
 //! which asks SQLite, on a connection of its own, which tables
 //! `PRAGMA optimize` would analyze: one whose size changed tenfold since its
 //! statistics, or one with an index that has none. A table it names that
 //! holds fewer than `SMALL_TABLE` rows would keep none, so only a larger one
-//! starts a run. A run gathers the statistics as an open does, holding
-//! coven's writer so no write of coven's finds the database locked meanwhile.
+//! starts a run. A run gathers the statistics as an open does, holding the
+//! writer so no write on it finds the database locked meanwhile.
 
 use crate::authorization::{Policy, PolicyError};
 use crate::connection::HostSql;
@@ -21,17 +21,17 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
 
 /// The rows the writer's commits change between two checks. A check took
-/// about 80 µs on a store of four 20,000-row tables beside coven's own,
+/// about 80 µs on a coven store of four 20,000-row tables beside coven's own,
 /// under 0.1 µs for each row changed since the last; and a table has
 /// statistics within this many changed rows of reaching the size that
 /// calls for them.
 pub(crate) const CHECKED_CHANGES: u64 = 1_000;
 
-/// The upkeep of the planner's statistics of a store's database.
+/// The upkeep of the planner's statistics of a database.
 pub(crate) struct PlannerStatistics<P: Policy> {
     /// The thread's own connection, held through each check and run.
     connection: Mutex<HostSql<P>>,
-    /// The writer, held only during a run, so the store's close can take it
+    /// The writer, held only during a run, so the database's close can take it
     /// back once the thread stops.
     writer: Weak<Mutex<HostSql<P>>>,
     /// Where a test hears of each run, told once it committed.
@@ -77,7 +77,7 @@ impl<P: Policy> Upkeep for PlannerStatistics<P> {
 
     const THREAD: &'static str = "sqlive planner statistics";
 
-    /// One wake's check, and the run it calls for. A store whose open failed
+    /// One wake's check, and the run it calls for. A database whose open failed
     /// may let its writer go before the thread stops; there is then nothing
     /// to keep statistics for.
     fn run(&self) -> Result<(), PolicyError<P>> {

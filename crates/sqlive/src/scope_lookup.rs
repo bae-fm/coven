@@ -21,7 +21,7 @@ pub enum Judging<'a> {
     Row(&'a str, &'a [Value]),
 }
 
-/// Runs one question about a changed row. `Ok(true)` also when coven gives
+/// Runs one question about a changed row. `Ok(true)` also when sqlive gives
 /// up on it, which then counts as a match.
 pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
 
@@ -91,7 +91,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
 /// statement's equality compares them.
 #[derive(Debug)]
 pub struct Lookup {
-    /// The partner FROM item, as coven's SQL names it with its qualifier.
+    /// The partner FROM item, as sqlive's SQL names it with its qualifier.
     from: String,
     qualifier: String,
     /// What the partner's rows give.

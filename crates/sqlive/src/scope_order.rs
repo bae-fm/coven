@@ -10,7 +10,7 @@
 //! last one could sort before it, so it passes. A run that returned fewer rows
 //! than its LIMIT holds every row its WHERE allows, and keeps its scope.
 //!
-//! coven compares the values as BINARY, as SQLite does for a stored column of
+//! sqlive compares the values as BINARY, as SQLite does for a stored column of
 //! that collation, and takes the last row's values from the result columns
 //! that return them. So each ORDER BY term is a column of one table of the
 //! statement's only SELECT, written as a name with no COLLATE and no NULLS
@@ -161,7 +161,7 @@ fn result_column(
         Expr::Qualified(..) | Expr::DoublyQualified(..) => None,
         _ => return None,
     };
-    // coven doesn't know how many columns a `*` adds, so it can't tell the
+    // sqlive doesn't know how many columns a `*` adds, so it can't tell the
     // position of a column after one.
     let listed: Vec<&Expr<'_>> = columns
         .iter()

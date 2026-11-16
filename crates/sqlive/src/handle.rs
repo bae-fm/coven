@@ -285,8 +285,8 @@ struct ObserverState {
 }
 
 thread_local! {
-    /// The store call this thread runs, if any, and the bug its own work
-    /// failed that store's handle with (E15).
+    /// The handle's call this thread runs, if any, and the bug its own work
+    /// failed that handle with (E15).
     // Clippy asks for a `const` initializer this already has where the
     // target has no native thread locals, as Android: std builds those
     // from a function, which the lint reads as the initializer.
@@ -415,8 +415,8 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     }
 
     /// Observe every commit except those made within `outside`. Once the
-    /// store has closed, a new subscription reports that it closed, as a
-    /// call to the store does, not the failure it may have closed with.
+    /// database has closed, a new subscription reports that it closed, as a
+    /// call to the database does, not the failure it may have closed with.
     pub fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
         self.with_state(|state| {
             let failure = if state.closed { None } else { state.failure.clone() };
@@ -632,7 +632,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// state or a fault a drop found in it. The handle fails with this bug,
     /// not the one a poisoned lock would name. The bug goes to one
     /// reporter: the handle's call this thread runs, which returns it as
-    /// its own (`calling`), or the store's bug sink, outside such a call or
+    /// its own (`calling`), or the handle's bug sink, outside such a call or
     /// once the call has a bug of its own already (E15).
     pub fn fail_with_bug(&self, bug: Bug) {
         {

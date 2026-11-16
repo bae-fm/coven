@@ -2,10 +2,11 @@
 //! SQLite, with no pre-update hook watching it (§4).
 //!
 //! A local write's hook records each row operation, which also keeps SQLite
-//! from emptying a table in one step. A bulk write changes no synced table,
-//! so nothing it does reaches a write record; live queries learn only which
-//! tables it changed, from what the authorizer saw as each statement was
-//! prepared, triggers and foreign-key actions included.
+//! from emptying a table in one step. The policy refuses a bulk write any
+//! table whose changes the host records, so nothing it does reaches a write
+//! record; live queries learn only which tables it changed, from what the
+//! authorizer saw as each statement was prepared, triggers and foreign-key
+//! actions included.
 
 use super::HostSql;
 use crate::authorization::Policy;

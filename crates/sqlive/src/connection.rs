@@ -54,9 +54,9 @@ use crate::authorization::SqlAuthorization;
 use crate::authorization::{Policy, Refresh};
 use crate::connection_setup::Setup;
 
-/// Statements kept prepared per connection, coven's and the app's: a local
-/// write runs about a hundred distinct ones of coven's, which a smaller cache
-/// would evict before reuse, beside the app's.
+/// Statements kept prepared per connection, the host's and the app's: a
+/// local write in coven runs about a hundred distinct ones of its own, which
+/// a smaller cache would evict before reuse, beside the app's.
 const STATEMENT_CACHE: usize = 512;
 
 /// Whether a statement run through `app_query` belongs to a read, whose
@@ -403,9 +403,10 @@ impl<P: Policy> HostSql<P> {
         Ok(self.authorization.app_result(prepared)?)
     }
 
-    /// Run coven's own SQL on the connection's cached statement, parsed once per
-    /// connection. The authorizer records reads only while a statement is
-    /// prepared, so while it records, the statement is prepared afresh.
+    /// Run the host's own SQL on the connection's cached statement, parsed
+    /// once per connection. The authorizer records reads only while a
+    /// statement is prepared, so while it records, the statement is prepared
+    /// afresh.
     fn with_statement<T, E: From<PolicyError<P>>>(
         &self,
         sql: &str,

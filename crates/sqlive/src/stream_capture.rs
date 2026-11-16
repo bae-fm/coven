@@ -1,6 +1,6 @@
 //! Bounded observation for streamed transactions, including WITHOUT ROWID
-//! tables: applying another device's slot, loading a snapshot, and coven's
-//! upload and claim bookkeeping.
+//! tables, as a host runs to apply another device's slot, load a snapshot
+//! or keep its own bookkeeping.
 
 use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;

@@ -179,7 +179,7 @@ impl RowScope {
 /// as one of its sources, and the app's views and the CTEs it read as
 /// sources of their own, by the names SQLite reports reads through them by,
 /// whose tables' rows those scopes cover. A table read otherwise, as
-/// through one of coven's views, depends on every row. Empty when the
+/// through a view read whole, depends on every row. Empty when the
 /// statement's shape keeps every table whole.
 #[derive(Default)]
 pub struct Scopes {
