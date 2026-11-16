@@ -364,10 +364,8 @@ async fn the_budgets_query_runs_only_for_counter_and_budget_changes() {
     assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, 100);
     db.write(|sql| sql.set_cache_budget("files", 50)).await.unwrap();
     assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].budget, 50);
-    async fn quiet(budgets: &mut crate::LiveQuery<Vec<NamespaceBytes>, DbError>) -> bool {
-        tokio::time::timeout(std::time::Duration::from_millis(300), budgets.next_inline())
-            .await
-            .is_err()
+    fn quiet(budgets: &mut crate::LiveQuery<Vec<NamespaceBytes>, DbError>) -> bool {
+        budgets.run_changed().is_none()
     }
     // A read of the cached range updates only its recency.
     db.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
@@ -376,9 +374,9 @@ async fn the_budgets_query_runs_only_for_counter_and_budget_changes() {
     owner.cache_range(&file, -1, 1, FileName::new("again").unwrap(), header.clone()).await.unwrap();
     assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, header.len() as u64);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), Some(header));
-    assert!(quiet(&mut budgets).await, "a read's recency starts no run");
+    assert!(quiet(&mut budgets), "a read's recency starts no run");
     db.inspect_writer(|sql| partial(sql, "partial_object", "partial_file", 4096));
     db.write(|_| Ok(())).await.unwrap();
-    assert!(quiet(&mut budgets).await, "a partial download starts no run");
+    assert!(quiet(&mut budgets), "a partial download starts no run");
     db.close().await.unwrap();
 }
