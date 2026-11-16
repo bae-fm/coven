@@ -21,8 +21,8 @@ pub(crate) enum StoreFailure {
     #[error("a WAL checkpoint failed")]
     Checkpoint(Arc<DbError>),
     /// Checking or gathering the planner's statistics failed with this
-    /// cause, other than on a busy or locked database, and keeping them
-    /// stopped.
+    /// cause, other than on a busy or locked database, and coven stopped
+    /// keeping them.
     #[error("gathering the planner's statistics failed")]
     Statistics(Arc<DbError>),
 }

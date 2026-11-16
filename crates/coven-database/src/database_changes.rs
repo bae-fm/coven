@@ -4,8 +4,9 @@ use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 
-/// A live commit observation; coalesces changes and ends when the writer
-/// closes. Its calls fail with `E`, which the handle's failure becomes.
+/// A live commit observation. `DatabaseChanges` merges several commits into
+/// one change and ends when the writer closes. Its methods convert the
+/// handle's failure into `E` and return that.
 pub struct DatabaseChanges<E> {
     commits: crate::observation::CommitSubscription,
     reads: sqlive::ReadSet,

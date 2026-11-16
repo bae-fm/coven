@@ -1,13 +1,13 @@
-//! How coven reports the engine's errors: each as the `DbError` an app
-//! sees, through which every error of coven's own converts from them.
+//! How coven reports the engine's errors: coven turns each engine error into
+//! the `DbError` an app sees.
 
 use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::{DbError, OpenError};
 
-/// An engine error as the `DbError` an app sees. An error coven raised
-/// inside a SQL function, or a refusal of coven's policy, comes back as
-/// coven raised it.
+/// Coven turns an engine error into the `DbError` an app sees. An error
+/// coven raised inside a SQL function, or a refusal of coven's policy, comes
+/// back as coven raised it.
 impl From<EngineError<StoreFailure, DbError>> for DbError {
     fn from(error: EngineError<StoreFailure, DbError>) -> Self {
         match error {
@@ -46,9 +46,9 @@ impl From<EngineError<StoreFailure, DbError>> for OpenError {
     }
 }
 
-/// The `DbError` an error raised inside a SQL function or a column
-/// conversion carries, coven's own or the engine's; any other error comes
-/// back as it is.
+/// Return the `DbError` that an error raised inside a SQL function or a
+/// column conversion carries, whether coven or the engine raised it, and
+/// return any other error unchanged.
 pub(crate) fn raised(
     source: Box<dyn std::error::Error + Send + Sync>,
 ) -> Result<DbError, Box<dyn std::error::Error + Send + Sync>> {

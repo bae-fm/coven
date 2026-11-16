@@ -34,8 +34,8 @@ impl UnrecordedTables {
 /// Why this handle refuses every call until the store is reopened.
 #[derive(Clone)]
 pub(crate) enum HandleFailure {
-    /// The host's failure: one coven reported, or the engine's that ended
-    /// the handle, as the host holds it.
+    /// A failure that coven reported, or an engine failure that ended the
+    /// handle, held as coven's `StoreFailure`.
     Host(StoreFailure),
     /// A bug, a panic or a fault a drop found, may have left this store's
     /// state wrong (E15). It reached its one reporter as it happened, so
@@ -285,7 +285,8 @@ fn half_changed(what: &'static str) -> Bug {
 }
 
 impl ObserverState {
-    /// Fail every later call and subscription; the first failure is kept.
+    /// Fail every later call and subscription. The handle keeps the first
+    /// failure and ignores later ones.
     fn fail(&mut self, failure: HandleFailure) {
         let error = self.failure.get_or_insert(failure).clone();
         self.subscriptions.retain(|subscription| {
@@ -549,8 +550,8 @@ impl CommitObserver {
         })
     }
 
-    /// Fail every later call and subscription with `failure`; the first
-    /// failure is kept.
+    /// Fail every later call and subscription with `failure`. The handle
+    /// keeps the first failure and ignores later ones.
     pub(crate) fn fail(&self, failure: StoreFailure) {
         self.with_state(|state| state.fail(HandleFailure::Host(failure)));
     }

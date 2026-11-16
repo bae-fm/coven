@@ -252,8 +252,8 @@ impl DatabaseBuilder {
             &self.functions,
             Some(&views),
         )?;
-        // The writer observes no commits while it opens, so coven's view of
-        // it names no device.
+        // The writer observes no commits while it opens, so the StoreCall
+        // its opening runs with carries no device.
         let opening = crate::store_call::TestRecords::new();
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) = {
             let call = &crate::store_call::StoreCall::new(None, &opening);

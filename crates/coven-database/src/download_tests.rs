@@ -756,9 +756,10 @@ async fn applying_a_write_reads_each_row_a_few_times() {
     let loads = after.get("links").copied().unwrap_or_default()
         - before.get("links").copied().unwrap_or_default();
     assert_eq!(count(&b, "links"), 40);
-    // On the writer, once as the write is staged and once as its region is
-    // put back, and on the reader once as the region's committed state: 13
-    // times each when nothing is kept.
+    // The writer loads each row once when it stages the write and once when
+    // it puts the region back, and the reader loads each row once to read
+    // the region's committed state. Without the rows the merge keeps from
+    // its last read, the writer would load each row 13 times.
     assert_eq!(loads, 3 * 40);
     a.close().await.unwrap();
     b.close().await.unwrap();

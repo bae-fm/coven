@@ -128,8 +128,9 @@ pub(crate) fn materialize(
     })
 }
 
-/// Mark ordinary materialization SQL so shared triggers stay suppressed.
-/// SQLite retains ownership of foreign keys, actions and deferred checks.
+/// Mark the SQL in `run` as applying merged rows: `coven_applying()`
+/// returns true, so the shared triggers skip their work. SQLite still
+/// enforces foreign keys, runs their actions and makes the deferred checks.
 pub(crate) fn applying<T>(
     sql: &DatabaseConnection,
     run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,

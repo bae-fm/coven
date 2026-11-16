@@ -17,8 +17,8 @@ pub(crate) enum EngineFailure<F, R> {
     /// on a busy or locked database, so checkpointing stopped.
     Checkpoint(EngineError<F, R>),
     /// Checking or gathering the query planner's statistics failed with this
-    /// cause, other than on a busy or locked database, so keeping them
-    /// stopped.
+    /// cause, other than on a busy or locked database, so the engine stopped
+    /// keeping them.
     Statistics(EngineError<F, R>),
 }
 
@@ -47,7 +47,8 @@ pub(crate) enum EngineError<F, R> {
     /// The call's work panicked: a bug, which the caller reports.
     Bug(Bug),
     /// An earlier bug may have left the handle's state wrong, so the handle
-    /// failed with it, and every call fails with it until reopened.
+    /// failed with it, and every call fails with it until the host reopens
+    /// the database.
     HandleFailed(Bug),
     /// The host failed the handle with this failure.
     Host(F),
@@ -74,7 +75,10 @@ pub(crate) enum EngineError<F, R> {
     /// Opening the database's file at `path` failed.
     #[cfg_attr(
         not(windows),
-        expect(dead_code, reason = "only a Windows path can name another file than it reads")
+        expect(
+            dead_code,
+            reason = "only on Windows can a name in the path mean another file once the engine drops the path's verbatim prefix"
+        )
     )]
     Path {
         /// The database file.
@@ -102,7 +106,7 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for EngineErr
                 write!(f, "app SQL cannot perform {operation}")
             }
             Self::TransactionEnded => f.write_str("SQLite ended the owned transaction"),
-            Self::Closed => f.write_str("store is closed"),
+            Self::Closed => f.write_str("the store is closed"),
             Self::Bug(bug) => bug.fmt(f),
             Self::HandleFailed(bug) => {
                 write!(f, "the store's handle failed on an earlier bug; reopen the store: {bug}")

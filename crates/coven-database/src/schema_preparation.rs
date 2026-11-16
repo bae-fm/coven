@@ -11,8 +11,9 @@ use crate::{
     SyncedTable,
 };
 
-/// Migrate local tables before app migrations or recovery's waiting work.
-/// Read-only connections require the supported internal version already.
+/// Create coven's internal tables on a database that has none, before the
+/// app's migrations or any other work reads them. A read-only connection
+/// requires the database to hold the current internal version already.
 pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<(), OpenError> {
     let internal: i32 = sql.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let internal = internal as u32;
@@ -27,8 +28,10 @@ pub(crate) fn prepare_internal_schema(sql: &mut DatabaseConnection) -> Result<()
         if sql.read_only()? {
             return Err(CovenMigrationError::ReadOnly.into());
         }
-        // Only the current greenfield schema is supported. An uninitialized
-        // database is version zero; an unknown newer schema is never rewritten.
+        // Coven creates its current internal schema on a database that holds
+        // none, which reads as version zero, and has no upgrade from an older
+        // version. The check above refuses a newer schema, so coven never
+        // rewrites one.
         sql.transaction(|db| {
             db.batch(&internal_schema::initial_schema())?;
             crate::sql_versions::record_library(db)?;
@@ -58,7 +61,8 @@ pub(crate) fn prepare_schema(
     let read_only = author.is_none();
     let supported = validate_versions(migrations)?;
     prepare_internal_schema(sql)?;
-    // Before the app's migrations, whose statements use the indexes.
+    // Rebuild the indexes, or on a read-only connection require them rebuilt,
+    // before the app's migrations run, since their statements use the indexes.
     if read_only {
         crate::sql_versions::require_built(sql, versions)?;
     } else {
@@ -68,8 +72,10 @@ pub(crate) fn prepare_schema(
     if current > supported {
         return Err(MigrationError::SchemaTooNew { current, supported }.into());
     }
-    // App declarations are inputs even when their SQL ran on an earlier open.
-    // Every breaking step retained its schema; other committed steps did not.
+    // Coven checks the declared kind of each migration it already applied,
+    // even when its SQL ran on an earlier open: coven kept the schema of each
+    // breaking migration it applied and of no other, so a kind the app now
+    // declares differently fails the open.
     for migration in migrations.iter().filter(|m| m.version <= current) {
         let breaking = sql.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_conversion_schemas WHERE version=?1)",
@@ -103,8 +109,8 @@ pub(crate) fn prepare_schema(
         crate::OpenStep::Migrating,
         migrations.iter().filter(|m| m.version > current).count() as u64,
     );
-    // A run with a breaking migration is checked against what each
-    // audience alone would make of it, from the rows as they are now (§18.3).
+    // Coven stages each audience's copy of the current rows and checks a run
+    // with a breaking migration against each copy (§18.3).
     let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > current).collect();
     let mut staged = None;
     if let Some(stage) = audiences.filter(|_| {
@@ -141,12 +147,13 @@ pub(crate) fn prepare_schema(
                 .map(|outcome| outcome.version)
                 .max();
             let raises = if let Some(minimum) = breaking {
-                // The raise snapshots are captured through the marker before any
-                // later app write; with no store there is no shared version to
-                // raise, and an installation that loads its store has no marker.
+                // Coven captures the raise snapshots through the marker before
+                // the app writes again. With no store, coven has no shared
+                // version to raise, and an installation that loads its store has
+                // no marker.
                 let schema = crate::write_schema::WriteSchema::read(db, call, tables.to_vec())?;
-                // A circle still waiting for its rebuild is rebuilt to this
-                // migration's version, under this migration's write.
+                // Coven rebuilds a circle that still waits for its rebuild to
+                // this migration's version, in this migration's transaction.
                 if let Some(marker) = marker {
                     crate::reload_gate::follow(db, marker)?;
                 }
@@ -156,8 +163,9 @@ pub(crate) fn prepare_schema(
                 crate::raise_capture::require(db, minimum)?;
                 true
             } else {
-                // Only additions: a raise still waiting to publish moves to
-                // this version, captured again at it (§18.5).
+                // When the migrations only add, coven moves a raise that has not
+                // published yet to this version and captures it again at this
+                // version (§18.5).
                 let device = device.expect("writable migration");
                 crate::raise_capture::raise_to(db, tables, device, supported)?
             };

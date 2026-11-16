@@ -160,8 +160,9 @@ non_owner_types = [
     # that connection's progress handler; it lives with the connection.
     "LookupLimit",
     "LookupState",
-    # What coven's tests read back of a store's work, which each call on its
-    # connections records; it lives with the store's connections.
+    # What coven's tests read back of a store's work. The store's
+    # DatabaseAccess and its input database each hold one beside their
+    # connections, and each call on those connections records into it.
     "TestRecords",
 ]
 # An API namespace that borrows an owner without becoming one: a store's

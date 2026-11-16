@@ -41,7 +41,7 @@ where
 /// did. When it did, `registering`'s write follows in the same
 /// transaction, as a local write made right after `run` (§13.2): both
 /// commit, or neither. Without one, or when `run` registered nothing,
-/// this is `stream_transaction`.
+/// `stream_registering` runs `run` as `stream_transaction` does.
 pub(crate) fn stream_registering<T>(
     sql: &mut DatabaseConnection,
     call: &StoreCall<'_>,
