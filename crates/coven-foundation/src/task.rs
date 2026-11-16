@@ -81,7 +81,7 @@ impl std::fmt::Display for ShutdownOutcome {
 impl TaskFailed {
     /// The failure a joined task's `error` stands for. A task the runtime
     /// dropped may have run in part: `ShutdownOutcome::Unknown`. A task
-    /// whose work runs under [`caught`] hands its panic back as a value, so
+    /// whose work runs under [`caught()`] hands its panic back as a value, so
     /// its join fails only as its runtime ends it; a panic that reached the
     /// join uncaught gives a bug that can't say where it began.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
@@ -133,7 +133,7 @@ pub async fn blocking<T: Send + 'static>(
     }
 }
 
-/// Wait for a task whose work runs under [`caught`], as
+/// Wait for a task whose work runs under [`caught()`], as
 /// `tokio::spawn(caught(operation, work))` starts it. Its panic comes back as
 /// `TaskFailed::Panicked`, naming where it began; the runtime cancelling it,
 /// as `Shutdown`.
