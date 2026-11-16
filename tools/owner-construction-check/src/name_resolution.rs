@@ -2,6 +2,7 @@
 //! a definition. External paths retain their identity; they never borrow a
 //! workspace definition with the same final identifier.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::Span;
@@ -68,6 +69,9 @@ pub(crate) struct NameResolver {
     /// Each crate's `#[macro_use] extern crate` names, whose exported
     /// definitions are in scope everywhere in it.
     macro_use_crates: BTreeMap<String, Vec<String>>,
+    /// For each scope, by its index, the type path each name looked up there
+    /// reaches, or `None` when it reaches none (`type_in_scope`).
+    type_lookups: Vec<RefCell<BTreeMap<String, Option<ItemPath>>>>,
 }
 
 /// A `macro_rules!` definition and where it is.
@@ -130,6 +134,7 @@ impl NameResolver {
             macro_paths: BTreeMap::new(),
             macro_use_modules: BTreeMap::new(),
             macro_use_crates: BTreeMap::new(),
+            type_lookups: Vec::new(),
         };
         let prelude = resolver.module(&["<prelude>".into()]);
         resolver.prelude = prelude;
@@ -158,6 +163,8 @@ impl NameResolver {
                     .visit_file(&file.syntax);
             }
         }
+        resolver.type_lookups =
+            std::iter::repeat_with(RefCell::default).take(resolver.scopes.len()).collect();
         resolver
     }
 
@@ -183,10 +190,29 @@ impl NameResolver {
             scope = self.scopes[current].parent;
         }
         self.scope_names(self.prelude, &mut names, &mut visited);
-        names.iter().filter(|name| name.as_str() != "_").any(|name| {
-            self.lookup(start, name, true, Namespace::Type, &mut BTreeSet::new())
-                .is_ok_and(|resolved| resolved == *path)
-        })
+        names
+            .iter()
+            .filter(|name| name.as_str() != "_")
+            .any(|name| self.type_in_scope(start, name).as_ref() == Some(path))
+    }
+
+    /// The type path a name reaches in a scope, looked up once per scope and
+    /// name. A block that neither binds the name nor imports a glob reaches
+    /// what the scope around it reaches, so the blocks of one module share
+    /// that module's lookup.
+    fn type_in_scope(&self, scope: usize, name: &str) -> Option<ItemPath> {
+        if let Some(found) = self.type_lookups[scope].borrow().get(name) {
+            return found.clone();
+        }
+        let current = &self.scopes[scope];
+        let found = match current.parent {
+            Some(parent) if !current.names.contains_key(name) && current.globs.is_empty() => {
+                self.type_in_scope(parent, name)
+            }
+            _ => self.lookup(scope, name, true, Namespace::Type, &mut BTreeSet::new()).ok(),
+        };
+        self.type_lookups[scope].borrow_mut().insert(name.to_string(), found.clone());
+        found
     }
 
     fn scope_names(
