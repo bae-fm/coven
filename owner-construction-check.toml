@@ -1371,12 +1371,17 @@ tables = [
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
 # holds for the whole process (§21.2).
 "crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
-# A connection's authorizer, whose state its SQLite hooks share: one judging
-# for the handle that holds the writer lock, one for a read-only handle.
-"crates/coven-database/src/authorization.rs" = [
-    "SqlAuthorization::new",
-    "SqlAuthorization::read_only",
-    "SqlAuthorization::judging",
+# A connection's authorizer, whose state its SQLite hooks share.
+"crates/coven-database/src/authorization.rs" = ["SqlAuthorization::new"]
+# Coven's policy for a connection's authorizer, whose state the connection
+# shares with the authorizer: one judging for the handle that holds the
+# writer lock, one for a read-only handle. Opening a connection makes its
+# authorizer, which asks that policy.
+"crates/coven-database/src/app_policy.rs" = [
+    "CovenPolicy::new",
+    "CovenPolicy::read_only",
+    "CovenPolicy::judging",
+    "CovenPolicy::open",
 ]
 # Each call on the store runs on the blocking pool to its end, even once its
 # caller stops waiting, and then its bug goes to the store's sink (E15).

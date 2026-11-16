@@ -16,7 +16,7 @@
 //! (`Database::change_retry_state`).
 //!
 //! Like the sync status, only the handle that holds the store's writer lock
-//! reads it (`authorization.rs`): a read-only handle can't tell whether the
+//! reads it (`app_policy.rs`): a read-only handle can't tell whether the
 //! writer that last wrote it still runs.
 
 use crate::stored_millis::{since_epoch, stored_time, Round};

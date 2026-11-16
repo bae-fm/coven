@@ -7,6 +7,7 @@ use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::Connection;
 
+use crate::app_policy::CovenPolicy;
 use crate::authorization::SqlAuthorization;
 
 /// A function whose result depends on its arguments alone, which views and
@@ -41,6 +42,7 @@ pub(crate) fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
 pub(crate) fn register(
     connection: &Connection,
     authorization: &SqlAuthorization,
+    policy: &CovenPolicy,
 ) -> rusqlite::Result<()> {
     add(
         connection,
@@ -48,7 +50,7 @@ pub(crate) fn register(
         "coven_applying",
         0,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        authorization.applying_function(),
+        policy.applying_function(),
     )?;
     add(
         connection,
@@ -56,7 +58,7 @@ pub(crate) fn register(
         "_coven_rowid_changed",
         0,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        authorization.rowid_changed_function(),
+        authorization.host_only_function("changing a hidden rowid"),
     )?;
     add(
         connection,

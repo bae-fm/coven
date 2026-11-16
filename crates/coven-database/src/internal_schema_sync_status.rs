@@ -20,7 +20,7 @@
 //!
 //! Only the handle that holds the store's writer lock reads it: a read-only
 //! handle can't tell whether that writer still runs, so app SQL there may not
-//! read the table (`authorization.rs`).
+//! read the table (`app_policy.rs`).
 
 use crate::DbError;
 use std::time::SystemTime;

@@ -1,7 +1,7 @@
 //! Hidden row addresses remain stable even when a declared column shadows ROWID.
 
 use super::DatabaseConnection;
-use crate::authorization::ChangedTables;
+use crate::app_policy::ChangedTables;
 use crate::sql::identifier;
 use std::collections::BTreeSet;
 
@@ -18,7 +18,7 @@ impl DatabaseConnection {
     /// later statement: a schema of hundreds of tables would read them all
     /// after each one.
     pub(super) fn refresh_changed_rowids(&self) -> rusqlite::Result<()> {
-        match self.authorization.take_changed_tables() {
+        match self.policy.take_changed_tables() {
             ChangedTables::None => Ok(()),
             ChangedTables::Named(tables) => self.protect_rowids(Some(&tables)),
             ChangedTables::All => self.protect_rowids(None),
@@ -106,7 +106,7 @@ impl DatabaseConnection {
                 identifier(&table),
             ))?;
         }
-        self.authorization.set_hidden_rowids(only, unambiguous);
+        self.policy.set_hidden_rowids(only, unambiguous);
         Ok(())
     }
 }

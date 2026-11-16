@@ -491,7 +491,7 @@ pub(crate) fn empty_queue(db: &crate::Database) {
 /// write.
 #[tokio::test]
 async fn app_statements_cannot_write_the_queue() {
-    crate::authorization::tests::refused_as_internal("DELETE FROM _coven_uploads").await;
+    crate::app_policy::tests::refused_as_internal("DELETE FROM _coven_uploads").await;
     let store = TestStore::new();
     let database = store.schema(notes(), NOTES).await.unwrap();
     let error =

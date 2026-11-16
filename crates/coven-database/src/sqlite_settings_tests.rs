@@ -1,5 +1,4 @@
 use super::*;
-use crate::authorization::SqlAuthorization;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
 use coven_foundation::id_source::{IdSource, UuidIds};
@@ -441,14 +440,15 @@ async fn an_incremental_vacuum_gives_back_free_pages() {
 
 #[test]
 fn wal_refusal_names_the_selected_journal_mode() {
-    let sql = DatabaseConnection::open(
-        Path::new(":memory:"),
-        false,
-        SqlAuthorization::new(&[], crate::internal_schema::whole_views()),
-        &SqliteSettings::default(),
-        &crate::SqlFunctions::default(),
-    )
-    .unwrap();
+    let sql = crate::app_policy::CovenPolicy::new(&[])
+        .open(
+            Path::new(":memory:"),
+            false,
+            &crate::internal_schema::whole_views(),
+            &SqliteSettings::default(),
+            &crate::SqlFunctions::default(),
+        )
+        .unwrap();
     assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));
 }
 

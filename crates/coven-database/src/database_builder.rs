@@ -238,13 +238,8 @@ impl DatabaseBuilder {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         coven_foundation::task::operation_step("opening the writer's connection");
-        let mut writer = DatabaseConnection::open(
-            &path,
-            false,
-            SqlAuthorization::new(&tables, Arc::clone(&whole)),
-            &self.sqlite,
-            &self.functions,
-        )?;
+        let mut writer =
+            CovenPolicy::new(&tables).open(&path, false, &whole, &self.sqlite, &self.functions)?;
         // Before the app's migrations, which may read coven's views.
         writer.serve_views(settings.device_id, &transfers, &network)?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
@@ -302,14 +297,9 @@ impl DatabaseBuilder {
                 // connection of its own: one that analyzes a small table loads its
                 // count, and forgetting the statistics afterwards doesn't unload it.
                 // The writer then reads what that connection kept.
-                DatabaseConnection::open(
-                    &path,
-                    false,
-                    SqlAuthorization::new(&tables, Arc::clone(&whole)),
-                    &self.sqlite,
-                    &self.functions,
-                )?
-                .gather_statistics()?;
+                CovenPolicy::new(&tables)
+                    .open(&path, false, &whole, &self.sqlite, &self.functions)?
+                    .gather_statistics()?;
                 // SQLite reads its statistics again only when told to.
                 writer.batch("ANALYZE sqlite_schema")?;
                 let optimized = clock.elapsed();
@@ -358,10 +348,10 @@ impl DatabaseBuilder {
         }
         let writer = Arc::new(Mutex::new(writer));
         if let Some(pages) = self.sqlite.checkpoint_pages() {
-            let checkpointing = DatabaseConnection::open(
+            let checkpointing = CovenPolicy::new(&[]).open(
                 &path,
                 false,
-                SqlAuthorization::new(&[], Arc::clone(&whole)),
+                &whole,
                 &self.sqlite,
                 &crate::SqlFunctions::default(),
             )?;
@@ -374,10 +364,10 @@ impl DatabaseBuilder {
         }
         let statistics =
             crate::upkeep::UpkeepThread::<crate::planner_statistics::PlannerStatistics>::start(
-                DatabaseConnection::open(
+                CovenPolicy::new(&tables).open(
                     &path,
                     false,
-                    SqlAuthorization::new(&tables, Arc::clone(&whole)),
+                    &whole,
                     &self.sqlite,
                     &self.functions,
                 )?,
@@ -393,10 +383,10 @@ impl DatabaseBuilder {
         );
         let mut readers = Vec::new();
         for _ in 0..4 {
-            let mut reader = DatabaseConnection::open(
+            let mut reader = CovenPolicy::new(&tables).open(
                 &path,
                 true,
-                SqlAuthorization::new(&tables, Arc::clone(&whole)),
+                &whole,
                 &self.sqlite,
                 &self.functions,
             )?;
@@ -467,10 +457,10 @@ impl DatabaseBuilder {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
-        let mut first = DatabaseConnection::open(
+        let mut first = CovenPolicy::read_only(&tables).open(
             &path,
             true,
-            SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
+            &whole,
             &self.sqlite,
             &self.functions,
         )?;
@@ -494,10 +484,10 @@ impl DatabaseBuilder {
         first.serve(observer.clone());
         let mut readers = vec![Mutex::new(first)];
         for _ in 1..4 {
-            let mut reader = DatabaseConnection::open(
+            let mut reader = CovenPolicy::read_only(&tables).open(
                 &path,
                 true,
-                SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
+                &whole,
                 &self.sqlite,
                 &self.functions,
             )?;
@@ -505,10 +495,10 @@ impl DatabaseBuilder {
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
-        let mut writer = DatabaseConnection::open(
+        let mut writer = CovenPolicy::read_only(&tables).open(
             &path,
             false,
-            SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
+            &whole,
             &self.sqlite,
             &self.functions,
         )?;
@@ -642,10 +632,10 @@ pub async fn discarded_store_name(
 /// database or a discarded one: no app table, SQLite setting or function
 /// reaches it.
 fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnection, DbError> {
-    DatabaseConnection::open(
+    CovenPolicy::new(&[]).open(
         path,
         read_only,
-        SqlAuthorization::new(&[], crate::internal_schema::whole_views()),
+        &crate::internal_schema::whole_views(),
         // The input database is a cache held to its byte budget (§21.1), and
         // the next received range reuses its freed pages; giving them back
         // would shrink and regrow the file.

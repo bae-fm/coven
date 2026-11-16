@@ -1,0 +1,677 @@
+use crate::{
+    tests::{database_error, TestStore},
+    *,
+};
+
+/// An app migration running `attack` fails to open, refused as reaching an
+/// internal object. A domain's tests show its own tables refused this way.
+pub(crate) async fn refused_as_internal(attack: &'static str) {
+    let store = TestStore::new();
+    let error = store
+        .builder(vec![], vec![Migration::addition(1, "attack", attack)])
+        .open()
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(database_error(error), DbError::InternalTable { .. }), "{attack}");
+}
+
+#[tokio::test]
+async fn app_statements_cannot_read_or_mutate_internal_objects() {
+    for attack in [
+        "SELECT * FROM _coven_rows",
+        "SELECT count(*) FROM _COVEN_ROWS",
+        "DROP TABLE _coven_columns",
+        "ALTER TABLE _coven_rows ADD COLUMN bad INTEGER",
+        "CREATE TABLE _coven_fake (x)",
+        "CREATE TABLE local(x); ALTER TABLE local RENAME TO _coven_fake",
+        "CREATE TEMP TABLE _coven_cells(x)",
+        "CREATE VIEW hidden AS SELECT * FROM _coven_rows; SELECT * FROM hidden",
+    ] {
+        refused_as_internal(attack).await;
+    }
+}
+
+#[tokio::test]
+async fn reserved_prefixes_cover_every_app_object_and_rename_destination() {
+    for prefix in ["_coven_", "_CoVeN_", "coven_", "CoVeN_"] {
+        for statement in [
+            "CREATE TABLE {name}(x)",
+            "CREATE TEMP TABLE {name}(x)",
+            "CREATE VIRTUAL TABLE {name} USING fts5(x)",
+            "CREATE INDEX {name} ON local(x)",
+            "CREATE TEMP TABLE scratch(x); CREATE INDEX {name} ON scratch(x)",
+            "CREATE TRIGGER {name} AFTER INSERT ON local BEGIN SELECT 1; END",
+            "CREATE TEMP TRIGGER {name} AFTER INSERT ON local BEGIN SELECT 1; END",
+            "CREATE VIEW {name} AS SELECT x FROM local",
+            "CREATE TEMP VIEW {name} AS SELECT x FROM local",
+            "ALTER TABLE local RENAME TO {name}",
+            "ALTER TABLE local RENAME TO \"{name}\"",
+            "ALTER TABLE local RENAME TO [{name}]",
+            "ALTER TABLE local RENAME TO `{name}`",
+            "ALTER TABLE local RENAME TO '{name}'",
+        ] {
+            let name = format!("{prefix}private");
+            let operation = statement.replace("{name}", &name);
+            let store = TestStore::new();
+            let error = store
+                .builder(
+                    vec![],
+                    vec![Migration::addition_with(1, "reserved name", move |sql| {
+                        sql.execute_batch("CREATE TABLE local(x)")?;
+                        sql.execute_batch(&operation)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .err()
+                .expect("reserved object must be refused");
+            let error = database_error(error);
+            assert!(
+                matches!(&error, DbError::InternalTable { table } if table.eq_ignore_ascii_case(&name)),
+                "{prefix}: {statement}: {error:?}",
+                statement = statement.replace("{name}", &name)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_prefixes_are_refused_in_synced_declarations() {
+    for name in ["_coven_private", "_CoVeN_private", "coven_private", "CoVeN_private"] {
+        let store = TestStore::new();
+        let error = store
+            .builder(vec![SyncedTable::new(name, RowIdentity::SharedKey)], vec![])
+            .open()
+            .await
+            .err()
+            .expect("reserved declaration must be refused");
+        assert!(matches!(database_error(error), DbError::InternalTable { table } if table == name));
+    }
+}
+
+#[tokio::test]
+async fn names_resembling_reserved_prefixes_remain_app_tables() {
+    for name in ["coven", "_coven", "xcoven_private", "_covenant", "app_coven_rows"] {
+        let store = TestStore::new();
+        let db = store
+            .builder(
+                vec![SyncedTable::new(name, RowIdentity::SharedKey)],
+                vec![Migration::addition_with(1, "app table", move |sql| {
+                    sql.execute_batch(&format!(
+                        "CREATE TABLE {name}(id TEXT NOT NULL PRIMARY KEY)"
+                    ))?;
+                    sql.execute_batch(&format!("REINDEX {name}"))?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .unwrap();
+        db.write(move |sql| {
+            sql.execute(&format!("INSERT INTO {name} VALUES('app')"), [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.read(move |sql| Ok::<_, DbError>(sql.query_row(
+                &format!("SELECT id FROM {name}"),
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
+            .await
+            .unwrap(),
+            "app"
+        );
+        db.close().await.unwrap();
+    }
+}
+
+/// A write changes no schema, so it can't make a trigger on a table the app
+/// may follow either.
+#[tokio::test]
+async fn a_write_cannot_create_a_trigger_on_a_followed_table() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let error = crate::write::tests::sql(
+        &db,
+        "CREATE TRIGGER noted AFTER INSERT ON coven_files BEGIN SELECT 1; END",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, DbError::StatementForbidden { operation: "schema changes in a write" }),
+        "{error:?}"
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn trigger_targets_are_rejected_while_preparing_before_any_row_changes() {
+    for shared in [false, true] {
+        let store = TestStore::new();
+        let mut table = SyncedTable::new("notes", RowIdentity::SharedKey);
+        if shared {
+            table = table.shared_trigger("effect");
+        }
+        let db = store.builder(vec![table], vec![Migration::addition_with(1, "triggers", move |sql| {
+            sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0)")?;
+            sql.execute_batch(if shared {
+                "CREATE TRIGGER effect AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE local SET n = n+1; END"
+            } else {
+                "CREATE TRIGGER effect AFTER INSERT ON notes BEGIN UPDATE notes SET n = n+1; END"
+            })?;
+            let error = DbError::from(sql.execute("INSERT INTO notes VALUES ('a',0)", []).unwrap_err());
+            assert!(matches!(error, DbError::TriggerTarget { trigger, table } if trigger == "effect" && table == if shared { "local" } else { "notes" }));
+            assert_eq!(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?, 0);
+            assert_eq!(sql.query_row("SELECT n FROM local", [], |r| r.get::<_, i64>(0))?, 0);
+            Ok(())
+        })]).open().await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn permitted_local_and_shared_triggers_run_with_applying_false() {
+    let store = TestStore::new();
+    let db = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::breaking_with(1, "triggers", |sql| {
+        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0); CREATE TRIGGER local_effect AFTER INSERT ON notes BEGIN UPDATE local SET n = n+1; END; CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET n = 7 WHERE id = new.id; END; INSERT INTO notes VALUES ('a',0)")?;
+        assert_eq!(sql.query_row("SELECT n FROM notes", [], |r| r.get::<_, i64>(0))?, 7);
+        assert_eq!(sql.query_row("SELECT n FROM local", [], |r| r.get::<_, i64>(0))?, 1);
+        assert!(!sql.query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0))?);
+        Ok(())
+    }, crate::OldWrites::Drop, Vec::new())]).open().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn app_reindex_cannot_write_an_internal_index() {
+    for name in ["_coven_write_identity", "sqlite_autoindex__coven_columns_1"] {
+        let store = TestStore::new();
+        let error = store
+            .builder(
+                vec![],
+                vec![Migration::addition_with(1, "reindex", move |sql| {
+                    sql.execute_batch(&format!("REINDEX {name}"))?;
+                    Ok(())
+                })],
+            )
+            .open()
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(database_error(error), DbError::InternalTable { table } if table == name));
+    }
+}
+
+#[tokio::test]
+async fn a_temporary_table_with_a_synced_name_is_still_local() {
+    let store = TestStore::new();
+    let db = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::addition_with(1, "shadow", |sql| {
+        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TABLE notes(id TEXT); CREATE TEMP TABLE source(id TEXT); CREATE TEMP TRIGGER local AFTER INSERT ON source BEGIN INSERT INTO notes VALUES(new.id); END; INSERT INTO source VALUES('local')")?;
+        assert_eq!(sql.query_row("SELECT count(*) FROM temp.notes", [], |r| r.get::<_, i64>(0))?,1);
+        Ok(())
+    })]).open().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
+    let store = TestStore::new();
+    let error = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::addition(1, "shadow", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN SELECT 1; END; CREATE TEMP TRIGGER shared AFTER INSERT ON main.notes BEGIN UPDATE notes SET id = 'unguarded'; END; INSERT INTO notes VALUES('x')")]).open().await.err().unwrap();
+    assert!(matches!(database_error(error), DbError::StatementForbidden { .. }));
+}
+
+#[tokio::test]
+async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
+    for key in ["id TEXT NOT NULL PRIMARY KEY", "id TEXT", "id INTEGER NOT NULL PRIMARY KEY DESC"] {
+        for column in ["rowid", "_rowid_", "oid", "\"RoWiD\"", "[OID]", "`_rowid_`", "'rowid'"] {
+            let operation = format!("UPDATE items SET {column}=2");
+            let store = TestStore::new();
+            let schema=format!("CREATE TABLE items({key},value TEXT); INSERT INTO items(id,value) VALUES(1,'original')");
+            let migration_schema = schema.clone();
+            let migration_operation = operation.clone();
+            let error = store
+                .builder(
+                    vec![],
+                    vec![Migration::addition_with(1, "forbidden rowid", move |sql| {
+                        sql.execute_batch(&migration_schema)?;
+                        sql.execute_batch(&migration_operation)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(
+                    database_error(error),
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                ),
+                "migration: {key}: {operation}"
+            );
+            let db = store
+                .builder(
+                    vec![],
+                    vec![Migration::addition_with(1, "schema", move |sql| {
+                        sql.execute_batch(&schema)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .unwrap();
+            let statement = operation.clone();
+            let error = db
+                .write(move |sql| {
+                    sql.execute(&statement, [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                ),
+                "write: {key}: {operation}: {error:?}"
+            );
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn integer_primary_key_aliases_and_real_rowid_named_columns_remain_writable() {
+    for (shape, suffix) in [
+        ("id INTEGER PRIMARY KEY,value TEXT", ""),
+        ("id INTEGER,value TEXT,PRIMARY KEY(id DESC)", ""),
+        ("id TEXT NOT NULL PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,value TEXT", ""),
+        (
+            "id TEXT PRIMARY KEY,rowid INTEGER,_rowid_ INTEGER,oid INTEGER,value TEXT",
+            " WITHOUT ROWID",
+        ),
+    ] {
+        for column in ["rowid", "_rowid_", "oid"] {
+            let store = TestStore::new();
+            let schema=format!("CREATE TABLE items({shape}){suffix}; INSERT INTO items(id,value) VALUES(1,'one'); UPDATE items SET {column}=2 WHERE id=1; INSERT INTO items({column},id,value) VALUES(3,3,'three')");
+            let db = store
+                .builder(
+                    vec![],
+                    vec![Migration::addition_with(1, "rowid aliases", move |sql| {
+                        sql.execute_batch(&schema)?;
+                        Ok(())
+                    })],
+                )
+                .open()
+                .await
+                .unwrap();
+            db.write(move |sql| {
+                sql.execute(&format!("UPDATE items SET {column}=4 WHERE id=3"), [])?;
+                sql.execute(
+                    &format!("INSERT INTO items({column},id,value) VALUES(5,5,'five')"),
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn rowid_policy_covers_tuple_assignments_ctes_upserts_and_returning() {
+    let store = TestStore::new();
+    let db=store.schema(vec![],"CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value TEXT); INSERT INTO items VALUES('a','original')").await.unwrap();
+    for statement in [
+        "UPDATE items AS i SET (value,_rowid_)=('changed',2) RETURNING value",
+        "WITH n(x) AS (SELECT 2) UPDATE main.items SET oid=(SELECT x FROM n) RETURNING value",
+        "INSERT INTO items(id,value) VALUES('a','changed') ON CONFLICT(id) DO UPDATE SET rowid=2 RETURNING value",
+    ] {
+        for query_row in [true,false] {
+            let error=db.write(move |sql| {
+                if query_row { sql.query_row(statement,[],|_|Ok(()))?; }
+                else { sql.query(statement,[],|_|Ok(()))?; }
+                Ok(())
+            }).await.unwrap_err();
+            assert!(matches!(error,DbError::StatementForbidden { operation: "changing a hidden rowid" }),"{statement}: {error:?}");
+        }
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rowid_updates_in_triggers_are_refused_before_any_changes() {
+    for trigger in ["TRIGGER", "TEMP TRIGGER"] {
+        for operation in [
+            "UPDATE target SET rowid=2",
+            "INSERT INTO target(id) VALUES('a') ON CONFLICT(id) DO UPDATE SET oid=2",
+        ] {
+            let store = TestStore::new();
+            let db = store.builder(vec![], vec![Migration::addition_with(1, "trigger targets", move |sql| {
+                sql.execute_batch(&format!("CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE {trigger} effect AFTER INSERT ON source BEGIN {operation}; END; CREATE TABLE target(id TEXT NOT NULL PRIMARY KEY); INSERT INTO target VALUES('a')"))?;
+                let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
+                assert!(matches!(error, DbError::StatementForbidden { operation: "changing a hidden rowid" }),"{trigger}: {operation}: {error:?}");
+                assert_eq!(sql.query_row("SELECT count(*) FROM source",[],|r|r.get::<_,i64>(0))?,0);
+                assert_eq!(sql.query_row("SELECT rowid FROM target",[],|r|r.get::<_,i64>(0))?,1);
+                Ok(())
+            })]).open().await.unwrap();
+            db.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn rowid_policy_distinguishes_temporary_tables_and_declared_alias_columns() {
+    let store = TestStore::new();
+    let db = store.builder(vec![],vec![Migration::addition_with(1, "row addresses", |sql| {
+        sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER); INSERT INTO items VALUES('a',1); CREATE TEMP TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items(rowid) VALUES(7); UPDATE items SET _rowid_=8; UPDATE main.items SET rowid=2;")?;
+        assert_eq!(sql.query_row("SELECT rowid FROM temp.items",[],|r|r.get::<_,i64>(0))?,8);
+        assert_eq!(sql.query_row("SELECT rowid FROM main.items",[],|r|r.get::<_,i64>(0))?,2);
+        let error = DbError::from(sql.execute("UPDATE main.items SET oid=9",[]).unwrap_err());
+        assert!(matches!(error, DbError::StatementForbidden { operation: "changing a hidden rowid" }));
+        sql.execute("INSERT INTO main.items(_rowid_,id) VALUES(10,'b')",[])?;
+        assert_eq!(sql.query_row("SELECT oid FROM main.items WHERE id='a'",[],|r|r.get::<_,i64>(0))?,1);
+        Ok(())
+    })]).open().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rowid_policy_distinguishes_same_named_main_and_temp_triggers() {
+    for event in ["INSERT ON other", "DELETE ON source", "UPDATE OF oid ON source"] {
+        let store = TestStore::new();
+        let db = store.builder(vec![],vec![Migration::addition_with(1, "distinct triggers", move |sql| {
+            sql.execute_batch(&format!("CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE other(id INTEGER PRIMARY KEY); CREATE TABLE allowed(id INTEGER PRIMARY KEY); CREATE TEMP TRIGGER same AFTER {event} BEGIN UPDATE target SET rowid=2; END; CREATE TRIGGER same AFTER UPDATE OF _rowid_ ON source BEGIN INSERT INTO allowed VALUES(3); END; CREATE TABLE target(id TEXT NOT NULL PRIMARY KEY); INSERT INTO source VALUES(1); UPDATE source SET _rowid_=2;"))?;
+            assert_eq!(sql.query_row("SELECT id FROM source",[],|r|r.get::<_,i64>(0))?,2);
+            assert_eq!(sql.query_row("SELECT id FROM allowed",[],|r|r.get::<_,i64>(0))?,3);
+            assert_eq!(sql.query_row("SELECT count(*) FROM target",[],|r|r.get::<_,i64>(0))?,0);
+            Ok(())
+        })]).open().await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rowid_policy_follows_nested_alias_updates_and_foreign_key_actions() {
+    for (schema, statement) in [
+        (
+            "CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER a_child AFTER UPDATE OF oid ON middle BEGIN UPDATE target SET rowid=2; END; CREATE TRIGGER z_parent AFTER UPDATE OF _rowid_ ON source BEGIN UPDATE middle SET oid=3; END;",
+            "UPDATE source SET _rowid_=2",
+        ),
+        (
+            "CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id TEXT NOT NULL PRIMARY KEY, parent INTEGER REFERENCES source(id) ON UPDATE CASCADE); CREATE TRIGGER child AFTER UPDATE OF parent ON middle BEGIN UPDATE target SET rowid=2; END;",
+            "UPDATE source SET id=2",
+        ),
+    ] {
+        let store = TestStore::new();
+        let db = store.builder(vec![],vec![Migration::addition_with(1, "indirect row addresses", move |sql| {
+            sql.execute_batch(schema)?;
+            sql.execute_batch("CREATE TABLE target(id TEXT NOT NULL PRIMARY KEY); INSERT INTO target VALUES('a'); INSERT INTO source VALUES(1)")?;
+            if statement == "UPDATE source SET id=2" {
+                sql.execute("INSERT INTO middle VALUES('b',1)",[])?;
+            }
+            let error = DbError::from(sql.execute(statement,[]).unwrap_err());
+            assert!(matches!(error, DbError::StatementForbidden { operation: "changing a hidden rowid" }),"{statement}: {error:?}");
+            assert_eq!(sql.query_row("SELECT id FROM source",[],|r|r.get::<_,i64>(0))?,1);
+            assert_eq!(sql.query_row("SELECT rowid FROM target",[],|r|r.get::<_,i64>(0))?,1);
+            Ok(())
+        })]).open().await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rowid_policy_uses_the_storage_schema_of_implicitly_temporary_triggers() {
+    let store = TestStore::new();
+    let db = store.builder(vec![],vec![Migration::addition_with(1, "implicit temp trigger", |sql| {
+        sql.execute_batch("CREATE TABLE target(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TEMP TABLE target(id INTEGER PRIMARY KEY); CREATE TEMP TABLE source(id INTEGER PRIMARY KEY); CREATE TRIGGER effect AFTER INSERT ON temp.source BEGIN INSERT INTO target(rowid) VALUES(4); END; INSERT INTO temp.source VALUES(1)")?;
+        assert_eq!(sql.query_row("SELECT id FROM temp.target",[],|r|r.get::<_,i64>(0))?,4);
+        sql.execute_batch("CREATE TRIGGER main.effect AFTER INSERT ON source BEGIN UPDATE target SET rowid=4; END")?;
+        let error = DbError::from(sql.execute("INSERT INTO main.source VALUES(1)",[]).unwrap_err());
+        assert!(matches!(error,DbError::StatementForbidden { operation: "changing a hidden rowid" }));
+        Ok(())
+    })]).open().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rowid_policy_refreshes_for_migrations_and_reopening() {
+    fn migrations() -> Vec<Migration> {
+        vec![
+            Migration::addition(
+                1,
+                "integer key",
+                "CREATE TABLE items(id INTEGER PRIMARY KEY); INSERT INTO items VALUES(1)",
+            ),
+            Migration::addition_with(2, "rebuild key", |sql| {
+                sql.execute_batch("ALTER TABLE items RENAME TO old_items; CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY); INSERT INTO items(rowid,id) VALUES(7,'a'); DROP TABLE old_items")?;
+                let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
+                assert!(matches!(
+                    error,
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                ));
+                // SQLite refuses to add, rename or drop a column a rowid
+                // table's address goes by, so the table is rebuilt with an
+                // `oid` column, then again with it renamed.
+                sql.execute_batch("CREATE TABLE items_oid(id TEXT NOT NULL PRIMARY KEY, oid INTEGER); INSERT INTO items_oid(_rowid_,id) SELECT rowid,id FROM items; DROP TABLE items; ALTER TABLE items_oid RENAME TO items; UPDATE items SET oid=4; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_oid INTEGER); INSERT INTO items_saved(rowid,id,saved_oid) SELECT _rowid_,id,oid FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items")?;
+                let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
+                assert!(matches!(
+                    error,
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                ));
+                sql.execute_batch("CREATE TEMP TABLE items(id INTEGER PRIMARY KEY); INSERT INTO temp.items VALUES(1); UPDATE temp.items SET rowid=2; DROP TABLE temp.items")?;
+                let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
+                assert!(matches!(
+                    error,
+                    DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                ));
+                Ok(())
+            }),
+        ]
+    }
+    let store = TestStore::new();
+    let mut initial = migrations();
+    initial.truncate(1);
+    store.builder(vec![], initial).open().await.unwrap().close().await.unwrap();
+    for _ in 0..2 {
+        let db = store.builder(vec![], migrations()).open().await.unwrap();
+        let error = db
+            .write(|sql| {
+                sql.execute("UPDATE items SET _rowid_=8", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::StatementForbidden { operation: "changing a hidden rowid" }
+        ));
+        assert_eq!(
+            db.read(|sql| Ok::<_, DbError>(
+                sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?
+            ))
+            .await
+            .unwrap(),
+            7
+        );
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addresses() {
+    for alias in ["RoWiD", "_ROWID_", "OiD"] {
+        let store = TestStore::new();
+        let db=store.builder(vec![],vec![Migration::addition_with(1, "declared column", move |sql| {
+            sql.execute_batch(&format!("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,{alias} INTEGER); INSERT INTO items VALUES('a',1)"))?;
+            Ok(())
+        })]).open().await.unwrap();
+        db.write(move |sql| {
+            sql.execute(&format!("UPDATE items SET {alias}=2"), [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.read(move |sql| Ok::<_, DbError>(sql.query_row(
+                &format!("SELECT {alias} FROM items"),
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .await
+            .unwrap(),
+            2
+        );
+        for hidden in ["rowid", "_rowid_", "oid"] {
+            if hidden.eq_ignore_ascii_case(alias) {
+                continue;
+            }
+            for statement in [
+                format!("UPDATE items SET {hidden}=9"),
+                format!("UPDATE items SET ({hidden},id)=(9,'b') RETURNING id"),
+                format!(
+                    "INSERT INTO items(id) VALUES('a') ON CONFLICT(id) DO UPDATE SET {hidden}=9"
+                ),
+            ] {
+                let error = db
+                    .write(move |sql| {
+                        sql.execute_batch(&statement)?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        DbError::StatementForbidden { operation: "changing a hidden rowid" }
+                    ),
+                    "{alias}: {error:?}"
+                );
+            }
+        }
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopening() {
+    fn migrations() -> Vec<Migration> {
+        vec![Migration::addition_with(1, "shadowed addresses", |sql| {
+            // SQLite refuses to add, rename or drop a column a rowid
+            // table's address goes by, so `items` declares both from the
+            // start, and renaming one rebuilds the table.
+            sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER, _rowid_ INTEGER); INSERT INTO items(oid,id) VALUES(1,'a'); UPDATE items SET rowid=2,_rowid_=3; CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER parent AFTER INSERT ON source BEGIN UPDATE middle SET id=2; END; CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;")?;
+            let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
+            ));
+            assert_eq!(
+                sql.query_row("SELECT count(*) FROM source", [], |r| r.get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?, 1);
+            // Renaming a table checks every trigger that names it, so the
+            // trigger naming `items` goes while `items` is rebuilt.
+            const CHILD: &str =
+                "CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;";
+            sql.execute_batch(&format!("DROP TRIGGER child; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_rowid INTEGER, _rowid_ INTEGER); INSERT INTO items_saved(oid,id,saved_rowid,_rowid_) SELECT oid,id,rowid,_rowid_ FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items; {CHILD}"))?;
+            let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
+            ));
+            sql.execute_batch(&format!("DROP TRIGGER child; CREATE TABLE items_back(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER, _rowid_ INTEGER); INSERT INTO items_back(oid,id,rowid,_rowid_) SELECT oid,id,saved_rowid,_rowid_ FROM items; DROP TABLE items; ALTER TABLE items_back RENAME TO items; {CHILD}"))?;
+            Ok(())
+        })]
+    }
+    let store = TestStore::new();
+    for _ in 0..2 {
+        let db = store.builder(vec![], migrations()).open().await.unwrap();
+        let error = db
+            .write(|sql| {
+                sql.execute("UPDATE items SET oid=9", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::StatementForbidden { operation: "changing a hidden rowid" }
+        ));
+        assert_eq!(
+            db.read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT oid,rowid,_rowid_ FROM items",
+                [],
+                |r| { Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)) }
+            )?))
+            .await
+            .unwrap(),
+            (1, 2, 3)
+        );
+        db.commit_writer(|sql| {
+            let error = sql
+                .materialize(|sql| Ok(sql.app_execute("UPDATE items SET oid=8", [])?))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                DbError::StatementForbidden { operation: "changing a hidden rowid" }
+            ));
+        });
+        db.close().await.unwrap();
+    }
+}
+
+/// A table that declares a column named `rowid` keeps a guard on its hidden
+/// address (rowid_policy.rs). The app's migration can still drop the table,
+/// and its guard goes with it; it still can't drop the guard alone.
+#[tokio::test]
+async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![],
+            vec![
+                Migration::addition(
+                    1,
+                    "shadowed",
+                    "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER)",
+                ),
+                Migration::breaking(
+                    2,
+                    "dropped",
+                    "DROP TABLE items",
+                    crate::OldWrites::Drop,
+                    vec![],
+                ),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let store = TestStore::new();
+    let error = store
+        .builder(
+            vec![],
+            vec![Migration::addition(
+                1,
+                "unguarded",
+                "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER);
+                 DROP TRIGGER temp._coven_rowid_guard_main_items",
+            )],
+        )
+        .open()
+        .await
+        .err()
+        .expect("dropping the guard alone is refused");
+    assert!(
+        matches!(crate::tests::database_error(error), DbError::InternalTable { table } if table == "_coven_rowid_guard_main_items")
+    );
+}

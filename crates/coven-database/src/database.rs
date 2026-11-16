@@ -49,7 +49,7 @@ use coven_foundation::files::{StoreDir, StoreLock};
 use coven_foundation::id_source::FileId;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
-use crate::authorization::SqlAuthorization;
+use crate::app_policy::CovenPolicy;
 use crate::observation::CommitObserver;
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;

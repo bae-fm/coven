@@ -825,7 +825,7 @@ async fn app_statements_cannot_change_the_merge_store() {
         "CREATE INDEX bad ON _coven_rows(audience)",
         "CREATE TRIGGER bad AFTER INSERT ON _coven_rows BEGIN SELECT 1; END",
     ] {
-        crate::authorization::tests::refused_as_internal(attack).await;
+        crate::app_policy::tests::refused_as_internal(attack).await;
     }
 }
 

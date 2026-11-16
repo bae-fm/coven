@@ -51,6 +51,7 @@ use coven_foundation::id_source::DeviceId;
 
 use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
 
+use crate::app_policy::CovenPolicy;
 use crate::authorization::SqlAuthorization;
 use crate::internal_schema;
 use crate::migration::validate_versions;
@@ -82,6 +83,8 @@ pub(crate) struct DatabaseConnection {
     statement_log: std::cell::RefCell<Option<crate::test_utils::StatementLog>>,
     connection: Connection,
     authorization: SqlAuthorization,
+    /// What coven adds to the authorizer's rules.
+    policy: CovenPolicy,
     /// Stops a lookup that runs too long (`live_judging.rs`).
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
@@ -166,6 +169,7 @@ impl DatabaseConnection {
         path: &Path,
         read_only: bool,
         authorization: SqlAuthorization,
+        policy: CovenPolicy,
         settings: &crate::SqliteSettings,
         functions: &crate::SqlFunctions,
     ) -> Result<Self, DbError> {
@@ -193,7 +197,7 @@ impl DatabaseConnection {
         // SQLite parse and plan it again on its next use, once per row of a
         // commit's lookups.
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
-        crate::coven_functions::register(&connection, &authorization)?;
+        crate::coven_functions::register(&connection, &authorization, &policy)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;
         let lookups = live_judging::LookupLimit::install(&mut connection)?;
@@ -204,6 +208,7 @@ impl DatabaseConnection {
             statement_log: std::cell::RefCell::new(None),
             connection,
             authorization,
+            policy,
             lookups,
             app_statements: app_statements::AppStatements::default(),
             constants: transaction_constants::TransactionConstants::default(),
@@ -538,7 +543,7 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let _scope = self.authorization.applying();
+        let _scope = self.policy.applying();
         run(self)
     }
 
@@ -625,7 +630,7 @@ impl DatabaseConnection {
     pub(crate) fn migration_targets(&self, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.authorization.mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
+        self.policy.mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
     }
 
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {

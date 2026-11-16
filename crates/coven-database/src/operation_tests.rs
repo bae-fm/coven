@@ -14,7 +14,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 /// The app's SQL can't add to the operation journal.
 #[tokio::test]
 async fn app_statements_cannot_write_the_journal() {
-    crate::authorization::tests::refused_as_internal(
+    crate::app_policy::tests::refused_as_internal(
         "INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES ('x',0,x'','x')",
     )
     .await;

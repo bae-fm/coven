@@ -7,7 +7,7 @@
 //! holds. Running the migrations there once per audience and comparing the
 //! result with the real run's finds every read across audiences.
 
-use crate::authorization::SqlAuthorization;
+use crate::app_policy::CovenPolicy;
 use crate::migration_snapshot::{key_sql, MigrationCapture};
 use crate::schema::{Schema, TableSchema};
 use crate::sql::identifier;
@@ -65,10 +65,10 @@ impl AudienceDatabase {
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
         let before = Schema::read(live, &crate::file_table::registered_columns(live)?)?;
-        let database = DatabaseConnection::open(
+        let database = CovenPolicy::new(tables).open(
             &directory.audience_database_path(),
             false,
-            SqlAuthorization::new(tables, Arc::clone(whole)),
+            whole,
             sqlite,
             functions,
         )?;

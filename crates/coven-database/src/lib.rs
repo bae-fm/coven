@@ -6,6 +6,7 @@
 //! owner. A local write commits its app rows, unsigned record and merge metadata
 //! together on the writer connection.
 
+mod app_policy;
 mod audience_database;
 mod author_judgement;
 mod authorization;
