@@ -11,8 +11,8 @@ fn a_handle_failed_on_a_bug_fails_the_store_with_it() {
     assert!(matches!(&failed, DbError::StoreFailed(found) if *found == bug), "{failed:?}");
 }
 
-/// A checkpoint SQLite failed fails every later call with
-/// `CheckpointFailed` carrying SQLite's cause (§4).
+/// When SQLite fails a checkpoint, the store fails every later call with
+/// `CheckpointFailed`, which carries SQLite's cause (§4).
 #[test]
 fn a_failed_checkpoint_fails_the_store_with_its_cause() {
     let cause = sqlive::Error::Sqlite(sqlive::rusqlite::Error::SqliteFailure(

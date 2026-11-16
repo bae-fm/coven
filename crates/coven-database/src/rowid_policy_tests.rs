@@ -15,9 +15,9 @@ async fn reading_steps(tables: usize) -> i64 {
         writer.batch("BEGIN").unwrap();
         writer.with_profile(|writer| writer.app_batch(&sql)).unwrap();
         writer.batch("ROLLBACK").unwrap();
-        // The connection keeps the read prepared, and SQLite counts its
-        // steps from its preparation: the reads in the batch took what the
-        // count grew by after the first.
+        // The connection keeps the read prepared, and SQLite adds each run's
+        // steps to one count it keeps from the preparation on. So the reads
+        // in the batch took the last profiled count minus the first.
         let counts: Vec<i64> = writer
             .profiled_statements()
             .iter()
@@ -48,7 +48,7 @@ async fn creating_tables_reads_each_ones_rowid_once() {
 async fn every_connection_keeps_its_rowid_guards_under_the_apps_settings() {
     let store = TestStore::new();
     let mut migrations = notes_migrations();
-    // A local table whose declared `rowid` column hides its address.
+    // A local table whose declared `rowid` column hides SQLite's own rowid.
     migrations.push(crate::Migration::addition(
         2,
         "shadowed",

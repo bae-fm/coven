@@ -269,9 +269,9 @@ fn the_store_records_no_table_only_a_write_reads() {
     assert!(!unrecorded.recorded("_coven_creations"));
 }
 
-/// The checkpointer lives as long as the store: a store opened on a runtime
-/// that then shuts down, and kept open and written on another, still has
-/// its WAL checkpointed (§4).
+/// The checkpointer lives as long as the store: when the runtime that opened
+/// a store shuts down, and the store stays open and takes writes on another
+/// runtime, the checkpointer still checkpoints the store's WAL (§4).
 #[test]
 fn a_store_outliving_its_opening_runtime_still_checkpoints() {
     let store = TestStore::new();

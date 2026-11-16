@@ -958,9 +958,10 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
     db.close().await.unwrap();
 }
 
-/// A run a write causes counts as one; one whose result is the same counts
-/// as equal too, and isn't returned. A write outside the query's scope runs
-/// nothing.
+/// Each run that a write causes adds one to the query's runs and to its
+/// writes. A run that finds the same result as the last one also adds one to
+/// its equal results, and the query returns nothing for it. A write outside
+/// the query's scope runs nothing.
 #[tokio::test]
 async fn counts_runs_writes_and_equal_results() {
     let store = TestStore::new();

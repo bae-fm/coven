@@ -363,8 +363,8 @@ async fn rejected_timestamps_cannot_advance_skipped_or_excluded_writes() {
 }
 
 /// Applying another device's write records the values a waiting live
-/// query's scope tests, as a local write does: another release's tracks
-/// wake nothing (§4).
+/// query's scope tests, as a local write does: a write to another release's
+/// tracks wakes no query (§4).
 #[tokio::test]
 async fn another_devices_writes_record_scoped_values() {
     use coven_format::value::Value;
@@ -438,8 +438,8 @@ async fn run_seed(seed: u64) {
         .schema(vec![SyncedTable::new(CAPTURED, RowIdentity::SharedKey)], SCHEMA)
         .await
         .unwrap();
-    // Rows in every table from the start, so joins, chained ones too, find
-    // partners for the writes to change.
+    // The test inserts rows into every table first, so joins, chained ones
+    // too, find matching rows for the writes to change.
     let mut rows = Vec::new();
     for table in TABLES {
         for id in 0..6 {
@@ -457,8 +457,8 @@ async fn run_seed(seed: u64) {
     let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
     let mut live = Vec::new();
     for query in &queries {
-        // Each run counted, so a rerun whose rows equal the last still
-        // answers.
+        // The query returns its run number with its rows, so a rerun whose
+        // rows equal the last ones still returns a new result.
         let runs = Arc::new(AtomicUsize::new(0));
         let sql = query.sql.clone();
         let parameters = query.parameters.clone();
@@ -501,7 +501,7 @@ async fn run_seed(seed: u64) {
                 )
             };
             if fresh != *last {
-                assert!(marked, "a changed result wasn't marked: {}", case());
+                assert!(marked, "a write changed a result but didn't mark its query: {}", case());
             }
             // A marked query sometimes stays marked through the next write,
             // which its judging then skips.

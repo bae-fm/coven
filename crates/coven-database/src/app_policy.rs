@@ -172,7 +172,8 @@ impl CovenPolicy {
 /// The parts of coven's own work its policy judges differently.
 pub(crate) enum CovenScope {
     /// Materialized SQL runs: `coven_applying()` returns true, so the shared
-    /// triggers skip their work, and coven's files table may be written.
+    /// triggers skip their work, and the policy lets coven write its files
+    /// table.
     Applying,
     /// The statements prepared record each table of `main` they change, as
     /// live queries name it; leaving the scope puts the tables here.
@@ -248,10 +249,10 @@ impl Policy for CovenPolicy {
     }
 
     /// Guard the hidden rowids of every table, or of the tables app SQL
-    /// created or dropped since they were last read, or of every table after
-    /// it altered one. Each table is read once as it appears, not again after
-    /// every later statement: a schema of hundreds of tables would read them
-    /// all after each one.
+    /// created or dropped since the policy last read them, or of every table
+    /// after app SQL altered one. The policy reads each table once, when it
+    /// appears, not again after every later statement, which in a schema of
+    /// hundreds of tables would read every table after each statement.
     fn refresh(&self, sql: &StoreSql, extent: Refresh) -> sqlive::rusqlite::Result<()> {
         let only = match extent {
             Refresh::Whole => None,

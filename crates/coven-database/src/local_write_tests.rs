@@ -230,7 +230,8 @@ enum Reading {
 }
 
 /// How long `commits` small writes take, each adding four rows of 4 KB,
-/// while `reading`; and how large the WAL file grew, and ended.
+/// while reads run as `reading` says; the largest size the WAL file reached;
+/// and its size when the writes ended.
 async fn timed_writes(
     commits: usize,
     reading: Reading,

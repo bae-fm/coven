@@ -21,9 +21,11 @@ pub(crate) mod staging;
 pub use staging::StagedDamage;
 pub use staging::{SnapshotStaging, StagedDigest};
 
-/// The input database, `None` once the store closes it. Shared with the
-/// retained bytes read from it, whose reads after the close fail. Closing
-/// takes it as one step, so the lock is taken as it is.
+/// The input database, `None` once the store closes it. The store shares it
+/// with the retained bytes read from it, whose reads after the close fail.
+/// Closing takes the database out in one step, so a panic never leaves it
+/// half closed, and every caller takes the lock even when a panic poisoned
+/// it.
 type InputConnection = Arc<RwLock<Option<Database<CovenPolicy>>>>;
 
 fn read_local<R>(

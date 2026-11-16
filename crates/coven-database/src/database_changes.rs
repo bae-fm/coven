@@ -42,7 +42,7 @@ impl StoreDatabase {
 
     /// Observe, from now, every commit made outside `attempt`: an operation
     /// attempt's own commits are no evidence against the wait it ends in,
-    /// and which rows matter is known only when it ends (§6.7).
+    /// and the attempt learns which rows matter only when it ends (§6.7).
     pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
         self.observer.attempt(attempt)
     }

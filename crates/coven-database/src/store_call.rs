@@ -26,8 +26,8 @@ pub(crate) struct StoreCall<'a> {
 pub(crate) struct TestRecords {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::sync::Mutex<Option<crate::test_utils::WorkCounter>>,
-    /// Where a test hears of each point a write passes, coven's and
-    /// sqlive's (`test_on_write_checkpoint`).
+    /// The callback a test set, which a write calls at each of coven's and
+    /// sqlive's write checkpoints it passes (`test_on_write_checkpoint`).
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoints: std::sync::Arc<std::sync::Mutex<Option<WriteCheckpoints>>>,
     /// Each queued write's record and judgement, also of a refused one, for
@@ -95,8 +95,9 @@ impl TestRecords {
     }
 }
 
-/// What a test hears each point a write passes with. A callback that panics
-/// leaves the slot whole, so it is taken as it is.
+/// The callback a test sets, which a write calls with each write checkpoint
+/// it passes. A callback that panics leaves the slot unchanged, so coven
+/// takes the slot's lock even when that panic poisoned it.
 #[cfg(any(test, feature = "test-utils"))]
 type WriteCheckpoints = Box<dyn Fn(crate::test_utils::WriteCheckpoint) + Send>;
 

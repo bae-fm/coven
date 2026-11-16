@@ -19,7 +19,8 @@ impl StoreDatabase {
         LiveQuery::new(self.subscribe_reconfigurable((), move |(), sql| query(sql)))
     }
 
-    /// Observe a query whose request can be replaced through a shared handle.
+    /// Observe a query whose request the caller can replace through a shared
+    /// handle.
     pub fn subscribe_reconfigurable<Q, F, R, E>(
         &self,
         initial_request: Q,

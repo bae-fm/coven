@@ -680,8 +680,10 @@ async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
     );
 }
 
-/// Notes, which sync, beside device-local tables: one a bulk write fills,
-/// one it writes alone, and an inbox whose trigger would write a note.
+/// A synced notes table beside three device-local tables: `queue`, which a
+/// bulk write fills from the notes, `other`, which a bulk write writes before
+/// the statement the policy refuses, and `inbox`, whose trigger writes a
+/// note.
 const BULK_SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
 CREATE TABLE queue(position INTEGER PRIMARY KEY, track TEXT NOT NULL);
 CREATE TABLE other(id INTEGER PRIMARY KEY);
@@ -698,7 +700,7 @@ async fn bulk(db: &StoreDatabase, sql: &'static str) -> Result<(), DbError> {
 }
 
 /// A bulk write may read a synced table, but writing one fails the whole
-/// write: nothing it did commits, and no write record is queued.
+/// write: nothing it did commits, and coven queues no write record.
 #[tokio::test]
 async fn a_bulk_write_to_a_synced_table_is_refused() {
     let store = TestStore::new();
@@ -722,8 +724,8 @@ async fn a_bulk_write_to_a_synced_table_is_refused() {
     db.close().await.unwrap();
 }
 
-/// A trigger that would write a synced table is refused as SQLite prepares
-/// the statement that fires it, and the bulk write rolls back.
+/// The policy refuses a trigger that would write a synced table as SQLite
+/// prepares the statement that fires it, and the bulk write rolls back.
 #[tokio::test]
 async fn a_bulk_writes_trigger_writing_a_synced_table_is_refused() {
     let store = TestStore::new();

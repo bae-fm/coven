@@ -7,9 +7,10 @@ use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 /// Guard the hidden rowids of the tables `only` names, by schema and
-/// lowercase name, or of every table when `None`. Of those tables, the ones
-/// whose hidden rowid is unambiguous: app SQL can't change it. A failure is
-/// SQLite's error, as the policy's refresh reports it.
+/// lowercase name, or of every table when `None`. Return those of the tables
+/// whose hidden rowid is unambiguous, which the guards keep app SQL from
+/// changing. A failure is SQLite's error, as the policy's refresh reports
+/// it.
 pub(crate) fn protect_rowids(
     sql: &StoreSql,
     only: Option<&BTreeSet<(String, String)>>,

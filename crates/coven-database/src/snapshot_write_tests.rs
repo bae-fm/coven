@@ -889,8 +889,8 @@ const SYNCED_MUSIC: &str =
     "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album TEXT, year INTEGER);
 CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, position INTEGER, title TEXT)";
 
-/// Another device's snapshot, loaded while a joined query is open, is
-/// judged as a write is: by lookups in the loading transaction. A changed
+/// sqlive judges another device's snapshot, loaded while a joined query is
+/// open, as it judges a write: by lookups in the loading transaction. A changed
 /// track of album y leaves the query alone; a changed track of album x, a
 /// track moved onto album x's release, and a release moved onto album x
 /// each run it again, and the run reads what a one-shot read does.

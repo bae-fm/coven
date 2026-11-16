@@ -29,7 +29,8 @@ coven-crypto = { workspace = true, features = ["test-utils"] }
 coven-merge = { workspace = true, features = ["test-utils"] }
 coven-format = { workspace = true, features = ["test-utils"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
-# The statement profiles coven's tests read, on for its own tests only.
+# coven-database's tests read sqlive's statement profiles, so only these
+# tests turn on its profiles feature.
 sqlive = { workspace = true, features = ["test-utils", "profiles"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "fs"] }
