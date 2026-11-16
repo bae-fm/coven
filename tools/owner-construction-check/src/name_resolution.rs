@@ -69,8 +69,9 @@ pub(crate) struct NameResolver {
     /// Each crate's `#[macro_use] extern crate` names, whose exported
     /// definitions are in scope everywhere in it.
     macro_use_crates: BTreeMap<String, Vec<String>>,
-    /// For each scope, by its index, the type path each name looked up there
-    /// reaches, or `None` when it reaches none (`type_in_scope`).
+    /// For each scope, by its index, the type path the resolver resolved each
+    /// name to there, or `None` when it resolved the name to none
+    /// (`type_in_scope`).
     type_lookups: Vec<RefCell<BTreeMap<String, Option<ItemPath>>>>,
 }
 
@@ -196,10 +197,10 @@ impl NameResolver {
             .any(|name| self.type_in_scope(start, name).as_ref() == Some(path))
     }
 
-    /// The type path a name reaches in a scope, looked up once per scope and
-    /// name. A block that neither binds the name nor imports a glob reaches
-    /// what the scope around it reaches, so the blocks of one module share
-    /// that module's lookup.
+    /// The type path the resolver resolves a name to in a scope. The resolver
+    /// looks up each name once per scope. In a block that neither binds the
+    /// name nor imports a glob, it resolves the name as the scope around the
+    /// block does, so the blocks of one module share that module's lookup.
     fn type_in_scope(&self, scope: usize, name: &str) -> Option<ItemPath> {
         if let Some(found) = self.type_lookups[scope].borrow().get(name) {
             return found.clone();
