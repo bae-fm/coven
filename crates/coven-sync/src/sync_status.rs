@@ -575,8 +575,8 @@ pub async fn sync_status(database: &coven_database::Database) -> Result<SyncStat
     database.sync_facts(SyncStatus::computed).await
 }
 
-/// The provider `coven_sync_status.provider` names; a name no provider has
-/// is damage.
+/// The provider that `coven_sync_status.provider` names, or
+/// `DamagedDatabase` when the name matches no provider.
 fn named_provider(name: &str) -> Result<CloudProvider, DbError> {
     name.parse().map_err(|_unknown| DbError::DamagedDatabase)
 }

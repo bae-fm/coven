@@ -47,8 +47,8 @@ fn credentials_compare_by_account_or_key_id() {
     assert!(!MemberAccess::ProviderAccount("a".into()).same_credential(&key("a")));
 }
 
-/// The `account` and `access_key_id` columns read as one access: an
-/// account, a key id, or none when both are NULL; both set is no access.
+/// `from_columns` returns the account, the key id, or `None` when both
+/// columns are NULL, and returns `BothAccesses` when both are set.
 #[test]
 fn the_two_access_columns_read_as_one_access() {
     assert_eq!(MemberAccess::from_columns(None, None), Ok(None));

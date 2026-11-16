@@ -1,13 +1,14 @@
-//! Coven's values that its tables and views hold by name, such as a
-//! member's role in `coven_members.role`: the one name each value has,
-//! which coven writes and reads, and which the app reads from the column or
-//! from the text a JSON array of the column holds (api.md E4).
+//! Coven stores some values in its tables and views as names, such as a
+//! member's role in `coven_members.role`. Each value has one name. Coven
+//! writes and reads that name, and the app reads it from the column or
+//! parses it from a JSON array of the column's values (api.md E4).
 
 /// Text that names none of a type's values.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("`{text}` names no {kind}")]
 pub struct UnknownName {
-    /// What the text was read as, such as "member role".
+    /// The kind of value coven tried to parse the text as, such as
+    /// "member role".
     pub kind: &'static str,
     /// The text.
     pub text: String,
@@ -15,8 +16,9 @@ pub struct UnknownName {
 
 /// Give the enum `$type`, whose values are `Copy`, the name each value has
 /// in coven's columns: `name()` gives it, `FromStr` reads it, and `ToSql`
-/// and `FromSql` bind and read it as SQL text. `$kind` says what text that
-/// names no value was read as, in `UnknownName`.
+/// and `FromSql` bind and read it as SQL text. `$kind` names the kind of
+/// value, such as "member role", that `UnknownName` reports when `FromStr`
+/// finds no value with the text's name.
 #[macro_export]
 macro_rules! column_names {
     ($type:ty, $kind:literal, { $($value:ident => $name:literal),+ $(,)? }) => {

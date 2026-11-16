@@ -679,8 +679,9 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     .unwrap();
 }
 
-/// Change the cause of half the fixture's records and clear others, for
-/// the audit's check that the tables coven's triggers keep follow them
+/// Change the cause of half the fixture's records and delete every
+/// eleventh record, so the audit can check that coven's triggers update the
+/// tables they write from the records
 /// (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(

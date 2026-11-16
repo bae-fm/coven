@@ -19,8 +19,8 @@ pub enum MemberAccess {
     },
 }
 
-/// An account and an S3 key id read together as one member's access, which
-/// holds one or the other.
+/// `MemberAccess::from_columns` returns this error when a row holds both an
+/// account and an S3 key id: a member's access holds only one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("a member's access holds an account or an S3 key id, not both")]
 pub struct BothAccesses;

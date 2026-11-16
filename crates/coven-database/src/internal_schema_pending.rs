@@ -4,11 +4,12 @@
 //! `_coven_pending_source` says what the table holds: each record of
 //! `_coven_pending`, once for each file it names on this device, or once
 //! with no file. Coven's triggers on the records, the uploads, the uploads'
-//! files and the stored files bring each record they change up to date in
-//! the same statement: a row is inserted as its record arises or comes to
-//! name its file, changed as what its record says changes, and deleted as
-//! its record ends or stops naming its file. A row whose record and file
-//! stayed the same is left alone.
+//! files and the stored files update the table in the statement that
+//! changes one of those tables. They insert a row when coven saves a record
+//! or when the record comes to name a file, update the row when the record's
+//! columns change, and delete the row when coven clears the record or when
+//! the record stops naming the file. They don't write a row whose record and
+//! file stayed the same.
 
 /// The table of pending records, which the app's triggers may follow.
 pub(crate) const PENDING: &str = "coven_pending";
@@ -99,10 +100,11 @@ pub(super) const TABLE: &str = "CREATE TABLE coven_pending (
 /// The view lists every record in the order the records arose; a record
 /// about stored bytes also names each file over them on this device: the
 /// files an upload of them switches, or, while it switches none, the stored
-/// files, and a record about a pin coven keeps names its file. A switched
-/// file is stored before its upload stops listing it, so the record names
-/// it throughout its switch. Its cause is the text of the error behind
-/// it, when this run met that error and no app call received it. A record
+/// files, and a record about a pin coven keeps names its file. Coven stores a
+/// switched file before its upload stops listing it, so the record names
+/// the file throughout its switch. A record's `cause` is the text of the
+/// error that made coven save the record, when this process got that error
+/// and no app call returned it. A record
 /// about a move names it in `move`, the id `coven_uploads.move` holds.
 /// `operation` is the journal row a record describes. `subject_kind` and
 /// `reason_kind` name the variants of the record's subject and reason in

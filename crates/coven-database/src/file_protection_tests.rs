@@ -11,9 +11,10 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     .unwrap();
 }
 
-/// Move some of the fixture's stored files to other bytes and delete
-/// others, for the audit's check that the tables coven's triggers keep
-/// follow them (`internal_schema_scan_reasons_tests.rs`).
+/// Set the object of some of the fixture's stored files to other bytes and
+/// delete others, so the audit can check that coven's triggers update the
+/// tables they write from the stored files
+/// (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "UPDATE _coven_stored_files SET object=zeroblob(16) WHERE CAST(substr(file,6) AS INTEGER)%5=0;

@@ -3714,10 +3714,11 @@ let moved = handle
 - A column that holds one of coven's values by name, `coven_members.role`,
   `coven_devices.state` or `coven_sync_status.provider`, reads as its type,
   and its `name()` gives the text the column holds. The type's `FromStr`
-  reads the same text, as a JSON array of the column holds it: Ben's music
-  app gathers each person's device states with `json_group_array(d.state)`
-  and parses each string, with no spelling of its own to fall behind
-  coven's. Text that names no value fails with `UnknownName`.
+  parses the same text when it comes from a JSON array of the column's
+  values: Ben's music app gathers each person's device states with
+  `json_group_array(d.state)` and parses each string, so the app keeps no
+  copy of coven's names that could differ from them. Text that names no
+  value fails with `UnknownName`.
   `MemberAccess::from_columns` reads `account` and `access_key_id` together,
   from the columns or from a JSON object of them.
 - The file views and tables name files, not rows, by the file's id as
@@ -7933,8 +7934,8 @@ pub enum MemberAccess {
 impl MemberAccess {
     /// The access the `account` and `access_key_id` columns of a
     /// `coven_members` row hold, from the columns or from a JSON object of
-    /// them (E4): `None` when both are NULL. Both set fails with
-    /// `BothAccesses`.
+    /// them (E4): `None` when both are NULL. When both columns are set, it
+    /// fails with `BothAccesses`.
     pub fn from_columns(
         account: Option<String>,
         access_key_id: Option<String>,

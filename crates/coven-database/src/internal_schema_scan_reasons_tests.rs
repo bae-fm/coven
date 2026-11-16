@@ -44,9 +44,10 @@ mod fixture {
         ] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new())).unwrap();
         }
-        // The pending records' triggers run these as the fixture fills
-        // them, whose records name no subject or reason: coven's own give
-        // NULL for each, as these do.
+        // The pending records' triggers call these when the fixture inserts
+        // its records. Those records name no subject or reason, so coven's
+        // own `_coven_variant_kind` and `_coven_json_bytes` return NULL for
+        // them, and these stand-ins return NULL too.
         for name in ["_coven_variant_kind", "_coven_json_bytes"] {
             db.create_scalar_function(name, 1, flags, |_| Ok(rusqlite::types::Value::Null))
                 .unwrap();
@@ -771,9 +772,10 @@ fn the_moves_table_holds_what_coven_keeps() {
     }
 }
 
-/// Coven's triggers keep `coven_pending` what `_coven_pending_source` says,
-/// however the tables behind it were filled, and as uploads, their files,
-/// stored files and records change and go.
+/// Coven's triggers keep `coven_pending` equal to `_coven_pending_source`
+/// after the fixture fills the tables behind it, and after the domains'
+/// test functions update and delete uploads, their files, stored files and
+/// records.
 #[test]
 fn the_pending_table_holds_what_its_source_says() {
     let db = fixture::populated();
@@ -787,7 +789,7 @@ fn the_pending_table_holds_what_its_source_says() {
                     "SELECT count(*) FROM (SELECT * FROM {from} EXCEPT SELECT * FROM {to})"
                 )),
                 0,
-                "{from} beyond {to}"
+                "{from} has rows that {to} lacks"
             );
         }
     };

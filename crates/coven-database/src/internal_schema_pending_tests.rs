@@ -148,12 +148,12 @@ fn step(
     (change.to_owned(), position, file, cause.map(str::to_owned), of)
 }
 
-/// A local trigger on `coven_pending` follows each record as it arises,
-/// each change to what it says, each file it comes to name and each one it
-/// stops naming, and the record's end, each in the statement that changes
-/// the record or its files. A change that leaves a row as it was, such as
-/// an upload switching its file to the bytes it stored, reaches no trigger
-/// (§4, §9.4).
+/// A local trigger on `coven_pending` runs when coven saves a record, when
+/// the record's columns change, when the record comes to name a file or
+/// stops naming one, and when coven clears the record, each in the statement
+/// that changes the record or its files. A change that leaves a row as it
+/// was, such as an upload switching its file to the bytes it stored, fires
+/// no trigger (§4, §9.4).
 #[tokio::test]
 async fn a_local_trigger_follows_each_record_coven_writes_changes_and_ends() {
     let store = TestStore::new();
@@ -234,7 +234,7 @@ async fn coven_refuses_a_pending_trigger_that_could_break_its_rules() {
             .open()
             .await
             .err()
-            .expect("the trigger is refused");
+            .expect("coven refuses the trigger");
         let error = crate::tests::database_error(error);
         assert_eq!(error.to_string(), expected.to_string(), "{trigger}");
     }

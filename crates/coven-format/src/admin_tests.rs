@@ -496,8 +496,8 @@ fn an_admission_names_its_person() {
     assert!(Object::Admin(admission).encode().is_err());
 }
 
-/// A role binds and reads as the name `coven_members.role` holds, and
-/// parses from the same text, as a JSON array of the column holds it.
+/// A role binds to SQL and reads back as the name `coven_members.role`
+/// holds, and parses from that same name.
 #[test]
 fn a_role_reads_as_the_name_its_column_holds() {
     let db = rusqlite::Connection::open_in_memory().unwrap();

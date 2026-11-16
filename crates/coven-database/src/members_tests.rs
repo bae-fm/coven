@@ -400,10 +400,10 @@ async fn the_apps_sql_reads_each_members_keys_and_access() {
     db.close().await.unwrap();
 }
 
-/// The app reads `coven_members.role` as `MemberRole`, its `account` and
-/// `access_key_id` together as `MemberAccess`, and `coven_devices.state` as
-/// `DeviceState`, from the columns and from the text a JSON array of the
-/// column holds, as `members()` gives the members who remain (api.md E4).
+/// The app reads each remaining member's `role` as `MemberRole` and its
+/// `account` and `access_key_id` together as `MemberAccess`, and parses each
+/// of its devices' states, which a JSON array of `coven_devices.state`
+/// carries, as `DeviceState`. It gets what `members()` gives (api.md E4).
 #[tokio::test]
 async fn the_apps_sql_reads_roles_access_and_states_as_covens_types() {
     type Listed = (MemberId, MemberRole, Option<coven_format::MemberAccess>, Vec<DeviceState>);

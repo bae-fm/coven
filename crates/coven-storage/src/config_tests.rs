@@ -1,9 +1,8 @@
 use super::*;
 use crate::*;
 
-/// A provider binds and reads as the name `coven_sync_status.provider`
-/// holds, its own, and parses from the same text, as a JSON array of the
-/// column holds it.
+/// A provider binds to SQL and reads back as its own name, the text
+/// `coven_sync_status.provider` holds, and parses from that same name.
 #[test]
 fn a_provider_reads_as_the_name_its_column_holds() {
     let db = rusqlite::Connection::open_in_memory().unwrap();

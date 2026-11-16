@@ -564,7 +564,7 @@ failed album's changed track from the move's pending record. A local trigger on
 `coven_pending` keeps the same column from that record, so the sort and the
 row read one fact. Coven's triggers on its records, the uploads, their files
 and the stored files change the table's rows in the statement that changes
-what they show: a record's rows appear as it is recorded, change as what it
+what they show: a record's rows appear as coven records it, change as what it
 says changes, and go as it ends, and a file's row appears as the record comes
 to name the file and goes as it stops naming it.
 
