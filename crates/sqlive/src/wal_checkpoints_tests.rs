@@ -143,7 +143,9 @@ async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writ
                     clippy::let_underscore_must_use,
                     reason = "a test that stopped listening lets the checkpoint go on"
                 )]
-                let _ = copied.send(()).map(|()| going.recv());
+                let _ = copied.send(()).map(|()| {
+                    going.recv_timeout(HANG_GUARD).expect("the test lets the copy go on")
+                });
             }
         })
     });
@@ -492,10 +494,12 @@ struct Holder {
     finished: bool,
     /// The test lets its busy handler give up.
     released: bool,
+    /// Its busy handler gave up without the test's release.
+    abandoned: bool,
 }
 
 static HOLDER: Mutex<Holder> =
-    Mutex::new(Holder { holding: false, finished: false, released: false });
+    Mutex::new(Holder { holding: false, finished: false, released: false, abandoned: false });
 static HOLDER_MOVED: Condvar = Condvar::new();
 
 /// Change the holder's state, and wake every thread that waits on it.
@@ -504,10 +508,16 @@ fn move_holder(change: impl FnOnce(&mut Holder)) {
     HOLDER_MOVED.notify_all();
 }
 
-/// A busy handler that waits until the test releases it, then gives up.
+/// A busy handler that waits until the test releases it, then gives up. One
+/// the test doesn't release within the hang guard gives up anyway, and marks
+/// itself abandoned for the test to fail on: SQLite's busy handler can't
+/// fail the test itself.
 fn wait_for_release(_tries: i32) -> bool {
     move_holder(|holder| holder.holding = true);
-    drop(HOLDER_MOVED.wait_while(HOLDER.lock().unwrap(), |holder| !holder.released).unwrap());
+    let (mut holder, waited) = HOLDER_MOVED
+        .wait_timeout_while(HOLDER.lock().unwrap(), HANG_GUARD, |holder| !holder.released)
+        .unwrap();
+    holder.abandoned |= waited.timed_out();
     false
 }
 
@@ -529,10 +539,16 @@ async fn hold_the_checkpoint_lock(db: &TestDatabase) -> std::thread::JoinHandle<
             busy
         });
         let holding = tokio::task::spawn_blocking(|| {
-            HOLDER_MOVED
-                .wait_while(HOLDER.lock().unwrap(), |holder| !holder.holding && !holder.finished)
-                .unwrap()
-                .holding
+            let (holder, waited) = HOLDER_MOVED
+                .wait_timeout_while(HOLDER.lock().unwrap(), HANG_GUARD, |holder| {
+                    !holder.holding && !holder.finished
+                })
+                .unwrap();
+            assert!(
+                !waited.timed_out(),
+                "the other connection's checkpoint neither waits nor ends"
+            );
+            holder.holding
         })
         .await
         .unwrap();
@@ -561,7 +577,9 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     for _ in 0..40 {
         add(&db);
     }
-    let holder = hold_the_checkpoint_lock(&db).await;
+    let holder = tokio::time::timeout(HANG_GUARD, hold_the_checkpoint_lock(&db))
+        .await
+        .expect("another connection takes the checkpoint lock");
     // Once the checkpointer's wake in progress, if any, ends, every later
     // checkpoint finds the lock held.
     db.with_database(|database| database.each_connection(|_connection| ()));
@@ -577,6 +595,7 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
 
     move_holder(|holder| holder.released = true);
     assert_eq!(holder.join().unwrap(), 1, "the other checkpoint gave up waiting for the reader");
+    assert!(!HOLDER.lock().unwrap().abandoned, "the other checkpoint gave up before its release");
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
     let restarted = checkpointed(&db, &mut restarts).await;
