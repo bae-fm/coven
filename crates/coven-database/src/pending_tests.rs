@@ -292,20 +292,24 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let entered = std::sync::Mutex::new(Some(entered));
     let (release, released) = std::sync::mpsc::channel();
     let released = std::sync::Mutex::new(released);
-    let mut live = db.subscribe(move |sql| {
+    let live = db.subscribe(move |sql| {
         let records = sql.pending::<Record>()?;
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
         released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         Ok(records)
     });
+    // The query's run holds a thread of tokio's blocking pool until the test
+    // releases it, so the test's own thread stays free to record the update.
+    let mut held = tokio::spawn(crate::next_result(live));
     tokio::select! {
-        result = live.next_inline() => panic!("held query returned: {result:?}"),
+        result = &mut held => panic!("held query returned: {:?}", result.unwrap().1),
         result = entry => result.unwrap(),
     }
     let failed = db.record_pending(pending).await;
     release.send(()).unwrap();
     let original = cause(failed.unwrap_err());
-    let observed = cause(live.next_inline().await.expect("the live query answers").unwrap_err());
+    let (_, answer) = held.await.unwrap();
+    let observed = cause(answer.expect("the held run answers").unwrap_err());
     assert!(std::sync::Arc::ptr_eq(&original, &observed));
     db.close().await.unwrap();
 }
