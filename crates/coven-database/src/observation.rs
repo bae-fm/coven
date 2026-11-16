@@ -4,6 +4,7 @@
 use crate::row_scope::{RowImage, RowScope};
 use crate::scope_lookup::{Judging, Lookups};
 use crate::sql_value::SqlValue;
+use crate::store_failure::StoreFailure;
 use crate::{CommitScope, DbError};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{Bug, BugSinkRef};
@@ -78,11 +79,25 @@ fn inserted(change: &RowChange) -> bool {
     change.column.is_empty() && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
 }
 
+/// A failure the host reported, after which every call fails with it.
+#[derive(Clone, Debug)]
+pub(crate) struct HostFailure(Arc<dyn std::error::Error + Send + Sync>);
+
+impl HostFailure {
+    pub(crate) fn new(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Arc::new(error))
+    }
+
+    pub(crate) fn error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        &*self.0
+    }
+}
+
 /// Why this handle refuses every call until the store is reopened.
 #[derive(Clone)]
 pub(crate) enum HandleFailure {
-    /// Saving pending state or the sync status failed, with this cause.
-    State(Arc<DbError>),
+    /// A failure the host reported.
+    Host(HostFailure),
     /// Rolling back a failed transaction failed, so the writer may still hold
     /// its uncommitted changes.
     Rollback,
@@ -93,8 +108,6 @@ pub(crate) enum HandleFailure {
     /// cause, other than on a busy or locked database, and keeping them
     /// stopped.
     Statistics(Arc<DbError>),
-    /// The handle's clock could not wait for an invite's expiry (§13.2).
-    WallTimer(coven_foundation::clock::WallTimerError),
     /// A bug, a panic or a fault a drop found, may have left this store's
     /// state wrong (E15). It reached its one reporter as it happened, so
     /// the calls after it repeat it as `DbError::StoreFailed`.
@@ -104,11 +117,10 @@ pub(crate) enum HandleFailure {
 impl HandleFailure {
     fn error(&self) -> DbError {
         match self {
-            Self::State(cause) => DbError::StatePersistence(cause.clone()),
+            Self::Host(failure) => StoreFailure::of(failure).error(),
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
             Self::Statistics(cause) => DbError::StatisticsFailed(cause.clone()),
-            Self::WallTimer(cause) => DbError::WallTimer(cause.clone()),
             Self::Bug(bug) => DbError::StoreFailed(bug.clone()),
         }
     }

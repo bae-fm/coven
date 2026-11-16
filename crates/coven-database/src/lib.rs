@@ -272,6 +272,7 @@ mod reload_gate;
 mod sequence;
 mod sequence_apply;
 mod snapshot_view;
+mod store_failure;
 mod store_state;
 mod store_state_tables;
 mod write_metadata;
