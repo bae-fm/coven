@@ -33,7 +33,7 @@ pub struct ConnectionWork {
 pub struct ConnectionWorkCounter(Arc<Mutex<ConnectionWork>>);
 
 impl ConnectionWorkCounter {
-    /// A counter no connection has counted on yet.
+    /// A counter that no connection has counted into yet.
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,8 +49,8 @@ impl ConnectionWorkCounter {
     }
 }
 
-/// The statements the reads of the connections it was given to ran, in
-/// order, from then on. Clones share one log.
+/// The statements that reads ran on the connections this log was given to,
+/// in order, from when each connection got it. Clones share one log.
 #[derive(Clone, Default)]
 pub struct StatementLog(Arc<Mutex<Vec<String>>>);
 
@@ -94,7 +94,7 @@ pub(crate) type CommitPointObserver = Box<dyn Fn(CommitPoint) + Send>;
 /// One measured number, as a line `scripts/perf.sh` reads:
 /// `COST metric=<name> value=<n> unit=<ms|ratio|count>`. Lower is better in
 /// every unit. A character in `metric` outside letters, digits and `_./-`
-/// becomes `_`, so a label can be passed as it reads.
+/// becomes `_`, so a caller can pass a label unchanged.
 pub fn report_cost(metric: &str, value: f64, unit: &str) {
     let metric: String = metric
         .chars()

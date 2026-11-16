@@ -1,5 +1,5 @@
-//! A connection to a database, the host's SQL capability: SQLite's
-//! connection is never returned or borrowed out.
+//! A connection to a database, the host's SQL capability. `HostSql` never
+//! returns or lends out SQLite's connection.
 
 #[path = "app_statements.rs"]
 mod app_statements;
@@ -164,8 +164,9 @@ impl<P: Policy> HostSql<P> {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
         };
-        // URI interpretation is deliberately absent: this is a StoreDir file,
-        // never a caller-selected SQLite URI or in-memory database.
+        // The flags leave out SQLite's URI reading: the path names a file in
+        // the host's directory, never a SQLite URI or an in-memory database
+        // that a caller picked.
         crate::sqlite_temporary::opening()?;
         let path = crate::sqlite_path::sqlite_path(path)?;
         let mut connection =
@@ -403,10 +404,10 @@ impl<P: Policy> HostSql<P> {
         Ok(self.authorization.app_result(prepared)?)
     }
 
-    /// Run the host's own SQL on the connection's cached statement, parsed
-    /// once per connection. The authorizer records reads only while a
-    /// statement is prepared, so while it records, the statement is prepared
-    /// afresh.
+    /// Run the host's own SQL on the connection's cached statement, which
+    /// SQLite parses once per connection. The authorizer records reads only
+    /// while SQLite prepares a statement, so while it records, this function
+    /// prepares the statement again instead of taking the cached one.
     fn with_statement<T, E: From<PolicyError<P>>>(
         &self,
         sql: &str,
@@ -483,8 +484,8 @@ impl<P: Policy> HostSql<P> {
             };
             let text = statement.expanded_sql().expect("prepared SQL");
             let mut step = || {
-                // Step every row so later execution errors cannot be
-                // discarded.
+                // Step every row, so SQLite reports an error that a later
+                // row raises.
                 let result = self.counting_steps(&mut statement, StepsOf::AppWrite, |statement| {
                     let mut rows = statement.raw_query();
                     let _scope = self.authorization.step();
@@ -503,8 +504,9 @@ impl<P: Policy> HostSql<P> {
         self.connection.prepare_cached("PRAGMA main.schema_version")?.query_row([], |r| r.get(0))
     }
 
-    /// Run one migration step inside the open migration transaction. Which
-    /// tables its statements write is decided as they are prepared (§18.1).
+    /// Run one migration step inside the open migration transaction. The
+    /// policy records which tables its statements write as SQLite prepares
+    /// them (§18.1).
     pub fn migrating<T, E: From<PolicyError<P>>>(
         &self,
         run: impl FnOnce() -> Result<T, E>,
@@ -637,7 +639,7 @@ impl<P: Policy> HostSql<P> {
         handle: crate::Handle<P::Failure>,
         recorded: BTreeSet<String>,
     ) {
-        assert!(self.observation.is_none(), "commit observation installed once");
+        assert!(self.observation.is_none(), "a writer starts observing its commits only once");
         self.serve(handle);
         self.observation = Some(WriterObservation { recorded: Arc::new(recorded) });
     }
@@ -692,10 +694,11 @@ impl<P: Policy> HostSql<P> {
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         let mut transaction = WriteTransaction::begin(self, streaming)?;
-        // A streamed transaction is observed by its operations; any other,
-        // on a serving writer, by a session. The write-record session ends
-        // before materialization; this one covers app SQL, merge metadata,
-        // materialization and local tables.
+        // StreamCapture records a streamed transaction's operations; on a
+        // serving writer, a session records any other transaction's changes.
+        // The write-record session ends before materialization, but this
+        // session covers app SQL, merge metadata, materialization and local
+        // tables.
         let observing = if streaming {
             stream_capture::StreamCapture::begin(&mut transaction).map(Observing::Stream)
         } else if transaction.within(|database| database.observation.is_some()) {
@@ -743,7 +746,8 @@ impl<P: Policy> HostSql<P> {
     pub fn leave_statement_open(&self) {
         let mut statement = std::ptr::null_mut();
         // SAFETY: the handle is this live connection's and the text is a
-        // NUL-terminated literal. The statement is never used or finalized.
+        // NUL-terminated literal. This function never uses or finalizes the
+        // statement.
         let prepared = unsafe {
             rusqlite::ffi::sqlite3_prepare_v2(
                 self.connection.handle(),
@@ -774,7 +778,8 @@ impl<P: Policy> HostSql<P> {
     }
 }
 
-/// How a write transaction's changes are observed for live queries.
+/// What records a write transaction's changes for live queries: the
+/// stream's capture, a session, or nothing.
 enum Observing {
     Stream(stream_capture::StreamCapture),
     Session(transaction_capture::SupplementalChanges),

@@ -119,9 +119,10 @@ impl ReadCapture {
     }
 
     /// Record `frame`'s tables, each read through the scope `scopes` gives
-    /// it, or whole: a table read through a view or CTE the statement didn't
-    /// read as a source of its own, as a view read whole, can be read in
-    /// any row.
+    /// it, or whole. A table read through a view or CTE that the statement
+    /// didn't read as a source of its own, such as a view read whole, may
+    /// give the statement any of its rows, so `finish` records it as read in
+    /// every row.
     fn finish(&mut self, frame: ReadFrame, scopes: &Scopes) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (table, column) in frame.columns {

@@ -123,10 +123,10 @@ impl<P: Policy> Upkeep for Checkpoints<P> {
 impl<P: Policy> Checkpoints<P> {
     /// One wake's checkpoint, on the checkpointer's connection, once the WAL
     /// holds `threshold` frames not yet in the database file. A checkpoint
-    /// the readers held up leaves the WAL copied but not started over; it is
-    /// tried again once the WAL grows by the threshold. A database whose open
-    /// failed may let its writer go before its checkpointer stops; there is
-    /// then nothing to checkpoint.
+    /// the readers held up leaves the WAL copied but not started over; the
+    /// checkpointer tries again once the WAL grows by the threshold. A
+    /// database whose open failed may let its writer go before its
+    /// checkpointer stops; there is then nothing to checkpoint.
     fn checkpoint(&self) -> Result<(), PolicyError<P>> {
         let connection = lock_unpoisoned(&self.connection);
         let Some(writer) = self.writer.upgrade() else {
@@ -225,7 +225,8 @@ fn uncopied_frames<P: Policy>(connection: &HostSql<P>) -> Result<Option<u32>, Po
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<P: Policy> WalCheckpointer<P> {
-    /// Visit the checkpointer's connection, after any checkpoint in progress.
+    /// Pass the checkpointer's connection to `visit`, after any checkpoint in
+    /// progress.
     pub(crate) fn with_connection(&self, visit: impl FnOnce(&HostSql<P>)) {
         visit(&lock_unpoisoned(&self.upkeep().connection));
     }
@@ -245,8 +246,9 @@ impl<P: Policy> WalCheckpointer<P> {
         *lock_unpoisoned(&self.upkeep().copied) = Some(Box::new(step));
     }
 
-    /// What each checkpoint's last step does from now on, told while the
-    /// checkpoint still holds the writer.
+    /// Return a receiver that gets what each later checkpoint's last step
+    /// does. The checkpointer sends it while the checkpoint still holds the
+    /// writer.
     pub(crate) fn report_restarts(&self) -> tokio::sync::mpsc::UnboundedReceiver<WalCheckpoint> {
         let (restarts, reported) = tokio::sync::mpsc::unbounded_channel();
         *lock_unpoisoned(&self.upkeep().restarts) = Some(restarts);

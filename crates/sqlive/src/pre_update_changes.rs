@@ -120,9 +120,11 @@ pub(crate) struct PreUpdateChanges {
     /// Shadow tables changed: each change is its virtual table's too, in
     /// every column.
     shadows: BTreeSet<usize>,
-    /// Tables the transaction's shapes don't hold, lowercase: made since
-    /// they were read, as only a migration makes a table the host records,
-    /// so these are device-local, and change whole.
+    /// Tables the transaction's shapes don't hold, lowercase. These tables
+    /// appeared after the transaction read its shapes, and only a migration
+    /// makes a table whose changes the host records, so these tables are
+    /// device-local, and sqlive counts any change to them as a change to the
+    /// whole table.
     unshaped: BTreeSet<String>,
     /// Tables a row was inserted into without an image of it: a read of
     /// insertions alone still learns of it.

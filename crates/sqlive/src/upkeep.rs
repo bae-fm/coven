@@ -4,18 +4,19 @@
 //! (wal_checkpoints.rs), and gathering the query planner's statistics
 //! (planner_statistics.rs).
 //!
-//! The thread starts as the database opens and is stopped and joined as it
-//! closes, so it lives exactly as long as the database: no runtime shutting
-//! down while the database stays open can stop it.
+//! The thread starts as the database opens, and the database stops and joins
+//! it as the database closes, so the thread lives exactly as long as the
+//! database: no runtime shutting down while the database stays open can stop
+//! it.
 //!
 //! A run that finds the database busy or locked waited out its busy
 //! timeout; the next wake tries again. Any other failure stops the upkeep
 //! for good, so the thread fails the handle with it: every later call and
-//! live query reports it until the database is reopened, rather than the
-//! database staying open without its upkeep. A panic in a run is a bug in
-//! sqlive: it goes to the handle's bug sink and fails the handle the same
-//! way, as `crate::Error::HandleFailed` carrying it, so the thread never ends
-//! in a way no one hears of.
+//! live query reports it until the host opens the database again, rather
+//! than the database staying open without its upkeep. A panic in a run is a
+//! bug in sqlive: the thread hands it to the handle's bug sink and fails the
+//! handle the same way, as `crate::Error::HandleFailed` carrying it, so every
+//! way the thread ends reaches the handle or the bug sink.
 
 use crate::authorization::{Policy, PolicyError};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,17 +53,18 @@ impl Wake {
 }
 
 struct Shared<U> {
-    /// Set as the database closes, before the thread is woken to see it.
+    /// `halt` sets this as the database closes, then wakes the thread, which
+    /// reads it and stops.
     closing: AtomicBool,
     upkeep: U,
 }
 
-/// A thread of the database's own running `U` at each wake. It stops as the
-/// database closes, before the writer.
+/// One of the database's own threads, which runs `U` at each wake. The thread
+/// stops as the database closes, before the writer.
 pub(crate) struct UpkeepThread<U: Upkeep> {
     shared: Arc<Shared<U>>,
-    /// Taken as the thread stops: when the database closes, or as it drops
-    /// when the open failed.
+    /// `halt` takes this as the thread stops: when the database closes, or
+    /// when the `UpkeepThread` drops because the open failed.
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -143,8 +145,8 @@ struct Serving<U: Upkeep> {
 impl<U: Upkeep> Serving<U> {
     /// Run at each wake until the database closes or a run fails. A panic is
     /// a bug in sqlive: rather than leave the database open without its
-    /// upkeep, the handle fails with it, and the handle's bug sink hears it
-    /// (E15).
+    /// upkeep, the thread fails the handle with it and hands it to the
+    /// handle's bug sink (E15).
     fn serve(self) {
         let served = caught::caught_sync(U::THREAD, || loop {
             std::thread::park();

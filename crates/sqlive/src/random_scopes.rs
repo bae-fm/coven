@@ -1,8 +1,8 @@
 //! Random live queries and writes over a schema whose joins, views,
 //! subqueries and conditions sqlive narrows by, so a test can check that a
-//! live query runs again whenever a commit changes what it returns: sqlive's
-//! own over plain tables, and a host's over its own writes. A seed
-//! reproduces a case.
+//! live query runs again whenever a commit changes what it returns. sqlive's
+//! own test runs them over plain tables, and a host's test runs them over the
+//! host's own writes. A seed reproduces a case.
 
 use crate::SqlValue;
 

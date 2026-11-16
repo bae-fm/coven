@@ -24,8 +24,9 @@ pub struct ProfiledStatement {
 
 impl<P: Policy> HostSql<P> {
     /// Trace this connection's statements until the matching
-    /// [`Self::end_profile`]. A profile inside another, as a migration's
-    /// inside the open's, leaves the outer one tracing.
+    /// [`Self::end_profile`]. A profile inside another, such as a migration's
+    /// profile inside the one that opening the database starts, leaves the
+    /// outer one tracing.
     pub(super) fn start_profile(&mut self) {
         let open = self.profiles.get();
         self.profiles.set(open + 1);

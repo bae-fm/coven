@@ -212,10 +212,10 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
     db.close();
 }
 
-/// The metadata reads of a write of two updates and one of six: each update
-/// and the trigger it fires read none, so the two are the same, whatever the
-/// commit reads once. A first write reads the tables' shapes, once for the
-/// schema.
+/// A write of two updates and a write of six read the same metadata: no
+/// update or trigger it fires reads any, and the commit reads the same
+/// metadata once whatever the write did. The first write reads the tables'
+/// shapes, once for the schema.
 #[test]
 fn app_writes_query_no_metadata_for_each_statement_or_trigger() {
     let db = TestDatabase::open("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(new.value); END");
@@ -337,8 +337,8 @@ fn a_profile_inside_another_leaves_the_outer_tracing() {
     assert!(database.close().is_empty());
 }
 
-/// A profile ends however its run ends, an error or a panic included: what
-/// the connection runs afterwards is never traced.
+/// A profile ends however its run ends, an error or a panic included, so the
+/// profile traces nothing the connection runs afterwards.
 #[test]
 fn a_profile_ends_on_every_path_out_of_its_run() {
     let db = TestDatabase::open("");

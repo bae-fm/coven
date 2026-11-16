@@ -93,8 +93,8 @@ pub(crate) struct Sources {
 pub(crate) struct Source {
     /// The table whose rows this source reads, lowercase; `None` for a FROM
     /// item sqlive reads only for its values, as a table function, a view
-    /// read whole, or a subquery, CTE or view whose own tables are read as
-    /// sources of their own.
+    /// read whole, or a subquery, CTE or view whose own tables sqlive reads
+    /// as sources of their own.
     pub(crate) table: Option<String>,
     /// The FROM item as sqlive's own SQL names it, with its qualifier;
     /// `None` for a table function of another source's columns, or a

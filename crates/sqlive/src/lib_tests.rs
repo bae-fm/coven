@@ -42,7 +42,7 @@ impl CarriesBug for QueryError {
 }
 
 /// The app's reads on one connection, as a live query or a one-shot read
-/// runs them: each statement's reads are recorded.
+/// runs them: the authorizer records each statement's reads.
 #[derive(Clone, Copy)]
 pub(crate) struct TestRead<'a>(pub(crate) &'a HostSql<NoPolicy>);
 
@@ -149,7 +149,8 @@ impl TestDatabase {
     /// The database in `directory`, opened with `options`, whose writer then
     /// ran `schema`.
     fn open_in(directory: tempfile::TempDir, schema: &str, options: TestOptions) -> Self {
-        // The directory as SQLite names it, with no link on the way.
+        // The directory as SQLite names it, with every symbolic link in its
+        // path resolved.
         let path =
             directory.path().canonicalize().expect("the directory exists").join("test.sqlite");
         let bugs = Arc::<HeardBugs>::default();
@@ -270,7 +271,7 @@ impl TestDatabase {
         LiveQuery::new(self.subscribe_reconfigurable((), move |(), reader| query(reader)))
     }
 
-    /// A live query whose request can be replaced.
+    /// A live query whose request the test can replace.
     pub(crate) fn subscribe_reconfigurable<Q, R, F>(
         &self,
         request: Q,

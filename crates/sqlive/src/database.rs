@@ -27,11 +27,11 @@ pub struct Options<'a, P: Policy> {
     pub settings: crate::SqliteSettings,
     /// The read-only connections beside the writer.
     pub readers: NonZeroUsize,
-    /// Run `prepare` on the first reader, and open the writer only once it
-    /// passed, leaving the journal as it is: a database whose checks must
-    /// not write, whose writer would create the file or the schema it
-    /// checks. Otherwise the writer switches the database to WAL and runs
-    /// `prepare`.
+    /// Run `prepare` on the first reader, and open the writer only once
+    /// `prepare` passes, leaving the journal mode as it is. Set this for a
+    /// database whose checks must not write, because its writer would create
+    /// the file or the schema the checks look for. Otherwise the writer
+    /// switches the database to WAL and runs `prepare`.
     pub prepare_on_reader: bool,
     /// The views and tables a live query reads whole.
     pub whole_views: Arc<crate::WholeViews>,
@@ -40,8 +40,9 @@ pub struct Options<'a, P: Policy> {
     /// What each connection registers, given that connection's policy,
     /// before any SQL runs on it.
     pub setup: &'a dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
-    /// Capture the writer's commits for the handle's live queries, keeping
-    /// a write's operations on these tables, lowercase, whole.
+    /// Capture the writer's commits for the handle's live queries, and record
+    /// each operation of a write on these tables, named in lowercase, with
+    /// every column's value before and after it.
     pub capture: Option<BTreeSet<String>>,
     /// Checkpoint the WAL on a thread of its own once it holds this many
     /// frames not yet in the database file (§4).
@@ -190,10 +191,11 @@ impl<P: Policy> Database<P> {
     }
 }
 
-/// Run `run` on `connection`, one of a database's connections. A panic
-/// while one is held leaves it whole: its open transaction rolls back as the
-/// panic unwinds (`write_transaction.rs`), and a failed rollback fails the
-/// handle. So the lock is taken as it is.
+/// Run `run` on `connection`, one of a database's connections. A panic while
+/// a caller holds the connection leaves it usable: its open transaction rolls
+/// back as the panic unwinds (`write_transaction.rs`), and a failed rollback
+/// fails the handle. So `with_locked` takes the lock even when a panic
+/// poisoned it.
 pub(crate) fn with_locked<T, R>(connection: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
     run(&mut lock_unpoisoned(connection))
 }

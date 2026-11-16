@@ -1,7 +1,7 @@
 //! A handle: the failure state and the subscriptions that several databases
-//! share. Per-subscription dependencies: commits during a read are retained
-//! until its dependencies are known; idle subscriptions retain only a changed
-//! bit.
+//! share. A subscription keeps the commits made during a run of its read
+//! until the run ends and its reads are known; an idle subscription keeps
+//! only whether something changed.
 
 use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
@@ -34,9 +34,9 @@ impl UnrecordedTables {
 }
 
 /// The host's failure that a handle failed with, or a bug. A subscription
-/// holds it too, and its type names no host failure type, so the host's
-/// failure is held as `Any`: the handle, whose type names the failure type,
-/// takes it back out ([`Handle::error`]).
+/// holds it too, and its type names no host failure type, so `Failure` holds
+/// the host's failure as `Any`: the handle, whose type names the failure
+/// type, takes it back out ([`Handle::error`]).
 #[derive(Clone)]
 pub(crate) enum Failure {
     /// A failure that the host reported, or an engine failure that ended the
@@ -352,8 +352,8 @@ pub struct Handle<F> {
     bugs: BugSinkRef,
     /// The tables whose changes no write records.
     unrecorded: Arc<UnrecordedTables>,
-    /// How many more of the databases' upkeep threads start before the next
-    /// is refused, when a test asked for that.
+    /// How many more of the databases' upkeep threads start before the
+    /// handle refuses the next, when a test asked for that.
     #[cfg(any(test, feature = "test-utils"))]
     upkeep_threads: Arc<Mutex<Option<usize>>>,
     failure: PhantomData<fn() -> F>,
@@ -454,9 +454,9 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         AttemptCommits { commits }
     }
 
-    /// Watch `reads` after `attempt`: a commit since it began that changed
-    /// what they read is reported at once, as evidence against the wait it
-    /// ended in.
+    /// Watch `reads` after `attempt`: the returned changes report at once a
+    /// commit since the attempt began that changed what they read, as
+    /// evidence against the wait the attempt ended in.
     pub fn watch_attempt<R: 'static, E: 'static>(
         &self,
         attempt: AttemptCommits,

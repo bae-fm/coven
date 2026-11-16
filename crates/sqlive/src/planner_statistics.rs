@@ -141,14 +141,15 @@ impl ChangeWake {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<P: Policy> UpkeepThread<PlannerStatistics<P>> {
-    /// Each run from now on, told once it committed.
+    /// Return a receiver that gets a message after each later run commits.
     pub(crate) fn report_runs(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
         let (runs, reported) = tokio::sync::mpsc::unbounded_channel();
         *lock_unpoisoned(&self.upkeep().runs) = Some(runs);
         reported
     }
 
-    /// Visit the thread's connection, after any check or run in progress.
+    /// Pass the thread's connection to `visit`, after any check or run in
+    /// progress.
     pub(crate) fn with_connection(&self, visit: impl FnOnce(&HostSql<P>)) {
         visit(&lock_unpoisoned(&self.upkeep().connection));
     }

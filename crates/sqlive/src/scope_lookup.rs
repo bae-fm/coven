@@ -21,8 +21,9 @@ pub enum Judging<'a> {
     Row(&'a str, &'a [Value]),
 }
 
-/// Runs one question about a changed row. `Ok(true)` also when sqlive gives
-/// up on it, which then counts as a match.
+/// Runs one question about a changed row. The closure also returns
+/// `Ok(true)` when the lookup reaches its step limit and stops, which sqlive
+/// counts as a match.
 pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
 
 /// The most SQLite steps one lookup runs. A lookup no index serves reads its

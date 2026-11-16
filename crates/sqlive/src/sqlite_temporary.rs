@@ -44,8 +44,9 @@ static TEMPORARY: Mutex<Temporary> = Mutex::new(Temporary { directory: None, ope
 /// Why the folder for temporary tables could not be named (E1).
 #[derive(Debug, thiserror::Error)]
 pub enum TemporaryDirectoryError {
-    /// A database opened in this process before the folder was named;
-    /// SQLite reads it without a lock, so it is named first.
+    /// A database opened in this process before the host named the folder.
+    /// SQLite reads the folder's name without a lock, so the host names the
+    /// folder before any database opens.
     #[error("the temporary folder is named before any store opens")]
     AfterOpening,
     /// Another folder was named already. Naming the same one again is allowed.

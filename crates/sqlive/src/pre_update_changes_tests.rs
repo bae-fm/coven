@@ -1,6 +1,6 @@
 use crate::tests::{next, TestDatabase, TestOptions};
 
-/// A queue whose operations no write keeps, beside a captured table.
+/// An uncaptured queue table beside a captured notes table.
 fn queue() -> TestDatabase {
     TestDatabase::open_with(
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
@@ -96,9 +96,9 @@ fn shape_reads(db: &TestDatabase) -> usize {
     })
 }
 
-/// A table's shape is read once for its schema, not once a commit: once
-/// read, an app's write, a bulk write and the host's own transaction each
-/// read none, commit after commit.
+/// The writer reads a table's shape once for each schema, not once for each
+/// commit: after that read, an app's write, a bulk write and the host's own
+/// transaction each read no shape, commit after commit.
 #[tokio::test]
 async fn commits_read_no_table_shape_their_schema_already_gave() {
     let db = queue();
@@ -119,10 +119,11 @@ async fn commits_read_no_table_shape_their_schema_already_gave() {
     db.close();
 }
 
-/// A commit after the schema changed reads its tables by their new shape: a
-/// column added after an earlier commit read the table is a change that a
-/// live query reading only that column runs again for, whether a session or
-/// an app's write's hook saw it.
+/// A commit after the schema changed reads its tables by their new shape.
+/// When the host adds a column after an earlier commit read the table, a
+/// live query that reads only that column runs again when a commit changes
+/// the column, whether a session or the hook on an app's write saw the
+/// change.
 #[tokio::test]
 async fn a_commit_after_a_schema_change_reads_the_tables_new_shape() {
     let db = queue();

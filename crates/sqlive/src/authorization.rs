@@ -54,7 +54,7 @@ pub trait Policy: Sized + Send + Sync + 'static {
     /// What the policy refuses a statement with.
     type Refusal: HostError;
     /// What the host's handle fails with: the host's own failures, and
-    /// sqlive's, which the host holds in its own terms.
+    /// sqlive's, which the host converts into this type through `From`.
     type Failure: HostError + Clone + From<crate::EngineFailure<Self::Failure, Self::Refusal>>;
     /// Judge an action the authorizer's rules allowed; `Err` refuses the
     /// statement with it. A host statement's actions come here too, so the
@@ -499,7 +499,7 @@ pub(crate) struct InternalSql<'a, P: Policy> {
 /// order first read, and each function they call, ASCII lowercase.
 #[derive(Clone, Default)]
 pub struct StatementReads {
-    /// Each column read, as `table.column`, in the order first read.
+    /// Each column read, by its name alone, in the order first read.
     pub columns: Vec<String>,
     /// Each function called, ASCII lowercase.
     pub functions: BTreeSet<String>,

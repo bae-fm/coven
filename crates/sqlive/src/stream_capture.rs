@@ -1,6 +1,7 @@
-//! Bounded observation for streamed transactions, including WITHOUT ROWID
-//! tables, as a host runs to apply another device's slot, load a snapshot
-//! or keep its own bookkeeping.
+//! `StreamCapture` records, within a bound, the changes of a streamed
+//! transaction, WITHOUT ROWID tables included. A host runs such a
+//! transaction to apply another device's slot, load a snapshot or keep its
+//! own bookkeeping.
 
 use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;

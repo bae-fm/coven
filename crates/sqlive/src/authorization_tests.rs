@@ -12,10 +12,11 @@ use crate::{EngineFailure, HostSql, WholeViews};
 
 /// The table `Recording` refused an insert into.
 #[derive(Debug, thiserror::Error)]
-#[error("inserting into {0} is refused")]
+#[error("the policy refuses inserts into {0}")]
 struct Refused(String);
 
-/// What a handle of `Recording`'s fails with; these tests fail none.
+/// The failure of a handle whose policy is `Recording`. No handle fails in
+/// these tests.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("the handle failed")]
 struct Failed;

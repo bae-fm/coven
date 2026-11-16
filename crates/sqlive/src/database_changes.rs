@@ -13,8 +13,9 @@ pub struct DatabaseChanges<E> {
 }
 
 impl<E> DatabaseChanges<E> {
-    /// What `commits`, waiting on `reads`, reports, failing with `failed`;
-    /// `first` reports the state now as their first change.
+    /// Report each commit `commits` sees that changes what `reads` read, and
+    /// turn the handle's failure into `E` with `failed`. With `first`, the
+    /// first report is the state now.
     pub(crate) fn new(
         commits: CommitSubscription,
         reads: crate::ReadSet,
@@ -41,9 +42,9 @@ impl<E> DatabaseChanges<E> {
     }
 
     /// Resolves once a relevant commit happened since the previous
-    /// observation, or the handle failed or closed. It owns its subscription,
-    /// so a worker can wait on it beside other wakes; `take_changed` then
-    /// consumes the change.
+    /// observation, or the handle failed or closed. The future owns a clone
+    /// of the subscription, so a worker can wait on it beside other futures;
+    /// `take_changed` then consumes the change.
     pub fn changed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let mut commits = self.commits.clone();
         let first = self.first;
@@ -58,7 +59,8 @@ impl<E> DatabaseChanges<E> {
         }
     }
 
-    /// The initial state, then each relevant commit. No timer or polling is used.
+    /// The initial state, then each relevant commit. `next` waits on the
+    /// commit subscription, with no timer or polling.
     pub async fn next(&mut self) -> Result<(), E> {
         loop {
             let state = self.commits.state();

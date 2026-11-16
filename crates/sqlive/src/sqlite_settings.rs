@@ -80,9 +80,9 @@ pub struct SqliteSettings {
     pub checkpoint_fullfsync: Option<bool>,
     /// How many rows of each index `ANALYZE` reads (`PRAGMA analysis_limit`).
     pub analysis_limit: Option<AnalysisLimit>,
-    /// The page size a database is created with (`PRAGMA page_size`). It is
-    /// fixed once the file has its first page: an existing database keeps
-    /// the size it was created with.
+    /// The page size SQLite creates a database with (`PRAGMA page_size`).
+    /// SQLite fixes the size once the file has its first page, so an existing
+    /// database keeps the size SQLite created it with.
     pub page_size: Option<PageSize>,
     /// The auto-vacuum mode a database is created with (`PRAGMA
     /// auto_vacuum`). Like the page size, an existing database keeps its

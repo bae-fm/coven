@@ -1,11 +1,12 @@
 //! Each way a write reaches live queries records the values their scopes
 //! test, so a write outside a scope wakes nothing and one inside it does.
-//! And over generated queries, schemas and writes, a live query is marked to
-//! run again whenever a commit changes what it returns, and its rerun returns
-//! what a one-shot read of the same SQL does (§4); a failure names the seed.
-//! Writes change several tables at once, joins chain through joined tables,
-//! and some lookups an index serves, so each write's lookups judge joins in
-//! its own transaction; a marked query sometimes waits through more writes.
+//! And over generated queries, schemas and writes, sqlive marks a live query
+//! to run again whenever a commit changes what it returns, and its rerun
+//! returns what a one-shot read of the same SQL does (§4); a failure names
+//! the seed. The writes change several tables at once, the joins chain
+//! through joined tables, and an index serves some of the lookups. sqlive
+//! runs each write's lookups for its joins in that write's own transaction.
+//! A marked query sometimes waits through more writes before it runs.
 //! `SQLIVE_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
@@ -84,8 +85,9 @@ async fn streamed_transactions_record_scoped_values() {
     db.close();
 }
 
-/// A write made while a query is reading records no values for the scope
-/// that run will have: the changes it couldn't judge still wake it.
+/// A write made while the query's run is reading records no values for the
+/// scope that run will have. sqlive can't judge those changes, so they still
+/// wake the query.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
     let db = TestDatabase::open(TRACKS);
@@ -146,8 +148,8 @@ async fn run_seed(seed: u64) -> usize {
         SCHEMA,
         TestOptions { captured: [CAPTURED.to_owned()].into(), ..TestOptions::default() },
     );
-    // Rows in every table from the start, so joins, chained ones too, find
-    // partners for the writes to change.
+    // The test inserts rows into every table first, so joins, chained ones
+    // too, find matching rows for the writes to change.
     let mut rows = Vec::new();
     for table in TABLES {
         for id in 0..6 {
@@ -177,7 +179,8 @@ async fn run_seed(seed: u64) -> usize {
     let mut spared = 0;
     for step in 0..24 {
         let sql = write(&mut rng).sql;
-        // The host's own transaction instead of the app's write.
+        // Some steps commit through the host's own transaction instead of
+        // the app's write.
         if rng.chance(40) {
             db.commit(&sql);
         } else {
@@ -193,7 +196,7 @@ async fn run_seed(seed: u64) -> usize {
                 )
             };
             if fresh != *last {
-                assert!(marked, "a changed result wasn't marked: {}", case());
+                assert!(marked, "a write changed a result but didn't mark its query: {}", case());
             }
             // A marked query sometimes stays marked through the next write,
             // which its judging then skips.
@@ -220,7 +223,7 @@ async fn live_queries_rerun_whenever_their_results_change() {
         spared += run_seed(seed).await;
     }
     eprintln!("{seeds} seeds, {spared} reruns spared");
-    // The test would pass with every table whole; narrowing must also spare
-    // the queries it can.
-    assert!(spared > 0, "no narrowing query was spared a rerun");
+    // The test would also pass if sqlive reran every query that reads a
+    // table a write changed; the narrowing must also skip the reruns it can.
+    assert!(spared > 0, "no query skipped a rerun through narrowing");
 }

@@ -13,7 +13,7 @@ impl<P: Policy> Database<P> {
         self.statistics.as_ref().expect("the database keeps its planner's statistics")
     }
 
-    /// Whether a thread of the database's own checkpoints its WAL.
+    /// Whether one of the database's own threads checkpoints its WAL.
     pub fn checkpoints(&self) -> bool {
         self.checkpoints.is_some()
     }
@@ -26,14 +26,15 @@ impl<P: Policy> Database<P> {
         self.checkpointer().fault(fault);
     }
 
-    /// Run `step` as the copy of each pass a checkpoint makes while writes
-    /// go on returns, before its sync.
+    /// A checkpoint copies the WAL in passes while writes go on. Run `step`
+    /// after each pass's copy returns, before the pass syncs.
     pub fn after_checkpoint_copies(&self, step: impl FnMut() + Send + 'static) {
         self.checkpointer().after_copy(step);
     }
 
-    /// What each checkpoint does at its last step from now on, told while
-    /// the checkpoint still holds the writer.
+    /// Return a receiver that gets what each later checkpoint does at its
+    /// last step. The checkpointer sends it while the checkpoint still holds
+    /// the writer.
     pub fn report_checkpoints(&self) -> UnboundedReceiver<crate::WalCheckpoint> {
         self.checkpointer().report_restarts()
     }
@@ -43,13 +44,14 @@ impl<P: Policy> Database<P> {
         self.checkpointer().run_now()
     }
 
-    /// Each run of the planner's statistics from now on, told once it
-    /// committed.
+    /// Return a receiver that gets a message after each later run of the
+    /// planner's statistics commits.
     pub fn report_statistics_runs(&self) -> UnboundedReceiver<()> {
         self.statistics().report_runs()
     }
 
-    /// Told when the next caller waits for a reader.
+    /// Return a receiver that gets a message when the next caller waits for
+    /// a reader.
     pub fn observe_next_reader_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         self.readers.observe_next_wait()
     }
@@ -59,8 +61,9 @@ impl<P: Policy> Database<P> {
         self.readers.each(visit);
     }
 
-    /// Every connection the database holds open, one at a time, each under
-    /// its own lock: the readers, the upkeep threads' and the writer.
+    /// Run `visit` on every connection the database holds open, one at a
+    /// time, each under its own lock: the readers, the upkeep threads'
+    /// connections and the writer.
     pub fn each_connection(&self, mut visit: impl FnMut(&HostSql<P>)) {
         self.readers.each(|reader| visit(reader));
         if let Some(checkpoints) = &self.checkpoints {

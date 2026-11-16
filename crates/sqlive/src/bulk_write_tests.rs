@@ -3,9 +3,10 @@ use crate::LiveQuery;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// A captured table of notes beside uncaptured ones: a queue, a list of
-/// other rows, a log a trigger on the queue keeps, and a lane whose rows a
-/// foreign key ties to its queue's.
+/// A captured table of notes beside uncaptured ones: `queue`, `other`,
+/// `logged_queue` with the `logged` table its delete trigger writes, and
+/// `lanes` with the `lane_tracks` rows that a foreign key deletes with their
+/// lane.
 const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
 CREATE TABLE queue(position INTEGER PRIMARY KEY, track TEXT NOT NULL);
 CREATE TABLE other(id INTEGER PRIMARY KEY);
@@ -16,7 +17,7 @@ BEGIN INSERT INTO logged(track) VALUES(old.track); END;
 CREATE TABLE lanes(id INTEGER PRIMARY KEY);
 CREATE TABLE lane_tracks(lane INTEGER NOT NULL REFERENCES lanes(id) ON DELETE CASCADE, track TEXT NOT NULL);";
 
-/// The rows the queue holds before it's cleared.
+/// The rows the queue holds before a bulk write clears it.
 const ROWS: i64 = 100_000;
 
 fn open() -> TestDatabase {

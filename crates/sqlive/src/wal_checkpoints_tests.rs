@@ -126,10 +126,10 @@ async fn sqlive_checkpoints_the_wal_past_its_threshold() {
     db.close();
 }
 
-/// A commit that lands while the checkpoint copies the WAL is copied and
-/// synced too before the checkpoint holds the writer: holding it, the
-/// checkpoint finds every frame already copied, so writes don't wait while
-/// it copies or syncs them (§4).
+/// The checkpoint also copies and syncs a commit made while it copies the
+/// WAL, before it holds the writer. Once the checkpoint holds the writer, it
+/// finds every frame already copied, so writes don't wait while it copies or
+/// syncs them (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writer() {
     let db = blobs(checkpointed_at_100_pages());
@@ -207,8 +207,8 @@ fn off_leaves_checkpoints_to_the_host() {
 }
 
 /// Closing the database still checkpoints the whole WAL and removes its
-/// file, as the last connection to close does: the checkpointer's closes
-/// first.
+/// file, as the last connection to close does: the checkpointer's connection
+/// closes first.
 #[test]
 fn closing_checkpoints_and_removes_the_wal() {
     let db = blobs(SqliteSettings::default());
@@ -258,9 +258,9 @@ fn faulted(
     tries
 }
 
-/// Write past the threshold until the checkpoint `fault` fails; then the
-/// error a live query reports, after which it ends, which the handle holds
-/// for every later call.
+/// Write past the threshold until `fault` fails the checkpoint. Return the
+/// error a live query reports before it ends, which is the error the handle
+/// holds for every later call.
 async fn checkpointer_failure(
     db: &TestDatabase,
     fault: impl FnMut() -> Result<(), TestError> + Send + 'static,
@@ -289,9 +289,9 @@ async fn checkpointer_failure(
 
 /// A panic in a checkpoint is a bug in sqlive. The database can't stay open
 /// with no checkpointer while its WAL grows without bound, so the handle
-/// fails with the bug: the bug sink hears it once, every live query and the
-/// handle's error after it hold `HandleFailed` carrying it, and the process
-/// lives on.
+/// fails with the bug: the bug sink receives it once, every live query and
+/// the handle's error after it hold `HandleFailed` carrying it, and the
+/// process keeps running.
 /// Closing the handle and opening the database again starts a checkpointer
 /// that checkpoints again (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,8 +316,9 @@ async fn a_panicking_checkpoint_fails_the_handle_with_its_bug_and_a_reopen_check
     db.close();
 }
 
-/// A checkpoint SQLite fails other than on a busy or locked database stops
-/// checkpointing too, and fails the handle with SQLite's cause (§4).
+/// When SQLite fails a checkpoint for a reason other than a busy or locked
+/// database, the checkpointer stops too, and fails the handle with SQLite's
+/// cause (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
     let db = blobs(checkpointed_at_100_pages());
@@ -340,9 +341,9 @@ async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
     db.close();
 }
 
-/// A database busy or locked past the busy timeout is expected: the
-/// checkpoint is tried again at the next commit's wake, and the handle
-/// goes on (§4).
+/// A database busy or locked past the busy timeout is no failure: the
+/// checkpointer tries again at the next commit's wake, and the handle keeps
+/// serving calls (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_checkpoint_is_tried_again() {
     let db = blobs(checkpointed_at_100_pages());
@@ -364,9 +365,9 @@ async fn a_busy_checkpoint_is_tried_again() {
     db.close();
 }
 
-/// Where the connection holding SQLite's checkpoint lock stands, as its
-/// busy handler, its thread and the test tell each other through `HOLDER`
-/// and `HOLDER_MOVED`.
+/// The state of the connection that holds SQLite's checkpoint lock, which
+/// its busy handler, its thread and the test share through `HOLDER` and wait
+/// on through `HOLDER_MOVED`.
 struct Holder {
     /// Its busy handler is waiting: it holds the lock.
     holding: bool,
@@ -380,7 +381,7 @@ static HOLDER: Mutex<Holder> =
     Mutex::new(Holder { holding: false, finished: false, released: false });
 static HOLDER_MOVED: Condvar = Condvar::new();
 
-/// Change where the holder stands, and wake whoever waits on it.
+/// Change the holder's state, and wake every thread that waits on it.
 fn move_holder(change: impl FnOnce(&mut Holder)) {
     change(&mut HOLDER.lock().unwrap());
     HOLDER_MOVED.notify_all();
@@ -395,8 +396,9 @@ fn wait_for_release(_tries: i32) -> bool {
 
 /// Start another connection's RESTART checkpoint, which takes SQLite's
 /// checkpoint lock and holds it while it waits for a reader, until the test
-/// releases it. It returns SQLite's busy column. A try that finds sqlive's
-/// own checkpointer holding the lock gives up at once, so it tries again.
+/// releases it. The checkpoint's thread returns SQLite's busy column. A
+/// checkpoint that finds sqlive's own checkpointer holding the lock gives up
+/// at once, so this function then starts another.
 async fn hold_the_checkpoint_lock(db: &TestDatabase) -> std::thread::JoinHandle<i64> {
     loop {
         move_holder(|holder| holder.finished = false);
@@ -426,9 +428,9 @@ async fn hold_the_checkpoint_lock(db: &TestDatabase) -> std::thread::JoinHandle<
 
 /// While another connection checkpoints the WAL, it holds SQLite's
 /// checkpoint lock, and a checkpoint that finds the lock held reads nothing
-/// of the WAL: SQLite reports busy with no frames. That is the database
-/// busy, not a failure: sqlive's checkpointer tries again at the next wake,
-/// and the handle goes on (§4).
+/// of the WAL: SQLite reports busy with no frames. SQLite reports a busy
+/// database, not a failure, so sqlive's checkpointer tries again at the next
+/// wake, and the handle keeps serving calls (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     let db = blobs(checkpointed_at_100_pages());
@@ -445,8 +447,8 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
 
     let checkpoint = db.host(|writer| writer.wal_checkpoint(CheckpointMode::Passive)).unwrap();
     assert_eq!(checkpoint, WalCheckpoint::NotStarted);
-    // The WAL is past the threshold, so this goes on past reading it to
-    // copying it, which finds the lock held.
+    // The WAL is past the threshold, so `checkpoint_now` reads the WAL and
+    // then tries to copy it, and the copy finds the lock held.
     db.with_database(|database| database.checkpoint_now()).unwrap();
 
     move_holder(|holder| holder.released = true);

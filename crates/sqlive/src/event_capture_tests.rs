@@ -8,8 +8,8 @@ CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY, parent TEXT REFERENCES parent(i
 CREATE TABLE log(id INTEGER PRIMARY KEY, note TEXT);
 CREATE TRIGGER logged AFTER DELETE ON child BEGIN INSERT INTO log(note) VALUES(old.id); END;";
 
-/// A database of `schema`, whose writes keep their operations on `tables`
-/// whole.
+/// A database of `schema` that records each operation of a write on
+/// `tables`, with every column's value before and after it.
 fn captured(schema: &str, tables: &[&str]) -> TestDatabase {
     TestDatabase::open_with(
         schema,
@@ -20,8 +20,8 @@ fn captured(schema: &str, tables: &[&str]) -> TestDatabase {
     )
 }
 
-/// A database of `SCHEMA`, whose writes keep their operations on `parent`
-/// and `child` whole.
+/// A database of `SCHEMA` that records each operation of a write on `parent`
+/// and `child`, with every column's value before and after it.
 fn family() -> TestDatabase {
     captured(SCHEMA, &["parent", "child"])
 }
@@ -30,9 +30,10 @@ fn summary(events: &[Operation]) -> Vec<(&str, Action)> {
     events.iter().map(|event| (event.table.as_str(), event.action)).collect()
 }
 
-/// Every operation on a captured table is recorded in order: a statement's
-/// own rows and the foreign-key actions they cause. The `log` row the
-/// trigger inserts isn't.
+/// The capture records every operation on a captured table in order: a
+/// statement's own rows and the foreign-key actions they cause. The capture
+/// leaves out the `log` row the trigger inserts, since `log` isn't
+/// captured.
 #[test]
 fn operations_keep_their_order() {
     let db = family();
@@ -71,7 +72,8 @@ fn operations_keep_their_order() {
     db.close();
 }
 
-/// Only a captured table's rows are copied into the write's operations.
+/// The capture copies only a captured table's rows into the write's
+/// operations.
 #[test]
 fn an_uncaptured_tables_rows_are_not_copied() {
     let db = family();

@@ -56,7 +56,7 @@ async fn a_table_that_fills_in_one_session_gets_statistics_before_close() {
     }
     tokio::time::timeout(HANG_GUARD, runs.recv())
         .await
-        .expect("the candidates' statistics are gathered")
+        .expect("the thread gathers the candidates' statistics")
         .expect("the database stays open");
     let counted: Option<String> = db.host(|writer| {
         writer

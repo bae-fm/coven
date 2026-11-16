@@ -503,7 +503,8 @@ fn closing_follows_the_sessions_writes_and_an_unchanged_database_analyzes_only_s
 }
 
 /// An app write can't run ANALYZE: the write's session table filter admits
-/// `sqlite_stat1`, so the statistics would be captured among its changes.
+/// `sqlite_stat1`, so the write's session would capture the statistics
+/// among its changes.
 #[test]
 fn an_app_write_cant_analyze() {
     let db = indexed_notes();
@@ -679,8 +680,8 @@ async fn commits_under_a_rerunning_live_query_cost() {
     }
 }
 
-/// Notes with an FTS5 index a trigger keeps. The index's data table holds
-/// two rows of its own as it is created.
+/// Notes with an FTS5 index that a trigger keeps. FTS5 writes two rows of its
+/// own into the index's data table as it creates the index.
 const SEARCHED_NOTES: &str =
     "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
      CREATE VIRTUAL TABLE note_search USING fts5(title);
@@ -695,7 +696,8 @@ fn searched_notes() -> TestDatabase {
 /// How the writer plans FTS5's cleanup of a merged segment's pages, the
 /// statement it runs as nearly every write to the index commits. Defensive
 /// mode refuses to prepare FTS5's own `DELETE` anywhere but inside FTS5, so
-/// this plans a read of the same range, whose `WHERE` SQLite plans alike.
+/// `index_cleanup_plan` plans a read of the same range, whose `WHERE` SQLite
+/// plans alike.
 fn index_cleanup_plan(db: &TestDatabase) -> String {
     db.host(|writer| {
         writer

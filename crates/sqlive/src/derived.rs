@@ -28,9 +28,10 @@ pub(crate) struct Ctes<'a> {
 }
 
 impl<'a> Ctes<'a> {
-    /// These and `with`'s, or `None` when a name repeats, which SQLite
-    /// resolves by where each is and sqlive doesn't follow, or names a view
-    /// read whole, which reads through the CTE couldn't be told from.
+    /// These CTEs and `with`'s, or `None` in two cases. When a name repeats,
+    /// SQLite resolves it by where each CTE is, which sqlive doesn't follow.
+    /// When a CTE has the name of a view read whole, sqlive couldn't tell
+    /// reads through the CTE from reads of the view.
     pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews) -> Option<Self> {
         let mut visible = self.visible.clone();
         for cte in with.ctes.iter() {

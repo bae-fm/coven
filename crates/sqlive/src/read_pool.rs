@@ -82,7 +82,8 @@ impl<P: Policy> Drop for Reader<'_, P> {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<P: Policy> ReadPool<P> {
-    /// Told when the next caller waits for a reader.
+    /// Return a receiver that gets a message when the next caller waits for
+    /// a reader.
     pub(super) fn observe_next_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         assert!(lock_unpoisoned(&self.waiting).replace(sender).is_none());
