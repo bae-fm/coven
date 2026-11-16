@@ -267,7 +267,7 @@ impl<L> DatabaseAccess<L> {
         self.call(|| {
             self.readers
                 .acquire_reader()
-                .with_reader(|reader| reader.read_transaction(|| run(reader)))
+                .with_reader(|reader| reader.read_with_constants(|| run(reader)))
         })
     }
 

@@ -103,7 +103,7 @@ pub(super) fn read<L>(
     file: &FileRef,
     index: i64,
 ) -> Result<Option<Vec<u8>>, DbError> {
-    let entry = access.with_writer(|db| db.read_transaction(|| covering(db, file, index)))?;
+    let entry = access.with_writer(|db| db.read_with_constants(|| covering(db, file, index)))?;
     let Some((path, first, _, length)) = entry else {
         return Ok(None);
     };
@@ -152,7 +152,7 @@ pub(super) fn repair<L>(
     index: i64,
     bytes: &[u8],
 ) -> Result<(), DbError> {
-    let entry = access.with_writer(|db| db.read_transaction(|| covering(db, file, index)))?;
+    let entry = access.with_writer(|db| db.read_with_constants(|| covering(db, file, index)))?;
     let Some((path, first, _, _)) = entry else {
         return Ok(());
     };

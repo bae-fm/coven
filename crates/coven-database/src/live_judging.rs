@@ -24,7 +24,7 @@ impl DatabaseConnection {
         E: From<DbError>,
     {
         let mut finished = false;
-        let result = self.read_transaction(|| {
+        let result = self.read_with_constants(|| {
             let _reading = self.authorization.live_reading();
             let result = read(SqlReadContext::new(self));
             let reads = self.authorization.reads();

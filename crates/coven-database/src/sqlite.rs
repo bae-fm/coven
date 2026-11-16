@@ -22,6 +22,8 @@ pub(crate) use pre_update_changes::ROWS_PER_TABLE;
 pub(crate) use rowid_policy::rowid_guard;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
+#[path = "schema_cookie.rs"]
+mod schema_cookie;
 #[path = "stream_capture.rs"]
 mod stream_capture;
 #[path = "table_shapes.rs"]
@@ -84,6 +86,8 @@ pub(crate) struct DatabaseConnection {
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
     constants: transaction_constants::TransactionConstants,
+    /// The schema cookie while a transaction that runs no DDL holds it.
+    cookie: schema_cookie::SchemaCookie,
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
@@ -203,6 +207,7 @@ impl DatabaseConnection {
             lookups,
             app_statements: app_statements::AppStatements::default(),
             constants: transaction_constants::TransactionConstants::default(),
+            cookie: schema_cookie::SchemaCookie::default(),
             handle: None,
             observation: None,
             shapes: std::cell::RefCell::new(None),

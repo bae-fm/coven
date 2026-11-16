@@ -127,7 +127,7 @@ impl Database {
                 let reader = inner.access.readers.acquire_reader();
                 let applied = inner.with_files("apply a slot", |writer, files| {
                     reader.with_reader(|reader| {
-                        reader.read_transaction(|| {
+                        reader.read_with_constants(|| {
                             crate::write_schema::prepare_evaluators(
                                 reader,
                                 &inner.access.write_schema,
@@ -711,7 +711,7 @@ impl Database {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
-                reader.read_transaction(|| crate::upload::read(reader, consume))
+                reader.read_with_constants(|| crate::upload::read(reader, consume))
             })
         })
         .await
@@ -729,7 +729,7 @@ impl Database {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
-                reader.read_transaction(|| crate::upload::oldest_keys(reader))
+                reader.read_with_constants(|| crate::upload::oldest_keys(reader))
             })
         })
         .await
@@ -867,11 +867,9 @@ impl Database {
         F: FnOnce(crate::ClaimBytes<'_>) -> Result<T, E> + Send + 'static,
     {
         self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| db.read_transaction(|| crate::claim::read_attempt(db, consume)))
+            inner.access.readers.acquire_reader().with_reader(|db| {
+                db.read_with_constants(|| crate::claim::read_attempt(db, consume))
+            })
         })
         .await
     }

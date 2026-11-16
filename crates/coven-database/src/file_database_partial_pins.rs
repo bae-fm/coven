@@ -26,9 +26,9 @@ impl FileDatabase {
             let file = file.clone();
             database
                 .call(move |inner| {
-                    let found = inner
-                        .access
-                        .with_writer(|writer| writer.read_transaction(|| partial(writer, &file)))?;
+                    let found = inner.access.with_writer(|writer| {
+                        writer.read_with_constants(|| partial(writer, &file))
+                    })?;
                     let Some((path, size)) = found else {
                         return Ok(None);
                     };

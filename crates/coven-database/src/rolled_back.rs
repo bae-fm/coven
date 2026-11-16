@@ -12,7 +12,7 @@ impl DatabaseConnection {
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
         E: From<DbError>,
     {
-        self.read_transaction(|| {
+        self.read_with_constants(|| {
             let _reading = self.authorization.reading();
             read(SqlReadContext::new(self))
         })
@@ -24,8 +24,8 @@ impl DatabaseConnection {
     ) -> Result<R, E> {
         self.batch("BEGIN DEFERRED")?;
         let mut guard = SqlTransaction { database: self, active: true };
-        // A read runs no migration and no DDL.
-        let constants = self.keep_constants();
+        // A read runs no DDL.
+        let cookie = self.keep_schema_cookie();
         // BEGIN alone does not fix a WAL snapshot. Pin it before invoking a
         // consumer that can wait while a writer commits. Reading the schema
         // table also brings this connection's copy of the schema, and the
@@ -35,7 +35,7 @@ impl DatabaseConnection {
             self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0))?;
             read()
         })();
-        drop(constants);
+        drop(cookie);
         guard.active = false;
         match self.roll_back() {
             Ok(()) => result,

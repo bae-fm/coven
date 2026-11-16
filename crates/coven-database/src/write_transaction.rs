@@ -21,8 +21,8 @@ pub(super) struct WriteTransaction<'a> {
     operations: bool,
     /// Whether its update hook is set.
     rows: bool,
-    /// Whether it keeps coven's constants once read (`transaction_constants.rs`).
-    constants: bool,
+    /// Whether it keeps the schema cookie once read (`schema_cookie.rs`).
+    cookie: bool,
     /// The first failure of one of its hooks: a read of the row that
     /// failed, or a panic. SQLite's hooks can't fail, and rusqlite drops a
     /// hook's panic, so a hook call that failed left what it observes
@@ -45,16 +45,18 @@ impl<'a> WriteTransaction<'a> {
             open: Cell::new(true),
             operations: false,
             rows: false,
-            constants: false,
+            cookie: false,
             hook_failure: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Read each of coven's constants once in this transaction, which runs
-    /// no migration and no DDL (`transaction_constants.rs`).
-    pub(super) fn keep_constants(&mut self) {
-        self.database.constants.keep();
-        self.constants = true;
+    /// Read the schema cookie once in this transaction, which runs no DDL
+    /// (`schema_cookie.rs`).
+    pub(super) fn keep_schema_cookie(&mut self) {
+        if !self.cookie {
+            self.database.cookie.hold();
+            self.cookie = true;
+        }
     }
 
     /// Observe each row operation, before SQLite makes it, until
@@ -195,8 +197,8 @@ fn keep_failure(failed: &Mutex<Option<DbError>>, observed: Result<Result<(), DbE
 impl Drop for WriteTransaction<'_> {
     fn drop(&mut self) {
         self.database.streaming.set(false);
-        if self.constants {
-            self.database.constants.forget();
+        if self.cookie {
+            self.database.cookie.release();
         }
         if self.open.get() {
             if let Err(rollback) = self.database.roll_back() {

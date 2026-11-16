@@ -21,7 +21,7 @@ impl DatabaseConnection {
         host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,
     ) -> Result<T, E> {
         let mut transaction = WriteTransaction::begin(self, false)?;
-        transaction.keep_constants();
+        transaction.keep_schema_cookie();
         let outcome = phases(&mut transaction, app, host);
         transaction.commit(outcome)
     }
@@ -51,7 +51,7 @@ impl DatabaseConnection {
             };
             let written = if writes {
                 transaction.stop_observing_operations()?;
-                transaction.keep_constants();
+                transaction.keep_schema_cookie();
                 let (written, rows) = phases(&mut transaction, app, host)?;
                 changes.extend(rows);
                 Some(written)

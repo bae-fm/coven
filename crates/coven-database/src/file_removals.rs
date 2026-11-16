@@ -36,7 +36,7 @@ pub(crate) fn choose(
     active: &BTreeSet<OwnedFile>,
     copying: &BTreeSet<String>,
 ) -> Chosen {
-    writer.read_transaction(|| {
+    writer.read_with_constants(|| {
         let mut released = pending(writer, active)?;
         released.extend(copies(writer, &Copies::Settled(copying))?);
         Ok(released)
@@ -46,7 +46,7 @@ pub(crate) fn choose(
 /// The copies at `paths` a call that is failing left unswitched, with the
 /// folders it made for them, for that call to remove (§17.3).
 pub(crate) fn choose_copies(writer: &DatabaseConnection, paths: &[String]) -> Chosen {
-    writer.read_transaction(|| copies(writer, &Copies::Of(paths)))
+    writer.read_with_constants(|| copies(writer, &Copies::Of(paths)))
 }
 
 /// Which copies a removal takes.

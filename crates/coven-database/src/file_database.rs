@@ -222,7 +222,7 @@ impl FileDatabase {
     {
         let file = file.clone();
         self.run(move |db, _, _, device| {
-            db.read_transaction(|| {
+            db.read_with_constants(|| {
                 if file.place() != (crate::FilePlace::DeviceOnly { device }) {
                     return Ok(None);
                 }
@@ -454,7 +454,7 @@ impl FileDatabase {
         subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
     ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
         self.run(move |db, _, _, _| {
-            db.read_transaction(|| {
+            db.read_with_constants(|| {
                 file_queue::read(db)?
                     .into_iter()
                     // A stored upload only waits for the rest of its move.
@@ -476,7 +476,7 @@ impl FileDatabase {
         subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
     ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
         self.run(move |db, _, _, _| {
-            db.read_transaction(|| {
+            db.read_with_constants(|| {
                 file_queue::abandoned(db)?
                     .into_iter()
                     .map(|upload| {

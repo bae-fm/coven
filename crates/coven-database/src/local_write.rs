@@ -72,6 +72,8 @@ where
     E: crate::WriteFailure,
     F: FnOnce(&crate::file_write::FileWrite<'_>) -> Result<R, E>,
 {
+    // A write runs no migration and no DDL.
+    let _constants = database.keep_constants();
     let files = &crate::file_write::FileWrite::new(database, files);
     let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
     let _scope = database.write_scope();
@@ -95,6 +97,7 @@ fn host_phase<R, E: crate::WriteFailure>(
     now: SystemTime,
     files: &crate::file_write::WriteFiles<'_>,
 ) -> Result<R, E> {
+    let _constants = database.keep_constants();
     let files = &crate::file_write::FileWrite::new(database, files);
     let captured = crate::write_capture::capture(schema, events)?;
     let before = crate::write_rows::AppView::before(database, schema, &captured)?;

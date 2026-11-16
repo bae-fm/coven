@@ -431,7 +431,7 @@ impl Database {
                 let reader = inner.access.readers.acquire_reader();
                 let loaded = inner.with_files("load a snapshot", |writer, files| {
                     reader.with_reader(|reader| {
-                        reader.read_transaction(|| {
+                        reader.read_with_constants(|| {
                             crate::write_schema::prepare_evaluators(
                                 reader,
                                 &inner.access.write_schema,

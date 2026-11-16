@@ -25,7 +25,7 @@ fn read_local<R>(
 ) -> Result<R, DbError> {
     let guard = lock_unpoisoned(reader);
     let reader = guard.as_ref().ok_or(DbError::StoreClosed)?;
-    reader.read_transaction(|| run(reader))
+    reader.read_with_constants(|| run(reader))
 }
 
 pub(crate) struct InputDatabase {

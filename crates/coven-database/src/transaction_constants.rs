@@ -1,11 +1,11 @@
 //! What a read, a local write or applying a slot reads of coven's state that
-//! the transaction can't change: the schema version, SQLite's schema cookie
-//! and each synced column's and foreign key's registered id. None runs a
-//! migration or DDL, so each is read once in it rather than once for every
-//! row or statement; outside them each is read afresh. A write's own
-//! authored parts are kept too, changed only where it records them
-//! (write_sources.rs).
+//! the transaction can't change: the schema version and each synced column's
+//! and foreign key's registered id. None runs a migration or DDL, so each is
+//! read once in it rather than once for every row or statement; outside them
+//! each is read afresh. A write's own authored parts are kept too, changed
+//! only where it records them (write_sources.rs).
 
+use super::schema_cookie::CookieScope;
 use super::DatabaseConnection;
 use crate::DbError;
 use coven_merge::Audience;
@@ -16,7 +16,6 @@ use std::collections::HashMap;
 pub(super) struct TransactionConstants {
     active: Cell<bool>,
     schema_version: Cell<Option<u32>>,
-    schema_cookie: Cell<Option<i64>>,
     columns: RefCell<HashMap<(String, String), i64>>,
     foreign_keys: RefCell<HashMap<(String, Vec<u8>), i64>>,
     parts: RefCell<HashMap<PartKey, Option<AuthoredPart>>>,
@@ -28,12 +27,16 @@ type PartKey = (Vec<u8>, Audience);
 /// An authored part's encoded header.
 pub(crate) type AuthoredPart = Vec<u8>;
 
-/// Holds the constants for one transaction; they go when it ends.
-pub(crate) struct ConstantScope<'a>(&'a TransactionConstants);
+/// Holds the constants, and the schema cookie, for one transaction; they go
+/// when it ends.
+pub(crate) struct ConstantScope<'a> {
+    constants: &'a TransactionConstants,
+    _cookie: CookieScope<'a>,
+}
 
 impl Drop for ConstantScope<'_> {
     fn drop(&mut self) {
-        self.0.forget();
+        self.constants.forget();
     }
 }
 
@@ -46,7 +49,6 @@ impl TransactionConstants {
     pub(super) fn forget(&self) {
         self.active.set(false);
         self.schema_version.set(None);
-        self.schema_cookie.set(None);
         self.columns.borrow_mut().clear();
         self.foreign_keys.borrow_mut().clear();
         self.parts.borrow_mut().clear();
@@ -58,7 +60,17 @@ impl DatabaseConnection {
     /// transaction runs no migration and no DDL.
     pub(crate) fn keep_constants(&self) -> ConstantScope<'_> {
         self.constants.keep();
-        ConstantScope(&self.constants)
+        ConstantScope { constants: &self.constants, _cookie: self.keep_schema_cookie() }
+    }
+
+    /// A read of one snapshot, as [`Self::read_transaction`] runs one, in
+    /// which each constant is read once. A read runs no migration and no DDL.
+    pub(crate) fn read_with_constants<R, E: From<DbError>>(
+        &self,
+        read: impl FnOnce() -> Result<R, E>,
+    ) -> Result<R, E> {
+        let _constants = self.keep_constants();
+        self.read_transaction(read)
     }
 
     /// The app schema version the store is at.
@@ -74,22 +86,6 @@ impl DatabaseConnection {
             self.constants.schema_version.set(Some(version));
         }
         Ok(version)
-    }
-
-    /// SQLite's count of changes to the main schema, which app statements
-    /// kept prepared were judged against and the tables' shapes were read
-    /// in.
-    pub(super) fn app_schema_cookie(&self) -> rusqlite::Result<i64> {
-        if let Some(cookie) = self.constants.schema_cookie.get() {
-            return Ok(cookie);
-        }
-        #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.constant_reads += 1);
-        let cookie = self.schema_cookie()?;
-        if self.constants.active.get() {
-            self.constants.schema_cookie.set(Some(cookie));
-        }
-        Ok(cookie)
     }
 
     /// The registered id of a synced column. Preparing the schema registers
