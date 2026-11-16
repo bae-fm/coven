@@ -1417,6 +1417,9 @@ tables = [
     # The one open of a connection to coven's own tables only, which the
     # input database and the discarded-database reads share.
     "coven_only",
+    # The one construction of a store's commit observer, which the three
+    # opens of a store share.
+    "store_observer",
 ]
 # The database a breaking migration's per-audience check runs in, with the
 # connection, authorizer and views it opens it with (§18.3).

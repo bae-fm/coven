@@ -232,10 +232,7 @@ impl DatabaseBuilder {
         let whole = crate::internal_schema::whole_views();
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
-        let observer = CommitObserver::new(
-            self.directory.bugs().clone(),
-            Arc::new(UnrecordedTables::new(crate::internal_schema::UNRECORDED)),
-        );
+        let observer = store_observer(self.directory.bugs());
         #[cfg(test)]
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
@@ -466,10 +463,7 @@ impl DatabaseBuilder {
         let path = self.directory.database_path();
         let whole = crate::internal_schema::whole_views();
         // Only the cache connection commits, and nothing subscribes to it.
-        let observer = CommitObserver::new(
-            self.directory.bugs().clone(),
-            Arc::new(UnrecordedTables::new(crate::internal_schema::UNRECORDED)),
-        );
+        let observer = store_observer(self.directory.bugs());
         // A read-only handle transfers nothing: every file reads as waiting.
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).
@@ -618,10 +612,7 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
         blocking_completing("read the closed store's sync status", bugs, move || {
             let _lock = lock;
             let settings = directory.settings()?;
-            let observer = CommitObserver::new(
-                directory.bugs().clone(),
-                Arc::new(UnrecordedTables::new(crate::internal_schema::UNRECORDED)),
-            );
+            let observer = store_observer(directory.bugs());
             let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
             let network = crate::network_facts::NetworkFacts::new(observer);
             let views = |setup: &Setup<'_>| {
@@ -655,6 +646,15 @@ pub async fn discarded_store_name(
             crate::store_state_tables::name(&database)
         })
         .await,
+    )
+}
+
+/// The observer of a store's commits: no live query reads the tables coven
+/// keeps beside its rows (`internal_schema::UNRECORDED`).
+fn store_observer(bugs: &coven_foundation::task::BugSinkRef) -> CommitObserver {
+    CommitObserver::new(
+        bugs.clone(),
+        Arc::new(UnrecordedTables::new(crate::internal_schema::UNRECORDED)),
     )
 }
 
