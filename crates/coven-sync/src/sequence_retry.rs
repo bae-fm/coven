@@ -196,41 +196,37 @@ impl SequenceSync {
                 None => self.database.record_operation_retry(pending, wait).await.map(|()| true),
             }
         };
-        self.waits
-            .attempt_scope(id)
-            .run(async {
-                let pending = PendingRecord { subject, reason, cause };
-                let subject = RetrySubject::Operation(id);
-                if pending.retry() == Retry::Automatic {
-                    let held =
-                        crate::RetryWaits::lacks_key(&pending.reason).map(|(audience, key)| {
-                            crate::write_seal::held(ring, &audience, key).is_some()
-                        });
-                    let reason = pending.reason.clone();
-                    let prior = self.database.retry_wait(subject).await?;
-                    let wait = self.waits.next(prior.as_ref())?;
-                    match save(pending, Some(wait)).await {
-                        Err(error) => {
-                            self.waits.arm_evidence(id, &reason, held, None);
-                            self.waits.hold(subject);
-                            return Err(error.into());
-                        }
-                        // The operation has left the step this attempt read.
-                        Ok(false) => return Ok(()),
-                        Ok(true) => (),
+        coven_database::in_commit_scope(self.waits.attempt_scope(id), async {
+            let pending = PendingRecord { subject, reason, cause };
+            let subject = RetrySubject::Operation(id);
+            if pending.retry() == Retry::Automatic {
+                let held = crate::RetryWaits::lacks_key(&pending.reason)
+                    .map(|(audience, key)| crate::write_seal::held(ring, &audience, key).is_some());
+                let reason = pending.reason.clone();
+                let prior = self.database.retry_wait(subject).await?;
+                let wait = self.waits.next(prior.as_ref())?;
+                match save(pending, Some(wait)).await {
+                    Err(error) => {
+                        self.waits.arm_evidence(id, &reason, held, None);
+                        self.waits.hold(subject);
+                        return Err(error.into());
                     }
-                    self.waits.arm_evidence(id, &reason, held, None);
-                    self.waits.arm(subject, &wait);
-                } else {
-                    if !save(pending, None).await? {
-                        return Ok(());
-                    }
-                    self.waits.forget(subject);
-                    self.waits.clear_evidence(id);
+                    // The operation has left the step this attempt read.
+                    Ok(false) => return Ok(()),
+                    Ok(true) => (),
                 }
-                Ok(())
-            })
-            .await
+                self.waits.arm_evidence(id, &reason, held, None);
+                self.waits.arm(subject, &wait);
+            } else {
+                if !save(pending, None).await? {
+                    return Ok(());
+                }
+                self.waits.forget(subject);
+                self.waits.clear_evidence(id);
+            }
+            Ok(())
+        })
+        .await
     }
 }
 #[cfg(test)]

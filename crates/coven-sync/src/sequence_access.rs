@@ -125,7 +125,11 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            let result = scope.run(self.apply_access(session, ring, member, record.id)).await;
+            let result = coven_database::in_commit_scope(
+                scope,
+                self.apply_access(session, ring, member, record.id),
+            )
+            .await;
             self.settle_resumed(record.id, OperationKind::RevokeAccess, result, ring).await?;
         }
         Ok(())

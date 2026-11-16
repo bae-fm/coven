@@ -111,7 +111,12 @@ impl SequenceSync {
         }
         let id = record.id;
         let scope = self.waits.begin_attempt(id);
-        if let Err(error) = scope.run(self.advance_reload(session, ring, member, record)).await {
+        if let Err(error) = coven_database::in_commit_scope(
+            scope,
+            self.advance_reload(session, ring, member, record),
+        )
+        .await
+        {
             // A reload whose selection retention deleted has ended (§16.5).
             if self.database.operation(id).await?.is_some() {
                 self.record_operation_error(

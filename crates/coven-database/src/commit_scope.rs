@@ -4,18 +4,12 @@
 //! `WaitingEvidence`).
 
 use std::cell::Cell;
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Commits made by database calls that a [`CommitScope::run`] future starts
-/// belong to that scope. Calls started from other tasks, including tasks the
-/// future spawns, are outside it.
+/// The work a commit belongs to: a commit made on a thread running inside
+/// `enter(scope, ..)` belongs to `scope`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommitScope(u64);
-
-tokio::task_local! {
-    static TASK: CommitScope;
-}
 
 thread_local! {
     // Clippy asks for a `const` initializer this already has where the
@@ -31,13 +25,6 @@ impl CommitScope {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
-
-    /// Run `work` with its database calls' commits attributed to this scope.
-    /// The work is held once, inside the scope that polls it; an `async fn`
-    /// here would hold a second, moved copy beside it.
-    pub fn run<F: Future>(self, work: F) -> impl Future<Output = F::Output> {
-        TASK.scope(self, work)
-    }
 }
 
 impl Default for CommitScope {
@@ -46,18 +33,8 @@ impl Default for CommitScope {
     }
 }
 
-/// Bind a database call to the scope of the task starting it, before it runs
-/// on a blocking thread: commits it makes report that scope.
-pub(crate) fn bind<R>(
-    run: impl FnOnce() -> R + Send + 'static,
-) -> impl FnOnce() -> R + Send + 'static {
-    let scope = TASK.try_with(|scope| *scope).ok();
-    #[cfg(any(test, feature = "test-utils"))]
-    let run = coven_foundation::test_work::bind(run);
-    move || enter(scope, run)
-}
-
-fn enter<R>(scope: Option<CommitScope>, run: impl FnOnce() -> R) -> R {
+/// Run `run` with commits made on this thread attributed to `scope`, if any.
+pub(crate) fn enter<R>(scope: Option<CommitScope>, run: impl FnOnce() -> R) -> R {
     struct Restore(Option<CommitScope>);
     impl Drop for Restore {
         fn drop(&mut self) {

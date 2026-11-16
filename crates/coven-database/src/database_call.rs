@@ -27,7 +27,7 @@ where
     blocking_completing(
         operation,
         bugs.clone(),
-        crate::commit_scope::bind(move || {
+        crate::commit_task::bind(move || {
             let slot = read_unpoisoned(&inner);
             run(slot.as_ref().ok_or(DbError::StoreClosed)?)
         }),

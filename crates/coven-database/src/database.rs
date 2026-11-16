@@ -799,7 +799,7 @@ impl Database {
             blocking_completing(
                 "stage files",
                 self.bugs.clone(),
-                crate::commit_scope::bind(move || {
+                crate::commit_task::bind(move || {
                     file_staging::FileStaging::new(database, lease, stage)
                 }),
             )
@@ -816,7 +816,7 @@ impl Database {
                 blocking_completing(
                     "discard staged files",
                     self.bugs.clone(),
-                    crate::commit_scope::bind(move || {
+                    crate::commit_task::bind(move || {
                         Err::<std::convert::Infallible, E>(staging.discard::<E>(error))
                     }),
                 )
@@ -915,7 +915,7 @@ impl Database {
                 blocking_completing(
                     "close the store",
                     bugs,
-                    crate::commit_scope::bind(move || {
+                    crate::commit_task::bind(move || {
                         let _file_tasks = file_tasks;
                         #[cfg(test)]
                         database.tell_close_wait();

@@ -66,7 +66,7 @@ async fn history(actions: &[Value]) -> Value {
                         let prerequisite = action["prereq"].as_u64().unwrap();
                         // Its own write to the very prerequisite it waits for
                         // must not wake the wait which this attempt records.
-                        scope.run(commit(&device, prerequisite)).await;
+                        coven_database::in_commit_scope(scope, commit(&device, prerequisite)).await;
                         let error = SyncError::Pending(Box::new(PendingRecord::new(
                             PendingSubject::Operation {
                                 id,

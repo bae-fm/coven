@@ -17,7 +17,11 @@ impl SequenceSync {
     ) -> Result<InviteProgress, SyncError> {
         let scope = self.waits.begin_attempt(id);
         let mut step = None;
-        let result = scope.run(self.advance_invite(session, ring, member, id, &mut step)).await;
+        let result = coven_database::in_commit_scope(
+            scope,
+            self.advance_invite(session, ring, member, id, &mut step),
+        )
+        .await;
         let pending = match &result {
             Ok(InviteProgress::Waiting(reason)) => {
                 Some(SyncError::Pending(Box::new(PendingRecord::new(

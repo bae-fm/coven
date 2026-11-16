@@ -111,8 +111,11 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            let result =
-                scope.run(self.apply_retention(session, ring, member, record.clone())).await;
+            let result = coven_database::in_commit_scope(
+                scope,
+                self.apply_retention(session, ring, member, record.clone()),
+            )
+            .await;
             self.settle_resumed(record.id, OperationKind::RetainSequence, result, ring).await?;
         }
         Ok(())

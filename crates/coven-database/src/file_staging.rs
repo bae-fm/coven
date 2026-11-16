@@ -181,7 +181,7 @@ impl FileStaging {
                 let (next, written) = coven_foundation::task::blocking_completing(
                     "stage copies",
                     bugs.clone(),
-                    crate::commit_scope::bind(move || {
+                    crate::commit_task::bind(move || {
                         let written = (|| -> Result<_, DbError> {
                             let held =
                                 held_folder(&self.database, held, &run[0].0.name, &mut batch)?;
@@ -221,7 +221,7 @@ impl FileStaging {
             let (next, writer, returned) = coven_foundation::task::blocking_completing(
                 "create a staged copy",
                 bugs.clone(),
-                crate::commit_scope::bind(move || {
+                crate::commit_task::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
                         let held = held_folder(&self.database, held, &file_name, &mut creating)?;
                         let writer = held.create(&file_name.copy())?;

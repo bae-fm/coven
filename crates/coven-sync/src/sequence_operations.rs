@@ -501,7 +501,11 @@ impl SequenceSync {
             return self.advance_administration(session, ring, member, id).await;
         }
         let scope = self.waits.begin_attempt(id);
-        let result = scope.run(self.advance_administration(session, ring, member, id)).await;
+        let result = coven_database::in_commit_scope(
+            scope,
+            self.advance_administration(session, ring, member, id),
+        )
+        .await;
         if let Err(error) = &result {
             if let Some(record) = self.database.operation(id).await? {
                 let work: SequenceOperation = serde_json::from_slice(&record.data)?;

@@ -254,6 +254,8 @@ pub use operation_outcome::{
 
 mod commit_scope;
 pub use commit_scope::CommitScope;
+mod commit_task;
+pub use commit_task::in_commit_scope;
 mod prerequisite_rows;
 pub use observation::AttemptCommits;
 pub use prerequisite_rows::PrerequisiteRows;

@@ -86,7 +86,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     // The attempt changes its own prerequisite: no evidence.
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
-    attempt.run(observe(7)).await;
+    crate::in_commit_scope(attempt, observe(7)).await;
     let mut wait = db.watch_attempt(commits, &seven);
     assert!(!wait.take_changed().unwrap());
     // Another row: no evidence. Its row, by other work: evidence, and the
@@ -105,7 +105,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     assert!(db.watch_attempt(commits, &seven).take_changed().unwrap());
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
-    attempt.run(async { tokio::spawn(observe(7)).await.unwrap() }).await;
+    crate::in_commit_scope(attempt, async { tokio::spawn(observe(7)).await.unwrap() }).await;
     assert!(db.watch_attempt(commits, &seven).take_changed().unwrap());
     let commits = db.attempt_commits(CommitScope::new());
     observe(8).await;

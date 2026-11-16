@@ -99,11 +99,11 @@ impl SequenceSync {
             }
         }
         let id = self.files_operation(existing).await?;
-        let result = self
-            .waits
-            .begin_attempt(id)
-            .run(self.delete_files(session, ring, member, uploaders, scans, id))
-            .await;
+        let result = coven_database::in_commit_scope(
+            self.waits.begin_attempt(id),
+            self.delete_files(session, ring, member, uploaders, scans, id),
+        )
+        .await;
         match result {
             Ok(()) => {
                 self.database.finish_operation(id).await?;
@@ -149,20 +149,17 @@ impl SequenceSync {
         }
         let existing = records.iter().find(|record| record.kind == operation_kind::SEQUENCE_FILES);
         let id = self.files_operation(existing).await?;
-        let result = self
-            .waits
-            .begin_attempt(id)
-            .run(async {
-                // A gone device whose key still works may have started
-                // uploads or stored snapshot bodies since its storage was
-                // last cleared. Its uploads end before its folders are
-                // listed again, its files' among them (§16.6).
-                for device in uploaders.iter().filter(|device| **device != self.device) {
-                    self.clear_gone_storage(&session, *device).await?;
-                }
-                self.delete_files(&session, &ring, &member, uploaders.clone(), scans, id).await
-            })
-            .await;
+        let result = coven_database::in_commit_scope(self.waits.begin_attempt(id), async {
+            // A gone device whose key still works may have started
+            // uploads or stored snapshot bodies since its storage was
+            // last cleared. Its uploads end before its folders are
+            // listed again, its files' among them (§16.6).
+            for device in uploaders.iter().filter(|device| **device != self.device) {
+                self.clear_gone_storage(&session, *device).await?;
+            }
+            self.delete_files(&session, &ring, &member, uploaders.clone(), scans, id).await
+        })
+        .await;
         match result {
             Ok(()) => {
                 self.database.finish_operation(id).await?;

@@ -179,7 +179,11 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            let result = scope.run(self.advance_member_keys(session, ring, record.id)).await;
+            let result = coven_database::in_commit_scope(
+                scope,
+                self.advance_member_keys(session, ring, record.id),
+            )
+            .await;
             self.settle_resumed(
                 record.id,
                 OperationKind::ReplaceMemberKeys,
