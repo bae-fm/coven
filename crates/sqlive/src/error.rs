@@ -20,6 +20,9 @@ pub enum EngineFailure<F, R> {
     /// cause, other than on a busy or locked database, so sqlive stopped
     /// keeping them.
     Statistics(Error<F, R>),
+    /// SQLite refused to remove a transaction's hook with this cause, so
+    /// what the connection calls next is unknown.
+    Hook(Error<F, R>),
 }
 
 /// Why a call failed.

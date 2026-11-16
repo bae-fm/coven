@@ -51,6 +51,7 @@ impl From<sqlive::EngineFailure<StoreFailure, DbError>> for StoreFailure {
             sqlive::EngineFailure::Statistics(cause) => {
                 Self::Statistics(Arc::new(DbError::from(cause)))
             }
+            sqlive::EngineFailure::Hook(cause) => Self::State(Arc::new(DbError::from(cause))),
         }
     }
 }

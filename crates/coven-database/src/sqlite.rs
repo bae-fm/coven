@@ -275,7 +275,7 @@ impl DatabaseConnection {
     pub(crate) fn removed_hook(&self, hook: &'static str, removed: rusqlite::Result<()>) {
         if let Err(error) = removed {
             tracing::error!(hook, %error, "removing a transaction's hook failed");
-            self.fail_handle(StoreFailure::State(Arc::new(error.into())));
+            self.fail_handle(StoreFailure::from(sqlive::EngineFailure::Hook(error.into())));
         }
     }
 
