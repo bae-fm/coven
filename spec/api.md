@@ -10581,9 +10581,9 @@ pub enum TaskFailed {
 }
 
 /// Work that panicked, or that code found wrong without a panic: a bug in
-/// it, not a failure its caller can act on (E15). A `Panic` is shown as
-/// "{operation} panicked: {message}", a `Found` bug as "{operation} found a
-/// bug: {message}".
+/// it, not a failure its caller can act on (E15). `Bug` displays a `Panic`
+/// as "{operation} panicked: {message}" and a `Found` bug as "{operation}
+/// found a bug: {message}".
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub struct Bug {
     /// What the work was doing, as its caller named it.
