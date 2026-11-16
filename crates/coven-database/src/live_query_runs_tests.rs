@@ -1,9 +1,9 @@
 use crate::tests::next;
 use crate::tests::TestStore;
-use crate::Database;
 use crate::DbError;
+use crate::StoreDatabase;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 

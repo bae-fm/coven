@@ -1,5 +1,5 @@
 use crate::tests::TestStore;
-use crate::{Database, DbError, RowIdentity, SyncedTable};
+use crate::{DbError, RowIdentity, StoreDatabase, SyncedTable};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ fn fill(table: &str, rows: i64) -> String {
     )
 }
 
-async fn bulk(db: &Database, sql: String) -> Result<(), DbError> {
+async fn bulk(db: &StoreDatabase, sql: String) -> Result<(), DbError> {
     db.write_bulk(move |context| {
         context.execute_batch(&sql)?;
         Ok(())
@@ -45,7 +45,7 @@ async fn bulk(db: &Database, sql: String) -> Result<(), DbError> {
 
 /// A live query counting `table`'s rows, and how many times it has run.
 fn counting(
-    db: &Database,
+    db: &StoreDatabase,
     table: &'static str,
 ) -> (crate::LiveQuery<i64, crate::DbError>, Arc<AtomicUsize>) {
     let runs = Arc::new(AtomicUsize::new(0));

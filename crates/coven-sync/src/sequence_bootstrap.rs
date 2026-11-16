@@ -131,7 +131,7 @@ impl SequenceSync {
     /// The store key that sealed this installation's newest applied original
     /// while custody holds no store key: syncing needs it unlocked first (§12.4).
     pub async fn missing_store_key(
-        database: &coven_database::Database,
+        database: &coven_database::StoreDatabase,
         keys: &coven_crypto::custody::KeySession<StoreKeyring>,
     ) -> Result<Option<KeyId>, SyncError> {
         if keys.read()?.is_some() {

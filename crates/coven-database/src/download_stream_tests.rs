@@ -351,7 +351,7 @@ mod memory {
         }
     }
 
-    fn state_digest(db: &Database) -> coven_crypto::ObjectDigest {
+    fn state_digest(db: &StoreDatabase) -> coven_crypto::ObjectDigest {
         db.inspect_writer_schema(|db, call,schema| {
             let store=crate::merge_store::MergeStore::from_schema(db, call,&schema.schema).without_row_cache();
             let mut digest=coven_crypto::ObjectHasher::new();
@@ -651,7 +651,7 @@ async fn compare(lean: bool) {
     }
 }
 
-fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &Database) {
+fn compare_lean(writes: &[WriteRecord], order: &[usize], db: &StoreDatabase) {
     use serde_json::json;
     let columns = ["id", "a", "b"];
     let rows: Vec<_> = writes

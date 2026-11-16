@@ -13,7 +13,7 @@
 //! state does. Opening writes the stopped row with nothing held, and each
 //! change writes the row in the step that makes it, on the writer, where
 //! the retry's own answer is decided from the same row
-//! (`Database::change_retry_state`).
+//! (`StoreDatabase::change_retry_state`).
 //!
 //! Like the sync status, only the handle that holds the store's writer lock
 //! reads it (`app_policy.rs`): a read-only handle can't tell whether the

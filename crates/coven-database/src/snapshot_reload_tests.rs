@@ -6,7 +6,7 @@ use crate::snapshot_write::tests::{decode, frames, id, load_one, SnapshotFrames}
 use crate::sqlite::DatabaseConnection;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
-use crate::{Database, Migration, RowIdentity, SyncedTable};
+use crate::{Migration, RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
@@ -37,12 +37,12 @@ fn library() -> Vec<SyncedTable> {
     TABLES.iter().map(|table| SyncedTable::new(*table, RowIdentity::SharedKey)).collect()
 }
 
-pub(crate) async fn open(store: &TestStore) -> Database {
+pub(crate) async fn open(store: &TestStore) -> StoreDatabase {
     store.schema(library(), LIBRARY).await.unwrap()
 }
 
 /// Apply `writer`'s queued writes on each of `devices`, in their order.
-pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
+pub(crate) async fn publish(writer: &StoreDatabase, devices: &[&StoreDatabase]) {
     let writes = records(writer);
     crate::upload::tests::empty_queue(writer);
     for write in writes {
@@ -53,14 +53,14 @@ pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
 }
 
 /// Every app row of the library's tables.
-pub(crate) fn app_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
+pub(crate) fn app_rows(db: &StoreDatabase) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
     TABLES.iter().map(|table| (table.to_string(), contents[*table].clone())).collect()
 }
 
 /// What the removal rules recorded, by row identity rather than local id:
 /// unique claims and written values.
-pub(crate) fn recorded(db: &Database) -> Vec<Vec<crate::types::Value>> {
+pub(crate) fn recorded(db: &StoreDatabase) -> Vec<Vec<crate::types::Value>> {
     db.inspect_writer(|db, _| {
         db.query(
                 "SELECT 'claim',r.table_name,r.key,r.audience,k.identity,c.value FROM _coven_claims c
@@ -103,7 +103,7 @@ pub(crate) fn everything(db: &DatabaseConnection) -> Vec<(String, Vec<Vec<crate:
 /// Running the removal rules over every row of every audience changes
 /// nothing an install left: the rows the rules didn't reach show what the
 /// rules give them, with their losses, claims and written values.
-pub(crate) fn assert_rules_settled(db: &Database) {
+pub(crate) fn assert_rules_settled(db: &StoreDatabase) {
     db.inspect_writer_schema(|writer, call, schema| {
         let db = &*writer;
         db
@@ -127,7 +127,11 @@ pub(crate) fn assert_rules_settled(db: &Database) {
 }
 
 /// The loading device holds what the source device holds.
-pub(crate) async fn assert_installed(source: &Database, loaded: &Database, audiences: &[Audience]) {
+pub(crate) async fn assert_installed(
+    source: &StoreDatabase,
+    loaded: &StoreDatabase,
+    audiences: &[Audience],
+) {
     assert_rules_settled(loaded);
     assert_eq!(app_rows(loaded), app_rows(source));
     assert_eq!(recorded(loaded), recorded(source));
@@ -142,7 +146,7 @@ pub(crate) async fn assert_installed(source: &Database, loaded: &Database, audie
 
 /// A local log of every app row change, for the order and count of what the
 /// app's triggers see.
-pub(crate) fn log_changes(db: &Database) {
+pub(crate) fn log_changes(db: &StoreDatabase) {
     let mut sql = String::from(
         "CREATE TABLE changes(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, tbl TEXT NOT NULL, row TEXT NOT NULL);",
     );
@@ -157,7 +161,7 @@ pub(crate) fn log_changes(db: &Database) {
     db.inspect_writer(|db, _| db.batch(&sql).unwrap());
 }
 
-pub(crate) fn changes(db: &Database) -> Vec<(String, String, String)> {
+pub(crate) fn changes(db: &StoreDatabase) -> Vec<(String, String, String)> {
     db.inspect_writer(|db, _| {
         db.query("SELECT kind,tbl,row FROM changes ORDER BY id", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -199,7 +203,7 @@ pub(crate) fn expected_changes(
 }
 
 /// The logged changes, sorted, with keys printed as `expected_changes` does.
-pub(crate) fn logged(db: &Database) -> Vec<(String, String, String)> {
+pub(crate) fn logged(db: &StoreDatabase) -> Vec<(String, String, String)> {
     let mut logged: Vec<_> = changes(db)
         .into_iter()
         .map(|(kind, table, row)| (kind, table, format!("{:?}", crate::types::Value::Text(row))))
@@ -210,7 +214,10 @@ pub(crate) fn logged(db: &Database) -> Vec<(String, String, String)> {
 
 /// Each logged insert or update of a track or file comes after its parent's
 /// change, and each delete of one before its parent's delete (§8.4).
-fn assert_parents_first(db: &Database, before: &BTreeMap<String, Vec<Vec<crate::types::Value>>>) {
+fn assert_parents_first(
+    db: &StoreDatabase,
+    before: &BTreeMap<String, Vec<Vec<crate::types::Value>>>,
+) {
     let log = changes(db);
     let after = app_rows(db);
     let mut pairs = Vec::new();
@@ -246,7 +253,7 @@ fn assert_parents_first(db: &Database, before: &BTreeMap<String, Vec<Vec<crate::
 /// unique value held twice, a reference to a deleted release, a failing
 /// CHECK with the rows it takes out, a lost cell, and a cover whose release
 /// is gone, which SQLite reads as NULL though its cell keeps the release.
-pub(crate) async fn concurrent_library(a: &Database, b: &Database) {
+pub(crate) async fn concurrent_library(a: &StoreDatabase, b: &StoreDatabase) {
     sql(
         a,
         "INSERT INTO releases VALUES('r1','One',NULL,NULL),('r2','Two',NULL,NULL),('r3','Three',1,5);
@@ -394,7 +401,7 @@ pub(crate) fn circle_tables() -> Vec<SyncedTable> {
 
 pub(crate) const GIFTS: CircleId = CircleId(uuid::Uuid::from_u128(10));
 
-pub(crate) async fn circle_device(store: &TestStore) -> Database {
+pub(crate) async fn circle_device(store: &TestStore) -> StoreDatabase {
     let db = store
         .builder(circle_tables(), vec![Migration::addition(1, "notes", CIRCLE_NOTES)])
         .open()
@@ -404,12 +411,12 @@ pub(crate) async fn circle_device(store: &TestStore) -> Database {
     db
 }
 
-pub(crate) fn circle_rows(db: &Database) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
+pub(crate) fn circle_rows(db: &StoreDatabase) -> BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     let contents = crate::tests::contents(db);
     ["folders", "notes"].iter().map(|table| (table.to_string(), contents[*table].clone())).collect()
 }
 
-pub(crate) async fn assert_circles_installed(source: &Database, loaded: &Database) {
+pub(crate) async fn assert_circles_installed(source: &StoreDatabase, loaded: &StoreDatabase) {
     assert_rules_settled(loaded);
     assert_eq!(circle_rows(loaded), circle_rows(source));
     assert_eq!(recorded(loaded), recorded(source));
@@ -424,7 +431,7 @@ pub(crate) async fn assert_circles_installed(source: &Database, loaded: &Databas
 /// Circle notes in store folders: a note taken out with its deleted folder,
 /// a moved note, one key in both audiences, and a title two circle notes
 /// hold at once.
-pub(crate) async fn circle_history(a: &Database, b: &Database, outside: &Database) {
+pub(crate) async fn circle_history(a: &StoreDatabase, b: &StoreDatabase, outside: &StoreDatabase) {
     sql(
         a,
         "INSERT INTO folders VALUES('home','Home'),('old','Old');
@@ -465,7 +472,7 @@ async fn circles_install_with_their_store_parents_and_keys_in_two_audiences() {
         }
     }
     circle_history(&a, &b, &d).await;
-    let rules = |db: &Database| {
+    let rules = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             db.query(
                 "SELECT count(*) FROM _coven_lost WHERE replacement_kind='rules' GROUP BY audience ORDER BY audience",

@@ -186,7 +186,7 @@ fn crashing_file_writer() {
 
 /// Complete the only queued upload as confirmed storage would, whether a
 /// file still waits for it or not.
-async fn complete(db: &Database) -> Result<crate::UploadCompletion, DbError> {
+async fn complete(db: &StoreDatabase) -> Result<crate::UploadCompletion, DbError> {
     let id = db.inspect_writer(|sql, _| {
         sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| r.get::<_, i64>(0)).unwrap()
     });
@@ -194,7 +194,7 @@ async fn complete(db: &Database) -> Result<crate::UploadCompletion, DbError> {
 }
 
 /// The size of the file row `7` references.
-fn file_size(db: &Database) -> i64 {
+fn file_size(db: &StoreDatabase) -> i64 {
     db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT f.size FROM files AS r JOIN main.coven_files AS f ON f.id=r.file WHERE r.id='7'",

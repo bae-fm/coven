@@ -312,7 +312,7 @@ const CYCLE_FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const CYCLE_SECOND: &str = "00000000-0000-4000-8000-000000000002";
 const CYCLE_CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
 
-async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database {
+async fn reference_cycle(store: &TestStore, reference: &str) -> crate::StoreDatabase {
     let schema = format!("CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,body TEXT,{reference}); CREATE INDEX nodes_parent ON nodes(parent)");
     let db = store
         .builder(
@@ -464,7 +464,7 @@ async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
     db.close().await.unwrap();
 }
 
-fn materialize_cycle(db: &crate::Database) -> Result<(), DbError> {
+fn materialize_cycle(db: &crate::StoreDatabase) -> Result<(), DbError> {
     crate::removal::tests::materialize_deleted(
         db,
         "nodes",
@@ -862,7 +862,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
             matches!(write, DbError::Rollback { operation, .. } if matches!(**operation, DbError::StoreClosed)),
             "{error:?}"
         );
-        let held = |db: &crate::Database| {
+        let held = |db: &crate::StoreDatabase| {
             db.inspect_writer(|writer, _| {
                 writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
             })

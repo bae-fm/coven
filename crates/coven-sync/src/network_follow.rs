@@ -5,7 +5,7 @@
 //! holds transfers for a metered network watches it itself (§17.9).
 
 use crate::RetryWaits;
-use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::network_watch::NetworkWatch;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -28,7 +28,7 @@ impl NetworkFollow {
     /// Show the network as the watch says it is now, report it if it is
     /// usable, so a wait saved before the store opened ends now, then follow
     /// each change.
-    pub fn start(watched: NetworkWatch, waits: Arc<RetryWaits>, database: Database) -> Self {
+    pub fn start(watched: NetworkWatch, waits: Arc<RetryWaits>, database: StoreDatabase) -> Self {
         let mut network = watched.view();
         let first = network.read();
         database.record_network(first);

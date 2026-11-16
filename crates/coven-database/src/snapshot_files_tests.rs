@@ -7,7 +7,7 @@ use crate::snapshot_reload::tests::{everything, publish};
 use crate::snapshot_write::tests::{frames, id, load_one};
 use crate::tests::TestStore;
 use crate::write::tests::count;
-use crate::Database;
+use crate::StoreDatabase;
 use coven_format::value::Value;
 use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId, SequentialIds};
@@ -73,7 +73,7 @@ fn recorded(
 
 /// What the device's rows protect: each file reference, stored path,
 /// stored file, file waiting for its record's delete, original and upload.
-fn protection(db: &Database) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
+fn protection(db: &StoreDatabase) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
     db.inspect_writer(|db, _| {
         everything(db)
             .into_iter()
@@ -94,7 +94,7 @@ fn protection(db: &Database) -> Vec<(String, Vec<Vec<crate::types::Value>>)> {
 
 /// Bringing every row's protection up to date one row at a time, from its
 /// whole merge state and losses, changes nothing an install left.
-fn assert_protection_settled(db: &Database) {
+fn assert_protection_settled(db: &StoreDatabase) {
     db.inspect_writer_schema(|writer, call, schema| {
         let db = &*writer;
         db.discarded_write_transaction(|_| {
@@ -118,7 +118,7 @@ fn assert_protection_settled(db: &Database) {
     });
 }
 
-async fn write_sql(db: &Database, sql: String) {
+async fn write_sql(db: &StoreDatabase, sql: String) {
     db.write(move |context| {
         context.execute_batch(&sql)?;
         Ok(())
@@ -155,7 +155,7 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
     for store in [&a, &b, &c, &d, &e] {
         devices.push(store.schema(vec![files_table()], FILES).await.unwrap());
     }
-    let Ok::<[Database; 5], _>([a, b, c, d, e]) = devices.try_into() else {
+    let Ok::<[StoreDatabase; 5], _>([a, b, c, d, e]) = devices.try_into() else {
         unreachable!("five devices opened")
     };
     let (shared, local, kept, dropped) = (file(1), file(2), file(3), file(4));
@@ -204,14 +204,14 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
     write_sql(&e, "DELETE FROM t WHERE id='two'".into()).await;
     publish(&d, &[&a]).await;
     publish(&e, &[&a]).await;
-    let unreferenced = |db: &Database| {
+    let unreferenced = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             db.query("SELECT file FROM _coven_unreferenced_files", [], |r| r.get::<_, String>(0))
                 .unwrap()
         })
     };
     assert_eq!(unreferenced(&a), [shared.0.to_string()]);
-    let references = |db: &Database| {
+    let references = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             db.query(
                 "SELECT file FROM _coven_file_references WHERE key=?1 ORDER BY file",

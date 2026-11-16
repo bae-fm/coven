@@ -15,7 +15,7 @@ use coven_crypto::{
 };
 use coven_database::operation_kind;
 use coven_database::{
-    Database, IncomingSlot, LoadStep, NewOperation, ProviderAccessChange, SlotContent,
+    IncomingSlot, LoadStep, NewOperation, ProviderAccessChange, SlotContent, StoreDatabase,
 };
 use coven_format::{
     floor::OriginalSlot,
@@ -54,7 +54,7 @@ pub(crate) struct Session {
 /// publisher shares this owner's serialization and actual blocked state.
 #[derive(Clone)]
 pub struct SequenceSync {
-    database: Database,
+    database: StoreDatabase,
     storage: Arc<dyn Storage>,
     keys: Arc<KeySession<StoreKeyring>>,
     member: Arc<KeySession<MemberIdentity>>,
@@ -79,7 +79,7 @@ impl SequenceSync {
     /// Reconstruct historical bindings once from committed originals. It
     /// performs no provider request and grants no sending authority.
     pub async fn open(
-        database: Database,
+        database: StoreDatabase,
         storage: Arc<dyn Storage>,
         directory: StoreDir,
         device: DeviceId,

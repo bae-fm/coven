@@ -1,12 +1,12 @@
 //! Persisted retry waits through the owning database (§6.7).
 
-use super::Database;
+use super::StoreDatabase;
 use crate::{
     retry::{self, RetrySubject, RetryWait},
     DbError,
 };
 
-impl Database {
+impl StoreDatabase {
     /// Persist a failed pass's connection condition and retry deadline together.
     /// A failure already owned by a slot or operation supplies no connection record.
     pub async fn record_sync_retry<P: crate::PendingValue>(

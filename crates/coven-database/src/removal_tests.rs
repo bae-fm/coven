@@ -5,7 +5,7 @@ use coven_merge::{ColumnValue, ForeignKey, Operation, Rule};
 
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 
 fn table(name: &str) -> SyncedTable {
     SyncedTable::new(name, RowIdentity::SharedKey)
@@ -13,7 +13,7 @@ fn table(name: &str) -> SyncedTable {
 
 type RemovedRow = (String, BTreeMap<String, ColumnValue<Value>>, BTreeSet<Rule>);
 
-fn losses(database: &Database) -> Vec<RemovedRow> {
+fn losses(database: &StoreDatabase) -> Vec<RemovedRow> {
     database.inspect_writer(|db, _| db.query("SELECT table_name,value,replaced_by FROM _coven_lost WHERE column_id IS NULL ORDER BY table_name,key", [], |r| Ok((r.get(0)?, merge_fields::decode_columns(&r.get::<_, Vec<u8>>(1)?).unwrap(), merge_fields::decode_rules(&r.get::<_, Vec<u8>>(2)?).unwrap()))).unwrap())
 }
 
@@ -645,7 +645,7 @@ async fn a_circle_deletion_runs_local_foreign_key_actions_once() {
     )
     .await
     .unwrap();
-    let remaining = |db: &Database| {
+    let remaining = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             (
                 db.query_row("SELECT count(*) FROM search_index", [], |r| r.get::<_, i64>(0))
@@ -808,7 +808,7 @@ async fn references_to_mutable_nonkey_columns_are_refused() {
 }
 
 pub(crate) fn materialize_deleted(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     table: &str,
     keys: &[&str],
     circle: coven_foundation::id_source::CircleId,
@@ -849,7 +849,7 @@ pub(crate) fn materialize_deleted(
 }
 
 /// A competing title hides the child while its parent remains writable.
-pub(crate) async fn hidden_plan_note(db: &Database) {
+pub(crate) async fn hidden_plan_note(db: &StoreDatabase) {
     sql(
         db,
         "INSERT INTO notes VALUES('1','Ideas',NULL); INSERT INTO notes VALUES('3','Plan',NULL)",
@@ -911,7 +911,7 @@ CREATE TRIGGER node_updated AFTER UPDATE ON nodes BEGIN
 END;";
 
 /// Ana's and Ben's devices on `schema`, each knowing both members.
-async fn two_devices(schema: &'static str) -> (Database, Database, [TestStore; 2]) {
+async fn two_devices(schema: &'static str) -> (StoreDatabase, StoreDatabase, [TestStore; 2]) {
     let ids = coven_foundation::id_source::SequentialIds::new();
     let stores = [TestStore::with_ids(&ids), TestStore::with_ids(&ids)];
     let ana = stores[0].schema(vec![table("nodes")], schema).await.unwrap();
@@ -924,7 +924,7 @@ async fn two_devices(schema: &'static str) -> (Database, Database, [TestStore; 2
 }
 
 /// Each node's arrival on `db`, in the order its triggers saw them.
-fn arrivals(db: &Database) -> Vec<(String, String, bool)> {
+fn arrivals(db: &StoreDatabase) -> Vec<(String, String, bool)> {
     db.inspect_writer(|db, _| {
         db.query("SELECT kind,id,parent_here FROM arrivals ORDER BY rowid", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))

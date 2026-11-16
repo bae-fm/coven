@@ -469,7 +469,7 @@ mod sequence_differential {
     }
 
     async fn apply_checked(
-        db: &coven_database::Database,
+        db: &coven_database::StoreDatabase,
         group: &Group,
         header: SlotHeader,
         change: StoreChange,

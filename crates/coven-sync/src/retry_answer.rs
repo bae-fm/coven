@@ -4,7 +4,7 @@
 //! connection will plan, whether a failure only new credentials, an update
 //! or a reset can clear holds every pass, and the provider cooldown holding
 //! them. Each step below changes that row and acts on the requests in one
-//! step on the store's writer (`Database::change_retry_state`), so the
+//! step on the store's writer (`StoreDatabase::change_retry_state`), so the
 //! answer a request gets is the effect the row shows when it is made (IO
 //! `ask_answers_by_effect`), and a request, stopping and a pass taking its
 //! requests each happen at once (IO `never_stranded`). Each step writes the
@@ -142,7 +142,7 @@ impl RetryEffect {
     /// Follow `coven_retry_effect` with a live query, as an app does.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
-        database: &coven_database::Database,
+        database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Self, DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(Self::read))
     }

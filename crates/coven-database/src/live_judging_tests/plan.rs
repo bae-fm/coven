@@ -1,13 +1,13 @@
 use super::lookup::follows;
 use crate::tests::next;
-use crate::{tests::TestStore, Database, DbError};
+use crate::{tests::TestStore, DbError, StoreDatabase};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 

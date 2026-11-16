@@ -99,7 +99,7 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     db.close().await.unwrap();
 }
 
-async fn clocked(store: &TestStore, milliseconds: u64) -> crate::Database {
+async fn clocked(store: &TestStore, milliseconds: u64) -> crate::StoreDatabase {
     store
         .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
@@ -163,7 +163,7 @@ async fn equal_scalars_keep_distinct_setters() {
 }
 
 /// The verdict `db` gave the change of `write` at `row`.
-fn verdict(db: &crate::Database, write: WriteId, row: &coven_merge::RowId) -> ChangeVerdict {
+fn verdict(db: &crate::StoreDatabase, write: WriteId, row: &coven_merge::RowId) -> ChangeVerdict {
     db.inspect_writer(|c, _| {
         let admission: Vec<u8> = c
             .query_row(

@@ -37,7 +37,7 @@ fn scan_candidates(store: &TestStore) -> crate::DatabaseBuilder {
 
 /// How each reader plans the lookup of a file root's candidates at its
 /// next read.
-fn readers_candidate_plans(db: &crate::Database) -> Vec<String> {
+fn readers_candidate_plans(db: &crate::StoreDatabase) -> Vec<String> {
     let plans = std::sync::Mutex::new(Vec::new());
     db.inspect_readers(|reader, call| {
         let _constants = crate::transaction_constants::keep_constants(reader, call);

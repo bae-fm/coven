@@ -3,10 +3,10 @@ use coven_format::write::WriteRecord;
 use coven_merge::Operation;
 
 use crate::tests::TestStore;
-use crate::{Database, DbError, RowIdentity, SyncedTable};
+use crate::{DbError, RowIdentity, StoreDatabase, SyncedTable};
 
 /// The queue's original records, exactly as they upload.
-pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
+pub(crate) fn records(database: &StoreDatabase) -> Vec<WriteRecord> {
     database
         .inspect_writer(|db, _| {
             db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| {
@@ -19,7 +19,7 @@ pub(crate) fn records(database: &Database) -> Vec<WriteRecord> {
         .collect()
 }
 
-pub(crate) async fn sql(database: &Database, sql: &'static str) -> Result<(), DbError> {
+pub(crate) async fn sql(database: &StoreDatabase, sql: &'static str) -> Result<(), DbError> {
     database
         .write(move |context| {
             context.execute_batch(sql)?;
@@ -28,7 +28,7 @@ pub(crate) async fn sql(database: &Database, sql: &'static str) -> Result<(), Db
         .await
 }
 
-pub(crate) fn count(database: &Database, table: &str) -> i64 {
+pub(crate) fn count(database: &StoreDatabase, table: &str) -> i64 {
     database.inspect_writer(|db, _| {
         db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
@@ -538,7 +538,7 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
     assert!(matches!(sql(&database, "DELETE FROM notes").await, Err(DbError::StoreClosed)));
 }
 
-fn assert_indexed(database: &Database) {
+fn assert_indexed(database: &StoreDatabase) {
     let statements = database.inspect_writer(|db, _| db.profiled_statements());
     assert!(!statements.is_empty(), "the whole write must be traced");
     let mut scans = std::collections::BTreeMap::<&str, i64>::new();

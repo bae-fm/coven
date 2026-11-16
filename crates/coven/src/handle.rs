@@ -51,7 +51,7 @@ pub use circles::Circles;
 
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
-use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
@@ -64,7 +64,7 @@ pub struct CovenHandle {
     // Drops first, so the store is closing before this clone of the
     // database goes.
     _scope: Arc<HandleScope>,
-    database: Database,
+    database: StoreDatabase,
     files: coven_sync::Files,
     /// The store's operation steps, which an app's write runs.
     steps: Arc<coven_sync::OperationSteps>,
@@ -84,7 +84,7 @@ pub struct CovenHandle {
 /// The app's hold on the store: ending it, as the last clone of the handle
 /// drops, marks the store closing though workers still hold the database
 /// (F.4).
-struct HandleScope(Database);
+struct HandleScope(StoreDatabase);
 
 impl Drop for HandleScope {
     fn drop(&mut self) {
@@ -100,7 +100,7 @@ impl std::fmt::Debug for CovenHandle {
 
 impl CovenHandle {
     pub(crate) fn new(
-        database: Database,
+        database: StoreDatabase,
         custody: StoreCustody,
         files: coven_sync::Files,
         steps: Arc<coven_sync::OperationSteps>,
@@ -683,7 +683,7 @@ impl CovenHandle {
     }
     /// The store's database, for tests that read what the owners keep.
     #[cfg(test)]
-    pub(crate) fn test_database(&self) -> &coven_database::Database {
+    pub(crate) fn test_database(&self) -> &coven_database::StoreDatabase {
         &self.database
     }
     /// Follow membership and audience state as passes apply it.

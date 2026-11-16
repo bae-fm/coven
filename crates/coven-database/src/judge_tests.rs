@@ -9,7 +9,9 @@ use crate::snapshot_write::tests::stream;
 use crate::tests::store_row;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
-use crate::{Database, LostValue, Replacement, RowAuthorizationFailure, RowIdentity, SyncedTable};
+use crate::{
+    LostValue, Replacement, RowAuthorizationFailure, RowIdentity, StoreDatabase, SyncedTable,
+};
 use coven_format::snapshot_rows::ChangeVerdict;
 use coven_format::write::{RowChange, WriteRecord};
 use coven_foundation::id_source::SequentialIds;
@@ -18,12 +20,12 @@ use coven_merge::{Audience, ColumnValue};
 pub(crate) const CAROL: u8 = 3;
 
 pub(crate) struct Devices {
-    ana: Database,
-    ben: Database,
-    mallory: Database,
-    carol: Database,
+    ana: StoreDatabase,
+    ben: StoreDatabase,
+    mallory: StoreDatabase,
+    carol: StoreDatabase,
     /// A device of Carol's member that has received nothing.
-    dan: Database,
+    dan: StoreDatabase,
     _stores: Vec<TestStore>,
     ids: SequentialIds,
     tables: Vec<SyncedTable>,
@@ -71,7 +73,7 @@ impl Devices {
     }
 
     /// Every device's member, registered on `db`.
-    fn register(&self, db: &Database) {
+    fn register(&self, db: &StoreDatabase) {
         let stores = &self._stores;
         TestStore::register(db, stores[0].device(), ANA);
         TestStore::register(db, stores[1].device(), BEN);
@@ -81,7 +83,7 @@ impl Devices {
     }
 
     /// A new device of Carol's member that has received nothing, and its store.
-    pub(crate) async fn fresh(&self) -> (TestStore, Database) {
+    pub(crate) async fn fresh(&self) -> (TestStore, StoreDatabase) {
         let store = TestStore::with_ids(&self.ids);
         let db = store.schema(self.tables.clone(), self.schema).await.unwrap();
         self.register(&db);
@@ -127,16 +129,16 @@ impl Devices {
 }
 
 /// Deliver one write, as its author's device published it.
-pub(crate) async fn receive(to: &Database, record: &WriteRecord) -> crate::ApplyOutcome {
+pub(crate) async fn receive(to: &StoreDatabase, record: &WriteRecord) -> crate::ApplyOutcome {
     to.receive_stream(stream(record), || Ok(())).await.unwrap()
 }
 
 /// The verdict a device recorded for one original change.
-pub(crate) fn verdict(db: &Database, record: &WriteRecord, row: &RowId) -> ChangeVerdict {
+pub(crate) fn verdict(db: &StoreDatabase, record: &WriteRecord, row: &RowId) -> ChangeVerdict {
     db.inspect_writer(|c, _| stored(c, &record.header, row).unwrap())
 }
 
-pub(crate) fn text(db: &Database, sql: &'static str) -> Option<String> {
+pub(crate) fn text(db: &StoreDatabase, sql: &'static str) -> Option<String> {
     db.inspect_writer(|c, _| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
@@ -151,7 +153,7 @@ pub(crate) fn not_owner(owner: u8) -> ChangeVerdict {
 }
 
 /// The lost values of one table's row on a device.
-async fn lost(db: &Database, table: &str, row: &str) -> Vec<LostValue> {
+async fn lost(db: &StoreDatabase, table: &str, row: &str) -> Vec<LostValue> {
     db.lost_values()
         .await
         .unwrap()
@@ -223,7 +225,7 @@ async fn a_direct_change_of_another_members_row_is_refused_alone() {
     devices.close().await;
 }
 
-async fn lost_is_empty(db: &Database, table: &str, row: &str) -> bool {
+async fn lost_is_empty(db: &StoreDatabase, table: &str, row: &str) -> bool {
     lost(db, table, row).await.is_empty()
 }
 
@@ -344,7 +346,7 @@ async fn verdicts_agree_in_both_arrival_orders() {
             ChangeVerdict::Derived(causes(&forged, &[("tracks", "t")]))
         );
     }
-    let state = |db: &Database| {
+    let state = |db: &StoreDatabase| {
         db.inspect_writer(|c, _| {
             c.query("SELECT id,body FROM reviews ORDER BY id", [], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -720,7 +722,7 @@ async fn generated_actions(receipt: &mut impl Receipt) {
 
 #[tokio::test]
 async fn actions_on_rows_with_generated_columns_match_exactly() {
-    generated_actions(&mut Observed(|_: &Database, _: &WriteRecord| {})).await;
+    generated_actions(&mut Observed(|_: &StoreDatabase, _: &WriteRecord| {})).await;
 }
 
 /// The receipts the model comparison checks (`judge_view::tests`), each
@@ -728,21 +730,21 @@ async fn actions_on_rows_with_generated_columns_match_exactly() {
 /// coalesced changes, triggers, unauthorized roots, a forged action payload,
 /// actions across affinities, by value alone and through shared columns, an
 /// action whose cause is refused, and actions on rows with generated columns.
-pub(crate) async fn receipts(compare: impl FnMut(&Database, &WriteRecord)) {
+pub(crate) async fn receipts(compare: impl FnMut(&StoreDatabase, &WriteRecord)) {
     received(&mut Observed(compare)).await;
 }
 
 /// How a receipt case delivers one write to `to`, one of `devices`, which
 /// holds the case's history.
 pub(crate) trait Receipt {
-    async fn receive(&mut self, devices: &Devices, to: &Database, record: &WriteRecord);
+    async fn receive(&mut self, devices: &Devices, to: &StoreDatabase, record: &WriteRecord);
 }
 
 /// Receive the write, then hand the device and the write to `F`.
 pub(crate) struct Observed<F>(pub(crate) F);
 
-impl<F: FnMut(&Database, &WriteRecord)> Receipt for Observed<F> {
-    async fn receive(&mut self, _: &Devices, to: &Database, record: &WriteRecord) {
+impl<F: FnMut(&StoreDatabase, &WriteRecord)> Receipt for Observed<F> {
+    async fn receive(&mut self, _: &Devices, to: &StoreDatabase, record: &WriteRecord) {
         receive(to, record).await;
         (self.0)(to, record);
     }
@@ -837,7 +839,7 @@ pub(crate) struct LoadedAlike {
 }
 
 impl Receipt for LoadedAlike {
-    async fn receive(&mut self, devices: &Devices, to: &Database, record: &WriteRecord) {
+    async fn receive(&mut self, devices: &Devices, to: &StoreDatabase, record: &WriteRecord) {
         let (_store, fresh) = devices.fresh().await;
         // The device holding the history writes the snapshot as its own, as
         // every device does: it keeps evidence only for other members' writes.

@@ -1,7 +1,7 @@
 use crate::snapshot_write::tests::{decode, prefix, SnapshotFrames};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
-use crate::{Database, DbError, Migration};
+use crate::{DbError, Migration, StoreDatabase};
 use coven_format::admin::SnapshotId;
 use coven_format::snapshot::SnapshotRecord;
 use coven_format::value::Value;
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 /// Make this database's own device the creator of a store, so a breaking
 /// migration has audiences to capture.
-pub(crate) async fn connect(db: &Database) {
+pub(crate) async fn connect(db: &StoreDatabase) {
     let device = db.local_device().unwrap();
     TestStore::register(db, device, 1);
     let mut state = db.store_state().await.unwrap();
@@ -46,7 +46,7 @@ fn index(version: u32, old_writes: crate::OldWrites) -> Migration {
     )
 }
 
-fn queue(db: &Database) -> Vec<(u64, Vec<u8>, Option<Vec<u8>>)> {
+fn queue(db: &StoreDatabase) -> Vec<(u64, Vec<u8>, Option<Vec<u8>>)> {
     db.inspect_writer(|db, _| {
         db.query("SELECT u.number,u.record,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k USING(device,number) ORDER BY u.number", [], |r| {
             Ok((crate::write_encoding::counter(r.get(0)?)?, r.get(1)?, r.get(2)?))
@@ -55,7 +55,7 @@ fn queue(db: &Database) -> Vec<(u64, Vec<u8>, Option<Vec<u8>>)> {
     })
 }
 
-async fn raise_frames(db: &Database, number: u64, version: u32) -> SnapshotFrames {
+async fn raise_frames(db: &StoreDatabase, number: u64, version: u32) -> SnapshotFrames {
     let through = db.raise_captures().await.unwrap()[0].through.number;
     crate::tests::publish_through(db, through).await.unwrap();
     db.prepare_raise_capture(Audience::Store, version).await.unwrap();
@@ -247,7 +247,7 @@ fn converted_index() -> Migration {
     index(2, crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))))
 }
 
-async fn migrated(store: &TestStore) -> Database {
+async fn migrated(store: &TestStore) -> StoreDatabase {
     let db = store.schema(notes(), NOTES).await.unwrap();
     connect(&db).await;
     sql(&db, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
@@ -255,7 +255,7 @@ async fn migrated(store: &TestStore) -> Database {
     store.builder(notes(), vec![initial(), converted_index()]).open().await.unwrap()
 }
 
-async fn title(db: &Database) -> String {
+async fn title(db: &StoreDatabase) -> String {
     db.read(|sql| {
         Ok::<_, DbError>(sql.query_row("SELECT title FROM notes WHERE id='n'", [], |r| r.get(0))?)
     })
@@ -336,7 +336,7 @@ async fn a_second_breaking_migration_captures_the_writes_between_its_markers() {
     let db = store.builder(notes(), migrations.clone()).open().await.unwrap();
     sql(&db, "UPDATE notes SET title='five'").await.unwrap();
     let device = db.local_device().unwrap();
-    let positions = |db: &Database| {
+    let positions = |db: &StoreDatabase| {
         records(db)
             .iter()
             .map(|r| (r.header.position.number, r.header.disposition))
@@ -495,7 +495,7 @@ async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
 }
 
 /// An audience's snapshot at the applied slot, leaving the queue unpublished.
-async fn unpublished_frames(db: &Database, audience: Audience) -> SnapshotFrames {
+async fn unpublished_frames(db: &StoreDatabase, audience: Audience) -> SnapshotFrames {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let (output, start) = (frames.clone(), metadata.clone());

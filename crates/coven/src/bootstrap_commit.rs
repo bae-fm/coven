@@ -127,7 +127,7 @@ pub(super) async fn publish_bootstrap(
     sign_in: SignInCustody,
     ring: StoreKeyring,
     owners: OpeningOwners,
-    database: Database,
+    database: StoreDatabase,
     waits: Arc<coven_sync::RetryWaits>,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
@@ -164,7 +164,7 @@ pub(super) async fn publish_bootstrap(
 /// rename the store applies later is newer, and one before that slot older
 /// (§13.1, §13.2).
 pub(super) async fn joined_name(
-    database: &Database,
+    database: &StoreDatabase,
     code: &InviteCode,
 ) -> Result<coven_sync::SavedName, BootstrapError> {
     let named_at = coven_merge::Slot::new(code.read_through)
@@ -178,7 +178,7 @@ pub(super) async fn joined_name(
 
 /// The loaded store's name and the slot that set it, for the saved code.
 pub(super) async fn loaded_name(
-    database: &Database,
+    database: &StoreDatabase,
 ) -> Result<coven_sync::SavedName, BootstrapError> {
     let (name, named_at) = database.named_store().await?;
     Ok(coven_sync::SavedName { name, named_at })

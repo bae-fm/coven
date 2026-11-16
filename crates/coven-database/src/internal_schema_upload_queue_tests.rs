@@ -15,7 +15,7 @@ const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEX
              first=(SELECT min(position) FROM coven_upload_queue);
      END;";
 
-async fn open(store: &TestStore, schema: &'static str) -> crate::Database {
+async fn open(store: &TestStore, schema: &'static str) -> crate::StoreDatabase {
     store
         .builder(tables(), vec![Migration::addition(1, "files", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
@@ -25,7 +25,7 @@ async fn open(store: &TestStore, schema: &'static str) -> crate::Database {
 }
 
 /// Whether `coven_upload_queue` holds exactly the files `coven_uploads` lists.
-fn agrees(db: &crate::Database) -> bool {
+fn agrees(db: &crate::StoreDatabase) -> bool {
     db.inspect_writer(|writer, _| {
         writer
             .query_row(
@@ -167,7 +167,10 @@ const LIBRARY: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release
 /// The library's tracks, all queued, and how long queuing them took. Without
 /// `follow`, with no trigger keeping `coven_upload_queue` or the app's count,
 /// as before coven kept the table.
-async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std::time::Duration) {
+async fn library(
+    files: usize,
+    follow: bool,
+) -> (TestStore, crate::StoreDatabase, std::time::Duration) {
     use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db = store

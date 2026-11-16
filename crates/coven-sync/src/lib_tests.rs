@@ -17,7 +17,7 @@ pub(crate) fn run_lean(variable: &str, cases: &serde_json::Value) -> serde_json:
 }
 
 pub(crate) async fn apply_write(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     record: coven_format::write::WriteRecord,
 ) -> Result<coven_database::ApplyOutcome, coven_database::DbError> {
     use coven_database::{DownloadedPartStream, DownloadedWriteStream, IncomingSlot, SlotContent};

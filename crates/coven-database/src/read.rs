@@ -1,7 +1,7 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
 use crate::sqlite::DatabaseConnection;
-use crate::{database, Database, DbError, LostValue, Mode, Writer};
+use crate::{database, DbError, LostValue, Mode, StoreDatabase, Writer};
 use coven_foundation::task::CarriesBug;
 use rusqlite::{Params, Row};
 use std::{
@@ -185,7 +185,7 @@ impl<'connection> SqlReadContext<'connection> {
 /// ends, on the store's writer or a read-only handle.
 #[must_use = "reads run when awaited"]
 pub struct Read<'a, F, M: Mode = Writer> {
-    database: &'a Database<M>,
+    database: &'a StoreDatabase<M>,
     state: ReadState<F>,
 }
 
@@ -203,7 +203,7 @@ where
     R: Send + 'static,
     E: From<DbError> + CarriesBug + Send + 'static,
 {
-    pub(crate) fn new(database: &'a Database<M>, read: F) -> Self {
+    pub(crate) fn new(database: &'a StoreDatabase<M>, read: F) -> Self {
         Self { database, state: ReadState::Pending(read) }
     }
 

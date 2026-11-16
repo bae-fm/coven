@@ -135,7 +135,7 @@ pub fn signer() -> coven_crypto::SigningKey {
 /// Stage a snapshot's whole plaintext from `input`, one chunk at a time, as
 /// sync stages an opened body (§16.2).
 pub async fn stage_plaintext(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     id: coven_format::admin::SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl std::io::Read,

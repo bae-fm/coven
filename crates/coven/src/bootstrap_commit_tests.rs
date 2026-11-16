@@ -51,7 +51,7 @@ impl Custody<MemberIdentity> for RefusedIdentity {
 }
 
 /// The bootstrap database's retry waits, as `prepare_and_load` opens them.
-async fn waits(database: &Database) -> Arc<coven_sync::RetryWaits> {
+async fn waits(database: &StoreDatabase) -> Arc<coven_sync::RetryWaits> {
     Arc::new(
         coven_sync::RetryWaits::open(
             database.clone(),
@@ -68,7 +68,7 @@ async fn prepared(
     keychain: Arc<Keychain>,
     keys: CustodyChoice<StoreKeyring>,
     identity: CustodyChoice<MemberIdentity>,
-) -> (BootstrapStore, OpeningOwners, Database) {
+) -> (BootstrapStore, OpeningOwners, StoreDatabase) {
     prepared_continuing(app, id, keychain, keys, identity, Continuing::Fresh).await
 }
 
@@ -79,7 +79,7 @@ async fn prepared_continuing(
     keys: CustodyChoice<StoreKeyring>,
     identity: CustodyChoice<MemberIdentity>,
     continuing: Continuing,
-) -> (BootstrapStore, OpeningOwners, Database) {
+) -> (BootstrapStore, OpeningOwners, StoreDatabase) {
     let pending = app.directories().begin_bootstrap(id, &UuidIds).await.unwrap();
     let builder = app
         .builder()

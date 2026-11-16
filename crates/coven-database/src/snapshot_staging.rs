@@ -5,7 +5,7 @@
 //! decoding records again; the few other records keep their frames.
 
 use super::InputDatabase;
-use crate::database::{start_call, Database, DatabaseInner};
+use crate::database::{start_call, DatabaseInner, StoreDatabase};
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
@@ -243,7 +243,7 @@ impl InputDatabase {
 /// its phases, and the load takes it whole. Dropped while still holding
 /// records, as by a cancelled or panicking caller, it removes them.
 pub struct SnapshotStaging {
-    database: Database,
+    database: StoreDatabase,
     expected: SnapshotId,
     /// Absent once the load or file check that read them removed them.
     tables: Option<StagedTables>,
@@ -342,7 +342,7 @@ impl Drop for SnapshotStaging {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Begin staging the snapshot `id`, whose signed prefix is `prefix`
     /// (§16.2). Nothing outside the loader reads what it stages.
     pub async fn stage_snapshot(
@@ -554,7 +554,7 @@ impl SnapshotStaging {
 
     /// Whether `database` staged it: records on another store's input
     /// connection are not there to read.
-    pub(crate) fn staged_by(&self, database: &Database) -> bool {
+    pub(crate) fn staged_by(&self, database: &StoreDatabase) -> bool {
         Arc::ptr_eq(&self.database.inner, &database.inner)
     }
 

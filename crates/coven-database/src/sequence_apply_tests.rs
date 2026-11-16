@@ -246,7 +246,7 @@ async fn compare(
     slots.len()
 }
 
-fn project(db: &Database, claims: &BTreeMap<coven_merge::WriteId, (u64, u64)>) -> Value {
+fn project(db: &StoreDatabase, claims: &BTreeMap<coven_merge::WriteId, (u64, u64)>) -> Value {
     db.inspect_writer(|c, _| {
         let winners = c
             .query("SELECT a,id FROM rows ORDER BY a", [], |r| {
@@ -419,7 +419,7 @@ async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
             .unwrap();
         }
     }
-    let merged = |db: &Database| {
+    let merged = |db: &StoreDatabase| {
         const ROW: &str = "r.table_name,r.key,r.audience,r.generation";
         let statements = [
             ("rows", "SELECT * FROM rows ORDER BY 1".to_owned()),
@@ -540,7 +540,7 @@ async fn a_unique_claim_counted_beside_an_unreached_row_leaves_nothing_taken_out
     }
     crate::write::tests::sql(&db, "UPDATE users SET email='x@' WHERE id='a'").await.unwrap();
     crate::write::tests::sql(&db, "UPDATE users SET email='a@' WHERE id='p'").await.unwrap();
-    let users = |db: &Database| -> Vec<(String, String, String)> {
+    let users = |db: &StoreDatabase| -> Vec<(String, String, String)> {
         db.inspect_writer(|db, _| {
             db.query("SELECT id,email,name FROM users ORDER BY id", [], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))

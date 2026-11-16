@@ -546,8 +546,8 @@ impl LastPass {
 
 impl SyncStatus {
     /// The sync state and when sync last finished, from what one committed
-    /// snapshot of coven's rows holds (§19.1): what `Database::sync_facts`
-    /// reads once and `Database::subscribe_sync_facts` follows.
+    /// snapshot of coven's rows holds (§19.1): what `StoreDatabase::sync_facts`
+    /// reads once and `StoreDatabase::subscribe_sync_facts` follows.
     pub fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> Result<Self, DbError> {
         let (facts, last_synced) = Facts::read(facts)?;
         Ok(Self { state: facts.state(), last_synced })
@@ -571,7 +571,7 @@ impl SyncStatus {
 
 /// The sync state and when sync last finished, computed from what coven
 /// knows in one committed snapshot (§19.1).
-pub async fn sync_status(database: &coven_database::Database) -> Result<SyncStatus, DbError> {
+pub async fn sync_status(database: &coven_database::StoreDatabase) -> Result<SyncStatus, DbError> {
     database.sync_facts(SyncStatus::computed).await
 }
 
@@ -586,7 +586,7 @@ fn named_provider(name: &str) -> Result<CloudProvider, DbError> {
 /// joining or restoring read to its end, is when (E5). A failure fails the
 /// store's handle with its cause.
 pub async fn record_opened(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     location: RecordedLocation<CloudProvider>,
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {
@@ -598,7 +598,7 @@ pub async fn record_opened(
 /// it; `finished`, for setup, is when it read the store to its end. A
 /// failure fails the store's handle with its cause.
 pub async fn record_location(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     location: RecordedLocation<CloudProvider>,
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {

@@ -2,11 +2,11 @@
 //! raise.
 
 use crate::sequence_sync::tests::*;
-use coven_database::{Database, DbError, Replacement};
+use coven_database::{DbError, Replacement, StoreDatabase};
 use coven_merge::Audience;
 
 async fn deed(
-    db: &Database,
+    db: &StoreDatabase,
     id: &'static str,
     circle: coven_foundation::id_source::CircleId,
     title: &'static str,
@@ -18,7 +18,7 @@ async fn deed(
     .await
     .unwrap();
 }
-async fn deeds(db: &Database) -> Vec<(String, String)> {
+async fn deeds(db: &StoreDatabase) -> Vec<(String, String)> {
     db.read(|sql| {
         Ok::<_, DbError>(sql.query("SELECT id,title FROM deeds ORDER BY id", [], |row| {
             Ok((row.get(0)?, row.get(1)?))

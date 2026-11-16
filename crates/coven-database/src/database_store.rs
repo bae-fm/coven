@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl Database {
+impl StoreDatabase {
     /// Save the name chosen for a local store before publishing its
     /// directory, which slot 1 will set (§10.3). This row is not sequence
     /// membership until the applied history creates the store and sets its
@@ -65,7 +65,7 @@ impl Database {
     }
 }
 
-impl<M: Mode> Database<M> {
+impl<M: Mode> StoreDatabase<M> {
     /// The name in this device's committed state, including a local creation
     /// on the writer (E9).
     pub async fn store_name(&self) -> Result<String, crate::DbError> {

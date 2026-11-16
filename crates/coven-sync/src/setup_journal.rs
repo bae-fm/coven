@@ -5,8 +5,8 @@
 
 use crate::{OperationKind, SyncError};
 use coven_database::{
-    operation_kind::STORAGE_SETUP, Database, DbError, NewOperation, OperationId, OperationOutcome,
-    OperationRecord,
+    operation_kind::STORAGE_SETUP, DbError, NewOperation, OperationId, OperationOutcome,
+    OperationRecord, StoreDatabase,
 };
 use coven_storage::StorageConfig;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ pub struct SetupJournal {
 impl SetupJournal {
     /// Journal a setup before its first write to storage, listed in
     /// `coven_operations` as `StorageSetup` from this commit on.
-    pub async fn start(database: &Database, creating: bool) -> Result<Self, SyncError> {
+    pub async fn start(database: &StoreDatabase, creating: bool) -> Result<Self, SyncError> {
         let work = SetupWork { creating, step: SetupStep::Checking };
         let id = database
             .start_listed_operation(
@@ -56,7 +56,7 @@ impl SetupJournal {
     }
 
     /// The setup a crash left running, if any.
-    pub async fn running(database: &Database) -> Result<Option<Self>, SyncError> {
+    pub async fn running(database: &StoreDatabase) -> Result<Option<Self>, SyncError> {
         database.first_operation(STORAGE_SETUP).await?.map(Self::read).transpose()
     }
 
@@ -90,7 +90,7 @@ impl SetupJournal {
     /// from here on it finishes (§11.6).
     pub async fn claim(
         &mut self,
-        database: &Database,
+        database: &StoreDatabase,
         location: StorageConfig,
     ) -> Result<(), SyncError> {
         let step = std::mem::replace(&mut self.work.step, SetupStep::Claiming { location });
@@ -126,7 +126,7 @@ impl SetupJournal {
     /// app acknowledges it (§11.4).
     pub async fn end(
         &self,
-        database: &Database,
+        database: &StoreDatabase,
         outcome: OperationOutcome,
     ) -> Result<(), SyncError> {
         Ok(database.finish_operation_with_outcome(self.id, outcome).await?)

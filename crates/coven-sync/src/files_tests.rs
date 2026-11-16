@@ -1,7 +1,7 @@
 use super::*;
 use coven_database::{
-    Database, DatabaseBuilder, FileColumn, FileLocation, FilePlace, FileRef, FileUpload, Migration,
-    Namespace, Provenance, RowIdentity, SyncedTable,
+    DatabaseBuilder, FileColumn, FileLocation, FilePlace, FileRef, FileUpload, Migration,
+    Namespace, Provenance, RowIdentity, StoreDatabase, SyncedTable,
 };
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::FileLease;
@@ -21,7 +21,7 @@ struct Fixture {
     ids: IdSourceRef,
     clock: ClockRef,
     send: Arc<crate::SequenceState>,
-    database: Database,
+    database: StoreDatabase,
     files: Files,
     storage: Arc<MemoryStorage>,
     namespaces: Vec<Namespace>,
@@ -945,7 +945,7 @@ impl Files {
 /// only afterwards, that drain could read the setting first and then upload a
 /// file the test queues meanwhile.
 async fn paused_files(
-    database: &Database,
+    database: &StoreDatabase,
     directory: &StoreDir,
     storage: Arc<dyn Storage>,
     send: Arc<crate::SequenceState>,

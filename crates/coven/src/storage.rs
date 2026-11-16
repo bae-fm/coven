@@ -61,7 +61,7 @@ pub(crate) type SetupProgress = tokio::sync::watch::Sender<Option<Progress<Stora
 /// reads a move a process that closed left behind, or an invite that has
 /// expired.
 pub(crate) async fn record_opened(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     clock: &ClockRef,
     location: coven_database::RecordedLocation<CloudProvider>,
     finished: Option<std::time::SystemTime>,
@@ -107,7 +107,7 @@ pub(crate) struct StorageConnections {
     /// The store's credential owner, connected or not; a change that needs
     /// the connection is given its sequence owner.
     codes: RestoreCodes,
-    database: coven_database::Database,
+    database: coven_database::StoreDatabase,
     files: coven_sync::Files,
     identity: Arc<KeySession<MemberIdentity>>,
     /// The person's entries, for each connection's sequence owner.
@@ -169,7 +169,7 @@ pub(crate) struct StorageConnections {
 
 impl StorageConnections {
     pub(crate) fn new(
-        database: coven_database::Database,
+        database: coven_database::StoreDatabase,
         files: coven_sync::Files,
         identity: Arc<KeySession<MemberIdentity>>,
         person: Arc<PersonEntries>,

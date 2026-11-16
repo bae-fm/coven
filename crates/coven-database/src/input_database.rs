@@ -1,6 +1,6 @@
 //! Durable remote observations, independently committed while application writes run.
 
-use super::{with_locked, Database};
+use super::{with_locked, StoreDatabase};
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::{StoreCall, TestRecords};
 use crate::DbError;
@@ -78,7 +78,7 @@ impl Drop for InputRead {
 /// One observed object version. A replacement invalidates the preceding handle.
 #[derive(Clone)]
 pub struct RetainedInput {
-    database: Database,
+    database: StoreDatabase,
     id: i64,
     reading: Arc<InputRead>,
 }
@@ -380,7 +380,7 @@ impl InputDatabase {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Forget the input records of the slots below a checked floor's `first`:
     /// nothing reads them again (§16.4). A record a live read holds stays.
     pub async fn forget_slot_inputs_below(

@@ -2,7 +2,7 @@ use crate::DbError;
 use crate::{
     tests::TestStore,
     write::tests::{records, sql},
-    ApplyOutcome, Database, Migration, Replacement, RowIdentity, SyncedTable,
+    ApplyOutcome, Migration, Replacement, RowIdentity, StoreDatabase, SyncedTable,
 };
 use coven_foundation::id_source::SequentialIds;
 use coven_merge::Audience;
@@ -53,7 +53,7 @@ fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>)
     steps
 }
 
-async fn result(db: &Database) -> Value {
+async fn result(db: &StoreDatabase) -> Value {
     let values: Vec<i64> = db
         .read(|sql| Ok::<_, DbError>(sql.query("SELECT value FROM notes", [], |row| row.get(0))?))
         .await
@@ -206,7 +206,7 @@ async fn an_attempted_write_arriving_after_the_raise_converts_like_an_untried_on
         if attempted {
             crate::upload::tests::attempt(&source, 9).await.unwrap();
         }
-        let queued = |db: &Database| {
+        let queued = |db: &StoreDatabase| {
             db.inspect_writer(|db, _| {
                 db.query(
                     "SELECT u.record,k.sealing_keys FROM _coven_uploads u
@@ -300,10 +300,10 @@ mod data_sources {
         };
         Migration::breaking(version, "rename", sql, old_writes, tables())
     }
-    async fn open(store: &TestStore, migrations: Vec<Migration>) -> Database {
+    async fn open(store: &TestStore, migrations: Vec<Migration>) -> StoreDatabase {
         store.builder(tables(), migrations).open().await.unwrap()
     }
-    async fn names(db: &Database, column: &'static str) -> Vec<(String, String)> {
+    async fn names(db: &StoreDatabase, column: &'static str) -> Vec<(String, String)> {
         db.read(move |sql| {
             Ok::<_, DbError>(sql.query(
                 &format!("SELECT id,{column} FROM notes ORDER BY id"),

@@ -10,7 +10,7 @@
 
 use crate::tests::next;
 use crate::tests::TestStore;
-use crate::{Database, DbError, LiveQuery, RowIdentity, SyncedTable};
+use crate::{DbError, LiveQuery, RowIdentity, StoreDatabase, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use sqlive::SqlValue;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +21,7 @@ type Pending = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 const TRACKS: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, title TEXT)";
 
-fn titles(db: &Database) -> LiveQuery<Vec<String>, crate::DbError> {
+fn titles(db: &StoreDatabase) -> LiveQuery<Vec<String>, crate::DbError> {
     db.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
             r.get::<_, String>(0)
@@ -32,7 +32,7 @@ fn titles(db: &Database) -> LiveQuery<Vec<String>, crate::DbError> {
 /// Through `write`, as the app's SQL in a local write, and through
 /// `commit`, as coven's own transaction: other releases' tracks wake
 /// nothing, this release's do, and so does a track moving in or out.
-async fn narrows(db: &Database, write: impl Fn(&'static str) -> Pending) {
+async fn narrows(db: &StoreDatabase, write: impl Fn(&'static str) -> Pending) {
     write("INSERT INTO tracks VALUES ('1','a','one'),('2','b','two')").await;
     let mut query = titles(db);
     assert_eq!(next(&mut query).await, ["one"]);
@@ -50,7 +50,7 @@ async fn narrows(db: &Database, write: impl Fn(&'static str) -> Pending) {
     assert!(!query.is_marked_for_rerun());
 }
 
-fn local_write(db: &Database) -> impl Fn(&'static str) -> Pending {
+fn local_write(db: &StoreDatabase) -> impl Fn(&'static str) -> Pending {
     let db = db.clone();
     move |sql| {
         let db = db.clone();
@@ -636,7 +636,7 @@ fn write(rng: &mut Rng) -> (String, bool) {
 /// Apply another device's update of one of `rows`, the synced table's
 /// keys, and describe it. Whether the merge keeps its values or not, live
 /// queries must follow what the table then holds.
-async fn remote(db: &Database, rng: &mut Rng, rows: &[String]) -> String {
+async fn remote(db: &StoreDatabase, rng: &mut Rng, rows: &[String]) -> String {
     use coven_format::value::Value;
     let id = rng.pick(rows).clone();
     let (column, value) = match rng.below(3) {
@@ -661,7 +661,7 @@ fn read(
     })
 }
 
-async fn one_shot(db: &Database, query: &Generated) -> Rows {
+async fn one_shot(db: &StoreDatabase, query: &Generated) -> Rows {
     let sql = query.sql.clone();
     let parameters = query.parameters.clone();
     db.read(move |context| Ok::<_, DbError>(read(&context, &sql, &parameters)?)).await.unwrap()

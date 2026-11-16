@@ -1,13 +1,13 @@
 //! Database operations used by synchronization, on the retained connections.
 
-use super::{Database, Mode};
+use super::{Mode, StoreDatabase};
 use crate::internal_schema::retry_effect::{self, RetryState};
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
 use crate::DbError;
 use coven_foundation::task::CarriesBug;
 
-impl Database {
+impl StoreDatabase {
     /// Transfer metadata of the current durable claim attempt.
     pub async fn claim_upload(&self) -> Result<crate::ClaimUpload, DbError> {
         self.call(|inner| inner.access.with_committed(|db, _| crate::claim::upload(db))).await
@@ -956,7 +956,7 @@ impl Database {
 #[path = "database_device.rs"]
 mod device;
 
-impl<M: Mode> Database<M> {
+impl<M: Mode> StoreDatabase<M> {
     /// Membership and audience state of the committed sequence prefix.
     pub async fn store_state(&self) -> Result<crate::StoreState, DbError> {
         self.call(|open| {

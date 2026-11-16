@@ -14,7 +14,7 @@ use super::InviteWork;
 use crate::sequence_sync::sequence_pairings::PairingWork;
 use crate::{RetryWaits, SequenceState};
 use coven_database::operation_kind;
-use coven_database::{Database, DbError, OperationId};
+use coven_database::{DbError, OperationId, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use std::{sync::Arc, time::SystemTime};
 use tokio::sync::watch;
@@ -35,14 +35,14 @@ impl InviteExpiry {
     /// End each invite whose lifetime ended while the store was closed, as
     /// it opens, before any app reads its invites. A failed write fails the
     /// handle with its cause.
-    pub async fn opened(database: &Database, now: SystemTime) -> Result<(), DbError> {
+    pub async fn opened(database: &StoreDatabase, now: SystemTime) -> Result<(), DbError> {
         write(database, now).await.map(drop)
     }
 
     /// Wake at each invite's expiry and write it, until closed. A new
     /// invite brings its expiry into the wakes as it is made.
     pub fn start(
-        database: Database,
+        database: StoreDatabase,
         clock: ClockRef,
         waits: Arc<RetryWaits>,
         state: Arc<SequenceState>,
@@ -83,7 +83,7 @@ impl InviteExpiry {
 }
 
 async fn run(
-    database: Database,
+    database: StoreDatabase,
     clock: ClockRef,
     waits: Arc<RetryWaits>,
     state: Arc<SequenceState>,
@@ -133,7 +133,7 @@ async fn run(
 /// return when the next one's does. Each ended invite's work is due at
 /// once, and a pass is asked for to do it.
 pub(crate) async fn expire(
-    database: &Database,
+    database: &StoreDatabase,
     now: SystemTime,
     waits: &RetryWaits,
     state: &SequenceState,
@@ -166,7 +166,7 @@ impl Ended {
 /// one step on the writer with reading them: no other write comes between.
 /// Returns what ended and the earliest expiry still to come.
 async fn write(
-    database: &Database,
+    database: &StoreDatabase,
     now: SystemTime,
 ) -> Result<(Ended, Option<SystemTime>), DbError> {
     let (invites, invite_next) = write_kind(
@@ -195,7 +195,7 @@ async fn write(
 /// End each journaled work of `kind` that `expired`, with `end`, and return
 /// the ended operations and the earliest `expiry` of the rest.
 async fn write_kind<W>(
-    database: &Database,
+    database: &StoreDatabase,
     kind: &str,
     expired: impl Fn(&W) -> bool + Send + 'static,
     end: impl Fn(&mut W) + Send + 'static,

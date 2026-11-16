@@ -14,7 +14,7 @@ use std::time::Duration;
 
 /// Stage `source` in the `files` namespace for row `7`.
 async fn stage_row(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     stage: impl FnOnce(&mut crate::WriteBatch<'_>) -> FileId + Send + 'static,
 ) -> FileId {
     db.staged_write::<_, _, _, _, DbError>(
@@ -30,7 +30,7 @@ async fn stage_row(
 
 /// Stage a user's original as row 7's file, in one write.
 async fn original_row(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     original: crate::PreparedUserFile,
     place: crate::Place,
 ) -> FileId {
@@ -43,7 +43,7 @@ async fn original_row(
     .unwrap()
 }
 
-async fn read_local(db: &crate::Database, file: FileId) -> Result<Vec<u8>, LocalFileError> {
+async fn read_local(db: &crate::StoreDatabase, file: FileId) -> Result<Vec<u8>, LocalFileError> {
     let reference = db.file_ref(file).await.unwrap();
     let stream = db
         .open_local_file(&reference, LeasePlace::for_test().await)
@@ -437,7 +437,7 @@ const CIRCLE: &str = "00000000-0000-4000-8000-000000000002";
 
 /// A store whose `photos` rows each reference one file and name their
 /// audience, with this device in `CIRCLE`.
-async fn photos(store: &TestStore) -> crate::Database {
+async fn photos(store: &TestStore) -> crate::StoreDatabase {
     use crate::{FileColumn, Migration, RowIdentity, SyncedTable};
     let declaration = SyncedTable::new("photos", RowIdentity::IndependentUuid)
         .audience_column("audience")
@@ -456,13 +456,13 @@ async fn photos(store: &TestStore) -> crate::Database {
     db
 }
 
-async fn photo_file(db: &crate::Database) -> FileId {
+async fn photo_file(db: &crate::StoreDatabase) -> FileId {
     db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?))
         .await
         .unwrap()
 }
 
-async fn move_to_circle(db: &crate::Database) {
+async fn move_to_circle(db: &crate::StoreDatabase) {
     db.write(move |sql| {
         sql.execute("UPDATE photos SET audience=?1", [CIRCLE])?;
         Ok(())

@@ -4,7 +4,7 @@ use crate::DbError;
 use crate::{Migration, RowIdentity, SyncedTable};
 
 /// A device-local queue beside a synced table.
-async fn queue(store: &TestStore) -> crate::Database {
+async fn queue(store: &TestStore) -> crate::StoreDatabase {
     store
         .builder(
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
@@ -110,7 +110,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
 
 /// How many of the writer's statements in its last profiled commit read a
 /// table's shape: its columns, or which tables are shadow tables.
-fn shape_reads(db: &crate::Database) -> usize {
+fn shape_reads(db: &crate::StoreDatabase) -> usize {
     db.inspect_writer(|writer, _| {
         writer
             .profiled_statements()

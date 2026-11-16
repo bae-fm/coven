@@ -1,12 +1,12 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::DbError;
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::value::Value;
 use coven_foundation::id_source::SequentialIds;
 use coven_merge::Audience;
 
-async fn open(store: &TestStore, seconds: u64) -> Database {
+async fn open(store: &TestStore, seconds: u64) -> StoreDatabase {
     store.builder(tables(), vec![crate::Migration::addition_with(1, "references", move |sql| {
         sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
         Ok(())
@@ -20,7 +20,7 @@ fn tables() -> Vec<SyncedTable> {
         .collect()
 }
 
-async fn reference(db: &Database, lost: bool) -> Option<String> {
+async fn reference(db: &StoreDatabase, lost: bool) -> Option<String> {
     if lost {
         return db
             .lost_values()
@@ -316,7 +316,7 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
             )))
             .open()
     };
-    let data = |db: &Database| {
+    let data = |db: &StoreDatabase| {
         let db = db.clone();
         async move { crate::tests::data(&db, Audience::Store) }
     };

@@ -9,7 +9,7 @@ use coven_foundation::{
 };
 
 /// What `coven_network` shows of the network.
-async fn shown(database: &Database) -> (Option<bool>, bool) {
+async fn shown(database: &StoreDatabase) -> (Option<bool>, bool) {
     database
         .read(|sql| {
             Ok::<_, DbError>(sql.query_row(

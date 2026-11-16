@@ -1,18 +1,18 @@
 use crate::snapshot_write::tests::{frames, id, SnapshotFrames};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
-use crate::{Database, DbError, SnapshotStaging};
+use crate::{DbError, SnapshotStaging, StoreDatabase};
 use coven_merge::Audience;
 use std::io::Cursor;
 
-async fn fixture(store: &TestStore) -> (Database, SnapshotFrames) {
+async fn fixture(store: &TestStore) -> (StoreDatabase, SnapshotFrames) {
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','kept','')").await.unwrap();
     let snapshot = frames(&db, Audience::Store).await;
     (db, snapshot)
 }
 
-async fn staged(db: &Database, snapshot: &SnapshotFrames) -> SnapshotStaging {
+async fn staged(db: &StoreDatabase, snapshot: &SnapshotFrames) -> SnapshotStaging {
     crate::test_utils::stage_plaintext(
         db,
         id(Audience::Store),
@@ -24,7 +24,7 @@ async fn staged(db: &Database, snapshot: &SnapshotFrames) -> SnapshotStaging {
 }
 
 fn reload(
-    db: &Database,
+    db: &StoreDatabase,
     covers: u64,
     snapshots: Vec<SnapshotStaging>,
 ) -> crate::SnapshotReload<SnapshotStaging, crate::DownloadedWriteStream<std::io::Empty>> {

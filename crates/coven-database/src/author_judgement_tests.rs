@@ -2,7 +2,7 @@ use super::*;
 use crate::snapshot_write::tests::stream;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_foundation::id_source::{MemberId, SequentialIds};
 use coven_merge::Audience;
 
@@ -39,8 +39,8 @@ pub(crate) fn tables() -> Vec<SyncedTable> {
 }
 
 pub(crate) struct Pair {
-    pub(crate) ana: Database,
-    pub(crate) ben: Database,
+    pub(crate) ana: StoreDatabase,
+    pub(crate) ben: StoreDatabase,
     _stores: (TestStore, TestStore),
 }
 
@@ -52,7 +52,7 @@ pub(crate) fn member(seed: u8) -> MemberId {
 }
 
 /// Deliver every write `from` has queued that `to` has not applied.
-pub(crate) async fn deliver(from: &Database, to: &Database) {
+pub(crate) async fn deliver(from: &StoreDatabase, to: &StoreDatabase) {
     for record in records(from) {
         from.receive_stream(stream(&record), || Ok(())).await.unwrap();
         to.receive_stream(stream(&record), || Ok(())).await.unwrap();
@@ -126,7 +126,7 @@ fn refused_for(error: DbError, table: &str, owner: u8) {
     }
 }
 
-pub(crate) fn value(db: &Database, sql: &'static str) -> Option<String> {
+pub(crate) fn value(db: &StoreDatabase, sql: &'static str) -> Option<String> {
     db.inspect_writer(|c, _| c.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).unwrap())
 }
 
@@ -556,7 +556,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     owners.close().await.unwrap();
     refused_for(db.dismiss_lost_values(&removed).await.unwrap_err(), "labels", owner);
     let creation =
-        |db: &Database| db.inspect_writer(|c, _| crate::ownership::creation(c, &row).unwrap());
+        |db: &StoreDatabase| db.inspect_writer(|c, _| crate::ownership::creation(c, &row).unwrap());
     let created = creation(&db);
     assert!(created.is_some());
     db.close().await.unwrap();
@@ -628,7 +628,7 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
     sql(&pair.ben, "DELETE FROM tracks WHERE id='t'").await.unwrap();
     let record = records(&pair.ben).pop().unwrap();
     deliver(&pair.ben, &pair.ana).await;
-    let verdicts = |db: &Database| {
+    let verdicts = |db: &StoreDatabase| {
         db.inspect_writer(|c, _| {
             record
                 .parts

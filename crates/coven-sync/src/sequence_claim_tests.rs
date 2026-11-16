@@ -573,7 +573,7 @@ async fn folders_device(group: &Group, seed: u8) -> Device {
         .await
 }
 
-async fn write(db: &coven_database::Database, statement: &'static str) {
+async fn write(db: &coven_database::StoreDatabase, statement: &'static str) {
     db.write(move |sql| {
         sql.execute(statement, [])?;
         Ok(())
@@ -583,7 +583,7 @@ async fn write(db: &coven_database::Database, statement: &'static str) {
 }
 
 /// What a device's database holds: its notes, and its lost values.
-async fn folders_state(db: &coven_database::Database) -> (Vec<(String, String)>, String) {
+async fn folders_state(db: &coven_database::StoreDatabase) -> (Vec<(String, String)>, String) {
     let notes = db
         .read(|sql| {
             Ok::<_, DbError>(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {

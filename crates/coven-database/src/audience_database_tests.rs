@@ -3,7 +3,7 @@ use crate::tests::database_error;
 use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{
-    Database, DbError, FileColumn, Migration, Namespace, OldWrites, Provenance, RowIdentity,
+    DbError, FileColumn, Migration, Namespace, OldWrites, Provenance, RowIdentity, StoreDatabase,
     SyncedTable,
 };
 use coven_foundation::files::FileLease;
@@ -73,7 +73,7 @@ async fn library_from(
     db.close().await.unwrap();
 }
 
-async fn migrate(store: &TestStore, migration: Migration) -> Result<Database, DbError> {
+async fn migrate(store: &TestStore, migration: Migration) -> Result<StoreDatabase, DbError> {
     match store.builder(tables(), vec![initial(), migration]).open().await {
         Ok(db) => Ok(db),
         Err(error) => Err(database_error(error)),

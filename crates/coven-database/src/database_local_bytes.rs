@@ -1,7 +1,7 @@
 //! The bytes the cache and pins keep on this device, read from the counters
 //! the cache keeps with its entries (§17.8, Appendix C.3).
 
-use super::{Database, Mode};
+use super::{Mode, StoreDatabase};
 use crate::sqlite::DatabaseConnection;
 use crate::{next_result, DbError, LiveQuery};
 use coven_foundation::task::CarriesBug;
@@ -86,7 +86,7 @@ pub(crate) fn partials(db: &DatabaseConnection) -> Result<u64, DbError> {
     })?)
 }
 
-impl<M: Mode> Database<M> {
+impl<M: Mode> StoreDatabase<M> {
     /// The cache's counters and the partial downloads' sizes, from one
     /// snapshot, for the namespaces declared at open, in declaration order.
     pub async fn cache_bytes(&self) -> Result<CacheBytes, DbError> {
@@ -113,7 +113,7 @@ impl<M: Mode> Database<M> {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// The namespaces' budgets and counters, now and after each change to
     /// either. Reads nothing else, so a cached read's recency or a pin
     /// download's partial growing starts no run.
@@ -125,7 +125,7 @@ impl Database {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// One measurement of what the store keeps on this device: the cache's
     /// counters, budgets and partials from one snapshot, then the store's
     /// directory walked for its own files and the archives resets kept. The
@@ -179,7 +179,7 @@ type NextBudgets = std::pin::Pin<
 
 /// The measurements of what the store keeps on this device, as they change.
 pub struct LocalBytesWatch {
-    database: Database,
+    database: StoreDatabase,
     /// The pending read of the budgets query's next result, kept until the
     /// result arrives, so a cancelled `next` loses nothing. The field is
     /// `None` once the query has ended.

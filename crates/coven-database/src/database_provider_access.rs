@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_crypto::SecretBytes;
 
-impl crate::Database {
+impl crate::StoreDatabase {
     /// Read confirmed sharing and its unfinished request from one committed row.
     pub async fn provider_access(
         &self,

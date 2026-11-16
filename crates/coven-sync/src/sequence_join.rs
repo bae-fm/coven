@@ -180,7 +180,7 @@ impl SequenceSync {
 /// cooldown (§6.7).
 #[derive(Clone)]
 pub struct ApprovalWaits {
-    database: coven_database::Database,
+    database: coven_database::StoreDatabase,
     waits: std::sync::Arc<crate::RetryWaits>,
     clock: coven_foundation::clock::ClockRef,
 }
@@ -188,7 +188,7 @@ pub struct ApprovalWaits {
 impl ApprovalWaits {
     /// The waits of an installation with this database, waits and clock.
     pub fn new(
-        database: coven_database::Database,
+        database: coven_database::StoreDatabase,
         waits: std::sync::Arc<crate::RetryWaits>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Self {

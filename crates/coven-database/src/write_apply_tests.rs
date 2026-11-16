@@ -234,7 +234,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
 }
 
 async fn assert_rejected_download(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     record: crate::DownloadedWrite,
     expected: coven_merge::MergeError,
 ) {

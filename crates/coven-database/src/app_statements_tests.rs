@@ -3,7 +3,7 @@ use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{DbError, Migration, RowIdentity, SyncedTable};
 
-async fn notes(store: &TestStore) -> crate::Database {
+async fn notes(store: &TestStore) -> crate::StoreDatabase {
     store
         .builder(
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],

@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 /// The pending records as the app's SQL reads them from `coven_pending`,
 /// as a live query.
-fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>, DbError> {
+fn records(db: &crate::StoreDatabase) -> crate::LiveQuery<Vec<Record>, DbError> {
     db.subscribe(|sql| {
         sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
             r.get::<_, Vec<u8>>(0)
@@ -634,7 +634,7 @@ async fn coven_pending_shows_the_kinds_the_record_names_and_an_originals_path() 
 async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let follow = |db: &crate::Database| {
+    let follow = |db: &crate::StoreDatabase| {
         db.subscribe(|sql| {
             Ok(sql.query("SELECT record,cause FROM coven_pending ORDER BY position", [], |r| {
                 let record: Vec<u8> = r.get(0)?;

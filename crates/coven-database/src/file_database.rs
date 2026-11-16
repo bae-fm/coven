@@ -1,6 +1,6 @@
 //! File metadata operations through the owning database, never through app SQL.
 
-use super::{Database, DatabaseAccess, DatabaseInner, Mode, Writer};
+use super::{DatabaseAccess, DatabaseInner, Mode, StoreDatabase, Writer};
 use crate::internal_schema::CACHE_NAME_USED_SQL;
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
@@ -44,7 +44,7 @@ pub(crate) use cache::{
 /// }
 /// ```
 pub struct FileDatabase<M: Mode = Writer> {
-    database: Database<M>,
+    database: StoreDatabase<M>,
 }
 
 // Written out: `derive(Clone)` would ask the mode to be `Clone`.
@@ -56,7 +56,7 @@ impl<M: Mode> Clone for FileDatabase<M> {
 
 impl<M: Mode> FileDatabase<M> {
     /// Use an open store's handle for its file operations.
-    pub fn new(database: Database<M>) -> Self {
+    pub fn new(database: StoreDatabase<M>) -> Self {
         Self { database }
     }
 
@@ -712,7 +712,7 @@ struct BytesWriting {
 impl BytesWriting {
     /// Hold `database`'s store while bytes are written, once no close has
     /// begun waiting for its file work.
-    async fn of(database: &Database) -> Self {
+    async fn of(database: &StoreDatabase) -> Self {
         Self {
             _lease: database.writer.file_tasks.clone().read_owned().await,
             _store: database.inner.clone(),
@@ -769,7 +769,7 @@ fn open_upload_source<L>(
         .transpose()
 }
 
-impl Database {
+impl StoreDatabase {
     /// Settle what other devices' writes left for this device's files, in
     /// one write of its own (§17.2): delete each record they left with no
     /// reference. An audience reloading, or a pause of this device's writes,

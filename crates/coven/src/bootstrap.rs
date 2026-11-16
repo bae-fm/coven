@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 use coven_crypto::custody::Keychain;
 use coven_crypto::custody::{InMemoryCustody, PersonEntries, StoreKeychain};
-use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{
@@ -587,7 +587,7 @@ struct Loaded {
     credentials: StorageCredentials,
     sign_in: SignInCustody,
     ring: StoreKeyring,
-    database: Database,
+    database: StoreDatabase,
     storage: Arc<coven_storage::StorageConnection>,
     /// The sequence state the handle continues, which gates the connection.
     state: Arc<coven_sync::SequenceState>,
@@ -939,7 +939,7 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 }
 
 /// Close the installation's database; its failure is the bootstrap's.
-async fn close_database(database: &Database) -> Result<(), BootstrapError> {
+async fn close_database(database: &StoreDatabase) -> Result<(), BootstrapError> {
     database.close().await.map_err(CovenError::from).map_err(BootstrapError::from)
 }
 

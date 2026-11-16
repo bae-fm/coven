@@ -2,7 +2,7 @@
 //! turn the circle loaded at its version into the circle at the app's.
 
 use super::{removed_after, RebuildDatabase, RebuildError};
-use crate::database::{Database, DatabaseBuilder};
+use crate::database::{DatabaseBuilder, StoreDatabase};
 use crate::{DbError, SnapshotStaging};
 use coven_foundation::id_source::KeyId;
 
@@ -112,7 +112,7 @@ impl RebuildDatabase {
         mut self,
         id: coven_format::admin::SnapshotId,
         key: KeyId,
-        into: &Database,
+        into: &StoreDatabase,
     ) -> Result<SnapshotStaging, RebuildError> {
         let exported = self.stage_export(id, key, into).await;
         let removed = self.discard_inner().await;
@@ -131,7 +131,7 @@ impl RebuildDatabase {
         &self,
         id: coven_format::admin::SnapshotId,
         key: KeyId,
-        into: &Database,
+        into: &StoreDatabase,
     ) -> Result<SnapshotStaging, RebuildError> {
         let Some(database) = &self.database else {
             return Err(DbError::StoreClosed.into());

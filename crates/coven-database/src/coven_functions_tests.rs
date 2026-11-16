@@ -2,7 +2,7 @@ use crate::tests::TestStore;
 use crate::{DbError, Migration, RowIdentity, SyncedTable};
 
 /// A store whose planner reads an analyzed index of coven keys.
-async fn analyzed_keys(store: &TestStore) -> crate::Database {
+async fn analyzed_keys(store: &TestStore) -> crate::StoreDatabase {
     store
         .builder(
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],

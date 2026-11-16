@@ -259,7 +259,7 @@ async fn an_absent_file_returns_an_error_without_panicking() {
 /// Open `reference`'s bytes here, running `meanwhile` after the read has
 /// found where they are and before it opens them.
 async fn open_local_around(
-    db: &Database,
+    db: &StoreDatabase,
     reference: FileRef,
     meanwhile: impl std::future::Future<Output = ()>,
 ) -> Result<Option<LocalFileStream>, LocalFileError> {

@@ -21,7 +21,7 @@ fn effect_row(sql: crate::SqlReadContext<'_>) -> Result<Row, DbError> {
 }
 
 /// Write `state` and return it as committed.
-async fn change(db: &crate::Database, state: RetryState) -> RetryState {
+async fn change(db: &crate::StoreDatabase, state: RetryState) -> RetryState {
     db.change_retry_state(move |_| state, |committed| committed).await.unwrap()
 }
 

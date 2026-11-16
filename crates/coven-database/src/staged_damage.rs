@@ -194,7 +194,7 @@ pub(super) fn removal_failure() -> DbError {
     ))
 }
 
-impl crate::Database {
+impl crate::StoreDatabase {
     /// Fail the next removal of the stagings a failed load or file check
     /// ends, as a disk error would; the stagings keep their records until
     /// they are dropped (§16.2).

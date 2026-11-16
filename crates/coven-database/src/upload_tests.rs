@@ -1,17 +1,17 @@
 use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::Database;
+use crate::StoreDatabase;
 use coven_format::dismissal::WriteFrame;
 use coven_format::write::{WritePart, WriteRecord};
 use coven_format::write_stream::PartDecoder;
 
 /// The oldest waiting write and the keys its first attempt fixed, if any.
-pub(crate) async fn selected(db: &Database) -> (WriteId, Option<WriteObjectPrefix>) {
+pub(crate) async fn selected(db: &StoreDatabase) -> (WriteId, Option<WriteObjectPrefix>) {
     db.oldest_upload_keys().await.unwrap().unwrap()
 }
 
-pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, DbError> {
+pub(crate) async fn attempt(db: &StoreDatabase, byte: u8) -> Result<Option<WriteId>, DbError> {
     db.prepare_upload(move |_, _, header| {
         let key = coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([byte; 16]));
         Ok(WriteObjectPrefix {
@@ -74,7 +74,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     db.close().await.unwrap();
 }
 
-async fn landed(db: &Database, through: WriteId) {
+async fn landed(db: &StoreDatabase, through: WriteId) {
     db.begin_claim(crate::ClaimWork::Writes(through.number), |_| {
         Ok::<_, crate::DbError>(crate::ClaimAttempt {
             path: coven_format::path::ObjectPath::slot(
@@ -483,7 +483,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
 }
 
 /// Empty `db`'s upload queue, as though every write in it were sent.
-pub(crate) fn empty_queue(db: &crate::Database) {
+pub(crate) fn empty_queue(db: &crate::StoreDatabase) {
     db.inspect_writer(|db, _| db.execute("DELETE FROM _coven_uploads", []).unwrap());
 }
 

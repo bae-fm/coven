@@ -11,7 +11,7 @@ const SYNC: RetrySubject = RetrySubject::Sync;
 /// A failed pass on a network failure the provider answered or not.
 async fn fail(
     retry: &mut ConnectionRetry,
-    database: &Database,
+    database: &StoreDatabase,
     waits: &RetryWaits,
     answered: bool,
 ) {

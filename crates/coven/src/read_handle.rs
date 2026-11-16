@@ -1,7 +1,7 @@
 //! The read-only application surface caches files under a shared deletion guard.
 
 use crate::*;
-use coven_database::{Database, ReadOnly};
+use coven_database::{ReadOnly, StoreDatabase};
 
 /// A handle that reads synced rows and maintains its local file cache (§4, E1).
 /// Its shared store lock prevents deletion until all its connections close.
@@ -20,12 +20,15 @@ use coven_database::{Database, ReadOnly};
 /// ```
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    database: Database<ReadOnly>,
+    database: StoreDatabase<ReadOnly>,
     files: coven_sync::Files<ReadOnly>,
 }
 
 impl CovenReadHandle {
-    pub(crate) fn new(database: Database<ReadOnly>, files: coven_sync::Files<ReadOnly>) -> Self {
+    pub(crate) fn new(
+        database: StoreDatabase<ReadOnly>,
+        files: coven_sync::Files<ReadOnly>,
+    ) -> Self {
         Self { database, files }
     }
     /// The store's current name from this device's committed state (E9).

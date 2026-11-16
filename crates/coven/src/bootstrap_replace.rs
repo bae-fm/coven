@@ -295,7 +295,7 @@ pub(super) async fn replace_installation(
 pub(super) async fn record_replacement(
     replacement: &ReplacementStore,
     recording: &restore::Recording,
-    database: &Database,
+    database: &StoreDatabase,
     prepare: Option<Prepare>,
     (member, store, data): (&MemberIdentity, StoreId, &ConnectionCredentials),
     sign_in: SignInCustody,
@@ -376,7 +376,7 @@ async fn ended(
 pub(super) async fn publish(
     replacement: &ReplacementStore,
     owners: OpeningOwners,
-    database: Database,
+    database: StoreDatabase,
     waits: Arc<coven_sync::RetryWaits>,
     location: coven_database::RecordedLocation<CloudProvider>,
     finished: Option<std::time::SystemTime>,
@@ -418,7 +418,7 @@ pub(super) async fn open_swapped(
     builder: &CovenBuilder,
     replacement: &ReplacementStore,
     status: &impl Fn(BootstrapStatus),
-) -> Result<(Database, Arc<coven_sync::RetryWaits>), BootstrapError> {
+) -> Result<(StoreDatabase, Arc<coven_sync::RetryWaits>), BootstrapError> {
     let database = open_installation(builder.database(replacement.directory())?, status).await?;
     match coven_sync::RetryWaits::open(database.clone(), builder.clock.clone()).await {
         Ok(waits) => Ok((database, Arc::new(waits))),
@@ -426,7 +426,7 @@ pub(super) async fn open_swapped(
     }
 }
 
-async fn close(database: Database) -> Result<(), BootstrapError> {
+async fn close(database: StoreDatabase) -> Result<(), BootstrapError> {
     close_database(&database).await
 }
 

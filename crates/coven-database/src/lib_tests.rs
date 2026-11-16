@@ -84,7 +84,7 @@ impl TestStore {
     /// Record `device` as member `seed`'s, as an applied registration would,
     /// without replaying a log.
     pub(crate) fn register(
-        database: &crate::Database,
+        database: &crate::StoreDatabase,
         device: coven_foundation::id_source::DeviceId,
         seed: u8,
     ) {
@@ -115,7 +115,7 @@ impl TestStore {
     /// Supply committed membership for tests of local writes, without replaying a log.
     pub(crate) fn join_circle(
         &self,
-        database: &crate::Database,
+        database: &crate::StoreDatabase,
         circle: coven_foundation::id_source::CircleId,
     ) {
         let device = self.directory.settings().unwrap().device_id;
@@ -178,7 +178,7 @@ impl TestStore {
         &self,
         tables: Vec<SyncedTable>,
         sql: &'static str,
-    ) -> Result<crate::Database, OpenError> {
+    ) -> Result<crate::StoreDatabase, OpenError> {
         self.builder(tables, vec![Migration::addition(1, "schema", sql)]).open().await
     }
 }
@@ -244,7 +244,7 @@ async fn required_builder_choices_are_typed() {
 /// Deliver an authenticated remote edit through the database's write boundary.
 /// The local queue supplies the row identity and reference metadata the peer read.
 pub(crate) async fn remote_update(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -257,7 +257,7 @@ pub(crate) async fn remote_update(
 
 /// [`remote_update`], returning what applying it did.
 pub(crate) async fn try_remote_update(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -268,7 +268,7 @@ pub(crate) async fn try_remote_update(
 /// [`try_remote_update`] authored at `schema_version`, or at this database's
 /// version when none is given.
 pub(crate) async fn try_remote_update_at(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -282,7 +282,7 @@ pub(crate) async fn try_remote_update_at(
 /// writes still wait in its queue: the slot comes before any of them, and
 /// coven folds the queue over it again (§6.2).
 pub(crate) async fn remote_update_beside_queue(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -297,7 +297,7 @@ pub(crate) async fn remote_update_beside_queue(
 /// Another device's update of `table` row `id`, read from what this device
 /// wrote of the row.
 fn remote_change(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -343,7 +343,10 @@ fn change_from(
     row
 }
 
-pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
+pub(crate) async fn remote_write(
+    database: &crate::StoreDatabase,
+    row: coven_format::write::RowChange,
+) {
     assert_eq!(
         try_remote_write(database, row, None, true).await.unwrap(),
         crate::ApplyOutcome::Applied
@@ -354,7 +357,7 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
 /// millisecond before the newest write this device authored and having read
 /// nothing, so its timestamp order disagrees with its slot order, after counting this device's queue.
 pub(crate) async fn remote_write_stamped_earlier(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     row: coven_format::write::RowChange,
 ) {
     let row = database.inspect_writer_schema(|db, call, schema| {
@@ -371,7 +374,7 @@ pub(crate) async fn remote_write_stamped_earlier(
 /// Deliver `row` as another device's write in the next slot while this
 /// device's writes still wait in its queue (§6.2).
 pub(crate) async fn remote_write_beside_queue(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     row: coven_format::write::RowChange,
 ) {
     assert_eq!(
@@ -383,7 +386,7 @@ pub(crate) async fn remote_write_beside_queue(
 /// Deliver `row` as another device's write in the next slot, after first
 /// counting every write this device has made when `count_queue` is set.
 async fn try_remote_write(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     row: coven_format::write::RowChange,
     schema_version: Option<u32>,
     count_queue: bool,
@@ -400,7 +403,7 @@ async fn try_remote_write(
 /// without seeing this device's queued writes: it replaces the counted
 /// setters, so it is concurrent with a queued write to the same cell (§8).
 pub(crate) async fn remote_update_concurrent_with_queue(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     table: &str,
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
@@ -431,7 +434,7 @@ pub(crate) async fn remote_update_concurrent_with_queue(
 /// after first counting every write this device has made when
 /// `count_queue` is set.
 async fn deliver(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     row: coven_format::write::RowChange,
     schema_version: Option<u32>,
     count_queue: bool,
@@ -441,7 +444,7 @@ async fn deliver(
 
 /// `deliver`, stamping the write before this device's newest when `earlier`.
 async fn deliver_stamped(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
     row: coven_format::write::RowChange,
     schema_version: Option<u32>,
     count_queue: bool,
@@ -484,7 +487,7 @@ async fn deliver_stamped(
 
 /// All app and coven tables, for whole-transaction rollback assertions.
 pub(crate) fn contents(
-    database: &crate::Database,
+    database: &crate::StoreDatabase,
 ) -> std::collections::BTreeMap<String, Vec<Vec<crate::types::Value>>> {
     database.inspect_writer(|db, _| {
         let tables = db
@@ -515,7 +518,7 @@ pub(crate) fn contents(
 }
 
 /// Seed counted metadata for merge-unit fixtures.
-pub(crate) fn applied(database: &crate::Database, stamp: coven_merge::Timestamp, number: u64) {
+pub(crate) fn applied(database: &crate::StoreDatabase, stamp: coven_merge::Timestamp, number: u64) {
     database.inspect_writer(|db, _| {
         let slot = crate::sequence::applied(db).unwrap() + 1;
         crate::write_commit::tests::record_write(

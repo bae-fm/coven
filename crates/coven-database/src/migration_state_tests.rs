@@ -1,7 +1,7 @@
 use crate::test_utils::tests::*;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records};
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::value::Value as Scalar;
 use coven_format::write::WriteRecord;
 use coven_foundation::id_source::CircleId;
@@ -35,7 +35,7 @@ pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteR
     write.parts[0].audience = audience;
     write
 }
-fn generations(db: &Database, row: &RowId) -> Vec<(u64, coven_merge::WriteId)> {
+fn generations(db: &StoreDatabase, row: &RowId) -> Vec<(u64, coven_merge::WriteId)> {
     db.inspect_writer_schema(|db, call, schema| {
         let store = crate::merge_store::MergeStore::from_schema(db, call, &schema.schema);
         Ok::<_, crate::DbError>(
@@ -211,7 +211,7 @@ mod queued {
     use coven_merge::{Operation, RowId, RowState};
     use std::sync::Arc;
 
-    fn queued_bytes(db: &Database) -> Vec<Vec<u8>> {
+    fn queued_bytes(db: &StoreDatabase) -> Vec<Vec<u8>> {
         db.inspect_writer(|db, _| {
             db.query("SELECT record FROM _coven_uploads ORDER BY number", [], |r| r.get(0)).unwrap()
         })
@@ -219,7 +219,7 @@ mod queued {
     fn initial() -> Migration {
         Migration::addition(1, "notes", NOTES)
     }
-    fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
+    fn state(db: &StoreDatabase, row: &RowId) -> RowState<WireValue> {
         db.inspect_writer_schema(|db, call, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
             crate::merge_store::MergeStore::new(db, call, &app).row(row).unwrap().state

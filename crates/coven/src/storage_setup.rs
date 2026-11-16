@@ -149,7 +149,7 @@ pub(super) fn with_cleanup(operation: StorageSetupError, cleanup: SyncError) -> 
 /// Credentials a finished setup left behind go too. Answers whether a setup
 /// is finishing.
 pub(crate) async fn settle_opened(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     keychain: &Arc<StoreKeychain>,
 ) -> Result<bool, SyncError> {
     let running = SetupJournal::running(database).await?;

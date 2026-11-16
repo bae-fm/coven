@@ -8,7 +8,7 @@ use crate::migration_state::tests::{circle_id, migration_insert};
 use crate::test_utils::tests::{run_lean, Generator};
 use crate::tests::TestStore;
 use crate::write::tests::records;
-use crate::{Database, Migration, RowIdentity, SyncedTable};
+use crate::{Migration, RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::loss::{Loss, LossCause, LossValues};
 use coven_format::value::Value as Scalar;
 use coven_merge::{Audience, ColumnValue, Operation, Rule};
@@ -201,7 +201,7 @@ fn tables(tags: bool) -> Vec<SyncedTable> {
     tables
 }
 
-async fn execute(db: &Database, statement: String) {
+async fn execute(db: &StoreDatabase, statement: String) {
     db.write(move |sql| {
         sql.execute_batch(&statement)?;
         Ok(())
@@ -290,7 +290,7 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
     all
 }
 
-fn read(db: &Database) -> Vec<Loss> {
+fn read(db: &StoreDatabase) -> Vec<Loss> {
     db.inspect_writer(|sql, _| {
         sql.query(
             &format!("{} ORDER BY l.id", crate::loss_record::SELECT),

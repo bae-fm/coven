@@ -360,7 +360,7 @@ pub fn pairing_status(
 /// screen shows one now. Each is forgotten once its marker is in place, and
 /// one that had ended already is forgotten at once, all in one transaction
 /// (§13.2).
-pub async fn pairings_opened(database: &coven_database::Database) -> Result<(), DbError> {
+pub async fn pairings_opened(database: &coven_database::StoreDatabase) -> Result<(), DbError> {
     database
         .settle_operations(operation_kind::PAIRING, |records| {
             let mut updates = Vec::new();

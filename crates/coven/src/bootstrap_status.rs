@@ -53,7 +53,7 @@ pub enum BootstrapStatus {
 pub(super) async fn open_installation(
     database: coven_database::DatabaseBuilder,
     status: &impl Fn(BootstrapStatus),
-) -> CovenResult<Database> {
+) -> CovenResult<StoreDatabase> {
     let database = database.loading_store();
     let progress = database.subscribe_progress();
     progress

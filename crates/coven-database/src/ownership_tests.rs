@@ -3,7 +3,7 @@ use crate::snapshot_write::tests::{frames, load_one, stream};
 use crate::test_utils::tests::{insert, SCHEMA};
 use crate::tests::TestStore;
 use crate::write::tests::sql;
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 
 fn owned() -> Vec<SyncedTable> {
     vec![SyncedTable::new("rows", RowIdentity::SharedKey).owner_only()]
@@ -13,7 +13,7 @@ fn row(n: usize) -> RowId {
     crate::tests::store_row("rows", &n.to_string())
 }
 
-fn selected(db: &Database, row: &RowId) -> Option<Creation> {
+fn selected(db: &StoreDatabase, row: &RowId) -> Option<Creation> {
     db.inspect_writer(|c, _| creation(c, row).unwrap())
 }
 
@@ -210,7 +210,7 @@ async fn a_new_write_offers_creations_and_retains_sources_without_reading() {
         .await
         .unwrap();
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES('a','one'),('b','one')").await.unwrap();
-    let creations = |db: &Database| {
+    let creations = |db: &StoreDatabase| {
         db.inspect_writer(|writer, _| {
             writer.query("SELECT key,write_id FROM _coven_creations ORDER BY key", [], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))

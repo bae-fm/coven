@@ -80,7 +80,7 @@ pub use builder::{
 pub(crate) use call::{finish_blocking, process, start_call};
 
 /// Shared ownership of the database, as its writer or a read-only handle
-/// (`Database<ReadOnly>`), which reads the store through the same calls and
+/// (`StoreDatabase<ReadOnly>`), which reads the store through the same calls and
 /// cannot write synced rows or migrate. A read-only handle's connections can
 /// change only local cache metadata, and its shared store lock prevents
 /// deletion until all of them close. Closing any clone closes them all.
@@ -110,7 +110,7 @@ pub(crate) use call::{finish_blocking, process, start_call};
 ///     handle.uploads_in_flight();
 /// }
 /// ```
-pub struct Database<M: Mode = Writer> {
+pub struct StoreDatabase<M: Mode = Writer> {
     /// Where every connection reports its commits (§4); it outlives them, and
     /// once they close makes only closed subscriptions.
     observer: CommitObserver,
@@ -128,7 +128,7 @@ pub struct Database<M: Mode = Writer> {
 }
 
 // Written out: `derive(Clone)` would ask the open store to be `Clone`.
-impl<M: Mode> Clone for Database<M> {
+impl<M: Mode> Clone for StoreDatabase<M> {
     fn clone(&self) -> Self {
         Self {
             observer: self.observer.clone(),
@@ -492,7 +492,7 @@ fn released(
     })
 }
 
-impl<M: Mode> Database<M> {
+impl<M: Mode> StoreDatabase<M> {
     /// Where a bug in the store's work that nobody waits for goes (E15).
     pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
         &self.bugs
@@ -580,7 +580,7 @@ impl<M: Mode> Database<M> {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Mark this instance as closing for a reopen to wait on, though workers
     /// still hold clones of it: the facade's owning scope ended (F.4).
     pub fn begin_close(&self) {
@@ -962,7 +962,7 @@ impl Database {
     }
 }
 
-impl Database<ReadOnly> {
+impl StoreDatabase<ReadOnly> {
     /// Begin closing every clone of this handle, at once and before its
     /// connections close: every later call fails with `StoreClosed`, a call
     /// already running answers `StoreClosed` too, and a deletion in this

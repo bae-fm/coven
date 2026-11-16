@@ -1,7 +1,7 @@
 use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{records, sql};
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::write::{Half, RowExecution};
 use coven_foundation::id_source::CircleId;
 
@@ -21,7 +21,7 @@ fn tables() -> Vec<SyncedTable> {
     ]
 }
 
-async fn database(store: &TestStore) -> Database {
+async fn database(store: &TestStore) -> StoreDatabase {
     let db = store.schema(tables(), SCHEMA).await.unwrap();
     sql(
         &db,
@@ -50,7 +50,7 @@ pub(crate) struct Classified {
 
 impl Classified {
     /// The last write the device queued or refused.
-    pub(crate) fn last(db: &Database) -> Self {
+    pub(crate) fn last(db: &StoreDatabase) -> Self {
         let (record, judgement) = db.inspect_writer(|_, call| call.take_judged().unwrap());
         let steps = record
             .parts
@@ -492,7 +492,7 @@ const NEW_TRACK: &str = "00000000-0000-4000-8000-0000000000a4";
 
 /// Albums whose audience their tracks follow, one album in the store with
 /// one track, on a device in a circle.
-async fn albums(store: &TestStore, deferred: bool) -> (Database, CircleId) {
+async fn albums(store: &TestStore, deferred: bool) -> (StoreDatabase, CircleId) {
     let schema = if deferred {
         "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
          CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,
@@ -653,7 +653,7 @@ mod write_cost {
 
     /// Run one write of `rows` rows and print what it cost per row.
     async fn measure(
-        db: &crate::Database,
+        db: &crate::StoreDatabase,
         label: &str,
         rows: usize,
         write: impl FnOnce(crate::SqlContext<'_, '_>) -> Result<(), crate::DbError> + Send + 'static,

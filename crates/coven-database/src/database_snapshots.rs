@@ -1,10 +1,10 @@
 //! Snapshot streams and atomic reload through the database owner.
 
-use super::Database;
+use super::StoreDatabase;
 use crate::DbError;
 use coven_foundation::progress::ProgressReport;
 
-impl Database {
+impl StoreDatabase {
     /// The sealed bytes a new device replays for `audience` after a
     /// snapshot's coverage (§16.2): each applied writes slot carrying one of
     /// its parts, and for the store every admin, key-copy and announcement

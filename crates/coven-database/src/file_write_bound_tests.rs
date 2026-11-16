@@ -10,7 +10,7 @@ const SCHEMA: &str = "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT
 
 /// `covers` binds its file at `limit` bytes, `photos` trails, and
 /// `originals` holds the user's files, in namespaces of their names.
-async fn open(store: &TestStore, cover: FileColumn) -> Database {
+async fn open(store: &TestStore, cover: FileColumn) -> StoreDatabase {
     store
         .builder(
             vec![
@@ -35,7 +35,7 @@ async fn open(store: &TestStore, cover: FileColumn) -> Database {
 /// Stage `bytes` into `table`'s namespace, where `place` says, and point
 /// row `id` of `table` at the new file.
 async fn stage(
-    db: &Database,
+    db: &StoreDatabase,
     table: &'static str,
     id: &'static str,
     bytes: Vec<u8>,
@@ -53,7 +53,7 @@ async fn stage(
 
 /// Point row `id` of `table` at `file`, a file staged earlier.
 async fn point(
-    db: &Database,
+    db: &StoreDatabase,
     table: &'static str,
     id: &'static str,
     file: FileId,
@@ -66,7 +66,7 @@ async fn point(
 }
 
 /// Each queued upload's files, with the write it holds.
-fn holds(db: &Database) -> Vec<(Vec<FileId>, Option<u64>)> {
+fn holds(db: &StoreDatabase) -> Vec<(Vec<FileId>, Option<u64>)> {
     db.inspect_writer(|db, _| crate::file_queue::read_all(db).unwrap())
         .into_iter()
         .map(|upload| (upload.files, upload.holds))
@@ -74,7 +74,7 @@ fn holds(db: &Database) -> Vec<(Vec<FileId>, Option<u64>)> {
 }
 
 /// The numbers of this device's waiting writes, oldest first.
-fn waiting(db: &Database) -> Vec<u64> {
+fn waiting(db: &StoreDatabase) -> Vec<u64> {
     records(db).iter().map(|record| record.header.position.number).collect()
 }
 
@@ -228,7 +228,7 @@ async fn the_pause_shows_on_trailing_uploads_only() {
     let db = open(&store, FileColumn::new("file").bound()).await;
     let photo = stage(&db, "photos", "1", b"photo".to_vec(), Place::Cloud).await.unwrap();
     let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
-    let paused = |db: Database| async move {
+    let paused = |db: StoreDatabase| async move {
         db.read(|sql| {
             Ok::<_, DbError>(sql.query(
                 "SELECT file,paused FROM coven_uploads ORDER BY position",

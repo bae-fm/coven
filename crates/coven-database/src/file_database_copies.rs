@@ -3,7 +3,7 @@
 //! their bytes exist, the write switching the call's files to them, and the
 //! removal of what a failing call made.
 
-use super::{BytesWriting, Database, FileDatabase};
+use super::{BytesWriting, FileDatabase, StoreDatabase};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
@@ -58,7 +58,7 @@ impl FileDatabase {
     }
 
     /// Record the copies one call writes, before any of their folders or
-    /// bytes exist (`Database::record_copies`). A path another call is
+    /// bytes exist (`StoreDatabase::record_copies`). A path another call is
     /// writing a copy at is `CopyPathTaken`; the returned reservation keeps
     /// the copies from other writes' removals while it is held.
     pub async fn record_copies(&self, copies: Vec<FolderCopy>) -> Result<CopyReservation, DbError> {
@@ -107,7 +107,7 @@ impl FileDatabase {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Record the copies one call writes, before any of their folders or
     /// bytes exist, so a failure or a crash leaves nothing unrecorded. A path
     /// another call is writing a copy at is `CopyPathTaken`. While the
@@ -227,7 +227,7 @@ impl Database {
 /// held, and the next write or open removes them once it drops; `abandon`
 /// removes them at once.
 pub struct PreparedDeviceOnly {
-    database: Database,
+    database: StoreDatabase,
     reservation: CopyReservation,
     copies: Vec<DeviceOnlyCopy>,
 }

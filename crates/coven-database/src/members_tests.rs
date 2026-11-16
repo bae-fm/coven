@@ -25,7 +25,7 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
 /// Replay state with this device's member 1, member 2 with an active, a
 /// removed and a replaced device, and removed member 3; circle 7 holds 1 and
 /// 2, and deleted circle 8 held 1.
-async fn fixture(db: &crate::Database) {
+async fn fixture(db: &crate::StoreDatabase) {
     let own = db.inspect_writer(|_, call| call.local_device()).unwrap();
     let mut state = db.store_state().await.unwrap();
     state.members = [

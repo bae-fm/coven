@@ -856,7 +856,7 @@ impl OpeningOwners {
     /// Construction after publication performs no fallible work and cannot suspend.
     fn into_handle(
         self,
-        database: coven_database::Database,
+        database: coven_database::StoreDatabase,
         waits: Arc<coven_sync::RetryWaits>,
         configured: bool,
         setup_finishing: bool,

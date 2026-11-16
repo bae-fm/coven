@@ -2,7 +2,7 @@ use crate::DbError;
 use crate::{
     tests::TestStore,
     write::tests::{count, notes, records, sql, NOTES},
-    Database, Migration, MigrationChange, RowIdentity, SyncedTable,
+    Migration, MigrationChange, RowIdentity, StoreDatabase, SyncedTable,
 };
 use coven_format::write::WriteDisposition;
 use std::collections::BTreeMap;
@@ -77,12 +77,12 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
     }
 }
 
-fn setters(db: &Database, table: &str, key: &str) -> BTreeMap<String, u64> {
+fn setters(db: &StoreDatabase, table: &str, key: &str) -> BTreeMap<String, u64> {
     let key = crate::tests::text_key(key);
     db.inspect_writer(|db, _| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
 }
 
-async fn seeded(store: &TestStore) -> Database {
+async fn seeded(store: &TestStore) -> StoreDatabase {
     let db = store.builder(notes(), sequence(vec![])).open().await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','Old title','body'); INSERT INTO notes VALUES('deleted','gone','')").await.unwrap();
     sql(&db, "UPDATE notes SET title='New title' WHERE id='n'").await.unwrap();

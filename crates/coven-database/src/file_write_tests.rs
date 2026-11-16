@@ -23,7 +23,7 @@ pub(crate) fn namespaces(kind: Provenance) -> Vec<Namespace> {
 }
 
 /// A store with `tables()` and one namespace, `files`, of this kind.
-pub(crate) async fn open(store: &TestStore, kind: Provenance) -> Database {
+pub(crate) async fn open(store: &TestStore, kind: Provenance) -> StoreDatabase {
     store
         .builder(tables(), vec![Migration::addition(1, "files", SCHEMA)])
         .namespaces(namespaces(kind))
@@ -33,7 +33,11 @@ pub(crate) async fn open(store: &TestStore, kind: Provenance) -> Database {
 }
 
 /// Stage `bytes` and point row `7` at it, inserting the row or updating it.
-pub(crate) async fn stage(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<FileId, DbError> {
+pub(crate) async fn stage(
+    db: &StoreDatabase,
+    bytes: Vec<u8>,
+    insert: bool,
+) -> Result<FileId, DbError> {
     db.staged_write::<_, _, _, _, crate::DbError>(
         move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
         move |sql, file| {
@@ -70,7 +74,7 @@ pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
 
 /// Complete every queued upload as confirmed storage would: its files switch
 /// to the cloud, and the queue's owned copies are released.
-pub(crate) async fn complete_uploads(db: &Database) {
+pub(crate) async fn complete_uploads(db: &StoreDatabase) {
     let owner = crate::FileDatabase::new(db.clone());
     // Uploads no file waits for too: their attempts end the same way.
     let uploads = "SELECT id FROM _coven_file_uploads ORDER BY id";
@@ -80,14 +84,14 @@ pub(crate) async fn complete_uploads(db: &Database) {
     }
 }
 
-pub(crate) fn local_count(db: &Database, table: &str) -> i64 {
+pub(crate) fn local_count(db: &StoreDatabase, table: &str) -> i64 {
     db.inspect_writer(|c, _| {
         c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     })
 }
 
 /// Whether this device has a record of `file`.
-pub(crate) fn has_record(db: &Database, file: FileId) -> bool {
+pub(crate) fn has_record(db: &StoreDatabase, file: FileId) -> bool {
     let record = "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1)";
     db.inspect_writer(|c, _| c.query_row(record, [file], |r| r.get(0)).unwrap())
 }
@@ -774,7 +778,7 @@ async fn write_once_refuses_changing_a_reference_that_names_a_file() {
 }
 
 /// The file `photos` row `row` names.
-async fn photo_file(db: &crate::Database, row: &'static str) -> FileId {
+async fn photo_file(db: &crate::StoreDatabase, row: &'static str) -> FileId {
     db.read(move |sql| {
         Ok::<_, DbError>(sql.query_row("SELECT file FROM photos WHERE id=?1", [row], |r| r.get(0))?)
     })

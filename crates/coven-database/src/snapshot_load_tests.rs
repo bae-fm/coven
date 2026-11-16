@@ -3,13 +3,13 @@ use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames}
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::DbError;
-use crate::{Database, Provenance, RowIdentity, SyncedTable};
+use crate::{Provenance, RowIdentity, StoreDatabase, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
 use std::io::Cursor;
 
-async fn load(db: &Database, audience: Audience, frames: SnapshotFrames) {
+async fn load(db: &StoreDatabase, audience: Audience, frames: SnapshotFrames) {
     load_one(db, id(audience), frames.prefix.clone(), Cursor::new(frames.concat())).await.unwrap();
 }
 
@@ -269,7 +269,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','parent')").await.unwrap();
         a.receive(records(&b)[0].clone().into()).await.unwrap();
         let circle = frames(&b, audience).await;
-        let history = |db: &Database| {
+        let history = |db: &StoreDatabase| {
             db.inspect_writer(|db, _|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
         };
         let child_history = history(&b);
@@ -711,7 +711,7 @@ async fn a_late_edit_after_a_snapshot_load_revives_no_deleted_generation() {
     let snapshot = frames(&a, Audience::Store).await;
     load(&b, Audience::Store, snapshot).await;
     b.receive(late.into()).await.unwrap();
-    let title = |db: &Database| {
+    let title = |db: &StoreDatabase| {
         db.inspect_writer(|sql, _| {
             sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0)).unwrap()
         })

@@ -69,7 +69,7 @@ impl PendingValue for Pending {
         Self { subject: slot.get(), cutoff: Some((cutoff.get(), format!("{cause:?}"))) }
     }
 }
-async fn open(owned: bool) -> (tempfile::TempDir, Database) {
+async fn open(owned: bool) -> (tempfile::TempDir, StoreDatabase) {
     let dir = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
     let store =
@@ -178,14 +178,14 @@ fn stream(record: WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     }
 }
 async fn apply(
-    db: &Database,
+    db: &StoreDatabase,
     slot: u64,
     writes: Vec<WriteRecord>,
 ) -> Result<ApplyOutcome, DbError> {
     apply_claim(db, slot, slot, [0x31; 32], writes).await
 }
 async fn apply_claim(
-    db: &Database,
+    db: &StoreDatabase,
     slot: u64,
     claim: u64,
     digest: [u8; 32],
@@ -234,7 +234,7 @@ async fn greatest_claim_keeps_its_digest_and_equal_claim_uses_the_later_slot() {
     }
     db.close().await.unwrap();
 }
-async fn rows(db: &Database) -> Vec<(String, String)> {
+async fn rows(db: &StoreDatabase) -> Vec<(String, String)> {
     db.read(|sql| {
         Ok::<_, DbError>(
             sql.query("SELECT id,value FROM items ORDER BY id", [], |r| {
@@ -332,7 +332,7 @@ async fn read_through_is_the_committed_prefix() {
 }
 
 async fn admin(
-    db: &Database,
+    db: &StoreDatabase,
     slot: u64,
     change: coven_format::admin::StoreChange,
     state: StoreState,

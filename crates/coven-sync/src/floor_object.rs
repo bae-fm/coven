@@ -10,7 +10,7 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_format::{
     floor::{FloorFrames, FloorHeader, OriginalSlot},
     floor_pointer::{FloorPointerHeader, FloorPointerPrefix},
@@ -56,7 +56,7 @@ const FOLLOWS: usize = 8;
 
 /// The pointer's clear prefix and revision, read without any key.
 async fn pointer_prefix(
-    database: &Database,
+    database: &StoreDatabase,
     storage: &dyn Storage,
     path: &ObjectPath,
 ) -> Result<Option<(FloorPointerPrefix, StoredObject)>, SyncError> {
@@ -78,7 +78,7 @@ async fn pointer_prefix(
 /// pointer's clear prefix names the body, and the body's clear prefix holds
 /// the key copies.
 pub(crate) async fn routed_keys(
-    database: &Database,
+    database: &StoreDatabase,
     storage: &dyn Storage,
     path: &ObjectPath,
     member: &MemberIdentity,
@@ -134,7 +134,7 @@ impl FloorObject {
     /// pointer's revision after the caller's sequence reads. A body that is
     /// gone because the pointer moved on is followed to the new pointer's.
     pub(crate) async fn read(
-        database: &Database,
+        database: &StoreDatabase,
         storage: &dyn Storage,
         path: &ObjectPath,
         previous: Option<&Self>,
@@ -217,7 +217,7 @@ impl FloorObject {
     /// The body at its own path: its clear key copies, its signed header and
     /// the announcements, each checked against the pointer's `first`.
     async fn read_body(
-        database: &Database,
+        database: &StoreDatabase,
         storage: &dyn Storage,
         path: &ObjectPath,
         pointer_first: coven_merge::Slot,

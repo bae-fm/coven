@@ -6,7 +6,7 @@
 
 use crate::SyncError;
 use coven_database::{
-    operation_kind::S3_DETECTION, Database, NewOperation, OperationId, OperationRecord,
+    operation_kind::S3_DETECTION, NewOperation, OperationId, OperationRecord, StoreDatabase,
 };
 use coven_storage::StorageConfig;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct DetectionRecord {
 impl DetectionRecord {
     /// Record `run` at `location` before its first probe.
     pub async fn start(
-        database: &Database,
+        database: &StoreDatabase,
         location: &StorageConfig,
         run: uuid::Uuid,
     ) -> Result<Self, SyncError> {
@@ -47,7 +47,10 @@ impl DetectionRecord {
 
     /// The recorded runs whose probes sit in `location`'s bucket: the same
     /// bucket at the same endpoint and region, whatever profile reached them.
-    pub async fn at(database: &Database, location: &StorageConfig) -> Result<Vec<Self>, SyncError> {
+    pub async fn at(
+        database: &StoreDatabase,
+        location: &StorageConfig,
+    ) -> Result<Vec<Self>, SyncError> {
         let mut records = Vec::new();
         for record in database.operations().await? {
             if record.kind != S3_DETECTION {
@@ -68,7 +71,7 @@ impl DetectionRecord {
 
     /// End the record, once a cleanup has confirmed the run's probes and
     /// uploads gone.
-    pub async fn end(&self, database: &Database) -> Result<(), SyncError> {
+    pub async fn end(&self, database: &StoreDatabase) -> Result<(), SyncError> {
         Ok(database.finish_operation(self.id).await?)
     }
 

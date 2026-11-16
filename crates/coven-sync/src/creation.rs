@@ -9,7 +9,7 @@ use crate::{
     slot_object, PendingRecord, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{ClaimAttempt, ClaimWork, Database};
+use coven_database::{ClaimAttempt, ClaimWork, StoreDatabase};
 use coven_format::{
     admin::StoreChange,
     path::ObjectPath,
@@ -57,7 +57,10 @@ pub struct Creation<'a> {
 /// not published yet, so no other device can claim slot 1 first; setup
 /// later sends these bytes (§10.3). The creator's copy of each key slot 1
 /// introduces rides in its clear prefix, as an admission's copies do (§12.1).
-pub async fn decide_creation(database: &Database, creation: Creation<'_>) -> Result<(), SyncError> {
+pub async fn decide_creation(
+    database: &StoreDatabase,
+    creation: Creation<'_>,
+) -> Result<(), SyncError> {
     let Creation { store, name, device, device_name, member, circles, ring } = creation;
     let breaking_version = database.breaking_version().await?;
     let circles = circles

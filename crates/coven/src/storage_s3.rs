@@ -123,7 +123,7 @@ impl StorageConnections {
 /// keeps its record for the next detection or connection there: they are
 /// space nothing refers to, so the connection doesn't wait on them.
 pub(super) async fn end_detection_runs(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     store: StoreId,
     location: &StorageConfig,
     storage: &StorageConnection,

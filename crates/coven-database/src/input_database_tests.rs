@@ -28,7 +28,7 @@ fn named(name: &str) -> String {
         .to_owned()
 }
 
-async fn input(db: &Database, path: &str, version: u8, replaceable: bool) -> RetainedInput {
+async fn input(db: &StoreDatabase, path: &str, version: u8, replaceable: bool) -> RetainedInput {
     db.observe_input(named(path), vec![version], vec![version], replaceable).await.unwrap().unwrap()
 }
 

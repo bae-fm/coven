@@ -299,7 +299,7 @@ fn published(
 }
 
 async fn close_failed(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     error: StoreCreationError,
 ) -> StoreCreationError {
     match database.close().await {

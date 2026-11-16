@@ -6,7 +6,7 @@ use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 
 /// Stage one file for row `7`: the file, and its upload's uploader and
 /// stored object, which transfers in flight name.
-async fn queued(db: &crate::Database) -> (FileId, DeviceId, ObjectId) {
+async fn queued(db: &crate::StoreDatabase) -> (FileId, DeviceId, ObjectId) {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     let upload = crate::FileDatabase::new(db.clone()).uploads().await.unwrap().remove(0);
     (file, upload.location.uploader(), upload.location.object())
@@ -133,7 +133,9 @@ async fn a_read_only_handle_reads_every_file_as_waiting() {
 
 /// A music library's queue: `files` tracks of 10 per release, every one
 /// queued, and three of them being sent.
-async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::Transferring>) {
+async fn queued_tracks(
+    files: usize,
+) -> (TestStore, crate::StoreDatabase, Vec<crate::Transferring>) {
     use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db = store

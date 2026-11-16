@@ -3,7 +3,7 @@
 use crate::{
     PassFailure, PendingRecord, PendingSubject, Retry, RetryWaits, SyncError, SyncFailure,
 };
-use coven_database::{Database, RetrySubject};
+use coven_database::{RetrySubject, StoreDatabase};
 
 /// What permits this connection to attempt another pass. Time is held by
 /// `RetryWaits`. A failure that waits for something other than time holds
@@ -27,7 +27,7 @@ pub enum ConnectionRetry {
 impl ConnectionRetry {
     /// Reopening is a new connection, but cannot clear a permanent failure or
     /// recheck immutable input with the same software.
-    pub async fn open(database: &Database) -> Result<Self, SyncError> {
+    pub async fn open(database: &StoreDatabase) -> Result<Self, SyncError> {
         let record = database
             .pending::<PendingRecord>()
             .await?
@@ -76,7 +76,7 @@ impl ConnectionRetry {
     /// fails on goes to the store's bug sink (E15).
     pub async fn failed(
         &mut self,
-        database: &Database,
+        database: &StoreDatabase,
         waits: &RetryWaits,
         reason: crate::PendingReason,
         connection_version: u64,
@@ -154,7 +154,7 @@ impl ConnectionRetry {
     /// A completed pass clears its condition and exponent together.
     pub async fn succeeded(
         &mut self,
-        database: &Database,
+        database: &StoreDatabase,
         waits: &RetryWaits,
     ) -> Result<(), SyncError> {
         database.clear_sync_retry(PendingSubject::Connection).await?;

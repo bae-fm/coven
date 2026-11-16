@@ -21,7 +21,7 @@ fn id(device: DeviceId, number: u64) -> WriteId {
     WriteId { device, number }
 }
 
-async fn store() -> (TestStore, Database) {
+async fn store() -> (TestStore, StoreDatabase) {
     let store = TestStore::new();
     let db =
         store.schema(vec![SyncedTable::new("rows", RowIdentity::SharedKey)], SCHEMA).await.unwrap();
@@ -89,14 +89,14 @@ fn delete(write: WriteId, tick: u64, read: u64, created: WriteId, setter: WriteI
     record
 }
 
-async fn land(db: &Database, slot: u64, write: WriteRecord, writers: &[DeviceId]) {
+async fn land(db: &StoreDatabase, slot: u64, write: WriteRecord, writers: &[DeviceId]) {
     try_land(db, slot, write, writers).await.unwrap();
 }
 
 /// Apply `write` alone in `slot`, with `writers` the other devices that can
 /// still write.
 async fn try_land(
-    db: &Database,
+    db: &StoreDatabase,
     slot: u64,
     write: WriteRecord,
     writers: &[DeviceId],
@@ -127,7 +127,7 @@ async fn try_land(
 /// What this device keeps of `write`'s part in the store: its kept records,
 /// their verdicts, its part header and leaf hashes, and the write's header
 /// evidence.
-fn kept(db: &Database, write: WriteId) -> [i64; 5] {
+fn kept(db: &StoreDatabase, write: WriteId) -> [i64; 5] {
     let id = merge_fields::encode_write_id(&write).unwrap();
     db.inspect_writer(|c, _| {
         [
@@ -147,7 +147,7 @@ fn kept(db: &Database, write: WriteId) -> [i64; 5] {
 }
 
 /// The writes whose kept changes a snapshot of the store carries.
-fn snapshot_changes(db: &Database) -> Vec<WriteId> {
+fn snapshot_changes(db: &StoreDatabase) -> Vec<WriteId> {
     db.inspect_writer(|c, _| {
         let mut writes = Vec::new();
         let mut part = None;
@@ -165,7 +165,7 @@ fn snapshot_changes(db: &Database) -> Vec<WriteId> {
 
 /// Ben inserts row 1 and edits its `b`; Cleo replaces his edit in slot 3.
 /// Each then lands a write: Ben's reads through slot 3, Cleo's through 4.
-async fn overwritten(db: &Database, writers: &[DeviceId]) {
+async fn overwritten(db: &StoreDatabase, writers: &[DeviceId]) {
     land(db, 1, insert(id(BEN, 1), 1, 0, 1), writers).await;
     land(db, 2, update(id(BEN, 2), 2, 1, id(BEN, 1), id(BEN, 1)), writers).await;
     land(db, 3, update(id(CLEO, 1), 3, 2, id(BEN, 1), id(BEN, 2)), writers).await;
@@ -193,7 +193,7 @@ async fn an_edit_every_writer_wrote_past_is_forgotten() {
 }
 
 /// The verdict this device gave the change of `write`.
-fn verdict(db: &Database, write: WriteId) -> ChangeVerdict {
+fn verdict(db: &StoreDatabase, write: WriteId) -> ChangeVerdict {
     let id = merge_fields::encode_write_id(&write).unwrap();
     db.inspect_writer(|c, _| {
         let admission: Vec<u8> = c
@@ -256,7 +256,7 @@ async fn with_no_other_writer_each_slot_forgets_what_stopped_in_it() {
 
 /// Whether this device keeps `write`'s applied-write entry, and its
 /// plaintext header.
-fn entry(db: &Database, write: WriteId) -> (bool, bool) {
+fn entry(db: &StoreDatabase, write: WriteId) -> (bool, bool) {
     db.inspect_writer(|c, _| {
         (
             crate::write_metadata::stored_write(c, write).unwrap().is_some(),
@@ -266,7 +266,7 @@ fn entry(db: &Database, write: WriteId) -> (bool, bool) {
 }
 
 /// The writes section 0 of a snapshot of the store names.
-async fn snapshot_writes(db: &Database) -> Vec<WriteId> {
+async fn snapshot_writes(db: &StoreDatabase) -> Vec<WriteId> {
     let snapshot = crate::snapshot_write::tests::capture(
         db,
         crate::snapshot_write::tests::id(Audience::Store),
@@ -390,7 +390,7 @@ fn history() -> Vec<(u64, WriteRecord)> {
 }
 
 /// A reload that starts the store empty and stages `history` again.
-async fn reload_from_empty(db: &Database, history: Vec<(u64, WriteRecord)>) {
+async fn reload_from_empty(db: &StoreDatabase, history: Vec<(u64, WriteRecord)>) {
     let target = history.last().unwrap().0;
     let slots = history
         .into_iter()

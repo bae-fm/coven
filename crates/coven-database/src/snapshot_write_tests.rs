@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::write_boundary::tests::version_two;
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::snapshot::section;
 use coven_format::snapshot::SnapshotDecoder;
 use coven_format::value::Value;
@@ -121,11 +121,11 @@ pub(crate) fn prefix(
     }
 }
 
-pub(crate) async fn frames(database: &Database, audience: Audience) -> SnapshotFrames {
+pub(crate) async fn frames(database: &StoreDatabase, audience: Audience) -> SnapshotFrames {
     frames_for(database, id(audience)).await
 }
 
-pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotFrames {
+pub(crate) async fn frames_for(database: &StoreDatabase, id: SnapshotId) -> SnapshotFrames {
     for record in records(database) {
         database.receive(record.into()).await.unwrap();
     }
@@ -133,7 +133,7 @@ pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotF
 }
 
 /// The snapshot of the database as it stands, without applying its queue.
-pub(crate) async fn capture(database: &Database, id: SnapshotId) -> SnapshotFrames {
+pub(crate) async fn capture(database: &StoreDatabase, id: SnapshotId) -> SnapshotFrames {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let output = frames.clone();
@@ -200,7 +200,7 @@ pub(crate) fn stream(
 /// Stage one snapshot and check it as file retention does, returning the
 /// files it names. A failure to stage it is returned as the staging's verdict.
 pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
-    database: &Database,
+    database: &StoreDatabase,
     id: SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
@@ -222,7 +222,7 @@ pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
 /// staging's or the loader's own verdict, after checking that the reload
 /// named this snapshot.
 pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
-    database: &Database,
+    database: &StoreDatabase,
     expected: SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
@@ -232,7 +232,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
 
 /// [`load_one`] of a snapshot signed by member `author`.
 pub(crate) async fn load_one_by<R: std::io::Read + Send + 'static>(
-    database: &Database,
+    database: &StoreDatabase,
     expected: SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     plaintext: R,
@@ -726,7 +726,7 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
 }
 
 /// Compare snapshots after both devices have consumed the target's marker.
-async fn consume_marker(source: &Database, target: &Database) {
+async fn consume_marker(source: &StoreDatabase, target: &StoreDatabase) {
     for write in records(target) {
         source.receive(write.into()).await.unwrap();
     }
@@ -810,7 +810,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
     }
 }
 
-pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
+pub(crate) async fn assert_loaded_losses(source: &StoreDatabase, target: &StoreDatabase) {
     let snapshot = frames(source, Audience::Store).await;
     target
         .load_snapshots::<crate::pending::tests::Record, std::io::Cursor<Vec<u8>>>(

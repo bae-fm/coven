@@ -1,7 +1,7 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::DbError;
-use crate::{Database, Migration};
+use crate::{Migration, StoreDatabase};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Audience;
 use std::{
@@ -9,7 +9,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-async fn open(store: &TestStore, schema: &'static str) -> Database {
+async fn open(store: &TestStore, schema: &'static str) -> StoreDatabase {
     store
         .builder(notes(), vec![Migration::addition(1, "notes", schema)])
         .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
@@ -19,7 +19,7 @@ async fn open(store: &TestStore, schema: &'static str) -> Database {
 }
 
 async fn data(
-    db: &Database,
+    db: &StoreDatabase,
 ) -> (Vec<coven_merge::RowState<coven_format::value::Value>>, Vec<coven_format::loss::Loss>) {
     crate::tests::data(db, Audience::Store)
 }
@@ -290,7 +290,7 @@ async fn dismissing_a_parent_records_its_owned_cascade_chain_in_one_write() {
 }
 
 pub(crate) async fn cascade_deletions(
-    mut compare: impl FnMut(&crate::Database, &coven_format::write::WriteRecord),
+    mut compare: impl FnMut(&crate::StoreDatabase, &coven_format::write::WriteRecord),
 ) {
     use crate::author_judgement::tests::deliver;
     use crate::judge::tests::{causes, verdict};
@@ -493,7 +493,7 @@ async fn an_empty_frozen_delete_can_be_dismissed_after_receipt_and_snapshot() {
     source.close().await.unwrap();
 }
 
-impl crate::Database {
+impl crate::StoreDatabase {
     /// Dismiss lost values in a write of their own, as the app's
     /// `dismiss_lost_values` does.
     pub(crate) async fn dismiss_lost_values(

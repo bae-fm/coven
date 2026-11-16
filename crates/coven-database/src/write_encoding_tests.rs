@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::snapshot_write::tests::{frames, stream};
 use crate::tests::{applied, contents, lean_model, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{ApplyOutcome, Database, DbError, Migration, WriteWait};
+use crate::{ApplyOutcome, DbError, Migration, StoreDatabase, WriteWait};
 
 #[tokio::test]
 async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_applied_log() {
@@ -148,7 +148,7 @@ fn other_local_format_errors_panic_naming_the_invariant() {
     assert!(message.contains("old columns") && message.contains("ColumnOperation"));
 }
 
-async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> Database {
+async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> StoreDatabase {
     store
         .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock.clone())
@@ -157,7 +157,7 @@ async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> Database {
         .unwrap()
 }
 
-async fn receive(db: &Database, write: &WriteRecord, streamed: bool) -> ApplyOutcome {
+async fn receive(db: &StoreDatabase, write: &WriteRecord, streamed: bool) -> ApplyOutcome {
     if streamed {
         db.receive_stream(stream(write), || Ok(())).await.unwrap()
     } else {
@@ -312,7 +312,7 @@ fn timestamp_json(timestamp: Timestamp) -> Value {
     json!([timestamp.milliseconds(), timestamp.counter(), timestamp.device().0])
 }
 
-fn latest(db: &Database) -> Timestamp {
+fn latest(db: &StoreDatabase) -> Timestamp {
     db.inspect_writer(|db, _| crate::write_encoding::latest_timestamp(db).unwrap().unwrap())
 }
 
@@ -329,7 +329,7 @@ async fn lean_differential_clocks() {
             UNIX_EPOCH + Duration::from_millis(wall as u64)
         }
     };
-    let stamped = |result: Result<(), DbError>, db: &Database| match result {
+    let stamped = |result: Result<(), DbError>, db: &StoreDatabase| match result {
         Ok(()) => timestamp_json(records(db).pop().unwrap().header.timestamp),
         Err(DbError::ClockOutOfRange) => Value::Null,
         Err(error) => panic!("stamping failed with {error:?}"),

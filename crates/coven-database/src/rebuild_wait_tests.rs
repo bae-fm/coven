@@ -55,7 +55,7 @@ fn index() -> Migration {
 
 /// This device after its app migrated: a store raise captured through its
 /// migration marker, which is the third write.
-async fn migrated() -> (TestStore, crate::Database) {
+async fn migrated() -> (TestStore, crate::StoreDatabase) {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     connect(&db).await;

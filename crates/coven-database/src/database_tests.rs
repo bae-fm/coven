@@ -44,7 +44,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         let slot = database.inner.read().unwrap();
         slot.as_ref().unwrap().access.readers.assert_read_only();
     }
-    let hold_reader = |database: Database| {
+    let hold_reader = |database: StoreDatabase| {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
@@ -616,7 +616,7 @@ async fn a_panicking_write_whose_rollback_fails_keeps_its_bug_and_fails_the_hand
         .await
         .unwrap_err();
     assert!(matches!(&error, DbError::Bug(bug) if bug.message == "app write panic"), "{error:?}");
-    let held = |db: &Database| {
+    let held = |db: &StoreDatabase| {
         db.inspect_writer(|writer, _| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
         })
@@ -877,7 +877,7 @@ async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
         matches!(&failed, DbError::Bug(bug) if bug.message == "the capture lost its place"),
         "{failed:?}"
     );
-    let count = |db: &Database| {
+    let count = |db: &StoreDatabase| {
         db.inspect_writer(|writer, _| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
         })

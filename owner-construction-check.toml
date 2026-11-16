@@ -522,11 +522,11 @@ closed_session_types = [
 FileBudgetWatch = "FileBudget"
 # A live query the database makes from its readers and commit observer for
 # the app, which keeps it as long as it follows the results (api.md E4).
-LiveQuery = "Database"
-ReconfigurableLiveQuery = "Database"
+LiveQuery = "StoreDatabase"
+ReconfigurableLiveQuery = "StoreDatabase"
 # The measurements of what the store keeps on this device, repeated as the
 # cache's counters, a budget or the archives change (api.md E8).
-LocalBytesWatch = "Database"
+LocalBytesWatch = "StoreDatabase"
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"
@@ -671,7 +671,7 @@ callable = "parameters"
 
 [[database.domains]]
 name = "sequence claims"
-owner = "Database"
+owner = "StoreDatabase"
 homes = ["crates/coven-database/src/claim.rs", "crates/coven-database/src/claim_schema.rs"]
 tables = [
     "_coven_claim_attempts",
@@ -698,7 +698,7 @@ tables = [
 
 [[database.domains]]
 name = "published merge state"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/published.rs",
     "crates/coven-database/src/published_migration.rs",
@@ -716,7 +716,7 @@ tables = [
 
 [[database.domains]]
 name = "store state"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/store_state_tables.rs",
     "crates/coven-database/src/store_state_schema.rs",
@@ -733,7 +733,7 @@ tables = [
 
 [[database.domains]]
 name = "authorship"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/authorship.rs",
     "crates/coven-database/src/authorship_schema.rs",
@@ -746,7 +746,7 @@ tables = [
 
 [[database.domains]]
 name = "sequence application"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/sequence_apply.rs",
     "crates/coven-database/src/sequence_apply_schema.rs",
@@ -760,7 +760,7 @@ tables = [
 
 [[database.domains]]
 name = "write headers"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/write_headers.rs",
     "crates/coven-database/src/write_headers_schema.rs",
@@ -771,7 +771,7 @@ tables = [
 
 [[database.domains]]
 name = "written values"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/written_values.rs",
     "crates/coven-database/src/written_values_schema.rs",
@@ -782,7 +782,7 @@ tables = [
 
 [[database.domains]]
 name = "SQL versions"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/sql_versions.rs",
     "crates/coven-database/src/sql_versions_schema.rs",
@@ -793,7 +793,7 @@ tables = [
 
 [[database.domains]]
 name = "source names"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/source_names.rs",
     "crates/coven-database/src/source_names_schema.rs",
@@ -805,7 +805,7 @@ tables = [
 
 [[database.domains]]
 name = "write boundaries"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/write_boundary.rs",
     "crates/coven-database/src/write_boundary_schema.rs",
@@ -816,7 +816,7 @@ tables = [
 
 [[database.domains]]
 name = "retries"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/retry.rs",
     "crates/coven-database/src/retry_schema.rs",
@@ -827,7 +827,7 @@ tables = [
 
 [[database.domains]]
 name = "uploads"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/upload.rs",
     "crates/coven-database/src/upload_schema.rs",
@@ -840,7 +840,7 @@ tables = [
 
 [[database.domains]]
 name = "device reset"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/device_reset.rs",
     "crates/coven-database/src/device_reset_schema.rs",
@@ -852,7 +852,7 @@ tables = [
 
 [[database.domains]]
 name = "file columns"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/file_table.rs",
     "crates/coven-database/src/file_table_schema.rs",
@@ -863,7 +863,7 @@ tables = [
 
 [[database.domains]]
 name = "pin requests"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/file_pins.rs",
     "crates/coven-database/src/file_pins_schema.rs",
@@ -874,7 +874,7 @@ tables = [
 
 [[database.domains]]
 name = "file moves"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/file_moves.rs",
     "crates/coven-database/src/file_moves_schema.rs",
@@ -886,7 +886,7 @@ tables = [
 
 [[database.domains]]
 name = "data reloads"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/reload_gate.rs",
     "crates/coven-database/src/reload_gate_schema.rs",
@@ -897,7 +897,7 @@ tables = [
 
 [[database.domains]]
 name = "conversion schemas"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/migration_receive.rs",
     "crates/coven-database/src/migration_receive_schema.rs",
@@ -908,7 +908,7 @@ tables = [
 
 [[database.domains]]
 name = "migration prefix"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/captured_changes.rs",
     "crates/coven-database/src/captured_changes_schema.rs",
@@ -919,7 +919,7 @@ tables = [
 
 [[database.domains]]
 name = "schema definitions"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/row_queries.rs",
     "crates/coven-database/src/row_queries_schema.rs",
@@ -933,7 +933,7 @@ tables = [
 
 [[database.domains]]
 name = "device-only copies"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/file_database_copies.rs",
     "crates/coven-database/src/file_database_copies_schema.rs",
@@ -945,7 +945,7 @@ tables = [
 
 [[database.domains]]
 name = "file protection"
-owner = "Database"
+owner = "StoreDatabase"
 # A snapshot install settles protection a table at a time in
 # snapshot_files.rs; the pins' triggers on the stored files keep the pins
 # table, the stored files' schema. The pending records' triggers on the
@@ -967,7 +967,7 @@ tables = [
 
 [[database.domains]]
 name = "merge store"
-owner = "Database"
+owner = "StoreDatabase"
 # A snapshot install writes the merge records of its staged rows a table at
 # a time in snapshot_install.rs.
 homes = [
@@ -986,7 +986,7 @@ tables = [
 
 [[database.domains]]
 name = "operations"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/operation.rs",
     "crates/coven-database/src/operation_schema.rs",
@@ -1001,7 +1001,7 @@ tables = [
 
 [[database.domains]]
 name = "file uploads"
-owner = "Database"
+owner = "StoreDatabase"
 # The upload queue's triggers on the uploads' files keep the
 # coven_upload_queue table, the upload files' schema; the pending records'
 # triggers on the uploads and their files keep coven_pending.
@@ -1023,7 +1023,7 @@ tables = [
 
 [[database.domains]]
 name = "applied sequence"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/sequence.rs",
     "crates/coven-database/src/sequence_schema.rs",
@@ -1036,7 +1036,7 @@ tables = [
 
 [[database.domains]]
 name = "file retention"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/database_file_retention.rs",
     "crates/coven-database/src/database_file_retention_schema.rs",
@@ -1049,7 +1049,7 @@ tables = [
 
 [[database.domains]]
 name = "ended requests"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/database_operations.rs",
     "crates/coven-database/src/database_operations_schema.rs",
@@ -1061,7 +1061,7 @@ tables = [
 
 [[database.domains]]
 name = "raises"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/raise_capture.rs",
     "crates/coven-database/src/raise_capture_schema.rs",
@@ -1073,7 +1073,7 @@ tables = [
 
 [[database.domains]]
 name = "object removals"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/object_removals.rs",
     "crates/coven-database/src/object_removals_schema.rs",
@@ -1084,7 +1084,7 @@ tables = [
 
 [[database.domains]]
 name = "provider access"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/provider_access.rs",
     "crates/coven-database/src/provider_access_schema.rs",
@@ -1095,7 +1095,7 @@ tables = [
 
 [[database.domains]]
 name = "pending"
-owner = "Database"
+owner = "StoreDatabase"
 # internal_schema_pending.rs defines the triggers on _coven_pending that
 # write coven_pending.
 homes = [
@@ -1109,7 +1109,7 @@ tables = [
 
 [[database.domains]]
 name = "migration write"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/migration_run.rs",
     "crates/coven-database/src/migration_run_schema.rs",
@@ -1122,7 +1122,7 @@ tables = [
 
 [[database.domains]]
 name = "user originals"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/user_file.rs",
     "crates/coven-database/src/user_file_schema.rs",
@@ -1134,7 +1134,7 @@ tables = [
 
 [[database.domains]]
 name = "file removals"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/file_removals.rs",
     "crates/coven-database/src/file_removals_schema.rs",
@@ -1145,7 +1145,7 @@ tables = [
 
 [[database.domains]]
 name = "cache"
-owner = "Database"
+owner = "StoreDatabase"
 # The pins' triggers on the cache keep the pins table, the cache's schema.
 homes = [
     "crates/coven-database/src/file_cache.rs",
@@ -1162,7 +1162,7 @@ tables = [
 
 [[database.domains]]
 name = "creations"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/ownership.rs",
     "crates/coven-database/src/ownership_schema.rs",
@@ -1173,7 +1173,7 @@ tables = [
 
 [[database.domains]]
 name = "authored sources"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/forget_records.rs",
     "crates/coven-database/src/write_sources.rs",
@@ -1187,7 +1187,7 @@ tables = [
 
 [[database.domains]]
 name = "forgetting"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/forget_entries.rs",
     "crates/coven-database/src/forget_records.rs",
@@ -1200,7 +1200,7 @@ tables = [
 
 [[database.domains]]
 name = "losses"
-owner = "Database"
+owner = "StoreDatabase"
 homes = [
     "crates/coven-database/src/loss_record.rs",
     "crates/coven-database/src/loss_record_schema.rs",
@@ -1415,11 +1415,11 @@ tables = [
 # caller stops waiting, and then its bug goes to the store's sink (E15).
 "crates/coven-database/src/database_call.rs" = ["process", "start_call"]
 "crates/coven-database/src/database.rs" = [
-    "Database::call",
-    "Database::start_read",
-    "Database::subscribe_reconfigurable",
-    "Database::close",
-    "Database::stage_files",
+    "StoreDatabase::call",
+    "StoreDatabase::start_read",
+    "StoreDatabase::subscribe_reconfigurable",
+    "StoreDatabase::close",
+    "StoreDatabase::stage_files",
 ]
 "crates/coven-database/src/database_builder.rs" = [
     "DatabaseBuilder::new",

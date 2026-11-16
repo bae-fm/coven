@@ -5,7 +5,7 @@
 use crate::author_judgement::tests::{deliver, Pair};
 use crate::tests::TestStore;
 use crate::write::tests::{count, records};
-use crate::{ApplyOutcome, Database, Migration, OldWrites, RowIdentity, SyncedTable};
+use crate::{ApplyOutcome, Migration, OldWrites, RowIdentity, StoreDatabase, SyncedTable};
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::{Audience, Rule};
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ const K: &str = "00000000-0000-4000-8000-00000000000a";
 const M: &str = "00000000-0000-4000-8000-00000000000b";
 
 /// Run `statements` as one write.
-async fn run(database: &Database, statements: String) {
+async fn run(database: &StoreDatabase, statements: String) {
     database
         .write(move |context| {
             context.execute_batch(&statements)?;
@@ -29,7 +29,7 @@ async fn run(database: &Database, statements: String) {
 type Removed = (String, Vec<u8>, String, BTreeSet<Rule>);
 
 /// What a device shows of `tables`, and which rows its rules took out.
-fn state(database: &Database, tables: &[&str]) -> (Vec<String>, Vec<Removed>) {
+fn state(database: &StoreDatabase, tables: &[&str]) -> (Vec<String>, Vec<Removed>) {
     database.inspect_writer(|db, _| {
         let mut shown = Vec::new();
         for table in tables {
@@ -192,7 +192,7 @@ async fn a_new_note_brings_back_the_row_stored_pointing_at_it() {
         }
         receivers.push(db);
     }
-    let [ana, carol] = <[Database; 2]>::try_from(receivers).ok().unwrap();
+    let [ana, carol] = <[StoreDatabase; 2]>::try_from(receivers).ok().unwrap();
     let tables = ["notes", "attachments"];
     assert_eq!(state(&ana, &tables).0, Vec::<String>::new());
     assert_eq!(state(&ana, &tables).1.len(), 1, "attachment 9 is out");
@@ -221,7 +221,7 @@ const LIBRARY: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,
 
 /// A library holding album `a`, its release `r` and tracks `t1` and `t2`,
 /// counting what its removal views evaluate.
-async fn library() -> (Database, TestStore, crate::test_utils::WorkCounter) {
+async fn library() -> (StoreDatabase, TestStore, crate::test_utils::WorkCounter) {
     let store = TestStore::new();
     let tables = ["albums", "releases", "tracks"]
         .into_iter()

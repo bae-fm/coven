@@ -1,7 +1,7 @@
 use crate::tests::TestStore;
 use crate::{
-    Database, DbError, FileColumn, FileDatabase, FileWork, Migration, Namespace, PendingValue,
-    Place, Provenance, RowIdentity, SyncedTable,
+    DbError, FileColumn, FileDatabase, FileWork, Migration, Namespace, PendingValue, Place,
+    Provenance, RowIdentity, StoreDatabase, SyncedTable,
 };
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ const SCHEMA: &str = "CREATE TABLE covers(id TEXT NOT NULL PRIMARY KEY,file TEXT
 
 /// `covers` binds its file, which holds the write that sets it, and `photos`
 /// trails (§17.4).
-async fn open(store: &TestStore) -> Database {
+async fn open(store: &TestStore) -> StoreDatabase {
     store
         .builder(
             vec![
@@ -32,7 +32,12 @@ async fn open(store: &TestStore) -> Database {
 }
 
 /// Stage `bytes` into `table`'s namespace and point row `id` at them.
-async fn stage(db: &Database, table: &'static str, id: &'static str, bytes: Vec<u8>) -> FileId {
+async fn stage(
+    db: &StoreDatabase,
+    table: &'static str,
+    id: &'static str,
+    bytes: Vec<u8>,
+) -> FileId {
     db.staged_write::<_, _, _, _, DbError>(
         move |batch| Ok(batch.put_file(table, bytes, Place::Cloud)),
         move |sql, file| {
@@ -148,7 +153,7 @@ fn upload_record(upload: &crate::FileUpload) -> Record {
 
 /// Attach one file to each of `rows` of `table` in one write, so their
 /// uploads share a move.
-async fn attach(db: &Database, table: &'static str, rows: &[&'static str]) {
+async fn attach(db: &StoreDatabase, table: &'static str, rows: &[&'static str]) {
     let rows = rows.to_vec();
     db.staged_write::<_, _, _, _, DbError>(
         {

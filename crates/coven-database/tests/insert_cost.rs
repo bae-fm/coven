@@ -7,8 +7,8 @@
 
 use coven_database::DbError;
 use coven_database::{
-    Database, DatabaseBuilder, FileColumn, Migration, Namespace, Place, Provenance, RowIdentity,
-    SyncedTable,
+    DatabaseBuilder, FileColumn, Migration, Namespace, Place, Provenance, RowIdentity,
+    StoreDatabase, SyncedTable,
 };
 use coven_foundation::{
     files::StoreDirectories,
@@ -54,7 +54,7 @@ fn median(mut times: Vec<Duration>) -> Duration {
     times[times.len() / 2] / ROWS as u32
 }
 
-async fn open(directory: &tempfile::TempDir) -> Database {
+async fn open(directory: &tempfile::TempDir) -> StoreDatabase {
     let ids = SequentialIds::new();
     let store =
         StoreDirectories::new(directory.path().into(), coven_foundation::task::HeardBugs::shared())
@@ -113,7 +113,7 @@ fn uuid(kind: u32, n: usize) -> String {
     format!("{kind:08x}-0000-4000-8000-{n:012x}")
 }
 
-async fn open_library(directory: &tempfile::TempDir) -> Database {
+async fn open_library(directory: &tempfile::TempDir) -> StoreDatabase {
     let ids = Arc::new(SequentialIds::new());
     let store =
         StoreDirectories::new(directory.path().into(), coven_foundation::task::HeardBugs::shared())
@@ -153,7 +153,7 @@ const JOINED: [&str; 4] = [
 /// Write releases `releases`, each with its album, medium, and tracks and
 /// their file rows, each file row referencing a staged file when `files`
 /// is set and none when not.
-async fn write_releases(db: &Database, files: bool, releases: std::ops::Range<usize>) {
+async fn write_releases(db: &StoreDatabase, files: bool, releases: std::ops::Range<usize>) {
     let (start, end) = (releases.start, releases.end);
     let staged = db
         .stage_files::<_, _, coven_database::DbError>(move |batch| {

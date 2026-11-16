@@ -7,13 +7,13 @@ use crate::{
     file_write::tests::{has_record, local_count, open},
     tests::TestStore,
     write::tests::records,
-    Database, DbError, FileDatabase, FilePlace, MoveFile, MoveId, Place, Provenance,
+    DbError, FileDatabase, FilePlace, MoveFile, MoveId, Place, Provenance, StoreDatabase,
 };
 use coven_foundation::files::FileLease;
 use coven_foundation::id_source::{FileId, SequentialIds};
 
 /// Stage one file per row id, each where `place` says, in one write.
-async fn stage(db: &Database, rows: &[&'static str], place: Place) -> Vec<FileId> {
+async fn stage(db: &StoreDatabase, rows: &[&'static str], place: Place) -> Vec<FileId> {
     let rows = rows.to_vec();
     let count = rows.len();
     db.staged_write::<_, _, _, _, DbError>(
@@ -33,7 +33,7 @@ async fn stage(db: &Database, rows: &[&'static str], place: Place) -> Vec<FileId
     .unwrap()
 }
 
-fn cloud(db: &Database, file: FileId) -> bool {
+fn cloud(db: &StoreDatabase, file: FileId) -> bool {
     db.inspect_writer(|sql, _| {
         sql.query_row(
             "SELECT coven_file_device(coordinates) IS NULL FROM main.coven_files WHERE id=?1",
@@ -45,7 +45,7 @@ fn cloud(db: &Database, file: FileId) -> bool {
 }
 
 /// Complete the queued upload storing `file`, as confirmed storage would.
-async fn complete(db: &Database, file: FileId) {
+async fn complete(db: &StoreDatabase, file: FileId) {
     let files = FileDatabase::new(db.clone());
     let upload = files
         .uploads()
@@ -58,7 +58,7 @@ async fn complete(db: &Database, file: FileId) {
 }
 
 /// The files the newest write of this device switched to the cloud.
-fn switched_in_last_write(db: &Database) -> usize {
+fn switched_in_last_write(db: &StoreDatabase) -> usize {
     records(db)
         .pop()
         .unwrap()
@@ -69,7 +69,7 @@ fn switched_in_last_write(db: &Database) -> usize {
         .count()
 }
 
-async fn move_files(db: &Database, files: Vec<MoveFile>) -> Result<MoveId, DbError> {
+async fn move_files(db: &StoreDatabase, files: Vec<MoveFile>) -> Result<MoveId, DbError> {
     db.write(move |sql| sql.move_to_cloud(files)).await
 }
 
@@ -302,7 +302,7 @@ async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
         crate::tests::publish_through(&a, record.header.position.number).await.unwrap();
         b.receive(record.into()).await.unwrap();
     }
-    let refused = |db: &Database, file| {
+    let refused = |db: &StoreDatabase, file| {
         let db = db.clone();
         async move {
             match move_files(&db, vec![MoveFile::App(file)]).await {
@@ -486,7 +486,7 @@ async fn a_local_trigger_follows_each_pin_request_coven_adds_and_ends() {
         .open()
         .await
         .unwrap();
-    let kept = |db: &Database| {
+    let kept = |db: &StoreDatabase| {
         let db = db.clone();
         async move {
             db.read(|sql| {
@@ -519,7 +519,7 @@ async fn a_local_trigger_follows_each_pin_request_coven_adds_and_ends() {
 
 /// What app SQL reads of `coven_moves`: each file a move lists, with the
 /// move's state, by move and file.
-async fn listed(db: &Database) -> Vec<(MoveId, String, FileId)> {
+async fn listed(db: &StoreDatabase) -> Vec<(MoveId, String, FileId)> {
     db.read(|sql| {
         Ok::<_, DbError>(sql.query(
             "SELECT move,state,file FROM coven_moves ORDER BY move,file",

@@ -6,7 +6,7 @@ use coven_merge::{Timestamp, WriteId};
 
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{Database, DbError, Migration, SyncedTable};
+use crate::{DbError, Migration, StoreDatabase, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 
 const CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
@@ -32,7 +32,7 @@ fn circle_tables() -> Vec<SyncedTable> {
     ]
 }
 
-fn leave_circle(db: &Database) {
+fn leave_circle(db: &StoreDatabase) {
     let member = crate::tests::member(2);
     db.inspect_writer(|db, _| {
         db.transaction(|db| {
@@ -106,7 +106,7 @@ async fn membership_refuses_sql_triggers_and_both_sides_of_moves_atomically() {
 
 const FILES_SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY)";
 
-async fn files_store(store: &TestStore, kind: crate::Provenance) -> Database {
+async fn files_store(store: &TestStore, kind: crate::Provenance) -> StoreDatabase {
     store
         .builder(
             vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
@@ -317,7 +317,7 @@ fn migrations() -> Vec<Migration> {
     })]
 }
 
-async fn seed(database: &Database) {
+async fn seed(database: &StoreDatabase) {
     sql(database, "INSERT INTO notes VALUES('42','Original','milk, eggs')").await.unwrap();
     sql(database, "UPDATE notes SET title='Groceries'").await.unwrap();
     let writes = records(database);
@@ -685,7 +685,7 @@ fn crashing_removal_writer() {
     panic!("write did not reach its removal crash point");
 }
 
-async fn run(db: &Database, statement: String) -> Result<(), crate::DbError> {
+async fn run(db: &StoreDatabase, statement: String) -> Result<(), crate::DbError> {
     db.write(move |sql| {
         sql.execute(&statement, [])?;
         Ok(())

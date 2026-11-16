@@ -4,7 +4,7 @@
 use crate::tests::{member, TestStore};
 use crate::write::tests::{count, notes, records, NOTES};
 use crate::{
-    Database, DbError, DeviceState, Joined, Joining, JoiningWrite, Migration, StoreDevice,
+    DbError, DeviceState, Joined, Joining, JoiningWrite, Migration, StoreDatabase, StoreDevice,
     StoreMember, StoreState,
 };
 use coven_format::admin::{MemberRole, StoreChange};
@@ -36,7 +36,7 @@ fn recording(
 async fn open(
     store: &TestStore,
     joining: impl Fn(&JoiningWrite<'_>, &Joining) -> Result<(), DbError> + Send + Sync + 'static,
-) -> Database {
+) -> StoreDatabase {
     store
         .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .joining_write(joining)

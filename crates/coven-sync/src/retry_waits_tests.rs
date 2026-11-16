@@ -32,7 +32,7 @@ impl Fixture {
         }
     }
 
-    pub(crate) async fn open(&self) -> (Database, RetryWaits) {
+    pub(crate) async fn open(&self) -> (StoreDatabase, RetryWaits) {
         let database = coven_database::DatabaseBuilder::new(self.directory.clone())
             .synced_tables(vec![])
             .migrations(vec![coven_database::Migration::addition(1, "local", "SELECT 1")])
@@ -50,7 +50,11 @@ impl Fixture {
 
 const JOIN: RetrySubject = RetrySubject::Join;
 
-pub(crate) async fn due(database: &Database, waits: &RetryWaits, subject: RetrySubject) -> bool {
+pub(crate) async fn due(
+    database: &StoreDatabase,
+    waits: &RetryWaits,
+    subject: RetrySubject,
+) -> bool {
     let persisted = database.retry_wait(subject).await.unwrap();
     waits.due(subject, persisted.as_ref())
 }

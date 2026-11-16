@@ -33,7 +33,7 @@ fn migrations(starts_from: Vec<SyncedTable>) -> Vec<Migration> {
     ]
 }
 
-async fn open_app(store: &TestStore) -> Database {
+async fn open_app(store: &TestStore) -> StoreDatabase {
     store.builder(tables(), migrations(tables())).open().await.unwrap()
 }
 
@@ -50,13 +50,13 @@ fn schema_of(rebuild: &RebuildDatabase, table: &'static str) -> String {
 }
 
 /// A device at version 1 holding a pin in Garden, and its snapshots.
-async fn version_one() -> (TestStore, Database, SnapshotFrames, SnapshotFrames) {
+async fn version_one() -> (TestStore, StoreDatabase, SnapshotFrames, SnapshotFrames) {
     version_one_with(&SequentialIds::new()).await
 }
 
 async fn version_one_with(
     ids: &SequentialIds,
-) -> (TestStore, Database, SnapshotFrames, SnapshotFrames) {
+) -> (TestStore, StoreDatabase, SnapshotFrames, SnapshotFrames) {
     let store = TestStore::with_ids(ids);
     let db =
         store.builder(tables(), vec![Migration::addition(1, "pins", PINS)]).open().await.unwrap();
@@ -217,7 +217,7 @@ async fn assert_kept_as_lost_values(rebuild: &RebuildDatabase, ids: &[&str], nee
 /// slots after them, with the store state of `source`.
 pub(crate) async fn reload_into(
     rebuild: &RebuildDatabase,
-    source: &Database,
+    source: &StoreDatabase,
     snapshots: [&SnapshotFrames; 2],
     writes: &[coven_format::write::WriteRecord],
 ) -> crate::SnapshotReload<
@@ -352,7 +352,7 @@ async fn the_rebuilds_files_count_in_the_storage_figures_while_it_lives() {
 async fn newest_writes(
     ids: &SequentialIds,
     audience_note: &'static str,
-) -> (TestStore, Database, Vec<coven_format::write::WriteRecord>) {
+) -> (TestStore, StoreDatabase, Vec<coven_format::write::WriteRecord>) {
     let store = TestStore::with_ids(ids);
     let newest = open_app(&store).await;
     store.join_circle(&newest, garden());
@@ -453,7 +453,7 @@ const GIFTS: &str =
 
 /// The app of version 3 that also adds a synced table, which version 1 and
 /// the rebuild at it don't have.
-async fn open_app_with_gifts(store: &TestStore) -> Database {
+async fn open_app_with_gifts(store: &TestStore) -> StoreDatabase {
     let both = || {
         let mut tables = tables();
         tables.push(

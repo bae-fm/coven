@@ -279,7 +279,7 @@ fn wal_bytes(store: &TestStore) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
 
-async fn write_notes(database: &crate::Database, round: &str, count: usize) {
+async fn write_notes(database: &crate::StoreDatabase, round: &str, count: usize) {
     for n in 0..count {
         let id = IdSource::new_id(&UuidIds).to_string();
         let title = format!("{round} {n}");
@@ -519,7 +519,7 @@ async fn opening_gathers_statistics_a_table_lacks() {
 }
 
 /// Insert notes `ids`, titled by their id modulo 7.
-async fn insert_titles(db: &crate::Database, ids: std::ops::RangeInclusive<i64>) {
+async fn insert_titles(db: &crate::StoreDatabase, ids: std::ops::RangeInclusive<i64>) {
     db.write(move |sql| {
         for id in ids {
             sql.execute(
@@ -792,7 +792,7 @@ fn searched_notes(store: &TestStore) -> crate::DatabaseBuilder {
 /// statement it runs as nearly every write to the index commits. Defensive
 /// mode refuses to prepare FTS5's own `DELETE` anywhere but inside FTS5, so
 /// this plans a read of the same range, whose `WHERE` SQLite plans alike.
-fn index_cleanup_plan(db: &crate::Database) -> String {
+fn index_cleanup_plan(db: &crate::StoreDatabase) -> String {
     db.inspect_writer(|writer, _| {
         writer
             .query(
@@ -807,7 +807,7 @@ fn index_cleanup_plan(db: &crate::Database) -> String {
 
 /// The rows `note_search_data` holds by the writer's statistics, if it has
 /// any.
-fn counted_index_pages(db: &crate::Database) -> Option<i64> {
+fn counted_index_pages(db: &crate::StoreDatabase) -> Option<i64> {
     db.inspect_writer(|writer, _| {
         writer
             .query(
@@ -823,7 +823,7 @@ fn counted_index_pages(db: &crate::Database) -> Option<i64> {
 }
 
 /// Write `notes` searched notes, ten to a write, after the `from`th.
-async fn write_searched(db: &crate::Database, from: usize, notes: usize) {
+async fn write_searched(db: &crate::StoreDatabase, from: usize, notes: usize) {
     for write in 0..notes / 10 {
         db.write(move |sql| {
             for note in from + write * 10..from + (write + 1) * 10 {

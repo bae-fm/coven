@@ -479,7 +479,7 @@ async fn a_parent_many_rows_name_is_read_once_per_write() {
         .open()
         .await
         .unwrap();
-    let parent_reads = |db: &crate::Database| {
+    let parent_reads = |db: &crate::StoreDatabase| {
         db.inspect_writer(|writer, _| {
             writer
                 .profiled_statements()
@@ -504,7 +504,7 @@ async fn a_parent_many_rows_name_is_read_once_per_write() {
             parent_reads(&db)
         }
     };
-    let add_to_existing = |db: &crate::Database, kids: &'static [&'static str]| {
+    let add_to_existing = |db: &crate::StoreDatabase, kids: &'static [&'static str]| {
         let db = db.clone();
         async move {
             db.write(move |sql| {

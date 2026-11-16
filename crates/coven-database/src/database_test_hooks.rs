@@ -8,7 +8,7 @@ use crate::store_call::StoreCall;
 /// The removal of a snapshot staging its caller abandoned.
 pub(crate) type StagingRemoval = coven_foundation::task::CompletingTask<Result<(), DbError>>;
 
-impl Database {
+impl StoreDatabase {
     /// Run `gate` where released files' bytes are about to go, after the
     /// writer is free, so a test can stall that disk work.
     pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
@@ -44,7 +44,7 @@ impl Database {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Tell a test waiting for it that this close finds a call holding the
     /// open store, and waits for it to end.
     pub(crate) fn tell_close_wait(&self) {
@@ -60,7 +60,7 @@ impl Database {
     }
 }
 
-impl Database {
+impl StoreDatabase {
     /// Wait until the removals of every snapshot staging abandoned so far
     /// have ended.
     pub(crate) async fn abandoned_stagings_removed(&self) {
@@ -198,7 +198,7 @@ impl Database {
     }
 }
 
-impl Database<ReadOnly> {
+impl StoreDatabase<ReadOnly> {
     pub(crate) fn inspect_readers(
         &self,
         inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>),

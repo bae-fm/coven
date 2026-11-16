@@ -1,7 +1,7 @@
 //! Reuse the exact bytes of a durable observation across consumers and reopening.
 
 use crate::SyncError;
-use coven_database::{Database, RetainedInput};
+use coven_database::{RetainedInput, StoreDatabase};
 use coven_storage::{ByteRange, ObjectPath, ObjectStream, Storage, StorageFailure, StoredObject};
 
 #[path = "input_stream.rs"]
@@ -40,7 +40,7 @@ impl ObjectInput {
     /// Keep `response`, the first `requested` bytes of the object at `path`,
     /// under the observation it describes.
     pub(crate) async fn receive_prefix(
-        database: &Database,
+        database: &StoreDatabase,
         path: &ObjectPath,
         response: coven_storage::ObjectRead,
         requested: u64,
@@ -101,7 +101,7 @@ impl ObjectInput {
     /// observation already retains are used first, and the response then
     /// supplies none of them.
     pub(crate) async fn receive_response(
-        database: &Database,
+        database: &StoreDatabase,
         storage: &dyn Storage,
         path: &ObjectPath,
         response: ObjectStream<'_>,
@@ -129,7 +129,7 @@ impl ObjectInput {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     pub(crate) async fn retained(
-        database: &Database,
+        database: &StoreDatabase,
         path: &ObjectPath,
     ) -> Result<Option<Self>, SyncError> {
         let Some(observation) = database.retained_observation(path.as_str().to_owned()).await?
@@ -160,7 +160,7 @@ impl ObjectInput {
         reason = "a stored value that won't convert or decode is DamagedDatabase"
     )]
     pub(crate) async fn observe(
-        database: &Database,
+        database: &StoreDatabase,
         object: &StoredObject,
     ) -> Result<Self, SyncError> {
         let retained = database

@@ -113,7 +113,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
     }
 }
 
-async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord) {
+async fn upload(db: &crate::StoreDatabase, record: &coven_format::write::WriteRecord) {
     crate::upload::tests::attempt(db, 17).await.unwrap();
     crate::tests::publish_through(db, record.header.position.number).await.unwrap();
 }

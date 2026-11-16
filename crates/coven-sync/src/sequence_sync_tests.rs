@@ -6,13 +6,13 @@ use coven_crypto::{
     },
     MemberIdentity, StoreKey, StoreKeyring,
 };
-use coven_database::DbError;
-use coven_database::{Database, DatabaseBuilder, Migration, OldWrites, RowIdentity, SyncedTable};
+use coven_database::{
+    DatabaseBuilder, DbError, Migration, OldWrites, RowIdentity, StoreDatabase, SyncedTable,
+};
 use coven_format::admin::{MemberRole, StoreChange};
-use coven_foundation::clock::HANG_GUARD;
-use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
-    files::{StoreDirectories, StoreFile},
+    clock::HANG_GUARD,
+    files::{StoreDirAccess, StoreDirectories, StoreFile},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId, UuidIds},
 };
 use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
@@ -43,7 +43,7 @@ impl Device {
     pub(crate) fn device_id(&self) -> coven_foundation::id_source::DeviceId {
         self.sync.device
     }
-    pub(crate) fn database(&self) -> &Database {
+    pub(crate) fn database(&self) -> &StoreDatabase {
         &self.sync.database
     }
     pub(crate) fn files(&self) -> &Files {
@@ -274,7 +274,7 @@ impl Group {
         identity: MemberIdentity,
         ring: Option<StoreKeyring>,
         storage: MemoryStorage,
-        database: Database,
+        database: StoreDatabase,
     ) -> Device {
         self.attach_with_clock(temp, identity, ring, storage, database, self.clock.clone()).await
     }
@@ -284,7 +284,7 @@ impl Group {
         identity: MemberIdentity,
         ring: Option<StoreKeyring>,
         storage: MemoryStorage,
-        database: Database,
+        database: StoreDatabase,
         clock: coven_foundation::clock::ClockRef,
     ) -> Device {
         let directory =
@@ -473,7 +473,7 @@ pub(crate) fn admission(
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey { access_key_id: name.into() }
 }
-pub(crate) async fn insert(db: &Database, id: &'static str, title: &'static str) {
+pub(crate) async fn insert(db: &StoreDatabase, id: &'static str, title: &'static str) {
     db.write(move |sql| {
         sql.execute("INSERT INTO notes VALUES(?1,?2)", (id, title))?;
         Ok(())
@@ -482,7 +482,7 @@ pub(crate) async fn insert(db: &Database, id: &'static str, title: &'static str)
     .unwrap();
 }
 pub(crate) async fn pin(
-    db: &Database,
+    db: &StoreDatabase,
     id: &'static str,
     circle: coven_foundation::id_source::CircleId,
     title: &'static str,
@@ -494,7 +494,7 @@ pub(crate) async fn pin(
     .await
     .unwrap();
 }
-async fn titles(db: &Database, table: &'static str) -> Vec<(String, String)> {
+async fn titles(db: &StoreDatabase, table: &'static str) -> Vec<(String, String)> {
     db.read(move |sql| {
         Ok::<_, DbError>(sql.query(
             &format!("SELECT id,title FROM {table} ORDER BY id"),
@@ -505,10 +505,10 @@ async fn titles(db: &Database, table: &'static str) -> Vec<(String, String)> {
     .await
     .unwrap()
 }
-pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
+pub(crate) async fn pins(db: &StoreDatabase) -> Vec<(String, String)> {
     titles(db, "pins").await
 }
-pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
+pub(crate) async fn rows(db: &StoreDatabase) -> Vec<(String, String)> {
     titles(db, "notes").await
 }
 pub(crate) async fn assert_idle_work(device: &Device) {

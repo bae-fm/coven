@@ -1,11 +1,11 @@
 //! Device-reset notices and committed member lists (§19.3, E5).
 
-use super::{Database, DbError};
+use super::{DbError, StoreDatabase};
 use crate::{LiveQuery, NewOperation, PendingValue, ProviderAccessChange};
 use coven_foundation::files::DeviceReset;
 use coven_foundation::locks::read_unpoisoned;
 
-impl Database {
+impl StoreDatabase {
     /// Commit carried provider cleanup with the replacement notice before
     /// publication. A resumed bootstrap cannot import the same work twice.
     pub async fn record_device_reset<P: PendingValue>(

@@ -5,7 +5,7 @@
 //! makes, never by running it.
 
 use super::builder::OpenInputs;
-use super::{Database, DatabaseBuilder};
+use super::{DatabaseBuilder, StoreDatabase};
 use crate::migration::MigrationKind;
 use crate::{DbError, OpenError, SnapshotWriteError};
 use coven_foundation::clock::ClockRef;
@@ -55,7 +55,7 @@ pub enum RebuildError {
 /// its folder.
 pub struct RebuildDatabase {
     /// None once `discard` took it to close.
-    database: Option<Database>,
+    database: Option<StoreDatabase>,
     /// The real store, whose folder holds the rebuild's.
     real: StoreDir,
     /// The rebuild's own store, which `migrate` opens again.
@@ -66,10 +66,10 @@ pub struct RebuildDatabase {
     ids: IdSourceRef,
     /// The real store's handle, told when the folder's bytes change: they
     /// are on this device's disk, so its storage figures count them (§17.8).
-    parent: Database,
+    parent: StoreDatabase,
 }
 
-impl Database {
+impl StoreDatabase {
     /// Open a database of its own for rebuilding `circle`, which is at
     /// breaking version `version`: the app's migrations through the version
     /// before the first breaking one past `version`, declared as that

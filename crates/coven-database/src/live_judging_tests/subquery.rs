@@ -5,11 +5,11 @@ use super::lookup::follows;
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::DbError;
-use crate::{Database, LiveQuery};
+use crate::{LiveQuery, StoreDatabase};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 

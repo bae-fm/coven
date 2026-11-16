@@ -4,7 +4,7 @@
 mod dropped_schema {
     use crate::snapshot_write::tests::assert_loaded_losses;
     use crate::write::tests::{count, records, sql};
-    use crate::{tests::TestStore, Database, Lost, Migration, Replacement, RowIdentity};
+    use crate::{tests::TestStore, Lost, Migration, Replacement, RowIdentity, StoreDatabase};
     use crate::{LostValue, SyncedTable};
     use coven_foundation::id_source::SequentialIds;
 
@@ -16,8 +16,8 @@ mod dropped_schema {
 
     /// `b` edits `column` of `row` concurrently with `a`; `a` keeps one loss.
     async fn concurrent_loss(
-        a: &Database,
-        b: &Database,
+        a: &StoreDatabase,
+        b: &StoreDatabase,
         inserted: &'static str,
         a_edit: &'static str,
         b_edit: &'static str,
@@ -31,7 +31,7 @@ mod dropped_schema {
         assert_eq!(a.lost_values().await.unwrap().len(), 1);
     }
 
-    async fn assert_frozen(db: &Database, before: &[LostValue]) {
+    async fn assert_frozen(db: &StoreDatabase, before: &[LostValue]) {
         let losses = db.lost_values().await.unwrap();
         assert_eq!(
             losses.len(),
@@ -54,7 +54,7 @@ mod dropped_schema {
         }
     }
 
-    fn evidence(db: &Database, table: &str) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    fn evidence(db: &StoreDatabase, table: &str) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         db.inspect_writer(|sql, _| {
             sql.query(
                 "SELECT c.write_id,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) WHERE c.table_name=?1 ORDER BY c.write_id,c.key",
@@ -237,7 +237,7 @@ mod dropped_schema {
             .open()
             .await
             .unwrap();
-        let body = |db: &Database| {
+        let body = |db: &StoreDatabase| {
             db.inspect_writer(|db, _| {
                 db.query_row(
                     "SELECT count(*) FROM _coven_columns WHERE table_name='notes' AND column_name='body'",

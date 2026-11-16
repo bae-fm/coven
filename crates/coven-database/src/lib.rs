@@ -180,8 +180,8 @@ pub use database::input_database::{
 pub use database::local_bytes::{CacheBytes, LocalBytes, LocalBytesWatch, NamespaceBytes};
 pub use database::{
     closed_sync_facts, discarded_operations, discarded_store_name, read_device_id_in_use,
-    read_store_name, Database, DatabaseBuilder, ExportStopped, Mode, ReadOnly, RebuildDatabase,
-    RebuildError, StagedFiles, Writer,
+    read_store_name, DatabaseBuilder, ExportStopped, Mode, ReadOnly, RebuildDatabase, RebuildError,
+    StagedFiles, StoreDatabase, Writer,
 };
 pub use declaration::{
     Binding, FileColumn, Namespace, Provenance, RowIdentity, SyncedTable, BOUND_FILE_LIMIT,

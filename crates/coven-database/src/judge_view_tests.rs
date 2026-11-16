@@ -14,7 +14,7 @@ use crate::store_call::StoreCall;
 use crate::test_utils::tests::run_lean;
 use crate::write_rows::{column_name, key_columns, target_columns};
 use crate::write_schema::WriteSchema;
-use crate::Database;
+use crate::StoreDatabase;
 use coven_format::loss::AuthorizationFailure;
 use coven_format::snapshot_rows::{ChangeVerdict, KeptValue};
 use coven_format::value::Value;
@@ -452,7 +452,7 @@ fn expected(
 }
 
 /// Compare one received write's recorded verdicts with the model's.
-fn compare(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> usize {
+fn compare(runner: &std::ffi::OsStr, db: &StoreDatabase, record: &WriteRecord) -> usize {
     let owners: BTreeMap<_, _> =
         [ANA, BEN, CAROL].into_iter().map(|seed| (member(seed), seed)).collect();
     let (input, mut ids, judgement) =
@@ -507,7 +507,7 @@ async fn receipt_matches_the_model() {
 /// model's `Classification.cause` with `heldRule` over the same steps and
 /// held references (B18). Returns how many steps were compared, and how
 /// many of them are actions.
-fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (usize, usize) {
+fn classify(runner: &std::ffi::OsStr, db: &StoreDatabase, record: &WriteRecord) -> (usize, usize) {
     use super::{key_names, key_values, Authoring, ChildView, HeldReference};
     use crate::judge::{Originals, StepIndex};
     // The received write's records, judged again as the receiver judged them.
@@ -707,7 +707,7 @@ async fn cascade_delete_old_matches_the_model() {
     .await;
 }
 
-async fn cascade_delete(mut observed: impl FnMut(&Database, &WriteRecord)) {
+async fn cascade_delete(mut observed: impl FnMut(&StoreDatabase, &WriteRecord)) {
     use crate::author_judgement::tests::deliver;
     use crate::tests::TestStore;
     use crate::write::tests::{records, sql};

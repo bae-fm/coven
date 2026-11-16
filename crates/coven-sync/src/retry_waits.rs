@@ -11,7 +11,7 @@
 //! overrides only the subject's ordinary wait.
 
 use crate::{PendingReason, SyncError};
-use coven_database::{Database, DbError, RetrySubject, RetryWait};
+use coven_database::{DbError, RetrySubject, RetryWait, StoreDatabase};
 use coven_foundation::clock::ClockRef;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{retry_delay, StorageError, StorageFailure};
@@ -40,7 +40,7 @@ pub(crate) fn restart_wait(not_before: SystemTime, now: SystemTime, wait: Durati
 pub struct RetryWaits {
     clock: ClockRef,
     /// Absent for a read-only handle, whose cooldowns last for its session.
-    database: Option<Database>,
+    database: Option<StoreDatabase>,
     /// Shared with the writer's steps that write `coven_retry_effect`,
     /// which read the live cooldown as they commit (`retry_answer.rs`).
     state: Arc<Mutex<WaitSchedule>>,
@@ -117,7 +117,7 @@ impl Armed {
 
 impl RetryWaits {
     /// Arm every persisted wait with the restart rule (§6.7).
-    pub async fn open(database: Database, clock: ClockRef) -> Result<Self, DbError> {
+    pub async fn open(database: StoreDatabase, clock: ClockRef) -> Result<Self, DbError> {
         let waits = database.retry_waits().await?;
         let now = clock.now();
         let owner = Self {

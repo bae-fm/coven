@@ -1,11 +1,11 @@
 use crate::tests::TestStore;
 use crate::write::tests::sql;
-use crate::{Database, Migration, RowIdentity, SyncedTable};
+use crate::{Migration, RowIdentity, StoreDatabase, SyncedTable};
 use coven_merge::ForeignKey;
 
 type Registered = (Vec<(String, String)>, Vec<(String, ForeignKey)>);
 
-fn registered(db: &Database) -> Registered {
+fn registered(db: &StoreDatabase) -> Registered {
     db.inspect_writer(|db, _| {
         let mut columns = db
             .query("SELECT table_name,column_name FROM _coven_columns", [], |r| {

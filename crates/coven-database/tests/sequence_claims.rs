@@ -1,7 +1,7 @@
 //! Durable claim identity and settlement through the database API.
 use coven_database::{
-    ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, DatabaseBuilder, DbError,
-    NewOperation,
+    ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, DatabaseBuilder, DbError, NewOperation,
+    StoreDatabase,
 };
 use coven_format::path::ObjectPath;
 use coven_foundation::clock::HANG_GUARD;
@@ -23,7 +23,7 @@ fn builder(directory: coven_foundation::files::StoreDir) -> DatabaseBuilder {
         )])
 }
 
-async fn open() -> (tempfile::TempDir, coven_foundation::files::StoreDir, Database) {
+async fn open() -> (tempfile::TempDir, coven_foundation::files::StoreDir, StoreDatabase) {
     let temporary = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
     let directory =
@@ -43,7 +43,7 @@ fn attempt(store: StoreId, slot: u64, bytes: &[u8]) -> ClaimAttempt<std::io::Cur
         bytes: std::io::Cursor::new(bytes.to_vec()),
     }
 }
-async fn operation(db: &Database) -> coven_database::OperationId {
+async fn operation(db: &StoreDatabase) -> coven_database::OperationId {
     db.start_operation(NewOperation {
         kind: "sequence".into(),
         data: vec![],

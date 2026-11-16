@@ -10,7 +10,9 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, PassMove};
+use coven_database::{
+    ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, PassMove, StoreDatabase,
+};
 use coven_format::{
     sealed_slot::{SlotKind, SlotObjectPrefix},
     sealed_write::WriteObjectPrefix,
@@ -21,7 +23,7 @@ use coven_storage::{StorageFailure, UploadSession};
 use std::io::{Cursor, Read};
 
 struct ClaimSource {
-    database: Database,
+    database: StoreDatabase,
 }
 impl UploadSource for ClaimSource {
     type Error = SyncError;

@@ -3,7 +3,7 @@
 
 use crate::tests::TestStore;
 use crate::write::tests::{count, sql};
-use crate::{Database, SyncedTable};
+use crate::{StoreDatabase, SyncedTable};
 
 /// A write's merge state is stored in a statement for each kind of record,
 /// not one for each row or column. A generation just inserted has no written
@@ -70,14 +70,14 @@ async fn a_write_upserts_its_references_in_one_statement() {
         .await
         .unwrap();
     sql(&db, "INSERT INTO notes VALUES('a','one'),('b','two'),('c','three')").await.unwrap();
-    let upserts = |db: &Database| {
+    let upserts = |db: &StoreDatabase| {
         db.inspect_writer(|writer, _| writer.profiled_statements())
             .iter()
             .filter(|s| s.sql.contains("INSERT INTO _coven_references"))
             .count()
     };
     assert_eq!(upserts(&db), 0, "notes name no parent");
-    let parents = |db: &Database| {
+    let parents = |db: &StoreDatabase| {
         db.inspect_writer(|writer, _| {
             writer.query(
                 "SELECT r.key,f.parent_key FROM _coven_references f JOIN _coven_rows r ON r.id=f.row_id ORDER BY r.key",

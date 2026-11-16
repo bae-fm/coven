@@ -150,7 +150,7 @@ impl InviteJoin {
         &mut self,
         sync: &SequenceSync,
         approval: &ApprovalWaits,
-        database: &Database,
+        database: &StoreDatabase,
         status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {
         let sent_before = self.identity.attempted() && !self.identity.opened();

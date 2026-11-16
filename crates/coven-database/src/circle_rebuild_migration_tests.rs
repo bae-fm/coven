@@ -41,7 +41,7 @@ fn convert() -> OldWrites {
     }))
 }
 
-async fn run(db: &Database, statement: String) {
+async fn run(db: &StoreDatabase, statement: String) {
     db.write(move |context| {
         context.execute_batch(&statement)?;
         Ok(())
@@ -51,13 +51,13 @@ async fn run(db: &Database, statement: String) {
 }
 
 /// Count every write `db` has queued, as the next slots.
-async fn count_queue(db: &Database) {
+async fn count_queue(db: &StoreDatabase) {
     for record in records_of(db) {
         db.receive(record.into()).await.unwrap();
     }
 }
 
-fn records_of(db: &Database) -> Vec<WriteRecord> {
+fn records_of(db: &StoreDatabase) -> Vec<WriteRecord> {
     crate::write::tests::records(db)
 }
 
@@ -127,7 +127,7 @@ fn another_pin(insert: &RowChange, id: &str, title: &str) -> RowChange {
 /// through `read_through`, which `db` hasn't applied: its sources are read
 /// from `db`'s state.
 fn written_by_another(
-    db: &Database,
+    db: &StoreDatabase,
     another: u64,
     change: RowChange,
     read_through: u64,
@@ -166,7 +166,7 @@ fn written_by_another(
 /// next.
 struct Holder {
     store: TestStore,
-    db: Database,
+    db: StoreDatabase,
     store_snapshot: SnapshotFrames,
     circle_snapshot: SnapshotFrames,
     /// The slots after the snapshots, through `applied`.
@@ -291,7 +291,7 @@ async fn read_forward(
 }
 
 /// A rebuild loaded with what `holder` held through its applied slot.
-async fn rebuild_through_applied(app: &Database, holder: &Holder) -> RebuildDatabase {
+async fn rebuild_through_applied(app: &StoreDatabase, holder: &Holder) -> RebuildDatabase {
     let rebuild = app.open_rebuild(Audience::Circle(garden()), 1).await.unwrap();
     let reload = reload_into(
         &rebuild,
@@ -306,7 +306,7 @@ async fn rebuild_through_applied(app: &Database, holder: &Holder) -> RebuildData
 }
 
 /// The audience's counted state as a snapshot, whether or not a raise waits.
-async fn counted_frames(db: &Database, audience: Audience) -> SnapshotFrames {
+async fn counted_frames(db: &StoreDatabase, audience: Audience) -> SnapshotFrames {
     let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let metadata = std::sync::Arc::new(std::sync::Mutex::new(None));
     let output = frames.clone();
@@ -421,11 +421,14 @@ async fn rebuilding_app(
     holder: &Holder,
     statement: &'static str,
     old_writes: OldWrites,
-) -> (TestStore, Database) {
+) -> (TestStore, StoreDatabase) {
     rebuilding_app_with(holder, filled_migrations(statement, old_writes)).await
 }
 
-async fn rebuilding_app_with(holder: &Holder, migrations: Vec<Migration>) -> (TestStore, Database) {
+async fn rebuilding_app_with(
+    holder: &Holder,
+    migrations: Vec<Migration>,
+) -> (TestStore, StoreDatabase) {
     let store = TestStore::with_ids(&SequentialIds::new());
     assert_eq!(store.device(), holder.store.device());
     // Its store loads from storage next, so it queues no migration write of
@@ -526,7 +529,7 @@ async fn a_migration_that_answers_differently_per_audience_fails_the_rebuild_and
 /// A rebuild of Garden for `holder`, as far as the circle at the slots the
 /// holder applied: migrated under `marker`'s header and read on through `next`.
 async fn rebuilt_to_the_end(
-    app: &Database,
+    app: &StoreDatabase,
     holder: &Holder,
     marker: &WriteRecord,
     next: &[WriteRecord],

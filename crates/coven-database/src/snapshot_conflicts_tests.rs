@@ -6,7 +6,7 @@ use crate::snapshot_reload::tests::*;
 use crate::snapshot_write::tests::{frames, id, load_one};
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::snapshot::SnapshotRecord;
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
@@ -83,7 +83,7 @@ fn without_key(
     download
 }
 
-async fn in_both(store: &TestStore, other: CircleId) -> Database {
+async fn in_both(store: &TestStore, other: CircleId) -> StoreDatabase {
     let db = circle_device(store).await;
     store.join_circle(&db, other);
     db
@@ -117,13 +117,13 @@ async fn judged_by_the_rows_this_device_has(other_circle: u128) {
         .unwrap();
     publish(&gifts, &[&both, &gifts]).await;
     let key = crate::tests::text_key(KEY);
-    let shown = |db: &Database| {
+    let shown = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             db.query("SELECT audience FROM notes WHERE id=?1", [KEY], |r| r.get::<_, String>(0))
                 .unwrap()
         })
     };
-    let removed = |db: &Database| {
+    let removed = |db: &StoreDatabase| {
         db.inspect_writer(|db, _| {
             db.query_row(
                 "SELECT count(*) FROM _coven_lost WHERE key=?1 AND audience=?2 AND replacement_kind='rules'",

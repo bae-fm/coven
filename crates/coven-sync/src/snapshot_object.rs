@@ -8,7 +8,7 @@ use crate::{
     Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, Signature, StoreKeyring, SIGNATURE_LEN};
-use coven_database::Database;
+use coven_database::StoreDatabase;
 use coven_format::{
     admin::SnapshotId,
     floor::OriginalSlot,
@@ -80,7 +80,7 @@ impl SnapshotObject {
     /// the object's first part, read once in one stream that stops at its
     /// end and kept for the body to go on from (§16.2, Appendix E.1).
     pub(crate) async fn read_prefix(
-        database: &Database,
+        database: &StoreDatabase,
         storage: &dyn Storage,
         path: &ObjectPath,
     ) -> Result<Self, SyncError> {

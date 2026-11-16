@@ -1,5 +1,5 @@
 use crate::sqlite::DatabaseConnection;
-use crate::{tests::TestStore, Database, DbError};
+use crate::{tests::TestStore, DbError, StoreDatabase};
 use crate::{Lost, LostCell, RemovalRule, Replacement, WriteId};
 use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
 use coven_foundation::clock::HANG_GUARD;
@@ -26,7 +26,7 @@ fn key() -> Vec<u8> {
 /// Store a loss as coven does: excluded, dependent and unauthorized ones
 /// frozen, as the table's check requires (format.md D7.2).
 fn insert(
-    db: &Database,
+    db: &StoreDatabase,
     column: Option<i64>,
     value: Vec<u8>,
     setters: Vec<u8>,

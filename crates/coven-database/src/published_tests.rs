@@ -63,13 +63,13 @@ fn synced(tables: &[&str]) -> Vec<SyncedTable> {
 }
 
 /// Count every write this device has made so far, as its slots coming back would.
-async fn count_own(database: &crate::Database) {
+async fn count_own(database: &crate::StoreDatabase) {
     for record in records(database) {
         database.receive(record.into()).await.unwrap();
     }
 }
 
-fn published(database: &crate::Database, table: &str) -> i64 {
+fn published(database: &crate::StoreDatabase, table: &str) -> i64 {
     database.inspect_writer(|db, _| {
         db.query_row(
             "SELECT count(*) FROM _coven_published_rows WHERE table_name=?1",
@@ -183,7 +183,10 @@ async fn slots_beside_unsent_rows_put_back_only_the_rows_they_reach() {
 
 /// The merge state of `albums` row `id` the counted projection a snapshot
 /// reads shows, or `None` while it shows no such row.
-fn counted_state(database: &crate::Database, id: &str) -> Option<coven_merge::RowState<Value>> {
+fn counted_state(
+    database: &crate::StoreDatabase,
+    id: &str,
+) -> Option<coven_merge::RowState<Value>> {
     let key = crate::tests::text_key(id);
     let album = |row: &coven_merge::RowId| row.table == "albums" && row.key == key;
     database.inspect_writer_schema(|db, call, schema| {
@@ -209,7 +212,7 @@ fn counted_state(database: &crate::Database, id: &str) -> Option<coven_merge::Ro
 }
 
 /// Whether the counted projection a snapshot reads shows `albums` row `id`.
-fn counted_visible(database: &crate::Database, id: &str) -> bool {
+fn counted_visible(database: &crate::StoreDatabase, id: &str) -> bool {
     counted_state(database, id).is_some()
 }
 
@@ -259,7 +262,7 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
 
 /// The counted projection a snapshot reads of `albums` row `id`: its
 /// `artist`, or `None` while it shows no such row.
-fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
+fn counted_artist(database: &crate::StoreDatabase, id: &str) -> Option<Value> {
     counted_state(database, id).map(|state| state.cells()["artist"].value.value.clone())
 }
 
@@ -268,7 +271,7 @@ fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
 async fn migrate_counted_album(
     schema: &'static str,
     migration: &'static str,
-) -> (TestStore, crate::Database) {
+) -> (TestStore, crate::StoreDatabase) {
     let store = TestStore::new();
     let initial = || vec![Migration::addition(1, "schema", schema)];
     let tables = || synced(&["artists", "albums"]);
@@ -287,7 +290,7 @@ async fn migrate_counted_album(
 
 /// Apply a slot from another device that renames counted artist Ana, ahead
 /// of the migration's write still in the queue.
-async fn rename_ana(database: &crate::Database) {
+async fn rename_ana(database: &crate::StoreDatabase) {
     let name = [("name", Value::Text("Ana B".into()))];
     crate::tests::remote_update_beside_queue(database, "artists", "ana", &name).await;
     let waiting = database.inspect_writer(|db, _| crate::queued_writes::present(db).unwrap());
@@ -392,7 +395,7 @@ async fn a_kept_row_shows_under_the_rules_a_migration_leaves() {
 }
 
 /// The counted losses a snapshot of the store reads.
-fn counted_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
+fn counted_losses(database: &crate::StoreDatabase) -> Vec<coven_format::loss::Loss> {
     database.inspect_writer_schema(|db, call, schema| {
         let removed = crate::published::removals(db, call, &schema.schema, &schema.rules).unwrap();
         let mut losses = Vec::new();
@@ -414,7 +417,7 @@ fn lost_title(loss: &coven_format::loss::Loss) -> &Value {
 }
 
 /// The losses the app shows.
-fn app_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
+fn app_losses(database: &crate::StoreDatabase) -> Vec<coven_format::loss::Loss> {
     database.inspect_writer(|db, _| {
         let mut losses = Vec::new();
         crate::loss_record::visit(db, &Audience::Store, |loss| {
@@ -703,7 +706,7 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
     ));
     let db = store.builder(synced(&["albums", "notes"]), migrations).open().await.unwrap();
     crate::tests::remote_write_beside_queue(&db, album_insert("first", "Ben's")).await;
-    let shown = |db: &crate::Database| -> Vec<(String, String)> {
+    let shown = |db: &crate::StoreDatabase| -> Vec<(String, String)> {
         db.inspect_writer(|db, _| {
             db.query("SELECT id,title FROM albums", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
         })
@@ -719,7 +722,7 @@ async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_nam
 }
 
 /// The notes the app shows, by id, with their titles.
-fn note_titles(database: &crate::Database) -> Vec<(String, String)> {
+fn note_titles(database: &crate::StoreDatabase) -> Vec<(String, String)> {
     database.inspect_writer(|db, _| {
         db.query("SELECT id,title FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
@@ -851,7 +854,7 @@ async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
         .await
         .unwrap();
     sql(&db, "DELETE FROM artists WHERE id='prince'").await.unwrap();
-    let albums = |db: &crate::Database| -> Vec<String> {
+    let albums = |db: &crate::StoreDatabase| -> Vec<String> {
         db.inspect_writer(|db, _| {
             db.query("SELECT id FROM albums ORDER BY id", [], |r| r.get(0)).unwrap()
         })
@@ -865,7 +868,7 @@ async fn a_slot_reaches_every_row_of_the_queued_writes_it_reaches() {
 }
 
 /// The kept record of `table` row `id`, as stored.
-fn kept_record(database: &crate::Database, table: &str, id: &str) -> Option<Vec<u8>> {
+fn kept_record(database: &crate::StoreDatabase, table: &str, id: &str) -> Option<Vec<u8>> {
     let key = crate::tests::text_key(id);
     database.inspect_writer(|db, _| {
         db.query(

@@ -51,12 +51,12 @@ use crate::database::file_database::{tests::stored, FileDatabase};
 use crate::{
     file_write::tests::{complete_uploads, open},
     tests::TestStore,
-    Database, DbError, FileRef, NamespaceBytes, Provenance,
+    DbError, FileRef, NamespaceBytes, Provenance, StoreDatabase,
 };
 use coven_foundation::files::FileName;
 
 /// A stored file of these bytes, referenced by row `8`, beside `stored`'s.
-pub(crate) async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
+pub(crate) async fn stored_second(db: &StoreDatabase, bytes: Vec<u8>) -> FileRef {
     let file = db
         .staged_write::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
@@ -74,7 +74,7 @@ pub(crate) async fn stored_second(db: &Database, bytes: Vec<u8>) -> FileRef {
 /// A namespace's `cached` and `pinned` byte counts are the sums of its
 /// chunks and headers, and of its whole copies, read from the entries
 /// themselves.
-fn counters(db: &Database) -> (i64, i64) {
+fn counters(db: &StoreDatabase) -> (i64, i64) {
     db.inspect_writer(|sql, _| {
         let recorded = (
             super::cached(sql, "files").unwrap(),
@@ -191,7 +191,7 @@ async fn a_pinned_copy_over_the_budget_crowds_out_no_cached_bytes() {
     assert!(counters(&db).1 > 40);
     owner.cache_range(&other, 0, 1, FileName::new("first").unwrap(), vec![2; 30]).await.unwrap();
     owner.trim_cache("files").await.unwrap();
-    let names = |db: &Database| {
+    let names = |db: &StoreDatabase| {
         db.inspect_writer(|sql, _| {
             sql.query("SELECT path FROM _coven_cache ORDER BY path", [], |r| r.get::<_, String>(0))
                 .unwrap()

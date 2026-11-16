@@ -4,13 +4,13 @@
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::DbError;
-use crate::{Database, LiveQuery};
+use crate::{LiveQuery, StoreDatabase};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
@@ -23,7 +23,7 @@ INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(
 /// Run `sql` live, then each write: `false` must leave it unmarked, `true`
 /// must rerun it, and the rerun must read what a one-shot read does.
 pub(super) async fn follows(
-    db: &Database,
+    db: &StoreDatabase,
     sql: &'static str,
     parameters: Vec<sqlive::SqlValue>,
     writes: &[(&str, bool)],
@@ -220,7 +220,7 @@ const CREDITED: u32 = 1_000;
 /// The median of `runs` writes that each credit another artist on
 /// [`CREDITED`] tracks. None of them may mark `live` to run again.
 async fn credit(
-    db: &Database,
+    db: &StoreDatabase,
     runs: u32,
     live: Option<&LiveQuery<Vec<String>, crate::DbError>>,
 ) -> Duration {

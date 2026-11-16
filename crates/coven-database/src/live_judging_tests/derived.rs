@@ -3,12 +3,12 @@
 
 use crate::tests::next;
 use crate::tests::TestStore;
-use crate::Database;
 use crate::DbError;
+use crate::StoreDatabase;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
@@ -24,7 +24,7 @@ INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(
 /// Run `sql` live, then each write: `false` must leave it unmarked, `true`
 /// must rerun it, and the rerun must read what a one-shot read does.
 async fn follows(
-    db: &Database,
+    db: &StoreDatabase,
     sql: &'static str,
     parameters: Vec<sqlive::SqlValue>,
     writes: &[(&str, bool)],

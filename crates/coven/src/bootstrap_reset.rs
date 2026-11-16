@@ -106,7 +106,7 @@ pub(crate) async fn reset_device(
 /// retries.
 pub(super) async fn carry_discarded_provider_work(
     sync: &SequenceSync,
-    database: &Database,
+    database: &StoreDatabase,
     replacement: &ReplacementStore,
 ) -> Result<(), BootstrapError> {
     // A resumed swap already holds the notice, and a restore may have

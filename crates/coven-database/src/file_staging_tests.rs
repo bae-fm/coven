@@ -102,7 +102,7 @@ fn committed_rows(store: &TestStore) -> i64 {
 }
 
 /// Stage two files and reference each from a row of `files`, in one write.
-async fn write_two(db: &Database, ran: Arc<AtomicBool>) -> Result<(), DbError> {
+async fn write_two(db: &StoreDatabase, ran: Arc<AtomicBool>) -> Result<(), DbError> {
     db.staged_write::<_, _, _, _, DbError>(
         |batch| {
             Ok([b"one", b"two"]
@@ -120,7 +120,7 @@ async fn write_two(db: &Database, ran: Arc<AtomicBool>) -> Result<(), DbError> {
 
 /// Stage `contents` on this device only, each referenced by a row of
 /// `files` whose id is the content, in one write, returning the files.
-async fn stage_rows(db: &Database, contents: [&'static str; 2]) -> [FileId; 2] {
+async fn stage_rows(db: &StoreDatabase, contents: [&'static str; 2]) -> [FileId; 2] {
     db.staged_write::<_, _, _, _, DbError>(
         move |batch| {
             Ok(contents
@@ -452,7 +452,7 @@ async fn staged_files_no_write_takes_go_with_the_next_write() {
     let db = open(&store, Provenance::AppProvided).await;
     let other = open(&other_store, Provenance::AppProvided).await;
     async fn stage(
-        db: &crate::Database,
+        db: &crate::StoreDatabase,
     ) -> Result<crate::StagedFiles<coven_foundation::id_source::FileId>, DbError> {
         db.stage_files(|batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)))
             .await

@@ -5,7 +5,7 @@
 //!   cargo test --release -p coven-database --test bulk_write_cost -- --ignored --nocapture
 
 use coven_database::DbError;
-use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use coven_database::{DatabaseBuilder, Migration, RowIdentity, StoreDatabase, SyncedTable};
 use coven_foundation::{
     files::StoreDirectories,
     id_source::{IdSource, SequentialIds, StoreId},
@@ -22,7 +22,7 @@ const FILL: &str = "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM 
      INSERT INTO queue SELECT i, printf('track-%08d', i) FROM n";
 const CLEAR: &str = "DELETE FROM queue";
 
-async fn open(directory: &tempfile::TempDir) -> Database {
+async fn open(directory: &tempfile::TempDir) -> StoreDatabase {
     let ids = SequentialIds::new();
     let store =
         StoreDirectories::new(directory.path().into(), coven_foundation::task::HeardBugs::shared())
@@ -36,13 +36,13 @@ async fn open(directory: &tempfile::TempDir) -> Database {
         .unwrap()
 }
 
-async fn write(db: &Database, sql: &'static str) -> Duration {
+async fn write(db: &StoreDatabase, sql: &'static str) -> Duration {
     let started = Instant::now();
     db.write(move |context| Ok(context.execute_batch(sql)?)).await.unwrap();
     started.elapsed()
 }
 
-async fn bulk(db: &Database, sql: &'static str) -> Duration {
+async fn bulk(db: &StoreDatabase, sql: &'static str) -> Duration {
     let started = Instant::now();
     db.write_bulk(move |context| Ok::<_, coven_database::DbError>(context.execute_batch(sql)?))
         .await

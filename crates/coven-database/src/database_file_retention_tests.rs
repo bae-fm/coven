@@ -186,7 +186,7 @@ pub(crate) fn write(
 /// Device 2 and device 3 each, unaware of the other, record `RECORD` over
 /// bytes of their own: the record shows device 3's, and device 2's
 /// coordinates are lost. Returns device 2's object.
-async fn file_loss_fixture() -> (TestStore, Database, ObjectId) {
+async fn file_loss_fixture() -> (TestStore, StoreDatabase, ObjectId) {
     let store = TestStore::new();
     let db = store.schema(vec![files_table()], FILES).await.unwrap();
     let file = ObjectId(uuid::Uuid::from_u128(7));
@@ -223,7 +223,7 @@ async fn a_records_lost_coordinates_protect_nothing() {
 #[tokio::test]
 async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
     let (_store, db, file) = file_loss_fixture().await;
-    let candidate = |db: &Database| {
+    let candidate = |db: &StoreDatabase| {
         let db = db.clone();
         async move {
             db.file_candidates(candidates_of(DeviceId(2)))
@@ -273,10 +273,10 @@ async fn a_candidate_counts_from_the_slot_its_path_last_lost_its_protection() {
 /// which keeps the path its coordinates name, without a displayed change.
 async fn frozen_loss(
     store: &TestStore,
-    db: Database,
+    db: StoreDatabase,
     tables: Vec<SyncedTable>,
     change: &'static str,
-) -> (Database, ObjectId) {
+) -> (StoreDatabase, ObjectId) {
     let db = migrate(store, db, tables, change).await;
     let file = ObjectId(uuid::Uuid::from_u128(9));
     db.receive(write(4, 3, stored(4, file, "ef")).into()).await.unwrap();
@@ -387,10 +387,10 @@ async fn a_queued_record_delete_keeps_its_path_after_the_apps_declaration_is_rem
 /// version-1 write is excluded (§18.6).
 async fn migrate(
     store: &TestStore,
-    db: Database,
+    db: StoreDatabase,
     tables: Vec<SyncedTable>,
     change: &'static str,
-) -> Database {
+) -> StoreDatabase {
     db.close().await.unwrap();
     let db = store
         .builder(

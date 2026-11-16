@@ -14,7 +14,7 @@ const FOLLOWED: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEX
      END;";
 
 /// Whether `coven_pins` holds exactly what its source says.
-fn agrees(db: &crate::Database) -> bool {
+fn agrees(db: &crate::StoreDatabase) -> bool {
     db.inspect_writer(|writer, _| {
         writer
             .query_row(
@@ -27,7 +27,7 @@ fn agrees(db: &crate::Database) -> bool {
     })
 }
 
-async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database {
+async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::StoreDatabase {
     store
         .builder(tables(), migrations)
         .namespaces(namespaces(Provenance::AppProvided))
@@ -37,7 +37,7 @@ async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database 
 }
 
 /// Stage row 7's file and store it, then pin a whole copy of it.
-async fn pin_stored(db: &crate::Database) -> crate::FileRef {
+async fn pin_stored(db: &crate::StoreDatabase) -> crate::FileRef {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     // Queued, the file is on this device only: it can't be pinned yet.
     let owner = FileDatabase::new(db.clone());
@@ -197,7 +197,7 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
     };
     let db = open(&store, migrations(false)).await;
     pin_stored(&db).await;
-    async fn changes(db: &crate::Database) -> Result<Vec<String>, DbError> {
+    async fn changes(db: &crate::StoreDatabase) -> Result<Vec<String>, DbError> {
         db.read(|sql| {
             Ok(sql
                 .query("SELECT kind FROM pin_changes ORDER BY id", [], |r| r.get::<_, String>(0))?)
@@ -335,7 +335,7 @@ const RELEASES: &str =
 /// `coven_pins`, coven's or the app's, as before coven kept the table.
 async fn releases(
     follow: bool,
-) -> (TestStore, crate::Database, std::time::Duration, std::time::Duration) {
+) -> (TestStore, crate::StoreDatabase, std::time::Duration, std::time::Duration) {
     use crate::{FileColumn, RowIdentity, SyncedTable};
     let store = TestStore::new();
     let db = store
@@ -399,7 +399,7 @@ async fn releases(
 async fn counting_unpinned_releases_costs() {
     let (_store, db, rows, pins) = releases(true).await;
     let (_bare_store, bare, bare_rows, bare_pins) = releases(false).await;
-    let count = |db: &crate::Database, sql: String| {
+    let count = |db: &crate::StoreDatabase, sql: String| {
         let db = db.clone();
         async move {
             let mut best = std::time::Duration::MAX;

@@ -174,14 +174,14 @@ impl DatabaseBuilder {
     /// Always migrate coven's internal tables, then rebuild the indexes a new
     /// version of SQLite or of the app's collations and functions changes,
     /// then migrate the app's schema.
-    pub async fn open(self) -> Result<Database, OpenError> {
+    pub async fn open(self) -> Result<StoreDatabase, OpenError> {
         let lock = self.directory.lock_for_open().await?;
         self.open_locked(lock).await
     }
 
     /// Open under a lock already held by the facade while checking restored
     /// device identity. The lock must protect this builder's directory.
-    pub async fn open_locked(self, lock: StoreLock) -> Result<Database, OpenError> {
+    pub async fn open_locked(self, lock: StoreLock) -> Result<StoreDatabase, OpenError> {
         let closing = lock.closing_guard();
         let bugs = self.directory.bugs().clone();
         let result = finish_blocking(
@@ -196,7 +196,7 @@ impl DatabaseBuilder {
     /// Open read-only connections under a shared deletion guard, without
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
-    pub async fn open_read_only(self) -> Result<Database<ReadOnly>, OpenError> {
+    pub async fn open_read_only(self) -> Result<StoreDatabase<ReadOnly>, OpenError> {
         let bugs = self.directory.bugs().clone();
         finish_blocking(
             blocking_completing("open the store read-only", bugs, move || self.open_read_graph())
@@ -204,7 +204,7 @@ impl DatabaseBuilder {
         )
     }
 
-    fn open_graph(self, lock: StoreLock) -> Result<Database, OpenError> {
+    fn open_graph(self, lock: StoreLock) -> Result<StoreDatabase, OpenError> {
         let tables =
             self.tables.ok_or(OpenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
@@ -416,7 +416,7 @@ impl DatabaseBuilder {
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
-        Ok(Database {
+        Ok(StoreDatabase {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: WriterParts {
@@ -465,7 +465,7 @@ impl DatabaseBuilder {
             }))),
         })
     }
-    fn open_read_graph(self) -> Result<Database<ReadOnly>, OpenError> {
+    fn open_read_graph(self) -> Result<StoreDatabase<ReadOnly>, OpenError> {
         let tables =
             self.tables.ok_or(OpenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
@@ -538,7 +538,7 @@ impl DatabaseBuilder {
             Some(&views),
         )?;
         writer.serve(observer.clone());
-        Ok(Database {
+        Ok(StoreDatabase {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: (),

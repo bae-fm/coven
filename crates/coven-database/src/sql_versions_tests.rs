@@ -1,7 +1,9 @@
 use crate::sqlite::DatabaseConnection;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::sql;
-use crate::{Database, DbError, Determinism, Migration, RowIdentity, SqlFunctions, SyncedTable};
+use crate::{
+    DbError, Determinism, Migration, RowIdentity, SqlFunctions, StoreDatabase, SyncedTable,
+};
 
 fn notes() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
@@ -55,12 +57,12 @@ async fn open(
     store: &TestStore,
     schema: &'static str,
     functions: SqlFunctions,
-) -> Result<Database, crate::OpenError> {
+) -> Result<StoreDatabase, crate::OpenError> {
     store.builder(notes(), migrations(schema)).sql_functions(functions).open().await
 }
 
 /// The REINDEX statements the writer ran as the store opened.
-fn reindexed(database: &Database) -> Vec<String> {
+fn reindexed(database: &StoreDatabase) -> Vec<String> {
     database.inspect_writer(|writer, _| {
         writer
             .profiled_statements()
@@ -301,7 +303,7 @@ const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL, score REAL NO
      CREATE INDEX words_plain ON words(word, score)";
 
 /// The SQLite library the store records as the one that built its indexes.
-fn recorded_library(database: &Database) -> Vec<i64> {
+fn recorded_library(database: &StoreDatabase) -> Vec<i64> {
     database.inspect_writer(|writer, _| recorded_library_in(writer))
 }
 

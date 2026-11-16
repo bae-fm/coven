@@ -1,12 +1,12 @@
 //! Operation transactions, borrowing the database owner's connections.
 
-use super::Database;
+use super::StoreDatabase;
 use crate::write_failure::{hosted, Hosted};
 use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate};
 use coven_foundation::id_source::DeviceId;
 use std::collections::BTreeSet;
 
-impl Database {
+impl StoreDatabase {
     /// Read every unfinished operation, including permanently failed ones.
     pub async fn operations(&self) -> Result<Vec<OperationRecord>, DbError> {
         self.call(move |inner| inner.access.with_committed(|db, _| crate::operation::read(db)))

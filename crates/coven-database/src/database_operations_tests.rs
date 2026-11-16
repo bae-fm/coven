@@ -1,9 +1,9 @@
 //! Test transport support using the actual local-write queue.
 
-use super::Database;
+use super::StoreDatabase;
 use crate::{test_utils::StatementLog, DbError};
 
-impl Database {
+impl StoreDatabase {
     /// Record the statements every read context of this database runs into
     /// `log` (`query` and `query_row`, in reads and live queries' runs), as
     /// SQLite reads them with their bound values written in. Writes and

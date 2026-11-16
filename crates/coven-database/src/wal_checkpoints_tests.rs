@@ -67,7 +67,7 @@ fn wal(store: &TestStore) -> std::path::PathBuf {
 }
 
 /// Write four rows of 4,000 bytes: some 5 frames of the WAL.
-async fn insert(db: &crate::Database) -> Result<(), DbError> {
+async fn insert(db: &crate::StoreDatabase) -> Result<(), DbError> {
     db.write(|sql| {
         sql.execute(
             "INSERT INTO blobs(body) SELECT randomblob(4000) FROM (VALUES(1),(2),(3),(4))",
@@ -78,12 +78,12 @@ async fn insert(db: &crate::Database) -> Result<(), DbError> {
     .await
 }
 
-async fn add(db: &crate::Database) {
+async fn add(db: &crate::StoreDatabase) {
     insert(db).await.unwrap();
 }
 
 /// Frames the WAL holds now.
-async fn frames(db: &crate::Database) -> u32 {
+async fn frames(db: &crate::StoreDatabase) -> u32 {
     match db.checkpoint(CheckpointMode::Noop).await.unwrap() {
         WalCheckpoint::Ran { log_frames, .. } => log_frames,
         WalCheckpoint::NotStarted => panic!("a NOOP checkpoint between writes reads the WAL"),
@@ -110,7 +110,7 @@ const THRESHOLD: u32 = 100;
 /// the commit path. The checkpointer tells it while holding the writer, so
 /// whatever `told` holds while the test holds the writer came from an earlier
 /// checkpoint, and the checkpoint the last commit woke tells it next.
-async fn checkpointed<T>(db: &crate::Database, told: &mut UnboundedReceiver<T>) -> T {
+async fn checkpointed<T>(db: &crate::StoreDatabase, told: &mut UnboundedReceiver<T>) -> T {
     loop {
         add(db).await;
         let past = db.inspect_writer(|writer, _| {
@@ -283,7 +283,7 @@ fn sqlite_error(code: std::ffi::c_int) -> sqlive::Error<StoreFailure, DbError> {
 /// Run `fault` as each checkpoint takes the writer, telling the returned
 /// receiver as it does.
 fn faulted(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     mut fault: impl FnMut() -> Result<(), sqlive::Error<StoreFailure, DbError>> + Send + 'static,
 ) -> UnboundedReceiver<()> {
     let (tried, tries) = unbounded_channel();
@@ -302,7 +302,7 @@ fn faulted(
 /// error a live query reports, after which it ends, and the write the
 /// failure refuses.
 async fn checkpointer_failure(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     fault: impl FnMut() -> Result<(), sqlive::Error<StoreFailure, DbError>> + Send + 'static,
 ) -> DbError {
     let mut tries = faulted(db, fault);

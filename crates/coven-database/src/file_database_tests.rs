@@ -9,7 +9,7 @@ use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::{FileLease, LeasePlace};
 
 /// A stored file of these bytes, referenced by row `7`.
-pub(crate) async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
+pub(crate) async fn stored(db: &StoreDatabase, bytes: Vec<u8>) -> FileRef {
     let file = stage(db, bytes, true).await.unwrap();
     complete_uploads(db).await;
     db.file_ref(file).await.unwrap()
@@ -119,7 +119,7 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
 
 /// Stage these bytes of either kind for row `7`, inserting or updating it.
 async fn stage_kind(
-    db: &Database,
+    db: &StoreDatabase,
     kind: &Provenance,
     originals: &std::path::Path,
     bytes: Vec<u8>,
@@ -928,7 +928,7 @@ async fn a_namespace_is_declared_once() {
 /// Pin `file` from a whole cache copy reserved under `name`, in a write, as
 /// a prepared pin's write does.
 pub(crate) async fn pin_whole(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     file: &crate::FileRef,
     name: &str,
 ) -> Result<(), DbError> {

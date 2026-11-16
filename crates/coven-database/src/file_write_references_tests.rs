@@ -9,7 +9,7 @@ use crate::{
     },
     tests::TestStore,
     write::tests::records,
-    Database, DbError, Migration, Provenance,
+    DbError, Migration, Provenance, StoreDatabase,
 };
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use std::{
@@ -17,19 +17,19 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-fn rows(db: &Database) -> Vec<String> {
+fn rows(db: &StoreDatabase) -> Vec<String> {
     db.inspect_writer(|sql, _| {
         sql.query("SELECT id FROM files ORDER BY id", [], |r| r.get(0)).unwrap()
     })
 }
 
-fn candidates(db: &Database) -> i64 {
+fn candidates(db: &StoreDatabase) -> i64 {
     local_count(db, "_coven_file_candidates")
 }
 
 /// Publish each of `from`'s waiting writes in a slot of its own, and apply
 /// each on `to` in the same slot, so both devices count the same slots.
-async fn share(from: &Database, to: &Database) -> Vec<coven_format::write::WriteRecord> {
+async fn share(from: &StoreDatabase, to: &StoreDatabase) -> Vec<coven_format::write::WriteRecord> {
     let mut shared = Vec::new();
     for record in records(from) {
         crate::tests::publish_through(from, record.header.position.number).await.unwrap();
@@ -275,7 +275,7 @@ async fn a_write_moving_a_files_last_reference_to_another_row_keeps_its_record()
 async fn a_row_the_reference_check_read_is_not_read_again() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    let reads = |db: &Database, table: &str| {
+    let reads = |db: &StoreDatabase, table: &str| {
         let text = format!("FROM main.\"{table}\" WHERE \"id\"=?");
         db.inspect_writer(|writer, _| {
             writer.profiled_statements().iter().filter(|s| s.sql.contains(&text)).count()
@@ -309,7 +309,7 @@ async fn a_row_the_reference_check_read_is_not_read_again() {
     db.close().await.unwrap();
 }
 
-fn count_titles(db: &Database) -> i64 {
+fn count_titles(db: &StoreDatabase) -> i64 {
     db.inspect_writer(|sql, _| {
         sql.query_row("SELECT count(*) FROM files WHERE title='t'", [], |r| r.get(0)).unwrap()
     })

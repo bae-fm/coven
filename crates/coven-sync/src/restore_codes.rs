@@ -5,7 +5,7 @@ use coven_crypto::{
     custody::{KeySession, StoreKeychain},
     MemberIdentity, SecretText,
 };
-use coven_database::{Database, DbError};
+use coven_database::{DbError, StoreDatabase};
 use coven_format::codes::RestoreCode;
 use coven_foundation::files::StoreDir;
 use coven_storage::{
@@ -69,7 +69,7 @@ pub struct RestoreCodes {
 
 struct RestoreCodesInner {
     directory: StoreDir,
-    database: Database,
+    database: StoreDatabase,
     identity: Arc<KeySession<MemberIdentity>>,
     credentials: Arc<DeviceCredentials>,
 }
@@ -99,7 +99,7 @@ impl RestoreCodes {
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(
         directory: StoreDir,
-        database: Database,
+        database: StoreDatabase,
         identity: Arc<KeySession<MemberIdentity>>,
         credentials: Arc<DeviceCredentials>,
     ) -> Self {
@@ -402,7 +402,7 @@ impl RestoreCodesInner {
 /// person has no storage access left to change, and saving an S3 key would
 /// write it back into the person entries their removal emptied (§14.1).
 pub(crate) async fn refuse_after_leaving(
-    database: &Database,
+    database: &StoreDatabase,
     identity: &KeySession<MemberIdentity>,
 ) -> Result<(), SyncError> {
     let member = identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?.member();

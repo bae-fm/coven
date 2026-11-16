@@ -9,7 +9,7 @@ use coven_storage::Cooldown;
 use futures_util::FutureExt;
 use std::time::Duration;
 
-async fn open(fixture: &Fixture) -> (coven_database::Database, Arc<RetryWaits>) {
+async fn open(fixture: &Fixture) -> (coven_database::StoreDatabase, Arc<RetryWaits>) {
     let (database, waits) = fixture.open().await;
     (database, Arc::new(waits))
 }

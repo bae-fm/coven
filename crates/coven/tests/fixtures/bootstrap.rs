@@ -482,7 +482,7 @@ pub(super) async fn profiles(handle: &CovenHandle) -> Vec<(String, String, Strin
         .unwrap()
 }
 
-pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
+pub(super) async fn rows(db: &StoreDatabase) -> Vec<(String, Vec<u8>)> {
     db.read(|sql| {
         Ok::<_, CovenError>(
             sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?,

@@ -11,7 +11,7 @@ use coven_format::admin::StoreChange;
 /// restore that ends without its store, its device absent from the history
 /// it applied, reads this before it removes its installation (§13.1, §11.6).
 pub async fn registration_journaled(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
 ) -> Result<bool, SyncError> {
     change_journaled(database, |change| matches!(change, StoreChange::AddDevice { .. })).await
 }
@@ -21,7 +21,7 @@ pub async fn registration_journaled(
 /// been applied. A deletion that leaves the store reads this to learn
 /// whether it has passed its point of no return (E1, §11.6).
 pub async fn removal_journaled(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     device: coven_foundation::id_source::DeviceId,
 ) -> Result<bool, SyncError> {
     change_journaled(
@@ -34,7 +34,7 @@ pub async fn removal_journaled(
 /// Whether a journaled sequence operation that hasn't ended makes a change
 /// `carries` picks.
 async fn change_journaled(
-    database: &coven_database::Database,
+    database: &coven_database::StoreDatabase,
     carries: impl Fn(&StoreChange) -> bool,
 ) -> Result<bool, SyncError> {
     for record in database.operations().await? {

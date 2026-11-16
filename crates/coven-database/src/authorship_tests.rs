@@ -5,7 +5,7 @@ use crate::snapshot_write::tests::{
 use crate::test_utils::tests::{insert, SCHEMA};
 use crate::test_utils::TestAuthorship;
 use crate::tests::TestStore;
-use crate::{Database, RowIdentity, SyncedTable};
+use crate::{RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::admin::SnapshotId;
 use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};
 use coven_format::value::Value;
@@ -55,7 +55,7 @@ fn overwrite() -> WriteRecord {
 }
 
 /// A database holding device 100's owned row, as streamed writes left it.
-async fn source(store: &TestStore, writes: &[WriteRecord]) -> Database {
+async fn source(store: &TestStore, writes: &[WriteRecord]) -> StoreDatabase {
     let db = store.schema(owned(), SCHEMA).await.unwrap();
     // Devices 100 and 101 are one member's, who may edit the row (§9.6).
     for write in writes {
@@ -135,7 +135,7 @@ async fn prepared_authorship_is_not_decoded_during_installation() {
 async fn a_write_by_this_devices_member_keeps_no_evidence() {
     let store = TestStore::new();
     let db = store.schema(owned(), SCHEMA).await.unwrap();
-    let register = |db: &Database| {
+    let register = |db: &StoreDatabase| {
         TestStore::register(db, store.device(), 1);
         TestStore::register(db, DeviceId(100), 1);
         TestStore::register(db, DeviceId(101), 2);

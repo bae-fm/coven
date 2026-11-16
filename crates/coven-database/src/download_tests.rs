@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::write_boundary::tests::version_two;
-use crate::{Database, Migration, RowIdentity, SyncedTable};
+use crate::{Migration, RowIdentity, StoreDatabase, SyncedTable};
 use coven_format::write::WriteDisposition;
 use coven_format::write::{WriteHeader, WriteRecord};
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -13,7 +13,7 @@ use rusqlite::params;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-async fn open(store: &TestStore) -> Database {
+async fn open(store: &TestStore) -> StoreDatabase {
     store
         .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
@@ -327,7 +327,7 @@ fn references() -> Vec<SyncedTable> {
         SyncedTable::new("links", RowIdentity::SharedKey),
     ]
 }
-async fn reference_db(store: &TestStore) -> Database {
+async fn reference_db(store: &TestStore) -> StoreDatabase {
     store
         .builder(references(), vec![Migration::addition(1, "references", REFERENCES)])
         .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
@@ -411,7 +411,7 @@ fn circle_tables() -> Vec<SyncedTable> {
         SyncedTable::new("children", RowIdentity::IndependentUuid).audience_from("note"),
     ]
 }
-async fn circle_db(store: &TestStore) -> Database {
+async fn circle_db(store: &TestStore) -> StoreDatabase {
     store
         .builder(circle_tables(), vec![Migration::addition(1, "circles", CIRCLE_SCHEMA)])
         .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1))))
@@ -419,7 +419,7 @@ async fn circle_db(store: &TestStore) -> Database {
         .await
         .unwrap()
 }
-async fn circle_note(db: &Database, circle: CircleId, child: &str) {
+async fn circle_note(db: &StoreDatabase, circle: CircleId, child: &str) {
     let child = child.to_owned();
     db.write(move |sql| {
         sql.execute("INSERT INTO notes VALUES(?1,?2,'title')", params![NOTE, circle.to_string()])?;

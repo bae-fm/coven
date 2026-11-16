@@ -1,6 +1,6 @@
 //! File references used to prove that storage deletion cannot strand a row.
 
-use super::Database;
+use super::StoreDatabase;
 use crate::file_protection::value as retain_value;
 use crate::sqlite::DatabaseConnection;
 use crate::{
@@ -21,7 +21,7 @@ pub(crate) struct FileRetention {
     pub references: BTreeSet<(DeviceId, ObjectId)>,
 }
 
-impl Database {
+impl StoreDatabase {
     /// A snapshot whose absence was confirmed by an exact read or deletion.
     pub async fn snapshot_absent(
         &self,

@@ -206,7 +206,7 @@ pub(crate) fn store() -> StoreId {
 pub(crate) struct Fixture {
     _temp: tempfile::TempDir,
     directory: StoreDir,
-    pub(crate) db: Database,
+    pub(crate) db: StoreDatabase,
 }
 impl Fixture {
     pub(crate) async fn new() -> Self {

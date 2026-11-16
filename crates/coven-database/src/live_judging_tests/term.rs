@@ -3,12 +3,12 @@
 
 use super::lookup::follows;
 use crate::tests::{next, TestStore};
-use crate::{Database, DbError};
+use crate::{DbError, StoreDatabase};
 use sqlive::SqlValue::{self as Value, Integer, Null};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 

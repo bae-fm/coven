@@ -3,7 +3,7 @@
 //! outcome (§11.4).
 
 use crate::tests::TestStore;
-use crate::{Database, DbError, NewOperation};
+use crate::{DbError, NewOperation, StoreDatabase};
 
 fn operation() -> NewOperation {
     NewOperation {
@@ -14,7 +14,7 @@ fn operation() -> NewOperation {
     }
 }
 
-async fn listed(db: &Database) -> Vec<(i64, String, Option<Vec<u8>>)> {
+async fn listed(db: &StoreDatabase) -> Vec<(i64, String, Option<Vec<u8>>)> {
     db.read(|sql| {
         Ok::<_, DbError>(sql.query(
             "SELECT operation,kind,outcome FROM coven_operations ORDER BY operation",

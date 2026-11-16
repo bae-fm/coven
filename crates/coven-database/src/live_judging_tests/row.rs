@@ -1,11 +1,11 @@
 use super::lookup::follows;
 use crate::tests::next;
-use crate::{tests::TestStore, Database, DbError, Determinism, Migration, SqlFunctions};
+use crate::{tests::TestStore, DbError, Determinism, Migration, SqlFunctions, StoreDatabase};
 use sqlive::SqlValue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-fn write(db: &Database, sql: &str) {
+fn write(db: &StoreDatabase, sql: &str) {
     db.commit_writer(|db, _| db.batch(sql).unwrap());
 }
 
@@ -448,7 +448,7 @@ async fn an_app_function_in_a_join_makes_an_edge_only_when_deterministic() {
 /// The median time and judging steps a row of `writes` writes of `rows`
 /// new tracks each, the first key being `from`.
 async fn spend(
-    db: &Database,
+    db: &StoreDatabase,
     counter: &crate::test_utils::WorkCounter,
     from: usize,
     writes: usize,

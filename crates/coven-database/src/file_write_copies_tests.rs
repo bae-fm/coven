@@ -27,7 +27,7 @@ const SCHEMA: &str =
 /// A store whose `photos` rows reference a file each, trailing, and whose
 /// `covers` rows a bound one, every row naming its audience, with this
 /// device in `CIRCLE` and one namespace, `files`, of this kind.
-async fn open(store: &TestStore, kind: Provenance) -> crate::Database {
+async fn open(store: &TestStore, kind: Provenance) -> crate::StoreDatabase {
     let db = store
         .builder(
             vec![
@@ -65,7 +65,12 @@ fn insert(
 
 /// Write a `photos` row `n` in `audience` naming a new file over `from`'s
 /// bytes, returning the new file.
-async fn share_into(db: &crate::Database, n: u8, audience: &'static str, from: FileId) -> FileId {
+async fn share_into(
+    db: &crate::StoreDatabase,
+    n: u8,
+    audience: &'static str,
+    from: FileId,
+) -> FileId {
     db.write_as::<_, _, DbError>(move |sql| {
         let file = sql.existing_file(from);
         insert(&sql, "photos", n, audience, file)?;
@@ -76,7 +81,7 @@ async fn share_into(db: &crate::Database, n: u8, audience: &'static str, from: F
 }
 
 /// Stage `bytes` for the cloud in a store `photos` row `1` and store them.
-async fn stored(db: &crate::Database, bytes: &[u8]) -> FileId {
+async fn stored(db: &crate::StoreDatabase, bytes: &[u8]) -> FileId {
     let bytes = bytes.to_vec();
     let file = db
         .staged_write::<_, _, _, _, DbError>(
@@ -92,13 +97,13 @@ async fn stored(db: &crate::Database, bytes: &[u8]) -> FileId {
     file
 }
 
-fn record(db: &crate::Database, file: FileId) -> crate::file_table::Record {
+fn record(db: &crate::StoreDatabase, file: FileId) -> crate::file_table::Record {
     db.inspect_writer(|sql, _| crate::file_table::Record::read(sql, file).unwrap()).unwrap()
 }
 
 /// The candidates of this device's own stored bytes nothing local protects.
 async fn unprotected(
-    db: &crate::Database,
+    db: &crate::StoreDatabase,
     device: coven_foundation::id_source::DeviceId,
 ) -> Vec<ObjectId> {
     db.file_candidates(BTreeSet::from([device]))
@@ -210,7 +215,7 @@ async fn a_new_file_over_a_file_this_device_has_no_record_of_fails() {
 }
 
 /// A user track stored in a store `photos` row `1`, and where it is stored.
-async fn stored_track(db: &crate::Database) -> (FileId, crate::FileLocation) {
+async fn stored_track(db: &crate::StoreDatabase) -> (FileId, crate::FileLocation) {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"track").unwrap();
@@ -234,7 +239,7 @@ async fn stored_track(db: &crate::Database) -> (FileId, crate::FileLocation) {
 /// Make `track`, stored at `location`, device-only on this device: write a
 /// copy of its bytes and switch the file to it, in a write not yet
 /// published.
-async fn make_device_only(db: &crate::Database, track: FileId, location: crate::FileLocation) {
+async fn make_device_only(db: &crate::StoreDatabase, track: FileId, location: crate::FileLocation) {
     let owner = crate::FileDatabase::new(db.clone());
     let music = tempfile::tempdir().unwrap();
     let path = music.path().join("track.flac");
@@ -575,7 +580,7 @@ async fn a_new_file_over_a_moving_file_joins_its_move() {
         .await
         .unwrap();
     let copy = share_into(&db, 2, CIRCLE, photo).await;
-    let listed = |db: &crate::Database| {
+    let listed = |db: &crate::StoreDatabase| {
         let db = db.clone();
         async move {
             db.read(|sql| {

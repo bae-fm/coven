@@ -90,7 +90,7 @@ impl LastPass {
     /// failure fails the store's handle with its cause
     /// (`DbError::StatePersistence`), so the caller stops the work that
     /// failed.
-    pub async fn record(&self, database: &coven_database::Database) -> Result<(), DbError> {
+    pub async fn record(&self, database: &coven_database::StoreDatabase) -> Result<(), DbError> {
         database.record_last_pass(self.encoded()?).await
     }
 
@@ -98,7 +98,10 @@ impl LastPass {
     /// halting sync until the store reopens: nothing moves, and no pass
     /// writes over it (IO `halt`). A failure fails the store's handle, as
     /// `record`'s does.
-    pub async fn record_halt(&self, database: &coven_database::Database) -> Result<(), DbError> {
+    pub async fn record_halt(
+        &self,
+        database: &coven_database::StoreDatabase,
+    ) -> Result<(), DbError> {
         database.record_halt(self.encoded()?).await
     }
 
@@ -108,7 +111,7 @@ impl LastPass {
     /// handle, as `record`'s does.
     pub async fn record_end(
         &self,
-        database: &coven_database::Database,
+        database: &coven_database::StoreDatabase,
         now: SystemTime,
     ) -> Result<(), DbError> {
         let finished = matches!(self, Self::Synced).then_some(now);
@@ -119,7 +122,7 @@ impl LastPass {
     /// SQL does: `None` until a pass ends on this device.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
-        database: &coven_database::Database,
+        database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Option<Self>, coven_database::DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(|sql| {
             Ok(sql.query_row("SELECT last_pass FROM coven_sync_status", [], |row| row.get(0))?)

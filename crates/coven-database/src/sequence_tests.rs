@@ -1,7 +1,7 @@
 //! Sequence fixtures exercise the public database application and claim APIs.
 use crate::{
-    ApplyOutcome, Database, DbError, DownloadedPart, DownloadedPartStream, DownloadedWrite,
-    DownloadedWriteStream, Slot,
+    ApplyOutcome, DbError, DownloadedPart, DownloadedPartStream, DownloadedWrite,
+    DownloadedWriteStream, Slot, StoreDatabase,
 };
 use coven_format::write::WriteRecord;
 use coven_merge::slot;
@@ -62,11 +62,11 @@ pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec
     DownloadedWriteStream { header, parts, signer: crate::test_utils::signer(), authorship }
 }
 
-pub(crate) async fn publish(db: &Database) -> Result<(), DbError> {
+pub(crate) async fn publish(db: &StoreDatabase) -> Result<(), DbError> {
     publish_through(db, u64::MAX).await
 }
 
-pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), DbError> {
+pub(crate) async fn publish_through(db: &StoreDatabase, through: u64) -> Result<(), DbError> {
     publish_with(db, through, crate::test_utils::idle_writers()).await
 }
 
@@ -74,7 +74,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
 /// `through` as the next slot, with `writers` the other devices that can
 /// still write.
 pub(crate) async fn publish_with(
-    db: &Database,
+    db: &StoreDatabase,
     through: u64,
     writers: crate::Writers,
 ) -> Result<(), DbError> {
@@ -140,7 +140,7 @@ pub(crate) async fn publish_with(
     db.finish_claim(None).await
 }
 
-impl Database {
+impl StoreDatabase {
     pub(crate) async fn receive(&self, write: DownloadedWrite) -> Result<ApplyOutcome, DbError> {
         self.receive_stream(stream(write), || Ok(())).await
     }
@@ -193,7 +193,7 @@ pub(crate) fn plaintext(record: &WriteRecord) -> Vec<u8> {
     bytes
 }
 
-impl Database {
+impl StoreDatabase {
     pub(crate) async fn admin_fixture(
         &self,
         change: coven_format::admin::StoreChange,
@@ -266,7 +266,7 @@ fn admin_original(
 }
 
 pub(crate) async fn delete_circle(
-    db: &Database,
+    db: &StoreDatabase,
     circle: coven_foundation::id_source::CircleId,
 ) -> Result<Slot, DbError> {
     let mut state = db.store_state().await.unwrap();
@@ -281,7 +281,7 @@ pub(crate) async fn delete_circle(
 }
 
 pub(crate) async fn remove_device(
-    db: &Database,
+    db: &StoreDatabase,
     device: coven_foundation::id_source::DeviceId,
 ) -> Slot {
     let mut state = db.store_state().await.unwrap();
@@ -296,7 +296,7 @@ pub(crate) async fn remove_device(
 }
 
 pub(crate) fn data(
-    db: &Database,
+    db: &StoreDatabase,
     audience: coven_merge::Audience,
 ) -> (Vec<coven_merge::RowState<coven_format::value::Value>>, Vec<coven_format::loss::Loss>) {
     db.inspect_writer(|db, call| {
@@ -311,7 +311,7 @@ pub(crate) fn data(
 
 /// A reload of `snapshots`, each staged from its plaintext first (§16.2).
 pub(crate) async fn reload<R: std::io::Read, W>(
-    db: &Database,
+    db: &StoreDatabase,
     snapshots: Vec<(
         coven_format::admin::SnapshotId,
         coven_format::sealed_snapshot::SnapshotObjectPrefix,

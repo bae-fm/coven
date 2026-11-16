@@ -19,7 +19,7 @@ fn an_established_version_does_not_select_a_later_preparation() {
 
 /// Breaking version 2 explicitly drops late old writes: an index preserves the notes table,
 /// while a table drop exercises frozen losses without the old app schema.
-pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::Database {
+pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::StoreDatabase {
     let (tables, change) = if notes_table {
         (notes(), "CREATE INDEX notes_title ON notes(title)")
     } else {
@@ -44,7 +44,7 @@ pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::
         .unwrap()
 }
 
-impl crate::Database {
+impl crate::StoreDatabase {
     pub(crate) async fn check_boundary_fixture(&self, boundary: Boundary) -> Result<Slot, DbError> {
         let entry = boundary.entry();
         let change = match &boundary {

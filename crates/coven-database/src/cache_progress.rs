@@ -2,7 +2,7 @@
 //! Nothing here counts bytes in flight.
 
 use crate::sqlite::DatabaseConnection;
-use crate::{Database, DbError, FileRef, LiveQuery};
+use crate::{DbError, FileRef, LiveQuery, StoreDatabase};
 use coven_foundation::id_source::{DeviceId, FileId};
 
 /// Verified cache coverage of requested files (§17.8, E8).
@@ -110,7 +110,7 @@ pub(crate) fn files_pinned(
         .collect()
 }
 
-impl Database {
+impl StoreDatabase {
     /// Verified cache coverage for these fixed references, in one snapshot.
     pub async fn pin_progress(&self, files: Vec<FileRef>) -> Result<PinProgress, DbError> {
         let device = self.local_device()?;

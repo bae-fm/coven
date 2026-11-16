@@ -30,7 +30,7 @@ fn followed_from_the_start() -> Vec<Migration> {
     })]
 }
 
-async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database {
+async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::StoreDatabase {
     store
         .builder(tables(), migrations)
         .namespaces(namespaces(Provenance::AppProvided))

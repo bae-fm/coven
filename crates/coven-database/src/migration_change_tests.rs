@@ -19,7 +19,7 @@ fn reference_tables() -> Vec<SyncedTable> {
         .collect()
 }
 
-fn state(db: &Database, row: &RowId) -> RowState<WireValue> {
+fn state(db: &StoreDatabase, row: &RowId) -> RowState<WireValue> {
     db.inspect_writer_schema(|db, call, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
         crate::merge_store::MergeStore::new(db, call, &app).row(row).unwrap().state
@@ -41,8 +41,8 @@ fn row(writes: &[WriteRecord], table: &str) -> RowId {
 /// version 2 with `migration` holds a kept raise to 2 that covers none of them.
 struct Case {
     _stores: (TestStore, TestStore),
-    source: Database,
-    receiver: Database,
+    source: StoreDatabase,
+    receiver: StoreDatabase,
     writes: Vec<WriteRecord>,
 }
 
@@ -501,7 +501,7 @@ fn counting(
     ]
 }
 
-async fn note_titles(db: &Database) -> Vec<(String, String)> {
+async fn note_titles(db: &StoreDatabase) -> Vec<(String, String)> {
     db.read(|sql| {
         Ok::<_, DbError>(
             sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {

@@ -115,7 +115,7 @@ async fn a_restored_device_starts_from_a_fresh_snapshot_while_every_slot_is_kept
 
 /// Ana's notes, about 3 MiB of them, so the store snapshot is larger than a
 /// lowered input budget.
-async fn large_notes(db: &coven_database::Database) {
+async fn large_notes(db: &coven_database::StoreDatabase) {
     db.write(|sql| {
         for row in 0..96 {
             let title = format!("{row:04}").repeat(8 * 1024);

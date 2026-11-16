@@ -1,9 +1,9 @@
 use crate::tests::TestStore;
-use crate::Database;
 use crate::DbError;
+use crate::StoreDatabase;
 use coven_foundation::clock::HANG_GUARD;
 
-async fn blobs(store: &TestStore) -> Database {
+async fn blobs(store: &TestStore) -> StoreDatabase {
     let db = store
         .schema(Vec::new(), "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)")
         .await
@@ -23,7 +23,7 @@ async fn blobs(store: &TestStore) -> Database {
 
 /// Each connection's cached bytes: the readers', the input database's, the
 /// checkpointers', the planner statistics' and the writer's.
-fn cache_used(db: &Database) -> Vec<i32> {
+fn cache_used(db: &StoreDatabase) -> Vec<i32> {
     let mut used = Vec::new();
     db.inspect_connections(|connection| used.push(connection.cache_used().unwrap()));
     used

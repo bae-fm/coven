@@ -335,7 +335,7 @@ impl Invite {
     /// Follow `coven_invites` with a live query, as an app does.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
-        database: &coven_database::Database,
+        database: &coven_database::StoreDatabase,
     ) -> coven_database::test_utils::Followed<Vec<Self>, DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(Self::list))
     }
