@@ -134,7 +134,7 @@ fn update(
         .map(|column| {
             format!(
                 "NOT {}",
-                crate::sql::same_value(&format!("i.{column}"), &format!("a.{column}"))
+                crate::schema_sql::same_value(&format!("i.{column}"), &format!("a.{column}"))
             )
         })
         .collect();

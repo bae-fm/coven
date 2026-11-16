@@ -2,7 +2,8 @@
 
 use crate::schema::{SchemaIndex, TableSchema};
 use crate::schema_source::SchemaSource;
-use crate::sql::{identifier, name, stored_statement};
+use crate::schema_sql::stored_statement;
+use crate::sql::{identifier, name};
 use sqlite3_parser::{
     ast::{ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint},
     Bump,

@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
+use crate::schema_sql::{guarded_trigger, table_parts};
 use crate::scope_term::Affinity;
-use crate::sql::{guarded_trigger, identifier, table_parts, tokens};
+use crate::sql::{identifier, tokens};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
 
@@ -266,7 +267,7 @@ impl Schema {
         for ((kind, name), object) in &self.objects {
             if kind == "trigger"
                 && object.follows()
-                && !object.sql.as_deref().is_some_and(crate::sql::after_trigger)
+                && !object.sql.as_deref().is_some_and(crate::schema_sql::after_trigger)
             {
                 return Err(SchemaError::TriggerTiming {
                     trigger: name.clone(),

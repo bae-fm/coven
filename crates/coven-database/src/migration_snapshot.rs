@@ -338,7 +338,7 @@ impl<'c> MigrationSnapshot<'c> {
                     match snapshot.and_then(|s| s.columns.get(&column.name)) {
                         Some(slot) => format!(
                             "NOT {}",
-                            crate::sql::same_value(
+                            crate::schema_sql::same_value(
                                 &format!("a.{}", identifier(&column.name)),
                                 &format!("b.{}", identifier(slot))
                             )

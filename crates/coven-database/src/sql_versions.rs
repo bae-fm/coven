@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlite3_parser::ast::{ColumnConstraint, CreateTableBody, Stmt, TableConstraint};
 use sqlite3_parser::Bump;
 
-use crate::sql::{identifier, stored_statement, tokens, Token};
+use crate::schema_sql::stored_statement;
+use crate::sql::{identifier, tokens, Token};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, OpenStep};
 use coven_foundation::progress::ProgressReport;

@@ -104,6 +104,7 @@ mod schema;
 mod schema_error;
 mod schema_local_children;
 mod schema_source;
+mod schema_sql;
 mod snapshot_conflicts;
 mod snapshot_coverage;
 mod snapshot_error;

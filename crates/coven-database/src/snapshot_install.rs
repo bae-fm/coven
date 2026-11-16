@@ -228,7 +228,7 @@ pub(crate) fn finish(
                 format!(
                     "(i.{} IS NOT NULL AND NOT {})",
                     table.setter_device(j),
-                    crate::sql::same_value(
+                    crate::schema_sql::same_value(
                         &format!("i.{}", table.value(j)),
                         &format!("i.{}", identifier(name))
                     )
