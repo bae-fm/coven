@@ -1,14 +1,16 @@
 //! Durable remote observations, independently committed while application writes run.
 
-use super::{with_locked, StoreDatabase};
+use super::StoreDatabase;
+use crate::app_policy::CovenPolicy;
 use crate::sqlite::DatabaseConnection;
+use crate::sqlite_database::Database;
 use crate::store_call::{StoreCall, TestRecords};
 use crate::DbError;
 use coven_format::path::{ObjectPath, PathError};
 use coven_foundation::id_source::{DeviceId, KeyId, ObjectId};
-use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 #[path = "input_bytes.rs"]
 mod bytes;
@@ -19,24 +21,28 @@ pub(crate) mod staging;
 pub use staging::StagedDamage;
 pub use staging::{SnapshotStaging, StagedDigest};
 
-type InputConnection = Arc<Mutex<Option<DatabaseConnection>>>;
+/// The input database, `None` once the store closes it. Shared with the
+/// retained bytes read from it, whose reads after the close fail. Closing
+/// takes it as one step, so the lock is taken as it is.
+type InputConnection = Arc<RwLock<Option<Database<CovenPolicy>>>>;
 
 fn read_local<R>(
-    reader: &InputConnection,
+    database: &InputConnection,
     run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, DbError>,
 ) -> Result<R, DbError> {
-    let guard = lock_unpoisoned(reader);
-    let reader = guard.as_ref().ok_or(DbError::StoreClosed)?;
-    // Reading the input catalog records none of coven's work.
-    crate::store_call::outside_store(|call| {
-        crate::transaction_constants::read_with_constants(reader, call, || run(reader, call))
+    let guard = read_unpoisoned(database);
+    let database = guard.as_ref().ok_or(DbError::StoreClosed)?;
+    let reader = database.reader();
+    reader.host(|reader| {
+        // Reading the input catalog records none of coven's work.
+        crate::store_call::outside_store(|call| {
+            crate::transaction_constants::read_with_constants(reader, call, || run(reader, call))
+        })
     })
 }
 
 pub(crate) struct InputDatabase {
-    reader: InputConnection,
-    /// Shared with the input database's checkpointer (§4).
-    writer: Arc<Mutex<DatabaseConnection>>,
+    database: InputConnection,
     /// What coven's tests read back of the calls on the input writer.
     tests: TestRecords,
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
@@ -187,23 +193,18 @@ impl InputDatabase {
     }
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
-        lock_unpoisoned(&self.reader)
-            .as_ref()
-            .expect("open input reader")
-            .test_track_work(counter.clone());
-        lock_unpoisoned(&self.writer).test_track_work(counter.clone());
+        let database = read_unpoisoned(&self.database);
+        let database = database.as_ref().expect("the store keeps its input database open");
+        database.each_reader(|reader| reader.test_track_work(counter.clone()));
+        database.host(|writer| writer.test_track_work(counter.clone()));
         self.tests.track_work(counter.clone());
     }
-    /// `writer` is shared with the input database's checkpointer (§4). Its
-    /// temporary storage, on disk, holds prepared inputs and staged snapshots.
-    pub(crate) fn new(
-        reader: DatabaseConnection,
-        writer: Arc<Mutex<DatabaseConnection>>,
-    ) -> Result<Self, DbError> {
-        with_locked(&writer, |writer| staging::create_tables(writer))?;
+    /// The input database `database`. Its writer's temporary storage, on
+    /// disk, holds prepared inputs and staged snapshots.
+    pub(crate) fn new(database: Database<CovenPolicy>) -> Result<Self, DbError> {
+        database.host(|writer| staging::create_tables(writer))?;
         Ok(Self {
-            reader: Arc::new(Mutex::new(Some(reader))),
-            writer,
+            database: Arc::new(RwLock::new(Some(database))),
             tests: TestRecords::new(),
             active: Arc::new(Mutex::new(BTreeMap::new())),
             stagings: std::sync::atomic::AtomicI64::new(1),
@@ -231,28 +232,16 @@ impl InputDatabase {
     }
 
     pub(crate) fn close(self) -> Vec<DbError> {
-        let reader = lock_unpoisoned(&self.reader).take().expect("open input reader");
-        let mut failures: Vec<DbError> =
-            reader.close().err().into_iter().map(DbError::from).collect();
-        // The checkpointer stopped before, and let go of the writer.
-        match Arc::try_unwrap(self.writer) {
-            Ok(writer) => {
-                if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
-                    failures.push(error.into());
-                }
-            }
-            Err(_held) => failures.push(DbError::Invariant {
-                what: "the input writer closes after its checkpointer stopped",
-            }),
-        }
-        failures
+        let database = write_unpoisoned(&self.database).take();
+        let database = database.expect("the store closes its input database once");
+        database.close().into_iter().map(DbError::from).collect()
     }
 
     fn read<R>(
         &self,
         run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
-        read_local(&self.reader, run)
+        read_local(&self.database, run)
     }
 
     fn write<R>(
@@ -268,9 +257,9 @@ impl InputDatabase {
 
     /// Run `run` on the input writer, with constants of its own.
     fn with_writer<R>(&self, run: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> R) -> R {
-        with_locked(&self.writer, |writer| {
-            run(writer, &crate::store_call::StoreCall::new(None, &self.tests))
-        })
+        let database = read_unpoisoned(&self.database);
+        let database = database.as_ref().expect("the store keeps its input database open");
+        database.host(|writer| run(writer, &crate::store_call::StoreCall::new(None, &self.tests)))
     }
 }
 
@@ -395,7 +384,7 @@ impl StoreDatabase {
     /// claims; the journal remains the authoritative copy until settlement.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn claim_input(&self) -> Result<RetainedBytes, DbError> {
-        let (reader, reading, length) = self.call(|inner| {
+        let (database, reading, length) = self.call(|inner| {
             inner.access.with_committed(|source, _| {
                 let upload = crate::claim::upload(source)?;
                 let id = inner.inputs.write(|db: &DatabaseConnection, _| {
@@ -405,10 +394,10 @@ impl StoreDatabase {
                 let reading = inner.inputs.reading(id);
                 copy_claim(&inner.inputs, source, id)?;
                 inner.inputs.release(vec![id])?;
-                Ok::<_, DbError>((inner.inputs.reader.clone(), reading, upload.size))
+                Ok::<_, DbError>((inner.inputs.database.clone(), reading, upload.size))
             })
         }).await?;
-        Ok(RetainedBytes::new(reader, reading, length))
+        Ok(RetainedBytes::new(database, reading, length))
     }
     /// The retained provider observation of an exact path, if any. A drained
     /// writer's discovered objects are found here instead of by probing (§6.1).
@@ -542,9 +531,9 @@ impl RetainedInput {
     /// fetches missing bytes or acquires the application writer. Consumers may
     /// use it inside a slot transaction after completing transport and floor checks.
     pub async fn local_bytes(&self, length: u64) -> Result<RetainedBytes, DbError> {
-        let reader =
-            self.database.call(|inner| Ok::<_, DbError>(inner.inputs.reader.clone())).await?;
-        Ok(RetainedBytes::new(reader, self.reading.clone(), length))
+        let database =
+            self.database.call(|inner| Ok::<_, DbError>(inner.inputs.database.clone())).await?;
+        Ok(RetainedBytes::new(database, self.reading.clone(), length))
     }
     /// The first completed provider observation for this identity, including
     /// native metadata whose representation can differ in later listings.

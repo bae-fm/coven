@@ -205,8 +205,9 @@ async fn notes_after_opening(store: &TestStore) -> i64 {
     notes
 }
 
-/// The system refuses each of the store's upkeep threads in turn: the input
-/// database's checkpointer, the main one's, the planner's statistics. The
+/// The system refuses each of the store's upkeep threads in turn: the main
+/// database's checkpointer, the planner's statistics, the input database's
+/// checkpointer. The
 /// store doesn't open (§4); what had started stops and lets go of the store,
 /// so the next open finds it as it was.
 #[tokio::test]

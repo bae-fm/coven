@@ -1,7 +1,7 @@
 //! How a call on a store's connections gets one: a reader or the writer,
 //! with the state coven keeps for that call beside it.
 
-use super::{read_pool, with_locked, DatabaseAccess};
+use super::DatabaseAccess;
 use crate::sqlite::DatabaseConnection;
 use crate::store_call::StoreCall;
 use crate::DbError;
@@ -28,23 +28,23 @@ impl<L> DatabaseAccess<L> {
         &self,
         run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> R,
     ) -> R {
-        self.with_leased(&self.readers.acquire_reader(), run)
+        self.with_leased(&self.database.reader(), run)
     }
 
-    /// Run `run` on the reader `lease` reserved, with constants of its own.
+    /// Run `run` on `reader`, which the caller reserved, with constants of its own.
     pub(super) fn with_leased<R>(
         &self,
-        lease: &read_pool::ReaderLease<'_, crate::app_policy::CovenPolicy>,
+        reader: &crate::sqlite_database::Reader<'_, crate::app_policy::CovenPolicy>,
         run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> R,
     ) -> R {
-        lease.with_reader(|reader| run(reader, &StoreCall::new(None, &self.tests)))
+        reader.host(|reader| run(reader, &StoreCall::new(None, &self.tests)))
     }
 
     pub(super) fn with_writer<R, E: From<DbError>>(
         &self,
         run: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        with_locked(&self.writer, |writer| {
+        self.database.host(|writer| {
             #[cfg(any(test, feature = "test-utils"))]
             self.tests.record_work(|work| work.writer_holds += 1);
             if let Some(error) = self.observer.error() {

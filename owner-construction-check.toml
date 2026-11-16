@@ -459,7 +459,8 @@ task_types = [
     # A write transaction holds the writer from BEGIN to its end and sets
     # and removes the hooks that observe it.
     "WriteTransaction",
-    "ReaderLease",
+    # A reader a call reserves from a database until the lease drops.
+    "Reader",
     "AppView",
     "MergeStore",
     "WriteMetadata",
@@ -1418,7 +1419,6 @@ tables = [
     "CovenPolicy::new",
     "CovenPolicy::read_only",
     "CovenPolicy::judging",
-    "CovenPolicy::open",
     "CovenPolicy::refresh",
 ]
 # Each call on the store runs on the blocking pool to its end, even once its
@@ -1448,8 +1448,8 @@ tables = [
     # A closed store's sync facts, read through a temporary read-only
     # connection under its writer lock (api.md E1).
     "closed_sync_facts",
-    # The one open of a connection to coven's own tables only, which the
-    # input database and the discarded-database reads share.
+    # The one open of a lone connection to coven's own tables only, which
+    # the discarded-database reads share.
     "coven_only",
     # The one construction of a store's commit observer, which the three
     # opens of a store share.
@@ -1478,6 +1478,9 @@ tables = [
 # (§17.3).
 "crates/coven-database/src/file_database_copies.rs" = ["CopyReservation::run_step"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
+# A database opens its writer, readers and upkeep threads, each connection
+# with a policy and setup of its own.
+"crates/coven-database/src/sqlite_database.rs" = ["Database::open_with"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).

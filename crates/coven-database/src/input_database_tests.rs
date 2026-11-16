@@ -6,13 +6,11 @@ use coven_format::{path::ObjectPath, value::Slot};
 use coven_foundation::clock::HANG_GUARD;
 
 impl InputDatabase {
-    /// Visit the reader, then the writer, each under its own lock.
-    pub(crate) fn each_connection(
-        &self,
-        mut visit: impl FnMut(&DatabaseConnection) -> Result<(), DbError>,
-    ) -> Result<(), DbError> {
-        with_locked(&self.reader, |reader| visit(reader.as_ref().ok_or(DbError::StoreClosed)?))?;
-        with_locked(&self.writer, |writer| visit(writer))
+    /// Visit each of the input database's connections, each under its own
+    /// lock.
+    pub(crate) fn each_connection(&self, visit: impl FnMut(&DatabaseConnection)) {
+        let database = read_unpoisoned(&self.database);
+        database.as_ref().expect("the store keeps its input database open").each_connection(visit);
     }
 }
 

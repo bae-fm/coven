@@ -8,11 +8,10 @@ use coven_foundation::locks::lock_unpoisoned;
 
 use rusqlite::hooks::AuthAction;
 
-use crate::authorization::{Owner, Policy, PolicyAction, Refresh, SqlAuthorization};
+use crate::authorization::{Owner, Policy, PolicyAction, Refresh};
 use crate::coven_functions::Views;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
-use sqlive::WholeViews;
 
 /// Coven's rules for the statements a connection prepares. A judgment
 /// changes several fields of the state together, so `judge` holds the
@@ -131,29 +130,6 @@ impl CovenPolicy {
                 writer_state,
             })),
         }
-    }
-
-    /// A connection to the database at `path` whose authorizer asks this
-    /// policy after its own rules.
-    pub(crate) fn open(
-        self,
-        path: &std::path::Path,
-        read_only: bool,
-        whole: &Arc<WholeViews>,
-        settings: &crate::SqliteSettings,
-        functions: &crate::SqlFunctions,
-        views: Option<&Views<'_>>,
-    ) -> Result<DatabaseConnection, DbError> {
-        let authorization = SqlAuthorization::new(Arc::clone(whole), Arc::new(self.clone()));
-        let policy = self.clone();
-        Ok(DatabaseConnection::open(path, read_only, authorization, self, settings, &|setup| {
-            crate::coven_functions::register(setup, &policy)?;
-            functions.register(setup)?;
-            match views {
-                Some(views) => views(setup),
-                None => Ok(()),
-            }
-        })?)
     }
 
     /// Whether materialized SQL is running, as `coven_applying()` says.
@@ -530,6 +506,23 @@ impl PolicyState {
             }
         }
         None
+    }
+}
+
+/// What every connection to a store's database registers before any SQL
+/// runs on it: coven's functions, with that connection's `policy`; the
+/// app's `functions`; and coven's `views`, when the database has them.
+pub(crate) fn setup<'a>(
+    functions: &'a crate::SqlFunctions,
+    views: Option<&'a Views<'a>>,
+) -> impl Fn(&crate::connection_setup::Setup<'_>, &CovenPolicy) -> rusqlite::Result<()> + 'a {
+    move |setup, policy| {
+        crate::coven_functions::register(setup, policy)?;
+        functions.register(setup)?;
+        match views {
+            Some(views) => views(setup),
+            None => Ok(()),
+        }
     }
 }
 

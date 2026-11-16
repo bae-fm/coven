@@ -14,7 +14,7 @@ impl StoreDatabase {
                 writer.test_record_statements(log.clone());
                 Ok::<_, DbError>(())
             })?;
-            inner.access.readers.test_record_statements(&log);
+            inner.access.database.each_reader(|reader| reader.test_record_statements(log.clone()));
             Ok::<_, DbError>(())
         })
         .await
@@ -31,7 +31,7 @@ impl StoreDatabase {
                 writer.test_track_work(counter.clone());
                 Ok::<_, DbError>(())
             })?;
-            inner.access.readers.test_track_work(&counter);
+            inner.access.database.each_reader(|reader| reader.test_track_work(counter.clone()));
             inner.access.tests.track_work(counter.clone());
             inner.inputs.test_track_work(&counter);
             Ok(())

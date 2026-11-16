@@ -8,15 +8,15 @@ use std::sync::Arc;
 /// every cursor; an absent cached range returns an I/O error, never a network read.
 #[derive(Clone)]
 pub struct RetainedBytes {
-    reader: InputConnection,
+    database: InputConnection,
     reading: Arc<InputRead>,
     position: u64,
     length: u64,
 }
 
 impl RetainedBytes {
-    pub(super) fn new(reader: InputConnection, reading: Arc<InputRead>, length: u64) -> Self {
-        Self { reader, reading, position: 0, length }
+    pub(super) fn new(database: InputConnection, reading: Arc<InputRead>, length: u64) -> Self {
+        Self { database, reading, position: 0, length }
     }
 
     /// The received object's declared length.
@@ -42,7 +42,7 @@ impl Read for RetainedBytes {
         }
         let start = self.position;
         let end = start + length;
-        let ranges = read_local(&self.reader, |db, _| {
+        let ranges = read_local(&self.database, |db, _| {
             Ok(db.query(
                 RANGES,
                 (self.reading.id, sql_offset(start)?, sql_offset(end)?),

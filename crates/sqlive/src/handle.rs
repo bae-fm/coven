@@ -608,6 +608,11 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         })
     }
 
+    /// Whether the handle failed: a handle its host only closed hasn't.
+    pub fn has_failed(&self) -> bool {
+        self.with_state(|state| state.failure.is_some())
+    }
+
     /// Fail every later call and subscription with `failure`. The handle
     /// keeps the first failure and ignores later ones.
     pub fn fail(&self, failure: F) {

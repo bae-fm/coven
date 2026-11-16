@@ -80,7 +80,7 @@ impl StoreDatabase {
 
     pub(crate) fn observe_next_reader_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         let inner = self.inner.read().unwrap();
-        inner.as_ref().unwrap().access.readers.observe_next_wait()
+        inner.as_ref().unwrap().access.database.observe_next_reader_wait()
     }
 
     pub(crate) fn commit_writer<T>(
@@ -122,22 +122,22 @@ impl StoreDatabase {
     }
 
     /// Every connection the store holds open, one at a time, each under its
-    /// own lock: the readers, the input database's, the checkpointers', the
-    /// planner statistics' and the writer.
+    /// own lock: the input database's, then the store database's readers,
+    /// checkpointer, planner statistics' and writer.
     pub(crate) fn inspect_connections(&self, mut inspect: impl FnMut(&DatabaseConnection)) {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let mut visit = |connection: &DatabaseConnection| {
-            inspect(connection);
-            Ok(())
-        };
-        inner.access.readers.each(|reader| visit(reader)).unwrap();
-        inner.inputs.each_connection(&mut visit).unwrap();
-        for checkpoints in &inner.checkpoints {
-            checkpoints.with_connection(&mut visit).unwrap();
-        }
-        inner.statistics.with_connection(&mut visit).unwrap();
-        with_locked(&inner.access.writer, |writer| visit(writer)).unwrap();
+        inner.inputs.each_connection(&mut inspect);
+        inner.access.database.each_connection(&mut inspect);
+    }
+
+    /// The store's database, under the open store's lock.
+    fn with_store_database<T>(
+        &self,
+        run: impl FnOnce(&crate::sqlite_database::Database<CovenPolicy>) -> T,
+    ) -> T {
+        let slot = self.inner.read().unwrap();
+        run(&slot.as_ref().unwrap().access.database)
     }
 
     /// Run `fault` as each checkpoint of the store's database, not its input
@@ -148,19 +148,13 @@ impl StoreDatabase {
             + Send
             + 'static,
     ) {
-        let slot = self.inner.read().unwrap();
-        let checkpointers = &slot.as_ref().unwrap().checkpoints;
-        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
-        checkpointers[1].fault(fault);
+        self.with_store_database(|database| database.fault_checkpoints(fault));
     }
 
     /// Run `step` as the copy of each pass a checkpoint of the store's
     /// database makes while writes go on returns, before its sync (§4).
     pub(crate) fn after_checkpoint_copies(&self, step: impl FnMut() + Send + 'static) {
-        let slot = self.inner.read().unwrap();
-        let checkpointers = &slot.as_ref().unwrap().checkpoints;
-        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
-        checkpointers[1].after_copy(step);
+        self.with_store_database(|database| database.after_checkpoint_copies(step));
     }
 
     /// What each checkpoint of the store's database does at its last step
@@ -168,33 +162,25 @@ impl StoreDatabase {
     pub(crate) fn report_checkpoints(
         &self,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::WalCheckpoint> {
-        let slot = self.inner.read().unwrap();
-        let checkpointers = &slot.as_ref().unwrap().checkpoints;
-        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
-        checkpointers[1].report_restarts()
+        self.with_store_database(|database| database.report_checkpoints())
     }
 
     /// Each run of the planner's statistics from now on, told once it
     /// committed (§4).
     pub(crate) fn report_statistics_runs(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
-        let slot = self.inner.read().unwrap();
-        slot.as_ref().unwrap().statistics.report_runs()
+        self.with_store_database(|database| database.report_statistics_runs())
     }
 
     /// Whether coven checkpoints the store's database, not only its input
     /// database (§4).
     pub(crate) fn checkpoints_its_database(&self) -> bool {
-        let slot = self.inner.read().unwrap();
-        slot.as_ref().unwrap().checkpoints.len() == 2
+        self.with_store_database(|database| database.checkpoints())
     }
 
     /// Run one checkpoint of the store's database now, on its checkpointer's
     /// connection, as a commit's wake does (§4).
     pub(crate) fn checkpoint_now(&self) -> Result<(), DbError> {
-        let slot = self.inner.read().unwrap();
-        let checkpointers = &slot.as_ref().unwrap().checkpoints;
-        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
-        Ok(checkpointers[1].run_now()?)
+        Ok(self.with_store_database(|database| database.checkpoint_now())?)
     }
 }
 
@@ -222,14 +208,15 @@ impl<L> DatabaseAccess<L> {
         &self,
         inspect: impl FnOnce(&mut DatabaseConnection, &StoreCall<'_>) -> T,
     ) -> T {
-        let mut writer = self.writer.lock().unwrap();
-        let device = writer.observes_commits().then_some(self.device);
-        inspect(&mut writer, &crate::store_call::StoreCall::new(device, &self.tests))
+        self.database.host(|writer| {
+            let device = writer.observes_commits().then_some(self.device);
+            inspect(writer, &crate::store_call::StoreCall::new(device, &self.tests))
+        })
     }
 
     /// Run `inspect` on each reader in turn, as a call on it would see it.
     fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection, &StoreCall<'_>)) {
-        self.readers.inspect_each(|reader| {
+        self.database.each_reader(|reader| {
             inspect(reader, &crate::store_call::StoreCall::new(None, &self.tests));
         });
     }

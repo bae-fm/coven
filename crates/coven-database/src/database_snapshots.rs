@@ -445,7 +445,7 @@ impl StoreDatabase {
                 let prepared = inner.clock.elapsed();
                 // Reserve a reader before locking the writer: snapshot consumers
                 // may be waiting for a commit before releasing their readers.
-                let reader = inner.access.readers.acquire_reader();
+                let reader = inner.access.database.reader();
                 let loaded = inner.with_files("load a snapshot", |writer, call, files| {
                     inner.access.with_leased(&reader, |reader, reader_call| {
                         crate::transaction_constants::read_with_constants(

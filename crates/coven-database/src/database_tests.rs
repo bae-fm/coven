@@ -42,14 +42,18 @@ async fn read_connections_are_read_only_and_run_concurrently() {
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     {
         let slot = database.inner.read().unwrap();
-        slot.as_ref().unwrap().access.readers.assert_read_only();
+        slot.as_ref().unwrap().access.database.each_reader(|reader| {
+            let error = reader.execute("INSERT INTO notes VALUES ('x', 'y', '')", []).unwrap_err();
+            assert!(matches!(error, sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::ReadOnly));
+        });
     }
     let hold_reader = |database: StoreDatabase| {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
             let slot = database.inner.read().unwrap();
-            let _reader = slot.as_ref().unwrap().access.readers.acquire_reader();
+            let _reader = slot.as_ref().unwrap().access.database.reader();
             entered_tx.send(()).unwrap();
             release_rx.recv_timeout(HANG_GUARD).unwrap();
         });
@@ -103,7 +107,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     let worker = std::thread::spawn(move || {
         let slot = clone.inner.read().unwrap();
         let access = &slot.as_ref().unwrap().access;
-        let reader = access.readers.acquire_reader();
+        let reader = access.database.reader();
         entered_tx.send(()).unwrap();
         release_rx.recv_timeout(HANG_GUARD).unwrap();
         access

@@ -42,7 +42,7 @@ pub(crate) struct PlannerStatistics<P: Policy> {
 impl<P: Policy> UpkeepThread<PlannerStatistics<P>> {
     /// Keep the planner's statistics of `writer`'s database from its commits
     /// on, on `connection`, a writable connection of its own to the same
-    /// database with the app's functions, as an open's run has, failing
+    /// database, set up as the database's other connections are, failing
     /// `handle` if a check or run fails.
     pub(crate) fn start(
         connection: DatabaseConnection<P>,

@@ -127,7 +127,7 @@ impl StoreDatabase {
                 let slot = incoming.slot;
                 let incoming = incoming.prepare(inputs)?;
                 let prepared = inner.clock.elapsed();
-                let reader = inner.access.readers.acquire_reader();
+                let reader = inner.access.database.reader();
                 let applied = inner.with_files("apply a slot", |writer, call, files| {
                     inner.access.with_leased(&reader, |reader, reader_call| {
                         crate::transaction_constants::read_with_constants(

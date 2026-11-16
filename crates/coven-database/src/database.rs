@@ -21,9 +21,6 @@ pub use mode::{Mode, ReadOnly, Writer};
 #[path = "file_staging.rs"]
 mod file_staging;
 pub use file_staging::StagedFiles;
-#[path = "read_pool.rs"]
-mod read_pool;
-use read_pool::ReadPool;
 
 #[path = "input_database.rs"]
 pub(crate) mod input_database;
@@ -66,6 +63,8 @@ use crate::{LiveQuery, LostValue, Read, SqlReadContext};
 
 #[path = "database_builder.rs"]
 mod builder;
+#[cfg(test)]
+pub(crate) use builder::coven_only;
 #[path = "database_store.rs"]
 mod store;
 
@@ -168,13 +167,6 @@ pub struct WriterParts {
 
 /// The writer's open store.
 pub struct DatabaseInner {
-    /// Coven's checkpointers of the input database and, unless the app
-    /// checkpoints it, the store's (§4); stopped before their writers close.
-    checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer<CovenPolicy>>,
-    /// The thread keeping the planner's statistics of the store's database
-    /// while it stays open (§4); stopped before the writer closes.
-    statistics:
-        crate::upkeep::UpkeepThread<crate::planner_statistics::PlannerStatistics<CovenPolicy>>,
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
@@ -223,10 +215,8 @@ pub struct DatabaseInner {
 /// directory, which outlives every connection, including when the last
 /// handle is dropped.
 pub struct DatabaseAccess<L> {
-    /// Shared with the store's checkpointer, which holds it while the WAL
-    /// starts over (§4).
-    writer: Arc<Mutex<DatabaseConnection>>,
-    readers: ReadPool,
+    /// The store's database: its writer, readers and upkeep threads.
+    database: crate::sqlite_database::Database<CovenPolicy>,
     // Every connection reports its commits and handle failures here (§4).
     observer: StoreHandle,
     write_schema: crate::write_schema::WriteSchema,
@@ -358,24 +348,12 @@ impl<L> DatabaseAccess<L> {
 
     /// Every connection has the same settings, so one reader reports them.
     fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        Ok(self.readers.acquire_reader().with_reader(DatabaseConnection::sqlite_settings)?)
+        Ok(self.database.reader().host(DatabaseConnection::sqlite_settings)?)
     }
 
     fn close(self) -> Result<(), DbError> {
         self.observer.close();
-        let mut failures: Vec<DbError> =
-            self.readers.close().into_iter().map(DbError::from).collect();
-        // Each checkpointer stopped before, and let go of the writer.
-        match Arc::try_unwrap(self.writer) {
-            Ok(writer) => {
-                if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
-                    failures.push(error.into());
-                }
-            }
-            Err(_held) => failures.push(DbError::Invariant {
-                what: "a writer closes after its checkpointer stopped",
-            }),
-        }
+        let failures: Vec<DbError> = self.database.close().into_iter().map(DbError::from).collect();
         drop(self.lock);
         if failures.is_empty() {
             Ok(())
@@ -780,7 +758,7 @@ impl StoreDatabase {
     /// and the checkpointers' too, and never waits for a write.
     pub async fn release_memory(&self) -> Result<(), DbError> {
         self.call(|inner| {
-            inner.access.readers.acquire_reader().with_reader(|reader| Ok(reader.release_memory()?))
+            inner.access.database.reader().host(|reader| Ok(reader.release_memory()?))
         })
         .await
     }
@@ -817,21 +795,7 @@ impl StoreDatabase {
                         let Some(inner) = slot.take() else {
                             return Err(DbError::StoreClosed);
                         };
-                        let mut failures: Vec<DbError> = inner
-                            .checkpoints
-                            .into_iter()
-                            .filter_map(|checkpoints| checkpoints.stop().err().map(DbError::from))
-                            .collect();
-                        failures.extend(inner.statistics.stop().err().map(DbError::from));
-                        failures.extend(inner.inputs.close());
-                        // The statistics follow this session's writes, outside
-                        // any captured transaction. A failed handle's writer may
-                        // still hold a transaction, which closing rolls back.
-                        if inner.access.observer.error::<DbError>().is_none() {
-                            if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
-                                failures.push(error.into());
-                            }
-                        }
+                        let mut failures = inner.inputs.close();
                         match inner.access.close() {
                             Err(DbError::Closing { failures: application }) => {
                                 failures.extend(application)

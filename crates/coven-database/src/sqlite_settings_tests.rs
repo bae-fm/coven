@@ -442,16 +442,7 @@ async fn an_incremental_vacuum_gives_back_free_pages() {
 
 #[test]
 fn wal_refusal_names_the_selected_journal_mode() {
-    let sql = crate::app_policy::CovenPolicy::new(&[])
-        .open(
-            Path::new(":memory:"),
-            false,
-            &crate::internal_schema::whole_views(),
-            &SqliteSettings::default(),
-            &crate::SqlFunctions::default(),
-            None,
-        )
-        .unwrap();
+    let sql = crate::database::coven_only(Path::new(":memory:"), false, None).unwrap();
     assert!(
         matches!(sql.enable_wal(), Err(sqlive::Error::WalUnavailable { mode }) if mode == "memory")
     );

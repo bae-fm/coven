@@ -1,13 +1,12 @@
 //! Reader reservations keep committed reads independent of the writer.
 
-use crate::app_policy::CovenPolicy;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::sqlite::DatabaseConnection;
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Condvar, Mutex};
 
-pub(super) struct ReadPool<P: Policy = CovenPolicy> {
+pub(super) struct ReadPool<P: Policy> {
     readers: Vec<Mutex<DatabaseConnection<P>>>,
     idle_readers: Mutex<Vec<usize>>,
     reader_ready: Condvar,
@@ -16,17 +15,11 @@ pub(super) struct ReadPool<P: Policy = CovenPolicy> {
 }
 
 impl<P: Policy> ReadPool<P> {
+    /// Run `visit` on each reader in turn, under its own lock.
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
+    pub(super) fn each(&self, mut visit: impl FnMut(&mut DatabaseConnection<P>)) {
         for reader in &self.readers {
-            lock_unpoisoned(reader).test_track_work(counter.clone());
-        }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(super) fn test_record_statements(&self, log: &crate::test_utils::StatementLog) {
-        for reader in &self.readers {
-            lock_unpoisoned(reader).test_record_statements(log.clone());
+            crate::database::with_locked(reader, |reader| visit(reader));
         }
     }
 
@@ -50,11 +43,11 @@ impl<P: Policy> ReadPool<P> {
         failures
     }
 
-    pub(super) fn acquire_reader(&self) -> ReaderLease<'_, P> {
+    pub(super) fn acquire_reader(&self) -> Reader<'_, P> {
         let mut idle = lock_unpoisoned(&self.idle_readers);
         loop {
             if let Some(index) = idle.pop() {
-                return ReaderLease { database: self, index };
+                return Reader { pool: self, index };
             }
             #[cfg(test)]
             if let Some(waiting) = self.waiting.lock().unwrap().take() {
@@ -65,23 +58,25 @@ impl<P: Policy> ReadPool<P> {
     }
 }
 
-// A call reserves one available reader while borrowing the database owner.
-// Dropping the reservation wakes a caller even when the call panics.
-pub(super) struct ReaderLease<'a, P: Policy> {
-    database: &'a ReadPool<P>,
+/// One of a database's readers, reserved for its caller until it drops.
+/// Dropping it wakes a caller waiting for a reader, even when a call on it
+/// panics.
+pub(crate) struct Reader<'a, P: Policy> {
+    pool: &'a ReadPool<P>,
     index: usize,
 }
 
-impl<P: Policy> ReaderLease<'_, P> {
-    pub(super) fn with_reader<R>(&self, read: impl FnOnce(&DatabaseConnection<P>) -> R) -> R {
-        super::with_locked(&self.database.readers[self.index], |reader| read(reader))
+impl<P: Policy> Reader<'_, P> {
+    /// Run `read` on the reader.
+    pub(crate) fn host<R>(&self, read: impl FnOnce(&DatabaseConnection<P>) -> R) -> R {
+        crate::database::with_locked(&self.pool.readers[self.index], |reader| read(reader))
     }
 }
 
-impl<P: Policy> Drop for ReaderLease<'_, P> {
+impl<P: Policy> Drop for Reader<'_, P> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.database.idle_readers).push(self.index);
-        self.database.reader_ready.notify_one();
+        lock_unpoisoned(&self.pool.idle_readers).push(self.index);
+        self.pool.reader_ready.notify_one();
     }
 }
 

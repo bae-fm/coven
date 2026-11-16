@@ -2,7 +2,12 @@
 
 use super::*;
 use crate::sqlite::DatabaseConnection;
+use crate::sqlite_database::{Database, Options};
 use coven_foundation::files::StoreDirAccess;
+use std::num::NonZeroUsize;
+
+/// The read-only connections of a store's database beside its writer.
+const READERS: NonZeroUsize = NonZeroUsize::new(4).expect("four is not zero");
 
 use crate::{migration::MigrationOperation, AutoVacuum, NewOperation, OpenError, OpenStep};
 use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
@@ -241,26 +246,33 @@ impl DatabaseBuilder {
         let views = |setup: &Setup<'_>| {
             crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
         };
-        coven_foundation::task::operation_step("opening the writer's connection");
-        // Opening the writer's connection registers the functions coven's
-        // views call, because the app's migrations may read the views.
-        let mut writer = CovenPolicy::new(&tables).open(
-            &path,
-            false,
-            &whole,
-            &self.sqlite,
-            &self.functions,
-            Some(&views),
-        )?;
+        let recorded = crate::file_table::synced(&tables)
+            .iter()
+            .map(|table| table.name.to_ascii_lowercase())
+            .collect();
         // The writer observes no commits while it opens, so the StoreCall
         // its opening runs with carries no device.
         let opening = crate::store_call::TestRecords::new();
-        let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) = {
-            let call = &crate::store_call::StoreCall::new(None, &opening);
-            let writer = &mut writer;
-            writer.with_profile(|writer| -> Result<_, OpenError> {
-                coven_foundation::task::operation_step("switching the store's database to WAL");
-                writer.enable_wal()?;
+        coven_foundation::task::operation_step("opening the store's database");
+        // Every connection registers the functions coven's views call,
+        // because the app's migrations may read the views.
+        let setup = crate::app_policy::setup(&self.functions, Some(&views));
+        let opened = Database::open_with(
+            &path,
+            observer.clone(),
+            Options {
+                settings: self.sqlite.clone(),
+                readers: READERS,
+                prepare_on_reader: false,
+                whole_views: whole.clone(),
+                policy: &|| CovenPolicy::new(&tables),
+                setup: &setup,
+                capture: Some(recorded),
+                checkpoint_pages: self.sqlite.checkpoint_pages(),
+                statistics: true,
+            },
+            |writer| -> Result<_, OpenError> {
+                let call = &crate::store_call::StoreCall::new(None, &opening);
                 let mut progress = ProgressReport::of(&self.progress, clock.clone());
                 let migrating = clock.elapsed();
                 coven_foundation::task::operation_step(
@@ -310,112 +322,57 @@ impl DatabaseBuilder {
                 crate::write_schema::prepare_evaluators(db, &write_schema)?;
                 let migrated = clock.elapsed();
                 coven_foundation::task::operation_step(
-                    "gathering statistics on a connection of its own",
+                    "gathering statistics, then starting commit capture and upkeep threads",
                 );
-                // After migrating, and before the writer captures commits, on a
-                // connection of its own: one that analyzes a small table loads its
-                // count, and forgetting the statistics afterwards doesn't unload it.
-                // The writer then reads what that connection kept.
-                CovenPolicy::new(&tables)
-                    .open(&path, false, &whole, &self.sqlite, &self.functions, None)?
-                    .gather_statistics()?;
-                // SQLite reads its statistics again only when told to.
-                writer.batch("ANALYZE sqlite_schema")?;
-                let optimized = clock.elapsed();
-                // The input database holds only coven's tables, which no app setting
-                // or function reaches.
-                coven_foundation::task::operation_step("opening the input database");
-                let input_path = self.directory.input_database_path();
-                let mut input_writer = coven_only(&input_path, false, None)?;
-                input_writer.enable_wal()?;
-                let version: u32 =
-                    input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-                match version {
-                    0 => input_writer.transaction(|db| {
-                        Ok::<_, DbError>(db.batch(&crate::internal_schema::initial_input_schema())?)
-                    })?,
-                    1 => (),
-                    _ => return Err(DbError::DamagedDatabase.into()),
-                }
-                let mut input_reader = coven_only(&input_path, true, None)?;
-                input_writer.serve(observer.clone());
-                input_reader.serve(observer.clone());
-                let input_writer = Arc::new(Mutex::new(input_writer));
-                // Coven checkpoints both databases off the commit path from here on,
-                // each on a connection of its own (§4); opening, with no reader yet,
-                // checkpointed as it committed.
-                let checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
-                    coven_only(&input_path, false, None)?,
-                    &input_writer,
-                    crate::sqlite_settings::CHECKPOINT_PAGES,
-                    observer.clone(),
-                )?];
-                let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
-                Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
-            })
-        }?;
-        coven_foundation::task::operation_step(
-            "starting the writer's commit capture and upkeep threads",
+                Ok((outcomes, write_schema, migrating, migrated))
+            },
         );
-        let recorded = crate::file_table::synced(&tables)
-            .iter()
-            .map(|table| table.name.to_ascii_lowercase())
-            .collect();
-        writer.observe_commits(observer.clone(), recorded);
+        drop(setup);
+        let (database, (outcomes, write_schema, migrating, migrated)) = opened?;
+        let opened = clock.elapsed();
         #[cfg(any(test, feature = "test-utils"))]
         if self.refuse_close {
-            writer.leave_statement_open();
+            database.host(|writer| writer.leave_statement_open());
         }
-        let writer = Arc::new(Mutex::new(writer));
-        if let Some(pages) = self.sqlite.checkpoint_pages() {
-            let checkpointing = CovenPolicy::new(&[]).open(
-                &path,
-                false,
-                &whole,
-                &self.sqlite,
-                &crate::SqlFunctions::default(),
-                None,
-            )?;
-            checkpoints.push(crate::wal_checkpoints::WalCheckpointer::start(
-                checkpointing,
-                &writer,
-                pages,
-                observer.clone(),
-            )?);
-        }
-        let statistics =
-            crate::upkeep::UpkeepThread::<crate::planner_statistics::PlannerStatistics<_>>::start(
-                CovenPolicy::new(&tables).open(
-                    &path,
-                    false,
-                    &whole,
-                    &self.sqlite,
-                    &self.functions,
-                    None,
-                )?,
-                &writer,
-                observer.clone(),
-            )?;
+        // The input database holds only coven's tables, which no app setting
+        // or function reaches. Its connections serve the store's handle, so a
+        // failure in it fails the store.
+        coven_foundation::task::operation_step("opening the input database");
+        let functions = crate::SqlFunctions::default();
+        let input_setup = crate::app_policy::setup(&functions, None);
+        let (input, ()) = Database::open_with(
+            &self.directory.input_database_path(),
+            observer.clone(),
+            Options {
+                settings: coven_only_settings(),
+                readers: NonZeroUsize::MIN,
+                prepare_on_reader: false,
+                whole_views: crate::internal_schema::whole_views(),
+                policy: &|| CovenPolicy::new(&[]),
+                setup: &input_setup,
+                capture: None,
+                checkpoint_pages: Some(crate::sqlite_settings::CHECKPOINT_PAGES),
+                statistics: false,
+            },
+            |input| -> Result<(), DbError> {
+                let version: u32 = input.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+                match version {
+                    0 => input.transaction(|db| {
+                        Ok::<_, DbError>(db.batch(&crate::internal_schema::initial_input_schema())?)
+                    }),
+                    1 => Ok(()),
+                    _ => Err(DbError::DamagedDatabase),
+                }
+            },
+        )?;
+        let inputs = input_database::InputDatabase::new(input)?;
         tracing::info!(
             migrations = migrations.len(),
             migrating = ?(migrated - migrating),
-            optimizing = ?(optimized - migrated),
+            opening = ?(opened - migrated),
             total = ?(clock.elapsed() - started),
             "opened the database"
         );
-        let mut readers = Vec::new();
-        for _ in 0..4 {
-            let mut reader = CovenPolicy::new(&tables).open(
-                &path,
-                true,
-                &whole,
-                &self.sqlite,
-                &self.functions,
-                Some(&views),
-            )?;
-            reader.serve(observer.clone());
-            readers.push(Mutex::new(reader));
-        }
         Ok(StoreDatabase {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
@@ -434,8 +391,7 @@ impl DatabaseBuilder {
                 inputs,
                 staging: Arc::new(crate::reserved_names::ReservedNames::new(observer.clone())),
                 access: DatabaseAccess {
-                    writer,
-                    readers: ReadPool::new(readers),
+                    database,
                     observer,
                     write_schema,
                     directory: self.directory,
@@ -445,8 +401,6 @@ impl DatabaseBuilder {
                     #[cfg(test)]
                     local_open_gate: Mutex::new(None),
                 },
-                checkpoints,
-                statistics,
                 migrations: outcomes,
                 raise_operation: self.migration_operation,
                 joining_write: self.joining_write,
@@ -483,69 +437,56 @@ impl DatabaseBuilder {
         let views = |setup: &Setup<'_>| {
             crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
         };
-        let mut first = CovenPolicy::read_only(&tables).open(
-            &path,
-            true,
-            &whole,
-            &self.sqlite,
-            &self.functions,
-            Some(&views),
-        )?;
         // A read-only open runs no step, so nothing reaches `progress`.
         let clock = match self.clock {
             Some(clock) => clock,
             None => Arc::new(SystemClock),
         };
-        crate::store_call::outside_store(|call| {
-            let first = &mut first;
-            crate::schema_preparation::prepare_schema(
-                first,
-                call,
-                &tables,
-                &migrations,
-                &self.functions.versions(),
-                None,
-                None,
-                None,
-                &mut ProgressReport::of(&self.progress, clock),
-            )
-        })?;
-        let mut schema = crate::store_call::outside_store(|call| {
-            let first = &first;
-            crate::write_schema::WriteSchema::read(first, call, tables.clone())
-        })?;
-        schema.namespaces = self.namespaces;
-        first.serve(observer.clone());
-        let mut readers = vec![Mutex::new(first)];
-        for _ in 1..4 {
-            let mut reader = CovenPolicy::read_only(&tables).open(
-                &path,
-                true,
-                &whole,
-                &self.sqlite,
-                &self.functions,
-                Some(&views),
-            )?;
-            reader.serve(observer.clone());
-            readers.push(Mutex::new(reader));
-        }
-        let mut writer = CovenPolicy::read_only(&tables).open(
+        let setup = crate::app_policy::setup(&self.functions, Some(&views));
+        // The checks run on a reader. The cache connection, writable, opens
+        // only once they pass.
+        let (database, schema) = Database::open_with(
             &path,
-            false,
-            &whole,
-            &self.sqlite,
-            &self.functions,
-            Some(&views),
+            observer.clone(),
+            Options {
+                settings: self.sqlite.clone(),
+                readers: READERS,
+                prepare_on_reader: true,
+                whole_views: whole,
+                policy: &|| CovenPolicy::read_only(&tables),
+                setup: &setup,
+                capture: None,
+                checkpoint_pages: None,
+                statistics: false,
+            },
+            |first| {
+                crate::store_call::outside_store(|call| {
+                    crate::schema_preparation::prepare_schema(
+                        first,
+                        call,
+                        &tables,
+                        &migrations,
+                        &self.functions.versions(),
+                        None,
+                        None,
+                        None,
+                        &mut ProgressReport::of(&self.progress, clock),
+                    )
+                })?;
+                let mut schema = crate::store_call::outside_store(|call| {
+                    crate::write_schema::WriteSchema::read(first, call, tables.clone())
+                })?;
+                schema.namespaces = self.namespaces;
+                Ok::<_, OpenError>(schema)
+            },
         )?;
-        writer.serve(observer.clone());
         Ok(StoreDatabase {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: (),
             bugs: self.directory.bugs().clone(),
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
-                writer: Arc::new(Mutex::new(writer)),
-                readers: ReadPool::new(readers),
+                database,
                 observer,
                 lock,
                 write_schema: schema,
@@ -686,25 +627,34 @@ fn store_observer(bugs: &coven_foundation::task::BugSinkRef) -> StoreHandle {
     )
 }
 
-/// A connection to a database of coven's own tables only, such as the input
-/// database or a discarded one: no app table, SQLite setting or function
-/// reaches it.
-fn coven_only(
+/// The settings of a database of coven's own tables only, such as the
+/// input database or a discarded one: no app table, SQLite setting or
+/// function reaches it.
+fn coven_only_settings() -> crate::SqliteSettings {
+    // The input database is a cache held to its byte budget (§21.1), and the
+    // next received range reuses its freed pages; giving them back would
+    // shrink and regrow the file.
+    crate::SqliteSettings { auto_vacuum: Some(AutoVacuum::Off), ..Default::default() }
+}
+
+/// A lone connection to a database of coven's own tables only, such as a
+/// discarded one, which registers coven's `views` when given.
+pub(crate) fn coven_only(
     path: &std::path::Path,
     read_only: bool,
     views: Option<&crate::coven_functions::Views<'_>>,
 ) -> Result<DatabaseConnection, DbError> {
-    CovenPolicy::new(&[]).open(
+    let functions = crate::SqlFunctions::default();
+    let setup = crate::app_policy::setup(&functions, views);
+    let connection = DatabaseConnection::open(
         path,
         read_only,
-        &crate::internal_schema::whole_views(),
-        // The input database is a cache held to its byte budget (§21.1), and
-        // the next received range reuses its freed pages; giving them back
-        // would shrink and regrow the file.
-        &crate::SqliteSettings { auto_vacuum: Some(AutoVacuum::Off), ..Default::default() },
-        &crate::SqlFunctions::default(),
-        views,
-    )
+        CovenPolicy::new(&[]),
+        crate::internal_schema::whole_views(),
+        &coven_only_settings(),
+        &setup,
+    )?;
+    Ok(connection)
 }
 
 #[cfg(test)]

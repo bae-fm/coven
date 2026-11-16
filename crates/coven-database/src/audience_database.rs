@@ -74,13 +74,13 @@ impl AudienceDatabase {
         let views = |setup: &Setup<'_>| {
             crate::coven_functions::register_views(setup, device, &transfers, &network)
         };
-        let database = CovenPolicy::new(tables).open(
+        let database = DatabaseConnection::open(
             &directory.audience_database_path(),
             false,
-            whole,
+            CovenPolicy::new(tables),
+            Arc::clone(whole),
             sqlite,
-            functions,
-            Some(&views),
+            &crate::app_policy::setup(functions, Some(&views)),
         )?;
         // From here every way out removes the files.
         let mut result = Self {

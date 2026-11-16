@@ -74,8 +74,9 @@ pub(crate) struct DatabaseConnection<P: Policy = CovenPolicy> {
     statement_log: std::cell::RefCell<Option<crate::test_utils::StatementLog>>,
     connection: Connection,
     authorization: SqlAuthorization<P>,
-    /// What the host adds to the authorizer's rules.
-    policy: P,
+    /// What the host adds to the authorizer's rules, shared with the
+    /// authorizer.
+    policy: Arc<P>,
     /// Stops a lookup that runs too long (`live_judging.rs`).
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
@@ -132,14 +133,20 @@ impl<P: Policy> DatabaseConnection<P> {
         }
     }
 
+    /// A connection to the database at `path`, for reading only when
+    /// `read_only`, whose authorizer asks `policy` after its own rules and
+    /// treats `whole_views` as a live query's whole reads. `setup` registers
+    /// what the connection needs, given its policy, before any SQL runs.
     pub(crate) fn open(
         path: &Path,
         read_only: bool,
-        authorization: SqlAuthorization<P>,
         policy: P,
+        whole_views: Arc<sqlive::WholeViews>,
         settings: &crate::SqliteSettings,
-        setup: &dyn Fn(&Setup<'_, P>) -> rusqlite::Result<()>,
+        setup: &dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
     ) -> Result<Self, PolicyError<P>> {
+        let policy = Arc::new(policy);
+        let authorization = SqlAuthorization::new(whole_views, Arc::clone(&policy));
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } else {
@@ -164,7 +171,7 @@ impl<P: Policy> DatabaseConnection<P> {
         // SQLite parse and plan it again on its next use, once per row of a
         // commit's lookups.
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
-        setup(&Setup::new(&connection, &authorization))?;
+        setup(&Setup::new(&connection, &authorization), &policy)?;
         connection.authorizer(Some(authorization.callback()))?;
         let lookups = live_judging::LookupLimit::install(&mut connection)?;
         let db = Self {
@@ -244,7 +251,7 @@ impl<P: Policy> DatabaseConnection<P> {
             }
         }
         self.policy.enter(&scope);
-        let _entered = EnteredScope { policy: &self.policy, scope };
+        let _entered = EnteredScope { policy: &*self.policy, scope };
         run()
     }
 

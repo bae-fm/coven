@@ -324,16 +324,8 @@ fn recorded_library_in(connection: &DatabaseConnection) -> Vec<i64> {
 #[test]
 fn a_new_database_records_the_sqlite_that_created_it() {
     let directory = tempfile::tempdir().unwrap();
-    let mut connection = crate::app_policy::CovenPolicy::new(&[])
-        .open(
-            &directory.path().join("new.db"),
-            false,
-            &crate::internal_schema::whole_views(),
-            &crate::SqliteSettings::default(),
-            &SqlFunctions::default(),
-            None,
-        )
-        .unwrap();
+    let mut connection =
+        crate::database::coven_only(&directory.path().join("new.db"), false, None).unwrap();
     let connection = &mut connection;
     crate::schema_preparation::prepare_internal_schema(connection).unwrap();
     assert_eq!(recorded_library_in(connection), [i64::from(rusqlite::version_number())]);

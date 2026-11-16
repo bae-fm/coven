@@ -67,8 +67,7 @@ impl<P: Policy> UpkeepThread<Checkpoints<P>> {
     /// Take checkpointing `writer`'s database over from its commits, once
     /// the WAL holds `threshold` frames not yet checkpointed, on
     /// `connection`, a connection of its own to the same database, failing
-    /// `handle` if checkpointing fails. Coven's checkpoints read and write
-    /// none of the app's tables, so it needs none of the app's functions.
+    /// `handle` if checkpointing fails.
     pub(crate) fn start(
         connection: DatabaseConnection<P>,
         writer: &Arc<Mutex<DatabaseConnection<P>>>,

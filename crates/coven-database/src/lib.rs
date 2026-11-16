@@ -113,6 +113,7 @@ mod snapshot_write;
 mod snapshot_writes;
 mod sql_read;
 mod sqlite;
+mod sqlite_database;
 mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
