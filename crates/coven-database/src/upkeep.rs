@@ -17,7 +17,7 @@
 //! `EngineError::HandleFailed` carrying it, so the thread never ends in a way no
 //! one hears of.
 
-use crate::engine_error::EngineError;
+use crate::engine_error::{EngineError, EngineFailure};
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +33,7 @@ pub(crate) trait Upkeep: Send + Sync + 'static {
 
     /// What the handle fails with once a run fails with `error` other than
     /// on a busy or locked database.
-    fn failure(error: EngineError<StoreFailure>) -> EngineError<StoreFailure>;
+    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure>;
 }
 
 /// Wakes an upkeep thread. Waking only leaves the thread's permit, which

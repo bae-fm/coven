@@ -4,7 +4,22 @@
 
 use coven_foundation::task::Bug;
 use std::path::PathBuf;
-use std::sync::Arc;
+
+/// A failure of the engine's own that ends its handle: every later call
+/// and live query fails with the host's failure built from it.
+#[derive(Debug)]
+pub(crate) enum EngineFailure<F> {
+    /// Rolling back a failed transaction failed, so a connection may still
+    /// be inside it.
+    Rollback,
+    /// One of the engine's WAL checkpoints failed with this cause, other than
+    /// on a busy or locked database, so checkpointing stopped.
+    Checkpoint(EngineError<F>),
+    /// Checking or gathering the query planner's statistics failed with this
+    /// cause, other than on a busy or locked database, so keeping them
+    /// stopped.
+    Statistics(EngineError<F>),
+}
 
 /// Why an engine call failed.
 #[derive(Debug)]
@@ -25,16 +40,6 @@ pub(crate) enum EngineError<F> {
     },
     /// SQLite rolled the owned transaction back itself, so it can't go on.
     TransactionEnded,
-    /// An earlier call's rollback failed, so a connection may still be inside
-    /// that transaction; the handle refuses calls until reopened.
-    RollbackFailed,
-    /// One of the engine's WAL checkpoints failed with this cause, other than
-    /// on a busy or locked database, so checkpointing stopped.
-    CheckpointFailed(Arc<EngineError<F>>),
-    /// Checking or gathering the query planner's statistics failed with this
-    /// cause, other than on a busy or locked database, so keeping them
-    /// stopped.
-    StatisticsFailed(Arc<EngineError<F>>),
     /// The handle has closed the database.
     Closed,
     /// The call's work panicked: a bug, which the caller reports.
@@ -75,8 +80,8 @@ pub(crate) enum EngineError<F> {
         /// What the file system answered.
         source: std::io::Error,
     },
-    /// A transaction failed and rolling it back failed too. Later calls fail
-    /// with `RollbackFailed` until reopened.
+    /// A transaction failed and rolling it back failed too. The handle fails
+    /// with `EngineFailure::Rollback`.
     Rollback {
         /// The operation that required rollback.
         operation: Box<EngineError<F>>,
@@ -95,11 +100,6 @@ impl<F: std::fmt::Display> std::fmt::Display for EngineError<F> {
                 write!(f, "app SQL cannot perform {operation}")
             }
             Self::TransactionEnded => f.write_str("SQLite ended the owned transaction"),
-            Self::RollbackFailed => f.write_str("an earlier rollback failed; reopen the store"),
-            Self::CheckpointFailed(cause) => write!(f, "a WAL checkpoint failed: {cause}"),
-            Self::StatisticsFailed(cause) => {
-                write!(f, "gathering the planner's statistics failed: {cause}")
-            }
             Self::Closed => f.write_str("store is closed"),
             Self::Bug(bug) => bug.fmt(f),
             Self::HandleFailed(bug) => {
@@ -129,7 +129,6 @@ impl<F: std::error::Error + 'static> std::error::Error for EngineError<F> {
             Self::Refused(refusal) => refusal.source(),
             Self::Bug(bug) => bug.source(),
             Self::Host(failure) => failure.source(),
-            Self::CheckpointFailed(cause) | Self::StatisticsFailed(cause) => Some(cause.as_ref()),
             Self::UpkeepThread(error) => Some(error),
             Self::Path { source, .. } => Some(source),
             Self::Rollback { rollback, .. } => Some(rollback),

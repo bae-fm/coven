@@ -2,7 +2,7 @@
 //! snapshot, and checks whose scratch writes are discarded.
 
 use super::DatabaseConnection;
-use crate::engine_error::{EngineError, RollbackJoin};
+use crate::engine_error::{EngineError, EngineFailure, RollbackJoin};
 use crate::store_failure::StoreFailure;
 
 impl DatabaseConnection {
@@ -108,7 +108,7 @@ impl DatabaseConnection {
         };
         if result.is_err() {
             if let Some(handle) = &self.handle {
-                handle.fail(StoreFailure::from(EngineError::RollbackFailed));
+                handle.fail(StoreFailure::from(EngineFailure::Rollback));
             }
         }
         result

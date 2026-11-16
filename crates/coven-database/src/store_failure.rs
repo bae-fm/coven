@@ -1,7 +1,7 @@
 //! The failures coven reports to its handle as its host, after which the
 //! handle's every call fails.
 
-use crate::engine_error::EngineError;
+use crate::engine_error::EngineFailure;
 use crate::DbError;
 use coven_foundation::clock::WallTimerError;
 use std::sync::Arc;
@@ -40,27 +40,14 @@ impl StoreFailure {
     }
 }
 
-/// The engine's error that ended the handle, as coven holds it: each later
+/// The engine's failure that ended the handle, as coven holds it: each later
 /// call's error carries the same cause.
-impl From<EngineError<StoreFailure>> for StoreFailure {
-    fn from(error: EngineError<StoreFailure>) -> Self {
-        match error {
-            EngineError::RollbackFailed => Self::Rollback,
-            EngineError::CheckpointFailed(cause) => Self::Checkpoint(Arc::new(sole(cause))),
-            EngineError::StatisticsFailed(cause) => Self::Statistics(Arc::new(sole(cause))),
-            EngineError::Host(failure) => failure,
-            // The engine ends a handle only on the three above; any other
-            // error keeps its cause as a state failure.
-            other => Self::State(Arc::new(DbError::from(other))),
+impl From<EngineFailure<StoreFailure>> for StoreFailure {
+    fn from(failure: EngineFailure<StoreFailure>) -> Self {
+        match failure {
+            EngineFailure::Rollback => Self::Rollback,
+            EngineFailure::Checkpoint(cause) => Self::Checkpoint(Arc::new(DbError::from(cause))),
+            EngineFailure::Statistics(cause) => Self::Statistics(Arc::new(DbError::from(cause))),
         }
-    }
-}
-
-/// A checkpoint's or statistics' cause as coven reports it. The engine
-/// hands it on as its only holder.
-pub(crate) fn sole(cause: Arc<EngineError<StoreFailure>>) -> DbError {
-    match Arc::try_unwrap(cause) {
-        Ok(cause) => DbError::from(cause),
-        Err(_) => DbError::Invariant { what: "a checkpoint's or statistics' cause has one holder" },
     }
 }

@@ -13,7 +13,7 @@
 //! starts a run. A run gathers the statistics as an open does, holding
 //! coven's writer so no write of coven's finds the database locked meanwhile.
 
-use crate::engine_error::EngineError;
+use crate::engine_error::{EngineError, EngineFailure};
 use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
@@ -98,8 +98,8 @@ impl Upkeep for PlannerStatistics {
         Ok(())
     }
 
-    fn failure(error: EngineError<StoreFailure>) -> EngineError<StoreFailure> {
-        EngineError::StatisticsFailed(Arc::new(error))
+    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure> {
+        EngineFailure::Statistics(error)
     }
 }
 

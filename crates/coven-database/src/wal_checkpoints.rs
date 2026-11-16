@@ -20,7 +20,7 @@
 //! other failure fails the handle rather than leave the store open while
 //! its WAL grows without bound.
 
-use crate::engine_error::EngineError;
+use crate::engine_error::{EngineError, EngineFailure};
 use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
@@ -116,8 +116,8 @@ impl Upkeep for Checkpoints {
         self.checkpoint()
     }
 
-    fn failure(error: EngineError<StoreFailure>) -> EngineError<StoreFailure> {
-        EngineError::CheckpointFailed(Arc::new(error))
+    fn failure(error: EngineError<StoreFailure>) -> EngineFailure<StoreFailure> {
+        EngineFailure::Checkpoint(error)
     }
 }
 

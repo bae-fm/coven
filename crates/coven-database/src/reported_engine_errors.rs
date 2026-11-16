@@ -2,9 +2,8 @@
 //! sees, through which every error of coven's own converts from them.
 
 use crate::engine_error::EngineError;
-use crate::store_failure::{sole, StoreFailure};
+use crate::store_failure::StoreFailure;
 use crate::{DbError, OpenError};
-use std::sync::Arc;
 
 /// An engine error as the `DbError` an app sees. An error coven raised
 /// inside a SQL function, or a refusal of coven's policy, comes back as
@@ -20,9 +19,6 @@ impl From<EngineError<StoreFailure>> for DbError {
             },
             EngineError::StatementForbidden { operation } => Self::StatementForbidden { operation },
             EngineError::TransactionEnded => Self::TransactionEnded,
-            EngineError::RollbackFailed => Self::RollbackFailed,
-            EngineError::CheckpointFailed(cause) => Self::CheckpointFailed(Arc::new(sole(cause))),
-            EngineError::StatisticsFailed(cause) => Self::StatisticsFailed(Arc::new(sole(cause))),
             EngineError::Closed => Self::StoreClosed,
             EngineError::Bug(bug) => Self::Bug(bug),
             EngineError::HandleFailed(bug) => Self::StoreFailed(bug),
