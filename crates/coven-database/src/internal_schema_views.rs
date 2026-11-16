@@ -14,7 +14,8 @@
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_pin_requests.rs`,
 /// `internal_schema_moves.rs`, `internal_schema_upload_queue.rs`,
-/// `internal_schema_sync_status.rs`, `internal_schema_retry_effect.rs`).
+/// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
+/// `internal_schema_retry_effect.rs`).
 const READABLE: [&str; 20] = [
     super::FILES,
     "coven_user_files",
@@ -29,7 +30,7 @@ const READABLE: [&str; 20] = [
     super::MOVES,
     super::SYNC_STATUS,
     super::RETRY_EFFECT,
-    "coven_pending",
+    super::PENDING,
     "coven_invites",
     "coven_operations",
     "coven_members",
@@ -100,29 +101,6 @@ pub(super) const SCHEMA: &str = concat!(
         FROM json_each(_coven_downloading_objects()) AS j
         CROSS JOIN _coven_stored_files AS f
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
-    // Every pending record (§19.1), in the order the records arose; a
-    // record about stored bytes also names each file over them on this
-    // device: the files an upload switches, or the stored files, and a
-    // record about a pin coven keeps names its file. Its cause is the text
-    // of the error behind it, when this run met that error and no app call
-    // received it. A record about a move names it in `move`, the id
-    // `coven_uploads.move` holds. `operation` is the journal row a record
-    // describes. `subject_kind` and `reason_kind` name the variants of the
-    // record's subject and reason in snake case, as `PendingSubject` and
-    // `PendingReason` name them; `original_path` is the path, as the bytes
-    // `coven_user_files.path` holds, of a reason that an original is missing
-    // or changed, and NULL for any other.
-    "CREATE VIEW coven_pending(record,file,position,cause,move,operation,subject_kind,
-            reason_kind,original_path) AS
-        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause,e.move,e.operation,
-            _coven_variant_kind(CAST(e.value AS TEXT)->'$.subject'),
-            _coven_variant_kind(CAST(e.value AS TEXT)->'$.reason'),
-            _coven_json_bytes(CAST(e.value AS TEXT)->'$.reason.Original.path')
-        FROM _coven_pending AS e
-        LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.object=e.object
-        LEFT JOIN _coven_upload_files AS l ON l.upload=u.id
-        LEFT JOIN _coven_stored_files AS f ON u.id IS NULL
-            AND f.device=e.device AND f.object=e.object;",
     // This device's invites that haven't ended, in the order they were made,
     // from the operations journal: each from the write that makes it, while
     // its share is recorded and its access granted, its request is awaited

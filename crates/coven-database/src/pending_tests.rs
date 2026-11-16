@@ -671,10 +671,21 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_pending(subject,value,operation,slot_key,work,device,object,build)
-           SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
+           SELECT key,CAST('{}' AS BLOB),CASE WHEN i%2=0 THEN i END,
                   CAST(x'00' || n AS BLOB),CASE WHEN i%4=1 THEN 'upload' WHEN i%4=3 THEN 'download' END,
                   CASE WHEN i%2=1 THEN device END,
                   CASE WHEN i%2=1 THEN substr(key,17,16) END,zeroblob(16) FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// Change the cause of half the fixture's records and clear others, for
+/// the audit's check that the tables coven's triggers keep follow them
+/// (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "UPDATE _coven_pending SET cause='changed' WHERE id%2=0;
+         DELETE FROM _coven_pending WHERE id%11=0;",
     )
     .unwrap();
 }

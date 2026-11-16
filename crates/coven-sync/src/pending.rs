@@ -593,7 +593,7 @@ impl PendingReason {
     }
 }
 
-/// A record as coven's `coven_uploads` and `coven_pending` views hold it
+/// A record as coven's `coven_uploads` view and `coven_pending` table hold it
 /// (api.md E4), without its cause: `coven_pending.cause` holds that.
 impl coven_database::types::FromSql for PendingRecord {
     fn column_result(

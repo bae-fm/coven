@@ -68,14 +68,15 @@ async fn only_the_spec_tables_are_created() {
             }
         }
         // What the app's SQL reads (Appendix C.1): the views, the files
-        // table, and the pins, pin requests, moves, queue, sync status and
-        // retry effect coven keeps as tables, which the app's triggers may
-        // follow.
+        // table, and the pins, pin requests, moves, queue, pending records,
+        // sync status and retry effect coven keeps as tables, which the
+        // app's triggers may follow.
         assert_eq!(
             views,
             [
                 ("table".into(), "coven_files".into()),
                 ("table".into(), "coven_moves".into()),
+                ("table".into(), "coven_pending".into()),
                 ("table".into(), "coven_pin_requests".into()),
                 ("table".into(), "coven_pins".into()),
                 ("table".into(), "coven_retry_effect".into()),
@@ -89,7 +90,6 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_members".into()),
                 ("view".into(), "coven_network".into()),
                 ("view".into(), "coven_operations".into()),
-                ("view".into(), "coven_pending".into()),
                 ("view".into(), "coven_sending".into()),
                 ("view".into(), "coven_upload_pause".into()),
                 ("view".into(), "coven_uploads".into()),
@@ -100,7 +100,7 @@ async fn only_the_spec_tables_are_created() {
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table'
                  AND name NOT IN('coven_files','coven_pins','coven_pin_requests','coven_moves',
-                     'coven_upload_queue','coven_sync_status','coven_retry_effect')
+                     'coven_upload_queue','coven_pending','coven_sync_status','coven_retry_effect')
                  ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),

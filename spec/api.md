@@ -1586,8 +1586,8 @@ pub enum DbError {
     InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one,
     /// including a trigger on `coven_files`, `coven_pins`,
-    /// `coven_pin_requests`, `coven_moves` or `coven_upload_queue` and those
-    /// it fires (§9.4).
+    /// `coven_pin_requests`, `coven_moves`, `coven_upload_queue` or
+    /// `coven_pending` and those it fires (§9.4).
     TriggerTarget { trigger: String, table: String },
     /// A bulk write's statement, or a trigger or foreign-key action it would
     /// run, writes a synced table (§4, E3). Nothing committed.
@@ -1959,8 +1959,9 @@ pub enum SchemaError {
     /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
     /// A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
-    /// `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
-    /// `coven_retry_effect` runs before its change (§9.4).
+    /// `coven_moves`, `coven_upload_queue`, `coven_pending`,
+    /// `coven_sync_status` or `coven_retry_effect` runs before its change
+    /// (§9.4).
     TriggerTiming { trigger: String, table: String },
 }
 
@@ -3678,10 +3679,10 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads eleven views of coven's own tables and
-  seven tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
-  `coven_moves`, `coven_upload_queue`, `coven_sync_status` and
-  `coven_retry_effect`, in reads,
+- *Coven's state in SQL.* App SQL reads twelve views of coven's own tables and
+  eight tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`
+  and `coven_retry_effect`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -3690,7 +3691,7 @@ let moved = handle
   own after one.
 - The app's migrations may declare local triggers on `coven_files`,
   `coven_pins`, `coven_pin_requests`, `coven_moves`, `coven_upload_queue`,
-  `coven_sync_status` and `coven_retry_effect`, AFTER their
+  `coven_pending`, `coven_sync_status` and `coven_retry_effect`, AFTER their
   changes, writing only
   local tables and reading only what app SQL reads
   ([§9.4](coven.md#94-triggers)). A trigger on `coven_files` sees each record
@@ -3738,7 +3739,7 @@ let moved = handle
   for it, written with the record. Opening clears every cause: one an earlier
   run wrote names a failure nothing has met since (E5).
 - *The app's schema outside a store, in tests.* With the test-utils
-  feature, `followed_tables_sql` gives the SQL that makes the seven tables
+  feature, `followed_tables_sql` gives the SQL that makes the eight tables
   above as every store makes them, `coven_sync_status` and
   `coven_retry_effect` with their one row. A test that runs the app's schema
   on a connection it opened itself, outside any store, runs it first, so the
@@ -3808,8 +3809,8 @@ let moved = handle
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
 | | `cooling_until` | while syncing, when the provider cooldown holding every pass ends, in milliseconds since the Unix epoch by the store's clock, rounded up; NULL with no cooldown, and while stopped |
-| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without its cause |
-| | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
+| `coven_pending`: every pending record (§19.1), once for each file it names, or once with no file; a table, which local triggers can follow: a record's rows appear in the transaction that records it, change as what the record says changes, a file's row appears as the record comes to name the file and goes as it stops naming it, and the rest go in the transaction that ends the record | `record` | the record, read as `PendingRecord`, without its cause |
+| | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload switches, or, while it switches none, the stored files, so a file the upload switches keeps its row as it is stored; for a record about a pin, its file; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
 | | `move` | for a record about a move, such as its original found missing, the move, read as `MoveId` and joined to `coven_uploads.move`; NULL otherwise |

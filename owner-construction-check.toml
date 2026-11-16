@@ -948,10 +948,12 @@ name = "file protection"
 owner = "Database"
 # A snapshot install settles protection a table at a time in
 # snapshot_files.rs; the pins' triggers on the stored files keep the pins
-# table, the stored files' schema.
+# table, the stored files' schema, and the pending records' triggers on them
+# keep coven_pending.
 homes = [
     "crates/coven-database/src/file_protection.rs",
     "crates/coven-database/src/file_protection_schema.rs",
+    "crates/coven-database/src/internal_schema_pending.rs",
     "crates/coven-database/src/internal_schema_pins.rs",
     "crates/coven-database/src/snapshot_files.rs",
 ]
@@ -1001,10 +1003,12 @@ tables = [
 name = "file uploads"
 owner = "Database"
 # The upload queue's triggers on the uploads' files keep the
-# coven_upload_queue table, the upload files' schema.
+# coven_upload_queue table, the upload files' schema; the pending records'
+# triggers on the uploads and their files keep coven_pending.
 homes = [
     "crates/coven-database/src/file_queue.rs",
     "crates/coven-database/src/file_queue_schema.rs",
+    "crates/coven-database/src/internal_schema_pending.rs",
     "crates/coven-database/src/internal_schema_upload_queue.rs",
 ]
 tables = [
@@ -1092,7 +1096,9 @@ tables = [
 [[database.domains]]
 name = "pending"
 owner = "Database"
+# The triggers keeping coven_pending follow the records.
 homes = [
+    "crates/coven-database/src/internal_schema_pending.rs",
     "crates/coven-database/src/pending.rs",
     "crates/coven-database/src/pending_schema.rs",
 ]

@@ -33,8 +33,6 @@ mod fixture {
             ("_coven_unix_ms", 1),
             ("_coven_unix_seconds", 1),
             ("_coven_unix_nanos", 1),
-            ("_coven_variant_kind", 1),
-            ("_coven_json_bytes", 1),
             ("_coven_request_member", 1),
             ("_coven_request_joiner", 1),
             ("coven_key", -1),
@@ -45,6 +43,13 @@ mod fixture {
             ("_coven_stored_object_path", 1),
         ] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new())).unwrap();
+        }
+        // The pending records' triggers run these as the fixture fills
+        // them, whose records name no subject or reason: coven's own give
+        // NULL for each, as these do.
+        for name in ["_coven_variant_kind", "_coven_json_bytes"] {
+            db.create_scalar_function(name, 1, flags, |_| Ok(rusqlite::types::Value::Null))
+                .unwrap();
         }
         // Like coven's own, this varies, so SQLite never evaluates it while
         // planning a statement.
@@ -321,6 +326,7 @@ mod source {
                     | "internal_schema_pin_requests.rs"
                     | "internal_schema_moves.rs"
                     | "internal_schema_upload_queue.rs"
+                    | "internal_schema_pending.rs"
             ) {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
@@ -763,6 +769,34 @@ fn the_moves_table_holds_what_coven_keeps() {
             "{from} beyond {to}"
         );
     }
+}
+
+/// Coven's triggers keep `coven_pending` what `_coven_pending_source` says,
+/// however the tables behind it were filled, and as uploads, their files,
+/// stored files and records change and go.
+#[test]
+fn the_pending_table_holds_what_its_source_says() {
+    let db = fixture::populated();
+    let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let agrees = || {
+        for (from, to) in
+            [("coven_pending", "_coven_pending_source"), ("_coven_pending_source", "coven_pending")]
+        {
+            assert_eq!(
+                differ(&format!(
+                    "SELECT count(*) FROM (SELECT * FROM {from} EXCEPT SELECT * FROM {to})"
+                )),
+                0,
+                "{from} beyond {to}"
+            );
+        }
+    };
+    assert!(differ("SELECT count(*) FROM coven_pending WHERE file IS NOT NULL") > 0);
+    agrees();
+    crate::file_queue::tests::change_for_plans(&db);
+    crate::file_protection::tests::change_for_plans(&db);
+    crate::pending::tests::change_for_plans(&db);
+    agrees();
 }
 
 /// Coven's triggers keep `coven_upload_queue` the files `coven_uploads`

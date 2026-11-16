@@ -15,6 +15,16 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     .unwrap();
 }
 
+/// Retire a third of the fixture's uploads, for the audit's check that the
+/// tables coven's triggers keep follow them (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "DELETE FROM _coven_upload_files WHERE upload%3=0;
+         DELETE FROM _coven_file_uploads WHERE id%3=0;",
+    )
+    .unwrap();
+}
+
 /// The statement pausing uploads, for a test of what a transaction records.
 pub(crate) const PAUSE: &str = "INSERT INTO _coven_upload_pause VALUES(1)";
 

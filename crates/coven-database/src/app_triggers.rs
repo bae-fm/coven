@@ -1,7 +1,7 @@
 //! The app's triggers that coven's own statements fire: those on the tables
 //! they may follow, `coven_files`, `coven_pins`, `coven_pin_requests`,
-//! `coven_moves`, `coven_upload_queue`, `coven_sync_status` and
-//! `coven_retry_effect`, and those on the app's tables as coven applies writes
+//! `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`
+//! and `coven_retry_effect`, and those on the app's tables as coven applies writes
 //! (§9.4). The authorizer judges what each writes, reads and calls as it would
 //! in an app statement, and a refusal names the trigger.
 
@@ -26,8 +26,8 @@ const FILE_CHANGES: [&str; 3] = [
 ];
 
 /// Each change coven's own triggers make to the tables they keep for the app:
-/// its pins, pin requests, moves and upload queue.
-const KEPT_CHANGES: [&str; 12] = [
+/// its pins, pin requests, moves, upload queue and pending records.
+const KEPT_CHANGES: [&str; 15] = [
     "INSERT INTO coven_pins(file) VALUES('')",
     "UPDATE coven_pins SET file=file",
     "DELETE FROM coven_pins",
@@ -40,6 +40,9 @@ const KEPT_CHANGES: [&str; 12] = [
     "INSERT INTO coven_upload_queue(file,position) VALUES('',0)",
     "UPDATE coven_upload_queue SET file=file",
     "DELETE FROM coven_upload_queue",
+    "INSERT INTO coven_pending(record,file,position,cause,move,operation,subject_kind,reason_kind,original_path) VALUES(x'',NULL,0,NULL,NULL,NULL,NULL,NULL,NULL)",
+    "UPDATE coven_pending SET record=record,cause=cause,move=move,operation=operation,subject_kind=subject_kind,reason_kind=reason_kind,original_path=original_path",
+    "DELETE FROM coven_pending",
 ];
 
 impl DatabaseConnection {
@@ -60,9 +63,9 @@ impl DatabaseConnection {
 /// Refuse the app's triggers on the tables they may follow that do what
 /// app SQL may not: write coven's tables, read them other than through
 /// its views, or call what only those views may, and that write synced
-/// tables, since a pin, a move, a queued file, the sync status, the retry
-/// effect and what a trigger keeps of a file's record are this device's
-/// alone.
+/// tables, since a pin, a move, a queued file, a pending record, the sync
+/// status, the retry effect and what a trigger keeps of a file's record are
+/// this device's alone.
 /// Coven changes these tables in its own statements, and as it applies
 /// merged rows of `coven_files`; the authorizer judges the app's
 /// triggers alike in both. Preparing each change, without running it,

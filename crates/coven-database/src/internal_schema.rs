@@ -273,6 +273,7 @@ pub(crate) fn initial_schema() -> String {
     }
     sql.push_str(&pins::source());
     sql.push_str(upload_queue::TRIGGERS);
+    sql.push_str(pending::SOURCE);
     sql.push_str(views::SCHEMA);
     sql
 }
@@ -297,6 +298,10 @@ pub(crate) use moves::MOVES;
 mod upload_queue;
 pub(crate) use upload_queue::UPLOAD_QUEUE;
 
+#[path = "internal_schema_pending.rs"]
+mod pending;
+pub(crate) use pending::PENDING;
+
 #[path = "internal_schema_sync_status.rs"]
 pub(crate) mod sync_status;
 pub(crate) use sync_status::SYNC_STATUS;
@@ -318,12 +323,13 @@ pub(crate) struct FollowedTable {
 /// as each record is made, stored or deleted here or merged from another
 /// device, its sync status and retry effect as they change, and the app's
 /// AFTER triggers on them write only local tables.
-pub(crate) const FOLLOWED: [FollowedTable; 7] = [
+pub(crate) const FOLLOWED: [FollowedTable; 8] = [
     FollowedTable { name: FILES, table: files::TABLE },
     FollowedTable { name: PINS, table: pins::TABLE },
     FollowedTable { name: PIN_REQUESTS, table: pin_requests::TABLE },
     FollowedTable { name: MOVES, table: moves::TABLE },
     FollowedTable { name: UPLOAD_QUEUE, table: upload_queue::TABLE },
+    FollowedTable { name: PENDING, table: pending::TABLE },
     FollowedTable { name: SYNC_STATUS, table: sync_status::TABLE },
     FollowedTable { name: RETRY_EFFECT, table: retry_effect::TABLE },
 ];

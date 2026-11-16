@@ -246,9 +246,9 @@ pub enum SchemaError {
         trigger: String,
     },
     /// A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
-    /// `coven_moves`, `coven_upload_queue`, `coven_sync_status` or
-    /// `coven_retry_effect` runs before the change, where it could skip or
-    /// refuse coven's own (§9.4).
+    /// `coven_moves`, `coven_upload_queue`, `coven_pending`,
+    /// `coven_sync_status` or `coven_retry_effect` runs before the change,
+    /// where it could skip or refuse coven's own (§9.4).
     #[error("trigger {trigger} on {table} must run AFTER the change")]
     TriggerTiming {
         /// The trigger.

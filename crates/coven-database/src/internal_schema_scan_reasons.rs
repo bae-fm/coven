@@ -87,8 +87,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         | ("coven_retry_effect", "SELECT * FROM coven_retry_effect", "coven_retry_effect") => {
             Some("the table holds one row")
         }
-        ("coven_pending", "SELECT * FROM coven_pending", "e") => {
-            Some("the view lists every pending record")
+        ("coven_pending", "SELECT * FROM coven_pending", "coven_pending") => {
+            Some("the table lists every pending record")
         }
         (
             "database_local_bytes.rs",
