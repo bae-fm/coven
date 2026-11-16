@@ -51,9 +51,9 @@ impl<P: Policy> HostSql<P> {
     /// After a checkpoint, send the main database file's size to the
     /// database's watch, which this connection holds when it is a database's
     /// writer or checkpointer. The watch's receivers wake only when the size
-    /// changed. This reads the size while it holds the watch's lock, so when
-    /// two checkpoints end close together, the watch keeps the size read
-    /// later.
+    /// changed. `send_checkpointed_size` reads the size while it holds the
+    /// watch's lock, so when two checkpoints end close together, the watch
+    /// keeps the size read later.
     pub(crate) fn send_checkpointed_size(&self) -> Result<(), PolicyError<P>> {
         let Some(sizes) = &self.checkpointed_sizes else {
             return Ok(());

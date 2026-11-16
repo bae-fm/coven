@@ -983,25 +983,26 @@ on macOS and iOS (§3). A live query that runs again after every commit keeps a
 reader's snapshot open nearly all the time, so that checkpoint can't copy the
 whole WAL, and every later commit runs another. Ben's music app imported 2,000
 small writes in 0.36 s with nobody reading, and in 2.3 to 4.5 s with its list's
-live query running again after each one, while the WAL grew to 23 MB. So no
-connection of the store's checkpoints as it commits: not the writer, and not
-the connection that keeps the planner's statistics while the store stays open,
-whose commits hold the writer. Each commit wakes a thread of the store's own
-instead, which checkpoints on a connection of its own once the WAL
-holds 1,000 pages, or the app's `wal_autocheckpoint`, not yet copied. It copies what
-it can while writes go on and syncs the database file, then holds coven's
-writer, copies and syncs what was committed meanwhile, and waits up to 100 ms for
-the readers to leave the WAL, so the next commit writes it from its start. A
-reader that started before then finishes within that, and later ones read the
-database file alone. The same import took 0.42 s with the live query, and 0.47
-s with a reader reading the whole table again and again without a pause, and
-the WAL stayed under 5 MB. Once the WAL starts over, its file shrinks back to
-4 MiB, or the app's `journal_size_limit`. A reader that holds one snapshot
-longer than the wait keeps the WAL from starting over; coven tries again once
-it has grown by the same amount again. Closing the store still checkpoints the
-whole WAL and removes its file. Coven's own database beside the store's,
-`inputs.db`, which keeps what this device observed in storage apart from
-the app's writes, is checkpointed the same way.
+live query running again after each one, while the WAL grew to 23 MB. So none
+of the store's connections runs a checkpoint as it commits. The writer doesn't,
+and neither does the connection that keeps the planner's statistics while the
+store stays open, because that connection's commits hold the writer. Each
+commit wakes a thread of the store's own instead, which checkpoints on a
+connection of its own once the WAL holds 1,000 pages, or the app's
+`wal_autocheckpoint`, not yet copied. It copies what it can while writes go on
+and syncs the database file, then holds coven's writer, copies and syncs what
+was committed meanwhile, and waits up to 100 ms for the readers to leave the
+WAL, so the next commit writes it from its start. A reader that started before
+then finishes within that, and later ones read the database file alone. The same
+import took 0.42 s with the live query, and 0.47 s with a reader reading the
+whole table again and again without a pause, and the WAL stayed under 5 MB. Once
+the WAL starts over, its file shrinks back to 4 MiB, or the app's
+`journal_size_limit`. A reader that holds one snapshot longer than the wait
+keeps the WAL from starting over; coven tries again once it has grown by the
+same amount again. Closing the store still checkpoints the whole WAL and removes
+its file. Coven's own database beside the store's, `inputs.db`, which keeps what
+this device observed in storage apart from the app's writes, is checkpointed the
+same way.
 
 The sync before it holds the writer keeps coven's writes from waiting for it.
 SQLite syncs the database file only when a checkpoint copies the whole WAL, and

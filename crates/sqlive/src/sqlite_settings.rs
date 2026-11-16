@@ -56,8 +56,8 @@ pub struct SqliteSettings {
     /// Unset is sqlive's 4 MiB.
     pub journal_size_limit: Option<JournalSizeLimit>,
     /// The WAL size at which sqlive checkpoints it, off the commit path; unset
-    /// is SQLite's 1000 pages (§4). No connection of a writable handle
-    /// checkpoints as it commits. A read-only handle's own commits, which
+    /// is SQLite's 1000 pages (§4). None of a writable handle's connections
+    /// runs a checkpoint as it commits. A read-only handle's own commits, which
     /// only its cache makes, checkpoint as SQLite's
     /// `PRAGMA wal_autocheckpoint` does.
     pub wal_autocheckpoint: Option<WalAutocheckpoint>,

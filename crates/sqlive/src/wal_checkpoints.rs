@@ -4,9 +4,9 @@
 //! commit wait for it, `F_FULLFSYNC` included on macOS and iOS. While a live
 //! query keeps a reader's snapshot open nearly all the time, that checkpoint
 //! can't finish, so every later commit runs another and the WAL never starts
-//! over. So no connection of the database's checkpoints as it commits: not
-//! the writer, and not the statistics thread's connection, whose commits
-//! hold the writer. Each of the writer's commits only wakes a thread of the
+//! over. So none of the database's connections runs a checkpoint as it
+//! commits: not the writer, and not the statistics thread's connection,
+//! whose commits hold the writer. Each of the writer's commits only wakes a thread of the
 //! database's own, which reads how many frames the WAL holds past what was
 //! checkpointed and, past the threshold, checkpoints on a
 //! connection of its own: first copying what it can while writes go on and
@@ -218,7 +218,7 @@ impl<P: Policy> Checkpoints<P> {
 }
 
 /// Turn SQLite's own automatic checkpoint off on `connection`, a connection
-/// of a database with a checkpointer that commits, so its commits run no
+/// that commits to a database with a checkpointer, so its commits run no
 /// checkpoint while the database stays open.
 pub(crate) fn leave_checkpoints_to_checkpointer<P: Policy>(
     connection: &HostSql<P>,

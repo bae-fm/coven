@@ -129,9 +129,10 @@ impl<P: Policy> Database<P> {
             (writer, sizes, prepared)
         };
         // Switching a new database to WAL writes the main file's first page,
-        // and the open's commits may run SQLite's own automatic checkpoint,
-        // which sends no size, until the checkpointer takes checkpoints over.
-        // No commit comes between this and that.
+        // and the commits `open_with` ran so far may have run SQLite's own
+        // automatic checkpoint, which sends no size. So the writer sends the
+        // file's size here, and no commit runs between this send and the
+        // checkpointer's start.
         writer.send_checkpointed_size()?;
         match options.capture {
             Some(recorded) => writer.observe_commits(handle.clone(), recorded),
@@ -194,7 +195,7 @@ impl<P: Policy> Database<P> {
     /// A view of the main database file's size in bytes after the latest
     /// checkpoint, which wakes when a later checkpoint changes the size.
     /// Before the first checkpoint, the watch holds the file's size once the
-    /// open's own commits ended. The writer and the checkpointer send the
+    /// commits `open_with` ran ended. The writer and the checkpointer send the
     /// size after each checkpoint they run through
     /// `HostSql::wal_checkpoint`: the checkpointer's own, and the host's on
     /// the writer.
