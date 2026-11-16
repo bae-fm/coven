@@ -241,7 +241,8 @@ impl Policy for CovenPolicy {
         match scope {
             CovenScope::Applying => state.applying = false,
             CovenScope::Mutations(into) => {
-                *lock_unpoisoned(into) = state.mutations.take().unwrap_or_default();
+                *lock_unpoisoned(into) =
+                    state.mutations.take().expect("enter starts the capture that leave ends");
             }
         }
     }
