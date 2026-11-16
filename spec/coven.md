@@ -680,24 +680,26 @@ LIMIT. Ben's album list shows each window as one live query, `SELECT title, id
 FROM albums WHERE title >= ?1 ORDER BY title LIMIT 100`. A run that returns 100
 rows depends only on the albums that sort at or before its last row: an album
 that sorts after that row would sort after every row the run returned, so it
-can't enter the result. So coven narrows `albums` to the rows whose `title` is
-at most the last row's, and each run sets that bound again from its own last
+can't appear in the result. So coven narrows `albums` to the rows whose `title`
+is at most the last row's, and each run sets that bound again from its own last
 row. An album added further down the list doesn't rerun the window. One added
-inside the window does, and so does deleting one, which pulls the next album in.
-A row equal to the last row on every ORDER BY column counts as inside, since
-SQLite could sort it before the last row. A run that returns fewer rows than
-its LIMIT already holds every row its WHERE allows, so its scope stays as the
-WHERE gives it.
+inside the window does, and so does deleting one, after which the window holds
+the next album too. A row equal to the last row on every ORDER BY column counts
+as inside, since SQLite could sort it before the last row. A run that returns
+fewer rows than its LIMIT already holds every row its WHERE allows, so its scope
+stays as the WHERE gives it.
 
 The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. Coven
 reads the last row's values from the result, so each ORDER BY term must be a
 column the statement also returns, listed before any `*`. Each term names a
 column of the same table, stored and BINARY, with no COLLATE and no NULLS FIRST
-or LAST. That table isn't the right side of a LEFT JOIN: there a row added for a
-left row with no partner takes out the row of NULLs that stood for it. The
-statement is one SELECT with no OFFSET, no GROUP BY, and no aggregate or window
-function in its result columns, where one result row comes of many. A join
+or LAST. That table isn't the right side of a LEFT JOIN. There, when a write
+adds a row that matches a left row that had no match, SQLite no longer returns
+the row of NULLs it returned for that left row, and that row of NULLs can sort
+before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
+and no aggregate or window function in its result columns, since there one
+result row's values depend on many table rows. A join
 that narrows another table by the sorted table's rows takes only the rows up to
 the bound. Any other ORDER BY, such as an expression, and any OFFSET leave the
 scope as the WHERE gives it.

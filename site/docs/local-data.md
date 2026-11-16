@@ -451,16 +451,16 @@ let count = handle.subscribe(|sql| {
 });
 ```
 
-A write that adds a row reruns `count`, and reruns the window only when the
-row sorts at or before the window's last row: when a run returns all 100 rows,
-a note that sorts after the last of them can't enter the window. Each run sets
-that bound again from its own last row, so a note inserted or deleted inside
-the window moves the bound to the window's new last row. A note equal to the
-last row on every ORDER BY column counts as inside, since SQLite could sort it
-before the last row. A run that returns fewer than 100 rows already holds every
-note after its start, and reruns for a change to any of them.
+A write that adds a row reruns `count`, and reruns the window only when the row
+sorts at or before the window's last row: when a run returns all 100 rows, a
+note that sorts after the last of them can't appear in the window. Each run sets
+that bound again from its own last row, so a note inserted or deleted inside the
+window moves the bound to the window's new last row. A note equal to the last
+row on every ORDER BY column counts as inside, since SQLite could sort it before
+the last row. A run that returns fewer than 100 rows already holds every note
+after its start, and reruns for a change to any of them.
 
-Coven narrows a window to its last row when:
+Coven ignores changes to rows that sort after a window's last row when:
 
 - the statement is one SELECT, with an `ORDER BY` and a `LIMIT` and no
   `OFFSET`;

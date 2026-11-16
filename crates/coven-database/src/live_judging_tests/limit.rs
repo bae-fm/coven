@@ -9,8 +9,9 @@ use sqlive::SqlValue::{Integer, Text};
 const NOTES: &str = "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT, body TEXT);
 INSERT INTO notes VALUES (1,'b',''),(2,'d',''),(3,'f',''),(4,'h',''),(5,'j',''),(6,'l','')";
 
-/// The window from `c` holds d, f and h. A change after h wakes nothing; one
-/// inside the window does, and each rerun ends the window at its new last row.
+/// The window from `c` holds d, f and h. A change after h reruns nothing, and
+/// a change inside the window reruns it. Each rerun moves the bound to the
+/// window's new last row.
 #[tokio::test]
 async fn a_full_window_reruns_only_for_rows_up_to_its_last() {
     let store = TestStore::new();
@@ -29,7 +30,7 @@ async fn a_full_window_reruns_only_for_rows_up_to_its_last() {
             ("INSERT INTO notes VALUES (10,'e','')", true),
             ("INSERT INTO notes VALUES (11,'g','')", false),
             ("UPDATE notes SET body = 'y' WHERE title = 'h'", false),
-            // Deleting e pulls g in: d, f and g.
+            // After deleting e, the window holds d, f and g.
             ("DELETE FROM notes WHERE title = 'e'", true),
             ("UPDATE notes SET body = 'y' WHERE title = 'g'", true),
             ("UPDATE notes SET body = 'z' WHERE title = 'h'", false),
@@ -142,10 +143,11 @@ INSERT INTO albums VALUES (10,2000,''),(20,2000,''),(30,2005,''),(40,2005,''),(5
     db.close().await.unwrap();
 }
 
-/// A join's lookup reads its partner's rows up to the window's last row: a
-/// track of a release past the window wakes nothing.
+/// When coven narrows `tracks` by the releases the window joins them to, it
+/// looks up only the releases up to the window's last row: a change to a track
+/// of a release after the window reruns nothing.
 #[tokio::test]
-async fn a_joined_tables_lookup_reads_its_partner_up_to_the_last_row() {
+async fn a_join_looks_up_only_the_sorted_rows_up_to_the_last_row() {
     let store = TestStore::new();
     let db = store
         .schema(
@@ -175,8 +177,9 @@ INSERT INTO tracks VALUES (1,'r1','one'),(2,'r2','two'),(3,'r3','three')",
     db.close().await.unwrap();
 }
 
-/// An OFFSET, an ORDER BY column the statement doesn't return, and an
-/// ORDER BY expression keep the scope open after the window's start.
+/// With an OFFSET, an ORDER BY column the statement doesn't return, an ORDER
+/// BY expression or a COLLATE, the scope stays as the WHERE gives it, so a row
+/// added after the window's last row reruns the window.
 #[tokio::test]
 async fn an_offset_an_unreturned_column_or_an_expression_narrows_nothing_more() {
     let store = TestStore::new();

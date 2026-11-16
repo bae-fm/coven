@@ -3,10 +3,10 @@
 //! row (§4).
 //!
 //! When a run returns as many rows as its LIMIT, a row that sorts after its
-//! last row can't enter the result: every row it would add sorts after the
-//! rows already there. So the run's scope for the table also requires a row
-//! to sort at or before the last row, in the ORDER BY's directions, and the
-//! next run sets that bound again from its own last row. A row equal to the
+//! last row can't appear in the result: every result row it would give sorts
+//! after the rows already there. So the run's scope for the table also requires
+//! a row to sort at or before the last row, in the ORDER BY's directions, and
+//! the next run sets that bound again from its own last row. A row equal to the
 //! last one could sort before it, so it passes. A run that returned fewer rows
 //! than its LIMIT holds every row its WHERE allows, and keeps its scope.
 //!
@@ -15,11 +15,12 @@
 //! that return them. So each ORDER BY term is a column of one table of the
 //! statement's only SELECT, written as a name with no COLLATE and no NULLS
 //! FIRST or LAST, that the statement returns as a result column. The table
-//! isn't the right side of a LEFT JOIN: there a row added for a left row with
-//! no partner takes out the row of NULLs that stood for it, which sorted
-//! before the last row. The SELECT has no GROUP BY and calls no aggregate or
-//! window function in its result columns, as one result row there comes of
-//! many rows.
+//! isn't the right side of a LEFT JOIN. There, when a write adds a row that
+//! matches a left row that had no match, SQLite no longer returns the row of
+//! NULLs it returned for that left row, and that row of NULLs can sort before
+//! the last row. The SELECT has no GROUP BY and calls no aggregate or window
+//! function in its result columns, since there one result row's values depend
+//! on many table rows.
 
 use std::cmp::Ordering;
 
@@ -145,8 +146,9 @@ pub(crate) fn sorted_limit(
 
 /// The result column that returns the ORDER BY term `expr`, and the source
 /// and column, lowercase, whose value it is, when `expr` names a column. A
-/// bare name that a result column is named by means that result column, as
-/// SQLite reads an ORDER BY; any other name means the column it resolves to.
+/// bare name that matches a result column's alias means that result column,
+/// as SQLite reads an ORDER BY; any other name means the column it resolves
+/// to.
 fn result_column(
     planner: &Planner,
     core: usize,
