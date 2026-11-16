@@ -624,10 +624,10 @@ impl Database {
     ) -> crate::DatabaseChanges {
         let reads: Vec<_> = tables
             .iter()
-            .map(|table| crate::observation::TableRead {
+            .map(|table| sqlive::TableRead {
                 table: (*table).into(),
                 columns: BTreeSet::new(),
-                scope: crate::row_scope::RowScope::All,
+                scope: sqlive::RowScope::All,
                 inserted_only,
             })
             .collect();

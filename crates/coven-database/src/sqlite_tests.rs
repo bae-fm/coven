@@ -28,7 +28,7 @@ impl DatabaseConnection {
     pub(crate) fn fail_at(&self, name: &str, event: &str, message: &str) {
         self.batch(&format!(
             "CREATE TRIGGER {} {event} BEGIN SELECT RAISE(ABORT,'{}'); END",
-            crate::sql::identifier(name),
+            sqlive::sql::identifier(name),
             message.replace('\'', "''")
         ))
         .unwrap();

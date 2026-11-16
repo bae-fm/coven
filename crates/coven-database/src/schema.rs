@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
 use crate::schema_sql::{guarded_trigger, table_parts};
-use crate::scope_term::Affinity;
-use crate::sql::{identifier, tokens};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
+use sqlive::sql::{identifier, tokens};
+use sqlive::Affinity;
 
 #[path = "schema_collation.rs"]
 mod collation;
@@ -614,7 +614,7 @@ impl Schema {
             }
             for clause in remaining {
                 let column = clause.first().and_then(|token| match token {
-                    crate::sql::Token::Word(name) | crate::sql::Token::Quoted(name) => {
+                    sqlive::sql::Token::Word(name) | sqlive::sql::Token::Quoted(name) => {
                         Some(name.to_ascii_lowercase())
                     }
                     _ => None,

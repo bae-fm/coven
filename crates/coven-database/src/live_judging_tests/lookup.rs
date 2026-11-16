@@ -22,10 +22,10 @@ INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(
 
 /// Run `sql` live, then each write: `false` must leave it unmarked, `true`
 /// must rerun it, and the rerun must read what a one-shot read does.
-pub(crate) async fn follows(
+pub(super) async fn follows(
     db: &Database,
     sql: &'static str,
-    parameters: Vec<crate::sql_value::SqlValue>,
+    parameters: Vec<sqlive::SqlValue>,
     writes: &[(&str, bool)],
 ) {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -33,9 +33,8 @@ pub(crate) async fn follows(
     let bound = parameters.clone();
     let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         let run = count.fetch_add(1, Ordering::SeqCst);
-        let rows = db.query(sql, rusqlite::params_from_iter(&bound), |r| {
-            r.get::<_, crate::sql_value::SqlValue>(0)
-        })?;
+        let rows =
+            db.query(sql, rusqlite::params_from_iter(&bound), |r| r.get::<_, sqlive::SqlValue>(0))?;
         Ok((run, rows))
     });
     let mut runs = next(&mut query).await.0;
@@ -51,7 +50,7 @@ pub(crate) async fn follows(
                     Ok::<_, DbError>(db.query(
                         sql,
                         rusqlite::params_from_iter(&parameters),
-                        |r| r.get::<_, crate::sql_value::SqlValue>(0),
+                        |r| r.get::<_, sqlive::SqlValue>(0),
                     )?)
                 })
                 .await
@@ -157,7 +156,7 @@ async fn table_functions_and_views_give_joined_tables_values() {
     follows(
         &db,
         "SELECT t.title FROM json_each(?1) AS w JOIN tracks t ON t.id = w.value ORDER BY t.id",
-        vec![crate::sql_value::SqlValue::Text(b"[1,3]".to_vec())],
+        vec![sqlive::SqlValue::Text(b"[1,3]".to_vec())],
         &[
             ("UPDATE tracks SET title = '.' WHERE id = 2", false),
             ("UPDATE tracks SET title = 'tres' WHERE id = 3", true),
@@ -396,7 +395,7 @@ async fn from_less_selects_and_compound_arms_narrow_each_core() {
     follows(
         &db,
         "SELECT EXISTS (SELECT 1 FROM tracks WHERE release = ?1 AND position = 2)",
-        vec![crate::sql_value::SqlValue::Text(b"r2".to_vec())],
+        vec![sqlive::SqlValue::Text(b"r2".to_vec())],
         &[
             ("UPDATE tracks SET position = 2 WHERE id = 4", false),
             ("INSERT INTO tracks VALUES (5,'r2',2,'five')", true),
@@ -584,7 +583,7 @@ async fn a_lookup_past_its_steps_counts_as_a_match() {
 async fn a_write_past_the_row_bound_looks_nothing_up() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
-    let bound = crate::sqlite::ROWS_PER_TABLE;
+    let bound = sqlive::ROWS_PER_TABLE;
     let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
     let insert = |from: usize, rows: usize| {
@@ -869,7 +868,7 @@ INSERT INTO placement VALUES (1,X'41','candidate','A'),(2,X'42','candidate','B')
         follows(
             &db,
             sql,
-            vec![crate::sql_value::SqlValue::Text(keys.to_vec())],
+            vec![sqlive::SqlValue::Text(keys.to_vec())],
             &[
                 ("INSERT INTO selection VALUES (1, X'43')", false),
                 ("INSERT INTO selection VALUES (1, X'42')", true),

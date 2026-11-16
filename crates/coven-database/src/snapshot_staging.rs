@@ -427,7 +427,7 @@ impl Database {
                 )?;
                 for table in tables {
                     count += writer.query_row(
-                        &format!("SELECT count(*) FROM temp.{}", crate::sql::identifier(&table)),
+                        &format!("SELECT count(*) FROM temp.{}", sqlive::sql::identifier(&table)),
                         [],
                         |row| row.get::<_, i64>(0),
                     )?;

@@ -515,6 +515,25 @@ pub(crate) struct Database {
     /// handle; ungated, it may not. With none, only `cfg(test)` counts.
     #[serde(default)]
     pub(crate) test_support_features: Vec<String>,
+    /// Public callables of the database's homes that take a raw database
+    /// handle, each with the reason it may. A callable listed here is exempt
+    /// from the parameter rule only; returning a handle stays refused.
+    #[serde(default)]
+    pub(crate) raw_handle_parameters: Vec<RawHandleParameter>,
+}
+
+/// A public callable that takes a raw database handle, and why.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawHandleParameter {
+    /// The source file that declares the callable.
+    pub(crate) path: String,
+    /// The callable, as `Owner::name` for a method or `name` for a function.
+    pub(crate) callable: String,
+    /// Why the callable takes the handle.
+    // The rule does not read the reason; it documents the row.
+    #[expect(dead_code, reason = "documents the policy row")]
+    pub(crate) reason: String,
 }
 
 /// A domain: tables whose schema and writes only its homes hold. SQL
@@ -603,6 +622,17 @@ impl Policy {
                 self.capabilities.iter().find(|capability| capability.name == database.capability)
             })
             .map_or(&[], |capability| capability.homes.as_slice())
+    }
+
+    /// Whether the callable `callable` of `path` is listed as taking a raw
+    /// database handle.
+    pub(crate) fn allows_raw_handle_parameter(&self, path: &str, callable: &str) -> bool {
+        self.database.as_ref().is_some_and(|database| {
+            database
+                .raw_handle_parameters
+                .iter()
+                .any(|row| row.path == path && row.callable == callable)
+        })
     }
 
     /// The features only test support enables, which let the items they gate

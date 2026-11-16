@@ -91,7 +91,7 @@ pub(crate) fn everything(
         .map(|table| {
             let rows = db
                 .query(
-                    &format!("SELECT * FROM main.{} ORDER BY 1", crate::sql::identifier(&table)),
+                    &format!("SELECT * FROM main.{} ORDER BY 1", sqlive::sql::identifier(&table)),
                     [],
                     |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect(),
                 )

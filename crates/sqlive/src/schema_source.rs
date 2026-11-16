@@ -9,13 +9,15 @@ use sqlite3_parser::lexer::{
 use std::ops::Range;
 use TokenType::{TK_COMMA, TK_LP, TK_RP};
 
-pub(crate) struct SchemaSource<'a> {
+/// The tokens of a CREATE statement's text, each with its range in that text.
+pub struct SchemaSource<'a> {
     sql: &'a str,
     tokens: Vec<(TokenType, Range<usize>)>,
 }
 
 impl<'a> SchemaSource<'a> {
-    pub(crate) fn new(sql: &'a str) -> Self {
+    /// The tokens of `sql`, which SQLite has already accepted.
+    pub fn new(sql: &'a str) -> Self {
         Self::try_new(sql).expect("accepted schema tokens")
     }
 
@@ -36,18 +38,26 @@ impl<'a> SchemaSource<'a> {
         self.tokens.iter().map(|(_, range)| &self.sql[range.clone()])
     }
 
+    /// The source between the parentheses of the first body, such as a
+    /// table's column list. This source drops its tokens up to the closing
+    /// parenthesis.
     // Only delimiters are interpreted here. The AST determines which nodes
     // exist, which expressions they own, and which clauses are constraints.
-    pub(crate) fn body(&mut self) -> Self {
+    pub fn body(&mut self) -> Self {
         self.try_body().expect("AST node body")
     }
 
-    pub(crate) fn try_body(&mut self) -> Option<Self> {
+    /// As [`body`](Self::body), or `None` when this source has no
+    /// parenthesis.
+    pub fn try_body(&mut self) -> Option<Self> {
         let start = self.tokens.iter().position(|(t, _)| *t == TK_LP)?;
         Some(self.body_at(start))
     }
 
-    pub(crate) fn node_body(&mut self, node: &impl ToTokens) -> Self {
+    /// The source between the parentheses of the body of `node`, the next
+    /// node this source holds. This source drops its tokens up to the
+    /// closing parenthesis.
+    pub fn node_body(&mut self, node: &impl ToTokens) -> Self {
         let mut prefix = NodePrefix { tokens: Vec::new(), finished: false };
         node.to_tokens(&mut prefix).unwrap();
         assert!(prefix.finished, "AST node has a parenthesized body");
@@ -71,7 +81,8 @@ impl<'a> SchemaSource<'a> {
         self.body_at(start + prefix.tokens.len() - 1)
     }
 
-    pub(crate) fn parts(&self) -> Vec<Self> {
+    /// The comma-separated parts at the top level of this source.
+    pub fn parts(&self) -> Vec<Self> {
         let mut depth = 0;
         let mut start = 0;
         let mut parts = Vec::new();
@@ -90,17 +101,21 @@ impl<'a> SchemaSource<'a> {
         parts
     }
 
-    pub(crate) fn text(&self) -> &'a str {
+    /// The SQL text of this source.
+    pub fn text(&self) -> &'a str {
         self.sql
     }
 
-    pub(crate) fn without_suffix(&self, tokens: usize) -> &'a str {
+    /// The text from the first token, without the last `tokens` tokens.
+    pub fn without_suffix(&self, tokens: usize) -> &'a str {
         let first = self.tokens.first().expect("AST expression").1.start;
         let last = self.tokens[self.tokens.len() - tokens - 1].1.end;
         &self.sql[first..last]
     }
 
-    pub(crate) fn trailing_expression(&self) -> &'a str {
+    /// The text after the first token, without a trailing semicolon: the
+    /// expression a leading keyword such as WHERE introduces.
+    pub fn trailing_expression(&self) -> &'a str {
         let tokens = &self.tokens;
         let last = if tokens.last().expect("AST WHERE clause").0 == TokenType::TK_SEMI {
             tokens.len() - 2

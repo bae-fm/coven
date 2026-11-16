@@ -7,7 +7,7 @@ use super::stream_capture::{StreamCapture, StreamChanges};
 use super::transaction_capture::{ChangeCapture, SupplementalChanges};
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::observation::RowChange;
+use sqlive::RowChange;
 
 impl DatabaseConnection {
     /// Run `app` while the pre-update hook keeps each operation on the

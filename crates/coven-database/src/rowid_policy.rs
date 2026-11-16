@@ -2,7 +2,7 @@
 
 use super::DatabaseConnection;
 use crate::app_policy::ChangedTables;
-use crate::sql::identifier;
+use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 impl DatabaseConnection {

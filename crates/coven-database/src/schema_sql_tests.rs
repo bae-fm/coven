@@ -1,5 +1,5 @@
 use super::*;
-use crate::sql::tokens;
+use sqlive::sql::tokens;
 
 #[test]
 fn shared_guard_is_a_required_conjunct_not_text_anywhere() {

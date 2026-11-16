@@ -43,14 +43,14 @@ use sqlite3_parser::{
 
 /// The rows of each table a statement can depend on, before its values are
 /// bound.
-pub(crate) struct ScopePlan {
+pub struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
     sources: Option<Sources>,
 }
 
 impl ScopePlan {
     /// The plan for `sql`, prepared as `statement`.
-    pub(crate) fn build(
+    pub fn build(
         connection: &Connection,
         sql: &str,
         statement: &Statement<'_>,
@@ -62,7 +62,7 @@ impl ScopePlan {
     /// The scope of each table the statement reads as one of its sources,
     /// for a run bound to `parameters`. A table the plan doesn't name
     /// depends on every row.
-    pub(crate) fn scopes(&self, parameters: &[Value]) -> Scopes {
+    pub fn scopes(&self, parameters: &[Value]) -> Scopes {
         match &self.sources {
             Some(sources) => crate::scope_lookup::scopes(sources, parameters),
             None => Scopes::default(),
@@ -863,7 +863,3 @@ pub(crate) fn is_name(expr: &Expr<'_>) -> bool {
         Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..)
     )
 }
-
-#[cfg(test)]
-#[path = "scope_plan_tests.rs"]
-mod tests;

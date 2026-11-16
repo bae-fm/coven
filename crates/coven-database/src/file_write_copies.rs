@@ -119,8 +119,8 @@ impl FileWrite<'_> {
                     let changed = db.internal_execute(
                         &format!(
                             "UPDATE main.{} SET {}=?1 WHERE {}",
-                            crate::sql::identifier(&table.name),
-                            crate::sql::identifier(column),
+                            sqlive::sql::identifier(&table.name),
+                            sqlive::sql::identifier(column),
                             crate::write_rows::key_predicate(table)
                         ),
                         rusqlite::params_from_iter(

@@ -6,8 +6,9 @@ use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::{observation::RowChange, DbError};
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
+use sqlive::RowChange;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 

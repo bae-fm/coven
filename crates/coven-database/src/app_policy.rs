@@ -10,9 +10,9 @@ use rusqlite::hooks::AuthAction;
 
 use crate::authorization::{Owner, Policy, PolicyAction, SqlAuthorization};
 use crate::coven_functions::Views;
-use crate::read_capture::WholeViews;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
+use sqlive::WholeViews;
 
 /// Coven's rules for the statements a connection prepares. A judgment
 /// changes several fields of the state together, so `judge` holds the
@@ -224,15 +224,15 @@ impl Policy for CovenPolicy {
         lock_unpoisoned(&self.state).judge(action)
     }
 
-    fn check_sql(&self, tokens: &[crate::sql::Token]) -> Result<(), DbError> {
+    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), DbError> {
         // SQLITE_ALTER_TABLE reports the old name, not the rename destination.
         // Check the destination token too; comments and string contents are not SQL.
         for part in tokens.windows(3) {
             if part[0].word("rename") && part[1].word("to") {
                 let name = match &part[2] {
-                    crate::sql::Token::Word(name)
-                    | crate::sql::Token::Quoted(name)
-                    | crate::sql::Token::String(name) => name,
+                    sqlive::sql::Token::Word(name)
+                    | sqlive::sql::Token::Quoted(name)
+                    | sqlive::sql::Token::String(name) => name,
                     _ => continue,
                 };
                 if crate::internal_schema::reserved_name(name) {

@@ -395,7 +395,3 @@ pub(crate) fn push_down(
         }
     }
 }
-
-#[cfg(test)]
-#[path = "derived_tests.rs"]
-mod tests;

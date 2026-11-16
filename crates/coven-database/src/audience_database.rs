@@ -11,7 +11,6 @@ use crate::app_policy::CovenPolicy;
 use crate::connection_setup::Setup;
 use crate::migration_snapshot::{key_sql, MigrationCapture};
 use crate::schema::{Schema, TableSchema};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{column_list, key_columns, AppValues, AppView};
@@ -21,6 +20,7 @@ use coven_foundation::files::{StoreDir, StoreDirAccess};
 use coven_merge::Audience;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ impl AudienceDatabase {
         observer: &crate::observation::CommitObserver,
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
-        whole: &Arc<crate::read_capture::WholeViews>,
+        whole: &Arc<sqlive::WholeViews>,
         live: &DatabaseConnection,
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;

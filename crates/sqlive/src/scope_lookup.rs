@@ -14,7 +14,7 @@ use crate::sql_value::SqlValue as Value;
 
 /// What a write asks of SQLite about a changed row.
 #[derive(Clone, Copy)]
-pub(crate) enum Judging<'a> {
+pub enum Judging<'a> {
     /// Whether some partner row in the lookup's scope holds the value.
     Partner(&'a Lookup, &'a Value),
     /// Whether a row passes a condition: the SQL and its parameters.
@@ -23,13 +23,13 @@ pub(crate) enum Judging<'a> {
 
 /// Runs one question about a changed row. `Ok(true)` also when coven gives
 /// up on it, which then counts as a match.
-pub(crate) type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
+pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
 
 /// The most SQLite steps one lookup runs. A lookup no index serves reads its
 /// partner row by row; past this it stops and counts as a match, so the
 /// query runs again and a write's cost stays bounded whatever the app's
 /// indexes.
-pub(crate) const LOOKUP_STEPS: i32 = 1_000;
+pub const LOOKUP_STEPS: i32 = 1_000;
 
 /// The scope of each table among `sources`, for a run bound to
 /// `parameters`.
@@ -83,7 +83,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
 /// run gave it, holds a value equal to the changed row's join column, as the
 /// statement's equality compares them.
 #[derive(Debug)]
-pub(crate) struct Lookup {
+pub struct Lookup {
     /// The partner FROM item, as coven's SQL names it with its qualifier.
     from: String,
     qualifier: String,
@@ -125,7 +125,7 @@ impl Lookup {
     }
 
     /// The SQL that looks up `value`, and its parameters with `value` last.
-    pub(crate) fn sql(&self, value: &Value) -> (&str, Vec<Value>) {
+    pub fn sql(&self, value: &Value) -> (&str, Vec<Value>) {
         let sql = &self.sql;
         let typed = match (self.affinity, value) {
             (Affinity::Text, Value::Text(_))
@@ -238,7 +238,3 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
         ),
     }
 }
-
-#[cfg(test)]
-#[path = "scope_lookup_tests.rs"]
-pub(crate) mod tests;

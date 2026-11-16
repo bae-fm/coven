@@ -9,10 +9,8 @@ use coven_foundation::task::Bug;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
-use crate::observation::ReadSet;
-use crate::read_capture::{ReadCapture, ReadFrame, WholeViews};
-use crate::row_scope::Scopes;
 use crate::DbError;
+use sqlive::{ReadCapture, ReadFrame, ReadSet, Scopes, WholeViews};
 
 /// Whose statement SQLite is preparing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +46,7 @@ pub(crate) trait Policy: Send + Sync + 'static {
     /// policy sees every action allowed.
     fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError>;
     /// Judge an app statement's text before it is prepared.
-    fn check_sql(&self, tokens: &[crate::sql::Token]) -> Result<(), DbError>;
+    fn check_sql(&self, tokens: &[sqlive::sql::Token]) -> Result<(), DbError>;
     /// A new app call begins: forget what the last statement left.
     fn begin_app_call(&self);
     /// Whether `name`, a trigger or view, is the host's own object.
@@ -415,7 +413,7 @@ impl SqlAuthorization {
     pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {
         // FTS prepares PRAGMA data_version itself. Permit that internal read,
         // while keeping direct app PRAGMAs outside the SQL capability.
-        let tokens = crate::sql::tokens(sql)?;
+        let tokens = sqlive::sql::tokens(sql)?;
         if tokens.first().is_some_and(|token| token.word("pragma")) {
             return Err(rusqlite::Error::UserFunctionError(Box::new(
                 DbError::StatementForbidden { operation: "PRAGMA" },

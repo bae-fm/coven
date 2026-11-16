@@ -10,7 +10,6 @@
 
 use crate::removal::Deferral;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{key_columns, key_parameters, key_predicate, AppValues};
@@ -18,6 +17,7 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::RowId;
 use rusqlite::{params, params_from_iter};
+use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 pub(crate) fn materialize(

@@ -1,7 +1,7 @@
 //! A column compared with a subquery's value narrows by the subquery's
 //! source: the rows whose value that source holds in its scope (§4).
 
-use crate::scope_lookup::tests::follows;
+use super::lookup::follows;
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::DbError;

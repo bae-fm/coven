@@ -20,7 +20,7 @@ pub(crate) struct CapturedRow {
 /// column has no stored value and is left out.
 pub(crate) fn values(
     table: &crate::schema::TableSchema,
-    values: &[Option<crate::sql_value::SqlValue>],
+    values: &[Option<sqlive::SqlValue>],
 ) -> Result<Option<AppValues>, DbError> {
     if values.is_empty() {
         return Ok(None);

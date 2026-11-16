@@ -14,6 +14,7 @@ coven-crypto.workspace = true
 coven-foundation.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
+sqlive.workspace = true
 rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation"] }
 sqlite3-parser.workspace = true
 thiserror.workspace = true

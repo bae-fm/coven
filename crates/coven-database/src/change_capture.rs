@@ -1,13 +1,11 @@
 //! Convert transaction changes into read dependencies before commit.
 
 use crate::sqlite::table_shapes::{TableShape, TableShapes};
-use crate::{
-    observation::RowChange, row_scope::RowImage, sql_value::SqlValue, sqlite::DatabaseConnection,
-    DbError,
-};
+use crate::{sqlite::DatabaseConnection, DbError};
 use rusqlite::{
     fallible_streaming_iterator::FallibleStreamingIterator, hooks::Action, session::ChangesetIter,
 };
+use sqlive::{RowChange, RowImage, SqlValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -200,13 +198,17 @@ fn current(
         "SELECT {} FROM main.{} WHERE {}",
         wanted
             .iter()
-            .map(|index| crate::sql::identifier(names[*index]))
+            .map(|index| sqlive::sql::identifier(names[*index]))
             .collect::<Vec<_>>()
             .join(","),
-        crate::sql::identifier(table),
+        sqlive::sql::identifier(table),
         keys.iter()
             .enumerate()
-            .map(|(slot, index)| format!("{}=?{}", crate::sql::identifier(names[*index]), slot + 1))
+            .map(|(slot, index)| format!(
+                "{}=?{}",
+                sqlive::sql::identifier(names[*index]),
+                slot + 1
+            ))
             .collect::<Vec<_>>()
             .join(" AND "),
     );

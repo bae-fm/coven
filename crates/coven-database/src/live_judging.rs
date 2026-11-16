@@ -4,9 +4,9 @@
 //! transaction.
 
 use super::DatabaseConnection;
-use crate::observation::{CommitObserver, ReadSet};
-use crate::scope_lookup::{Judging, Lookups};
+use crate::observation::CommitObserver;
 use crate::{DbError, SqlReadContext};
+use sqlive::{Judging, Lookups, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ impl DatabaseConnection {
     pub(super) fn judge(
         &self,
         handle: &CommitObserver,
-        changes: Vec<crate::observation::RowChange>,
+        changes: Vec<sqlive::RowChange>,
     ) -> Result<crate::observation::Judged, DbError> {
         let _reading = self.authorization.reading();
         handle
@@ -83,11 +83,7 @@ impl DatabaseConnection {
 
     /// Whether `sql` finds a row. A question that runs past `LOOKUP_STEPS`
     /// stops and counts as a match (§4).
-    fn run_limited(
-        &self,
-        sql: &str,
-        parameters: &[crate::sql_value::SqlValue],
-    ) -> rusqlite::Result<bool> {
+    fn run_limited(&self, sql: &str, parameters: &[sqlive::SqlValue]) -> rusqlite::Result<bool> {
         let mut statement = self.connection.prepare_cached(sql)?;
         for (index, value) in parameters.iter().enumerate() {
             statement.raw_bind_parameter(index + 1, value)?;
@@ -129,7 +125,7 @@ impl LookupLimit {
         });
         let handler = Arc::clone(&state);
         connection.progress_handler(
-            crate::scope_lookup::LOOKUP_STEPS,
+            sqlive::LOOKUP_STEPS,
             Some(move || {
                 let stop = handler.armed.load(Ordering::Relaxed);
                 if stop {
@@ -152,3 +148,7 @@ impl LookupLimit {
         self.0.stopped.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+#[path = "live_judging_tests.rs"]
+mod tests;

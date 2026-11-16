@@ -1004,6 +1004,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlite3-parser",
+ "sqlive",
  "syn 3.0.6",
  "tempfile",
  "thiserror 2.0.21",
@@ -3131,6 +3132,14 @@ dependencies = [
  "indexmap",
  "log",
  "memchr",
+]
+
+[[package]]
+name = "sqlive"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sqlite3-parser",
 ]
 
 [[package]]

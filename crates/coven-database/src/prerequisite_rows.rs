@@ -3,12 +3,10 @@
 //! is evidence for that wait; no other commit is. The rows are exactly what
 //! the waiting work reads, including advancement of the shared prefix.
 
-use crate::observation::TableRead;
-use crate::row_scope::RowScope;
-use crate::sql_value::SqlValue;
 use crate::WriteId;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
+use sqlive::{RowScope, SqlValue, TableRead};
 
 /// Committed state a waiting operation names.
 #[derive(Clone, Debug, PartialEq, Eq)]

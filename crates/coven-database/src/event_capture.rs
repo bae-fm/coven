@@ -9,10 +9,10 @@
 
 use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
-use crate::sql_value::SqlValue;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
+use sqlive::SqlValue;
 use std::sync::{Arc, Mutex};
 
 /// One row operation of the app phase.
@@ -137,7 +137,7 @@ impl EventCapture {
     }
 
     /// The device-local tables' changes, as live queries read them.
-    pub(super) fn local_changes(&self) -> Vec<crate::observation::RowChange> {
+    pub(super) fn local_changes(&self) -> Vec<sqlive::RowChange> {
         std::mem::take(&mut lock_unpoisoned(&self.events).local).finish(&self.shapes)
     }
 

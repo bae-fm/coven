@@ -6,12 +6,18 @@ use rusqlite::{
     ToSql,
 };
 
+/// A value SQLite stores.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SqlValue {
+pub enum SqlValue {
+    /// NULL.
     Null,
+    /// An integer.
     Integer(i64),
+    /// A floating-point number.
     Real(f64),
+    /// Text, as the bytes SQLite stores, which may not be valid UTF-8.
     Text(Vec<u8>),
+    /// A blob.
     Blob(Vec<u8>),
 }
 
@@ -35,7 +41,7 @@ impl From<ValueRef<'_>> for SqlValue {
 
 impl SqlValue {
     /// The value as SQLite reports it.
-    pub(crate) fn as_value_ref(&self) -> ValueRef<'_> {
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
         match self {
             Self::Null => ValueRef::Null,
             Self::Integer(value) => ValueRef::Integer(*value),
@@ -52,7 +58,9 @@ impl ToSql for SqlValue {
     }
 }
 
-pub(crate) fn parameters<P: rusqlite::Params>(
+/// The values `params` binds to `statement`'s parameters, in parameter order,
+/// with one entry for each index, anonymous ones and holes included.
+pub fn parameters<P: rusqlite::Params>(
     connection: &rusqlite::Connection,
     statement: &rusqlite::Statement<'_>,
     params: P,

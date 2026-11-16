@@ -132,7 +132,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             writer.batch("CREATE TEMP TABLE failure_step(number INTEGER NOT NULL,fail_at INTEGER NOT NULL); INSERT INTO failure_step VALUES(0,1)").unwrap();
             for (index, table) in before.keys().filter(|name| !name.starts_with("sqlite_")).enumerate() {
                 for action in ["INSERT", "UPDATE", "DELETE"] {
-                    writer.batch(&format!("CREATE TEMP TRIGGER fault_{index}_{action} AFTER {action} ON main.{} BEGIN UPDATE failure_step SET number=number+1; SELECT CASE WHEN number=fail_at THEN RAISE(ABORT,'injected apply failure') END FROM failure_step; END", crate::sql::identifier(table))).unwrap();
+                    writer.batch(&format!("CREATE TEMP TRIGGER fault_{index}_{action} AFTER {action} ON main.{} BEGIN UPDATE failure_step SET number=number+1; SELECT CASE WHEN number=fail_at THEN RAISE(ABORT,'injected apply failure') END FROM failure_step; END", sqlive::sql::identifier(table))).unwrap();
                 }
             }
         });

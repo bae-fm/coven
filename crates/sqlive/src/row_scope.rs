@@ -14,26 +14,34 @@ use crate::sql_value::SqlValue as Value;
 /// A predicate over a table's rows. A change reruns a query when its row
 /// passes in its old or its new image.
 #[derive(Clone, Debug)]
-pub(crate) enum RowScope {
+pub enum RowScope {
     /// Every row.
     All,
     /// Rows whose `column` compares with `value` as `ordering`, or equal too
     /// when `inclusive`.
     Compare {
+        /// The tested column, lowercase.
         column: String,
+        /// The value the column is compared with.
         value: Value,
+        /// The order the column's value has to `value`.
         ordering: Ordering,
+        /// Whether a value equal to `value` also passes.
         inclusive: bool,
     },
     /// Rows whose `column` is NULL, or is not NULL when `not`.
     Null {
+        /// The tested column, lowercase.
         column: String,
+        /// Whether rows whose column is not NULL pass instead.
         not: bool,
     },
     /// Rows whose `column` equals one of `values`, sorted in SQLite's order
     /// with NULLs and repeats left out: made by [`RowScope::equal`].
     In {
+        /// The tested column, lowercase.
         column: String,
+        /// The values that pass, in SQLite's order.
         values: Vec<Value>,
     },
     /// Rows a condition on their columns holds for, which a write judges by
@@ -42,10 +50,14 @@ pub(crate) enum RowScope {
     /// Rows whose `column` equals a value some row of another source holds
     /// in its own scope: a join, which a write judges by running `lookup`.
     Joined {
+        /// The joined column, lowercase.
         column: String,
+        /// The question that finds partner rows holding a value.
         lookup: Arc<Lookup>,
     },
+    /// Rows both scopes pass.
     And(Box<Self>, Box<Self>),
+    /// Rows either scope passes.
     Or(Box<Self>, Box<Self>),
 }
 
@@ -95,7 +107,7 @@ impl RowScope {
     }
 
     /// Rows whose `column` equals one of `values`.
-    pub(crate) fn equal(column: String, mut values: Vec<Value>) -> Self {
+    pub fn equal(column: String, mut values: Vec<Value>) -> Self {
         values.retain(|value| !matches!(value, Value::Null));
         values.sort_by(|left, right| compare(left, right).expect("NULLs were left out"));
         values.dedup_by(|left, right| compare(left, right).is_some_and(Ordering::is_eq));
@@ -127,7 +139,7 @@ impl RowScope {
     }
 
     /// The columns this scope tests, lowercase.
-    pub(crate) fn columns(&self, into: &mut std::collections::BTreeSet<String>) {
+    pub fn columns(&self, into: &mut std::collections::BTreeSet<String>) {
         match self {
             Self::All => {}
             Self::Compare { column, .. }
@@ -147,7 +159,7 @@ impl RowScope {
     }
 
     /// Both scopes: either alone when the other is every row.
-    pub(crate) fn and(self, other: Self) -> Self {
+    pub fn and(self, other: Self) -> Self {
         match (self, other) {
             (Self::All, scope) | (scope, Self::All) => scope,
             (left, right) => Self::And(Box::new(left), Box::new(right)),
@@ -170,7 +182,7 @@ impl RowScope {
 /// through one of coven's views, depends on every row. Empty when the
 /// statement's shape keeps every table whole.
 #[derive(Default)]
-pub(crate) struct Scopes {
+pub struct Scopes {
     pub(crate) tables: BTreeMap<String, RowScope>,
     pub(crate) inlined: BTreeSet<String>,
 }
@@ -178,7 +190,7 @@ pub(crate) struct Scopes {
 /// The values of some of a changed row's columns, as a write recorded them:
 /// its key's, and those a waiting live query's scope tests.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RowImage {
+pub struct RowImage {
     /// The columns, lowercase, shared by every image of one table in a write.
     columns: Arc<[String]>,
     /// Each column's value, or `None` where the write couldn't record it.
@@ -186,7 +198,8 @@ pub(crate) struct RowImage {
 }
 
 impl RowImage {
-    pub(crate) fn new(columns: Arc<[String]>, values: Vec<Option<Value>>) -> Self {
+    /// The image of a row that holds `values` in `columns`.
+    pub fn new(columns: Arc<[String]>, values: Vec<Option<Value>>) -> Self {
         assert_eq!(columns.len(), values.len(), "one value per column");
         Self { columns, values }
     }

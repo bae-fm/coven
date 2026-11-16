@@ -148,10 +148,7 @@ async fn local_table_writes_against_plain_sqlite() {
         crate::write::tests::sql(&db, "DELETE FROM queue").await.unwrap();
         let narrowed_delete = started.elapsed();
         // Past the bound, the write keeps only that the table changed.
-        assert_eq!(
-            narrow.is_marked_for_rerun(),
-            rows as usize > crate::sqlite::pre_update_changes::ROWS_PER_TABLE
-        );
+        assert_eq!(narrow.is_marked_for_rerun(), rows as usize > sqlive::ROWS_PER_TABLE);
         db.close().await.unwrap();
         for (metric, time) in [
             ("coven_insert", coven_insert),

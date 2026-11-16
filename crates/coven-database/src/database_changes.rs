@@ -4,7 +4,7 @@ use crate::DbError;
 /// A live commit observation; coalesces changes and ends when the writer closes.
 pub struct DatabaseChanges {
     commits: crate::observation::CommitSubscription,
-    reads: crate::observation::ReadSet,
+    reads: sqlive::ReadSet,
     first: bool,
 }
 impl DatabaseChanges {
@@ -12,7 +12,7 @@ impl DatabaseChanges {
     /// state now as their first change.
     pub(crate) fn new(
         commits: crate::observation::CommitSubscription,
-        reads: crate::observation::ReadSet,
+        reads: sqlive::ReadSet,
         first: bool,
     ) -> Self {
         Self { commits, reads, first }

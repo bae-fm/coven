@@ -24,6 +24,7 @@ api_crate = "coven"
 # Appendix F.1: the crates in dependency order.
 crate_order = [
     "caught",
+    "sqlive",
     "coven-foundation",
     "coven-crypto",
     "coven-merge",
@@ -645,6 +646,16 @@ rusqlite_reexport = "coven-database"
 # caller opened, so a domain's tables are written there or in its owner's
 # methods (F.2).
 write_types = ["DatabaseConnection"]
+# Public callables of a database home that take the raw connection (F.2).
+[[database.raw_handle_parameters]]
+path = "crates/sqlive/src/scope_plan.rs"
+callable = "ScopePlan::build"
+reason = "coven-database passes the connection that prepared the statement; sqlive holds no connection"
+
+[[database.raw_handle_parameters]]
+path = "crates/sqlive/src/sql_value.rs"
+callable = "parameters"
+reason = "coven-database passes the connection that prepared the statement; sqlive holds no connection"
 
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement
@@ -1950,7 +1961,7 @@ paths = ["OsRng", "thread_rng", "ThreadRng"]
 
 [[capabilities]]
 name = "SQLite"
-homes = ["crates/coven-database/src/"]
+homes = ["crates/coven-database/src/", "crates/sqlive/src/"]
 
 [[capabilities.gates]]
 kind = "SQLite library (rusqlite / libsqlite3-sys)"

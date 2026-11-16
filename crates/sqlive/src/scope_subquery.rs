@@ -90,7 +90,3 @@ impl Planner<'_> {
         })
     }
 }
-
-#[cfg(test)]
-#[path = "scope_subquery_tests.rs"]
-mod tests;

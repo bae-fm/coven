@@ -95,7 +95,7 @@ pub(crate) fn row_term(
 
 /// A run's condition: the term bound to the run's parameters.
 #[derive(Debug)]
-pub(crate) struct RowCondition {
+pub struct RowCondition {
     pub(crate) term: Arc<RowTerm>,
     pub(crate) parameters: Vec<Value>,
 }
@@ -135,7 +135,3 @@ impl RowCondition {
         Some((sql, bound))
     }
 }
-
-#[cfg(test)]
-#[path = "scope_row_tests.rs"]
-mod tests;

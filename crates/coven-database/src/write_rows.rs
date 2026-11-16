@@ -2,7 +2,6 @@
 
 use crate::declaration::AudienceSource;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_capture::CapturedRow;
 use crate::write_encoding::{encoded, sql_value, value};
@@ -11,6 +10,7 @@ use crate::{DbError, RowKey};
 use coven_format::value::Value;
 use coven_merge::{Audience, ForeignKey, RowId};
 use rusqlite::params_from_iter;
+use sqlive::sql::identifier;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 

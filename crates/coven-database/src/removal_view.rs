@@ -3,7 +3,6 @@ use crate::merge_store::MergeStore;
 use crate::removal_schema::TableRules;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::schema::{Schema, TableSchema};
-use crate::sql::identifier;
 use crate::write_encoding::{decoded, sql_value};
 use crate::write_rows::{column_list, column_name, read_row, row_id, row_key, AppValues, AppView};
 use crate::write_schema::WriteSchema;
@@ -15,6 +14,7 @@ use coven_merge::{
     RemovalRow, RemovalView, RowId, RowState, RowUpdate, WriteId,
 };
 use rusqlite::params_from_iter;
+use sqlive::sql::identifier;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 

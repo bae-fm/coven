@@ -1,0 +1,12 @@
+[package]
+name = "sqlive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }
+sqlite3-parser.workspace = true
+
+[lints]
+workspace = true

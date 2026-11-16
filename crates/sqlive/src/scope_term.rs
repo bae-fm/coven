@@ -352,9 +352,10 @@ impl Operand {
 
 /// A column's affinity, as SQLite derives it from the declared type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Affinity {
+pub enum Affinity {
     /// INTEGER, REAL or NUMERIC: they compare their values alike.
     Numeric,
+    /// CHAR, CLOB or TEXT.
     Text,
     /// BLOB, or no declared type: SQLite converts nothing.
     Blob,
@@ -362,7 +363,7 @@ pub(crate) enum Affinity {
 
 impl Affinity {
     /// SQLite's rules for a declared column type (datatype3 §3.1).
-    pub(crate) fn declared(declared: &str) -> Self {
+    pub fn declared(declared: &str) -> Self {
         let declared = declared.to_ascii_uppercase();
         if declared.contains("INT") {
             Self::Numeric

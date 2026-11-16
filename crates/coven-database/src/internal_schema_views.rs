@@ -205,8 +205,8 @@ pub(super) const SCHEMA: &str = concat!(
 
 /// The views and tables a live query reads whole: coven's views and tables
 /// app SQL may read.
-pub(crate) fn whole_views() -> std::sync::Arc<crate::read_capture::WholeViews> {
-    std::sync::Arc::new(crate::read_capture::WholeViews::new(READABLE))
+pub(crate) fn whole_views() -> std::sync::Arc<sqlive::WholeViews> {
+    std::sync::Arc::new(sqlive::WholeViews::new(READABLE))
 }
 
 /// Whether `name` is one of coven's views or tables app SQL may read.

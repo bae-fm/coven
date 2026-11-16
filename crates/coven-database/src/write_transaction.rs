@@ -5,11 +5,11 @@
 //! would free what that statement still calls.
 
 use super::DatabaseConnection;
-use crate::observation::RowChange;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
+use sqlive::RowChange;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 

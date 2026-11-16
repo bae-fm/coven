@@ -1,7 +1,7 @@
-use crate::scope_lookup::tests::follows;
-use crate::sql_value::SqlValue;
+use super::lookup::follows;
 use crate::tests::next;
 use crate::{tests::TestStore, Database, DbError, Determinism, Migration, SqlFunctions};
+use sqlive::SqlValue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

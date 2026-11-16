@@ -9,9 +9,8 @@
 
 use super::DatabaseConnection;
 use crate::authorization::AppContext;
-use crate::read_capture::ReadFrame;
-use crate::scope_plan::ScopePlan;
 use rusqlite::{CachedStatement, Statement};
+use sqlive::{ReadFrame, ScopePlan};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -87,7 +86,7 @@ impl DatabaseConnection {
         &self,
         sql: &str,
         statement: &AppStatement<'_>,
-    ) -> rusqlite::Result<Option<Arc<crate::scope_plan::ScopePlan>>> {
+    ) -> rusqlite::Result<Option<Arc<sqlive::ScopePlan>>> {
         if !self.authorization.capturing_reads() {
             return Ok(None);
         }
@@ -98,12 +97,12 @@ impl DatabaseConnection {
     /// `plan` gives it for this run, or whole.
     pub(super) fn record_app_statement(
         &self,
-        plan: Option<&crate::scope_plan::ScopePlan>,
-        parameters: &[crate::sql_value::SqlValue],
+        plan: Option<&sqlive::ScopePlan>,
+        parameters: &[sqlive::SqlValue],
     ) {
         self.authorization.record_statement(&match plan {
             Some(plan) => plan.scopes(parameters),
-            None => crate::row_scope::Scopes::default(),
+            None => sqlive::Scopes::default(),
         });
     }
 

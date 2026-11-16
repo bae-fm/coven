@@ -6,22 +6,15 @@
 //! scope tests, only where a waiting live query narrows that table.
 
 use super::table_shapes::{TableShape, TableShapes};
-use crate::observation::RowChange;
-use crate::row_scope::RowImage;
-use crate::sql_value::SqlValue;
 use crate::DbError;
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
+use sqlive::{RowChange, RowImage, SqlValue, ROWS_PER_TABLE};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A whole row's change, beside the column positions an update names.
 const ROW: usize = usize::MAX;
-
-/// Past this many row changes to one table, a write keeps that the table
-/// changed instead of each row, so its memory stays bounded; every live
-/// query that reads the table then runs again.
-pub(crate) const ROWS_PER_TABLE: usize = 10_000;
 
 /// The columns a table's row images hold, with their pre-update positions.
 pub(crate) struct ImageColumns {

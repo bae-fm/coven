@@ -3,7 +3,6 @@
 use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::migration_names::MigrationMatch;
 use crate::schema::{Schema, TableSchema};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience, value};
 use crate::write_rows::{key_columns, AppKey, AppRow, AppValues};
@@ -14,6 +13,7 @@ use sqlite3_parser::{
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
+use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// What one migration run captures of the synced state before its first
@@ -82,12 +82,12 @@ impl<'c> MigrationCapture<'c> {
         // The synced tables whose rows this statement may change, lowercase.
         let mut changes = BTreeSet::new();
         let main = |name: &Option<sqlite3_parser::ast::Name<'_>>| {
-            name.as_ref().is_none_or(|n| crate::sql::name(n.0).eq_ignore_ascii_case("main"))
+            name.as_ref().is_none_or(|n| sqlive::sql::name(n.0).eq_ignore_ascii_case("main"))
         };
         let breaking = match command {
             Some(Cmd::Stmt(Stmt::AlterTable(table, AlterTableBody::AddColumn(column)))) => {
                 main(&table.db_name)
-                    && self.synced.contains(&crate::sql::name(table.name.0).to_ascii_lowercase())
+                    && self.synced.contains(&sqlive::sql::name(table.name.0).to_ascii_lowercase())
                     && column.constraints.iter().any(|c| {
                         c.name.is_some()
                             || !matches!(
@@ -101,17 +101,17 @@ impl<'c> MigrationCapture<'c> {
                 main(&table.db_name)
                     && before
                         .tables
-                        .contains_key(&crate::sql::name(table.name.0).to_ascii_lowercase())
+                        .contains_key(&sqlive::sql::name(table.name.0).to_ascii_lowercase())
                     && (matches!(body, AlterTableBody::RenameTo(_))
                         || self
                             .synced
-                            .contains(&crate::sql::name(table.name.0).to_ascii_lowercase()))
+                            .contains(&sqlive::sql::name(table.name.0).to_ascii_lowercase()))
             }
             Some(Cmd::Stmt(Stmt::DropTable { tbl_name, .. })) => {
                 main(&tbl_name.db_name)
                     && before
                         .tables
-                        .contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
+                        .contains_key(&sqlive::sql::name(tbl_name.name.0).to_ascii_lowercase())
             }
             Some(Cmd::Stmt(
                 Stmt::CreateTable { body: CreateTableBody::ColumnsAndConstraints { .. }, .. }
@@ -119,11 +119,11 @@ impl<'c> MigrationCapture<'c> {
                 | Stmt::DropView { .. },
             )) => false,
             Some(Cmd::Stmt(Stmt::CreateIndex { tbl_name, .. })) => {
-                before.tables.contains_key(&crate::sql::name(tbl_name.0).to_ascii_lowercase())
+                before.tables.contains_key(&sqlive::sql::name(tbl_name.0).to_ascii_lowercase())
                     && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
             }
             Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => {
-                before.tables.contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
+                before.tables.contains_key(&sqlive::sql::name(tbl_name.name.0).to_ascii_lowercase())
                     && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
             }
             other => {
@@ -185,7 +185,7 @@ fn named_table(command: &Option<Cmd<'_>>) -> Option<String> {
         Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => tbl_name.name.0,
         _ => return None,
     };
-    Some(crate::sql::name(name).to_ascii_lowercase())
+    Some(sqlive::sql::name(name).to_ascii_lowercase())
 }
 
 impl<'c> MigrationSnapshot<'c> {

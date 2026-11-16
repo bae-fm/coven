@@ -1,7 +1,6 @@
 //! Materialize the affected removal region in the same writer transaction.
 use crate::removal_view::DatabaseRemovalView;
 use crate::schema::TableSchema;
-use crate::sql::identifier;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
 use crate::write_commit::StoredGeneration;
@@ -11,6 +10,7 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{RemovalResult, RowId};
 use rusqlite::params_from_iter;
+use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `stored` names the current generation's id of each present row the

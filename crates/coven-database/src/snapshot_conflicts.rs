@@ -11,13 +11,13 @@
 //! written value.
 
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_foundation::id_source::CircleId;
 use coven_merge::{Audience, RowId};
 use rusqlite::params;
+use sqlive::sql::identifier;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The rows with a reason the rules can take out, or whose removal can

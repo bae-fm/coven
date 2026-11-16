@@ -2,10 +2,10 @@
 
 use crate::removal_schema::TableRules;
 use crate::schema::{Schema, SchemaForeignKey, TableSchema};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
 use coven_merge::ForeignKey;
+use sqlive::sql::identifier;
 use std::collections::BTreeMap;
 
 pub(crate) struct WriteSchema {

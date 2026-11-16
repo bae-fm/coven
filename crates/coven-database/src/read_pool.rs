@@ -80,10 +80,7 @@ impl ReaderLease<'_> {
 
     pub(super) fn live_read<F, R, E>(
         &self,
-        judge: &mut dyn FnMut(
-            crate::observation::ReadSet,
-            &mut crate::scope_lookup::Lookups<'_>,
-        ) -> rusqlite::Result<()>,
+        judge: &mut dyn FnMut(sqlive::ReadSet, &mut sqlive::Lookups<'_>) -> rusqlite::Result<()>,
         read: F,
     ) -> Result<R, E>
     where

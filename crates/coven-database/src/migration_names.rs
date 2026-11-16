@@ -1,7 +1,6 @@
 //! Identity across a migration: explicit renames first, surviving names second.
 
 use crate::schema::Schema;
-use crate::sql::name;
 use coven_merge::{ConstraintColumns, ForeignKey};
 use rusqlite::fallible_iterator::FallibleIterator;
 use sqlite3_parser::{
@@ -9,6 +8,7 @@ use sqlite3_parser::{
     lexer::sql::Parser,
     Bump,
 };
+use sqlive::sql::name;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Origin {

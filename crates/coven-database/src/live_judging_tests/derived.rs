@@ -26,7 +26,7 @@ INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(
 async fn follows(
     db: &Database,
     sql: &'static str,
-    parameters: Vec<crate::sql_value::SqlValue>,
+    parameters: Vec<sqlive::SqlValue>,
     writes: &[(&str, bool)],
 ) {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -34,9 +34,8 @@ async fn follows(
     let bound = parameters.clone();
     let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         let run = count.fetch_add(1, Ordering::SeqCst);
-        let rows = db.query(sql, rusqlite::params_from_iter(&bound), |r| {
-            r.get::<_, crate::sql_value::SqlValue>(0)
-        })?;
+        let rows =
+            db.query(sql, rusqlite::params_from_iter(&bound), |r| r.get::<_, sqlive::SqlValue>(0))?;
         Ok((run, rows))
     });
     let mut runs = next(&mut query).await.0;
@@ -52,7 +51,7 @@ async fn follows(
                     Ok::<_, DbError>(db.query(
                         sql,
                         rusqlite::params_from_iter(&parameters),
-                        |r| r.get::<_, crate::sql_value::SqlValue>(0),
+                        |r| r.get::<_, sqlive::SqlValue>(0),
                     )?)
                 })
                 .await
@@ -120,7 +119,7 @@ async fn a_ctes_rows_give_values_and_each_arm_takes_the_condition() {
     follows(
         &db,
         "WITH c AS MATERIALIZED (SELECT r.id, r.album FROM releases r WHERE r.id = ?1) SELECT coalesce(t.title, c.album) FROM c LEFT JOIN tracks t ON t.release = c.id ORDER BY t.id",
-        vec![crate::sql_value::SqlValue::Text(b"r2".to_vec())],
+        vec![sqlive::SqlValue::Text(b"r2".to_vec())],
         &[
             ("UPDATE tracks SET title = '.' WHERE id = 1", false),
             ("UPDATE releases SET album = 'z' WHERE id = 'r1'", false),

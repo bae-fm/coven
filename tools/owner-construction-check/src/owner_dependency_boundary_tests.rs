@@ -157,6 +157,28 @@ fn public_database_parameters_and_mutating_receiver_parameters_are_rejected() {
 }
 
 #[test]
+fn a_listed_callable_may_take_a_raw_handle_but_not_return_one() {
+    let listed = policy_with(&format!(
+        r#"
+        [[database.raw_handle_parameters]]
+        path = "{PATH}"
+        callable = "Owner::open"
+        reason = "the caller holds the connection"
+        "#
+    ));
+    let source = "impl Owner { pub fn open(connection: &Connection) {} pub fn other(connection: &Connection) {} }";
+    assert_eq!(
+        leaks_under(&listed, PATH, source),
+        findings(PATH, &["Owner::other accepts raw dependency Connection"])
+    );
+    let returned = "impl Owner { pub fn open(connection: &Connection) -> Connection { todo!() } }";
+    assert_eq!(
+        leaks_under(&listed, PATH, returned),
+        findings(PATH, &["Owner::open returns retained dependency Connection"])
+    );
+}
+
+#[test]
 fn tasks_taken_whole_or_mutably_can_transfer_products_but_cannot_lend_or_expose_raw_handles() {
     let found = leaks(PATH, "struct Plan { permit: Permit } impl Plan { fn into_permit(self) -> Permit { todo!() } fn next(&mut self) -> Permit { todo!() } fn copy(&self) -> Permit { todo!() } fn borrow(&self) -> &Permit { todo!() } fn borrow_consumed(self) -> &'static Permit { todo!() } fn raw(self) -> Connection { todo!() } }");
     assert_eq!(

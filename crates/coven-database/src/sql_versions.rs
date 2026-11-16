@@ -8,10 +8,10 @@ use sqlite3_parser::ast::{ColumnConstraint, CreateTableBody, Stmt, TableConstrai
 use sqlite3_parser::Bump;
 
 use crate::schema_sql::stored_statement;
-use crate::sql::{identifier, tokens, Token};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, OpenStep};
 use coven_foundation::progress::ProgressReport;
+use sqlive::sql::{identifier, tokens, Token};
 
 /// What a version belongs to. SQLite keeps collations and functions apart,
 /// so one name can be both.

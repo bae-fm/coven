@@ -1,4 +1,4 @@
-use crate::scope_lookup::tests::follows;
+use super::lookup::follows;
 use crate::tests::next;
 use crate::{tests::TestStore, Database, DbError};
 use coven_foundation::clock::HANG_GUARD;
@@ -410,7 +410,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
     db.commit_writer(|db| {
         db.internal_execute(
             "INSERT INTO \"a\"\"b\" VALUES (?,0)",
-            [crate::sql_value::SqlValue::Text(vec![255, 0, 1])],
+            [sqlive::SqlValue::Text(vec![255, 0, 1])],
         )
         .unwrap()
     });
@@ -420,7 +420,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query_row(
             "SELECT value FROM \"a\"\"b\" AS \"x\"\"y\" WHERE \"x\"\"y\".\"i\"\"d\"=?",
-            [crate::sql_value::SqlValue::Text(vec![255, 0, 1])],
+            [sqlive::SqlValue::Text(vec![255, 0, 1])],
             |r| r.get::<_, i64>(0),
         )?)
     });
@@ -431,7 +431,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
     db.commit_writer(|db| {
         db.internal_execute(
             "UPDATE \"a\"\"b\" SET value=2 WHERE \"i\"\"d\"=?",
-            [crate::sql_value::SqlValue::Text(vec![255, 0, 1])],
+            [sqlive::SqlValue::Text(vec![255, 0, 1])],
         )
         .unwrap()
     });
@@ -692,13 +692,10 @@ async fn conversions_collations_and_generated_columns_keep_whole_tables() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, number INTEGER, name TEXT COLLATE NOCASE, label TEXT, shout TEXT AS (upper(label))); INSERT INTO items(id,number,name,label) VALUES (1,1,'a','x'),(9,9,'z','y')").await.unwrap();
     for (sql, parameter) in [
-        (
-            "SELECT label FROM items WHERE number=?1",
-            crate::sql_value::SqlValue::Text(b"1".to_vec()),
-        ),
-        ("SELECT label FROM items WHERE label=?1", crate::sql_value::SqlValue::Integer(1)),
-        ("SELECT label FROM items WHERE name=?1", crate::sql_value::SqlValue::Text(b"a".to_vec())),
-        ("SELECT label FROM items WHERE shout=?1", crate::sql_value::SqlValue::Text(b"X".to_vec())),
+        ("SELECT label FROM items WHERE number=?1", sqlive::SqlValue::Text(b"1".to_vec())),
+        ("SELECT label FROM items WHERE label=?1", sqlive::SqlValue::Integer(1)),
+        ("SELECT label FROM items WHERE name=?1", sqlive::SqlValue::Text(b"a".to_vec())),
+        ("SELECT label FROM items WHERE shout=?1", sqlive::SqlValue::Text(b"X".to_vec())),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -718,7 +715,7 @@ async fn conversions_collations_and_generated_columns_keep_whole_tables() {
 /// by changing the tested column between NULL and a value.
 #[tokio::test]
 async fn null_tests_and_is_narrow() {
-    use crate::sql_value::SqlValue;
+    use sqlive::SqlValue;
     let store = TestStore::new();
     let db = store
         .schema(
@@ -850,7 +847,7 @@ async fn collated_comparisons_narrow_by_sqlites_answer() {
         ("SELECT value FROM items WHERE x COLLATE NOCASE IS 'a'", vec![]),
         (
             "SELECT value FROM items WHERE x COLLATE NOCASE IS ?1",
-            vec![crate::sql_value::SqlValue::Text(b"a".to_vec())],
+            vec![sqlive::SqlValue::Text(b"a".to_vec())],
         ),
         ("SELECT value FROM items WHERE x IS NOT 'z'", vec![]),
     ] {

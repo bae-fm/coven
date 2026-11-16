@@ -6,7 +6,6 @@ use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
 use crate::snapshot_preparation::PreparedSnapshot;
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::AppValues;
@@ -16,6 +15,7 @@ use coven_foundation::progress::ProgressReport;
 use coven_merge::{Audience, RowId};
 use rusqlite::types::ToSqlOutput;
 use rusqlite::{params, params_from_iter};
+use sqlive::sql::identifier;
 
 /// The passes installing makes over each snapshot's tables, one table at a
 /// time: `copy_rows`, `persist_rows` and `finish`. Each table counts once in

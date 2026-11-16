@@ -8,11 +8,11 @@
 //! its own transaction; a marked query sometimes waits through more writes.
 //! `COVEN_SCOPE_SEEDS` sets how many seeds run (default 40).
 
-use crate::sql_value::SqlValue;
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{Database, DbError, LiveQuery, RowIdentity, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
+use sqlive::SqlValue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -768,29 +768,4 @@ async fn live_queries_rerun_whenever_their_results_change() {
     // The test would pass with every table whole; narrowing must also spare
     // the queries it can.
     assert!(spared > 0, "no narrowing query was spared a rerun");
-}
-
-#[test]
-fn numbers_compare_exactly_as_sqlite_does() {
-    use crate::row_scope::compare;
-    use std::cmp::Ordering::{Equal, Greater, Less};
-    let cases = [
-        (
-            SqlValue::Integer(9_007_199_254_740_993),
-            SqlValue::Real(9_007_199_254_740_992.0),
-            Greater,
-        ),
-        (SqlValue::Real(-0.0), SqlValue::Integer(0), Equal),
-        (SqlValue::Real(-0.0), SqlValue::Real(0.0), Equal),
-        (SqlValue::Integer(i64::MAX), SqlValue::Real(9.3e18), Less),
-        (SqlValue::Integer(i64::MIN), SqlValue::Real(-9.3e18), Greater),
-        (SqlValue::Integer(-1), SqlValue::Real(-1.5), Greater),
-        (SqlValue::Integer(1), SqlValue::Real(1.5), Less),
-        (SqlValue::Integer(2), SqlValue::Integer(10), Less),
-        (SqlValue::Real(1.5), SqlValue::Real(-2.5), Greater),
-    ];
-    for (left, right, expected) in cases {
-        assert_eq!(compare(&left, &right), Some(expected), "{left:?} against {right:?}");
-        assert_eq!(compare(&right, &left), Some(expected.reverse()), "{right:?} against {left:?}");
-    }
 }

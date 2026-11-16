@@ -649,22 +649,22 @@ impl FileDatabase {
         // pause starting or ending, which holds trailing uploads'
         // completions (§12.3, §17.4).
         let reads = vec![
-            crate::observation::TableRead {
+            sqlive::TableRead {
                 table: "_coven_write_pause".into(),
                 columns: ["paused".into()].into(),
-                scope: crate::row_scope::RowScope::All,
+                scope: sqlive::RowScope::All,
                 inserted_only: false,
             },
-            crate::observation::TableRead {
+            sqlive::TableRead {
                 table: "_coven_file_uploads".into(),
                 columns: ["location".into()].into(),
-                scope: crate::row_scope::RowScope::All,
+                scope: sqlive::RowScope::All,
                 inserted_only: true,
             },
-            crate::observation::TableRead {
+            sqlive::TableRead {
                 table: "_coven_upload_files".into(),
                 columns: ["file".into()].into(),
-                scope: crate::row_scope::RowScope::All,
+                scope: sqlive::RowScope::All,
                 inserted_only: false,
             },
         ];

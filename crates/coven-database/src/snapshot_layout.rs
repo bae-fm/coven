@@ -5,9 +5,9 @@
 //! the writer once and works on them there with SQL (§16.2, §21.2).
 
 use crate::schema::TableSchema;
-use crate::sql::identifier;
 use crate::write_schema::WriteSchema;
 use coven_merge::ForeignKey;
+use sqlive::sql::identifier;
 
 /// One synced table's columns as both connections lay them out.
 pub(crate) struct TableLayout {

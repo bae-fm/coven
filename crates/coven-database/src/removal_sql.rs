@@ -1,7 +1,6 @@
 //! SQLite evaluates one region row at a time with the app's affinities and SQL.
 use crate::removal_schema::TableRules;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{column_list, equality_key, read_row, AppValues};
@@ -10,6 +9,7 @@ use crate::DbError;
 use coven_format::value::Value;
 use coven_merge::{Constraints, RowState, UniqueClaim};
 use rusqlite::params_from_iter;
+use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 /// Whether `values` are already the row SQLite would store: no column left to

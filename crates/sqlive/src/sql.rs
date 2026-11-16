@@ -3,27 +3,34 @@
 use crate::schema_source::SchemaSource;
 use sqlite3_parser::ast::Expr;
 
+/// A token of SQL text.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Token {
+pub enum Token {
+    /// An unquoted word, with ASCII letters lowercased.
     Word(String),
+    /// A name in double quotes, backticks or brackets, without the quotes.
     Quoted(String),
+    /// A string in single quotes, without the quotes.
     String(String),
+    /// A punctuation character.
     Symbol(char),
 }
 
 impl Token {
-    pub(crate) fn word(&self, word: &str) -> bool {
+    /// Whether this is the unquoted word `word`, in any letter case.
+    pub fn word(&self, word: &str) -> bool {
         matches!(self, Self::Word(value) if value.eq_ignore_ascii_case(word))
     }
 }
 
-pub(crate) fn tokens(sql: &str) -> rusqlite::Result<Vec<Token>> {
+/// The tokens of `sql`, without its comments and whitespace.
+pub fn tokens(sql: &str) -> rusqlite::Result<Vec<Token>> {
     Ok(normalized(&SchemaSource::try_new(sql)?))
 }
 
-// Keep migration comparison's spelling rules: quote contents retain case,
-// unquoted words fold ASCII case, and numeric/operator punctuation stays separate.
-pub(crate) fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
+/// The tokens of `source`. Quoted contents keep their case, unquoted words
+/// fold ASCII case, and numeric and operator punctuation stay separate.
+pub fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
     let mut tokens = Vec::new();
     for mut text in source.tokens() {
         if text.starts_with(['x', 'X']) && text.as_bytes().get(1) == Some(&b'\'') {
@@ -60,14 +67,14 @@ pub(crate) fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
 }
 
 /// Quote an identifier, never a value or SQL fragment.
-pub(crate) fn identifier(name: &str) -> String {
+pub fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// A name the parser read, without the quotes SQLite allows around it:
 /// double quotes, backticks, brackets, or single quotes where SQLite reads
 /// a string as a name.
-pub(crate) fn name(raw: &str) -> String {
+pub fn name(raw: &str) -> String {
     match raw.as_bytes()[0] {
         b'[' => raw[1..raw.len() - 1].to_owned(),
         quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1]
@@ -77,7 +84,7 @@ pub(crate) fn name(raw: &str) -> String {
 }
 
 /// `expr` without the parentheses around it, each holding one expression.
-pub(crate) fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
+pub fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
     while let Expr::Parenthesized(items) = expr {
         let [item] = items.as_slice() else { break };
         expr = item;

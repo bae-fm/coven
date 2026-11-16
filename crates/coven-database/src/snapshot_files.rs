@@ -13,12 +13,12 @@
 
 use crate::file_write::FileWrite;
 use crate::snapshot_layout::{SnapshotLayout, TableLayout};
-use crate::sql::identifier;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_foundation::id_source::FileId;
 use rusqlite::params;
+use sqlive::sql::identifier;
 
 pub(crate) fn protect(
     db: &DatabaseConnection,

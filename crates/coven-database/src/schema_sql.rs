@@ -3,13 +3,13 @@
 //! removes tables. The snapshot install and the migration snapshot build the
 //! value comparison `same_value` returns.
 
-use crate::schema_source::SchemaSource;
-use crate::sql::{normalized, unparenthesized, Token};
 use sqlite3_parser::{
     ast::{Cmd, Expr, Name, Operator, Stmt, TriggerTime, UnaryOperator},
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
+use sqlive::sql::{normalized, unparenthesized, Token};
+use sqlive::SchemaSource;
 
 /// One statement of SQLite's stored schema, which SQLite has already parsed
 /// and accepted, as sqlite3-parser reads it.

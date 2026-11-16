@@ -18,7 +18,6 @@ mod page_cache;
 mod pre_update_changes;
 #[path = "rolled_back.rs"]
 mod rolled_back;
-pub(crate) use pre_update_changes::ROWS_PER_TABLE;
 pub(crate) use rowid_policy::rowid_guard;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
@@ -554,7 +553,7 @@ impl DatabaseConnection {
         let result = self.with_statement(sql, |statement| {
             statement.query_row(params, map).map_err(DbError::from)
         });
-        self.authorization.record_statement(&crate::row_scope::Scopes::default());
+        self.authorization.record_statement(&sqlive::Scopes::default());
         result
     }
 
@@ -588,7 +587,7 @@ impl DatabaseConnection {
             }
             Ok(())
         });
-        self.authorization.record_statement(&crate::row_scope::Scopes::default());
+        self.authorization.record_statement(&sqlive::Scopes::default());
         result
     }
 
@@ -734,7 +733,7 @@ impl DatabaseConnection {
         self.authorization.begin_read_statement();
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
-            let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
+            let parameters = sqlive::parameters(&self.connection, &statement, params)?;
             let plan = self.live_scope_plan(sql, &statement)?;
             let result = self.counting_steps(&mut statement, StepsOf::AppRead, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;

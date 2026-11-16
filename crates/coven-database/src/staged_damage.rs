@@ -165,7 +165,7 @@ pub(super) fn damage(
             )?;
             let mut changed = 0;
             for name in rows.into_iter().filter(|name| !others.contains(name)) {
-                let name = format!("temp.{}", crate::sql::identifier(&name));
+                let name = format!("temp.{}", sqlive::sql::identifier(&name));
                 changed = db.internal_execute(
                     &format!("DELETE FROM {name} WHERE rowid=(SELECT min(rowid) FROM {name})"),
                     [],

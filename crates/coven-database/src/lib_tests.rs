@@ -502,7 +502,7 @@ pub(crate) fn contents(
                     .query(
                         &format!(
                             "SELECT * FROM main.{} ORDER BY 1",
-                            crate::sql::identifier(&table)
+                            sqlive::sql::identifier(&table)
                         ),
                         [],
                         |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect(),

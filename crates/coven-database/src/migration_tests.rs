@@ -535,7 +535,7 @@ pub(crate) mod declarations {
                 let values = db
                     .prepare(&format!(
                         "SELECT * FROM {} ORDER BY 1",
-                        crate::sql::identifier(&object.1)
+                        sqlive::sql::identifier(&object.1)
                     ))
                     .unwrap()
                     .query_map([], |r| (0..r.as_ref().column_count()).map(|i| r.get(i)).collect())

@@ -8,8 +8,8 @@ use rusqlite::hooks::AuthAction;
 use rusqlite::Connection;
 
 use super::{Owner, Policy, PolicyAction, SqlAuthorization};
-use crate::read_capture::WholeViews;
 use crate::DbError;
+use sqlive::WholeViews;
 
 /// A policy that allows every action the authorizer asks it about and
 /// records the owner of each table an insert reached. `Recording` treats an
@@ -31,7 +31,7 @@ impl Policy for Recording {
         Ok(())
     }
 
-    fn check_sql(&self, _tokens: &[crate::sql::Token]) -> Result<(), DbError> {
+    fn check_sql(&self, _tokens: &[sqlive::sql::Token]) -> Result<(), DbError> {
         Ok(())
     }
 

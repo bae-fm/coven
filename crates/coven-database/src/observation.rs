@@ -1,22 +1,17 @@
 //! Per-subscription dependencies. Commits during a read are retained until its
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
-use crate::row_scope::{RowImage, RowScope};
-use crate::scope_lookup::{Judging, Lookups};
-use crate::sql_value::SqlValue;
 use crate::store_failure::StoreFailure;
 use crate::{CommitScope, DbError};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{Bug, BugSinkRef};
+use sqlive::{affected, Answers, Lookups, ReadSet, RowChange, RowScope};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::watch;
-
-pub(crate) type ColumnSet = BTreeSet<(String, String)>;
-pub(crate) type ReadSet = Vec<TableRead>;
 
 /// Tables whose changes no write records for live queries, lowercase.
 #[derive(Debug)]
@@ -31,52 +26,6 @@ impl UnrecordedTables {
     pub(crate) fn recorded(&self, table: &str) -> bool {
         !self.0.contains(&table.to_ascii_lowercase())
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct TableRead {
-    pub(crate) table: String,
-    pub(crate) columns: BTreeSet<String>,
-    /// The rows whose changes matter.
-    pub(crate) scope: RowScope,
-    /// Only inserted rows affect this read, not updates or deletions.
-    pub(crate) inserted_only: bool,
-}
-
-pub(crate) struct RowChange {
-    pub(crate) table: String,
-    pub(crate) column: String,
-    /// The row before and after, `None` on the side where it isn't there;
-    /// `None` altogether for a change no row names, as a virtual table's or
-    /// one only the update hook observed, which every scope covers.
-    pub(crate) rows: Option<(Option<RowImage>, Option<RowImage>)>,
-}
-
-impl TableRead {
-    /// Whether `change` could change what this read returned, running
-    /// `lookups` for a join's values.
-    fn affected(&self, change: &RowChange, lookups: &mut Lookups<'_>) -> rusqlite::Result<bool> {
-        if self.table != change.table
-            || !(change.column.is_empty() || self.columns.contains(&change.column))
-            || (self.inserted_only && !inserted(change))
-        {
-            return Ok(false);
-        }
-        let Some((old, new)) = &change.rows else {
-            return Ok(true);
-        };
-        for row in [old, new].into_iter().flatten() {
-            if self.scope.matches(row, lookups)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-}
-
-/// An insertion: a whole-row change with no row before it.
-fn inserted(change: &RowChange) -> bool {
-    change.column.is_empty() && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
 }
 
 /// Why this handle refuses every call until the store is reopened.
@@ -280,98 +229,6 @@ impl CommitSubscription {
             }
         }
         failure.map_or(Ok(()), Err)
-    }
-}
-
-/// Whether `changes` could change what `reads` returned. Past
-/// `ROWS_PER_TABLE` row changes to one table, a join's values in that table
-/// count as matched without a lookup, as a table changed whole would, so a
-/// write's lookups stay bounded.
-fn affected(
-    reads: &ReadSet,
-    changes: &[RowChange],
-    answers: &mut Answers,
-    lookups: &mut Lookups<'_>,
-) -> rusqlite::Result<bool> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for change in changes.iter().filter(|change| change.rows.is_some()) {
-        *counts.entry(&change.table).or_default() += 1;
-    }
-    for change in changes {
-        let bounded = counts
-            .get(change.table.as_str())
-            .is_some_and(|count| *count > crate::sqlite::ROWS_PER_TABLE);
-        for read in reads {
-            let found = if bounded {
-                read.affected(change, &mut |_| Ok(true))?
-            } else {
-                read.affected(change, &mut |judging| answers.answer(judging, lookups))?
-            };
-            if found {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// The questions one judging asked, by lookup and value, or by condition
-/// and values, so rows sharing a value, and a row's old and new images that
-/// agree on the columns a condition names, ask once.
-#[derive(Default)]
-struct Answers {
-    partners: HashMap<(usize, ValueKey), bool>,
-    rows: HashMap<(String, Vec<ValueKey>), bool>,
-}
-
-impl Answers {
-    fn answer(
-        &mut self,
-        judging: Judging<'_>,
-        lookups: &mut Lookups<'_>,
-    ) -> rusqlite::Result<bool> {
-        match judging {
-            Judging::Partner(lookup, value) => {
-                let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));
-                if let Some(found) = self.partners.get(&key) {
-                    return Ok(*found);
-                }
-                let found = lookups(judging)?;
-                self.partners.insert(key, found);
-                Ok(found)
-            }
-            Judging::Row(sql, parameters) => {
-                let key = (sql.to_owned(), parameters.iter().map(ValueKey::of).collect());
-                if let Some(found) = self.rows.get(&key) {
-                    return Ok(*found);
-                }
-                let found = lookups(judging)?;
-                self.rows.insert(key, found);
-                Ok(found)
-            }
-        }
-    }
-}
-
-/// A value as a hash key, by its type and bytes.
-#[derive(Hash, PartialEq, Eq)]
-enum ValueKey {
-    Null,
-    Integer(i64),
-    Real(u64),
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
-}
-
-impl ValueKey {
-    fn of(value: &SqlValue) -> Self {
-        match value {
-            SqlValue::Null => Self::Null,
-            SqlValue::Integer(value) => Self::Integer(*value),
-            SqlValue::Real(value) => Self::Real(value.to_bits()),
-            SqlValue::Text(value) => Self::Text(value.clone()),
-            SqlValue::Blob(value) => Self::Blob(value.clone()),
-        }
     }
 }
 

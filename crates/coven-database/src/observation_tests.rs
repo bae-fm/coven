@@ -1,5 +1,6 @@
 use super::*;
 use coven_foundation::task::HeardBugs;
+use sqlive::TableRead;
 
 fn bug(message: &str) -> Bug {
     Bug::new("a test's work", message)
