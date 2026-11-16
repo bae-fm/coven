@@ -48,6 +48,8 @@ mod sqlite_temporary;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_records;
 mod token_scan;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod triggered_inserts;
 mod upkeep;
 mod wal_checkpoints;
 
