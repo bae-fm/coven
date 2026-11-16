@@ -7,7 +7,9 @@
 //! carried, the operation the work was doing, and the [`SourceLocation`] where
 //! the panic began, which a panic's payload does not hold.
 //!
-//! [`locks`] holds the helpers that take a lock whose holder panicked.
+//! Work nobody waits for hands its bug to a [`BugSink`] instead, through
+//! [`report`]. [`locks`] holds the helpers that take a lock whose holder
+//! panicked.
 
 use std::any::Any;
 use std::future::Future;
@@ -112,6 +114,25 @@ pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -
 /// value.
 pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
     location::catch_located(operation, work).map_err(|(payload, at)| bug_of(operation, payload, at))
+}
+
+/// Where a bug in work nobody waits for goes: a long-lived worker, or work
+/// whose caller stopped waiting for it. The program passes its own crash
+/// reporter.
+pub trait BugSink: Send + Sync {
+    /// Report `bug`, which no caller hears of otherwise.
+    fn report(&self, bug: &Bug);
+}
+
+/// A shared [`BugSink`].
+pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
+
+/// Hand `bug` to `bugs`. A sink that panics too is logged, and its panic
+/// goes no further: it runs where nothing above it catches.
+pub fn report(bugs: &dyn BugSink, bug: &Bug) {
+    if let Err(again) = caught_sync("report a bug", || bugs.report(bug)) {
+        tracing::error!(operation = bug.operation, "reporting {bug} panicked: {again}");
+    }
 }
 
 /// Make the bug for a caught panic's `payload`, which began at `location`.

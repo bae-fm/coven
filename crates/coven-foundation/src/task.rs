@@ -17,7 +17,8 @@ use std::task::{Context, Poll};
 mod in_flight;
 
 pub use ::caught::{
-    catching_operation, caught, caught_sync, panic_message, Bug, BugKind, SourceLocation,
+    catching_operation, caught, caught_sync, panic_message, report, Bug, BugKind, BugSink,
+    BugSinkRef, SourceLocation,
 };
 
 /// Name the step the blocking operation running on this thread has reached.
@@ -146,18 +147,6 @@ pub async fn joined<T: Send + 'static>(
         Err(error) => Err(TaskFailed::of_join(operation, error)),
     }
 }
-
-/// Where a bug in work nobody waits for goes (E15): a store's long-lived
-/// workers, such as its sync loop and upload worker, and work whose caller
-/// stopped waiting for it. The app passes its own crash reporter to
-/// `Coven::new`.
-pub trait BugSink: Send + Sync {
-    /// Report `bug`, which no caller hears of otherwise.
-    fn report(&self, bug: &Bug);
-}
-
-/// A shared [`BugSink`].
-pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 
 /// Logs each bug at error: the sink of an app that wants its bugs only
 /// logged.
@@ -290,14 +279,6 @@ impl CarriesBug for TaskFailed {
             Self::Panicked(bug) => Some(bug),
             Self::Shutdown(_) => None,
         }
-    }
-}
-
-/// Hand `bug` to `bugs`. A sink that panics too is logged, and its panic
-/// goes no further: it runs where nothing above it catches.
-pub fn report(bugs: &dyn BugSink, bug: &Bug) {
-    if let Err(again) = caught_sync("report a bug", || bugs.report(bug)) {
-        tracing::error!(operation = bug.operation, "reporting {bug} panicked: {again}");
     }
 }
 

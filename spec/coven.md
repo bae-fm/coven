@@ -13586,7 +13586,7 @@ document:
 
 | Crate | Owns | Sections |
 | --- | --- | --- |
-| `caught` | catching a panic as a value that names where it began, and taking a lock whose holder panicked | api.md E15 |
+| `caught` | catching a panic as a value that names where it began, handing a bug no caller waits for to a sink, and taking a lock whose holder panicked | api.md E15 |
 | `sqlive` | what a live query's statements read, and the rows each read depends on | §4 |
 | `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, watching the device's network, reporting a panic in coven's work to the app's bug sink, and a runtime shutting down into a value | §6.7, §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
