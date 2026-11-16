@@ -3142,6 +3142,7 @@ dependencies = [
 name = "sqlive"
 version = "0.1.0"
 dependencies = [
+ "caught",
  "rusqlite",
  "sqlite3-parser",
 ]

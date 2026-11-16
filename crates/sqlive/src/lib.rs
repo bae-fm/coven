@@ -6,6 +6,7 @@
 //! the run's result could have changed.
 
 mod derived;
+mod error;
 mod from_item;
 mod read_capture;
 mod read_set;
@@ -21,6 +22,8 @@ pub mod sql;
 mod sql_value;
 mod token_scan;
 
+pub use caught;
+pub use error::{EngineFailure, Error, RollbackJoin};
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
 pub use read_set::{affected, Answers, ColumnSet, ReadSet, RowChange, TableRead, ROWS_PER_TABLE};
 pub use row_scope::{RowImage, RowScope, Scopes};

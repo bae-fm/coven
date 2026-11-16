@@ -6,7 +6,6 @@ use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
@@ -45,9 +44,9 @@ impl StreamCapture {
     /// table, as a local write does.
     pub(super) fn begin(
         transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
+    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
         let recorded = Arc::new(Mutex::new(transaction.within(|database| {
-            Ok::<_, EngineError<StoreFailure, DbError>>(match &database.observation {
+            Ok::<_, sqlive::Error<StoreFailure, DbError>>(match &database.observation {
                 Some(_) => {
                     let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {

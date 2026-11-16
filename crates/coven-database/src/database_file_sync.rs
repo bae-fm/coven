@@ -1,7 +1,6 @@
 //! Syncing the database file through SQLite's own handle to it (§4).
 
 use super::DatabaseConnection;
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 
@@ -12,8 +11,8 @@ impl DatabaseConnection {
     /// otherwise. It goes through SQLite's own handle to the file, because
     /// closing any other handle to it would drop every lock SQLite holds on
     /// it in this process.
-    pub(crate) fn sync_database_file(&self) -> Result<(), EngineError<StoreFailure, DbError>> {
-        let flush = |pragma: &str| -> Result<bool, EngineError<StoreFailure, DbError>> {
+    pub(crate) fn sync_database_file(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+        let flush = |pragma: &str| -> Result<bool, sqlive::Error<StoreFailure, DbError>> {
             Ok(self.query_row::<i64, _>(&format!("PRAGMA {pragma}"), [], |r| r.get(0))? != 0)
         };
         let flags = if flush("checkpoint_fullfsync")? || flush("fullfsync")? {
@@ -37,7 +36,7 @@ impl DatabaseConnection {
         // connection is, with the methods SQLite set as it opened it.
         let sync = unsafe { file.as_ref().and_then(|file| file.pMethods.as_ref()) }
             .and_then(|methods| methods.xSync)
-            .ok_or(EngineError::Invariant { what: "an open connection's database file syncs" })?;
+            .ok_or(sqlive::Error::Invariant { what: "an open connection's database file syncs" })?;
         // SAFETY: the file is the connection's own, which no one else uses
         // while this owner holds the connection.
         failed(unsafe { sync(file, flags) })
@@ -45,7 +44,7 @@ impl DatabaseConnection {
 }
 
 /// SQLite's result `code` as a result.
-fn failed(code: std::ffi::c_int) -> Result<(), EngineError<StoreFailure, DbError>> {
+fn failed(code: std::ffi::c_int) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
     if code == rusqlite::ffi::SQLITE_OK {
         return Ok(());
     }

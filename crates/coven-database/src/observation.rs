@@ -2,7 +2,6 @@
 //! dependencies are known; idle subscriptions retain only a changed bit.
 
 use crate::database_changes::DatabaseChanges;
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::CommitScope;
 use crate::DbError;
@@ -39,15 +38,15 @@ pub(crate) enum HandleFailure {
     Host(StoreFailure),
     /// A bug, a panic or a fault a drop found, may have left this store's
     /// state wrong (E15). It reached its one reporter as it happened, so
-    /// the calls after it repeat it as `EngineError::HandleFailed`.
+    /// the calls after it repeat it as `sqlive::Error::HandleFailed`.
     Bug(Bug),
 }
 
 impl HandleFailure {
-    fn error(&self) -> EngineError<StoreFailure, DbError> {
+    fn error(&self) -> sqlive::Error<StoreFailure, DbError> {
         match self {
-            Self::Host(failure) => EngineError::Host(failure.clone()),
-            Self::Bug(bug) => EngineError::HandleFailed(bug.clone()),
+            Self::Host(failure) => sqlive::Error::Host(failure.clone()),
+            Self::Bug(bug) => sqlive::Error::HandleFailed(bug.clone()),
         }
     }
 }
@@ -65,11 +64,11 @@ impl CommitState {
         self.closed
     }
 
-    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure, DbError>> {
+    pub(crate) fn error(&self) -> Option<sqlive::Error<StoreFailure, DbError>> {
         self.failure
             .as_ref()
             .map(HandleFailure::error)
-            .or_else(|| self.closed.then_some(EngineError::Closed))
+            .or_else(|| self.closed.then_some(sqlive::Error::Closed))
     }
 }
 
@@ -399,7 +398,7 @@ impl CommitObserver {
 
     /// Watch `reads` from now on; `first` reports the state now as their
     /// first change.
-    pub(crate) fn changes<E: From<EngineError<StoreFailure, DbError>>>(
+    pub(crate) fn changes<E: From<sqlive::Error<StoreFailure, DbError>>>(
         &self,
         reads: ReadSet,
         first: bool,
@@ -420,7 +419,7 @@ impl CommitObserver {
 
     /// Watch `rows` after `attempt`: a commit since it began that changed
     /// one is reported at once, as evidence against the wait it ended in.
-    pub(crate) fn watch_attempt<E: From<EngineError<StoreFailure, DbError>>>(
+    pub(crate) fn watch_attempt<E: From<sqlive::Error<StoreFailure, DbError>>>(
         &self,
         attempt: AttemptCommits,
         rows: &[crate::PrerequisiteRows],
@@ -539,14 +538,14 @@ impl CommitObserver {
     }
 
     /// What every call on the handle fails with: its failure, or
-    /// `EngineError::Closed` once it closed.
-    pub(crate) fn error(&self) -> Option<EngineError<StoreFailure, DbError>> {
+    /// `sqlive::Error::Closed` once it closed.
+    pub(crate) fn error(&self) -> Option<sqlive::Error<StoreFailure, DbError>> {
         self.with_state(|state| {
             state
                 .failure
                 .as_ref()
                 .map(HandleFailure::error)
-                .or_else(|| state.closed.then_some(EngineError::Closed))
+                .or_else(|| state.closed.then_some(sqlive::Error::Closed))
         })
     }
 

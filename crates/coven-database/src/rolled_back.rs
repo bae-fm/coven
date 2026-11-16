@@ -2,7 +2,6 @@
 //! snapshot, and checks whose scratch writes are discarded.
 
 use super::DatabaseConnection;
-use crate::engine_error::{EngineError, EngineFailure, RollbackJoin};
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 
@@ -12,7 +11,7 @@ impl DatabaseConnection {
     pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<EngineError<StoreFailure, DbError>>,
+        E: From<sqlive::Error<StoreFailure, DbError>>,
     {
         self.read_transaction(|| {
             let _reading = self.authorization.reading();
@@ -20,7 +19,7 @@ impl DatabaseConnection {
         })
     }
 
-    pub(crate) fn read_transaction<R, E: From<EngineError<StoreFailure, DbError>>>(
+    pub(crate) fn read_transaction<R, E: From<sqlive::Error<StoreFailure, DbError>>>(
         &self,
         read: impl FnOnce() -> Result<R, E>,
     ) -> Result<R, E> {
@@ -43,7 +42,7 @@ impl DatabaseConnection {
             Ok(()) => result,
             // A failed read keeps its own cause; the handle now refuses calls.
             Err(rollback) => Err(match result {
-                Ok(_) => EngineError::from(rollback).into(),
+                Ok(_) => sqlive::Error::from(rollback).into(),
                 Err(error) => {
                     tracing::error!(%rollback, "ending a failed read's snapshot failed");
                     error
@@ -55,7 +54,7 @@ impl DatabaseConnection {
     /// Run checks that write scratch state, such as temporary tables, in a
     /// transaction that always rolls back, so nothing they write is kept or
     /// observed. It takes no write lock until something writes the main schema.
-    pub(crate) fn discarded_transaction<T, E: RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn discarded_transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
@@ -69,14 +68,14 @@ impl DatabaseConnection {
     /// with `SQLITE_BUSY` if another connection holds it even for a moment,
     /// where `BEGIN IMMEDIATE` waits out the busy timeout.
     #[cfg(test)]
-    pub(crate) fn discarded_write_transaction<T, E: RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn discarded_write_transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.discarded("BEGIN IMMEDIATE", run)
     }
 
-    fn discarded<T, E: RollbackJoin<StoreFailure, DbError>>(
+    fn discarded<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
         &self,
         begin: &str,
         run: impl FnOnce(&Self) -> Result<T, E>,
@@ -88,7 +87,7 @@ impl DatabaseConnection {
         match self.roll_back() {
             Ok(()) => result,
             Err(rollback) => Err(match result {
-                Ok(_) => E::from(EngineError::from(rollback)),
+                Ok(_) => E::from(sqlive::Error::from(rollback)),
                 Err(error) => error.with_rollback(rollback),
             }),
         }
@@ -109,7 +108,7 @@ impl DatabaseConnection {
         };
         if result.is_err() {
             if let Some(handle) = &self.handle {
-                handle.fail(StoreFailure::from(EngineFailure::Rollback));
+                handle.fail(StoreFailure::from(sqlive::EngineFailure::Rollback));
             }
         }
         result

@@ -351,9 +351,9 @@ async fn unnamed_check_sqlite_differential() {
                     Ok(_) => {
                         writer.execute(&format!("DELETE FROM oracle{i}"), []).unwrap();
                     }
-                    Err(crate::engine_error::EngineError::Sqlite(
-                        rusqlite::Error::SqliteFailure(e, _),
-                    )) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK => {
+                    Err(sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                        if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK =>
+                    {
                         expected.insert((*expression).to_owned());
                     }
                     result => panic!("unexpected SQLite enforcement result: {result:?}"),

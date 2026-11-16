@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+caught.workspace = true
 rusqlite = { workspace = true, features = ["bundled"] }
 sqlite3-parser.workspace = true
 

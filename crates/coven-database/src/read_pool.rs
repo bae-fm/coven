@@ -1,6 +1,5 @@
 //! Reader reservations keep committed reads independent of the writer.
 
-use crate::engine_error::EngineError;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
@@ -40,7 +39,7 @@ impl ReadPool {
         }
     }
 
-    pub(super) fn close(self) -> Vec<EngineError<StoreFailure, DbError>> {
+    pub(super) fn close(self) -> Vec<sqlive::Error<StoreFailure, DbError>> {
         let mut failures = Vec::new();
         for reader in self.readers {
             if let Err(error) = coven_foundation::locks::into_unpoisoned(reader).close() {

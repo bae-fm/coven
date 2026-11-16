@@ -1,6 +1,5 @@
 //! Commit notifications shared by file work and synchronization.
 
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 
@@ -23,7 +22,7 @@ impl<E> DatabaseChanges<E> {
         first: bool,
     ) -> Self
     where
-        E: From<EngineError<StoreFailure, DbError>>,
+        E: From<sqlive::Error<StoreFailure, DbError>>,
     {
         Self { commits, reads, first, failed: E::from }
     }

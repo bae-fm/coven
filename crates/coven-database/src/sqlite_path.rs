@@ -12,7 +12,6 @@
 //! a local verbatim path goes to SQLite in its plain form, where each
 //! connection locks through a handle of its own.
 
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 use std::borrow::Cow;
@@ -22,7 +21,7 @@ use std::path::Path;
 #[cfg(not(windows))]
 pub(crate) fn sqlite_path(
     path: &Path,
-) -> Result<Cow<'_, Path>, EngineError<StoreFailure, DbError>> {
+) -> Result<Cow<'_, Path>, sqlive::Error<StoreFailure, DbError>> {
     Ok(Cow::Borrowed(path))
 }
 
@@ -35,7 +34,7 @@ pub(crate) fn sqlite_path(
 #[cfg(windows)]
 pub(crate) fn sqlite_path(
     path: &Path,
-) -> Result<Cow<'_, Path>, EngineError<StoreFailure, DbError>> {
+) -> Result<Cow<'_, Path>, sqlive::Error<StoreFailure, DbError>> {
     use std::ffi::OsString;
     use std::path::{Component, PathBuf, Prefix};
     let mut components = path.components();
@@ -59,7 +58,7 @@ pub(crate) fn sqlite_path(
             Component::RootDir => {}
             Component::Normal(name) if reads_alike(name) => plain.push(name),
             _ => {
-                return Err(EngineError::Path {
+                return Err(sqlive::Error::Path {
                     path: path.to_owned(),
                     source: std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,

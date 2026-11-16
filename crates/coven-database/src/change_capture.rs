@@ -1,6 +1,5 @@
 //! Convert transaction changes into read dependencies before commit.
 
-use crate::engine_error::EngineError;
 use crate::sqlite::table_shapes::{TableShape, TableShapes};
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
@@ -38,11 +37,10 @@ fn changed_table<'a>(
     shapes: &'a TableShapes,
     table: &str,
     changes: &mut Vec<RowChange>,
-) -> Result<&'a TableShape, EngineError<StoreFailure, DbError>> {
-    let shape = shapes
-        .position(table)
-        .map(|position| shapes.shape(position))
-        .ok_or(EngineError::Invariant { what: "every table a transaction changes has a shape" })?;
+) -> Result<&'a TableShape, sqlive::Error<StoreFailure, DbError>> {
+    let shape = shapes.position(table).map(|position| shapes.shape(position)).ok_or(
+        sqlive::Error::Invariant { what: "every table a transaction changes has a shape" },
+    )?;
     if let Some(parent) = &shape.parent {
         changes.push(RowChange { table: parent.clone(), column: String::new(), rows: None });
     }
@@ -55,7 +53,7 @@ fn changed_table<'a>(
 pub(crate) fn table_changes(
     database: &DatabaseConnection,
     mut tables: BTreeSet<String>,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
     let shapes = database.table_shapes()?;
     for table in tables.clone() {
         if let Some(parent) = shapes.parent(&table) {
@@ -72,7 +70,7 @@ pub(crate) fn changes(
     database: &DatabaseConnection,
     bytes: &[u8],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
     let mut input = bytes;
     let input: &mut dyn std::io::Read = &mut input;
     let mut items = ChangesetIter::start_strm(&input)?;
@@ -195,7 +193,7 @@ fn current(
     pk: &[u8],
     before: &[Option<SqlValue>],
     wanted: &[usize],
-) -> Result<Vec<Option<SqlValue>>, EngineError<StoreFailure, DbError>> {
+) -> Result<Vec<Option<SqlValue>>, sqlive::Error<StoreFailure, DbError>> {
     let keys: Vec<usize> = (0..names.len()).filter(|index| pk[*index] != 0).collect();
     let sql = format!(
         "SELECT {} FROM main.{} WHERE {}",
@@ -247,7 +245,7 @@ pub(crate) fn event_changes(
     database: &DatabaseConnection,
     events: &[crate::sqlite::Operation],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, EngineError<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
     let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();

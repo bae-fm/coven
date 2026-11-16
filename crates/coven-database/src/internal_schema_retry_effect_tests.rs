@@ -138,7 +138,7 @@ async fn the_table_refuses_a_cooldown_while_stopped_and_any_app_write() {
     let refused = db.commit_writer(|sql, _| {
         sql.execute("UPDATE coven_retry_effect SET cooling_until=1 WHERE singleton=1", [])
     });
-    assert!(matches!(refused, Err(crate::engine_error::EngineError::Sqlite(_))), "{refused:?}");
+    assert!(matches!(refused, Err(sqlive::Error::Sqlite(_))), "{refused:?}");
     let error =
         crate::write::tests::sql(&db, "UPDATE coven_retry_effect SET syncing=1").await.unwrap_err();
     assert!(

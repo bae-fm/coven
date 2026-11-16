@@ -14,10 +14,9 @@
 //! live query reports it until the store is reopened, rather than the store
 //! staying open without its upkeep. A panic in a run is a bug in coven: it
 //! goes to the store's bug sink and fails the handle the same way, as
-//! `EngineError::HandleFailed` carrying it, so the thread never ends in a way no
+//! `sqlive::Error::HandleFailed` carrying it, so the thread never ends in a way no
 //! one hears of.
 
-use crate::engine_error::{EngineError, EngineFailure};
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
@@ -30,11 +29,13 @@ pub(crate) trait Upkeep: Send + Sync + 'static {
     const THREAD: &'static str;
 
     /// One wake's upkeep. A wake may come with no commit.
-    fn run(&self) -> Result<(), EngineError<StoreFailure, DbError>>;
+    fn run(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>>;
 
     /// What the handle fails with once a run fails with `error` other than
     /// on a busy or locked database.
-    fn failure(error: EngineError<StoreFailure, DbError>) -> EngineFailure<StoreFailure, DbError>;
+    fn failure(
+        error: sqlive::Error<StoreFailure, DbError>,
+    ) -> sqlive::EngineFailure<StoreFailure, DbError>;
 }
 
 /// Wakes an upkeep thread. Waking only leaves the thread's permit, which
@@ -70,17 +71,17 @@ impl<U: Upkeep> UpkeepThread<U> {
     pub(crate) fn spawn(
         upkeep: U,
         handle: CommitObserver,
-    ) -> Result<Self, EngineError<StoreFailure, DbError>> {
+    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
         #[cfg(test)]
         if handle.upkeep_thread_refused() {
-            return Err(EngineError::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
+            return Err(sqlive::Error::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
         }
         let shared = Arc::new(Shared { closing: AtomicBool::new(false), upkeep });
         let serving = Serving { shared: shared.clone(), handle };
         let thread = std::thread::Builder::new()
             .name(U::THREAD.into())
             .spawn(move || serving.serve())
-            .map_err(EngineError::UpkeepThread)?;
+            .map_err(sqlive::Error::UpkeepThread)?;
         Ok(Self { shared, thread: Some(thread) })
     }
 
@@ -169,10 +170,10 @@ impl<U: Upkeep> Serving<U> {
 
 /// Whether `error` is SQLite finding the database busy or locked: another
 /// connection held on past the busy timeout.
-fn busy(error: &EngineError<StoreFailure, DbError>) -> bool {
+fn busy(error: &sqlive::Error<StoreFailure, DbError>) -> bool {
     matches!(
         error,
-        EngineError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+        sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
             if matches!(
                 failure.code,
                 rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked

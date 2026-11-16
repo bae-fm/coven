@@ -25,7 +25,6 @@ mod download;
 mod download_checks;
 mod download_stage;
 mod download_stream;
-mod engine_error;
 mod error;
 mod execution_capture;
 mod file_hashes;

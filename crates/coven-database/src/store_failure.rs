@@ -1,7 +1,6 @@
 //! The failures coven reports to its handle as its host, after which the
 //! handle's every call fails.
 
-use crate::engine_error::EngineFailure;
 use crate::DbError;
 use coven_foundation::clock::WallTimerError;
 use std::sync::Arc;
@@ -42,12 +41,16 @@ impl StoreFailure {
 
 /// The engine's failure that ended the handle, as coven holds it: each later
 /// call's error carries the same cause.
-impl From<EngineFailure<StoreFailure, DbError>> for StoreFailure {
-    fn from(failure: EngineFailure<StoreFailure, DbError>) -> Self {
+impl From<sqlive::EngineFailure<StoreFailure, DbError>> for StoreFailure {
+    fn from(failure: sqlive::EngineFailure<StoreFailure, DbError>) -> Self {
         match failure {
-            EngineFailure::Rollback => Self::Rollback,
-            EngineFailure::Checkpoint(cause) => Self::Checkpoint(Arc::new(DbError::from(cause))),
-            EngineFailure::Statistics(cause) => Self::Statistics(Arc::new(DbError::from(cause))),
+            sqlive::EngineFailure::Rollback => Self::Rollback,
+            sqlive::EngineFailure::Checkpoint(cause) => {
+                Self::Checkpoint(Arc::new(DbError::from(cause)))
+            }
+            sqlive::EngineFailure::Statistics(cause) => {
+                Self::Statistics(Arc::new(DbError::from(cause)))
+            }
         }
     }
 }

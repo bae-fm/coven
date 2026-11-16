@@ -16,7 +16,7 @@ fn a_bug_inside_a_call_is_the_calls_own() {
     assert_eq!(own, Some(bug("torn")));
     assert!(bugs.take().is_empty());
     assert!(
-        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(found)) if found == bug("torn"))
+        matches!(handle.error(), Some(sqlive::Error::HandleFailed(found)) if found == bug("torn"))
     );
 }
 
@@ -33,7 +33,7 @@ fn a_calls_second_bug_goes_to_the_sink() {
     assert_eq!(own, Some(bug("first")));
     assert_eq!(bugs.take(), [bug("second")]);
     assert!(
-        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(found)) if found == bug("first"))
+        matches!(handle.error(), Some(sqlive::Error::HandleFailed(found)) if found == bug("first"))
     );
 }
 

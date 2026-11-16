@@ -453,7 +453,7 @@ fn wal_refusal_names_the_selected_journal_mode() {
         )
         .unwrap();
     assert!(
-        matches!(sql.enable_wal(), Err(crate::engine_error::EngineError::WalUnavailable { mode }) if mode == "memory")
+        matches!(sql.enable_wal(), Err(sqlive::Error::WalUnavailable { mode }) if mode == "memory")
     );
 }
 

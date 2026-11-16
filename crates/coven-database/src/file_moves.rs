@@ -90,7 +90,7 @@ pub(crate) fn bound(db: &DatabaseConnection, id: MoveId) -> Result<bool, DbError
 pub(crate) fn of_upload(db: &DatabaseConnection, upload: i64) -> Result<MoveId, DbError> {
     db.query_row("SELECT move FROM _coven_file_uploads WHERE id=?1", [upload], |r| r.get(0))
         .map_err(|error| match error {
-            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a queued upload belongs to a move" }
             }
             error => DbError::from(error),

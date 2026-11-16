@@ -110,11 +110,11 @@ async fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
     match refused {
         Err(rusqlite::Error::UserFunctionError(error)) => assert!(
             matches!(
-                error.downcast_ref::<crate::engine_error::EngineError<
+                error.downcast_ref::<sqlive::Error<
                     crate::store_failure::StoreFailure,
                     crate::DbError,
                 >>(),
-                Some(crate::engine_error::EngineError::StatementForbidden {
+                Some(sqlive::Error::StatementForbidden {
                     operation: "writing through a read context"
                 })
             ),

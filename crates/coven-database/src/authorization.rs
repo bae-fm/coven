@@ -1,7 +1,6 @@
 //! The authorizer: the rules the engine enforces on every statement, then
 //! the policy its host supplies.
 
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 use std::collections::BTreeSet;
@@ -94,7 +93,7 @@ impl<'a> FunctionCall<'a> {
     /// Refuse the statement running the function with `refusal`, in place
     /// of the message the function's own failure carries.
     pub(crate) fn deny(&self, refusal: DbError) {
-        lock_unpoisoned(self.state).denied = Some(EngineError::Refused(refusal));
+        lock_unpoisoned(self.state).denied = Some(sqlive::Error::Refused(refusal));
     }
 }
 
@@ -127,7 +126,7 @@ struct AuthorizationState {
     /// What a live query's statements read, while one of its runs reads.
     reads: Option<ReadCapture>,
     altering: bool,
-    denied: Option<EngineError<StoreFailure, DbError>>,
+    denied: Option<sqlive::Error<StoreFailure, DbError>>,
     /// The authorizer panicked with this: the state may be half-changed, so
     /// it refuses every later statement with it (E15).
     broken: Option<Bug>,
@@ -187,7 +186,7 @@ impl SqlAuthorization {
     /// `function`, one of the host's SQL functions named `name`, as the
     /// connection registers it. rusqlite turns a function's panic into an
     /// error that names no bug, so the function keeps it: the statement
-    /// fails with the bug's text, and the app's call with `EngineError::Bug`
+    /// fails with the bug's text, and the app's call with `sqlive::Error::Bug`
     /// (E15). A function changes nothing, so the connection goes on.
     pub(crate) fn function<T: rusqlite::types::ToSql>(
         &self,
@@ -207,8 +206,8 @@ impl SqlAuthorization {
                 function(&FunctionCall { context: &*context, owner, state: &state })
             });
             called.unwrap_or_else(|bug| {
-                lock_unpoisoned(&state).denied = Some(EngineError::Bug(bug.clone()));
-                let error: EngineError<StoreFailure, DbError> = EngineError::Bug(bug);
+                lock_unpoisoned(&state).denied = Some(sqlive::Error::Bug(bug.clone()));
+                let error: sqlive::Error<StoreFailure, DbError> = sqlive::Error::Bug(bug);
                 Err(rusqlite::Error::UserFunctionError(Box::new(error)))
             })
         }
@@ -229,7 +228,7 @@ impl SqlAuthorization {
         move |context| {
             let mut state = lock_unpoisoned(&state);
             if let Some(bug) = &state.broken {
-                state.denied = Some(EngineError::HandleFailed(bug.clone()));
+                state.denied = Some(sqlive::Error::HandleFailed(bug.clone()));
                 return Authorization::Deny;
             }
             // SQLite's authorizer can't fail, and rusqlite turns its panic
@@ -245,7 +244,7 @@ impl SqlAuthorization {
                     if let Some(handle) = handle.get() {
                         handle.fail_with_bug(bug.clone());
                     }
-                    state.denied = Some(EngineError::Bug(bug.clone()));
+                    state.denied = Some(sqlive::Error::Bug(bug.clone()));
                     state.broken = Some(bug);
                     Authorization::Deny
                 }
@@ -420,13 +419,13 @@ impl SqlAuthorization {
         // while keeping direct app PRAGMAs outside the SQL capability.
         let tokens = sqlive::sql::tokens(sql)?;
         if tokens.first().is_some_and(|token| token.word("pragma")) {
-            let error: EngineError<StoreFailure, DbError> =
-                EngineError::StatementForbidden { operation: "PRAGMA" };
+            let error: sqlive::Error<StoreFailure, DbError> =
+                sqlive::Error::StatementForbidden { operation: "PRAGMA" };
             return Err(rusqlite::Error::UserFunctionError(Box::new(error)));
         }
         self.policy.check_sql(&tokens).map_err(|refusal| {
             rusqlite::Error::UserFunctionError(Box::new(
-                EngineError::<StoreFailure, DbError>::Refused(refusal),
+                sqlive::Error::<StoreFailure, DbError>::Refused(refusal),
             ))
         })
     }
@@ -580,7 +579,7 @@ impl AuthorizationState {
                     owner,
                     scope: StatementScope { bulk: self.bulk.is_some() },
                 })
-                .map_err(EngineError::Refused)
+                .map_err(sqlive::Error::Refused)
         });
         match judged {
             Ok(()) => Authorization::Allow,
@@ -596,7 +595,7 @@ impl AuthorizationState {
     fn refusal(
         &mut self,
         context: AuthContext<'_>,
-    ) -> Result<(), EngineError<StoreFailure, DbError>> {
+    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
         use AuthAction::*;
         // FTS5 reads the database's data version as it prepares a statement
         // over its table, in a read or in a write that changes its index, as
@@ -609,7 +608,7 @@ impl AuthorizationState {
         if self.reading
             && !matches!(context.action, Read { .. } | Select | Function { .. } | Recursive)
         {
-            return Err(EngineError::StatementForbidden {
+            return Err(sqlive::Error::StatementForbidden {
                 operation: "writing through a read context",
             });
         }
@@ -637,7 +636,9 @@ impl AuthorizationState {
                     | DropTempView { .. }
             )
         {
-            return Err(EngineError::StatementForbidden { operation: "schema changes in a write" });
+            return Err(sqlive::Error::StatementForbidden {
+                operation: "schema changes in a write",
+            });
         }
         if matches!(context.action, AlterTable { .. }) {
             self.altering = true;
@@ -671,7 +672,7 @@ impl AuthorizationState {
             _ => None,
         };
         match forbidden {
-            Some(operation) => Err(EngineError::StatementForbidden { operation }),
+            Some(operation) => Err(sqlive::Error::StatementForbidden { operation }),
             None => Ok(()),
         }
     }

@@ -220,9 +220,7 @@ async fn a_failing_hook_rolls_its_transaction_back() {
         let mut transaction = WriteTransaction::begin(c, false).unwrap();
         transaction
             .observe_operations(|_, _, _, _| {
-                Err(crate::engine_error::EngineError::Invariant {
-                    what: "the row's old value could be read",
-                })
+                Err(sqlive::Error::Invariant { what: "the row's old value could be read" })
             })
             .unwrap();
         transaction.within(|db| db.batch("INSERT INTO parent VALUES('p')")).unwrap();

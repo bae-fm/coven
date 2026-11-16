@@ -1,6 +1,5 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
-use crate::engine_error::EngineError;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
@@ -23,7 +22,7 @@ type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send +
 
 /// How a query's error type `E` holds an engine error: the handle's failure,
 /// or the bug a run's panic is.
-pub(crate) type Failed<E> = fn(EngineError<StoreFailure, DbError>) -> E;
+pub(crate) type Failed<E> = fn(sqlive::Error<StoreFailure, DbError>) -> E;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -218,7 +217,7 @@ where
         let mapped: Run<Q, U, E> = Arc::new(move |request, commits| {
             let value = run(request, commits)?;
             caught_sync("process a read", || process(value))
-                .unwrap_or_else(|bug| Err(failed(EngineError::Bug(bug))))
+                .unwrap_or_else(|bug| Err(failed(sqlive::Error::Bug(bug))))
         });
         // A new output type has no previous result to compare. Rerun the current
         // request so the transformed query answers it.
@@ -311,7 +310,7 @@ where
         } else {
             self.commits.begin();
             caught_sync("live query", || (self.run)(&request, &self.commits))
-                .unwrap_or_else(|bug| Err((self.failed)(EngineError::Bug(bug))))
+                .unwrap_or_else(|bug| Err((self.failed)(sqlive::Error::Bug(bug))))
         };
         self.current = Some((request.clone(), revision));
         let equal = match &result {
@@ -353,7 +352,7 @@ where
     /// result equals the last. Once the store is closed, or the handle fails
     /// every call, one result reports why and every later call returns
     /// `None`. So does a run whose error carries a bug, as one that panicked
-    /// does with `EngineError::Bug`: what it read is unknown, so no commit could
+    /// does with `sqlive::Error::Bug`: what it read is unknown, so no commit could
     /// tell whether to run it again (E15).
     pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where

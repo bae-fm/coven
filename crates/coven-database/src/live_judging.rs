@@ -4,7 +4,6 @@
 //! transaction.
 
 use super::DatabaseConnection;
-use crate::engine_error::EngineError;
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
@@ -23,7 +22,7 @@ impl DatabaseConnection {
     ) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<EngineError<StoreFailure, DbError>>,
+        E: From<sqlive::Error<StoreFailure, DbError>>,
     {
         let mut finished = false;
         let result = self.read_transaction(|| {
@@ -35,7 +34,7 @@ impl DatabaseConnection {
                 self.authorization.judged_unrecorded(|| self.ask(judging))
             });
             let value = result?;
-            judged.map_err(EngineError::from)?;
+            judged.map_err(sqlive::Error::from)?;
             Ok(value)
         });
         // A run that never began read nothing.
@@ -53,7 +52,7 @@ impl DatabaseConnection {
         &self,
         handle: &CommitObserver,
         changes: Vec<sqlive::RowChange>,
-    ) -> Result<crate::observation::Judged, EngineError<StoreFailure, DbError>> {
+    ) -> Result<crate::observation::Judged, sqlive::Error<StoreFailure, DbError>> {
         let _reading = self.authorization.reading();
         handle
             .judge(changes, crate::commit_scope::committing(), &mut |judging| {

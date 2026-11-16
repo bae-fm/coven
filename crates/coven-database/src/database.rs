@@ -52,7 +52,6 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::app_policy::CovenPolicy;
 use crate::connection_setup::Setup;
-use crate::engine_error::EngineError;
 use crate::observation::{CommitObserver, UnrecordedTables};
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
@@ -431,7 +430,7 @@ impl DatabaseInner {
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(
                 self.access.observer.error(),
-                Some(EngineError::Host(StoreFailure::Rollback))
+                Some(sqlive::Error::Host(StoreFailure::Rollback))
             );
             let chosen = usable.then(|| released(writer, call, self));
             Ok::<_, E>((result, chosen, files.take_committed()))

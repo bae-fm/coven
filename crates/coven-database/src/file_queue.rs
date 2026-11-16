@@ -390,9 +390,7 @@ pub(crate) fn chunk_hash(
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
-            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                DbError::DamagedDatabase
-            }
+            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
             error => DbError::from(error),
         })?;
     crate::file_hashes::stored_hash(hash)
@@ -453,7 +451,7 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     let copy: Option<String> = db
         .query_row("SELECT copy FROM _coven_file_uploads WHERE id=?1", [id], |r| r.get(0))
         .map_err(|error| match error {
-            crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+            sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                 DbError::Invariant { what: "a retired upload is queued" }
             }
             error => DbError::from(error),

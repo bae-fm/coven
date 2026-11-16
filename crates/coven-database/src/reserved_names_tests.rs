@@ -19,7 +19,7 @@ fn releasing_an_unreserved_name_fails_the_handle() {
     reserved.release([&name("a")]);
     let heard = bugs.take();
     assert!(
-        matches!(handle.error(), Some(crate::engine_error::EngineError::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "release reserved file names"),
+        matches!(handle.error(), Some(sqlive::Error::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "release reserved file names"),
         "{:?}, heard {heard:?}",
         handle.error()
     );

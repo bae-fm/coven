@@ -1,30 +1,30 @@
-//! The error the engine's modules return: SQLite's failures, the handle's,
-//! and its host's. `F` is the host's failure type, which a handle the host
+//! The error sqlive's calls return: SQLite's failures, the handle's, and its
+//! host's. `F` is the host's failure type, which a handle the host
 //! failed carries as it is, and `R` is the type the host's policy refuses
 //! with, which a refused statement carries as it is.
 
-use coven_foundation::task::Bug;
+use caught::Bug;
 use std::path::PathBuf;
 
-/// A failure of the engine's own that ends its handle: every later call
+/// A failure of sqlive's own that ends its handle: every later call
 /// and live query fails with the host's failure built from it.
 #[derive(Debug)]
-pub(crate) enum EngineFailure<F, R> {
+pub enum EngineFailure<F, R> {
     /// Rolling back a failed transaction failed, so a connection may still
     /// be inside it.
     Rollback,
-    /// One of the engine's WAL checkpoints failed with this cause, other than
+    /// One of sqlive's WAL checkpoints failed with this cause, other than
     /// on a busy or locked database, so checkpointing stopped.
-    Checkpoint(EngineError<F, R>),
+    Checkpoint(Error<F, R>),
     /// Checking or gathering the query planner's statistics failed with this
-    /// cause, other than on a busy or locked database, so the engine stopped
+    /// cause, other than on a busy or locked database, so sqlive stopped
     /// keeping them.
-    Statistics(EngineError<F, R>),
+    Statistics(Error<F, R>),
 }
 
-/// Why an engine call failed.
+/// Why a call failed.
 #[derive(Debug)]
-pub(crate) enum EngineError<F, R> {
+pub enum Error<F, R> {
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
@@ -52,7 +52,7 @@ pub(crate) enum EngineError<F, R> {
     HandleFailed(Bug),
     /// The host failed the handle with this failure.
     Host(F),
-    /// The engine broke a rule it relies on: a bug, not damage.
+    /// sqlive broke a rule it relies on: a bug, not damage.
     Invariant {
         /// The broken rule.
         what: &'static str,
@@ -69,17 +69,12 @@ pub(crate) enum EngineError<F, R> {
         /// The largest value SQLite holds for it.
         maximum: u64,
     },
-    /// The system refused a thread of the engine's upkeep, so the database
+    /// The system refused a thread of sqlive's upkeep, so the database
     /// did not open.
     UpkeepThread(std::io::Error),
-    /// Opening the database's file at `path` failed.
-    #[cfg_attr(
-        not(windows),
-        expect(
-            dead_code,
-            reason = "only on Windows can a name in the path mean another file once the engine drops the path's verbatim prefix"
-        )
-    )]
+    /// Opening the database's file at `path` failed. Only on Windows can a
+    /// name in the path mean another file once sqlive drops the path's
+    /// verbatim prefix.
     Path {
         /// The database file.
         path: PathBuf,
@@ -90,13 +85,13 @@ pub(crate) enum EngineError<F, R> {
     /// with `EngineFailure::Rollback`.
     Rollback {
         /// The operation that required rollback.
-        operation: Box<EngineError<F, R>>,
+        operation: Box<Error<F, R>>,
         /// SQLite's rollback failure.
         rollback: rusqlite::Error,
     },
 }
 
-impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for EngineError<F, R> {
+impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for Error<F, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(error) => error.fmt(f),
@@ -106,13 +101,16 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for EngineErr
                 write!(f, "app SQL cannot perform {operation}")
             }
             Self::TransactionEnded => f.write_str("SQLite ended the owned transaction"),
-            Self::Closed => f.write_str("the store is closed"),
+            Self::Closed => f.write_str("the database is closed"),
             Self::Bug(bug) => bug.fmt(f),
             Self::HandleFailed(bug) => {
-                write!(f, "the store's handle failed on an earlier bug; reopen the store: {bug}")
+                write!(
+                    f,
+                    "the database's handle failed on an earlier bug; reopen the database: {bug}"
+                )
             }
             Self::Host(failure) => failure.fmt(f),
-            Self::Invariant { what } => write!(f, "coven invariant failed: {what}"),
+            Self::Invariant { what } => write!(f, "sqlive invariant failed: {what}"),
             Self::WalUnavailable { mode } => {
                 write!(f, "SQLite kept journal mode {mode} instead of WAL")
             }
@@ -129,7 +127,7 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for EngineErr
 }
 
 impl<F: std::error::Error + 'static, R: std::error::Error + 'static> std::error::Error
-    for EngineError<F, R>
+    for Error<F, R>
 {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -145,14 +143,14 @@ impl<F: std::error::Error + 'static, R: std::error::Error + 'static> std::error:
     }
 }
 
-impl<F, R> From<rusqlite::Error> for EngineError<F, R>
+impl<F, R> From<rusqlite::Error> for Error<F, R>
 where
     F: std::error::Error + Send + Sync + 'static,
     R: std::error::Error + Send + Sync + 'static,
 {
     fn from(error: rusqlite::Error) -> Self {
         match error {
-            // An error the engine raised inside a SQL function or a column
+            // An error sqlive raised inside a SQL function or a column
             // conversion comes back as it was raised.
             rusqlite::Error::UserFunctionError(source) => match source.downcast::<Self>() {
                 Ok(error) => *error,
@@ -173,14 +171,14 @@ where
     }
 }
 
-/// A caller's error for a transaction it runs: built from the engine's
+/// A caller's error for a transaction it runs: built from sqlive's
 /// errors, and able to keep a failed rollback beside its own cause.
-pub(crate) trait RollbackJoin<F, R>: From<EngineError<F, R>> {
+pub trait RollbackJoin<F, R>: From<Error<F, R>> {
     /// Keep `rollback`, SQLite's failure to roll back, beside this error.
     fn with_rollback(self, rollback: rusqlite::Error) -> Self;
 }
 
-impl<F, R> RollbackJoin<F, R> for EngineError<F, R> {
+impl<F, R> RollbackJoin<F, R> for Error<F, R> {
     fn with_rollback(self, rollback: rusqlite::Error) -> Self {
         Self::Rollback { operation: Box::new(self), rollback }
     }

@@ -144,13 +144,8 @@ impl Database {
     /// database's, takes the writer (§4).
     pub(crate) fn fault_checkpoints(
         &self,
-        fault: impl FnMut() -> Result<
-                (),
-                crate::engine_error::EngineError<
-                    crate::store_failure::StoreFailure,
-                    crate::DbError,
-                >,
-            > + Send
+        fault: impl FnMut() -> Result<(), sqlive::Error<crate::store_failure::StoreFailure, crate::DbError>>
+            + Send
             + 'static,
     ) {
         let slot = self.inner.read().unwrap();

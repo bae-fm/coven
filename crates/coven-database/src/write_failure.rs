@@ -1,7 +1,6 @@
 //! Preserve the facade's callback failure when a transaction or cleanup also fails.
 //! A committed result never becomes a failure because of cleanup (§2.1, Appendix C.3).
 
-use crate::engine_error::EngineError;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 
@@ -53,7 +52,7 @@ impl WriteFailure for DbError {
     }
 }
 
-impl crate::engine_error::RollbackJoin<StoreFailure, DbError> for DbError {
+impl sqlive::RollbackJoin<StoreFailure, DbError> for DbError {
     fn with_rollback(self, rollback: rusqlite::Error) -> Self {
         WriteFailure::with_rollback(self, rollback)
     }
@@ -76,13 +75,13 @@ pub(crate) fn hosted<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T, Host
     run().map_err(Hosted)
 }
 
-impl<E: From<DbError>> From<EngineError<StoreFailure, DbError>> for Hosted<E> {
-    fn from(error: EngineError<StoreFailure, DbError>) -> Self {
+impl<E: From<DbError>> From<sqlive::Error<StoreFailure, DbError>> for Hosted<E> {
+    fn from(error: sqlive::Error<StoreFailure, DbError>) -> Self {
         Self(E::from(DbError::from(error)))
     }
 }
 
-impl<E: WriteFailure> crate::engine_error::RollbackJoin<StoreFailure, DbError> for Hosted<E> {
+impl<E: WriteFailure> sqlive::RollbackJoin<StoreFailure, DbError> for Hosted<E> {
     fn with_rollback(self, rollback: rusqlite::Error) -> Self {
         Self(self.0.with_rollback(rollback))
     }

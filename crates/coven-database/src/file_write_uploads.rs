@@ -102,7 +102,7 @@ impl FileWrite<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|error| match error {
-                crate::engine_error::EngineError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
+                sqlive::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
                     DbError::Invariant { what: "a completed upload is queued" }
                 }
                 error => DbError::from(error),
