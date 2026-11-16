@@ -26,6 +26,43 @@ fn panicked(operation: &'static str, message: &str) -> Bug {
     Bug { operation, message: message.to_string(), location: panic_site(), kind: BugKind::Panic }
 }
 
+/// One panic the test binary's hook ran for.
+struct Heard {
+    message: String,
+    /// The operation of the innermost catch of this crate's on the panicking
+    /// thread when the hook ran.
+    operation: Option<&'static str>,
+}
+
+static HEARD: std::sync::Mutex<Vec<Heard>> = std::sync::Mutex::new(Vec::new());
+
+static HOOKED: std::sync::Once = std::sync::Once::new();
+
+/// Install the test binary's hook, once. It records each panic in [`HEARD`]
+/// and then runs the hook set before it. This crate's hook goes in before the
+/// first catch, in front of this one, so the first catch must not run before
+/// this: replacing a hook leaves a moment in which another test's panic finds
+/// neither hook. Each test that catches or begins a panic calls this first.
+fn with_test_hook() {
+    HOOKED.call_once(|| {
+        let earlier = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic| {
+            locks::lock_unpoisoned(&HEARD).push(Heard {
+                message: panic_message(panic.payload()),
+                operation: catching_operation(),
+            });
+            earlier(panic);
+        }));
+    });
+}
+
+/// The operation of the innermost catch of this crate's on the panicking
+/// thread, for each panic the test hook ran for with `message`.
+fn operations_heard(message: &str) -> Vec<Option<&'static str>> {
+    let heard = locks::lock_unpoisoned(&HEARD);
+    heard.iter().filter(|heard| heard.message == message).map(|heard| heard.operation).collect()
+}
+
 /// Sets its flag when dropped: the cleanup a caller's work holds.
 struct SetOnDrop(Arc<AtomicBool>);
 
@@ -37,6 +74,7 @@ impl Drop for SetOnDrop {
 
 #[test]
 fn caught_fails_the_work_and_its_held_cleanup_runs() {
+    with_test_hook();
     let cleaned = Arc::new(AtomicBool::new(false));
     let guard = SetOnDrop(cleaned.clone());
     let failed = block_on(caught("apply one slot", async move {
@@ -52,6 +90,7 @@ fn caught_fails_the_work_and_its_held_cleanup_runs() {
 
 #[test]
 fn caught_names_where_a_later_poll_panicked() {
+    with_test_hook();
     let failed = block_on(caught("apply one slot", async {
         yield_now().await;
         panics("row count went negative")
@@ -61,6 +100,7 @@ fn caught_names_where_a_later_poll_panicked() {
 
 #[test]
 fn caught_returns_the_work_s_value_across_polls() {
+    with_test_hook();
     let value = block_on(caught("count", async {
         yield_now().await;
         3
@@ -90,12 +130,14 @@ impl Drop for PanicsTwice {
 
 #[test]
 fn caught_keeps_a_panicking_drop_of_the_failed_work_from_unwinding() {
+    with_test_hook();
     let failed = block_on(caught("decode", PanicsTwice));
     assert_eq!(failed, Err(panicked("decode", "decoder state is wrong")));
 }
 
 #[test]
 fn caught_sync_turns_a_panic_into_its_bug() {
+    with_test_hook();
     let failed =
         caught_sync("read callback", || -> i32 { panics("buffer gone") }).expect_err("panicked");
     assert_eq!(failed, panicked("read callback", "buffer gone"));
@@ -106,6 +148,7 @@ fn caught_sync_turns_a_panic_into_its_bug() {
 /// the inner one has ended, names the panic that reached it.
 #[test]
 fn a_catch_inside_another_names_its_own_panic() {
+    with_test_hook();
     let outer = caught_sync("serve a message", || {
         let inner = caught_sync("decode", || -> u8 { panics("decoder state is wrong") });
         assert_eq!(inner, Err(panicked("decode", "decoder state is wrong")));
@@ -146,6 +189,7 @@ impl Drop for PanicsElsewhereWhenDropped {
 /// the panics that begin on its own thread.
 #[test]
 fn a_panic_on_another_thread_leaves_this_catch_s_place() {
+    with_test_hook();
     let failed = caught_sync("read callback", || -> i32 {
         let _elsewhere = PanicsElsewhereWhenDropped;
         panics("buffer gone")
@@ -158,6 +202,7 @@ fn a_panic_on_another_thread_leaves_this_catch_s_place() {
 /// outer one once it has ended, and none outside every catch.
 #[test]
 fn a_hook_names_the_innermost_catch_s_operation() {
+    with_test_hook();
     assert_eq!(catching_operation(), None);
     let outer = caught_sync("serve a message", || {
         let inner = caught_sync("decode", catching_operation);
@@ -173,37 +218,27 @@ fn a_hook_names_the_innermost_catch_s_operation() {
 /// operation as the hook runs.
 #[test]
 fn a_panic_handled_inside_a_catch_names_the_catch_s_operation() {
-    static NAMED: std::sync::Mutex<Vec<Option<&'static str>>> = std::sync::Mutex::new(Vec::new());
-    let earlier = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic| {
-        if panic_message(panic.payload()) == "a handled panic names its catch" {
-            NAMED.lock().unwrap().push(catching_operation());
-        }
-        earlier(panic);
-    }));
+    with_test_hook();
     let served = caught_sync("serve a message", || {
         std::panic::catch_unwind(|| -> u8 { panics("a handled panic names its catch") })
             .unwrap_or(0)
     });
     assert_eq!(served, Ok(0));
-    assert_eq!(*NAMED.lock().unwrap(), [Some("serve a message")]);
+    assert_eq!(operations_heard("a handled panic names its catch"), [Some("serve a message")]);
 }
 
 /// This crate's hook runs before the hook the app set, and the app's hook
 /// still runs for every panic.
 #[test]
 fn the_app_s_own_panic_hook_still_runs() {
-    static HEARD: AtomicBool = AtomicBool::new(false);
-    let earlier = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic| {
-        if panic_message(panic.payload()) == "the app's hook hears this" {
-            HEARD.store(true, Ordering::SeqCst);
-        }
-        earlier(panic);
-    }));
+    with_test_hook();
     let failed = caught_sync("read callback", || -> i32 { panics("the app's hook hears this") });
     assert_eq!(failed, Err(panicked("read callback", "the app's hook hears this")));
-    assert!(HEARD.load(Ordering::SeqCst), "the app's hook ran for the panic");
+    assert_eq!(
+        operations_heard("the app's hook hears this"),
+        [Some("read callback")],
+        "the app's hook ran for the panic"
+    );
 }
 
 /// A bug code finds without a panic names the line that made it.
@@ -240,6 +275,7 @@ impl Drop for PanicsWhenDropped {
 
 #[test]
 fn caught_sync_keeps_a_payload_whose_drop_panics_from_unwinding() {
+    with_test_hook();
     let failed =
         caught_sync("seek callback", || -> i32 { std::panic::panic_any(PanicsWhenDropped) })
             .expect_err("panicked");
@@ -249,6 +285,7 @@ fn caught_sync_keeps_a_payload_whose_drop_panics_from_unwinding() {
 
 #[test]
 fn an_unlocated_bug_keeps_the_message_and_names_no_place() {
+    with_test_hook();
     let bug = bug_of_unlocated("fill the read-ahead", Box::new("no window 7"));
     assert_eq!(
         bug,
