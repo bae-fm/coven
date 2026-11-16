@@ -7,8 +7,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -31,8 +29,8 @@ fn keyed(body: &str) -> Vec<(usize, String)> {
     let source =
         format!("{HELPERS}\nfn read(sql: &SqlReadContext<'_>, request: Request) {{\n{body}\n}}");
     let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     keyed_statements(&read)
         .into_iter()
@@ -114,8 +112,8 @@ fn a_statement_keyed_by_what_a_read_function_value_returned_is_found() {
         }}"
     );
     let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     let found =
         keyed_statements(&read).into_iter().map(|hit| (hit.item, hit.what)).collect::<Vec<_>>();

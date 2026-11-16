@@ -13975,7 +13975,9 @@ the same on any platform.
    one of F.2's, that a domain's tests live with it, a file's
    `<name>_tests.rs` beside the file; and to F.5's. Test code is the
    `<name>_tests.rs` files, each crate's `tests/` directory, files only test
-   modules declare, and every item that compiles only into tests. A test may
+   modules declare, and every item that compiles only into tests: under
+   `cfg(test)`, or under a Cargo feature only tests turn on, such as the
+   fakes' `test-utils` (F.5). The policy lists those features. A test may
    assemble its own graph (F.3) from raw material, and nothing outside tests
    can reach what it builds.
    The checker expands each of coven's own `macro_rules!` where it is invoked,

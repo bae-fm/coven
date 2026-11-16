@@ -6,6 +6,12 @@
 //! So a test module never has an inline body in a non-test source, a test file
 //! is never named `<name>_test.rs`, and a `<name>_tests.rs` always has the
 //! `<name>.rs` it tests beside it.
+//!
+//! A test module here is a source's own tests: a module only `cfg(test)`
+//! compiles. A module gated on a test-support feature is test code too
+//! (`syntax::is_test_only`), but other crates' tests build it as an ordinary
+//! module, so it is declared and named as one. The rule looks for test modules
+//! in no test file, those only such modules reach among them.
 
 use std::collections::BTreeSet;
 
@@ -56,7 +62,7 @@ struct TestModuleVisitor<'a> {
 
 impl<'ast> Visit<'ast> for TestModuleVisitor<'_> {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if is_test_only(&node.attrs) {
+        if is_test_only(&node.attrs, &[]) {
             let line = node.ident.span().start().line;
             if node.content.is_some() {
                 self.violations.push(violation(self.path, line, Convention::InlineTestModule));

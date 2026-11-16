@@ -8,8 +8,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -33,7 +31,7 @@ fn sql_file(path: &str, text: &str) -> SqlFile {
 fn counters_in(sql: &[(&str, &str)], rust: &[(&str, &str)]) -> Vec<String> {
     let sql = sql.iter().map(|(path, text)| sql_file(path, text)).collect::<Vec<_>>();
     let files = rust.iter().map(|(path, text)| RustFile::fixture(path, text)).collect::<Vec<_>>();
-    let mut found = counters(&CrateCode::of(&files, &sql))
+    let mut found = counters(&CrateCode::fixture(&files, &sql, &policy()))
         .into_iter()
         .map(|hit| {
             assert!(matches!(hit.shape.id(), "counter" | "reset-counter"));
@@ -115,7 +113,7 @@ fn the_finding_is_at_the_first_increment() {
 #[test]
 fn increment_sites_list_every_increment_whether_a_counter_or_not() {
     let sql = sql_file(SQL, "UPDATE v SET version = version + 1; UPDATE v SET version = 0;");
-    let sites = increment_sites(&CrateCode::of(&[], &[sql]));
+    let sites = increment_sites(&CrateCode::fixture(&[], &[sql], &policy()));
     assert_eq!(sites.into_iter().collect::<Vec<_>>(), [(SQL.to_string(), "v.version".to_string())]);
 }
 
@@ -130,8 +128,8 @@ const REQUESTS: &str = r#"
 fn bumps(body: &str) -> Vec<(String, String)> {
     let source = format!("{REQUESTS}\nimpl Screen {{ fn work(&mut self, x: &mut Own, q: &mut Query, limit: u64) {{ {body} }} }}");
     let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
-    let files = crate::crate_code::checked(&files);
     let policy = policy();
+    let files = crate::crate_code::checked(&files, &policy);
     let shapes = policy.read_shapes.as_ref().expect("rows");
     let read = ReadCode::collect(&files, &policy, shapes);
     let mut found = request_bumps(&read, &files, shapes)
@@ -191,10 +189,10 @@ fn a_column_counted_up_and_reset_to_zero_is_a_counter() {
     let sql = "UPDATE q SET additions = additions + 1; UPDATE q SET additions = 0, added = NULL;";
     assert_eq!(counters_in(&[(SQL, sql)], &[]), ["crates/app/src/schema.sql:1 q.additions"]);
     let files = [sql_file(SQL, sql)];
-    let hits = counters(&CrateCode::of(&[], &files));
+    let hits = counters(&CrateCode::fixture(&[], &files, &policy()));
     assert_eq!(hits[0].shape.id(), "reset-counter");
     let plain = [sql_file(SQL, "UPDATE q SET additions = additions + 1;")];
-    assert_eq!(counters(&CrateCode::of(&[], &plain))[0].shape.id(), "counter");
+    assert_eq!(counters(&CrateCode::fixture(&[], &plain, &policy()))[0].shape.id(), "counter");
     assert_eq!(
         counters_in(
             &[(SQL, "UPDATE q SET additions = additions + 1; UPDATE q SET additions = ?1;")],

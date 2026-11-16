@@ -36,7 +36,7 @@ fn files_only_test_only_declarations_reach_are_test_modules() {
     ]
     .map(|(path, source)| RustFile::fixture(path, source));
     assert_eq!(
-        test_module_files(&files),
+        test_module_files(&files, &[]),
         [
             "crates/app/src/tests.rs",
             "crates/app/src/tests/helpers.rs",
@@ -46,6 +46,37 @@ fn files_only_test_only_declarations_reach_are_test_modules() {
         .map(str::to_string)
         .into()
     );
+}
+
+/// A declaration gated on a listed test-support feature is test-only, so the
+/// files only it reaches are test code; one gated on an unlisted feature is
+/// production's.
+#[test]
+fn files_only_test_support_declarations_reach_are_test_modules() {
+    let mut files = [
+        (
+            "crates/app/src/lib.rs",
+            r#"#[cfg(feature = "test-utils")] mod fakes;
+            #[cfg(any(test, feature = "profiles"))] mod profile;
+            #[cfg(feature = "cloud")] mod upload;"#,
+        ),
+        ("crates/app/src/fakes.rs", "mod clock;"),
+        ("crates/app/src/fakes/clock.rs", ""),
+        ("crates/app/src/profile.rs", ""),
+        ("crates/app/src/upload.rs", ""),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    mark_test_modules(&mut files, &["test-utils".to_string(), "profiles".to_string()]);
+    assert_eq!(
+        files
+            .iter()
+            .filter(|file| file.test_module)
+            .map(|file| file.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        ["crates/app/src/fakes.rs", "crates/app/src/fakes/clock.rs", "crates/app/src/profile.rs"]
+    );
+    mark_test_modules(&mut files, &[]);
+    assert!(files.iter().all(|file| !file.test_module));
 }
 
 /// `include!` makes the included file's items the includer's, child modules
@@ -66,7 +97,7 @@ fn included_files_belong_to_the_including_module() {
     assert_eq!(modules["crates/app/src/work/parts.rs"], [vec!["app", "work"]]);
     assert_eq!(modules["crates/app/src/work/nested.rs"], [vec!["app", "work", "nested"]]);
     assert_eq!(
-        test_module_files(&files),
+        test_module_files(&files, &[]),
         ["crates/app/src/tests.rs", "crates/app/src/tests/case.rs", "crates/app/src/tests/list.rs"]
             .map(str::to_string)
             .into()
@@ -91,7 +122,7 @@ fn modules_an_included_file_declares_resolve_from_its_directory() {
     let modules = module_sources(&files);
     assert_eq!(modules["crates/app/src/work/parts/pathed.rs"], [vec!["app", "work", "pathed"]]);
     assert_eq!(modules["crates/app/src/work/parts/plain.rs"], [vec!["app", "work", "plain"]]);
-    assert!(test_module_files(&files).contains("crates/app/src/cases/round_trips.rs"));
+    assert!(test_module_files(&files, &[]).contains("crates/app/src/cases/round_trips.rs"));
 }
 
 /// Cargo makes each file directly under `examples/`, `benches/` and `src/bin/`

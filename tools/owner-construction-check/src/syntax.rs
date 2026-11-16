@@ -24,7 +24,8 @@ pub(crate) struct RustFile {
     /// Cargo dependency names, including aliases, mapped to their crate names.
     pub(crate) extern_crates: BTreeMap<String, String>,
     /// Whether only test-only module declarations reach the file, as one
-    /// declared `#[cfg(test)] mod tests;` (`module_sources::test_module_files`).
+    /// declared `#[cfg(test)] mod tests;` or one gated on a test-support
+    /// feature (`module_sources::mark_test_modules`).
     pub(crate) test_module: bool,
 }
 
@@ -49,9 +50,8 @@ impl RustFile {
     }
 
     /// Test code: a file the test layout of Appendix F.5 names as tests, or
-    /// one only test-only module declarations reach. Nothing else is —
-    /// test-support modules behind a `test-utils` feature are production
-    /// sources and answer to every rule.
+    /// one only test-only module declarations reach, those gated on a
+    /// test-support feature among them (`test_module`).
     pub(crate) fn is_test_source(&self) -> bool {
         self.test_module || self.is_test_source_by_name()
     }
@@ -526,18 +526,13 @@ pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
 }
 
 /// Whether an item compiles only into tests: a `#[test]` (or `#[tokio::test]`
-/// and the like), or a `#[cfg(…)]` whose predicate holds only under `test`.
-/// `cfg(not(test))`, `cfg(any(test, feature = "…"))` and
-/// `cfg(feature = "test-utils")` all compile into production builds.
-pub(crate) fn is_test_only(attrs: &[syn::Attribute]) -> bool {
-    is_test_support_only(attrs, &[])
-}
-
-/// [`is_test_only`], also counting the `features` that only test support
-/// enables: a `#[cfg(…)]` whose predicate holds only under `test` or one of
-/// them, such as `cfg(feature = "test-utils")` or
-/// `cfg(any(test, feature = "test-utils"))`.
-pub(crate) fn is_test_support_only(attrs: &[syn::Attribute], features: &[String]) -> bool {
+/// and the like), or a `#[cfg(…)]` whose predicate holds only under `test` or
+/// one of `features`, the Cargo features only tests turn on
+/// (`Policy::test_support_features`). With `test-utils` among them,
+/// `cfg(feature = "test-utils")` and `cfg(any(test, feature = "test-utils"))`
+/// are test-only; `cfg(not(test))` and a feature not among them compile into
+/// production builds.
+pub(crate) fn is_test_only(attrs: &[syn::Attribute], features: &[String]) -> bool {
     attrs.iter().any(|attribute| {
         attribute.path().segments.last().is_some_and(|segment| segment.ident == "test")
             || (attribute.path().is_ident("cfg")

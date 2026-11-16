@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::crate_dependencies::{dependency_entries, dependency_package};
-use crate::module_sources::test_module_files;
+use crate::module_sources::mark_test_modules;
 use crate::syntax::RustFile;
 
 pub(crate) struct Workspace {
@@ -101,10 +101,13 @@ pub(crate) enum LoadError {
 }
 
 /// The workspace at `root`. `library_names` holds the policy's dependencies
-/// whose library is not named after their package (`Policy::library_names`).
+/// whose library is not named after their package (`Policy::library_names`),
+/// and `test_support_features` the Cargo features only tests turn on
+/// (`Policy::test_support_features`).
 pub(crate) fn load(
     root: &Path,
     library_names: &BTreeMap<String, String>,
+    test_support_features: &[String],
 ) -> Result<Workspace, LoadError> {
     let workspace_manifest = root.join("Cargo.toml");
     let Some(toml::Value::Table(mut workspace_table)) =
@@ -229,10 +232,7 @@ pub(crate) fn load(
             })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
-    let test_modules = test_module_files(&workspace.files);
-    for file in &mut workspace.files {
-        file.test_module = test_modules.contains(&file.relative_path);
-    }
+    mark_test_modules(&mut workspace.files, test_support_features);
     Ok(workspace)
 }
 

@@ -3,7 +3,7 @@ use crate::crate_code::checked;
 
 /// The rule as the checker runs it: on the files' production code.
 fn find_capability_construction_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
-    let files = checked(files);
+    let files = checked(files, policy);
     super::find_capability_construction_violations(
         &files,
         policy,

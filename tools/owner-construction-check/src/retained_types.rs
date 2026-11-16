@@ -1,15 +1,12 @@
 //! The workspace's declared types and the types each retains through its
 //! fields, for the read rule's questions (`read_code.rs`, `kept_state.rs`):
 //! which types hold a live query or a value stream, and which keep state. An
-//! alias retains what its target does. The graph leaves out the fields that
-//! only test support compiles.
+//! alias retains what its target does.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use syn::visit_mut::{self, VisitMut};
-
 use crate::policy::{Policy, ReadShapes};
-use crate::syntax::{collect_declared_types, is_test_support_only, RustFile, StructInfo};
+use crate::syntax::{collect_declared_types, RustFile, StructInfo};
 use crate::type_identity::TypeIdentity;
 
 /// The workspace's declared types and what they retain.
@@ -20,7 +17,6 @@ pub(crate) struct Graph<'a> {
 
 impl<'a> Graph<'a> {
     pub(crate) fn of(files: &[RustFile], policy: &Policy, shapes: &'a ReadShapes) -> Self {
-        let files = &without_test_support_fields(files, policy.test_support_features());
         let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
         Graph {
             types: collect_declared_types(files, &policy.shared_pointer_types, &identity),
@@ -84,26 +80,4 @@ impl<'a> Graph<'a> {
                 info.named_fields.values().any(|names| self.retains_request(names))
             })
     }
-}
-
-/// The files without the fields only test support compiles.
-fn without_test_support_fields(files: &[RustFile], features: &[String]) -> Vec<RustFile> {
-    struct Gated<'a>(&'a [String]);
-    impl VisitMut for Gated<'_> {
-        fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
-            fields.named = std::mem::take(&mut fields.named)
-                .into_iter()
-                .filter(|field| !is_test_support_only(&field.attrs, self.0))
-                .collect();
-            visit_mut::visit_fields_named_mut(self, fields);
-        }
-    }
-    files
-        .iter()
-        .map(|file| {
-            let mut file = file.clone();
-            Gated(features).visit_file_mut(&mut file.syntax);
-            file
-        })
-        .collect()
 }

@@ -29,7 +29,7 @@ fn test_sources_are_dropped_whole() {
         reached,
     ];
     let kept =
-        production_code(&files).into_iter().map(|file| file.relative_path).collect::<Vec<_>>();
+        production_code(&files, &[]).into_iter().map(|file| file.relative_path).collect::<Vec<_>>();
     assert_eq!(kept, ["crates/app/src/lib.rs"]);
 }
 
@@ -61,7 +61,7 @@ fn test_only_parts_are_removed_and_the_rest_kept() {
         trait Work { #[cfg(test)] fn probe(&self); fn run(&self); }
         "#,
     );
-    let code = production_code(&[file]);
+    let code = production_code(&[file], &[]);
     let identifiers = identifiers(&code[0]);
     for absent in ["Fake", "checks", "case", "probe", "Probe", "Probed", "check", "more"] {
         assert!(!identifiers.contains(absent), "kept {absent}");
@@ -88,7 +88,7 @@ fn test_code_is_test_files_and_test_only_items() {
         ),
         RustFile::fixture("crates/app/src/lib_tests.rs", "fn whole() {}"),
     ];
-    let code = test_code(&files);
+    let code = test_code(&files, &[]);
     let production = identifiers(&code[0]);
     for absent in ["kept", "shared_fake", "run"] {
         assert!(!production.contains(absent), "kept {absent}");
@@ -97,4 +97,51 @@ fn test_code_is_test_files_and_test_only_items() {
         assert!(production.contains(present), "removed {present}");
     }
     assert!(identifiers(&code[1]).contains("whole"));
+}
+
+/// Code that compiles only under a feature the policy lists as test support
+/// is test code, as `cfg(test)` code is; a feature it doesn't list compiles
+/// into production.
+#[test]
+fn code_gated_on_a_listed_test_support_feature_is_test_code() {
+    let files = [
+        RustFile::fixture(
+            "crates/app/src/lib.rs",
+            r#"
+            #[cfg(feature = "test-utils")] fn fake() {}
+            #[cfg(any(test, feature = "test-utils"))] fn shared_fake() {}
+            #[cfg(feature = "cloud")] fn upload() {}
+            #[cfg(any(feature = "test-utils", feature = "cloud"))] fn either() {}
+            struct Worker { kept: u8, #[cfg(feature = "test-utils")] probe: u8 }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app/src/fakes.rs",
+            r#"#![cfg(feature = "test-utils")] fn fake() {}"#,
+        ),
+    ];
+    let features = ["test-utils".to_string()];
+    let production = production_code(&files, &features);
+    assert_eq!(
+        production.iter().map(|file| file.relative_path.as_str()).collect::<Vec<_>>(),
+        ["crates/app/src/lib.rs"]
+    );
+    let kept = identifiers(&production[0]);
+    for absent in ["fake", "shared_fake", "probe"] {
+        assert!(!kept.contains(absent), "kept {absent}");
+    }
+    for present in ["upload", "either", "kept"] {
+        assert!(kept.contains(present), "removed {present}");
+    }
+    let tests = test_code(&files, &features);
+    let gated = identifiers(&tests[0]);
+    for present in ["fake", "shared_fake"] {
+        assert!(gated.contains(present), "left out {present}");
+    }
+    for absent in ["upload", "either"] {
+        assert!(!gated.contains(absent), "took {absent}");
+    }
+    assert!(identifiers(&tests[1]).contains("fake"));
+    let unlisted = identifiers(&production_code(&files, &[])[0]);
+    assert!(unlisted.contains("fake") && unlisted.contains("probe"));
 }

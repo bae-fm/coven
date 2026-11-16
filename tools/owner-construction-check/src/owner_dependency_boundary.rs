@@ -32,8 +32,8 @@ use crate::made_here::{callback_argument_made_here, returns_made_here};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    is_test_support_only, kept_callback_arguments, shared_type_names, supplied_type_names,
-    type_name, type_names, visibility_crosses_owner, RustFile,
+    kept_callback_arguments, shared_type_names, supplied_type_names, type_name, type_names,
+    visibility_crosses_owner, RustFile,
 };
 use crate::type_identity::TypeIdentity;
 
@@ -355,7 +355,6 @@ fn collect_database_callables(
         collect_database_callables_in_items(
             &file.relative_path,
             &file.syntax.items,
-            false,
             policy,
             raw_database_types,
             identity,
@@ -367,7 +366,6 @@ fn collect_database_callables(
 fn collect_database_callables_in_items(
     path: &str,
     items: &[syn::Item],
-    gated: bool,
     policy: &Policy,
     raw_database_types: &BTreeSet<String>,
     identity: &TypeIdentity,
@@ -380,12 +378,7 @@ fn collect_database_callables_in_items(
                     path,
                     None,
                     &function.sig,
-                    matches!(function.vis, syn::Visibility::Public(_))
-                        && !(gated
-                            || is_test_support_only(
-                                &function.attrs,
-                                policy.test_support_features(),
-                            )),
+                    matches!(function.vis, syn::Visibility::Public(_)),
                     policy,
                     raw_database_types,
                     identity,
@@ -396,8 +389,6 @@ fn collect_database_callables_in_items(
                 let Some(owner) = type_name(&implementation.self_ty) else {
                     continue;
                 };
-                let gated = gated
-                    || is_test_support_only(&implementation.attrs, policy.test_support_features());
                 for item in &implementation.items {
                     let syn::ImplItem::Fn(method) = item else {
                         continue;
@@ -406,12 +397,7 @@ fn collect_database_callables_in_items(
                         path,
                         Some(&owner),
                         &method.sig,
-                        matches!(method.vis, syn::Visibility::Public(_))
-                            && !(gated
-                                || is_test_support_only(
-                                    &method.attrs,
-                                    policy.test_support_features(),
-                                )),
+                        matches!(method.vis, syn::Visibility::Public(_)),
                         policy,
                         raw_database_types,
                         identity,
@@ -423,8 +409,6 @@ fn collect_database_callables_in_items(
                 if matches!(trait_item.vis, syn::Visibility::Public(_)) =>
             {
                 let owner = trait_item.ident.to_string();
-                let gated = gated
-                    || is_test_support_only(&trait_item.attrs, policy.test_support_features());
                 for item in &trait_item.items {
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
@@ -433,8 +417,7 @@ fn collect_database_callables_in_items(
                         path,
                         Some(&owner),
                         &method.sig,
-                        !(gated
-                            || is_test_support_only(&method.attrs, policy.test_support_features())),
+                        true,
                         policy,
                         raw_database_types,
                         identity,
@@ -447,8 +430,6 @@ fn collect_database_callables_in_items(
                     collect_database_callables_in_items(
                         path,
                         items,
-                        gated
-                            || is_test_support_only(&module.attrs, policy.test_support_features()),
                         policy,
                         raw_database_types,
                         identity,

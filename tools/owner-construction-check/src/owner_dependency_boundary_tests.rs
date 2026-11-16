@@ -1,4 +1,5 @@
 use super::*;
+use crate::crate_code::checked;
 
 const PATH: &str = "crates/app-database/src/work.rs";
 fn policy() -> Policy {
@@ -300,8 +301,10 @@ fn a_listed_root_can_return_the_graph_it_constructs() {
     );
 }
 
+/// The policy lists no test-support feature, so code gated on one is
+/// production code.
 #[test]
-fn test_support_has_the_same_hand_out_boundary() {
+fn code_gated_on_an_unlisted_feature_has_the_same_hand_out_boundary() {
     let source = "#[cfg(feature = \"test-utils\")] struct Owner { clock: Clock } impl Owner { pub fn clock(&self) -> Clock { todo!() } }";
     assert_eq!(
         leaks(PATH, source),
@@ -468,57 +471,110 @@ fn a_listed_trait_method_can_return_the_owner_it_makes() {
     }
 }
 
+/// The leaks the checker finds in `source` under `policy`: in its production
+/// code, as the checker runs the rule.
+fn checked_leaks(policy: &Policy, source: &str) -> Vec<Finding> {
+    let files = checked(&[RustFile::fixture(PATH, source)], policy);
+    find_owner_dependency_leaks(&files, policy, &OwnerGraph::collect(&files, policy))
+}
+
+/// The gates the policy below counts as test code or not: `test-utils` is its
+/// one test-support feature.
+const GATES: [(&str, bool); 5] = [
+    (r#"#[cfg(feature = "test-utils")]"#, true),
+    (r#"#[cfg(any(test, feature = "test-utils"))]"#, true),
+    ("", false),
+    (r#"#[cfg(any(feature = "test-utils", feature = "cloud"))]"#, false),
+    (r#"#[cfg(feature = "cloud")]"#, false),
+];
+
+fn test_support_policy() -> Policy {
+    let mut policy = policy();
+    policy.test_support_features = vec!["test-utils".into()];
+    policy
+}
+
+/// Code gated on a feature the policy lists as test support is test code, as
+/// `cfg(test)` code is: it may take or return a raw handle. Ungated, or gated
+/// on a feature the policy doesn't list, it may not.
 #[test]
-fn items_gated_on_test_support_take_a_raw_handle_only_when_the_policy_names_the_feature() {
-    let named = policy_with(r#"test_support_features = ["test-utils"]"#);
-    for (gated, source) in [
-        (true, r#"#[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {}"#),
-        (
-            true,
-            r#"#[cfg(any(test, feature = "test-utils"))] pub fn open_on(connection: &Connection) {}"#,
-        ),
-        (
-            true,
-            r#"impl Library { #[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {} }"#,
-        ),
-        (
-            true,
-            r#"#[cfg(feature = "test-utils")] impl Library { pub fn open_on(connection: &Connection) {} }"#,
-        ),
-        (
-            true,
-            r#"#[cfg(feature = "test-utils")] mod support { pub fn open_on(connection: &Connection) {} }"#,
-        ),
-        (false, "pub fn open_on(connection: &Connection) {}"),
-        (
-            false,
-            r#"#[cfg(any(feature = "test-utils", feature = "cloud"))] pub fn open_on(connection: &Connection) {}"#,
-        ),
-        (false, r#"#[cfg(feature = "other")] pub fn open_on(connection: &Connection) {}"#),
-    ] {
-        let expected = if gated {
-            Vec::new()
-        } else {
-            findings(PATH, &["open_on accepts raw dependency Connection"])
-        };
-        assert_eq!(leaks_under(&named, PATH, source), expected, "{source}");
+fn items_gated_on_a_listed_test_support_feature_are_test_code() {
+    let policy = test_support_policy();
+    for (gate, test_code) in GATES {
+        for (source, message) in [
+            (
+                format!("{gate} pub fn open_on(connection: &Connection) {{}}"),
+                "open_on accepts raw dependency Connection",
+            ),
+            (
+                format!("{gate} pub fn open() -> Connection {{ todo!() }}"),
+                "open returns retained dependency Connection",
+            ),
+            (
+                format!("impl Library {{ {gate} pub fn open_on(connection: &Connection) {{}} }}"),
+                "Library::open_on accepts raw dependency Connection",
+            ),
+            (
+                format!("{gate} impl Library {{ pub fn open_on(connection: &Connection) {{}} }}"),
+                "Library::open_on accepts raw dependency Connection",
+            ),
+            (
+                format!("{gate} mod support {{ pub fn open_on(connection: &Connection) {{}} }}"),
+                "open_on accepts raw dependency Connection",
+            ),
+        ] {
+            let expected = if test_code { Vec::new() } else { findings(PATH, &[message]) };
+            assert_eq!(checked_leaks(&policy, &source), expected, "{source}");
+        }
     }
     assert_eq!(
-        leaks(PATH, r#"#[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {}"#),
+        checked_leaks(
+            &policy_with(""),
+            r#"#[cfg(feature = "test-utils")] pub fn open_on(connection: &Connection) {}"#
+        ),
         findings(PATH, &["open_on accepts raw dependency Connection"]),
         "a policy naming no feature refuses it"
     );
 }
 
+/// Test support may hand out shared state, as `cfg(test)` code may.
 #[test]
-fn an_item_gated_on_test_support_still_cannot_return_a_raw_handle() {
-    let named = policy_with(r#"test_support_features = ["test-utils"]"#);
-    assert_eq!(
-        leaks_under(
-            &named,
-            PATH,
-            r#"#[cfg(feature = "test-utils")] pub fn open() -> Connection { todo!() }"#
-        ),
-        findings(PATH, &["open returns retained dependency Connection"])
-    );
+fn shared_state_handed_out_by_test_support_is_test_code() {
+    let mut policy = test_support_policy();
+    policy.shared_state_types.insert("Sender".into());
+    for (gate, test_code) in GATES {
+        let source = format!(
+            "struct Status {{ sender: Sender<u8> }} \
+            impl Status {{ {gate} pub fn sender(&self) -> Sender<u8> {{ todo!() }} }}"
+        );
+        let expected = if test_code {
+            Vec::new()
+        } else {
+            vec![Finding::new(
+                PATH,
+                1,
+                "Status::sender hands out shared state Sender",
+                SHARED_STATE_REMEDY,
+            )]
+        };
+        assert_eq!(checked_leaks(&policy, &source), expected, "{source}");
+    }
+}
+
+/// Test support may return what an owner retains, as `cfg(test)` code may.
+#[test]
+fn retained_dependencies_returned_by_test_support_are_test_code() {
+    let policy = test_support_policy();
+    for (gate, test_code) in GATES {
+        let source = format!(
+            "struct Owner {{ clock: Clock }} \
+            impl Owner {{ {gate} pub fn clock(&self) -> Clock {{ todo!() }} }}"
+        );
+        let expected = if test_code {
+            Vec::new()
+        } else {
+            findings(PATH, &["Owner::clock returns retained dependency Clock"])
+        };
+        assert_eq!(checked_leaks(&policy, &source), expected, "{source}");
+    }
 }

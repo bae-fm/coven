@@ -1,6 +1,6 @@
 //! Owners and capabilities are constructed at composition roots (Appendix F.3). The policy names
-//! interfaces; every implementation, including feature-gated fakes, contributes
-//! a construction-only type. Explicit non-trait capabilities join the same set.
+//! interfaces; every implementation outside test code contributes a
+//! construction-only type. Explicit non-trait capabilities join the same set.
 //!
 //! Capability factory definitions may build their declared result; owner factories
 //! require a root entry themselves. Both have their use sites checked.

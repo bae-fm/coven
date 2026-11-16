@@ -6,8 +6,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext", "LiveQuery"]
@@ -39,8 +37,8 @@ const LIVE: (&str, &str) = (
 /// Each finding of the files as its item and what it says, sorted.
 fn found(files: &[(&str, &str)]) -> Vec<(String, String)> {
     let files = files.iter().map(|(path, text)| RustFile::fixture(path, text)).collect::<Vec<_>>();
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let shapes = policy.read_shapes.as_ref().expect("rows");
     let read = ReadCode::collect(&files, &policy, shapes);
     let mut hits = kept_state(&read, &files, shapes)

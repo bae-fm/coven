@@ -55,7 +55,7 @@ fn members_anywhere_give_their_files_a_package() {
     fixture.write("app-core/tests/fixture.sql", "");
     fixture.write("app-ignored/src/schema.sql", "");
     fixture.write("app-ignored/src/lib.rs", "");
-    let workspace = load(&fixture.0, &BTreeMap::new()).expect("load the fixture workspace");
+    let workspace = load(&fixture.0, &BTreeMap::new(), &[]).expect("load the fixture workspace");
     let files = workspace
         .files
         .iter()
@@ -128,7 +128,7 @@ fn members_are_directories_that_hold_one_package_each() {
         for (path, contents) in files {
             fixture.write(path, contents);
         }
-        assert!(load(&fixture.0, &BTreeMap::new()).is_err(), "{members} {files:?}");
+        assert!(load(&fixture.0, &BTreeMap::new(), &[]).is_err(), "{members} {files:?}");
     }
 }
 
@@ -147,7 +147,7 @@ fn dependencies_go_by_their_library_or_their_rename() {
     );
     fixture.write("app/src/lib.rs", "");
     let libraries = BTreeMap::from([("coreaudio-rs".to_string(), "coreaudio".to_string())]);
-    let workspace = load(&fixture.0, &libraries).expect("load the fixture workspace");
+    let workspace = load(&fixture.0, &libraries, &[]).expect("load the fixture workspace");
     assert_eq!(
         workspace.files[0].extern_crates,
         BTreeMap::from(

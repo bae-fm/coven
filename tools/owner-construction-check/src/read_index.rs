@@ -1,16 +1,15 @@
 //! The workspace's functions, methods and struct fields, as the search for
 //! read code (`read_code.rs`) looks callees and receivers up: each callable
 //! with its generics' bounds, each struct's field types, and the names a type
-//! mentions. Items gated on test support alone are left out.
+//! mentions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use syn::visit::{self, Visit};
 
-use crate::module_sources::test_support_module_files;
 use crate::name_resolution::{ItemPath, NameResolver};
 use crate::policy::{Policy, ReadShapes};
-use crate::syntax::{is_test_support_only, type_name, RustFile};
+use crate::syntax::{type_name, RustFile};
 
 /// The names in a type's paths, bounds and arguments; the arguments a
 /// callback type is given only when `callbacks`.
@@ -263,20 +262,9 @@ impl<'a> Index<'a> {
             read_functions: BTreeSet::new(),
             pointers: policy.shared_pointer_types.clone(),
         };
-        let features = policy.test_support_features();
-        let support_modules = test_support_module_files(files, features);
-        for file in files.iter().filter(|file| {
-            !is_test_support_only(&file.syntax.attrs, features)
-                && !support_modules.contains(&file.relative_path)
-        }) {
-            let mut collector = Collector {
-                file,
-                resolver,
-                shapes,
-                features,
-                index: &mut index,
-                owners: Vec::new(),
-            };
+        for file in files {
+            let mut collector =
+                Collector { file, resolver, shapes, index: &mut index, owners: Vec::new() };
             collector.visit_file(&file.syntax);
         }
         index
@@ -287,17 +275,12 @@ struct Collector<'a, 'b> {
     file: &'a RustFile,
     resolver: &'b NameResolver,
     shapes: &'b ReadShapes,
-    features: &'b [String],
     index: &'b mut Index<'a>,
     /// The enclosing `impl` blocks and traits: their type and generics.
     owners: Vec<Option<(String, Bounds)>>,
 }
 
 impl<'a> Collector<'a, '_> {
-    fn gated(&self, attrs: &[syn::Attribute]) -> bool {
-        is_test_support_only(attrs, self.features)
-    }
-
     fn add(
         &mut self,
         owner: Option<String>,
@@ -348,16 +331,7 @@ fn generic_bounds(generics: &syn::Generics, into: &mut Bounds) {
 }
 
 impl<'a> Visit<'a> for Collector<'a, '_> {
-    fn visit_item_mod(&mut self, node: &'a syn::ItemMod) {
-        if !self.gated(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
     fn visit_item_fn(&mut self, node: &'a syn::ItemFn) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         let path = self.resolver.definition(&self.file.relative_path, &node.sig.ident);
         let id = self.add(None, &node.sig, Some(&node.block), BTreeMap::new());
         self.index.free.insert(path, id);
@@ -365,16 +339,10 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_item_struct(&mut self, node: &'a syn::ItemStruct) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         let name = node.ident.to_string();
         if let syn::Fields::Named(fields) = &node.fields {
             for field in &fields.named {
                 let Some(field_name) = &field.ident else { continue };
-                if self.gated(&field.attrs) {
-                    continue;
-                }
                 if let Some(ty) = peel(&field.ty, Some(&name), &self.index.pointers) {
                     self.index.fields.insert((name.clone(), field_name.to_string()), ty);
                 }
@@ -385,8 +353,7 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_item_type(&mut self, node: &'a syn::ItemType) {
-        if !self.gated(&node.attrs)
-            && is_function_pointer(&node.ty)
+        if is_function_pointer(&node.ty)
             && !names(&node.ty, true).is_disjoint(&self.shapes.read_types)
         {
             self.index.read_functions.insert(node.ident.to_string());
@@ -394,16 +361,11 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_item_enum(&mut self, node: &'a syn::ItemEnum) {
-        if !self.gated(&node.attrs) {
-            self.index.declared.insert(node.ident.to_string());
-            visit::visit_item_enum(self, node);
-        }
+        self.index.declared.insert(node.ident.to_string());
+        visit::visit_item_enum(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'a syn::ItemImpl) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         let owner = type_name(&node.self_ty).map(|owner| {
             let mut bounds = BTreeMap::new();
             generic_bounds(&node.generics, &mut bounds);
@@ -418,9 +380,6 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'a syn::ImplItemFn) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         if let Some((owner, bounds)) = self.owner() {
             self.add(Some(owner), &node.sig, Some(&node.block), bounds);
         }
@@ -428,9 +387,6 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_item_trait(&mut self, node: &'a syn::ItemTrait) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         let mut bounds = BTreeMap::new();
         generic_bounds(&node.generics, &mut bounds);
         self.owners.push(Some((node.ident.to_string(), bounds)));
@@ -439,9 +395,6 @@ impl<'a> Visit<'a> for Collector<'a, '_> {
     }
 
     fn visit_trait_item_fn(&mut self, node: &'a syn::TraitItemFn) {
-        if self.gated(&node.attrs) {
-            return;
-        }
         if let Some((owner, bounds)) = self.owner() {
             self.add(Some(owner), &node.sig, node.default.as_ref(), bounds);
         }

@@ -7,8 +7,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -21,8 +19,8 @@ fn policy() -> Policy {
 /// Each hit of `source`'s read code, as its shape's id.
 fn hits_in(source: &str) -> Vec<Hit> {
     let files = [RustFile::fixture("crates/app/src/a.rs", source)];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     row_work(&read)
 }

@@ -34,7 +34,7 @@ fn only_items_that_compile_solely_into_tests_are_test_only() {
         "#[cfg(all(test, unix))] fn f() {}",
         "#[cfg(any(test, all(test, unix)))] fn f() {}",
     ] {
-        assert!(is_test_only(&item(test_only).attrs), "{test_only}");
+        assert!(is_test_only(&item(test_only).attrs, &[]), "{test_only}");
     }
     for production in [
         "fn f() {}",
@@ -43,6 +43,27 @@ fn only_items_that_compile_solely_into_tests_are_test_only() {
         "#[cfg(any(test, feature = \"test-utils\"))] fn f() {}",
         "#[cfg(unix)] fn f() {}",
     ] {
-        assert!(!is_test_only(&item(production).attrs), "{production}");
+        assert!(!is_test_only(&item(production).attrs, &[]), "{production}");
+    }
+}
+
+#[test]
+fn items_gated_on_a_listed_test_support_feature_are_test_only() {
+    let item = |source: &str| syn::parse_str::<syn::ItemFn>(source).expect("parse fixture item");
+    let features = ["test-utils".to_string(), "profiles".to_string()];
+    for test_only in [
+        "#[cfg(feature = \"test-utils\")] fn f() {}",
+        "#[cfg(any(test, feature = \"test-utils\"))] fn f() {}",
+        "#[cfg(any(feature = \"test-utils\", feature = \"profiles\"))] fn f() {}",
+        "#[cfg(all(unix, feature = \"profiles\"))] fn f() {}",
+    ] {
+        assert!(is_test_only(&item(test_only).attrs, &features), "{test_only}");
+    }
+    for production in [
+        "#[cfg(feature = \"cloud\")] fn f() {}",
+        "#[cfg(any(feature = \"test-utils\", feature = \"cloud\"))] fn f() {}",
+        "#[cfg(not(feature = \"test-utils\"))] fn f() {}",
+    ] {
+        assert!(!is_test_only(&item(production).attrs, &features), "{production}");
     }
 }

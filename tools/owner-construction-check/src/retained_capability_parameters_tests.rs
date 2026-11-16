@@ -25,7 +25,7 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
         }
         "#,
     )];
-    let files = checked(&files);
+    let files = checked(&files, &policy);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
     let methods: BTreeSet<_> = violations
@@ -59,7 +59,7 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
         }
         "#,
     )];
-    let files = checked(&files);
+    let files = checked(&files, &policy);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
 
@@ -105,7 +105,7 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
         "#,
         ),
     ];
-    let files = checked(&files);
+    let files = checked(&files, &policy);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
     assert_eq!(
@@ -147,7 +147,7 @@ fn a_handle_is_received_only_by_constructors_roots_and_free_functions() {
         fn send(requests: &Requests) {}
         "#,
     )];
-    let files = checked(&files);
+    let files = checked(&files, &policy);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
     assert_eq!(
@@ -190,7 +190,7 @@ fn a_value_method_cannot_accept_a_construction_only_capability() {
         fn insert(database: &DatabaseConnection, record: &Record) {}
         "#,
     )];
-    let files = checked(&files);
+    let files = checked(&files, &policy);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
     assert_eq!(

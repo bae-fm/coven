@@ -5,8 +5,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext", "LiveQuery"]
@@ -33,8 +31,8 @@ const STORE: (&str, &str) = (
 /// sorted.
 fn units(files: &[(&str, &str)]) -> Vec<(String, String, Why)> {
     let files = files.iter().map(|(path, text)| RustFile::fixture(path, text)).collect::<Vec<_>>();
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let shapes = policy.read_shapes.as_ref().expect("fixture read_shapes");
     let mut found = ReadCode::collect(&files, &policy, shapes)
         .units()
@@ -541,8 +539,8 @@ fn a_call_that_hands_over_a_read_value_is_known_by_its_place() {
         "crates/app/src/a.rs",
         "fn outer(sql: &SqlReadContext<'_>) {\n    inner(sql);\n    other(3);\n}\nfn inner(sql: &SqlReadContext<'_>) {}\nfn other(n: u8) {}",
     )];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     assert!(read.hands_read_value("crates/app/src/a.rs", (2, 4)));
     assert!(!read.hands_read_value("crates/app/src/a.rs", (3, 4)));
@@ -573,8 +571,8 @@ fn only_what_a_live_query_s_process_runs_and_no_other_read_code_reaches_is_proce
         fn plain(sql: &SqlReadContext<'_>) { shared(vec![]); }
         "#,
     )];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     let only = |item: &str| read.is_process_only("crates/app/src/a.rs", item);
     for item in ["Views::by_closure", "Views::shape", "label_lines", "helper"] {

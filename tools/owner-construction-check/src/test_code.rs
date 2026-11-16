@@ -1,8 +1,9 @@
 //! Test code, defined once for every rule (Appendix F.3, F.6): a file the test
 //! layout names as tests or that only test modules reach
-//! (`RustFile::is_test_source`), a file whose root is `#![cfg(test)]`, and
-//! every item, statement, field, variant, match arm and struct-literal field
-//! that compiles only into tests (`syntax::is_test_only`).
+//! (`RustFile::is_test_source`), a file whose root is test-only, and every
+//! item, statement, field, variant, match arm and struct-literal field that
+//! compiles only into tests (`syntax::is_test_only`): under `test`, or under
+//! one of the policy's test-support features (`Policy::test_support_features`).
 //!
 //! The rules of F.1 to F.3 read the code that remains: test code may assemble
 //! its own graphs from raw material, and nothing outside it can reach what it
@@ -15,14 +16,15 @@ use syn::visit_mut::{self, VisitMut};
 
 use crate::syntax::{is_test_only, RustFile};
 
-/// The crates' files without their test code.
-pub(crate) fn production_code(files: &[RustFile]) -> Vec<RustFile> {
+/// The crates' files without their test code. `features` are the Cargo
+/// features only tests turn on.
+pub(crate) fn production_code(files: &[RustFile], features: &[String]) -> Vec<RustFile> {
     files
         .iter()
-        .filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
+        .filter(|file| !is_test_file(file, features))
         .map(|file| {
             let mut file = file.clone();
-            TestCode.visit_file_mut(&mut file.syntax);
+            TestCode { features }.visit_file_mut(&mut file.syntax);
             file
         })
         .collect()
@@ -30,32 +32,37 @@ pub(crate) fn production_code(files: &[RustFile]) -> Vec<RustFile> {
 
 /// The crates' test code: each test file whole, and from every other file
 /// its test-only items, impl items among them.
-pub(crate) fn test_code(files: &[RustFile]) -> Vec<RustFile> {
+pub(crate) fn test_code(files: &[RustFile], features: &[String]) -> Vec<RustFile> {
     files
         .iter()
         .map(|file| {
             let mut file = file.clone();
-            if !file.is_test_source() && !is_test_only(&file.syntax.attrs) {
-                file.syntax.items = test_items(&file.syntax.items);
+            if !is_test_file(&file, features) {
+                file.syntax.items = test_items(&file.syntax.items, features);
             }
             file
         })
         .collect()
 }
 
+/// Whether the whole file is test code.
+fn is_test_file(file: &RustFile, features: &[String]) -> bool {
+    file.is_test_source() || is_test_only(&file.syntax.attrs, features)
+}
+
 /// The test-only items among `items`, with those of inline modules and impls
 /// that are not test-only themselves.
-fn test_items(items: &[syn::Item]) -> Vec<syn::Item> {
+fn test_items(items: &[syn::Item], features: &[String]) -> Vec<syn::Item> {
     items
         .iter()
         .filter_map(|item| {
-            if is_test_only(item_attrs(item)) {
+            if is_test_only(item_attrs(item), features) {
                 return Some(item.clone());
             }
             match item {
                 syn::Item::Mod(module) => {
                     let (brace, items) = module.content.as_ref()?;
-                    let items = test_items(items);
+                    let items = test_items(items, features);
                     (!items.is_empty()).then(|| {
                         syn::Item::Mod(syn::ItemMod {
                             content: Some((*brace, items)),
@@ -67,7 +74,7 @@ fn test_items(items: &[syn::Item]) -> Vec<syn::Item> {
                     let items = implementation
                         .items
                         .iter()
-                        .filter(|item| is_test_only(impl_item_attrs(item)))
+                        .filter(|item| is_test_only(impl_item_attrs(item), features))
                         .cloned()
                         .collect::<Vec<_>>();
                     (!items.is_empty())
@@ -80,63 +87,71 @@ fn test_items(items: &[syn::Item]) -> Vec<syn::Item> {
 }
 
 /// Removes every test-only part of a syntax tree.
-struct TestCode;
+struct TestCode<'a> {
+    features: &'a [String],
+}
 
-impl VisitMut for TestCode {
+impl TestCode<'_> {
+    fn is_test_only(&self, attrs: &[syn::Attribute]) -> bool {
+        is_test_only(attrs, self.features)
+    }
+}
+
+impl VisitMut for TestCode<'_> {
     fn visit_file_mut(&mut self, node: &mut syn::File) {
-        node.items.retain(|item| !is_test_only(item_attrs(item)));
+        node.items.retain(|item| !self.is_test_only(item_attrs(item)));
         visit_mut::visit_file_mut(self, node);
     }
 
     fn visit_item_mod_mut(&mut self, node: &mut syn::ItemMod) {
         if let Some((_, items)) = &mut node.content {
-            items.retain(|item| !is_test_only(item_attrs(item)));
+            items.retain(|item| !self.is_test_only(item_attrs(item)));
         }
         visit_mut::visit_item_mod_mut(self, node);
     }
 
     fn visit_item_impl_mut(&mut self, node: &mut syn::ItemImpl) {
-        node.items.retain(|item| !is_test_only(impl_item_attrs(item)));
+        node.items.retain(|item| !self.is_test_only(impl_item_attrs(item)));
         visit_mut::visit_item_impl_mut(self, node);
     }
 
     fn visit_item_trait_mut(&mut self, node: &mut syn::ItemTrait) {
-        node.items.retain(|item| !is_test_only(trait_item_attrs(item)));
+        node.items.retain(|item| !self.is_test_only(trait_item_attrs(item)));
         visit_mut::visit_item_trait_mut(self, node);
     }
 
     fn visit_item_foreign_mod_mut(&mut self, node: &mut syn::ItemForeignMod) {
-        node.items.retain(|item| !is_test_only(foreign_item_attrs(item)));
+        node.items.retain(|item| !self.is_test_only(foreign_item_attrs(item)));
         visit_mut::visit_item_foreign_mod_mut(self, node);
     }
 
     fn visit_item_enum_mut(&mut self, node: &mut syn::ItemEnum) {
-        retain(&mut node.variants, |variant| !is_test_only(&variant.attrs));
+        retain(&mut node.variants, |variant| !self.is_test_only(&variant.attrs));
         visit_mut::visit_item_enum_mut(self, node);
     }
 
     fn visit_fields_named_mut(&mut self, node: &mut syn::FieldsNamed) {
-        retain(&mut node.named, |field| !is_test_only(&field.attrs));
+        retain(&mut node.named, |field| !self.is_test_only(&field.attrs));
         visit_mut::visit_fields_named_mut(self, node);
     }
 
     fn visit_fields_unnamed_mut(&mut self, node: &mut syn::FieldsUnnamed) {
-        retain(&mut node.unnamed, |field| !is_test_only(&field.attrs));
+        retain(&mut node.unnamed, |field| !self.is_test_only(&field.attrs));
         visit_mut::visit_fields_unnamed_mut(self, node);
     }
 
     fn visit_block_mut(&mut self, node: &mut syn::Block) {
-        node.stmts.retain(|statement| !is_test_only(stmt_attrs(statement)));
+        node.stmts.retain(|statement| !self.is_test_only(stmt_attrs(statement)));
         visit_mut::visit_block_mut(self, node);
     }
 
     fn visit_expr_match_mut(&mut self, node: &mut syn::ExprMatch) {
-        node.arms.retain(|arm| !is_test_only(&arm.attrs));
+        node.arms.retain(|arm| !self.is_test_only(&arm.attrs));
         visit_mut::visit_expr_match_mut(self, node);
     }
 
     fn visit_expr_struct_mut(&mut self, node: &mut syn::ExprStruct) {
-        retain(&mut node.fields, |field| !is_test_only(&field.attrs));
+        retain(&mut node.fields, |field| !self.is_test_only(&field.attrs));
         visit_mut::visit_expr_struct_mut(self, node);
     }
 }

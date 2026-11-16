@@ -6,8 +6,6 @@ fn policy() -> Policy {
     Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -31,8 +29,8 @@ fn cutoffs_in(body: &str, outside: &str) -> Vec<String> {
         "{CONSTANTS}\nfn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, found: u64, kept: u64, passed: u64, total: u64) {{ {body} }}\n{outside}"
     );
     let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     let mut found = cutoffs(&read, &files)
         .into_iter()
@@ -86,8 +84,8 @@ fn the_same_comparison_outside_read_code_is_not_found() {
         "crates/app/src/a.rs",
         "const LIMIT: usize = 100; fn write(rows: Vec<u8>) { if rows.len() > 500 || rows.len() > LIMIT {} }",
     )];
-    let files = checked(&files);
     let policy = policy();
+    let files = checked(&files, &policy);
     let read = ReadCode::collect(&files, &policy, policy.read_shapes.as_ref().expect("rows"));
     assert!(cutoffs(&read, &files).is_empty());
 }

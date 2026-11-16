@@ -90,6 +90,13 @@ pub(crate) struct Policy {
     /// checker. Every other member is a crate and answers to every rule.
     #[serde(default)]
     pub(crate) tools: BTreeSet<String>,
+    /// Cargo features that only tests turn on. Every rule counts code that
+    /// compiles only under `test` or one of these features
+    /// (`cfg(feature = "test-utils")`, `cfg(any(test, feature = "test-utils"))`)
+    /// as test code, as it counts `cfg(test)` code (`test_code.rs`). With
+    /// none, only `cfg(test)` and `#[test]` code is test code.
+    #[serde(default)]
+    pub(crate) test_support_features: Vec<String>,
     /// The crate whose root re-exports the API and keeps every module private
     /// (Appendix F.5).
     #[serde(default)]
@@ -109,9 +116,10 @@ pub(crate) struct Policy {
     #[serde(default)]
     pub(crate) database: Option<Database>,
     /// Every callable allowed to construct owners or start background work (Appendix F.3),
-    /// including owner constructors and feature-gated fixtures. The file lists
-    /// them by source file: `Type::method`, or a free function's or a
-    /// static's name; a static's value is built at the root it names.
+    /// including owner constructors; test code needs none (`test_code.rs`).
+    /// The file lists them by source file: `Type::method`, or a free
+    /// function's or a static's name; a static's value is built at the root
+    /// it names.
     #[serde(default, deserialize_with = "composition_roots")]
     pub(crate) composition_roots: Vec<CompositionRoot>,
     /// Runtime acquisition and background work starts require an entry in
@@ -146,8 +154,8 @@ pub(crate) struct Policy {
     /// `Arc`: what one holds through them is shared with the others.
     #[serde(default)]
     pub(crate) shared_pointer_types: BTreeSet<String>,
-    /// Capability interfaces. Every workspace implementation is construction-only,
-    /// including generic implementations and feature-gated test support.
+    /// Capability interfaces. Every workspace implementation outside test code
+    /// is construction-only, including generic implementations.
     #[serde(default)]
     pub(crate) capability_traits: BTreeSet<String>,
     /// Handles (Appendix F.3), each with the type that makes it:
@@ -508,13 +516,6 @@ pub(crate) struct Database {
     /// (`database_boundary.rs`). With none, the rule reads no write path.
     #[serde(default)]
     pub(crate) write_types: Vec<String>,
-    /// Cargo features that only test support enables. A callable, or the
-    /// `impl`, trait or module holding it, gated on `test` or on one of these
-    /// features alone (`cfg(feature = "test-utils")`,
-    /// `cfg(any(test, feature = "test-utils"))`) may take a raw database
-    /// handle; ungated, it may not. With none, only `cfg(test)` counts.
-    #[serde(default)]
-    pub(crate) test_support_features: Vec<String>,
     /// Public callables of the database's homes that take a raw database
     /// handle, each with the reason it may. A callable listed here is exempt
     /// from the parameter rule only; returning a handle stays refused.
@@ -632,10 +633,9 @@ impl Policy {
         })
     }
 
-    /// The features only test support enables, which let the items they gate
-    /// take a raw database handle.
+    /// The Cargo features only tests turn on (`syntax::is_test_only`).
     pub(crate) fn test_support_features(&self) -> &[String] {
-        self.database.as_ref().map_or(&[], |database| database.test_support_features.as_slice())
+        &self.test_support_features
     }
 
     /// The types whose holder is an owner: the capability types, shared

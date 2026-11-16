@@ -19,9 +19,10 @@ fn policy() -> Policy {
 }
 
 fn kinds(path: &str, source: &str) -> BTreeSet<String> {
+    let policy = policy();
     find_database_boundary_violations(
-        &CrateCode::of(&[RustFile::fixture(path, source)], &[]),
-        &policy(),
+        &CrateCode::fixture(&[RustFile::fixture(path, source)], &[], &policy),
+        &policy,
     )
     .into_iter()
     .map(|violation| {
@@ -138,15 +139,17 @@ fn sql_on_the_databases_own_tables_is_rejected_outside_its_homes() {
         ),
     ];
 
-    let kinds = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
-        .into_iter()
-        .map(|violation| {
-            violation
-                .message
-                .trim_end_matches(" is confined to crates/app-database/src/")
-                .to_string()
-        })
-        .collect::<BTreeSet<_>>();
+    let policy = policy();
+    let kinds =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
+            .into_iter()
+            .map(|violation| {
+                violation
+                    .message
+                    .trim_end_matches(" is confined to crates/app-database/src/")
+                    .to_string()
+            })
+            .collect::<BTreeSet<_>>();
     assert_eq!(
         kinds,
         BTreeSet::from([
@@ -204,10 +207,12 @@ fn table_macros_are_read_from_every_file_of_the_schema_module() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
-        .into_iter()
-        .map(|violation| (violation.path, violation.line, violation.message))
-        .collect::<Vec<_>>();
+    let policy = policy();
+    let violations =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
+            .into_iter()
+            .map(|violation| (violation.path, violation.line, violation.message))
+            .collect::<Vec<_>>();
     assert_eq!(
         violations,
         vec![(
@@ -247,18 +252,20 @@ fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
-        .into_iter()
-        .map(|violation| {
-            (
-                violation.line,
-                violation
-                    .message
-                    .trim_end_matches(" is confined to crates/app-database/src/")
-                    .to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
+    let policy = policy();
+    let violations =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
+            .into_iter()
+            .map(|violation| {
+                (
+                    violation.line,
+                    violation
+                        .message
+                        .trim_end_matches(" is confined to crates/app-database/src/")
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
     assert_eq!(
         violations,
         vec![
@@ -323,8 +330,9 @@ fn a_table_is_written_only_in_its_domain_s_homes() {
             "#,
         ),
     ];
+    let policy = domain_policy();
     let violations =
-        find_database_boundary_violations(&CrateCode::of(&files, &[]), &domain_policy())
+        find_database_boundary_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
             .into_iter()
             .map(|violation| (violation.path, violation.line, violation.message))
             .collect::<Vec<_>>();
@@ -356,7 +364,8 @@ fn sql(path: &str, text: &str) -> SqlFile {
 }
 
 fn domain_violations(files: &[RustFile], sql: &[SqlFile]) -> Vec<(String, usize, String)> {
-    find_database_boundary_violations(&CrateCode::of(files, sql), &domain_policy())
+    let policy = domain_policy();
+    find_database_boundary_violations(&CrateCode::fixture(files, sql, &policy), &policy)
         .into_iter()
         .map(|violation| (violation.path, violation.line, violation.message))
         .collect()
@@ -622,7 +631,8 @@ CREATE TRIGGER listing_moved INSTEAD OF INSERT ON listing_moves BEGIN
 END;";
 
 fn view_violations(files: &[RustFile], sql: &[SqlFile]) -> Vec<(String, usize, String)> {
-    find_database_boundary_violations(&CrateCode::of(files, sql), &view_policy())
+    let policy = view_policy();
+    find_database_boundary_violations(&CrateCode::fixture(files, sql, &policy), &policy)
         .into_iter()
         .map(|violation| (violation.path, violation.line, violation.message))
         .collect()
@@ -731,10 +741,11 @@ fn sql_reads_and_fires_on_only_its_own_and_earlier_crates() {
             "CREATE TRIGGER listed AFTER INSERT ON note_listing BEGIN SELECT RAISE(ABORT, 'no'); END;",
         ),
     ];
-    let violations = find_database_boundary_violations(&CrateCode::of(&files, &schema), &policy)
-        .into_iter()
-        .map(|violation| (violation.path, violation.line, violation.message))
-        .collect::<Vec<_>>();
+    let violations =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &schema, &policy), &policy)
+            .into_iter()
+            .map(|violation| (violation.path, violation.line, violation.message))
+            .collect::<Vec<_>>();
     let kept = |name: &str| {
         format!(
             "{name}, which the listing domain keeps in app-core, after app-database in crate_order"
@@ -796,10 +807,11 @@ fn a_domains_writes_run_in_its_owner_or_with_an_open_write() {
             r#"fn fill(pool: &Pool) { pool.execute("INSERT INTO note_listing VALUES (1)"); }"#,
         ),
     ];
-    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy)
-        .into_iter()
-        .map(|violation| (violation.line, violation.message))
-        .collect::<Vec<_>>();
+    let violations =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
+            .into_iter()
+            .map(|violation| (violation.line, violation.message))
+            .collect::<Vec<_>>();
     let message = |scope: &str, table: &str| {
         format!("{scope} writes {table}, which the listing domain writes in its owner Listing's methods or with an open write (Write)")
     };

@@ -24,8 +24,8 @@ fn policy() -> Policy {
 }
 
 fn findings(source: &str) -> Vec<(usize, String)> {
-    let files = checked(&[RustFile::fixture("crates/app-core/src/lib.rs", source)]);
     let policy = policy();
+    let files = checked(&[RustFile::fixture("crates/app-core/src/lib.rs", source)], &policy);
     find_domain_owner_forwarding(&files, &policy, &OwnerGraph::collect(&files, &policy))
         .into_iter()
         .map(|finding| (finding.line, finding.message))

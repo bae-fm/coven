@@ -12,20 +12,23 @@ fn file(path: &str, source: &str) -> RustFile {
 
 /// A workspace `Connection` holding a capability, which makes it an owner,
 /// beside rusqlite's.
-fn workspace(holders: &str) -> Vec<RustFile> {
-    checked(&[
-        file("crates/app-core/src/lib.rs", "mod connection; mod holders;"),
-        file(
-            "crates/app-core/src/connection.rs",
-            "pub(crate) struct Connection { socket: Socket }",
-        ),
-        file("crates/app-core/src/holders.rs", holders),
-    ])
+fn workspace(holders: &str, policy: &Policy) -> Vec<RustFile> {
+    checked(
+        &[
+            file("crates/app-core/src/lib.rs", "mod connection; mod holders;"),
+            file(
+                "crates/app-core/src/connection.rs",
+                "pub(crate) struct Connection { socket: Socket }",
+            ),
+            file("crates/app-core/src/holders.rs", holders),
+        ],
+        policy,
+    )
 }
 
 fn owners(holders: &str) -> BTreeSet<String> {
     let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
-    OwnerGraph::collect(&workspace(holders), &policy).owners
+    OwnerGraph::collect(&workspace(holders, &policy), &policy).owners
 }
 
 /// A path to rusqlite's `Connection`, written out or imported, names no
@@ -62,6 +65,7 @@ fn colliding_external_paths_are_known_by_their_resolved_path() {
         use rusqlite::Connection;
         struct Holder<T> { connection: Connection, local: crate::connection::Connection, value: T }
         "#,
+        &Policy::fixture(""),
     );
     let identity = TypeIdentity::of(&files, &BTreeSet::new());
     let holder = files.iter().find(|file| file.relative_path.ends_with("holders.rs")).unwrap();
@@ -102,22 +106,25 @@ fn a_projection_names_every_type_impls_give_it() {
 /// its types through the module.
 #[test]
 fn a_module_file_two_roots_declare_resolves_from_each() {
-    let files = checked(&[
-        file("crates/app-core/src/lib.rs", ""),
-        file(
-            "crates/app-core/examples/first.rs",
-            "mod shared; struct First { c: shared::Connection }",
-        ),
-        file(
-            "crates/app-core/examples/second.rs",
-            "mod shared; struct Second { c: shared::Connection }",
-        ),
-        file(
-            "crates/app-core/examples/shared/mod.rs",
-            "pub(crate) struct Connection { socket: Socket }",
-        ),
-    ]);
     let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
+    let files = checked(
+        &[
+            file("crates/app-core/src/lib.rs", ""),
+            file(
+                "crates/app-core/examples/first.rs",
+                "mod shared; struct First { c: shared::Connection }",
+            ),
+            file(
+                "crates/app-core/examples/second.rs",
+                "mod shared; struct Second { c: shared::Connection }",
+            ),
+            file(
+                "crates/app-core/examples/shared/mod.rs",
+                "pub(crate) struct Connection { socket: Socket }",
+            ),
+        ],
+        &policy,
+    );
     assert_eq!(
         OwnerGraph::collect(&files, &policy).owners,
         BTreeSet::from(["Connection".into(), "First".into(), "Second".into()])

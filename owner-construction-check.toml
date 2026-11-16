@@ -18,6 +18,9 @@ rules = [
 # The checker itself answers only to the conventions.
 tools = ["owner-construction-check"]
 
+# These are the features only tests turn on.
+test_support_features = ["test-utils", "profiles"]
+
 # coven re-exports the API at its root and keeps every module private (F.5).
 api_crate = "coven"
 
@@ -91,7 +94,6 @@ capability_types = [
 # that do, so it is shared on purpose, by an owner, and leaves that owner only
 # inside a handle.
 shared_state_types = [
-    "Barrier",
     "Semaphore",
     "JoinHandle",
     "AtomicBool",
@@ -173,7 +175,6 @@ task_types = [
     # ready, shared by its task and its owner for a test to wait on, and
     # what the task holds while it runs.
     "Parks",
-    "ParkCounts",
     "LoopRunning",
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
@@ -182,14 +183,9 @@ task_types = [
     # client each of its attempts goes through, and that start as the
     # in-memory provider lets it out (Appendix E.10).
     "StartSent",
-    "MemoryStart",
     # One copy being written under its temporary name in the folder the
     # person picked, whose file its blocking writes share (§17.3).
     "CopyWriter",
-    # The measurement in effect on a thread for one scope of a test, and the
-    # one it replaced, put back when the scope ends.
-    "Active",
-    "PreviousActive",
     # One storage setup call until it journals itself, which a cancel
     # already reaches and whose end before the journal ends it (§11.6).
     "SetupCall",
@@ -257,12 +253,6 @@ task_types = [
     # Which of them removals skip, until the last of the call's
     # reservation and the steps it runs drops (§17.3).
     "CopyNames",
-    # One read's body from the in-memory provider, which shares the
-    # provider's state to answer the holds a test placed on it.
-    "MemoryBody",
-    # One request to the in-memory provider, counted among those running
-    # until it ends.
-    "ActiveMemoryRequest",
     # One change of the files owner's connection, which holds its upload
     # runs until it ends.
     "ConnectionChange",
@@ -297,8 +287,6 @@ task_types = [
     "FileStaging",
     # A read's call on the blocking pool, awaited by its read.
     "RunningRead",
-    # A test's follow of one live query's results, while it follows them.
-    "Followed",
     # One read's response body, holding that read's place under the
     # store's download limit until it ends (api.md E5).
     "ObjectStream",
@@ -312,13 +300,6 @@ task_types = [
     "CloudKitReply",
     "CloudKitCompletion",
     "Unanswered",
-    # A test's hold on one request of the in-memory provider, until the
-    # test releases it.
-    "HeldRead",
-    "HeldBody",
-    "HeldRequest",
-    "HeldNext",
-    "HeldAccess",
     # The retry requests one pass took, answered when it ends.
     "PassRequests",
     # An app's early retry of its uploads, waiting for its answer.
@@ -476,7 +457,6 @@ task_types = [
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
-    "Barrier",
     "Semaphore",
     "RwLock",
     "JoinHandle",
@@ -522,8 +502,6 @@ closed_session_types = [
 # the owner makes one; it, and the owners holding it, return a fresh one; a
 # holder receives it when it is built.
 [handles]
-# What a test reads of the budget (api.md E1).
-FileBudgetWatch = "FileBudget"
 # A live query the database makes from its readers and commit observer for
 # the app, which keeps it as long as it follows the results (api.md E4).
 LiveQuery = "StoreDatabase"
@@ -546,12 +524,6 @@ ProviderCheckPermit = "SequenceState"
 SequenceStatusWatch = "SequenceState"
 # The running pass's first move, for the sync loop to write that it moves.
 PassMoves = "SequenceState"
-# A test's count of the requests the in-memory provider's connections
-# attempt, to wait on without polling.
-RequestWatch = "MemoryStorage"
-# A test's hearing of each object the in-memory provider stores or
-# removes, to wait for one without polling.
-StoredWatch = "MemoryObjects"
 # The progress one kind of operation reports, such as a store's open or a
 # load from storage, for the host drawing it (api.md E1).
 ProgressWatch = "ProgressChannel"
@@ -588,9 +560,6 @@ InFlight = "TransfersInFlight"
 # Marks a store closing when its owner's scope ends, without holding its
 # lock, so a reopen in this process waits for its release (F.4).
 StoreClosingGuard = "LockRegistration"
-# The person's iCloud Keychain entries, shared by each in-memory keychain of
-# the person: a keychain makes the share for another of the person's devices.
-SyncedEntries = "Keychain"
 # One input object's reading: every retained input of that object shares it,
 # and the input database keeps its bytes while any does.
 InputRead = "InputDatabase"
@@ -1224,10 +1193,7 @@ tables = [
 "crates/coven-foundation/src/files/file_budget.rs" = [
     "FileBudget::new",
     "FileBudget::under_descriptor_limit",
-    "FileBudget::for_test",
     "FileBudget::granted",
-    "FileLease::for_test",
-    "LeasePlace::for_test",
 ]
 # A batch's flush syncs its folders and the drive's cache on a blocking
 # task, which the write waits for before its commit.
@@ -1242,38 +1208,11 @@ tables = [
     "spawn_owned",
     "spawn_completing",
     "blocking_completing",
-    # A test's bug sink, which the test shares with coven and takes from.
-    "HeardBugs::shared",
 ]
-# A test clock that keeps time by the clock it is given and records what one
-# progress watch holds at each reading.
-# The work one test measures, shared by its task and the blocking calls it
-# binds; the measurement in effect, and the one it replaced, are tasks.
-"crates/coven-foundation/src/test_work.rs" = [
-    "Counter::new",
-    # The measurement in effect on this thread, which the scopes a test
-    # enters set and put back: its scope is the thread.
-    "ACTIVE",
-]
-# What a test process's hang report knows of the operations running in it: a
-# list shared by every thread of the process, and the thread that prints it
-# once the hang guard has passed, which lives as long as the process.
-"crates/coven-foundation/src/task_in_flight.rs" = [
-    "FLIGHTS",
-    "with_flights",
-    "Flight::begin",
-]
-# The paths tests wait on file work to reach: a path names one file to the
-# whole process, so the waits on it are the process's.
-"crates/coven-foundation/src/files/reached.rs" = ["WATCHED"]
 "crates/coven-foundation/src/progress.rs" = [
-    "RecordingClock::new",
     # Where an owner reports each run of one kind of operation, made with
     # that owner.
     "ProgressChannel::new",
-    # A test's recording clock takes the watch it records once the work it
-    # times exists.
-    "RecordingClock::watch_progress",
 ]
 "crates/coven-foundation/src/files/bootstrap.rs" = [
     "reserve_bootstrap_directory",
@@ -1288,7 +1227,6 @@ tables = [
     "NetworkWatch::unwatched",
     "NetworkWatch::without_platform",
     "NetworkSink::new",
-    "TestNetwork::new",
 ]
 # Each platform's registration, which the watch keeps until it drops.
 "crates/coven-foundation/src/network_watch_apple.rs" = ["PathMonitor::start"]
@@ -1319,9 +1257,6 @@ tables = [
 # A copy's file work runs on a blocking task to its end, even once its
 # caller stops waiting, and then its bug goes to the app's sink (E15).
 "crates/coven-foundation/src/files/folder_copy.rs" = ["blocking"]
-# The kernel's type number for file objects, the same for every handle in
-# the process, read once.
-"crates/coven-foundation/src/files/open_files.rs" = ["FILE_TYPE"]
 "crates/coven-foundation/src/files/lock_registry.rs" = [
     # The process's registry of every store's locks: its scope is the
     # process, like the OS file locks it tracks (F.4).
@@ -1336,8 +1271,6 @@ tables = [
     "acquire_registered",
     "acquire_registered_in",
     "acquire_closing_writer",
-    # Takes a lock at once or refuses, for a test.
-    "try_acquire",
     # Reserves a reader's lock and takes its file at once, beside the
     # store's other readers.
     "acquire_reader",
@@ -1351,14 +1284,8 @@ tables = [
     "begin",
     "ReplacementStore::remove_replaced",
 ]
-# A test's id source, which a test hands the builder as it would random ids.
-"crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
-# A test's clock, which a test hands the builder as it would the system's.
-"crates/coven-foundation/src/clock.rs" = ["FixedClock::new"]
-"crates/coven-foundation/src/clock_polling.rs" = ["PollingClock::new"]
 # A store's writer, reader or bootstrap lock, taken through the registry.
 "crates/coven-foundation/src/files/lock.rs" = [
-    "acquire",
     "acquire_for_open",
     # The writer lock a read of a closed store holds (api.md E1).
     "acquire_closed",
@@ -1377,23 +1304,7 @@ tables = [
 ]
 "crates/coven-crypto/src/custody/passphrase.rs" = ["PassphraseCustody::new"]
 "crates/coven-crypto/src/custody/store_custody.rs" = ["StoreCustody::new"]
-"crates/coven-crypto/src/custody/keychain_test_utils.rs" = [
-    # The in-memory keychain's entries, and the person's in iCloud Keychain.
-    "Keychain::memory",
-    "Keychain::in_memory",
-    # Another of the person's devices shares only the person entries.
-    "Keychain::another_device",
-    # An Android phone keeps the person entries in Block Store, and a new
-    # phone set up from it receives a copy of them.
-    "Keychain::in_memory_block_store",
-    "Keychain::set_up_new_device",
-    "Keychain::restore_new_device_from_cloud",
-]
 
-# The work a test counts on a database, shared by its writer and readers.
-"crates/coven-database/src/work_counts.rs" = ["WorkCounter::new"]
-# The statements a test records a database's reads running.
-"crates/coven-database/src/statement_log.rs" = ["StatementLog::new"]
 # The next commit scope's number, unique across the process.
 "crates/sqlive/src/commit_scope.rs" = ["NEXT"]
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
@@ -1471,8 +1382,6 @@ tables = [
 "crates/coven-database/src/file_removals.rs" = ["remove_bytes"]
 # The folder the person picked, which the app's call hands in (§17.3).
 "crates/coven-sync/src/file_device_only.rs" = ["Files::prepare_device_only"]
-# A test's join with a circle named "Circle", whose ids are random ones.
-"crates/coven-sync/src/joining_identity.rs" = ["JoiningIdentity::prepare_for_test"]
 # A device-only call's step that makes a name in the person's folder runs
 # to its end with its record as its own task, though the call is dropped
 # (§17.3).
@@ -1492,7 +1401,6 @@ tables = [
 # A live query's run goes to the blocking pool and runs to its end even when
 # its caller stops waiting; then its bug goes to the store's sink (E15).
 "crates/coven-database/src/live_results.rs" = ["next_result"]
-"crates/coven-database/src/test_utils.rs" = ["Followed::next"]
 # Removes an abandoned snapshot staging's records on a blocking task as it
 # drops; closing the store waits for it (§16.2).
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
@@ -1506,10 +1414,6 @@ tables = [
 # One per open store, which every connection tells of its commits (§4).
 "crates/sqlive/src/handle.rs" = [
     "Handle::new",
-    # A test's handle, and a test's panic on a thread of its own while it
-    # holds the handle's state.
-    "Handle::recording_all",
-    "Handle::test_poison",
     # Makes each subscription's state, which its handle reaches by a weak
     # reference.
     "CommitSubscription::new",
@@ -1549,38 +1453,6 @@ tables = [
 # owner.
 "crates/coven-storage/src/transfer_budget.rs" = ["TransferBudget::new"]
 "crates/coven-storage/src/providers/oauth_folders.rs" = ["OAuthFolders::new"]
-"crates/coven-storage/src/memory_connector.rs" = [
-    # Reads the account label through a connection of its own, as the
-    # provider connector does through its folders.
-    "MemoryStorage::account_label",
-    # Reads the signed-in account's id the same way, before a join keeps
-    # its sign-in.
-    "MemoryStorage::signed_in_account",
-    "MemoryStorage::with_transfers",
-    "MemoryStorage::connect",
-    "MemoryStorage::shared_connection",
-    "MemoryStorage::with_publication_gate",
-    "MemoryStorage::with_cooldown",
-    "MemoryStorage::with_device",
-]
-"crates/coven-storage/src/test_utils.rs" = [
-    # A test gives a fake connection its first tokens, which a real one
-    # has from its sign-in.
-    "MemoryProvider::set_oauth_tokens",
-    "MemoryStorage::builder",
-    "MemoryStorage::from_memory",
-    "MemoryStorage::clone",
-    "MemoryStorage::connect_device",
-    "MemoryStorage::for_device",
-    "MemoryStorage::for_recipient",
-]
-"crates/coven-storage/src/conformance.rs" = ["Conformance::new"]
-"crates/coven-storage/src/memory_storage_builder.rs" = [
-    "MemoryStorageBuilder::new",
-    "MemoryStorageBuilder::build",
-]
-# The in-memory provider's objects, made with its state by its builder.
-"crates/coven-storage/src/memory_objects.rs" = ["MemoryObjects::new"]
 "crates/coven-storage/src/providers/cloudkit.rs" = ["CloudKitStorage::new"]
 "crates/coven-storage/src/providers/dropbox.rs" = ["DropboxStorage::new"]
 "crates/coven-storage/src/providers/oauth.rs" = [
@@ -1850,36 +1722,11 @@ tables = [
 ]
 # Each attempt is its own task, marked on the file layer while it lives.
 "crates/coven/src/storage_attempt.rs" = ["StorageConnections::start_attempt"]
-"crates/coven/src/test_utils.rs" = [
-    # An installation for a test, with an in-memory keychain and a network the
-    # test drives.
-    "Coven::testing",
-    "Coven::create_closed_store",
-    "Coven::keep_store_keys",
-    # Deleting one store's credentials reaches its device-only entries, as a
-    # person deleting the keychain entry by hand does.
-    "Coven::lose_storage_credentials",
-    "Coven::in_memory",
-    # An installation whose bugs in work nobody waits for go to the test.
-    "Coven::in_memory_reporting_to",
-    # An installation sharing the budget of open files an app's test made.
-    "Coven::in_memory_sharing",
-    # The same device again, over the device-only entries a test saved.
-    "Coven::in_memory_with_saved_keychain",
-    # Another of the person's devices shares only the person entries.
-    "Coven::another_device",
-    # An Android phone keeps the person entries in Block Store, and a new
-    # phone set up from it receives a copy of them.
-    "Coven::with_block_store",
-    "Coven::set_up_new_device",
-    "Coven::restore_new_device_from_cloud",
-]
 
 # These methods derive a scoped capability from their injected directory.
 # They do not acquire an unrelated directory or file for another owner.
 [capability_factories."crates/coven-foundation/src/files/layout.rs"]
 "StoreDirectories::store_dir" = "StoreDir"
-"StoreDirectories::create_store_dir" = "StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/bootstrap.rs"]
 "BootstrapStore::directory" = "StoreDir"
@@ -1899,7 +1746,6 @@ tables = [
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
 "StoreDir::rebuild_directory" = "StoreDir"
 "StoreDir::lock_read_only" = "StoreReadLock"
-"StoreDir::lock_exclusive" = "StoreLock"
 "StoreDir::lock_for_open" = "StoreLock"
 "StoreDir::lock_closed" = "ClosedStoreLock"
 "StoreDir::owned_file" = "AtomicFile"

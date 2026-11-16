@@ -15,7 +15,7 @@ fn policy() -> Policy {
     ))
 }
 fn constructions(source: &str, policy: &Policy) -> Vec<Finding> {
-    let files = checked(&[RustFile::fixture(PATH, source)]);
+    let files = checked(&[RustFile::fixture(PATH, source)], policy);
     find_capability_construction_violations(&files, policy, &OwnerGraph::collect(&files, policy))
 }
 const WORKER: &str = "struct Worker { clock: Clock } impl Worker { fn new(clock: Clock) -> Self { Self { clock } } }";
@@ -123,7 +123,8 @@ fn tests_do_not_make_production_values_into_owners() {
         RustFile::fixture(PATH, "struct Value; #[cfg(test)] struct Hidden { clock: Clock }"),
         RustFile::fixture("crates/app-sync/src/fixture_tests.rs", "struct Value { clock: Clock }"),
     ];
-    assert!(OwnerGraph::collect(&checked(&files), &policy()).owners.is_empty());
+    let policy = policy();
+    assert!(OwnerGraph::collect(&checked(&files, &policy), &policy).owners.is_empty());
 }
 
 #[test]
@@ -398,6 +399,42 @@ fn macro_declared_functions_resolve_at_the_invocation() {
 fn test_only_calls_and_cfg_predicates_are_not_production_calls() {
     let source = "fn run() { #[cfg(test)] absent(); #[cfg(test)] { another_absent(); } let _ = cfg!(any(unix, windows)); }";
     assert!(constructions(source, &policy()).is_empty());
+}
+
+/// Code gated on a feature the policy lists as test support is test code, as
+/// `cfg(test)` code is: it may construct an owner outside a composition root
+/// and implement `Default` for one. Ungated, or gated on a feature the policy
+/// doesn't list, it is production code and may not.
+#[test]
+fn test_support_constructs_owners_and_implements_default_as_tests_do() {
+    let mut policy = policy();
+    policy.test_support_features = vec!["test-utils".into()];
+    for (gate, test_code) in [
+        (r#"#[cfg(feature = "test-utils")]"#, true),
+        (r#"#[cfg(any(test, feature = "test-utils"))]"#, true),
+        ("", false),
+        (r#"#[cfg(feature = "cloud")]"#, false),
+    ] {
+        let construction =
+            format!("{WORKER} {gate} fn fixture(clock: Clock) {{ let _ = Worker::new(clock); }}");
+        let expected =
+            if test_code { Vec::new() } else { vec![finding("<free>::fixture", "Worker")] };
+        assert_eq!(constructions(&construction, &policy), expected, "{construction}");
+        let default = format!(
+            "{WORKER} {gate} impl Default for Worker {{ fn default() -> Self {{ todo!() }} }}"
+        );
+        let expected = if test_code {
+            Vec::new()
+        } else {
+            vec![Finding::new(
+                PATH,
+                1,
+                "implements Default for owner Worker, which permits implicit construction through Default::default()",
+                "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default",
+            )]
+        };
+        assert_eq!(constructions(&default, &policy), expected, "{default}");
+    }
 }
 
 #[test]

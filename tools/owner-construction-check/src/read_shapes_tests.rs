@@ -11,8 +11,6 @@ fn policy(rows: &str) -> Policy {
     Policy::fixture(&format!(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -32,7 +30,8 @@ fn row(list: &str, count: usize) -> String {
 
 fn run(files: &[(&str, &str)], rows: &str) -> Vec<Finding> {
     let files = files.iter().map(|(path, text)| RustFile::fixture(path, text)).collect::<Vec<_>>();
-    find_read_shape_violations(&CrateCode::of(&files, &[]), &policy(rows))
+    let policy = policy(rows);
+    find_read_shape_violations(&CrateCode::fixture(&files, &[], &policy), &policy)
 }
 
 fn lines(findings: Vec<Finding>) -> Vec<String> {
@@ -171,7 +170,7 @@ fn plumbing_test_code_and_a_workspace_without_the_rows_have_no_findings() {
     assert!(run(&[(PATH, tests)], "").is_empty());
     let files = [RustFile::fixture(PATH, SOURCE)];
     let none = Policy::fixture(r#"rules = ["read-shapes"]"#);
-    assert!(find_read_shape_violations(&CrateCode::of(&files, &[]), &none).is_empty());
+    assert!(find_read_shape_violations(&CrateCode::fixture(&files, &[], &none), &none).is_empty());
 }
 
 #[test]
@@ -189,7 +188,7 @@ fn kept_state_has_its_own_remedy_and_is_keyed_by_the_type() {
     );
     let source = "struct Holder { query: LiveQuery<u8>, told: Mutex<u8> }\nstruct Other { query: LiveQuery<u8>, told: Mutex<u8> }";
     let files = [RustFile::fixture(PATH, source)];
-    let found = find_read_shape_violations(&CrateCode::of(&files, &[]), &policy);
+    let found = find_read_shape_violations(&CrateCode::fixture(&files, &[], &policy), &policy);
     let lines = lines(found);
     assert_eq!(
         lines[0],
@@ -211,8 +210,6 @@ fn a_workspace_with_every_shape_reports_the_exact_lines_and_remedies() {
     let policy = Policy::fixture(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext"]
@@ -250,7 +247,8 @@ fn read(sql: &SqlReadContext<'_>, rows: Vec<u8>, ids: Vec<u8>, q: &mut Query) {
         package: "app".to_string(),
         text: "UPDATE v SET version = version + 1;".to_string(),
     }];
-    let lines = lines(find_read_shape_violations(&CrateCode::of(&files, &sql), &policy));
+    let lines =
+        lines(find_read_shape_violations(&CrateCode::fixture(&files, &sql, &policy), &policy));
     let remedy =
         |instead: &str| format!("projects/rule.md in agent-instructions: {instead} {ENDING}");
     assert_eq!(
@@ -293,8 +291,6 @@ fn run_processed(rows: &str) -> Vec<String> {
     let policy = Policy::fixture(&format!(
         r#"
         rules = ["read-shapes"]
-        [database]
-        capability = "SQLite"
         test_support_features = ["test-utils"]
         [read_shapes]
         read_types = ["SqlReadContext", "LiveQuery"]
@@ -305,7 +301,7 @@ fn run_processed(rows: &str) -> Vec<String> {
         "#
     ));
     let files = [RustFile::fixture(PATH, PROCESSED)];
-    let found = find_read_shape_violations(&CrateCode::of(&files, &[]), &policy);
+    let found = find_read_shape_violations(&CrateCode::fixture(&files, &[], &policy), &policy);
     found.into_iter().map(|finding| finding.message).collect()
 }
 

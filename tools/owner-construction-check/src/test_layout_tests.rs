@@ -117,8 +117,11 @@ fn a_test_module_declared_elsewhere_than_the_sibling_is_rejected() {
     );
 }
 
+/// A test module is a source's own tests, which only `cfg(test)` compiles. A
+/// module gated on a feature, test support among them, is declared as any
+/// module is.
 #[test]
-fn modules_that_compile_into_production_are_not_test_modules() {
+fn modules_a_feature_compiles_are_not_test_modules() {
     assert!(conventions(&[(
         "crates/app-sync/src/pull.rs",
         r#"
@@ -131,4 +134,31 @@ fn modules_that_compile_into_production_are_not_test_modules() {
         "#,
     )])
     .is_empty());
+}
+
+/// A file only test-support declarations reach is test code, so the rule
+/// reads it as it reads a `<name>_tests.rs`.
+#[test]
+fn files_only_test_support_reaches_are_test_files() {
+    let mut files = [
+        ("crates/app-sync/src/lib.rs", r#"#[cfg(feature = "test-utils")] mod fakes;"#),
+        ("crates/app-sync/src/fakes.rs", "#[cfg(test)] mod checks {}"),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    let found = |files: &[RustFile]| {
+        find_test_layout_violations(files)
+            .into_iter()
+            .map(|violation| (violation.path, violation.message))
+            .collect::<Vec<_>>()
+    };
+    crate::module_sources::mark_test_modules(&mut files, &["test-utils".to_string()]);
+    assert!(found(&files).is_empty());
+    crate::module_sources::mark_test_modules(&mut files, &[]);
+    assert_eq!(
+        found(&files),
+        [(
+            "crates/app-sync/src/fakes.rs".to_string(),
+            Convention::InlineTestModule.message("fakes.rs")
+        )]
+    );
 }

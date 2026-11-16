@@ -77,13 +77,14 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let workspace = match sources::load(&root, &policy.library_names) {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            eprintln!("owner-construction-check: {error}");
-            std::process::exit(2);
-        }
-    };
+    let workspace =
+        match sources::load(&root, &policy.library_names, policy.test_support_features()) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                eprintln!("owner-construction-check: {error}");
+                std::process::exit(2);
+            }
+        };
     let code = crate_code::CrateCode::read(&workspace, &policy);
     let graph = owner_graph::OwnerGraph::collect(&code.expanded, &policy);
     let stale = policy_check::stale_rows(&workspace, &code, &graph, &policy);

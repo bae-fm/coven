@@ -3,11 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::syntax::{is_test_only, is_test_support_only, RustFile};
+use crate::syntax::{is_test_only, RustFile};
 
-/// Each production file's module paths. A file two crate roots declare, such
-/// as an example's `mod shared;` in two examples, is one module in each root's
-/// crate, so it has one path per root, as that root reaches it.
+/// Each file's module paths. A file two crate roots declare, such as an
+/// example's `mod shared;` in two examples, is one module in each root's
+/// crate, so it has one path per root, as that root reaches it. The rules pass
+/// production code (`test_code::production_code`), which holds no test-only
+/// file or module declaration, so every path is a production module's.
 pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<Vec<String>>> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
@@ -17,7 +19,7 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<Vec<Str
     // root.
     let roots = files
         .iter()
-        .filter(|file| production(file) && is_crate_root(file))
+        .filter(|file| is_crate_root(file))
         .map(|file| {
             let mut reached = BTreeMap::new();
             collect(file, inferred_module(file), &sources, &mut reached);
@@ -41,7 +43,7 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<Vec<Str
     }
     // Isolated syntax fixtures and feature-specific source files can have no
     // root in the input. Their conventional module path remains well-defined.
-    for file in files.iter().filter(|file| production(file)) {
+    for file in files {
         if !modules.contains_key(&file.relative_path) {
             let mut reached = BTreeMap::new();
             collect(file, inferred_module(file), &sources, &mut reached);
@@ -63,10 +65,6 @@ fn is_crate_root(file: &RustFile) -> bool {
         components.as_deref(),
         Some([.., "lib.rs" | "main.rs"] | ["examples" | "benches", _] | ["src", "bin", _])
     )
-}
-
-fn production(file: &RustFile) -> bool {
-    !file.is_test_source() && !is_test_only(&file.syntax.attrs)
 }
 
 /// The crate is the file's package; the module path is the file's directories
@@ -201,12 +199,7 @@ fn collect_items(
     let Items { path_directory, child_directory, file_directory } = directories;
     for item in items {
         if let Some(path) = included_file(item, file_directory) {
-            if let syn::Item::Macro(macro_item) = item {
-                if is_test_only(&macro_item.attrs) {
-                    continue;
-                }
-            }
-            if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
+            if let Some(file) = sources.get(path.as_str()) {
                 if modules.insert(file.relative_path.clone(), module.to_vec()).is_none() {
                     let items = included_items(file);
                     collect_items(&file.syntax.items, module, items, sources, modules);
@@ -215,9 +208,6 @@ fn collect_items(
             continue;
         }
         let syn::Item::Mod(item) = item else { continue };
-        if is_test_only(&item.attrs) {
-            continue;
-        }
         let mut child = module.to_vec();
         child.push(item.ident.to_string());
         match module_contents(item, path_directory, child_directory) {
@@ -231,7 +221,7 @@ fn collect_items(
             }
             ModuleContents::Files(paths) => {
                 for path in paths {
-                    if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
+                    if let Some(file) = sources.get(path.as_str()) {
                         collect(file, child.clone(), sources, modules);
                     }
                 }
@@ -240,21 +230,22 @@ fn collect_items(
     }
 }
 
-/// The files that only test-only module declarations reach, such as one
-/// declared `#[cfg(test)] mod tests;`: test code, whatever they are named.
-/// A file some production declaration also reaches is production, and one no
-/// crate root reaches keeps what its name says.
-pub(crate) fn test_module_files(files: &[RustFile]) -> BTreeSet<String> {
-    test_support_module_files(files, &[])
+/// Marks each file that only test-only module declarations reach as test
+/// code (`RustFile::test_module`), `features` being the Cargo features only
+/// tests turn on (`syntax::is_test_only`).
+pub(crate) fn mark_test_modules(files: &mut [RustFile], features: &[String]) {
+    let test_modules = test_module_files(files, features);
+    for file in files {
+        file.test_module = test_modules.contains(&file.relative_path);
+    }
 }
 
-/// [`test_module_files`], also counting the `features` that only test support
-/// enables: a file only `#[cfg(feature = "test-utils")] mod support;` reaches
-/// is test-support code.
-pub(crate) fn test_support_module_files(
-    files: &[RustFile],
-    features: &[String],
-) -> BTreeSet<String> {
+/// The files that only test-only module declarations reach, such as one
+/// declared `#[cfg(test)] mod tests;`, or `#[cfg(feature = "test-utils")] mod
+/// support;` with `test-utils` among `features`: test code, whatever they are
+/// named. A file some production declaration also reaches is production, and
+/// one no crate root reaches keeps what its name says.
+fn test_module_files(files: &[RustFile], features: &[String]) -> BTreeSet<String> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
     let mut reached = [BTreeSet::new(), BTreeSet::new()];
@@ -276,9 +267,8 @@ fn reach(
     sources: &BTreeMap<&str, &RustFile>,
     reached: &mut [BTreeSet<String>; 2],
 ) {
-    let in_test = in_test
-        || file.is_test_source_by_name()
-        || is_test_support_only(&file.syntax.attrs, features);
+    let in_test =
+        in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs, features);
     if !reached[usize::from(in_test)].insert(file.relative_path.clone()) {
         return;
     }
@@ -303,11 +293,11 @@ fn reach_items(
     for item in items {
         if let Some(path) = included_file(item, file_directory) {
             let syn::Item::Macro(macro_item) = item else { continue };
-            let in_test = in_test || is_test_support_only(&macro_item.attrs, features);
+            let in_test = in_test || is_test_only(&macro_item.attrs, features);
             if let Some(file) = sources.get(path.as_str()) {
                 let in_test = in_test
                     || file.is_test_source_by_name()
-                    || is_test_support_only(&file.syntax.attrs, features);
+                    || is_test_only(&file.syntax.attrs, features);
                 if reached[usize::from(in_test)].insert(file.relative_path.clone()) {
                     let items = included_items(file);
                     reach_items(&file.syntax.items, in_test, features, items, sources, reached);
@@ -316,7 +306,7 @@ fn reach_items(
             continue;
         }
         let syn::Item::Mod(item) = item else { continue };
-        let in_test = in_test || is_test_support_only(&item.attrs, features);
+        let in_test = in_test || is_test_only(&item.attrs, features);
         match module_contents(item, path_directory, child_directory) {
             ModuleContents::Inline(items, directory) => {
                 let inline = Items {

@@ -28,6 +28,7 @@ fn code(files: &[(&str, &str)]) -> CrateCode {
     CrateCode::of(
         &files.iter().map(|(path, source)| RustFile::fixture(path, source)).collect::<Vec<_>>(),
         &[],
+        &[],
     )
 }
 

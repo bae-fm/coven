@@ -16,8 +16,8 @@ fn policy() -> Policy {
 }
 
 fn leaks(source: &str) -> Vec<Finding> {
-    let files = checked(&[RustFile::fixture(PATH, source)]);
     let policy = policy();
+    let files = checked(&[RustFile::fixture(PATH, source)], &policy);
     find_task_state_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy))
 }
 
