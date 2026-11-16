@@ -6,9 +6,9 @@
     scripts/perf.sh accept [scenario...]
 
 A scenario is one of the workspace's ignored measurements (the `SCENARIOS`
-table: its cargo command and how its numbers are read). They run on a person's
-machine on demand, in the release profile, on an otherwise idle machine; no
-runner holds them and GitHub never does.
+table: its cargo command and how perf.py reads its numbers). They run on a
+person's machine on demand, in the release profile, on an otherwise idle
+machine; no runner holds them and GitHub never does.
 
 `run` runs each scenario's command `--repeat` times (3 by default). A number's
 value is the median over those runs, its spread is (largest - smallest) /
@@ -30,7 +30,7 @@ is kept in `target/perf/last-run.json` (build output, not the repo) with each
 scenario's raw output beside it. `accept` copies the last run's medians and
 spreads into the machine's baseline file for the person to commit.
 
-The numbers are read from the lines the measurements print through
+perf.py reads the numbers from the lines the measurements print through
 `sqlive::report_cost`: `COST metric=<name> value=<n> unit=<ms|ratio|count>`.
 """
 
