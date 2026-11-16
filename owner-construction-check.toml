@@ -647,15 +647,17 @@ rusqlite_reexport = "coven-database"
 # methods (F.2).
 write_types = ["DatabaseConnection"]
 # Public callables of a database home that take the raw connection (F.2).
+# coven-database passes the connection that prepared the statement; sqlive
+# holds no connection.
 [[database.raw_handle_parameters]]
 path = "crates/sqlive/src/scope_plan.rs"
 callable = "ScopePlan::build"
-reason = "coven-database passes the connection that prepared the statement; sqlive holds no connection"
 
+# coven-database passes the connection that prepared the statement; sqlive
+# holds no connection.
 [[database.raw_handle_parameters]]
 path = "crates/sqlive/src/sql_value.rs"
 callable = "parameters"
-reason = "coven-database passes the connection that prepared the statement; sqlive holds no connection"
 
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement

@@ -522,7 +522,8 @@ pub(crate) struct Database {
     pub(crate) raw_handle_parameters: Vec<RawHandleParameter>,
 }
 
-/// A public callable that takes a raw database handle, and why.
+/// A public callable that takes a raw database handle. The policy file states
+/// why in a comment above its row.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawHandleParameter {
@@ -530,10 +531,6 @@ pub(crate) struct RawHandleParameter {
     pub(crate) path: String,
     /// The callable, as `Owner::name` for a method or `name` for a function.
     pub(crate) callable: String,
-    /// Why the callable takes the handle.
-    // The rule does not read the reason; it documents the row.
-    #[expect(dead_code, reason = "documents the policy row")]
-    pub(crate) reason: String,
 }
 
 /// A domain: tables whose schema and writes only its homes hold. SQL

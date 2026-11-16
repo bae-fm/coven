@@ -163,7 +163,6 @@ fn a_listed_callable_may_take_a_raw_handle_but_not_return_one() {
         [[database.raw_handle_parameters]]
         path = "{PATH}"
         callable = "Owner::open"
-        reason = "the caller holds the connection"
         "#
     ));
     let source = "impl Owner { pub fn open(connection: &Connection) {} pub fn other(connection: &Connection) {} }";
