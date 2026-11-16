@@ -99,7 +99,7 @@ pub(crate) fn prepare_schema(
         if !read_only {
             sql.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
         }
-        sql.refresh_changed_rowids()?;
+        sql.refresh_policy(crate::authorization::Refresh::Changed)?;
         return Ok(Vec::new());
     }
     let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
@@ -179,7 +179,7 @@ pub(crate) fn prepare_schema(
                 &Schema::read(db, &crate::file_table::declared(tables))?,
                 tables,
             )?;
-            db.refresh_hidden_rowids()?;
+            db.refresh_policy(crate::authorization::Refresh::Whole)?;
             Ok(outcomes)
         })
     });

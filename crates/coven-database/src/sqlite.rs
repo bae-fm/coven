@@ -47,8 +47,9 @@ use std::sync::Arc;
 
 use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
 
-use crate::app_policy::CovenPolicy;
+use crate::app_policy::{CovenPolicy, CovenScope};
 use crate::authorization::SqlAuthorization;
+use crate::authorization::{Policy, Refresh};
 use crate::connection_setup::Setup;
 use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
@@ -73,7 +74,7 @@ pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     statement_log: std::cell::RefCell<Option<crate::test_utils::StatementLog>>,
     connection: Connection,
-    authorization: SqlAuthorization,
+    authorization: SqlAuthorization<CovenPolicy>,
     /// What coven adds to the authorizer's rules.
     policy: CovenPolicy,
     /// Stops a lookup that runs too long (`live_judging.rs`).
@@ -135,7 +136,7 @@ impl DatabaseConnection {
     pub(crate) fn open(
         path: &Path,
         read_only: bool,
-        authorization: SqlAuthorization,
+        authorization: SqlAuthorization<CovenPolicy>,
         policy: CovenPolicy,
         settings: &crate::SqliteSettings,
         setup: &dyn Fn(&Setup<'_>) -> rusqlite::Result<()>,
@@ -194,7 +195,7 @@ impl DatabaseConnection {
             hook_panics: Arc::default(),
         };
         db.configure(settings, read_only)?;
-        db.refresh_hidden_rowids()?;
+        db.refresh_policy(Refresh::Whole)?;
         Ok(db)
     }
 
@@ -233,10 +234,26 @@ impl DatabaseConnection {
         }
     }
 
-    /// Mark the SQL that runs until the returned scope drops as applying
-    /// merged rows, for coven's policy.
-    pub(crate) fn applying(&self) -> crate::app_policy::ApplyingSql<'_> {
-        self.policy.applying()
+    /// Run `run` with this connection's policy in `scope`, leaving the scope
+    /// on every path out of `run`, a panic's included.
+    pub(crate) fn within<T>(&self, scope: CovenScope, run: impl FnOnce() -> T) -> T {
+        struct EnteredScope<'a> {
+            policy: &'a CovenPolicy,
+            scope: CovenScope,
+        }
+        impl Drop for EnteredScope<'_> {
+            fn drop(&mut self) {
+                self.policy.leave(&self.scope);
+            }
+        }
+        self.policy.enter(&scope);
+        let _entered = EnteredScope { policy: &self.policy, scope };
+        run()
+    }
+
+    /// Have this connection's policy read the schema again (`Policy::refresh`).
+    pub(crate) fn refresh_policy(&self, extent: Refresh) -> rusqlite::Result<()> {
+        self.policy.refresh(self, extent)
     }
 
     /// Whether SQLite opened the main database for reading only.
@@ -397,10 +414,12 @@ impl DatabaseConnection {
         }
     }
 
-    pub(crate) fn migration_targets(&self, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
+    /// Prepare the app statement `sql`, judged as an app statement is, and
+    /// drop it unrun: what preparing it tells the policy is the result.
+    pub(crate) fn prepare_app(&self, sql: &str) -> rusqlite::Result<()> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
-        self.policy.mutations(|| self.authorization.app_result(self.connection.prepare(sql)))
+        self.authorization.app_result(self.connection.prepare(sql)).map(drop)
     }
 
     pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
@@ -609,8 +628,9 @@ impl DatabaseConnection {
         self.require_transaction()
             .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
         // Migrations may create, rename or rebuild tables between app statements.
-        // Ordinary writes reuse the set without querying SQLite's schema.
-        self.refresh_changed_rowids()?;
+        // Ordinary writes reuse what the policy read without querying SQLite's
+        // schema.
+        self.refresh_policy(Refresh::Changed)?;
         self.authorization.begin_app_call();
         Ok(())
     }

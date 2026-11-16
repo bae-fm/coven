@@ -201,11 +201,14 @@ task_types = [
     # requests, which its steps draw on and then the connection it makes for
     # its own requests (§20.8).
     "SetupWaits",
-    # How the authorizer judges the SQL of one scope: coven's own, an
-    # applied write's, a write's, a bulk write's, one step's or one read's,
-    # and the reads one statement makes while it is prepared.
+    # How the authorizer judges the SQL of one scope: coven's own, a
+    # write's, a bulk write's, one step's or one read's, and the reads one
+    # statement makes while it is prepared.
     "InternalSql",
-    "ApplyingSql",
+    # A scope of coven's own work its policy judges differently, and the
+    # connection's hold on it while that work runs.
+    "CovenScope",
+    "EnteredScope",
     "WriteSql",
     "BulkSql",
     "StepSql",
@@ -1395,8 +1398,13 @@ tables = [
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
 # holds for the whole process (§21.2).
 "crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
-# A connection's authorizer, whose state its SQLite hooks share.
-"crates/coven-database/src/authorization.rs" = ["SqlAuthorization::new", "SqlAuthorization::function"]
+# A connection's authorizer, whose state its SQLite hooks and the host's SQL
+# functions share.
+"crates/coven-database/src/authorization.rs" = [
+    "SqlAuthorization::new",
+    "SqlAuthorization::functions",
+    "HostFunctions::function",
+]
 # What a connection's setup registers on it, which `DatabaseConnection::open`
 # makes as it opens the connection.
 "crates/coven-database/src/connection_setup.rs" = ["Setup::new"]
@@ -1404,12 +1412,14 @@ tables = [
 # Coven's policy for a connection's authorizer, whose state the connection
 # shares with the authorizer: one judging for the handle that holds the
 # writer lock, one for a read-only handle. Opening a connection makes its
-# authorizer, which asks that policy.
+# authorizer, which asks that policy. The connection hands itself to its
+# policy as the policy reads the connection's schema again.
 "crates/coven-database/src/app_policy.rs" = [
     "CovenPolicy::new",
     "CovenPolicy::read_only",
     "CovenPolicy::judging",
     "CovenPolicy::open",
+    "CovenPolicy::refresh",
 ]
 # Each call on the store runs on the blocking pool to its end, even once its
 # caller stops waiting, and then its bug goes to the store's sink (E15).

@@ -1,33 +1,17 @@
 //! Hidden row addresses remain stable even when a declared column shadows ROWID.
 
 use super::DatabaseConnection;
-use crate::app_policy::ChangedTables;
 use sqlive::sql::identifier;
 use std::collections::BTreeSet;
 
 impl DatabaseConnection {
-    /// Read every table's hidden rowid again, as the connection opens and
-    /// after a migration.
-    pub(crate) fn refresh_hidden_rowids(&self) -> rusqlite::Result<()> {
-        self.protect_rowids(None)
-    }
-
-    /// Read again the hidden rowids of the tables app SQL created or
-    /// dropped since they were last read, or every table's after it altered
-    /// one. Each table is read once as it appears, not again after every
-    /// later statement: a schema of hundreds of tables would read them all
-    /// after each one.
-    pub(crate) fn refresh_changed_rowids(&self) -> rusqlite::Result<()> {
-        match self.policy.take_changed_tables() {
-            ChangedTables::None => Ok(()),
-            ChangedTables::Named(tables) => self.protect_rowids(Some(&tables)),
-            ChangedTables::All => self.protect_rowids(None),
-        }
-    }
-
     /// Guard the hidden rowids of the tables `only` names, by schema and
-    /// lowercase name, or of every table when `None`.
-    fn protect_rowids(&self, only: Option<&BTreeSet<(String, String)>>) -> rusqlite::Result<()> {
+    /// lowercase name, or of every table when `None`. Of those tables, the
+    /// ones whose hidden rowid is unambiguous: app SQL can't change it.
+    pub(crate) fn protect_rowids(
+        &self,
+        only: Option<&BTreeSet<(String, String)>>,
+    ) -> rusqlite::Result<BTreeSet<(String, String)>> {
         let _scope = self.authorization.internal();
         let guards = match only {
             Some(tables) => tables.iter().map(|(schema, table)| guard(schema, table)).collect(),
@@ -106,8 +90,7 @@ impl DatabaseConnection {
                 identifier(&table),
             ))?;
         }
-        self.policy.set_hidden_rowids(only, unambiguous);
-        Ok(())
+        Ok(unambiguous)
     }
 }
 

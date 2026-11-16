@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::hooks::AuthAction;
 use rusqlite::Connection;
 
-use super::{Owner, Policy, PolicyAction, SqlAuthorization};
+use super::{Owner, Policy, PolicyAction, Refresh, SqlAuthorization};
 use crate::DbError;
 use sqlive::WholeViews;
 
@@ -46,11 +46,25 @@ impl Policy for Recording {
     fn statement_key(&self) -> u64 {
         0
     }
+
+    type Scope = ();
+
+    fn enter(&self, _scope: &()) {}
+
+    fn leave(&self, _scope: &()) {}
+
+    fn refresh(
+        &self,
+        _sql: &crate::sqlite::DatabaseConnection,
+        _extent: Refresh,
+    ) -> rusqlite::Result<()> {
+        Ok(())
+    }
 }
 
 /// An in-memory connection authorized by the rules and `policy`, holding the
 /// table `local(x)`.
-fn plain(policy: &Arc<Recording>) -> (Connection, SqlAuthorization) {
+fn plain(policy: &Arc<Recording>) -> (Connection, SqlAuthorization<Recording>) {
     let mut connection = Connection::open_in_memory().unwrap();
     let authorization =
         SqlAuthorization::new(Arc::new(WholeViews::new([])), Arc::<Recording>::clone(policy));
@@ -65,7 +79,7 @@ fn plain(policy: &Arc<Recording>) -> (Connection, SqlAuthorization) {
 /// The app's one statement `sql`, as an app call runs it.
 fn app(
     connection: &Connection,
-    authorization: &SqlAuthorization,
+    authorization: &SqlAuthorization<Recording>,
     sql: &str,
 ) -> Result<(), DbError> {
     authorization.check_sql(sql)?;

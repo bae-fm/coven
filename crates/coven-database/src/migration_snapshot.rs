@@ -126,14 +126,14 @@ impl<'c> MigrationCapture<'c> {
             )) => false,
             Some(Cmd::Stmt(Stmt::CreateIndex { tbl_name, .. })) => {
                 before.tables.contains_key(&sqlive::sql::name(tbl_name.0).to_ascii_lowercase())
-                    && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
+                    && migration_targets(db, sql)?.iter().any(|t| self.synced.contains(t))
             }
             Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => {
                 before.tables.contains_key(&sqlive::sql::name(tbl_name.name.0).to_ascii_lowercase())
-                    && db.migration_targets(sql)?.iter().any(|t| self.synced.contains(t))
+                    && migration_targets(db, sql)?.iter().any(|t| self.synced.contains(t))
             }
             other => {
-                let targets = db.migration_targets(sql)?;
+                let targets = migration_targets(db, sql)?;
                 let breaking = targets.iter().any(|t| self.synced.contains(t));
                 changes.extend(targets.iter().cloned());
                 // A statement that writes rows names its tables, and those
@@ -421,4 +421,15 @@ pub(crate) fn key_sql(table: &TableSchema, prefix: &str) -> String {
             .collect::<Vec<_>>()
             .join(",")
     )
+}
+
+/// The tables of `main` the migration statement `sql` changes, as live
+/// queries name them, from what preparing it shows coven's policy.
+fn migration_targets(db: &DatabaseConnection, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
+    let targets = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+    db.within(crate::app_policy::CovenScope::Mutations(std::sync::Arc::clone(&targets)), || {
+        db.prepare_app(sql)
+    })?;
+    let targets = std::mem::take(&mut *coven_foundation::locks::lock_unpoisoned(&targets));
+    Ok(targets)
 }

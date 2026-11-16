@@ -7,20 +7,21 @@ use std::collections::BTreeSet;
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 
-use crate::authorization::{FunctionCall, SqlAuthorization};
+use crate::authorization::{FunctionCall, HostFunctions, Policy, SqlAuthorization};
+use crate::DbError;
 
 /// What a connection's setup may register.
 pub(crate) struct Setup<'a> {
     connection: &'a rusqlite::Connection,
-    authorization: &'a SqlAuthorization,
+    functions: HostFunctions,
 }
 
 impl<'a> Setup<'a> {
     pub(crate) fn new(
         connection: &'a rusqlite::Connection,
-        authorization: &'a SqlAuthorization,
+        authorization: &SqlAuthorization<impl Policy<Refusal = DbError>>,
     ) -> Self {
-        Self { connection, authorization }
+        Self { connection, functions: authorization.functions() }
     }
 
     /// Register `function` as `name`. rusqlite turns a function's panic into
@@ -38,7 +39,7 @@ impl<'a> Setup<'a> {
             name,
             arguments,
             flags,
-            self.authorization.function(name, function),
+            self.functions.function(name, function),
         )
     }
 

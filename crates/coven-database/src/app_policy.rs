@@ -8,7 +8,7 @@ use coven_foundation::locks::lock_unpoisoned;
 
 use rusqlite::hooks::AuthAction;
 
-use crate::authorization::{Owner, Policy, PolicyAction, SqlAuthorization};
+use crate::authorization::{Owner, Policy, PolicyAction, Refresh, SqlAuthorization};
 use crate::coven_functions::Views;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
@@ -164,22 +164,15 @@ impl CovenPolicy {
         move |_| Ok(lock_unpoisoned(&state).applying)
     }
 
-    pub(crate) fn applying(&self) -> ApplyingSql<'_> {
-        let mut state = lock_unpoisoned(&self.state);
-        assert!(!state.applying, "applying SQL scope cannot nest");
-        state.applying = true;
-        ApplyingSql(self)
-    }
-
     /// The tables whose hidden rowids may have changed since a caller last
     /// called `take_changed_tables`. The caller reads them again.
-    pub(crate) fn take_changed_tables(&self) -> ChangedTables {
+    fn take_changed_tables(&self) -> ChangedTables {
         std::mem::replace(&mut lock_unpoisoned(&self.state).changed_tables, ChangedTables::None)
     }
 
     /// Of the tables `read`, or every table when `None`, those whose hidden
     /// rowid is `unambiguous`: app SQL can't change it.
-    pub(crate) fn set_hidden_rowids(
+    fn set_hidden_rowids(
         &self,
         read: Option<&BTreeSet<(String, String)>>,
         unambiguous: BTreeSet<(String, String)>,
@@ -196,27 +189,16 @@ impl CovenPolicy {
             }
         }
     }
-
-    /// The tables of `main` the statement `prepare` prepares changes, as
-    /// live queries name them.
-    pub(crate) fn mutations<T>(
-        &self,
-        prepare: impl FnOnce() -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<BTreeSet<String>> {
-        lock_unpoisoned(&self.state).mutations = Some(BTreeSet::new());
-        let result = prepare();
-        let mutations = lock_unpoisoned(&self.state).mutations.take().expect("mutation capture");
-        result?;
-        Ok(mutations)
-    }
 }
 
-pub(crate) struct ApplyingSql<'a>(&'a CovenPolicy);
-
-impl Drop for ApplyingSql<'_> {
-    fn drop(&mut self) {
-        lock_unpoisoned(&self.0.state).applying = false;
-    }
+/// The parts of coven's own work its policy judges differently.
+pub(crate) enum CovenScope {
+    /// Materialized SQL runs: `coven_applying()` returns true, so the shared
+    /// triggers skip their work, and coven's files table may be written.
+    Applying,
+    /// The statements prepared record each table of `main` they change, as
+    /// live queries name it; leaving the scope puts the tables here.
+    Mutations(Arc<Mutex<BTreeSet<String>>>),
 }
 
 impl Policy for CovenPolicy {
@@ -257,6 +239,51 @@ impl Policy for CovenPolicy {
 
     fn statement_key(&self) -> u64 {
         u64::from(lock_unpoisoned(&self.state).applying)
+    }
+
+    type Scope = CovenScope;
+
+    fn enter(&self, scope: &CovenScope) {
+        let mut state = lock_unpoisoned(&self.state);
+        match scope {
+            CovenScope::Applying => {
+                assert!(!state.applying, "applying SQL scope cannot nest");
+                state.applying = true;
+            }
+            CovenScope::Mutations(_) => {
+                assert!(state.mutations.is_none(), "mutation capture cannot nest");
+                state.mutations = Some(BTreeSet::new());
+            }
+        }
+    }
+
+    fn leave(&self, scope: &CovenScope) {
+        let mut state = lock_unpoisoned(&self.state);
+        match scope {
+            CovenScope::Applying => state.applying = false,
+            CovenScope::Mutations(into) => {
+                *lock_unpoisoned(into) = state.mutations.take().unwrap_or_default();
+            }
+        }
+    }
+
+    /// Guard the hidden rowids of every table, or of the tables app SQL
+    /// created or dropped since they were last read, or of every table after
+    /// it altered one. Each table is read once as it appears, not again after
+    /// every later statement: a schema of hundreds of tables would read them
+    /// all after each one.
+    fn refresh(&self, sql: &DatabaseConnection, extent: Refresh) -> rusqlite::Result<()> {
+        let only = match extent {
+            Refresh::Whole => None,
+            Refresh::Changed => match self.take_changed_tables() {
+                ChangedTables::None => return Ok(()),
+                ChangedTables::Named(tables) => Some(tables),
+                ChangedTables::All => None,
+            },
+        };
+        let unambiguous = sql.protect_rowids(only.as_ref())?;
+        self.set_hidden_rowids(only.as_ref(), unambiguous);
+        Ok(())
     }
 }
 

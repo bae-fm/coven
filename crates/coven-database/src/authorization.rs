@@ -56,6 +56,31 @@ pub(crate) trait Policy: Send + Sync + 'static {
     fn host_object(&self, name: &str) -> bool;
     /// What the policy adds to the app statement cache's key.
     fn statement_key(&self) -> u64;
+    /// A part of the host's work the policy judges differently, which the
+    /// host runs through `DatabaseConnection::within`.
+    type Scope;
+    /// Work in `scope` begins.
+    fn enter(&self, scope: &Self::Scope);
+    /// Work in `scope` ended, on any path out of it, a panic's included.
+    fn leave(&self, scope: &Self::Scope);
+    /// Read again what the policy keeps of the connection's schema: all of
+    /// it, or what changed since it last read. The connection calls it with
+    /// `Refresh::Whole` as it opens and with `Refresh::Changed` before each
+    /// app statement, and the host through `refresh_policy`.
+    fn refresh(
+        &self,
+        sql: &crate::sqlite::DatabaseConnection,
+        extent: Refresh,
+    ) -> rusqlite::Result<()>;
+}
+
+/// How much of the schema the policy reads again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refresh {
+    /// All of it, as the connection opens.
+    Whole,
+    /// What the statements since it last read changed.
+    Changed,
 }
 
 /// The state an app statement is judged in as it is prepared: the same SQL
@@ -100,7 +125,7 @@ impl<'a> FunctionCall<'a> {
 /// Every change to the state but the authorizer's own is whole before it
 /// can panic, and the authorizer catches its own panic (`callback`), so the
 /// lock is taken as it is.
-pub(crate) struct SqlAuthorization {
+pub(crate) struct SqlAuthorization<P> {
     state: Arc<Mutex<AuthorizationState>>,
     /// The handle the connection serves, once it serves one, which a panic
     /// in the authorizer fails.
@@ -109,7 +134,7 @@ pub(crate) struct SqlAuthorization {
     whole: Arc<WholeViews>,
     /// What the host adds to the rules. The authorizer asks it after its own
     /// rules allow an action.
-    policy: Arc<dyn Policy<Refusal = DbError>>,
+    policy: Arc<P>,
 }
 
 struct AuthorizationState {
@@ -139,10 +164,10 @@ struct AuthorizationState {
     panic_next_function: bool,
 }
 
-impl SqlAuthorization {
+impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
     /// An authorizer that asks `policy` about each action its own rules
     /// allow.
-    pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<dyn Policy<Refusal = DbError>>) -> Self {
+    pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<P>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
@@ -183,34 +208,9 @@ impl SqlAuthorization {
         lock_unpoisoned(&self.state).panic_next_function = true;
     }
 
-    /// `function`, one of the host's SQL functions named `name`, as the
-    /// connection registers it. rusqlite turns a function's panic into an
-    /// error that names no bug, so the function keeps it: the statement
-    /// fails with the bug's text, and the app's call with `sqlive::Error::Bug`
-    /// (E15). A function changes nothing, so the connection goes on.
-    pub(crate) fn function<T: rusqlite::types::ToSql>(
-        &self,
-        name: &'static str,
-        function: impl Fn(&FunctionCall<'_>) -> rusqlite::Result<T> + Send + 'static,
-    ) -> impl Fn(&mut rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static
-    {
-        let state = Arc::clone(&self.state);
-        move |context| {
-            let called = coven_foundation::task::caught_sync(name, || {
-                #[cfg(test)]
-                assert!(
-                    !std::mem::take(&mut lock_unpoisoned(&state).panic_next_function),
-                    "{name} lost its argument"
-                );
-                let owner = if lock_unpoisoned(&state).internal { Owner::Host } else { Owner::App };
-                function(&FunctionCall { context: &*context, owner, state: &state })
-            });
-            called.unwrap_or_else(|bug| {
-                lock_unpoisoned(&state).denied = Some(sqlive::Error::Bug(bug.clone()));
-                let error: sqlive::Error<StoreFailure, DbError> = sqlive::Error::Bug(bug);
-                Err(rusqlite::Error::UserFunctionError(Box::new(error)))
-            })
-        }
+    /// What wraps the host's SQL functions as the connection registers them.
+    pub(crate) fn functions(&self) -> HostFunctions {
+        HostFunctions { state: Arc::clone(&self.state) }
     }
 
     /// The connection now serves `handle`, which a panic in its authorizer
@@ -256,21 +256,21 @@ impl SqlAuthorization {
         let mut state = lock_unpoisoned(&self.state);
         let previous = state.internal;
         state.internal = true;
-        InternalSql { authorization: self, previous }
+        InternalSql { state: &self.state, previous }
     }
 
     pub(crate) fn observe_reads(&self) -> ObservedReads<'_> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(state.observed.is_none(), "read observation cannot nest");
         state.observed = Some(StatementReads::default());
-        ObservedReads(self)
+        ObservedReads(&self.state)
     }
 
     pub(crate) fn write(&self) -> WriteSql<'_> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
-        WriteSql(self)
+        WriteSql(&self.state)
     }
 
     /// A bulk write's SQL: a write's, refused any change to a synced table,
@@ -280,14 +280,14 @@ impl SqlAuthorization {
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
         state.bulk = Some(BTreeSet::new());
-        BulkSql(self)
+        BulkSql(&self.state)
     }
 
     pub(crate) fn step(&self) -> StepSql<'_> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.stepping, "SQL step scope cannot nest");
         state.stepping = true;
-        StepSql(self)
+        StepSql(&self.state)
     }
 
     pub(crate) fn begin_app_call(&self) {
@@ -304,7 +304,7 @@ impl SqlAuthorization {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.reading, "read scopes cannot nest");
         state.reading = true;
-        ReadingSql(self)
+        ReadingSql(&self.state)
     }
 
     /// A live query's run's SQL: it may only read, and records what it
@@ -439,8 +439,47 @@ impl SqlAuthorization {
     }
 }
 
+/// Wraps the host's SQL functions, sharing the authorizer's state: the
+/// function learns whose statement runs it, and its refusal or panic fails
+/// that statement.
+pub(crate) struct HostFunctions {
+    state: Arc<Mutex<AuthorizationState>>,
+}
+
+impl HostFunctions {
+    /// `function`, one of the host's SQL functions named `name`, as the
+    /// connection registers it. rusqlite turns a function's panic into an
+    /// error that names no bug, so the function keeps it: the statement
+    /// fails with the bug's text, and the app's call with `sqlive::Error::Bug`
+    /// (E15). A function changes nothing, so the connection goes on.
+    pub(crate) fn function<T: rusqlite::types::ToSql>(
+        &self,
+        name: &'static str,
+        function: impl Fn(&FunctionCall<'_>) -> rusqlite::Result<T> + Send + 'static,
+    ) -> impl Fn(&mut rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static
+    {
+        let state = Arc::clone(&self.state);
+        move |context| {
+            let called = coven_foundation::task::caught_sync(name, || {
+                #[cfg(test)]
+                assert!(
+                    !std::mem::take(&mut lock_unpoisoned(&state).panic_next_function),
+                    "{name} lost its argument"
+                );
+                let owner = if lock_unpoisoned(&state).internal { Owner::Host } else { Owner::App };
+                function(&FunctionCall { context: &*context, owner, state: &state })
+            });
+            called.unwrap_or_else(|bug| {
+                lock_unpoisoned(&state).denied = Some(sqlive::Error::Bug(bug.clone()));
+                let error: sqlive::Error<StoreFailure, DbError> = sqlive::Error::Bug(bug);
+                Err(rusqlite::Error::UserFunctionError(Box::new(error)))
+            })
+        }
+    }
+}
+
 pub(crate) struct InternalSql<'a> {
-    authorization: &'a SqlAuthorization,
+    state: &'a Mutex<AuthorizationState>,
     previous: bool,
 }
 
@@ -452,63 +491,60 @@ pub(crate) struct StatementReads {
     pub(crate) functions: BTreeSet<String>,
 }
 
-pub(crate) struct ObservedReads<'a>(&'a SqlAuthorization);
+pub(crate) struct ObservedReads<'a>(&'a Mutex<AuthorizationState>);
 
 impl ObservedReads<'_> {
     pub(crate) fn reads(&self) -> StatementReads {
-        lock_unpoisoned(&self.0.state).observed.as_ref().expect("observing reads").clone()
+        lock_unpoisoned(self.0).observed.as_ref().expect("observing reads").clone()
     }
 }
 
 impl Drop for ObservedReads<'_> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.0.state).observed = None;
+        lock_unpoisoned(self.0).observed = None;
     }
 }
 
-pub(crate) struct WriteSql<'a>(&'a SqlAuthorization);
+pub(crate) struct WriteSql<'a>(&'a Mutex<AuthorizationState>);
 
 impl Drop for WriteSql<'_> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.0.state).writing = false;
+        lock_unpoisoned(self.0).writing = false;
     }
 }
 
 /// A bulk write's SQL scope; it ends with the write's SQL.
-pub(crate) struct BulkSql<'a>(&'a SqlAuthorization);
+pub(crate) struct BulkSql<'a>(&'a Mutex<AuthorizationState>);
 
 impl BulkSql<'_> {
     /// The tables of `main` the write's statements changed so far, as live
     /// queries name them.
     pub(crate) fn changed(&self) -> BTreeSet<String> {
-        lock_unpoisoned(&self.0.state)
-            .bulk
-            .clone()
-            .expect("a bulk write records the tables it changes")
+        lock_unpoisoned(self.0).bulk.clone().expect("a bulk write records the tables it changes")
     }
 }
 
 impl Drop for BulkSql<'_> {
     fn drop(&mut self) {
-        let mut state = lock_unpoisoned(&self.0.state);
+        let mut state = lock_unpoisoned(self.0);
         state.writing = false;
         state.bulk = None;
     }
 }
 
-pub(crate) struct StepSql<'a>(&'a SqlAuthorization);
+pub(crate) struct StepSql<'a>(&'a Mutex<AuthorizationState>);
 
 impl Drop for StepSql<'_> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.0.state).stepping = false;
+        lock_unpoisoned(self.0).stepping = false;
     }
 }
 
-pub(crate) struct ReadingSql<'a>(&'a SqlAuthorization);
+pub(crate) struct ReadingSql<'a>(&'a Mutex<AuthorizationState>);
 
 impl Drop for ReadingSql<'_> {
     fn drop(&mut self) {
-        let mut state = lock_unpoisoned(&self.0.state);
+        let mut state = lock_unpoisoned(self.0);
         state.reading = false;
         state.reads = None;
     }
@@ -516,14 +552,14 @@ impl Drop for ReadingSql<'_> {
 
 impl Drop for InternalSql<'_> {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.authorization.state).internal = self.previous;
+        lock_unpoisoned(self.state).internal = self.previous;
     }
 }
 
 impl AuthorizationState {
     /// Whose statement `accessor`, the innermost trigger or view being
     /// prepared, if any, belongs to.
-    fn owner(&self, accessor: Option<&str>, policy: &dyn Policy<Refusal = DbError>) -> Owner {
+    fn owner(&self, accessor: Option<&str>, policy: &impl Policy) -> Owner {
         match accessor {
             _ if !self.internal => Owner::App,
             Some(name) if !policy.host_object(name) => Owner::AppTriggerOfHost,
@@ -536,7 +572,7 @@ impl AuthorizationState {
     fn judge(
         &mut self,
         context: AuthContext<'_>,
-        policy: &dyn Policy<Refusal = DbError>,
+        policy: &impl Policy<Refusal = DbError>,
     ) -> Authorization {
         #[cfg(test)]
         assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
