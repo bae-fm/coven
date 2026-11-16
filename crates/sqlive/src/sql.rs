@@ -1,7 +1,8 @@
 //! SQLite tokens used to inspect CREATE statements without matching comments or strings.
 
-use crate::schema_source::SchemaSource;
 use sqlite3_parser::ast::Expr;
+
+pub use crate::token_scan::scan;
 
 /// A token of SQL text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,14 +26,16 @@ impl Token {
 
 /// The tokens of `sql`, without its comments and whitespace.
 pub fn tokens(sql: &str) -> rusqlite::Result<Vec<Token>> {
-    Ok(normalized(&SchemaSource::try_new(sql)?))
+    let scanned = crate::token_scan::scan(sql)?;
+    Ok(normalized(scanned.iter().map(|(_, range)| &sql[range.clone()])))
 }
 
-/// The tokens of `source`. Quoted contents keep their case, unquoted words
-/// fold ASCII case, and numeric and operator punctuation stay separate.
-pub fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
+/// The tokens that the texts `scanned` hold. Quoted contents keep their case,
+/// unquoted words fold ASCII case, and numeric and operator punctuation stay
+/// separate.
+fn normalized<'a>(scanned: impl Iterator<Item = &'a str>) -> Vec<Token> {
     let mut tokens = Vec::new();
-    for mut text in source.tokens() {
+    for mut text in scanned {
         if text.starts_with(['x', 'X']) && text.as_bytes().get(1) == Some(&b'\'') {
             tokens.push(Token::Word("x".into()));
             text = &text[1..];

@@ -1,13 +1,13 @@
 //! Removal constraints from SQLite's schema AST, with original expression text.
 
 use crate::schema::{SchemaIndex, TableSchema};
+use crate::schema_source::SchemaSource;
 use crate::schema_sql::stored_statement;
 use sqlite3_parser::{
     ast::{ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint},
     Bump,
 };
 use sqlive::sql::{identifier, name};
-use sqlive::SchemaSource;
 
 pub(crate) struct TableRules {
     pub(crate) columns: Vec<String>,

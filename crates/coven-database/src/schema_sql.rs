@@ -3,13 +3,13 @@
 //! removes tables. The snapshot install and the migration snapshot build the
 //! value comparison `same_value` returns.
 
+use crate::schema_source::SchemaSource;
 use sqlite3_parser::{
     ast::{Cmd, Expr, Name, Operator, Stmt, TriggerTime, UnaryOperator},
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
-use sqlive::sql::{normalized, unparenthesized, Token};
-use sqlive::SchemaSource;
+use sqlive::sql::{tokens, unparenthesized, Token};
 
 /// One statement of SQLite's stored schema, which SQLite has already parsed
 /// and accepted, as sqlite3-parser reads it.
@@ -74,7 +74,8 @@ fn guarded_predicate(expr: &Expr<'_>) -> bool {
 pub(crate) fn table_parts(sql: &str) -> Option<(Vec<Vec<Token>>, Vec<Token>)> {
     let mut source = SchemaSource::new(sql);
     let body = source.try_body()?;
-    Some((body.parts().iter().map(normalized).collect(), normalized(&source)))
+    let accepted = |sql: &str| tokens(sql).expect("SQLite accepted these tokens");
+    Some((body.parts().iter().map(|part| accepted(part.text())).collect(), accepted(source.rest())))
 }
 
 #[cfg(test)]

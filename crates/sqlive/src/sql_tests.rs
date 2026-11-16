@@ -1,4 +1,5 @@
 use super::*;
+use crate::token_scan::scan;
 
 #[test]
 fn quoted_identifiers_and_strings_are_distinct_from_keywords() {
@@ -41,14 +42,10 @@ fn migration_tokens_preserve_literal_case_and_operator_boundaries() {
 }
 
 #[test]
-fn source_ranges_keep_constraint_spelling() {
-    let mut source =
-        SchemaSource::new("CREATE TABLE t (id TEXT, CHECK /* a */ (id <> 'A,B')) STRICT");
-    let body = source.body();
-    let parts = body.parts();
-    assert_eq!(parts[0].text(), "id TEXT");
-    assert_eq!(parts[1].text(), " CHECK /* a */ (id <> 'A,B')");
-    assert_eq!(source.tokens().collect::<Vec<_>>(), ["STRICT"]);
+fn scan_gives_each_token_its_kind_and_range() {
+    let sql = "CREATE /* a */ TABLE t (x)";
+    let ranges: Vec<_> = scan(sql).unwrap().into_iter().map(|(_, range)| &sql[range]).collect();
+    assert_eq!(ranges, ["CREATE", "TABLE", "t", "(", "x", ")"]);
 }
 
 #[test]
