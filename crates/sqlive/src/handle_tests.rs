@@ -1,27 +1,7 @@
 use super::*;
+use crate::tests::HeardBugs;
 use crate::TableRead;
-use caught::BugSink;
 use std::convert::Infallible;
-
-/// The bugs a test's handle hands its sink.
-#[derive(Default)]
-struct HeardBugs(Mutex<Vec<Bug>>);
-
-impl HeardBugs {
-    fn shared() -> Arc<Self> {
-        Arc::default()
-    }
-
-    fn take(&self) -> Vec<Bug> {
-        std::mem::take(&mut *lock_unpoisoned(&self.0))
-    }
-}
-
-impl BugSink for HeardBugs {
-    fn report(&self, bug: &Bug) {
-        lock_unpoisoned(&self.0).push(bug.clone());
-    }
-}
 
 /// A handle whose host fails with text, reporting to `bugs`.
 fn text_handle(bugs: &Arc<HeardBugs>) -> Handle<String> {
@@ -36,7 +16,7 @@ fn bug(message: &str) -> Bug {
 /// to return; the sink hears nothing of it (api.md E15).
 #[test]
 fn a_bug_inside_a_call_is_the_calls_own() {
-    let bugs = HeardBugs::shared();
+    let bugs = Arc::<HeardBugs>::default();
     let handle = text_handle(&bugs);
     let ((), own) = handle.calling(|| handle.fail_with_bug(bug("torn")));
     assert_eq!(own, Some(bug("torn")));
@@ -50,7 +30,7 @@ fn a_bug_inside_a_call_is_the_calls_own() {
 /// second, so neither is lost. The handle keeps the first (api.md E15).
 #[test]
 fn a_calls_second_bug_goes_to_the_sink() {
-    let bugs = HeardBugs::shared();
+    let bugs = Arc::<HeardBugs>::default();
     let handle = text_handle(&bugs);
     let ((), own) = handle.calling(|| {
         handle.fail_with_bug(bug("first"));
@@ -68,7 +48,7 @@ fn a_calls_second_bug_goes_to_the_sink() {
 /// none of this handle's bugs, which go to the sink (api.md E15).
 #[test]
 fn only_the_outer_call_on_the_handle_claims_its_bug() {
-    let bugs = HeardBugs::shared();
+    let bugs = Arc::<HeardBugs>::default();
     let handle = text_handle(&bugs);
     let other = text_handle(&bugs);
     let ((), outer) = handle.calling(|| {
@@ -87,7 +67,8 @@ fn only_the_outer_call_on_the_handle_claims_its_bug() {
 /// the list finishes normally.
 #[test]
 fn a_run_that_reads_an_unrecorded_table_panics() {
-    let observer: Handle<String> = Handle::new(HeardBugs::shared(), vec!["Hidden".to_owned()]);
+    let observer: Handle<String> =
+        Handle::new(Arc::<HeardBugs>::default(), vec!["Hidden".to_owned()]);
     let read = |table: &str| {
         vec![TableRead {
             table: table.into(),
