@@ -16,7 +16,8 @@ pub(super) struct ChangeCapture<'a> {
     database: &'a DatabaseConnection,
     supplemental: SupplementalChanges,
     /// The tables the session doesn't record. The session's filter reads
-    /// them through a pointer, so this outlives the session.
+    /// them through a pointer, so the capture keeps them until after it
+    /// deletes the session.
     unrecorded: Arc<UnrecordedTables>,
 }
 
@@ -64,7 +65,7 @@ impl<'a> ChangeCapture<'a> {
             database
                 .handle
                 .as_ref()
-                .ok_or(DbError::Invariant { what: "a capturing writer serves its handle" })?
+                .ok_or(DbError::Invariant { what: "a capturing connection has its handle" })?
                 .unrecorded(),
         );
         let mut session = std::ptr::null_mut();

@@ -151,8 +151,8 @@ impl SequenceSync {
         let id = self.files_operation(existing).await?;
         let result = coven_database::in_commit_scope(self.waits.begin_attempt(id), async {
             // A gone device whose key still works may have started
-            // uploads or stored snapshot bodies since its storage was
-            // last cleared. Its uploads end before its folders are
+            // uploads or stored snapshot bodies since this device last
+            // cleared its storage. Its uploads end before its folders are
             // listed again, its files' among them (§16.6).
             for device in uploaders.iter().filter(|device| **device != self.device) {
                 self.clear_gone_storage(&session, *device).await?;

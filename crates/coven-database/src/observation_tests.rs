@@ -51,8 +51,9 @@ fn only_the_outer_call_on_the_handle_claims_its_bug() {
     assert!(other.error().is_none());
 }
 
-/// A live query that read a table whose changes no write records is a bug
-/// that panics as its run finishes; a table not named reads fine.
+/// When a live query's run reads a table listed in `UnrecordedTables`, the
+/// observer panics as the run finishes. A run that reads only tables not on
+/// the list finishes normally.
 #[test]
 fn a_run_that_reads_an_unrecorded_table_panics() {
     let observer =

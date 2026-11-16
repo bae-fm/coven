@@ -9,9 +9,9 @@ tokio::task_local! {
 }
 
 /// Run `work` with its database calls' commits attributed to `scope`. The
-/// work is held once, inside the scope that polls it; an `async fn` here
-/// would hold a second, moved copy beside it. Calls started from other
-/// tasks, including tasks the work spawns, are outside the scope.
+/// scope's future holds `work` once and polls it; an `async fn` here would
+/// hold a second, moved copy beside it. Calls started from other tasks,
+/// including tasks `work` spawns, are outside the scope.
 pub fn in_commit_scope<F: Future>(scope: CommitScope, work: F) -> impl Future<Output = F::Output> {
     TASK.scope(scope, work)
 }
