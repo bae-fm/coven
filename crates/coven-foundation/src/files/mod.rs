@@ -50,7 +50,7 @@ pub use device_reset::{
 pub use directory::StoreLockProbe;
 pub use directory::{
     settle_files, verify_lock, FileArea, FileName, FileNameError, StagedName, StagingFolderError,
-    StoreDir, StoreDirAccess, StoreFile, TemporaryFolder, WriterError,
+    StoreDir, StoreDirAccess, StoreFile, WriterError,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use file_budget::FileBudgetWatch;

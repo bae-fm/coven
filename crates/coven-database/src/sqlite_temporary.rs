@@ -5,10 +5,31 @@
 //! so a staged snapshot waits on disk. SQLite finds a folder for itself
 //! everywhere but Android, where an app names one, such as its cache folder.
 
-use coven_foundation::files::TemporaryFolder;
 use coven_foundation::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// The folder an app names for SQLite's temporary tables (§21.2), outside
+/// coven's directories. It is made where the app's call names it.
+#[derive(Debug, PartialEq, Eq)]
+struct TemporaryFolder {
+    path: PathBuf,
+}
+
+impl TemporaryFolder {
+    /// The folder at `path`, when it names an existing folder, following
+    /// symlinks. A folder this process can't inspect counts as absent.
+    fn at(path: &Path) -> Option<Self> {
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir())
+            .then(|| Self { path: path.to_owned() })
+    }
+
+    /// Its path.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// What this process has told SQLite, and whether a connection may be using it.
 struct Temporary {
