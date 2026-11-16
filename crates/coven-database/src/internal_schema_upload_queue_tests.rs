@@ -53,10 +53,10 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
         })?)
     });
-    assert_eq!(queued.next().await.unwrap().unwrap(), (0, None));
+    assert_eq!(queued.next_inline().await.unwrap().unwrap(), (0, None));
     stage(&db, b"take".to_vec(), true).await.unwrap();
     let first = owner.uploads().await.unwrap()[0].id;
-    assert_eq!(queued.next().await.unwrap().unwrap(), (1, Some(first)));
+    assert_eq!(queued.next_inline().await.unwrap().unwrap(), (1, Some(first)));
     assert!(agrees(&db));
     // A newer file for row 7 leaves the first with no reference, which
     // deletes its record and takes it out of the queue: one file is queued,
@@ -66,10 +66,10 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
     assert_eq!(uploads.len(), 1);
     let second = uploads[0].id;
     assert_ne!(second, first);
-    assert_eq!(queued.next().await.unwrap().unwrap(), (1, Some(second)));
+    assert_eq!(queued.next_inline().await.unwrap().unwrap(), (1, Some(second)));
     assert!(agrees(&db));
     owner.complete_upload(second, ()).await.unwrap();
-    assert_eq!(queued.next().await.unwrap().unwrap(), (0, None));
+    assert_eq!(queued.next_inline().await.unwrap().unwrap(), (0, None));
     assert!(agrees(&db));
     db.close().await.unwrap();
 }

@@ -417,7 +417,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+    while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
     assert!(handle.pending().await.unwrap().iter().all(|record| !matches!(
         record.subject,
         PendingSubject::Upload { .. } | PendingSubject::Download { .. }

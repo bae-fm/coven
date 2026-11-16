@@ -687,7 +687,7 @@ where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Clone + PartialEq + Send + 'static,
 {
-    tokio::time::timeout(HANG_GUARD, query.next())
+    tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("query must answer")
         .expect("the live query answers")

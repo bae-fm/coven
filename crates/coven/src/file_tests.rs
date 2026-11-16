@@ -185,7 +185,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
         });
-        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+        while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
         // The two in flight finish; each later upload starts under the new limit.
         assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
         let mut uploaded = Vec::new();
@@ -521,16 +521,22 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     assert_eq!(handle.file_status(&file).await.unwrap(), FileStatus::Available);
     let mut pins = handle.subscribe_files_pinned(&[staged, absent]);
     assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
+        pins.next_inline().await.expect("the live query answers").unwrap(),
         vec![Some(false), None]
     );
     handle.pin(std::slice::from_ref(&file)).await.unwrap();
-    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), vec![Some(true), None]);
+    assert_eq!(
+        pins.next_inline().await.expect("the live query answers").unwrap(),
+        vec![Some(true), None]
+    );
     assert_eq!(handle.files_pinned(&files).await.unwrap(), vec![None, Some(true), Some(true)]);
     // Watching different files is a new subscription with those files.
     drop(pins);
     let mut pins = handle.subscribe_files_pinned(&[absent, staged]);
-    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), vec![None, Some(true)]);
+    assert_eq!(
+        pins.next_inline().await.expect("the live query answers").unwrap(),
+        vec![None, Some(true)]
+    );
     assert_eq!(handle.file_ref(staged).await.unwrap(), file);
     let wrong_location = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
@@ -564,7 +570,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);
     assert!(storage.reads().await.len() > reads, "uncached read-only ranges reach saved storage");
     assert_eq!(
-        pins.next().await.expect("the live query answers").unwrap(),
+        pins.next_inline().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
     );
     assert_eq!(handle.file_ref(staged).await.unwrap(), file);
@@ -695,7 +701,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     };
     // Oldest first, as uploads() lists them, both waiting on the pause.
     assert_eq!(
-        queued.next().await.expect("the live query answers").unwrap(),
+        queued.next_inline().await.expect("the live query answers").unwrap(),
         [waiting("take", true), waiting("preview", true)]
     );
     let listed: Vec<FileId> =
@@ -712,7 +718,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )?)
     };
     let mut pins = handle.subscribe(pinned);
-    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(pins.next_inline().await.expect("the live query answers").unwrap().is_empty());
 
     // The recording changes while uploads are paused. Once the pause ends,
     // its move fails and its record says so, and the thumbnail is stored.
@@ -727,11 +733,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .await;
     handle.set_uploads_paused(false).await.unwrap();
     starting.await.unwrap();
-    while queued.next().await.expect("the live query answers").unwrap()
+    while queued.next_inline().await.expect("the live query answers").unwrap()
         != [waiting("preview", false)]
     {}
     release.send(()).unwrap();
-    while !queued.next().await.expect("the live query answers").unwrap().is_empty() {}
+    while !queued.next_inline().await.expect("the live query answers").unwrap().is_empty() {}
     let records = handle.pending().await.unwrap();
     let record = records
         .iter()
@@ -760,9 +766,9 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     // The stored thumbnail is pinned once the app pins it, and unpinned again.
     let stored = handle.file_ref(preview).await.unwrap();
     handle.pin(std::slice::from_ref(&stored)).await.unwrap();
-    let mut listed = pins.next().await.expect("the live query answers").unwrap();
+    let mut listed = pins.next_inline().await.expect("the live query answers").unwrap();
     while listed.is_empty() {
-        listed = pins.next().await.expect("the live query answers").unwrap();
+        listed = pins.next_inline().await.expect("the live query answers").unwrap();
     }
     assert_eq!(listed, ["preview"]);
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
@@ -772,11 +778,11 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
     assert!(handle.clear_cache("missing").await.is_err());
     handle.unpin(&[stored.id()]).await.unwrap();
-    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(pins.next_inline().await.expect("the live query answers").unwrap().is_empty());
     // Deleting the row deletes its file's record, so nothing of it stays
     // pinned.
     handle.pin(std::slice::from_ref(&stored)).await.unwrap();
-    assert_eq!(pins.next().await.expect("the live query answers").unwrap(), ["preview"]);
+    assert_eq!(pins.next_inline().await.expect("the live query answers").unwrap(), ["preview"]);
     let row = thumbnail.clone();
     handle
         .write(move |sql| {
@@ -785,7 +791,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         })
         .await
         .unwrap();
-    assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(pins.next_inline().await.expect("the live query answers").unwrap().is_empty());
     let listed: i64 = handle
         .read(move |sql| {
             Ok::<_, CovenError>(sql.query_row(

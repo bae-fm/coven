@@ -58,7 +58,7 @@ fn counting(
 }
 
 async fn answer(live: &mut crate::LiveQuery<i64, crate::DbError>) -> i64 {
-    live.next().await.expect("the live query answers").unwrap()
+    live.next_inline().await.expect("the live query answers").unwrap()
 }
 
 /// With no pre-update hook watching, SQLite empties a table without a

@@ -56,19 +56,19 @@ async fn a_local_trigger_follows_each_record_this_device_changes() {
     let store = TestStore::new();
     let db = open(&store, followed_from_the_start()).await;
     let mut followed = db.subscribe(changes);
-    assert!(followed.next().await.unwrap().unwrap().is_empty());
+    assert!(followed.next_inline().await.unwrap().unwrap().is_empty());
     let first = stage(&db, b"take".to_vec(), true).await.unwrap();
     let made = ("made".to_owned(), first, false);
-    assert_eq!(followed.next().await.unwrap().unwrap(), std::slice::from_ref(&made));
+    assert_eq!(followed.next_inline().await.unwrap().unwrap(), std::slice::from_ref(&made));
     // The upload's completion switches the record to its stored bytes.
     complete_uploads(&db).await;
     let stored = ("switched".to_owned(), first, true);
-    assert_eq!(followed.next().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
+    assert_eq!(followed.next_inline().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
     // A newer file for row 7 leaves the first with no reference: the same
     // write makes the new record and deletes the old one.
     let second = stage(&db, b"retake".to_vec(), false).await.unwrap();
     assert_eq!(
-        followed.next().await.unwrap().unwrap(),
+        followed.next_inline().await.unwrap().unwrap(),
         [made, stored, ("made".to_owned(), second, false), ("deleted".to_owned(), first, true),]
     );
     db.close().await.unwrap();
@@ -87,7 +87,7 @@ async fn a_local_trigger_follows_each_record_another_device_changes() {
     let ana = open(&ana_store, followed_from_the_start()).await;
     let ben = open(&ben_store, followed_from_the_start()).await;
     let mut followed = ben.subscribe(changes);
-    assert!(followed.next().await.unwrap().unwrap().is_empty());
+    assert!(followed.next_inline().await.unwrap().unwrap().is_empty());
     // Each of Ana's writes reaches its slot, and then Ben's device.
     let deliver = |delivered: usize| {
         let (ana, ben) = (ana.clone(), ben.clone());
@@ -102,14 +102,14 @@ async fn a_local_trigger_follows_each_record_another_device_changes() {
     let first = stage(&ana, b"take".to_vec(), true).await.unwrap();
     deliver(0).await;
     let made = ("made".to_owned(), first, false);
-    assert_eq!(followed.next().await.unwrap().unwrap(), std::slice::from_ref(&made));
+    assert_eq!(followed.next_inline().await.unwrap().unwrap(), std::slice::from_ref(&made));
     complete_uploads(&ana).await;
     deliver(1).await;
     let stored = ("switched".to_owned(), first, true);
-    assert_eq!(followed.next().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
+    assert_eq!(followed.next_inline().await.unwrap().unwrap(), [made.clone(), stored.clone()]);
     let second = stage(&ana, b"retake".to_vec(), false).await.unwrap();
     deliver(2).await;
-    let mut applied = followed.next().await.unwrap().unwrap();
+    let mut applied = followed.next_inline().await.unwrap().unwrap();
     // One write makes the new record and deletes the old: Ben's device
     // applies both changes, in an order of its own.
     applied[2..].sort();

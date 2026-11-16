@@ -1,20 +1,23 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
+use crate::block_on::block_on;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::task::{BugSinkRef, CarriesBug};
+use coven_foundation::task::{caught_sync, BugSinkRef, CarriesBug};
 use std::{
-    future::Future,
-    pin::Pin,
+    future::{poll_fn, Future},
+    pin::pin,
     sync::{Arc, Mutex},
+    task::Poll,
 };
 use tokio::sync::Notify;
 
-type Run<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send>>;
-type Query<Q, T, E> = Arc<dyn Fn(Q) -> Run<T, E> + Send + Sync>;
+/// One run of the query for a request: it reads on a connection it releases
+/// before returning, and hands its reads to the subscription.
+type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send + Sync>;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -107,23 +110,15 @@ impl<Q> Drop for QueryLifetime<Q> {
     }
 }
 
-struct Running<Q, T, E> {
-    request: Q,
-    revision: LiveQueryRevision,
-    cause: LiveQueryCause,
-    run: Run<T, E>,
-}
-
 /// A subscription whose request may be replaced while it runs. Its results
 /// fail with `E`, the query closure's own error type.
 pub struct ReconfigurableLiveQuery<Q, T, E> {
     lifetime: QueryLifetime<Q>,
-    query: Query<Q, T, E>,
+    run: Run<Q, T, E>,
     commits: CommitSubscription,
-    /// Where a bug in a run nobody waits for any more goes (E15).
+    /// Where a bug in a result nobody waits for any more goes (E15).
     bugs: BugSinkRef,
     current: Option<(Q, LiveQueryRevision)>,
-    running: Option<Running<Q, T, E>>,
     previous: Option<T>,
     /// The store closed, its handle failed or a run's error carried a bug,
     /// as a panic's does, and a result said so: the query has ended, and
@@ -141,7 +136,7 @@ where
 {
     pub(crate) fn new(
         request: Q,
-        query: Query<Q, T, E>,
+        run: Run<Q, T, E>,
         commits: CommitSubscription,
         bugs: BugSinkRef,
     ) -> Self {
@@ -155,11 +150,10 @@ where
                 }),
                 changed: Notify::new(),
             })),
-            query,
+            run,
             commits,
             bugs,
             current: None,
-            running: None,
             previous: None,
             ended: false,
             #[cfg(any(test, feature = "test-utils"))]
@@ -178,11 +172,13 @@ where
     /// queries it changes as it commits, so this answers with no waiting.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn is_marked_for_rerun(&self) -> bool {
-        assert!(
-            self.current.is_some() && self.running.is_none(),
-            "probe requires a completed, idle query"
-        );
+        assert!(self.current.is_some(), "probe requires a completed query");
         self.commits.state().changed
+    }
+
+    /// Where a bug in a result nobody waits for any more goes (E15).
+    pub(crate) fn bugs(&self) -> &BugSinkRef {
+        &self.bugs
     }
 
     /// Obtain a cloneable handle for replacing this query's request.
@@ -190,7 +186,7 @@ where
         LiveQueryRequests { state: Arc::clone(&self.lifetime.0) }
     }
 
-    /// Process each value on a worker after releasing the connection.
+    /// Process each value after its run releases the connection.
     /// Equality compares processed values; request handles and event metadata remain.
     pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
     where
@@ -198,47 +194,36 @@ where
         P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static,
     {
-        let process = Arc::new(process);
         let ReconfigurableLiveQuery {
             lifetime,
-            query,
+            run,
             commits,
             bugs,
             current,
-            running,
             previous: _,
             ended,
             #[cfg(any(test, feature = "test-utils"))]
             runs,
         } = self;
-        let next_process = Arc::clone(&process);
-        let next_bugs = bugs.clone();
-        let mapped: Query<Q, U, E> = Arc::new(move |request| {
-            process_run(query(request), Arc::clone(&next_process), next_bugs.clone())
-        });
-        let running = running.map(|Running { request, revision, cause, run }| Running {
-            request,
-            revision,
-            cause,
-            run: process_run(run, Arc::clone(&process), bugs.clone()),
+        let mapped: Run<Q, U, E> = Arc::new(move |request, commits| {
+            let value = run(request, commits)?;
+            caught_sync("process a read", || process(value))
+                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
         });
         // A new output type has no previous result to compare. Rerun the current
-        // request if it has already completed so the transformed query answers it.
-        if running.is_none() {
-            if let Some(request) = &current {
-                let mut requests = lock_unpoisoned(&lifetime.0.requests);
-                if requests.pending.is_none() {
-                    requests.pending = Some(request.clone());
-                }
+        // request so the transformed query answers it.
+        if let Some(request) = &current {
+            let mut requests = lock_unpoisoned(&lifetime.0.requests);
+            if requests.pending.is_none() {
+                requests.pending = Some(request.clone());
             }
         }
         ReconfigurableLiveQuery {
             lifetime,
-            query: mapped,
+            run: mapped,
             commits,
             bugs,
             current,
-            running,
             previous: None,
             ended,
             #[cfg(any(test, feature = "test-utils"))]
@@ -246,100 +231,147 @@ where
         }
     }
 
-    /// Return the next result and its request. Cancelling this wait retains the
-    /// in-flight run, so its request revision is not lost. Once the store is
-    /// closed, or the handle fails every call, one result reports why and
-    /// every later call returns `None`. So does a run whose error carries a
-    /// bug, as one that panicked does with `DbError::Bug`: what it read is
-    /// unknown, so no commit could tell whether to run it again (E15).
-    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
+    /// Resolves once `next_blocking` has something to do: a commit changed
+    /// what the last run read, a new request came, the handle failed or
+    /// closed, the query ended, or no run has answered yet. Dropping it
+    /// loses nothing, and it needs no runtime.
+    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut commits = self.commits.clone();
+        let requests = Arc::clone(&self.lifetime.0);
+        let settled = self.ended || self.current.is_none();
+        async move {
+            loop {
+                let commit = commits.observe();
+                if settled
+                    || commit.changed
+                    || commit.error().is_some()
+                    || lock_unpoisoned(&requests.requests).pending.is_some()
+                {
+                    return;
+                }
+                let mut commit_wait = pin!(commits.changed());
+                let mut request_wait = pin!(requests.changed.notified());
+                poll_fn(|context| {
+                    if commit_wait.as_mut().poll(context).is_ready()
+                        || request_wait.as_mut().poll(context).is_ready()
+                    {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Runs the query once if a commit changed what its last run read, a new
+    /// request came, the handle failed or closed, or no run has answered yet.
+    /// Returns `None` when nothing changed, when a write-caused result equals
+    /// the last one (the skip `LiveQueryRuns` counts), and once the query has
+    /// ended. Never parks.
+    pub fn run_changed(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq,
     {
-        loop {
-            if self.ended {
-                return None;
-            }
-            if self.running.is_none() {
-                let commits = self.commits.state();
-                let failure = commits.error();
-                let changed = commits.changed;
-                let request = lock_unpoisoned(&self.lifetime.0.requests).pending.take();
-                let next = match (request, changed) {
-                    (Some(request), true) => Some((request, LiveQueryCause::RequestAndWrite)),
-                    (Some(request), false) => Some((request, LiveQueryCause::Request)),
-                    (None, true) => Some((
-                        self.current.as_ref().expect("a previous run read columns").clone(),
-                        LiveQueryCause::Write,
-                    )),
-                    (None, false) if failure.is_some() => Some((
-                        self.current.as_ref().expect("initial request was answered").clone(),
-                        LiveQueryCause::Write,
-                    )),
-                    (None, false) => None,
-                };
-                if let Some(((request, revision), cause)) = next {
-                    let run: Run<T, E> = if let Some(error) = failure {
-                        Box::pin(async move { Err(error.into()) })
-                    } else {
-                        self.commits.begin();
-                        caught_run((self.query)(request.clone()))
-                    };
-                    self.running = Some(Running { request, revision, cause, run });
-                } else {
-                    tokio::select! {
-                        _ = self.lifetime.0.changed.notified() => {},
-                        _ = self.commits.changed() => {},
-                    }
-                    continue;
-                }
-            }
-            let running = self.running.as_mut().expect("run selected");
-            let result = running.run.as_mut().await;
-            let running = self.running.take().expect("finished run");
-            self.current = Some((running.request.clone(), running.revision));
-            let equal = match &result {
-                Ok(value) => self.previous.as_ref() == Some(value),
-                Err(_) => false,
-            };
-            // An error keeps its typed sources, which need have no value
-            // equality or Clone. A failed run is delivered and breaks the chain
-            // of equal successful results; it never terminates the subscription.
-            self.previous = match &result {
-                Ok(value) => Some(value.clone()),
-                Err(_) => None,
-            };
-            #[cfg(any(test, feature = "test-utils"))]
-            self.runs.count(running.cause, equal);
-            if running.cause == LiveQueryCause::Write && equal {
-                continue;
-            }
-            // A failure while the store is closed or the handle failed is the
-            // last result: answering again would only repeat it. So is a bug,
-            // after which the query watches nothing more.
-            let bug = result.as_ref().err().and_then(CarriesBug::bug).is_some();
-            if bug {
-                self.commits.stop();
-            }
-            self.ended = bug || (result.is_err() && self.commits.state().error().is_some());
-            return Some(ReconfigurableLiveQueryEvent {
-                request: running.request,
-                revision: running.revision,
-                cause: running.cause,
-                result,
-            });
+        if self.ended {
+            return None;
         }
+        let commits = self.commits.state();
+        let failure = commits.error();
+        let changed = commits.changed;
+        let request = lock_unpoisoned(&self.lifetime.0.requests).pending.take();
+        let next = match (request, changed) {
+            (Some(request), true) => Some((request, LiveQueryCause::RequestAndWrite)),
+            (Some(request), false) => Some((request, LiveQueryCause::Request)),
+            (None, true) => Some((
+                self.current.as_ref().expect("a previous run read columns").clone(),
+                LiveQueryCause::Write,
+            )),
+            (None, false) if failure.is_some() => Some((
+                self.current.as_ref().expect("initial request was answered").clone(),
+                LiveQueryCause::Write,
+            )),
+            (None, false) => None,
+        };
+        let ((request, revision), cause) = next?;
+        let result = if let Some(error) = failure {
+            Err(error.into())
+        } else {
+            self.commits.begin();
+            caught_sync("live query", || (self.run)(&request, &self.commits))
+                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
+        };
+        self.current = Some((request.clone(), revision));
+        let equal = match &result {
+            Ok(value) => self.previous.as_ref() == Some(value),
+            Err(_) => false,
+        };
+        // An error keeps its typed sources, which need have no value
+        // equality or Clone. A failed run is delivered and breaks the chain
+        // of equal successful results; it never terminates the subscription.
+        self.previous = match &result {
+            Ok(value) => Some(value.clone()),
+            Err(_) => None,
+        };
+        #[cfg(any(test, feature = "test-utils"))]
+        self.runs.count(cause, equal);
+        if cause == LiveQueryCause::Write && equal {
+            return None;
+        }
+        // A failure while the store is closed or the handle failed is the
+        // last result: answering again would only repeat it. So is a bug,
+        // after which the query watches nothing more.
+        let bug = result.as_ref().err().and_then(CarriesBug::bug).is_some();
+        if bug {
+            self.commits.stop();
+        }
+        self.ended = bug || (result.is_err() && self.commits.state().error().is_some());
+        Some(ReconfigurableLiveQueryEvent { request, revision, cause, result })
     }
-}
 
-/// `run`, which ends with its `DbError::Bug` if it panics, so `next` never
-/// polls it again after the panic.
-fn caught_run<T: Send + 'static, E: From<DbError> + Send + 'static>(run: Run<T, E>) -> Run<T, E> {
-    Box::pin(async move {
-        coven_foundation::task::caught("live query", run)
-            .await
-            .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
-    })
+    /// Whether the store closed, the handle failed or a run's error carried a
+    /// bug, and a result said so: the query answers nothing more.
+    pub fn has_ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Return the next result and its request, as `changed` waits for it:
+    /// this thread parks until a commit or a request calls for a run, and
+    /// then `run_changed` runs the query on it, again if a write-caused
+    /// result equals the last. Once the store is closed, or the handle fails
+    /// every call, one result reports why and every later call returns
+    /// `None`. So does a run whose error carries a bug, as one that panicked
+    /// does with `DbError::Bug`: what it read is unknown, so no commit could
+    /// tell whether to run it again (E15).
+    pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
+    where
+        T: Clone + PartialEq,
+    {
+        while !self.ended {
+            block_on(self.changed());
+            if let Some(event) = self.run_changed() {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    /// `next_blocking` for a test on an async executor: `changed().await`,
+    /// then `run_changed` on the executor's thread.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn next_inline(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
+    where
+        T: Clone + PartialEq,
+    {
+        while !self.ended {
+            self.changed().await;
+            if let Some(event) = self.run_changed() {
+                return Some(event);
+            }
+        }
+        None
+    }
 }
 
 /// A subscription's results and lifetime; dropping it ends future runs. Its
@@ -353,15 +385,55 @@ impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuer
         Self { inner }
     }
 
-    /// The first result at once; then only changed results. Errors remain
-    /// results and don't end the query, except the one reporting that the
-    /// store closed, the handle failed or a run's error carries a bug, as a
-    /// panic's does: after it, `None`.
-    pub async fn next(&mut self) -> Option<Result<T, E>>
+    /// Resolves once `next_blocking` has something to do: a commit changed
+    /// what the last run read, the handle failed or closed, the query ended,
+    /// or no run has answered yet. Dropping it loses nothing, and it needs no
+    /// runtime.
+    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.changed()
+    }
+
+    /// Runs the query once if a commit changed what its last run read or no
+    /// run has answered yet. Returns `None` when nothing changed, when a
+    /// write-caused result equals the last one, and once the query has ended.
+    /// Never parks.
+    pub fn run_changed(&mut self) -> Option<Result<T, E>>
     where
         T: Clone + PartialEq,
     {
-        Some(self.inner.next().await?.result)
+        Some(self.inner.run_changed()?.result)
+    }
+
+    /// Whether the store closed, the handle failed or a run's error carried a
+    /// bug, and a result said so: the query answers nothing more.
+    pub fn has_ended(&self) -> bool {
+        self.inner.has_ended()
+    }
+
+    /// The first result at once; then only changed results. This thread
+    /// parks until `changed` would resolve, then runs the query on it.
+    /// Errors remain results and don't end the query, except the one
+    /// reporting that the store closed, the handle failed or a run's error
+    /// carries a bug, as a panic's does: after it, `None`.
+    pub fn next_blocking(&mut self) -> Option<Result<T, E>>
+    where
+        T: Clone + PartialEq,
+    {
+        Some(self.inner.next_blocking()?.result)
+    }
+
+    /// `next_blocking` for a test on an async executor.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn next_inline(&mut self) -> Option<Result<T, E>>
+    where
+        T: Clone + PartialEq,
+    {
+        Some(self.inner.next_inline().await?.result)
+    }
+
+    /// Where a bug in a result nobody waits for any more goes (E15).
+    pub(crate) fn bugs(&self) -> &BugSinkRef {
+        self.inner.bugs()
     }
 
     /// How often this query has run so far.
@@ -377,7 +449,7 @@ impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuer
         self.inner.is_marked_for_rerun()
     }
 
-    /// Process each value on a worker after its connection has been released.
+    /// Process each value after its run has released its connection.
     /// Equality is tested on the processed value.
     pub fn process<P, U>(self, process: P) -> LiveQuery<U, E>
     where
@@ -387,24 +459,6 @@ impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuer
     {
         LiveQuery { inner: self.inner.process(process) }
     }
-}
-
-fn process_run<T: Send + 'static, U: Send + 'static, E, P>(
-    run: Run<T, E>,
-    process: Arc<P>,
-    bugs: BugSinkRef,
-) -> Run<U, E>
-where
-    E: From<DbError> + CarriesBug + Send + 'static,
-    P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
-{
-    Box::pin(async move {
-        let result = run.await;
-        match result {
-            Ok(value) => crate::database::process(&bugs, move || process(value)).await,
-            Err(error) => Err(error),
-        }
-    })
 }
 
 #[cfg(test)]

@@ -163,24 +163,24 @@ async fn subscriptions_start_with_the_committed_value_and_follow_replay() {
     let mut members = db.subscribe_members::<DbError>();
     let mut circles = db.subscribe_circles::<DbError>();
     let mut circle = db.subscribe_circle_members::<DbError>(CircleId(uuid::Uuid::from_u128(7)));
-    assert!(members.next().await.expect("the live query answers").unwrap().is_empty());
-    assert!(circles.next().await.expect("the live query answers").unwrap().is_empty());
-    assert!(circle.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(members.next_inline().await.expect("the live query answers").unwrap().is_empty());
+    assert!(circles.next_inline().await.expect("the live query answers").unwrap().is_empty());
+    assert!(circle.next_inline().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
-    let next = tokio::time::timeout(HANG_GUARD, members.next())
+    let next = tokio::time::timeout(HANG_GUARD, members.next_inline())
         .await
         .unwrap()
         .expect("the live query answers")
         .unwrap();
     assert_eq!(next, db.members().await.unwrap());
     assert_eq!(next.len(), 2);
-    let next = tokio::time::timeout(HANG_GUARD, circles.next())
+    let next = tokio::time::timeout(HANG_GUARD, circles.next_inline())
         .await
         .unwrap()
         .expect("the live query answers")
         .unwrap();
     assert_eq!(next.len(), 1);
-    let next = tokio::time::timeout(HANG_GUARD, circle.next())
+    let next = tokio::time::timeout(HANG_GUARD, circle.next_inline())
         .await
         .unwrap()
         .expect("the live query answers")
@@ -196,7 +196,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     fixture(&db).await;
     let mut members = db.subscribe_members::<DbError>();
-    assert_eq!(members.next().await.expect("the live query answers").unwrap().len(), 2);
+    assert_eq!(members.next_inline().await.expect("the live query answers").unwrap().len(), 2);
     db.inspect_writer(|db| {
         crate::store_state_tables::tests::damage(
             db,
@@ -206,7 +206,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     assert!(db.members().await.is_err());
     assert!(db
         .subscribe_members::<DbError>()
-        .next()
+        .next_inline()
         .await
         .expect("the live query answers")
         .is_err());
@@ -306,7 +306,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let mut members = db.subscribe(member_rows);
-    assert!(members.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(members.next_inline().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
     let mut expected = vec![
         (member(1), "admin".to_owned(), false, true),
@@ -315,7 +315,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     ];
     expected.sort_by_key(|row| row.0.to_string());
     // Applying the membership reruns the app's query.
-    let next = tokio::time::timeout(HANG_GUARD, members.next())
+    let next = tokio::time::timeout(HANG_GUARD, members.next_inline())
         .await
         .unwrap()
         .expect("the live query answers")

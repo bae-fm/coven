@@ -31,7 +31,7 @@ async fn files_pinned_answers_in_request_order() {
     let absent = coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1));
     let mut live = db.subscribe_files_pinned::<DbError>(vec![absent, file]);
     assert_eq!(
-        live.next().await.expect("the live query answers").unwrap(),
+        live.next_inline().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
     );
     assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), vec![Some(false), None]);
@@ -49,10 +49,10 @@ async fn a_live_pin_answer_follows_coven_pins() {
     complete_uploads(&db).await;
     let absent = coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1));
     let mut live = db.subscribe_files_pinned::<DbError>(vec![file, absent]);
-    assert_eq!(live.next().await.unwrap().unwrap(), [Some(false), None]);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), [Some(false), None]);
     let stored = db.file_ref(file).await.unwrap();
     crate::database::file_database::tests::pin_whole(&db, &stored, "whole").await.unwrap();
-    assert_eq!(live.next().await.unwrap().unwrap(), [Some(true), None]);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), [Some(true), None]);
     assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), [Some(true), None]);
     db.close().await.unwrap();
 }

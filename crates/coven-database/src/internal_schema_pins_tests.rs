@@ -68,11 +68,11 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
             Ok(sql.query("SELECT file FROM coven_pins", [], |r| r.get::<_, String>(0))?)
         })
         .process(Ok);
-    assert!(pinned.next().await.unwrap().unwrap().is_empty());
-    assert!(pins.next().await.unwrap().unwrap().is_empty());
+    assert!(pinned.next_inline().await.unwrap().unwrap().is_empty());
+    assert!(pins.next_inline().await.unwrap().unwrap().is_empty());
     let file = pin_stored(&db).await;
-    assert_eq!(pinned.next().await.unwrap().unwrap(), ["7"]);
-    assert_eq!(pins.next().await.unwrap().unwrap(), [file.id().to_string()]);
+    assert_eq!(pinned.next_inline().await.unwrap().unwrap(), ["7"]);
+    assert_eq!(pins.next_inline().await.unwrap().unwrap(), [file.id().to_string()]);
     assert!(agrees(&db));
     let writes = pins.runs().writes();
     let id = file.id();
@@ -94,8 +94,8 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
     })
     .await
     .unwrap();
-    assert!(pinned.next().await.unwrap().unwrap().is_empty());
-    assert!(pins.next().await.unwrap().unwrap().is_empty());
+    assert!(pinned.next_inline().await.unwrap().unwrap().is_empty());
+    assert!(pins.next_inline().await.unwrap().unwrap().is_empty());
     assert_eq!(pins.runs().writes(), writes + 1);
     assert!(agrees(&db));
     assert_eq!(local_count(&db, "_coven_cache"), 0);

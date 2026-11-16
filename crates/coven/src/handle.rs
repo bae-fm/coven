@@ -362,8 +362,11 @@ impl CovenHandle {
                 )?
                 .pop())
         });
-        while let Some(listed) = listed.next().await {
-            match listed? {
+        loop {
+            let (next, answer) = coven_database::next_result(listed).await;
+            listed = next;
+            let Some(answer) = answer else { break };
+            match answer? {
                 None => return Err(DbError::OperationUnknown(operation).into()),
                 Some(Some(outcome)) => return Ok(outcome),
                 Some(None) => {}

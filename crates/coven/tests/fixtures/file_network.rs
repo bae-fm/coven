@@ -61,7 +61,7 @@ pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::time::timeout(HANG_GUARD, async {
-        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+        while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
     })
     .await
     .unwrap();

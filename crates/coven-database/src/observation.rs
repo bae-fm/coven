@@ -152,6 +152,11 @@ impl CommitSubscription {
         self.receiver.borrow().clone()
     }
 
+    /// The state now, marked as seen: `changed` then waits for a later one.
+    pub(crate) fn observe(&mut self) -> CommitState {
+        self.receiver.borrow_and_update().clone()
+    }
+
     pub(crate) async fn changed(&mut self) {
         self.receiver.changed().await.expect("subscription owns its sender");
     }

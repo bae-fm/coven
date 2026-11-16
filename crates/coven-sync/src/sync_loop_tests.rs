@@ -173,12 +173,12 @@ async fn a_pass_end_that_cant_be_written_fails_the_handle() {
             row.get::<_, Option<LastPass>>(0)
         })?)
     });
-    assert_eq!(status.next().await.unwrap().unwrap(), None);
+    assert_eq!(status.next_inline().await.unwrap().unwrap(), None);
     ana.sync.database.test_fail_sync_status().await.unwrap();
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().await.unwrap();
-    let failed = tokio::time::timeout(HANG_GUARD, status.next())
+    let failed = tokio::time::timeout(HANG_GUARD, status.next_inline())
         .await
         .unwrap()
         .expect("the live query reports the failure");

@@ -139,7 +139,7 @@ async fn coven_checkpoints_the_wal_past_its_threshold() {
     let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
     });
-    let reader = tokio::spawn(async move { while let Some(Ok(_)) = query.next().await {} });
+    let reader = tokio::spawn(async move { while let Some(Ok(_)) = query.next_inline().await {} });
     tokio::time::timeout(HANG_GUARD, async {
         let mut started_over = 0;
         while started_over < 3 {
@@ -308,7 +308,7 @@ async fn checkpointer_failure(
     checkpointed(db, &mut tries).await;
     let failure = tokio::time::timeout(HANG_GUARD, async {
         loop {
-            match query.next().await {
+            match query.next_inline().await {
                 Some(Ok(_)) => (),
                 Some(Err(error)) => return error,
                 None => panic!("the query ended without the failure"),
@@ -317,7 +317,7 @@ async fn checkpointer_failure(
     })
     .await
     .expect("the live query reports the failure");
-    assert!(query.next().await.is_none(), "the live query ends after the failure");
+    assert!(query.next_inline().await.is_none(), "the live query ends after the failure");
     assert!(insert(db).await.is_err(), "the failed handle refuses a write");
     failure
 }

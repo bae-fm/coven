@@ -593,7 +593,7 @@ mod pending_records {
                 r.get::<_, PendingRecord>(0)
             })?)
         });
-        assert!(received.next().await.expect("the live query answers").unwrap().is_empty());
+        assert!(received.next_inline().await.expect("the live query answers").unwrap().is_empty());
         let owner = &network.devices[0].handle;
         owner
             .write(|sql| {
@@ -617,7 +617,7 @@ mod pending_records {
             PendingReason::Refused(Refusal::Signature { cause: None }),
         );
         assert_eq!(
-            received.next().await.expect("the live query answers").unwrap(),
+            received.next_inline().await.expect("the live query answers").unwrap(),
             vec![record.clone()]
         );
         let reads = || async {

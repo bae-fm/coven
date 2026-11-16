@@ -697,31 +697,20 @@ impl Database {
         E: From<DbError> + CarriesBug + Send + 'static,
     {
         let commits = self.observer.subscribe();
-        // A subscription retains a database only for its active blocking read.
+        // A subscription retains a database only for its active read.
         // Idle queries and undelivered results cannot keep a closing lock held.
         let database = Arc::downgrade(&self.inner);
         let query = Arc::new(query);
-        let completion = commits.clone();
-        let bugs = self.bugs.clone();
         ReconfigurableLiveQuery::new(
             initial_request,
-            Arc::new(move |request| {
-                let database = database.clone();
-                let query = query.clone();
-                let completion = completion.clone();
-                let bugs = bugs.clone();
-                Box::pin(async move {
-                    let database = database.upgrade().ok_or(DbError::StoreClosed)?;
-                    finish_blocking(
-                        start_call("live query", &bugs, database, move |inner| {
-                            inner.call(|inner| {
-                                inner.access.readers.acquire_reader().live_read(
-                                    &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                                    move |sql| query(&request, sql),
-                                )
-                            })
-                        })
-                        .await,
+            Arc::new(move |request, completion| {
+                let database = database.upgrade().ok_or(DbError::StoreClosed)?;
+                let slot = coven_foundation::locks::read_unpoisoned(&database);
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                inner.call(|inner| {
+                    inner.access.readers.acquire_reader().live_read(
+                        &mut |reads, lookups| completion.finish_judging(reads, lookups),
+                        |sql| query(request, sql),
                     )
                 })
             }),

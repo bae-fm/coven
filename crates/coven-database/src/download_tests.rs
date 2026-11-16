@@ -32,7 +32,7 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let mut query: crate::LiveQuery<_, DbError> = receiver.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(query.next_inline().await.expect("the live query answers").unwrap().is_empty());
     sql(&source, "INSERT INTO notes VALUES('n','first','body')").await.unwrap();
     sql(&source, "UPDATE notes SET title='second'").await.unwrap();
     let writes = records(&source);
@@ -45,9 +45,9 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     );
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(receiver.receive(writes[0].clone().into()).await.unwrap(), ApplyOutcome::Applied);
-    assert_eq!(query.next().await.expect("the live query answers").unwrap(), ["first"]);
+    assert_eq!(query.next_inline().await.expect("the live query answers").unwrap(), ["first"]);
     assert_eq!(receiver.receive(writes[1].clone().into()).await.unwrap(), ApplyOutcome::Applied);
-    assert_eq!(query.next().await.expect("the live query answers").unwrap(), ["second"]);
+    assert_eq!(query.next_inline().await.expect("the live query answers").unwrap(), ["second"]);
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied

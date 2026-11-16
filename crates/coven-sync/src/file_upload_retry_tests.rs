@@ -159,7 +159,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     f.set_uploads_paused(false).await;
     tokio::time::timeout(HANG_GUARD, async {
         while retry(&f).await.is_none() {
-            uploads.next().await.expect("the live query answers").unwrap();
+            uploads.next_inline().await.expect("the live query answers").unwrap();
         }
     })
     .await
@@ -171,7 +171,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     advance(&clock, 1);
     tokio::time::timeout(HANG_GUARD, async {
         while f.queued(&file).await {
-            uploads.next().await.expect("the live query answers").unwrap();
+            uploads.next_inline().await.expect("the live query answers").unwrap();
         }
     })
     .await
@@ -196,7 +196,9 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     resume.send(()).unwrap();
     // The first file finishes; the second does not start until a catch-up.
     tokio::time::timeout(HANG_GUARD, async {
-        while uploads.next().await.expect("the live query answers").unwrap().files.len() != 1 {}
+        while uploads.next_inline().await.expect("the live query answers").unwrap().files.len() != 1
+        {
+        }
     })
     .await
     .unwrap();
@@ -220,7 +222,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     f.send.set(crate::SequenceStatus::Synced { through: 0 });
     tokio::time::timeout(HANG_GUARD, async {
         loop {
-            uploads.next().await.expect("the live query answers").unwrap();
+            uploads.next_inline().await.expect("the live query answers").unwrap();
             if !f.queued(&second).await {
                 break;
             }
@@ -626,7 +628,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     f.reopen().await;
     assert_eq!(f.queue().await, before);
     let mut live = f.subscribe_queue();
-    assert_eq!(live.next().await.expect("the live query answers").unwrap(), viewed);
+    assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), viewed);
     f.close().await;
 }
 
@@ -795,7 +797,7 @@ async fn a_pending_records_cause_arrives_with_it_in_the_view() {
             |row| Ok((row.get::<_, crate::PendingRecord>(0)?, row.get::<_, Option<String>>(1)?)),
         )?)
     });
-    let mut next = async || viewed.next().await.expect("the live query answers").unwrap();
+    let mut next = async || viewed.next_inline().await.expect("the live query answers").unwrap();
     assert!(next().await.is_empty());
     f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);

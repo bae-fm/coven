@@ -358,21 +358,23 @@ async fn the_budgets_query_runs_only_for_counter_and_budget_changes() {
     let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
     let owner = FileDatabase::new(db.clone());
     let mut budgets = db.subscribe_cache_budgets::<DbError>();
-    let first = budgets.next().await.unwrap().unwrap();
+    let first = budgets.next_inline().await.unwrap().unwrap();
     assert_eq!(first[0].cached, 0);
     owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
-    assert_eq!(budgets.next().await.unwrap().unwrap()[0].cached, 100);
+    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, 100);
     db.write(|sql| sql.set_cache_budget("files", 50)).await.unwrap();
-    assert_eq!(budgets.next().await.unwrap().unwrap()[0].budget, 50);
+    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].budget, 50);
     async fn quiet(budgets: &mut crate::LiveQuery<Vec<NamespaceBytes>, DbError>) -> bool {
-        tokio::time::timeout(std::time::Duration::from_millis(300), budgets.next()).await.is_err()
+        tokio::time::timeout(std::time::Duration::from_millis(300), budgets.next_inline())
+            .await
+            .is_err()
     }
     // A read of the cached range updates only its recency.
     db.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
-    budgets.next().await.unwrap().unwrap();
+    budgets.next_inline().await.unwrap().unwrap();
     let header = vec![1; coven_format::file::FILE_HEADER_LEN];
     owner.cache_range(&file, -1, 1, FileName::new("again").unwrap(), header.clone()).await.unwrap();
-    assert_eq!(budgets.next().await.unwrap().unwrap()[0].cached, header.len() as u64);
+    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, header.len() as u64);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), Some(header));
     assert!(quiet(&mut budgets).await, "a read's recency starts no run");
     db.inspect_writer(|sql| partial(sql, "partial_object", "partial_file", 4096));

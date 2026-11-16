@@ -11,6 +11,7 @@ mod audience_database;
 mod author_judgement;
 mod authorization;
 mod authorship;
+mod block_on;
 mod change_capture;
 mod connection_setup;
 mod coven_functions;
@@ -45,6 +46,7 @@ mod judge_view;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;
+mod live_results;
 mod load_step;
 mod local_write;
 mod loss_record;
@@ -195,6 +197,7 @@ pub use live_query::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use live_query_runs::LiveQueryRuns;
+pub use live_results::next_result;
 pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
 };

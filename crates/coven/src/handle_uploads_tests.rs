@@ -120,7 +120,7 @@ async fn upload_failed(device: &Device, failure: StorageFailure) {
     });
     tokio::time::timeout(HANG_GUARD, async {
         while !pending
-            .next()
+            .next_inline()
             .await
             .expect("the live query answers")
             .unwrap()

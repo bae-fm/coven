@@ -230,7 +230,7 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
     let directory = app.create_closed_store("closing", Arc::new(UuidIds)).await.unwrap();
     let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     let mut live = handle.subscribe(|_| Ok(()));
-    live.next().await.expect("the live query answers").unwrap();
+    live.next_inline().await.expect("the live query answers").unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
     {
         let close = handle.close();
@@ -242,7 +242,7 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         .await;
     }
     assert!(matches!(
-        tokio::time::timeout(HANG_GUARD, live.next())
+        tokio::time::timeout(HANG_GUARD, live.next_inline())
             .await
             .unwrap()
             .expect("the live query answers"),
@@ -333,14 +333,14 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self && members[0].access.is_none());
     assert_eq!(
-        handle.subscribe_members().next().await.expect("the live query answers").unwrap(),
+        handle.subscribe_members().next_inline().await.expect("the live query answers").unwrap(),
         members
     );
     assert!(handle.circles().list().await.unwrap().is_empty());
     assert!(handle
         .circles()
         .subscribe_list()
-        .next()
+        .next_inline()
         .await
         .expect("the live query answers")
         .unwrap()
@@ -722,7 +722,7 @@ mod store_rename {
     use crate::tests::{landed, Network};
 
     async fn name(query: &mut LiveQuery<String, crate::CovenError>) -> String {
-        tokio::time::timeout(HANG_GUARD, query.next())
+        tokio::time::timeout(HANG_GUARD, query.next_inline())
             .await
             .unwrap()
             .expect("the live query answers")
@@ -885,8 +885,8 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
     let bens = crate::tests::circle(&network.devices[1].handle, "Ben's own").await;
     let mut listed = ana.circles().subscribe_list();
     let mut gifts_members = ana.circles().subscribe_members(gifts);
-    assert_eq!(listed.next().await.expect("answers").unwrap().len(), 2);
-    assert_eq!(gifts_members.next().await.expect("answers").unwrap().len(), 1);
+    assert_eq!(listed.next_inline().await.expect("answers").unwrap().len(), 2);
+    assert_eq!(gifts_members.next_inline().await.expect("answers").unwrap().len(), 1);
     for who in [&ben, &carol] {
         crate::tests::landed(ana, ana.circles().add_member(gifts, who).await.unwrap()).await;
     }
@@ -906,7 +906,7 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
     assert_eq!(members.iter().map(|m| m.member).collect::<Vec<_>>(), ids);
     assert_eq!(members.iter().filter(|m| m.is_self).count(), 1);
     let live = loop {
-        let value = gifts_members.next().await.expect("answers").unwrap();
+        let value = gifts_members.next_inline().await.expect("answers").unwrap();
         if value.len() == 3 {
             break value;
         }
@@ -916,7 +916,7 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
     crate::tests::landed(ana, ana.remove_member(&carol).await.unwrap()).await;
     network.sync(0).await;
     let live = loop {
-        let value = gifts_members.next().await.expect("answers").unwrap();
+        let value = gifts_members.next_inline().await.expect("answers").unwrap();
         if value.len() == 2 {
             break value;
         }
@@ -926,7 +926,7 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
     // Deleting a circle takes it out of the list.
     crate::tests::landed(ana, ana.circles().delete(garden).await.unwrap()).await;
     let live = loop {
-        let value = listed.next().await.expect("answers").unwrap();
+        let value = listed.next_inline().await.expect("answers").unwrap();
         if value.iter().all(|c| c.id != garden) {
             break value;
         }

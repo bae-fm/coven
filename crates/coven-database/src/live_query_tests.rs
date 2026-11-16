@@ -19,13 +19,15 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     let entered = Mutex::new(Some(entered));
     let (release, released) = mpsc::channel();
     let released = Mutex::new(released);
-    let mut query = database.subscribe(move |_| {
+    let query = database.subscribe(move |_| {
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
         released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         Ok(17)
     });
+    let answer = crate::next_result(query);
+    tokio::pin!(answer);
     tokio::select! {
-        result = query.next() => panic!("held query returned: {result:?}"),
+        result = &mut answer => panic!("held query returned: {:?}", result.1),
         result = entry => result.unwrap(),
     }
     drop(database);
@@ -36,12 +38,108 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     crate::tests::until_waiting(&mut reopen, waits).await;
     release.send(()).unwrap();
     let reopened = reopen.await.unwrap();
-    assert_eq!(query.next().await.expect("the live query answers").unwrap(), 17);
-    assert!(matches!(
-        query.next().await.expect("the live query answers"),
-        Err(DbError::StoreClosed)
-    ));
+    let (query, first) = answer.await;
+    assert_eq!(first.expect("the live query answers").unwrap(), 17);
+    let (_query, closed) = crate::next_result(query).await;
+    assert!(matches!(closed.expect("the live query answers"), Err(DbError::StoreClosed)));
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_changed_runs_once_for_a_change_and_returns_none_for_a_skipped_write() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query_row("SELECT count(*) > 0 FROM notes", [], |r| r.get::<_, bool>(0))?)
+    });
+    // No run has answered yet.
+    assert!(query.run_changed().unwrap().unwrap());
+    assert!(query.run_changed().is_none());
+    assert_eq!(query.runs().runs(), 1);
+    // A second row changes what the query read, and not its result.
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
+    assert!(query.is_marked_for_rerun());
+    assert!(query.run_changed().is_none());
+    assert_eq!((query.runs().runs(), query.runs().equal()), (2, 1));
+    assert!(!query.is_marked_for_rerun());
+    assert!(query.run_changed().is_none());
+    assert_eq!(query.runs().runs(), 2);
+    db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
+    assert!(!query.run_changed().unwrap().unwrap());
+    db.close().await.unwrap();
+    assert!(matches!(query.run_changed().unwrap(), Err(DbError::StoreClosed)));
+    assert!(query.has_ended());
+    assert!(query.run_changed().is_none());
+}
+
+/// Whether `changed` has resolved, with no waiting.
+async fn resolved(changed: &mut (impl Future<Output = ()> + Unpin)) -> bool {
+    tokio::select! {
+        biased;
+        () = changed => true,
+        () = std::future::ready(()) => false,
+    }
+}
+
+#[tokio::test]
+async fn changed_resolves_for_a_first_run_a_relevant_commit_a_request_and_the_end() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(1, |request, sql| {
+            Ok(sql.query("SELECT id FROM notes WHERE title='Plan' AND ?1 > 0", [request], |r| {
+                r.get::<_, String>(0)
+            })?)
+        });
+    // No run has answered yet.
+    assert!(resolved(&mut Box::pin(query.changed())).await);
+    assert_eq!(query.next_inline().await.unwrap().result.unwrap(), ["a"]);
+
+    let mut idle = Box::pin(query.changed());
+    assert!(!resolved(&mut idle).await);
+    db.commit_writer(|sql| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
+    assert!(!resolved(&mut idle).await);
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','Plan','')").unwrap());
+    idle.await;
+    assert_eq!(query.next_inline().await.unwrap().result.unwrap(), ["a", "b"]);
+
+    // A request answers without a commit.
+    let mut idle = Box::pin(query.changed());
+    assert!(!resolved(&mut idle).await);
+    query.requests().set(2).unwrap();
+    idle.await;
+    assert_eq!(query.next_inline().await.unwrap().request, 2);
+
+    // A closed store is a result, and the query's end resolves it again.
+    let idle = Box::pin(query.changed());
+    db.close().await.unwrap();
+    idle.await;
+    assert!(matches!(query.next_inline().await.unwrap().result, Err(DbError::StoreClosed)));
+    assert!(resolved(&mut Box::pin(query.changed())).await);
+    assert!(query.next_inline().await.is_none());
+}
+
+#[tokio::test]
+async fn next_blocking_parks_its_thread_until_a_commit_changes_what_the_query_read() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(|sql| Ok(sql.query("SELECT id FROM notes", [], |r| r.get::<_, String>(0))?));
+    let (waiting, parked) = mpsc::channel();
+    let following = std::thread::spawn(move || {
+        let first = query.next_blocking();
+        waiting.send(()).unwrap();
+        let second = query.next_blocking();
+        (first, second)
+    });
+    parked.recv_timeout(HANG_GUARD).unwrap();
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
+    let (first, second) = following.join().unwrap();
+    assert!(first.unwrap().unwrap().is_empty());
+    assert_eq!(second.unwrap().unwrap(), ["a"]);
+    db.close().await.unwrap();
 }
 
 async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 'static>(
@@ -270,14 +368,14 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
             )?)
         });
     let requests = query.requests();
-    let first = query.next().await.expect("the live query answers");
+    let first = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (first.request, first.revision, first.cause, first.result.unwrap()),
         (false, LiveQueryRevision(0), LiveQueryCause::Request, "same".into())
     );
     assert_eq!(requests.set(false).unwrap(), LiveQueryRevision(0));
     assert_eq!(requests.set(true).unwrap(), LiveQueryRevision(1));
-    let changed_request = query.next().await.expect("the live query answers");
+    let changed_request = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (
             changed_request.request,
@@ -294,7 +392,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
     assert_eq!(requests.set(false).unwrap(), LiveQueryRevision(2));
     assert_eq!(requests.clone().set(true).unwrap(), LiveQueryRevision(3));
     assert_eq!(requests.set(true).unwrap(), LiveQueryRevision(3));
-    let both = query.next().await.expect("the live query answers");
+    let both = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (both.request, both.revision, both.cause, both.result.unwrap()),
         (true, LiveQueryRevision(3), LiveQueryCause::RequestAndWrite, "new".into())
@@ -307,7 +405,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_next_keeps_its_request_and_inflight_result() {
+async fn requests_set_during_a_run_wait_for_it_and_the_latest_answers_next() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -323,17 +421,22 @@ async fn cancelled_next_keeps_its_request_and_inflight_result() {
             Ok(sql.query_row("SELECT ?1", [request], |r| r.get::<_, i32>(0))?)
         });
     let requests = query.requests();
-    tokio::select! { _ = entry => {}, _ = query.next() => panic!("run should be blocked"), }
+    let running = tokio::task::spawn_blocking(move || {
+        let first = query.next_blocking();
+        (query, first)
+    });
+    entry.await.unwrap();
     assert_eq!(requests.set(6).unwrap(), LiveQueryRevision(1));
     assert_eq!(requests.set(7).unwrap(), LiveQueryRevision(2));
-    let mut query = query.process(|value| Ok(format!("value {value}")));
     release.send(()).unwrap();
-    let first = query.next().await.expect("the live query answers");
+    let (query, first) = running.await.unwrap();
+    let first = first.expect("the live query answers");
     assert_eq!(
         (first.request, first.revision, first.result.unwrap()),
-        (5, LiveQueryRevision(0), "value 5".into())
+        (5, LiveQueryRevision(0), 5)
     );
-    let second = query.next().await.expect("the live query answers");
+    let mut query = query.process(|value| Ok(format!("value {value}")));
+    let second = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (second.request, second.revision, second.result.unwrap()),
         (7, LiveQueryRevision(2), "value 7".into())
@@ -480,7 +583,7 @@ async fn replacement_before_first_run_supersedes_the_initial_request() {
     let requests = query.requests();
     assert_eq!(requests.set(1).unwrap(), LiveQueryRevision(1));
     assert_eq!(requests.set(2).unwrap(), LiveQueryRevision(2));
-    let event = query.next().await.expect("the live query answers");
+    let event = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (event.request, event.revision, event.cause, event.result.unwrap()),
         (2, LiveQueryRevision(2), LiveQueryCause::Request, 2)
@@ -594,17 +697,17 @@ async fn processing_a_completed_query_preserves_a_newer_pending_request() {
     let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
         db.subscribe_reconfigurable(1, |request, _| Ok(*request));
     let requests = query.requests();
-    assert_eq!(query.next().await.expect("the live query answers").result.unwrap(), 1);
+    assert_eq!(query.next_inline().await.expect("the live query answers").result.unwrap(), 1);
     let revision = requests.set(2).unwrap();
     let mut query = query.process(|value| Ok(value.to_string()));
-    let event = query.next().await.expect("the live query answers");
+    let event = query.next_inline().await.expect("the live query answers");
     assert_eq!(
         (event.request, event.revision, event.cause, event.result.unwrap()),
         (2, revision, LiveQueryCause::Request, "2".into())
     );
     // With no pending replacement, changing output type answers the current request.
     let mut query = query.process(|value| Ok(value.len()));
-    let event = query.next().await.expect("the live query answers");
+    let event = query.next_inline().await.expect("the live query answers");
     assert_eq!((event.request, event.revision, event.result.unwrap()), (2, revision, 1));
     drop(query);
     assert_eq!(requests.set(3), Err(LiveQueryClosed));
@@ -629,12 +732,12 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
             Ok(value.to_string())
         });
     let requests = query.requests();
-    let event = query.next().await.expect("the live query answers");
+    let event = query.next_inline().await.expect("the live query answers");
     assert!(matches!(event.result, Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for request in [1, 2, 1, 2] {
         let revision = requests.set(request).unwrap();
-        let event = query.next().await.expect("the live query answers");
+        let event = query.next_inline().await.expect("the live query answers");
         assert_eq!(
             (event.request, event.revision, event.cause),
             (request, revision, LiveQueryCause::Request)
@@ -666,14 +769,12 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
             released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
             Ok(value.to_string())
         });
-    tokio::select! {
-        result = entry => result.unwrap(),
-        _ = query.next() => panic!("processing is held"),
-    }
+    let running = tokio::task::spawn_blocking(move || query.next_blocking());
+    entry.await.unwrap();
     // Closing waits for active reads, so this would block if processing held its lease.
     tokio::time::timeout(HANG_GUARD, db.close()).await.unwrap().unwrap();
     release.send(()).unwrap();
-    let event = query.next().await.expect("the live query answers");
+    let event = running.await.unwrap().expect("the live query answers");
     assert_eq!(
         (event.request, event.revision, event.result.unwrap()),
         (7, LiveQueryRevision(0), "7".into())
@@ -750,19 +851,19 @@ async fn a_closed_stores_query_reports_once_then_ends() {
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let mut query = db.subscribe(count_notes);
     let mut requested = db.subscribe_reconfigurable(0, |_, sql| count_notes(sql));
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
-    assert_eq!(requested.next().await.unwrap().result.unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
+    assert_eq!(requested.next_inline().await.unwrap().result.unwrap(), 0);
     db.close().await.unwrap();
-    assert!(matches!(query.next().await, Some(Err(DbError::StoreClosed))));
-    assert!(query.next().await.is_none());
-    assert!(query.next().await.is_none());
+    assert!(matches!(query.next_inline().await, Some(Err(DbError::StoreClosed))));
+    assert!(query.next_inline().await.is_none());
+    assert!(query.next_inline().await.is_none());
     // A new request doesn't revive it either.
     requested.requests().set(1).unwrap();
     assert!(matches!(
-        requested.next().await.map(|event| event.result),
+        requested.next_inline().await.map(|event| event.result),
         Some(Err(DbError::StoreClosed))
     ));
-    assert!(requested.next().await.is_none());
+    assert!(requested.next_inline().await.is_none());
 }
 
 /// A handle whose rollback failed: its live queries report that once and end.
@@ -771,7 +872,7 @@ async fn a_failed_handles_query_reports_once_then_ends() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let mut query = db.subscribe(count_notes);
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.inspect_writer(|writer| writer.refuse_transaction_end(true));
     assert!(db
         .write(|sql| -> Result<(), DbError> {
@@ -780,8 +881,8 @@ async fn a_failed_handles_query_reports_once_then_ends() {
         })
         .await
         .is_err());
-    assert!(matches!(query.next().await, Some(Err(DbError::RollbackFailed))));
-    assert!(query.next().await.is_none());
+    assert!(matches!(query.next_inline().await, Some(Err(DbError::RollbackFailed))));
+    assert!(query.next_inline().await.is_none());
     db.close().await.unwrap();
 }
 
@@ -796,9 +897,9 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
         assert!(count == 0, "the notes table has {count} rows");
         Ok(count)
     });
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
-    let ended = query.next().await;
+    let ended = query.next_inline().await;
     assert!(
         matches!(
             &ended,
@@ -808,7 +909,7 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
         "{ended:?}"
     );
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
-    assert!(query.next().await.is_none());
+    assert!(query.next_inline().await.is_none());
     db.close().await.unwrap();
 }
 
@@ -824,12 +925,12 @@ async fn a_live_query_delivers_its_closures_own_error_and_goes_on() {
         1 => Err(AppError::Refused("one note")),
         count => Ok(count),
     });
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
-    let refused = query.next().await;
+    let refused = query.next_inline().await;
     assert!(matches!(refused, Some(Err(AppError::Refused("one note")))), "{refused:?}");
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
-    assert_eq!(query.next().await.unwrap().unwrap(), 2);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 2);
     db.close().await.unwrap();
 }
 
@@ -845,9 +946,9 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
         assert!(count == 0, "the notes table has {count} rows");
         Ok::<_, AppError>(count)
     });
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
-    let ended = query.next().await;
+    let ended = query.next_inline().await;
     assert!(
         matches!(
             &ended,
@@ -857,6 +958,6 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
         "{ended:?}"
     );
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
-    assert!(query.next().await.is_none());
+    assert!(query.next_inline().await.is_none());
     db.close().await.unwrap();
 }

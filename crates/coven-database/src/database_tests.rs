@@ -133,13 +133,13 @@ fn calls_whose_runtime_is_shutting_down_return_shutdown() {
     let store = TestStore::new();
     let database =
         runtime.block_on(store.builder(notes_tables(), notes_migrations()).open()).unwrap();
-    let mut query = database.subscribe(|sql| sql.store_state());
+    let query = database.subscribe(|sql| sql.store_state());
     drop(runtime);
     let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
     outlived.block_on(async {
         let _entered = handle.enter();
         assert!(matches!(
-            query.next().await,
+            crate::next_result(query).await.1,
             Some(Err(DbError::Shutdown(Shutdown {
                 operation: "live query",
                 outcome: ShutdownOutcome::NotRun,
@@ -904,14 +904,14 @@ async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     let mut query = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
     });
-    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    assert_eq!(query.next_inline().await.unwrap().unwrap(), 0);
     db.observer.test_poison();
     assert!(matches!(
         db.read(|_| Ok(())).await,
         Err(DbError::StoreFailed(bug)) if bug.operation == "the store's live queries"
     ));
-    assert!(matches!(query.next().await, Some(Err(DbError::StoreFailed(_)))));
-    assert!(query.next().await.is_none());
+    assert!(matches!(query.next_inline().await, Some(Err(DbError::StoreFailed(_)))));
+    assert!(query.next_inline().await.is_none());
 }
 
 /// Sends each bug it hears of, so a test waits for the report.

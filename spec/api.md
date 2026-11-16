@@ -3632,8 +3632,17 @@ let moved = handle
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read. Its errors are results and don't end it, except the one saying
   the store closed or its handle fails every call, and one that carries a bug,
-  as a run that panicked does (E15): after that one, `next()` returns `None`,
-  and never repeats it.
+  as a run that panicked does (E15): after that one, `next_blocking()` returns
+  `None`, and never repeats it.
+- A live query's calls block and need no async runtime. `changed()` returns a
+  future that resolves on any executor once a write changed what the query
+  read, a new request came, or the handle failed or closed. `run_changed()`
+  then runs the query once on the calling thread, without waiting.
+  `next_blocking()` parks the calling thread until `changed()` would resolve
+  and runs the query on it. An async app awaits `changed()` and runs
+  `run_changed()` on a blocking thread, which leaves no thread waiting when a
+  write leaves the result equal. The examples below call `next_blocking()` on
+  a blocking thread for brevity; a program with no runtime calls it alone.
 - A read and a live query fail with their closure's own error type, as a
   write does (E3): Ana's music app's closures return its `LibraryError`, and
   its live query of albums delivers one. The type takes coven's `DbError`
@@ -3898,7 +3907,16 @@ let mut failing: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
         },
     )?)
 });
-while let Some(rows) = failing.next().await {
+loop {
+    failing.changed().await;
+    let (failing_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = failing.next_blocking();
+        (failing, answer)
+    })
+    .await
+    .unwrap();
+    failing = failing_next;
+    let Some(rows) = answer else { break };
     show_failures(rows?);
 }
 ```
@@ -4102,19 +4120,34 @@ where
     T: Send + 'static,
     E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
-    /// The first result at once; after that, waits for a write that changes
-    /// the result and returns the new one. An error is a result too, and
-    /// doesn't end the query, except the one saying the store closed, the
-    /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `StatisticsFailed`, `WallTimer`, or `StoreFailed`
-    /// for state a bug may have left wrong), or one that carries a bug, as a
-    /// run that panicked does (`DbError::Bug`, E15): after it, `None`, so a
-    /// loop over the query ends.
-    pub async fn next(&mut self) -> Option<Result<T, E>>
+    /// Resolves once `next_blocking` has something to do: a write changed what
+    /// the last run read, the handle failed or closed, the query ended, or no
+    /// run has answered yet. Any executor can poll it, and dropping it loses
+    /// nothing.
+    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static;
+
+    /// Runs the query once if a write changed what the last run read or no
+    /// run has answered yet, and never parks. Returns `None` when nothing
+    /// changed, when the new result equals the last, and once the query has
+    /// ended.
+    pub fn run_changed(&mut self) -> Option<Result<T, E>>
     where
         T: Clone + PartialEq;
 
-    /// Runs `process` on each result after the connection is released.
+    /// The first result at once; after that, parks this thread until a write
+    /// changes the result, then runs the query on it and returns the new
+    /// result. An error is a result too, and doesn't end the query, except the
+    /// one saying the store closed, the handle fails every call
+    /// (`RollbackFailed`, `StatePersistence`, `CheckpointFailed`,
+    /// `StatisticsFailed`, `WallTimer`, or `StoreFailed` for state a bug may
+    /// have left wrong), or one that carries a bug, as a run that panicked
+    /// does (`DbError::Bug`, E15): after it, `None`, so a loop over the query
+    /// ends.
+    pub fn next_blocking(&mut self) -> Option<Result<T, E>>
+    where
+        T: Clone + PartialEq;
+
+    /// Runs `process` on each result after its run releases the connection.
     pub fn process<P, U>(self, process: P) -> LiveQuery<U, E>
     where
         T: Clone + PartialEq,
@@ -4126,7 +4159,7 @@ where
     pub fn runs(&self) -> LiveQueryRuns;
 
     /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next` runs it again. A commit marks the queries it changes
+    /// reads, so `next_blocking` runs it again. A commit marks the queries it changes
     /// as it commits, so this answers at once.
     #[cfg(feature = "test-utils")]
     pub fn is_marked_for_rerun(&self) -> bool;
@@ -4138,7 +4171,7 @@ where
     T: Send + 'static,
     E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
-    /// Process each successful value on a worker after releasing its connection.
+    /// Process each successful value after its run releases the connection.
     /// Request, revision and cause stay on the event; errors remain results.
     /// Equality compares processed values. Existing request handles still work.
     pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
@@ -4155,15 +4188,23 @@ where
     pub fn runs(&self) -> LiveQueryRuns;
 
     /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next` runs it again, answered at once.
+    /// reads, so `next_blocking` runs it again, answered at once.
     #[cfg(feature = "test-utils")]
     pub fn is_marked_for_rerun(&self) -> bool;
 
-    /// The next result, with the request and revision that produced it, and
-    /// whether a new request, a write, or both caused it; `None` after the
-    /// result saying the store closed or the handle failed, or one carrying
-    /// a bug, as for `LiveQuery::next`.
-    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
+    /// As `LiveQuery::changed`, and a new request resolves it too.
+    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static;
+
+    /// As `LiveQuery::run_changed`, returning the event.
+    pub fn run_changed(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
+    where
+        T: Clone + PartialEq;
+
+    /// As `LiveQuery::next_blocking`: the next result, with the request and
+    /// revision that produced it, and whether a new request, a write, or both
+    /// caused it; `None` after the result saying the store closed or the
+    /// handle failed, or one carrying a bug.
+    pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq;
 }
@@ -4385,12 +4426,30 @@ let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
     )?)
 });
-while let Some(Ok(rows)) = notes.next().await {
+loop {
+    notes.changed().await;
+    let (notes_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = notes.next_blocking();
+        (notes, answer)
+    })
+    .await
+    .unwrap();
+    notes = notes_next;
+    let Some(Ok(rows)) = answer else { break };
     show_notes(rows);
 }
 
 let mut lost = handle.subscribe_lost_values();
-while let Some(Ok(values)) = lost.next().await {
+loop {
+    lost.changed().await;
+    let (lost_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = lost.next_blocking();
+        (lost, answer)
+    })
+    .await
+    .unwrap();
+    lost = lost_next;
+    let Some(Ok(values)) = answer else { break };
     offer_to_restore(values);
 }
 ```
@@ -6454,7 +6513,16 @@ match handle.setup_s3_storage(storage, access_key_id, secret, show_setup_step).a
 // The sync state, as a live query follows it; the first value is the
 // current state.
 let mut status = handle.subscribe_sync_status();
-while let Some(result) = status.next().await {
+loop {
+    status.changed().await;
+    let (status_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = status.next_blocking();
+        (status, answer)
+    })
+    .await
+    .unwrap();
+    status = status_next;
+    let Some(result) = answer else { break };
     let SyncStatus { state, last_synced } = result?;
     show_sync_line(&state, last_synced);
 }
@@ -6954,7 +7022,16 @@ let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
                   row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)),
     )?)
 });
-while let Some(rows) = outbox.next().await {
+loop {
+    outbox.changed().await;
+    let (outbox_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = outbox.next_blocking();
+        (outbox, answer)
+    })
+    .await
+    .unwrap();
+    outbox = outbox_next;
+    let Some(rows) = answer else { break };
     let rows = rows?;
     show_outbox(&rows);
     if rows.is_empty() {
@@ -9371,7 +9448,16 @@ let pairing = handle.add_device().await?;
 show_blurred_qr_code(&pairing.qr_code);
 offer_to_share(&pairing.shared_code);
 let mut status = handle.follow_add_device(pairing.id);
-while let Some(now) = status.next().await {
+loop {
+    status.changed().await;
+    let (status_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = status.next_blocking();
+        (status, answer)
+    })
+    .await
+    .unwrap();
+    status = status_next;
+    let Some(now) = answer else { break };
     match now? {
         Some(AddDeviceStatus::Waiting { request: Some(request) }) => {
             // "Add Ana's laptop?" with the number the laptop shows.
@@ -9530,7 +9616,16 @@ let (invite, _, _) = handle
 
 let mut invites = handle.subscribe(Invite::list);
 let mut sent = false;
-while let Some(open) = invites.next().await {
+loop {
+    invites.changed().await;
+    let (invites_next, answer) = tokio::task::spawn_blocking(move || {
+        let answer = invites.next_blocking();
+        (invites, answer)
+    })
+    .await
+    .unwrap();
+    invites = invites_next;
+    let Some(open) = answer else { break };
     let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);
     match found {
         // A pass has granted its access and fixed its code.
@@ -10279,12 +10374,13 @@ pool, and calls that must finish even when their caller stops waiting, such
 as closing a store, as their own task. A runtime shutting down is not a bug,
 so such a call ends with a `Shutdown` in its error instead of a panic.
 
-- Ana's music app keeps a live query of its albums. A test of the app opens
-  the store on its own runtime and ends while the query is still reading.
-  The query's next read goes to a blocking pool that runs nothing more, and
-  its `next` returns `Err(CovenError::Database(DbError::Shutdown(Shutdown {
-  operation: "live query", outcome: ShutdownOutcome::NotRun })))`. Had coven
-  panicked there, the test process would have aborted.
+- Ana's music app waits for an operation's outcome with `operation_outcome`
+  (E6). A test of the app opens the store on its own runtime and ends while
+  that wait's query is still reading. The query's next read goes to a blocking
+  pool that runs nothing more, and `operation_outcome` fails with a
+  `DbError::Shutdown(Shutdown { operation: "live query", outcome:
+  ShutdownOutcome::NotRun })`. Had coven panicked there, the test process
+  would have aborted.
 - `Shutdown.outcome` says how far the work got, so whether a write took
   effect. tokio can't stop a closure on the blocking pool once it has
   started, so the pool only drops a closure it never ran: `NotRun`, and

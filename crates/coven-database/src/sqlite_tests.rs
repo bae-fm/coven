@@ -642,7 +642,7 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
     let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(query.next().await.expect("the live query answers").is_err());
+    assert!(query.next_inline().await.expect("the live query answers").is_err());
     db.commit_writer(|writer| {
         writer.internal_execute("INSERT INTO items VALUES(1,'execute')", []).unwrap()
     });
@@ -881,7 +881,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         assert!(rollback_failed(db.schema_version().await.unwrap_err()));
         assert!(matches!(db.read(|_| Ok(())).await.unwrap_err(), DbError::RollbackFailed));
         assert!(matches!(
-            notes.next().await.expect("the live query answers").unwrap_err(),
+            notes.next_inline().await.expect("the live query answers").unwrap_err(),
             DbError::RollbackFailed
         ));
         db.close().await.unwrap();

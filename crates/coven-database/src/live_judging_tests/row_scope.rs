@@ -668,7 +668,7 @@ async fn one_shot(db: &Database, query: &Generated) -> Rows {
 }
 
 async fn next_rows(query: &mut LiveQuery<(usize, Rows), crate::DbError>) -> (usize, Rows) {
-    tokio::time::timeout(HANG_GUARD, query.next())
+    tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("query must answer")
         .expect("the live query answers")

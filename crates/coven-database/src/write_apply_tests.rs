@@ -125,7 +125,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
             })?)
         });
-        let old_rows = query.next().await.expect("the live query answers").unwrap();
+        let old_rows = query.next_inline().await.expect("the live query answers").unwrap();
         // Count actual row mutations, including repeated changes to one table,
         // local trigger effects, losses and the applied slot.
         db.inspect_writer(|writer| {
@@ -213,7 +213,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             }
         }
         assert!(applied, "all mutations must eventually succeed");
-        let rows = query.next().await.expect("the live query answers").unwrap();
+        let rows = query.next_inline().await.expect("the live query answers").unwrap();
         assert_eq!(
             rows,
             vec![
@@ -243,7 +243,7 @@ async fn assert_rejected_download(
     let before = contents(database);
     let mut query: crate::LiveQuery<_, DbError> = database
         .subscribe(|sql| Ok(sql.query("SELECT * FROM notes", [], |r| r.get::<_, String>(0))?));
-    query.next().await.expect("the live query answers").unwrap();
+    query.next_inline().await.expect("the live query answers").unwrap();
     for _ in 0..2 {
         let error = database.receive(record.clone()).await.unwrap_err();
         assert!(

@@ -224,7 +224,7 @@ async fn import(files: bool, live: bool) -> Duration {
                     read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?,
                 )
             });
-            assert!(!query.next().await.unwrap().unwrap().is_empty(), "{sql}");
+            assert!(!query.next_inline().await.unwrap().unwrap().is_empty(), "{sql}");
             queries.push(query);
         }
     }
@@ -299,14 +299,14 @@ async fn a_joined_live_querys_run_cost() {
                 read.query(sql, [album], |r| r.get::<_, coven_database::types::Value>(0))?,
             )
         });
-        assert!(!query.next().await.unwrap().result.unwrap().is_empty(), "{sql}");
+        assert!(!query.next_inline().await.unwrap().result.unwrap().is_empty(), "{sql}");
         let requests = query.requests();
         let (mut live, mut once) = (Vec::new(), Vec::new());
         for run in 1..=RUNS {
             let album = uuid(1, run % 2);
             requests.set(album.clone()).unwrap();
             let started = Instant::now();
-            let answered = query.next().await.unwrap().result.unwrap();
+            let answered = query.next_inline().await.unwrap().result.unwrap();
             live.push(started.elapsed());
             let started = Instant::now();
             let read = db

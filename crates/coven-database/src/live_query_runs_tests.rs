@@ -36,7 +36,7 @@ async fn counts_runs_writes_and_equal_results() {
     write(&db, "UPDATE items SET value = 3 WHERE id = 1");
     // The run this write causes finds the same result, and returns nothing.
     tokio::select! {
-        result = query.next() => panic!("an equal result was returned: {result:?}"),
+        result = query.next_inline() => panic!("an equal result was returned: {result:?}"),
         read = runs.recv() => read.unwrap(),
     }
     write(&db, "UPDATE items SET value = 0 WHERE id = 1");

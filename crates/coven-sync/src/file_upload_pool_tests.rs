@@ -46,7 +46,9 @@ async fn until_creates(f: &Fixture, count: usize) {
 async fn until_queued(f: &Fixture, count: usize) {
     let mut queue = f.subscribe_queue();
     tokio::time::timeout(HANG_GUARD, async {
-        while queue.next().await.expect("the live query answers").unwrap().files.len() != count {}
+        while queue.next_inline().await.expect("the live query answers").unwrap().files.len()
+            != count
+        {}
     })
     .await
     .unwrap();
@@ -633,11 +635,12 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     // The file is being sent, but bytes in flight are not progress: it has
     // none until storage confirms and completion retires it.
     let mut uploads = f.subscribe_queue();
-    let queued = uploads.next().await.expect("the live query answers").unwrap().files.remove(0);
+    let queued =
+        uploads.next_inline().await.expect("the live query answers").unwrap().files.remove(0);
     assert_eq!((queued.sending, queued.progress), (true, None));
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
-    assert!(uploads.next().await.expect("the live query answers").unwrap().files.is_empty());
+    assert!(uploads.next_inline().await.expect("the live query answers").unwrap().files.is_empty());
     f.close().await;
 }
 
@@ -667,7 +670,7 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
     // The files being sent, how many `sending` counts, and how many are queued.
     type Outbox = (Vec<String>, i64, i64);
     let mut until = async |done: &dyn Fn(&Outbox) -> bool| loop {
-        let answer = tokio::time::timeout(HANG_GUARD, counts.next())
+        let answer = tokio::time::timeout(HANG_GUARD, counts.next_inline())
             .await
             .expect("the live query answers")
             .expect("the live query is open")

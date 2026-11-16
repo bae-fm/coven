@@ -323,7 +323,7 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
                 .query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)
         })
         .process(Ok);
-    assert!(!paused.next().await.unwrap().unwrap());
+    assert!(!paused.next_inline().await.unwrap().unwrap());
     db.write(|sql| {
         sql.execute("INSERT INTO files(id) VALUES('paused')", [])?;
         sql.set_uploads_paused(true)?;
@@ -334,9 +334,9 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
     })
     .await
     .unwrap();
-    assert!(paused.next().await.unwrap().unwrap());
+    assert!(paused.next_inline().await.unwrap().unwrap());
     assert_eq!(paused.runs().writes(), 1);
     db.write(|sql| sql.set_uploads_paused(false)).await.unwrap();
-    assert!(!paused.next().await.unwrap().unwrap());
+    assert!(!paused.next_inline().await.unwrap().unwrap());
     db.close().await.unwrap();
 }

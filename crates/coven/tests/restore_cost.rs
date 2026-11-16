@@ -272,7 +272,7 @@ async fn uploaded(handle: &CovenHandle) {
     let mut uploads: coven::LiveQuery<_, coven::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+    while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
 }
 
 async fn edit(handle: &CovenHandle, clock: &GraceClock) {

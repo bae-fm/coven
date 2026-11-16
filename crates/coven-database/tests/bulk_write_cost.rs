@@ -58,17 +58,17 @@ async fn clearing_a_local_table_through_a_write_and_a_bulk_write() {
     let mut live: coven_database::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
     });
-    assert_eq!(live.next().await.unwrap().unwrap(), 0);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), 0);
 
     let write_fill = write(&db, FILL).await;
-    assert_eq!(live.next().await.unwrap().unwrap(), i64::from(ROWS));
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), i64::from(ROWS));
     let write_clear = write(&db, CLEAR).await;
-    assert_eq!(live.next().await.unwrap().unwrap(), 0);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), 0);
 
     let bulk_fill = bulk(&db, FILL).await;
-    assert_eq!(live.next().await.unwrap().unwrap(), i64::from(ROWS));
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), i64::from(ROWS));
     let bulk_clear = bulk(&db, CLEAR).await;
-    assert_eq!(live.next().await.unwrap().unwrap(), 0);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), 0);
     // What committing alone costs, `F_FULLFSYNC` included on macOS (§3).
     let commit = bulk(&db, "SELECT 1").await;
 

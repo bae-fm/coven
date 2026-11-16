@@ -393,11 +393,11 @@ async fn pin_progress_reads_committed_coverage() {
         bytes_total: total,
     };
     let mut live = f.database.subscribe_pin_progress::<DbError>(vec![file.clone()]);
-    assert_eq!(live.next().await.expect("the live query answers").unwrap(), progress(0));
+    assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), progress(0));
     // Another reader's verified chunk is coverage the moment it commits.
     let stream = f.files.open_file_stream(&file, &lease().await).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
-    assert_eq!(live.next().await.expect("the live query answers").unwrap(), progress(CHUNK as u64));
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), progress(CHUNK as u64));
     // A read that fails authentication commits nothing.
     f.storage.corrupt_byte(&f.path(&file), 11 + 2 * (CHUNK + 16) + 3).await.unwrap();
     assert!(matches!(
@@ -956,7 +956,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
     tokio::select! {
         result = &mut pin => panic!("the pin went on over a metered network: {result:?}"),
         () = async {
-            while listed.next().await.expect("the live query answers").unwrap() != 0 {}
+            while listed.next_inline().await.expect("the live query answers").unwrap() != 0 {}
         } => {}
     }
     until_held(&f, &mut pin).await;

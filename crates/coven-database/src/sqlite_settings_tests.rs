@@ -701,7 +701,7 @@ async fn timed_writes(
         Reading::None => None,
         Reading::LiveQuery => {
             let mut query = db.subscribe(read);
-            Some(tokio::spawn(async move { while let Some(Ok(_)) = query.next().await {} }))
+            Some(tokio::spawn(async move { while let Some(Ok(_)) = query.next_inline().await {} }))
         }
         Reading::Unpaused => {
             let reading = db.clone();

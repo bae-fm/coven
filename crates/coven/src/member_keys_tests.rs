@@ -37,7 +37,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     assert_eq!(decode_code_info(invite.shown_code()).unwrap().metadata().member, carol);
     assert_eq!(Some(old.member_keys.public_keys()), *requested.lock().unwrap());
     let mut members = handle.subscribe_members();
-    let initial = members.next().await.expect("the live query answers").unwrap();
+    let initial = members.next_inline().await.expect("the live query answers").unwrap();
     let mine = |list: &[MemberInfo]| list.iter().find(|m| m.id == carol).unwrap().clone();
     assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
     // The keychain syncs Carol's code to her other Apple devices.
@@ -61,7 +61,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     assert_ne!(replaced, old.member_keys.public_keys());
     assert_eq!(person(), replaced);
     let current = loop {
-        let list = members.next().await.expect("the live query answers").unwrap();
+        let list = members.next_inline().await.expect("the live query answers").unwrap();
         if mine(&list).keys == replaced {
             break mine(&list);
         }

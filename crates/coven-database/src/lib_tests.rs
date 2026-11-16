@@ -204,7 +204,7 @@ where
     T: Clone + PartialEq + Send + 'static,
     E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
 {
-    tokio::time::timeout(HANG_GUARD, query.next())
+    tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("the live query answers in time")
         .expect("the live query is open")

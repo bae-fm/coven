@@ -74,7 +74,7 @@ async fn stored(handle: &CovenHandle, file: &FileRef) -> (FileRef, ObjectPath) {
     let mut queue: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    while queue.next().await.unwrap().unwrap() != 0 {}
+    while queue.next_inline().await.unwrap().unwrap() != 0 {}
     let file = handle.file_ref(file.id()).await.unwrap();
     let FilePlace::Cloud { location, .. } = file.place() else {
         panic!("the upload stored the photo");

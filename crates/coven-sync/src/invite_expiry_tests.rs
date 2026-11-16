@@ -63,7 +63,7 @@ async fn the_expiry_wake_follows_a_clock_set_by_hand() {
     );
     let mut open: coven_database::LiveQuery<_, coven_database::DbError> =
         ana.sync.database.subscribe(|sql| Ok(Invite::list(sql)?.len()));
-    assert_eq!(open.next().await.unwrap().unwrap(), 1);
+    assert_eq!(open.next_inline().await.unwrap().unwrap(), 1);
     // The handle waits for the wall clock to reach the expiry; only a setting
     // at or past it ends that wait.
     tokio::time::timeout(HANG_GUARD, arming.wait_for(|armed| armed.contains(&invite.expires_at)))
@@ -73,7 +73,7 @@ async fn the_expiry_wake_follows_a_clock_set_by_hand() {
     group.clock.set(group.clock.now() - Duration::from_secs(86_400));
     group.clock.set(invite.expires_at - Duration::from_secs(1));
     group.clock.set(invite.expires_at);
-    let ended = tokio::time::timeout(HANG_GUARD, open.next()).await;
+    let ended = tokio::time::timeout(HANG_GUARD, open.next_inline()).await;
     assert_eq!(ended.expect("the handle woke at the expiry").unwrap().unwrap(), 0);
     expiry.close().await;
     ana.sync.database.close().await.unwrap();
@@ -97,7 +97,7 @@ async fn a_clock_that_cant_wait_for_an_expiry_fails_the_handle() {
     );
     let mut open = ana.sync.database.subscribe(|sql| Ok(Invite::list(sql)?.len()));
     let failure = loop {
-        match open.next().await.expect("the live query reports the failure") {
+        match open.next_inline().await.expect("the live query reports the failure") {
             Ok(_) => continue,
             Err(error) => break error,
         }

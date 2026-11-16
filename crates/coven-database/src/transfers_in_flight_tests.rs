@@ -27,7 +27,7 @@ const COUNTS: &str = "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven
 async fn next<T: Clone + PartialEq + Send + 'static>(
     query: &mut crate::LiveQuery<T, crate::DbError>,
 ) -> T {
-    tokio::time::timeout(HANG_GUARD, query.next())
+    tokio::time::timeout(HANG_GUARD, query.next_inline())
         .await
         .expect("the live query answers")
         .expect("the live query is open")
@@ -88,13 +88,13 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
             r.get::<_, i64>(0)
         })?)
     });
-    assert_eq!(queued.next().await.unwrap().unwrap(), 1);
+    assert_eq!(queued.next_inline().await.unwrap().unwrap(), 1);
     let mut sending_list: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT file FROM coven_sending", [], |r| r.get::<_, String>(0))?)
     });
-    assert!(sending_list.next().await.unwrap().unwrap().is_empty());
+    assert!(sending_list.next_inline().await.unwrap().unwrap().is_empty());
     let _sending = db.uploads_in_flight().start(uploader, object, vec![file], PROGRESS);
-    assert_eq!(sending_list.next().await.unwrap().unwrap(), [file.to_string()]);
+    assert_eq!(sending_list.next_inline().await.unwrap().unwrap(), [file.to_string()]);
     // The start marked the sending query as it committed; it marked this one
     // too only if this one reads what sending changes.
     assert!(!queued.is_marked_for_rerun());

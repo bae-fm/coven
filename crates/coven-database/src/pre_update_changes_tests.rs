@@ -30,15 +30,18 @@ async fn a_local_tables_columns_still_decide_a_rerun() {
     let mut tracks: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT track FROM queue ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(tracks.next().await.expect("the live query answers").unwrap(), ["a", "b"]);
+    assert_eq!(tracks.next_inline().await.expect("the live query answers").unwrap(), ["a", "b"]);
     sql(&db, "UPDATE queue SET played=1 WHERE id=1").await.unwrap();
     assert!(!tracks.is_marked_for_rerun());
     sql(&db, "UPDATE queue SET track='c' WHERE id=2").await.unwrap();
-    assert_eq!(tracks.next().await.expect("the live query answers").unwrap(), ["a", "c"]);
+    assert_eq!(tracks.next_inline().await.expect("the live query answers").unwrap(), ["a", "c"]);
     sql(&db, "INSERT INTO queue(id, track) VALUES (3,'d')").await.unwrap();
-    assert_eq!(tracks.next().await.expect("the live query answers").unwrap(), ["a", "c", "d"]);
+    assert_eq!(
+        tracks.next_inline().await.expect("the live query answers").unwrap(),
+        ["a", "c", "d"]
+    );
     sql(&db, "DELETE FROM queue WHERE id=1").await.unwrap();
-    assert_eq!(tracks.next().await.expect("the live query answers").unwrap(), ["c", "d"]);
+    assert_eq!(tracks.next_inline().await.expect("the live query answers").unwrap(), ["c", "d"]);
     db.close().await.unwrap();
 }
 
@@ -52,7 +55,7 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
     let mut first: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT track FROM queue WHERE id = 1", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(first.next().await.expect("the live query answers").unwrap(), ["a"]);
+    assert_eq!(first.next_inline().await.expect("the live query answers").unwrap(), ["a"]);
     sql(&db, "UPDATE queue SET track='z' WHERE id=2; INSERT INTO queue(id, track) VALUES (3,'d'); DELETE FROM queue WHERE id=3")
         .await
         .unwrap();
@@ -60,9 +63,9 @@ async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
     sql(&db, "UPDATE queue SET id=4 WHERE id=2").await.unwrap();
     assert!(!first.is_marked_for_rerun());
     sql(&db, "UPDATE queue SET track='y' WHERE id=1").await.unwrap();
-    assert_eq!(first.next().await.expect("the live query answers").unwrap(), ["y"]);
+    assert_eq!(first.next_inline().await.expect("the live query answers").unwrap(), ["y"]);
     sql(&db, "DELETE FROM queue WHERE id=1").await.unwrap();
-    assert!(first.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(first.next_inline().await.expect("the live query answers").unwrap().is_empty());
     db.close().await.unwrap();
 }
 
@@ -81,7 +84,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
         Ok((run, tracks))
     });
     assert_eq!(
-        first.next().await.expect("the live query answers").unwrap(),
+        first.next_inline().await.expect("the live query answers").unwrap(),
         (0, vec!["a".to_string()])
     );
     let fill = |rows: usize| -> &'static str {
@@ -99,7 +102,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
     assert!(!first.is_marked_for_rerun());
     sql(&db, fill(super::ROWS_PER_TABLE + 1)).await.unwrap();
     assert_eq!(
-        first.next().await.expect("the live query answers").unwrap(),
+        first.next_inline().await.expect("the live query answers").unwrap(),
         (1, vec!["a".to_string()])
     );
     db.close().await.unwrap();
@@ -175,14 +178,14 @@ async fn a_commit_after_a_schema_change_reads_the_tables_new_shape() {
     let mut ratings: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT rating FROM queue WHERE id = 1", [], |r| r.get::<_, Option<i64>>(0))?)
     });
-    assert_eq!(ratings.next().await.expect("the live query answers").unwrap(), [None]);
+    assert_eq!(ratings.next_inline().await.expect("the live query answers").unwrap(), [None]);
     db.commit_writer(|writer| {
         writer.batch("UPDATE queue SET rating=5 WHERE id=1").unwrap();
     });
     assert!(ratings.is_marked_for_rerun());
-    assert_eq!(ratings.next().await.expect("the live query answers").unwrap(), [Some(5)]);
+    assert_eq!(ratings.next_inline().await.expect("the live query answers").unwrap(), [Some(5)]);
     sql(&db, "UPDATE queue SET rating=4 WHERE id=1").await.unwrap();
     assert!(ratings.is_marked_for_rerun());
-    assert_eq!(ratings.next().await.expect("the live query answers").unwrap(), [Some(4)]);
+    assert_eq!(ratings.next_inline().await.expect("the live query answers").unwrap(), [Some(4)]);
     db.close().await.unwrap();
 }

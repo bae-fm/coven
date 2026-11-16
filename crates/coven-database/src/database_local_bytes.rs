@@ -2,8 +2,9 @@
 //! the cache keeps with its entries (§17.8, Appendix C.3).
 
 use super::{Database, Mode};
-use crate::{sqlite::DatabaseConnection, DbError, LiveQuery};
+use crate::{next_result, sqlite::DatabaseConnection, DbError, LiveQuery};
 use coven_foundation::task::CarriesBug;
+use std::future::Future;
 
 /// One namespace's cache, in bytes on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,7 +151,11 @@ impl Database {
     pub fn subscribe_local_bytes(&self) -> LocalBytesWatch {
         let mut changed = self.writer.local_bytes_changes.subscribe();
         changed.mark_unchanged();
-        LocalBytesWatch { database: self.clone(), budgets: self.subscribe_cache_budgets(), changed }
+        LocalBytesWatch {
+            database: self.clone(),
+            budgets: Some(Box::pin(next_result(self.subscribe_cache_budgets()))),
+            changed,
+        }
     }
 
     /// Say that the store's directory changed in a way its database doesn't
@@ -160,10 +165,23 @@ impl Database {
     }
 }
 
+type NextBudgets = std::pin::Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    LiveQuery<Vec<NamespaceBytes>, DbError>,
+                    Option<Result<Vec<NamespaceBytes>, DbError>>,
+                ),
+            > + Send,
+    >,
+>;
+
 /// The measurements of what the store keeps on this device, as they change.
 pub struct LocalBytesWatch {
     database: Database,
-    budgets: LiveQuery<Vec<NamespaceBytes>, DbError>,
+    /// The next result of the budgets query, in flight until it arrives, so
+    /// a cancelled `next` loses nothing. `None` once the query has ended.
+    budgets: Option<NextBudgets>,
     changed: tokio::sync::watch::Receiver<u64>,
 }
 
@@ -172,11 +190,18 @@ impl LocalBytesWatch {
     /// A reader slower than the changes gets one measurement of the state
     /// now, not one per change. `None` once the store has closed.
     pub async fn next(&mut self) -> Option<Result<LocalBytes, DbError>> {
+        let running = self.budgets.as_mut()?;
         tokio::select! {
-            run = self.budgets.next() => match run? {
-                Ok(_) => {}
-                Err(error) => return Some(Err(error)),
-            },
+            (budgets, run) = running => {
+                if run.is_none() {
+                    self.budgets = None;
+                    return None;
+                }
+                self.budgets = Some(Box::pin(next_result(budgets)));
+                if let Some(Err(error)) = run {
+                    return Some(Err(error));
+                }
+            }
             changed = self.changed.changed() => changed.ok()?,
         }
         Some(self.database.local_bytes().await)

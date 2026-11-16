@@ -33,7 +33,7 @@ async fn a_new_store_reads_no_storage_set_up() {
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
     let mut rows = db.subscribe(row);
     assert_eq!(
-        rows.next().await.unwrap().unwrap(),
+        rows.next_inline().await.unwrap().unwrap(),
         SyncStatusRow {
             location: RecordedLocation::None,
             last_pass: None,
@@ -43,7 +43,7 @@ async fn a_new_store_reads_no_storage_set_up() {
     );
     db.record_opened(RecordedLocation::SignedOut("Dropbox".into()), None).await.unwrap();
     assert_eq!(
-        rows.next().await.unwrap().unwrap().location,
+        rows.next_inline().await.unwrap().unwrap().location,
         RecordedLocation::SignedOut("Dropbox".into())
     );
     db.close().await.unwrap();
@@ -101,7 +101,7 @@ async fn a_local_trigger_follows_each_change_of_the_row() {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?)
     });
-    assert!(log.next().await.unwrap().unwrap().is_empty());
+    assert!(log.next_inline().await.unwrap().unwrap().is_empty());
     db.record_opened(connected(), None).await.unwrap();
     db.record_opened(connected(), None).await.unwrap();
     db.record_moved(PassMove::Read).await.unwrap();
@@ -109,9 +109,9 @@ async fn a_local_trigger_follows_each_change_of_the_row() {
     db.record_moved(PassMove::Claimed).await.unwrap();
     db.record_pass_end(b"\"Synced\"".to_vec(), None).await.unwrap();
     db.record_last_pass(b"\"Synced\"".to_vec()).await.unwrap();
-    let mut seen = log.next().await.unwrap().unwrap();
+    let mut seen = log.next_inline().await.unwrap().unwrap();
     while seen.len() < 4 {
-        seen = log.next().await.unwrap().unwrap();
+        seen = log.next_inline().await.unwrap().unwrap();
     }
     assert_eq!(
         seen,

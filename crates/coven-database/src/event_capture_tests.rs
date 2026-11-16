@@ -124,23 +124,26 @@ async fn local_table_writes_against_plain_sqlite() {
         let mut live: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
         });
-        assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
+        assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), 0);
         let insert: &'static str = Box::leak(fill(rows).into_boxed_str());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
         let coven_insert = started.elapsed();
-        assert_eq!(live.next().await.expect("the live query answers").unwrap(), i64::from(rows));
+        assert_eq!(
+            live.next_inline().await.expect("the live query answers").unwrap(),
+            i64::from(rows)
+        );
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, "DELETE FROM queue").await.unwrap();
         let coven_delete = started.elapsed();
-        assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
+        assert_eq!(live.next_inline().await.expect("the live query answers").unwrap(), 0);
         drop(live);
         let mut narrow: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
             Ok(sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
                 r.get::<_, i64>(0)
             })?)
         });
-        assert!(narrow.next().await.expect("the live query answers").unwrap().is_empty());
+        assert!(narrow.next_inline().await.expect("the live query answers").unwrap().is_empty());
         let started = std::time::Instant::now();
         crate::write::tests::sql(&db, insert).await.unwrap();
         let narrowed_insert = started.elapsed();

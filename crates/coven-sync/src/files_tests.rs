@@ -833,8 +833,7 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         let mut uploads = a.subscribe_queue();
         a.files.set_storage(Some(a.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
         tokio::time::timeout(HANG_GUARD, async {
-            while !uploads.next().await.expect("the live query answers").unwrap().files.is_empty() {
-            }
+            while !uploads.next_inline().await.unwrap().unwrap().files.is_empty() {}
         })
         .await
         .unwrap();

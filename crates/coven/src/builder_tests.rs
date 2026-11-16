@@ -136,7 +136,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::time::timeout(HANG_GUARD, async {
-        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+        while uploads.next_inline().await.expect("the live query answers").unwrap() != 0 {}
     })
     .await
     .unwrap();

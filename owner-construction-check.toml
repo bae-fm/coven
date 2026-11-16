@@ -1461,6 +1461,14 @@ tables = [
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).
 "crates/coven-database/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
+# `next_result` takes a live query to the blocking pool and gives it back
+# with its result, so a caller that waits on one holds the query it got back
+# (api.md E4).
+"crates/coven-database/src/database_local_bytes.rs" = ["LocalBytesWatch::next"]
+# A live query's run goes to the blocking pool and runs to its end even when
+# its caller stops waiting; then its bug goes to the store's sink (E15).
+"crates/coven-database/src/live_results.rs" = ["next_result"]
+"crates/coven-database/src/test_utils.rs" = ["Followed::next"]
 # Removes an abandoned snapshot staging's records on a blocking task as it
 # drops; closing the store waits for it (§16.2).
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
@@ -1758,7 +1766,11 @@ tables = [
 # Recovery discovery and forgetting scope the installation's keychain to each
 # store's entries.
 "crates/coven/src/saved_restore.rs" = ["list", "forget"]
-"crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
+"crates/coven/src/handle.rs" = [
+    "CovenHandle::close",
+    "CovenHandle::new",
+    "CovenHandle::operation_outcome",
+]
 # Leaving a store runs in a task of its own that finishes even if the app
 # stops waiting: past its removal's journal it only goes forward (§11.6).
 # Its record and the store's deletion run on the blocking pool to their end,

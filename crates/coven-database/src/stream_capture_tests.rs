@@ -8,8 +8,8 @@ async fn streamed_commits_observe_without_rowid_and_virtual_tables_and_discard_r
         .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
     let mut search: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM search", [], |r| r.get::<_, String>(0))?));
-    assert!(items.next().await.expect("the live query answers").unwrap().is_empty());
-    assert!(search.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(items.next_inline().await.expect("the live query answers").unwrap().is_empty());
+    assert!(search.next_inline().await.expect("the live query answers").unwrap().is_empty());
     db.inspect_writer(|writer| {
         assert!(writer
             .stream_transaction::<()>(|writer| {
@@ -31,14 +31,14 @@ async fn streamed_commits_observe_without_rowid_and_virtual_tables_and_discard_r
             })
             .unwrap()
     });
-    assert_eq!(items.next().await.expect("the live query answers").unwrap(), ["stored"]);
-    assert_eq!(search.next().await.expect("the live query answers").unwrap(), ["stored"]);
+    assert_eq!(items.next_inline().await.expect("the live query answers").unwrap(), ["stored"]);
+    assert_eq!(search.next_inline().await.expect("the live query answers").unwrap(), ["stored"]);
     db.inspect_writer(|writer| {
         writer
             .stream_transaction(|writer| writer.batch("DELETE FROM items; DELETE FROM search"))
             .unwrap()
     });
-    assert!(items.next().await.expect("the live query answers").unwrap().is_empty());
-    assert!(search.next().await.expect("the live query answers").unwrap().is_empty());
+    assert!(items.next_inline().await.expect("the live query answers").unwrap().is_empty());
+    assert!(search.next_inline().await.expect("the live query answers").unwrap().is_empty());
     db.close().await.unwrap();
 }

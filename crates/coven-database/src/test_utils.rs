@@ -65,7 +65,9 @@ pub enum WriteCheckpoint {
 /// A live query's results as a test follows them: each in the order the
 /// query reports it, kept as the latest one seen.
 pub struct Followed<T, E> {
-    query: crate::LiveQuery<T, E>,
+    /// `None` only while a result is awaited, which a test that gives up
+    /// on it does not come back from.
+    query: Option<crate::LiveQuery<T, E>>,
     latest: Option<T>,
 }
 
@@ -76,17 +78,18 @@ where
 {
     /// Follow `query` from its first result.
     pub fn new(query: crate::LiveQuery<T, E>) -> Self {
-        Self { query, latest: None }
+        Self { query: Some(query), latest: None }
     }
 
     /// The next result the query reports. Panics on an error result or
     /// after the query ends, and when none ever comes.
     pub async fn next(&mut self) -> T {
-        let next = coven_foundation::clock::within(self.query.next())
+        let query = self.query.take().expect("the live query was awaited and abandoned");
+        let (query, next) = coven_foundation::clock::within(crate::next_result(query))
             .await
-            .unwrap_or_else(|| panic!("no result after {:?}", self.latest))
-            .expect("the live query ended")
-            .expect("the live query failed");
+            .unwrap_or_else(|| panic!("no result after {:?}", self.latest));
+        self.query = Some(query);
+        let next = next.expect("the live query ended").expect("the live query failed");
         self.latest = Some(next.clone());
         next
     }

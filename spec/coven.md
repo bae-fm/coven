@@ -13777,7 +13777,7 @@ built only to be taken apart again, with every field public and no methods, isn'
 used to pass collaborators; they are passed by name.
 
 **A handle is what an owner hands out on purpose.** A reconfigurable live query
-(api.md E4) waits for its next result in one call while the app replaces its
+(api.md E4) waits for a change in one call while the app replaces its
 request from another. The query's `requests()` returns a `LiveQueryRequests`,
 which shares the query's pending request and the signal that wakes it. Such a
 value is an owner's *handle*, not to be confused with the store's handle the app
