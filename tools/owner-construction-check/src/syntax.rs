@@ -542,6 +542,21 @@ pub(crate) fn is_test_only(attrs: &[syn::Attribute], features: &[String]) -> boo
     })
 }
 
+/// Whether `attribute` is a `#[cfg_attr(…)]` whose predicate holds only in
+/// tests, as `is_test_only` judges a `cfg`: the attributes it adds, such as
+/// `cfg_attr(feature = "test-utils", derive(Default))`'s derive, exist only
+/// in test builds.
+pub(crate) fn is_test_only_attribute(attribute: &syn::Attribute, features: &[String]) -> bool {
+    attribute.path().is_ident("cfg_attr")
+        && attribute
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .is_ok_and(|arguments| {
+                arguments.first().is_some_and(|predicate| cfg_requires_test(predicate, features))
+            })
+}
+
 /// Whether a `cfg` predicate can hold only when `test` or one of `features`
 /// does.
 fn cfg_requires_test(predicate: &syn::Meta, features: &[String]) -> bool {

@@ -4,6 +4,9 @@
 //! item, statement, field, variant, match arm and struct-literal field that
 //! compiles only into tests (`syntax::is_test_only`): under `test`, or under
 //! one of the policy's test-support features (`Policy::test_support_features`).
+//! So is every attribute a `cfg_attr` adds only in tests
+//! (`syntax::is_test_only_attribute`), such as a derive of `Default` for a
+//! test's fake: production code keeps the item without it.
 //!
 //! The rules of F.1 to F.3 read the code that remains: test code may assemble
 //! its own graphs from raw material, and nothing outside it can reach what it
@@ -14,7 +17,7 @@
 use syn::punctuated::Punctuated;
 use syn::visit_mut::{self, VisitMut};
 
-use crate::syntax::{is_test_only, RustFile};
+use crate::syntax::{is_test_only, is_test_only_attribute, RustFile};
 
 /// The crates' files without their test code. `features` are the Cargo
 /// features only tests turn on.
@@ -95,9 +98,38 @@ impl TestCode<'_> {
     fn is_test_only(&self, attrs: &[syn::Attribute]) -> bool {
         is_test_only(attrs, self.features)
     }
+
+    /// Drop the attributes a `cfg_attr` adds only in tests.
+    fn strip(&self, attrs: &mut Vec<syn::Attribute>) {
+        attrs.retain(|attribute| !is_test_only_attribute(attribute, self.features));
+    }
 }
 
 impl VisitMut for TestCode<'_> {
+    fn visit_item_mut(&mut self, node: &mut syn::Item) {
+        if let Some(attrs) = item_attrs_mut(node) {
+            self.strip(attrs);
+        }
+        visit_mut::visit_item_mut(self, node);
+    }
+
+    fn visit_impl_item_mut(&mut self, node: &mut syn::ImplItem) {
+        if let Some(attrs) = impl_item_attrs_mut(node) {
+            self.strip(attrs);
+        }
+        visit_mut::visit_impl_item_mut(self, node);
+    }
+
+    fn visit_field_mut(&mut self, node: &mut syn::Field) {
+        self.strip(&mut node.attrs);
+        visit_mut::visit_field_mut(self, node);
+    }
+
+    fn visit_variant_mut(&mut self, node: &mut syn::Variant) {
+        self.strip(&mut node.attrs);
+        visit_mut::visit_variant_mut(self, node);
+    }
+
     fn visit_file_mut(&mut self, node: &mut syn::File) {
         node.items.retain(|item| !self.is_test_only(item_attrs(item)));
         visit_mut::visit_file_mut(self, node);
@@ -178,6 +210,37 @@ fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
         syn::Item::Union(item) => &item.attrs,
         syn::Item::Use(item) => &item.attrs,
         _ => &[],
+    }
+}
+
+fn item_attrs_mut(item: &mut syn::Item) -> Option<&mut Vec<syn::Attribute>> {
+    match item {
+        syn::Item::Const(item) => Some(&mut item.attrs),
+        syn::Item::Enum(item) => Some(&mut item.attrs),
+        syn::Item::ExternCrate(item) => Some(&mut item.attrs),
+        syn::Item::Fn(item) => Some(&mut item.attrs),
+        syn::Item::ForeignMod(item) => Some(&mut item.attrs),
+        syn::Item::Impl(item) => Some(&mut item.attrs),
+        syn::Item::Macro(item) => Some(&mut item.attrs),
+        syn::Item::Mod(item) => Some(&mut item.attrs),
+        syn::Item::Static(item) => Some(&mut item.attrs),
+        syn::Item::Struct(item) => Some(&mut item.attrs),
+        syn::Item::Trait(item) => Some(&mut item.attrs),
+        syn::Item::TraitAlias(item) => Some(&mut item.attrs),
+        syn::Item::Type(item) => Some(&mut item.attrs),
+        syn::Item::Union(item) => Some(&mut item.attrs),
+        syn::Item::Use(item) => Some(&mut item.attrs),
+        _ => None,
+    }
+}
+
+fn impl_item_attrs_mut(item: &mut syn::ImplItem) -> Option<&mut Vec<syn::Attribute>> {
+    match item {
+        syn::ImplItem::Const(item) => Some(&mut item.attrs),
+        syn::ImplItem::Fn(item) => Some(&mut item.attrs),
+        syn::ImplItem::Type(item) => Some(&mut item.attrs),
+        syn::ImplItem::Macro(item) => Some(&mut item.attrs),
+        _ => None,
     }
 }
 

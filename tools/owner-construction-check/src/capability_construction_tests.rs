@@ -707,6 +707,39 @@ fn default_is_forbidden_even_when_declared_inside_a_root_but_test_items_are_exem
     assert!(check("crates/app-foundation/src/clock_tests.rs", declaration).is_empty());
 }
 
+/// A derive of `Default` that a `cfg_attr` adds only in tests is test code,
+/// as an item under the same `cfg` is.
+#[test]
+fn a_default_derive_only_tests_add_is_test_code() {
+    let mut listed = policy();
+    listed.test_support_features = vec!["test-utils".into()];
+    let check = |definition: &str, policy: &Policy| {
+        find_capability_construction_violations(
+            &[
+                RustFile::fixture("crates/app-foundation/src/capabilities.rs", CAPABILITIES),
+                RustFile::fixture(
+                    "crates/app-foundation/src/fakes.rs",
+                    &format!("{definition} use app_foundation::capabilities::*;"),
+                ),
+            ],
+            policy,
+        )
+    };
+    for definition in [
+        "#[cfg_attr(feature = \"test-utils\", derive(Default))] struct SystemClock;",
+        "#[cfg_attr(any(test, feature = \"test-utils\"), derive(Default))] struct SystemClock;",
+        "#[cfg_attr(test, derive(Debug, Default))] struct SystemClock;",
+    ] {
+        assert!(check(definition, &listed).is_empty(), "flagged {definition}");
+    }
+    for definition in [
+        "#[cfg_attr(feature = \"cloud\", derive(Default))] struct SystemClock;",
+        "#[cfg_attr(any(test, feature = \"cloud\"), derive(Default))] struct SystemClock;",
+    ] {
+        assert!(!check(definition, &listed).is_empty(), "accepted {definition}");
+    }
+}
+
 #[test]
 fn associated_constants_are_not_composition_roots() {
     for (caller, source) in [

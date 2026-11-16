@@ -13978,7 +13978,9 @@ the same on any platform.
    `<name>_tests.rs` files, each crate's `tests/` directory, files only test
    modules declare, and every item that compiles only into tests: under
    `cfg(test)`, or under a Cargo feature only tests turn on, such as the
-   fakes' `test-utils` (F.5). The policy lists those features. The test
+   fakes' `test-utils` (F.5). So is an attribute a `cfg_attr` adds only
+   under them, such as a fake's `cfg_attr(feature = "test-utils",
+   derive(Default))`. The policy lists those features. The test
    module F.2's rule places in `<name>_tests.rs` is one under `cfg(test)`
    alone: a module under such a feature is test support that other crates
    use, and it stays where its crate keeps it. A test may

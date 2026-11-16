@@ -145,3 +145,33 @@ fn code_gated_on_a_listed_test_support_feature_is_test_code() {
     let unlisted = identifiers(&production_code(&files, &[])[0]);
     assert!(unlisted.contains("fake") && unlisted.contains("probe"));
 }
+
+#[test]
+fn attributes_a_cfg_attr_adds_only_in_tests_are_test_code() {
+    let file = RustFile::fixture(
+        "crates/app/src/lib.rs",
+        r#"
+        #[cfg_attr(feature = "test-utils", derive(Default))] struct Fake(u8);
+        #[cfg_attr(test, derive(Hash))] struct Probe { #[cfg_attr(test, serde(skip))] kept: u8 }
+        #[cfg_attr(feature = "cloud", derive(Clone))] struct Upload;
+        impl Upload { #[cfg_attr(any(test, feature = "test-utils"), inline)] fn send() {} }
+        "#,
+    );
+    // Attribute arguments are tokens, which a syntax tree's identifiers
+    // leave out, so the file is read back as text.
+    let text = |features: &[String]| {
+        quote::ToTokens::to_token_stream(
+            &production_code(std::slice::from_ref(&file), features)[0].syntax,
+        )
+        .to_string()
+    };
+    let kept = text(&["test-utils".to_string()]);
+    for absent in ["Default", "Hash", "serde", "inline"] {
+        assert!(!kept.contains(absent), "kept {absent}: {kept}");
+    }
+    for present in ["Fake", "Probe", "kept", "Clone", "send"] {
+        assert!(kept.contains(present), "removed {present}: {kept}");
+    }
+    let unlisted = text(&[]);
+    assert!(unlisted.contains("Default") && !unlisted.contains("Hash"), "{unlisted}");
+}
