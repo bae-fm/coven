@@ -203,6 +203,12 @@ pub(super) const SCHEMA: &str = concat!(
         WHERE s.removed=0 AND x.circle IS NULL;",
 );
 
+/// The views and tables a live query reads whole: coven's views and tables
+/// app SQL may read.
+pub(crate) fn whole_views() -> std::sync::Arc<crate::read_capture::WholeViews> {
+    std::sync::Arc::new(crate::read_capture::WholeViews::new(READABLE))
+}
+
 /// Whether `name` is one of coven's views or tables app SQL may read.
 pub(crate) fn app_readable(name: &str) -> bool {
     READABLE.iter().any(|object| object.eq_ignore_ascii_case(name))

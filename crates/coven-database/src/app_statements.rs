@@ -151,9 +151,9 @@ impl DatabaseConnection {
                 return Ok(Arc::clone(plan));
             }
         }
-        let plan = Arc::new(
-            self.authorization.unrecorded(|| ScopePlan::build(&self.connection, sql, statement))?,
-        );
+        let plan = Arc::new(self.authorization.unrecorded(|| {
+            ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
+        })?);
         if kept {
             let mut plans = self.app_statements.plans.borrow_mut();
             if plans.len() >= RECORDED {

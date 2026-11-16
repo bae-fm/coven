@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
+use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
@@ -53,8 +54,9 @@ impl ScopePlan {
         connection: &Connection,
         sql: &str,
         statement: &Statement<'_>,
+        whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        Ok(Self { sources: Sources::read(connection, sql, statement)? })
+        Ok(Self { sources: Sources::read(connection, sql, statement, whole)? })
     }
 
     /// The scope of each table the statement reads as one of its sources,
@@ -141,6 +143,7 @@ impl Sources {
         connection: &Connection,
         sql: &str,
         statement: &Statement<'_>,
+        whole: &WholeViews,
     ) -> rusqlite::Result<Option<Self>> {
         let Some(sql) = number_parameters(sql, statement)? else {
             return Ok(None);
@@ -161,6 +164,7 @@ impl Sources {
             edges: Vec::new(),
             aggregates: aggregates(connection)?,
             inlined: Vec::new(),
+            whole,
         };
         Ok(read_select(connection, &mut planner, select, None, &Ctes::default())?
             .map(|_| planner.ordered()))
@@ -170,7 +174,7 @@ impl Sources {
 /// A statement's cores, their items and the edges between them, as the
 /// `read_` functions find them; each of those gives `None` for a shape that
 /// keeps every table whole.
-pub(crate) struct Planner {
+pub(crate) struct Planner<'a> {
     pub(crate) items: Vec<FromItem>,
     /// Each core after the core it sits in.
     pub(crate) cores: Vec<Core>,
@@ -181,6 +185,8 @@ pub(crate) struct Planner {
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by.
     pub(crate) inlined: Vec<String>,
+    /// The views and tables the live query reads whole.
+    pub(crate) whole: &'a WholeViews,
 }
 
 /// The names of the connection's aggregate and window functions.
@@ -194,7 +200,7 @@ fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
     names
 }
 
-impl Planner {
+impl Planner<'_> {
     /// Order the items so each comes after the sources it takes values
     /// from: core by core, each after the core it sits in; within a core,
     /// those an ordered one reaches first, so each takes the values of the
@@ -545,7 +551,7 @@ pub(crate) fn read_select<'a>(
     let inner;
     let ctes = match &select.with {
         Some(with) => {
-            let Some(with) = ctes.with(with) else {
+            let Some(with) = ctes.with(with, planner.whole) else {
                 return Ok(None);
             };
             inner = with;

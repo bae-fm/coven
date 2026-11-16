@@ -9,7 +9,7 @@ use coven_foundation::task::Bug;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
 use crate::observation::ReadSet;
-use crate::read_capture::{ReadCapture, ReadFrame};
+use crate::read_capture::{ReadCapture, ReadFrame, WholeViews};
 use crate::row_scope::Scopes;
 use crate::{DbError, SyncedTable};
 
@@ -33,6 +33,7 @@ pub(crate) struct SqlAuthorization {
     /// The handle the connection serves, once it serves one, which a panic
     /// in the authorizer fails.
     handle: Arc<OnceLock<crate::observation::CommitObserver>>,
+    whole: Arc<WholeViews>,
 }
 
 impl ChangedTables {
@@ -141,18 +142,18 @@ struct AuthorizationState {
 impl SqlAuthorization {
     /// The authorizer of a connection of the handle that holds the store's
     /// writer lock.
-    pub(crate) fn new(tables: &[SyncedTable]) -> Self {
-        Self::judging(tables, true)
+    pub(crate) fn new(tables: &[SyncedTable], whole: Arc<WholeViews>) -> Self {
+        Self::judging(tables, true, whole)
     }
 
     /// The authorizer of a read-only handle's connection, which may not read
     /// the sync status or the retry effect (`internal_schema_sync_status.rs`,
     /// `internal_schema_retry_effect.rs`).
-    pub(crate) fn read_only(tables: &[SyncedTable]) -> Self {
-        Self::judging(tables, false)
+    pub(crate) fn read_only(tables: &[SyncedTable], whole: Arc<WholeViews>) -> Self {
+        Self::judging(tables, false, whole)
     }
 
-    fn judging(tables: &[SyncedTable], writer_state: bool) -> Self {
+    fn judging(tables: &[SyncedTable], writer_state: bool, whole: Arc<WholeViews>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
@@ -183,7 +184,12 @@ impl SqlAuthorization {
                 writer_state,
             })),
             handle: Arc::new(OnceLock::new()),
+            whole,
         }
+    }
+
+    pub(crate) fn whole_views(&self) -> &WholeViews {
+        &self.whole
     }
 
     /// Panic in the next judgment, as a bug in the authorizer would.
@@ -378,7 +384,7 @@ impl SqlAuthorization {
     /// reads, so a commit that changes it runs the query again (§4).
     pub(crate) fn live_reading(&self) -> ReadingSql<'_> {
         let reading = self.reading();
-        lock_unpoisoned(&self.state).reads = Some(ReadCapture::new());
+        lock_unpoisoned(&self.state).reads = Some(ReadCapture::new(Arc::clone(&self.whole)));
         reading
     }
 

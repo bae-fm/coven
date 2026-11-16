@@ -2,9 +2,26 @@
 //! it while each is prepared, and the scope each table was read in (§4).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::observation::{ColumnSet, ReadSet, TableRead};
 use crate::row_scope::{RowScope, Scopes};
+
+/// The views and tables a live query reads whole: a read through one of them
+/// depends on the object itself, which can change with no change to the
+/// tables it reads.
+pub(crate) struct WholeViews(BTreeSet<String>);
+
+impl WholeViews {
+    pub(crate) fn new<'a>(views: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(views.into_iter().map(str::to_ascii_lowercase).collect())
+    }
+
+    /// Whether `name` names one, in any letter case.
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.0.contains(&name.to_ascii_lowercase())
+    }
+}
 
 /// What a read context's statements read. Each statement running has its own
 /// frame, innermost last, so a statement a row mapper starts records its own
@@ -13,6 +30,7 @@ use crate::row_scope::{RowScope, Scopes};
 pub(crate) struct ReadCapture {
     frames: Vec<ReadFrame>,
     completed: ReadSet,
+    whole: Arc<WholeViews>,
 }
 
 /// What one statement read, as SQLite reported it while preparing it.
@@ -34,8 +52,8 @@ impl ReadFrame {
 }
 
 impl ReadCapture {
-    pub(crate) fn new() -> Self {
-        Self { frames: vec![ReadFrame::default()], completed: ReadSet::new() }
+    pub(crate) fn new(whole: Arc<WholeViews>) -> Self {
+        Self { frames: vec![ReadFrame::default()], completed: ReadSet::new(), whole }
     }
 
     fn current(&mut self) -> &mut ReadFrame {
@@ -45,6 +63,7 @@ impl ReadCapture {
     /// The statement being prepared read `column` of `table`, through the
     /// view or CTE `accessor` when it names one.
     pub(crate) fn read(&mut self, table: &str, column: &str, accessor: Option<&str>) {
+        let whole = accessor.filter(|name| self.whole.contains(name));
         let frame = self.current();
         frame.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
         if let Some(view) = accessor {
@@ -54,11 +73,11 @@ impl ReadCapture {
                 .or_default()
                 .insert(view.to_ascii_lowercase());
         }
-        // A read through one of coven's views reads the view itself too,
-        // even when the statement reads none of the view's columns, as a
-        // count of its rows or an EXISTS doesn't: a view can change with no
-        // change to its tables, as `coven_sending` does (§4).
-        if let Some(view) = accessor.filter(|name| crate::internal_schema::app_readable(name)) {
+        // A read through one of the views read whole reads the view itself
+        // too, even when the statement reads none of the view's columns, as
+        // a count of its rows or an EXISTS doesn't: a view can change with
+        // no change to its tables, as `coven_sending` does (§4).
+        if let Some(view) = whole {
             frame.columns.insert((view.to_ascii_lowercase(), String::new()));
         }
     }

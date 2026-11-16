@@ -8,6 +8,7 @@
 //! failing it makes only output rows that fail it.
 
 use crate::from_item::{Column, Columns, FromItem};
+use crate::read_capture::WholeViews;
 use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text, Part};
@@ -30,11 +31,11 @@ impl<'a> Ctes<'a> {
     /// These and `with`'s, or `None` when a name repeats, which SQLite
     /// resolves by where each is and coven doesn't follow, or names one of
     /// coven's views, which reads through the CTE couldn't be told from.
-    pub(crate) fn with(&self, with: &'a With<'a>) -> Option<Self> {
+    pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews) -> Option<Self> {
         let mut visible = self.visible.clone();
         for cte in with.ctes.iter() {
             if visible.iter().any(|seen| seen.tbl_name == cte.tbl_name)
-                || crate::internal_schema::app_readable(&crate::sql::name(cte.tbl_name.0))
+                || whole.contains(&crate::sql::name(cte.tbl_name.0))
             {
                 return None;
             }

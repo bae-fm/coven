@@ -35,7 +35,7 @@ pub(crate) fn compared_subquery<'a>(
     }
 }
 
-impl Planner {
+impl Planner<'_> {
     /// The edge from the column `member_expr` names, written in `core`, to
     /// the source of the column `select` returns, when `cores` are the cores
     /// `select` was read as. The column and the source's column compare by

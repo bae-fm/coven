@@ -444,7 +444,7 @@ fn wal_refusal_names_the_selected_journal_mode() {
     let sql = DatabaseConnection::open(
         Path::new(":memory:"),
         false,
-        SqlAuthorization::new(&[]),
+        SqlAuthorization::new(&[], crate::internal_schema::whole_views()),
         &SqliteSettings::default(),
         &crate::SqlFunctions::default(),
     )

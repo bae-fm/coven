@@ -325,7 +325,7 @@ fn a_new_database_records_the_sqlite_that_created_it() {
     let mut connection = DatabaseConnection::open(
         &directory.path().join("new.db"),
         false,
-        crate::authorization::SqlAuthorization::new(&[]),
+        crate::authorization::SqlAuthorization::new(&[], crate::internal_schema::whole_views()),
         &crate::SqliteSettings::default(),
         &SqlFunctions::default(),
     )

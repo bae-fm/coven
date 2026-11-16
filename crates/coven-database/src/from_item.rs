@@ -121,7 +121,7 @@ pub(crate) fn read_item<'a>(
                 return Ok(None);
             };
             let ordinary = kind == "table";
-            if !ordinary && !crate::internal_schema::app_readable(&stored) {
+            if !ordinary && !planner.whole.contains(&stored) {
                 let read = (
                     planner.items.len(),
                     planner.cores.len(),

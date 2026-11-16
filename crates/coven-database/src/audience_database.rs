@@ -21,6 +21,7 @@ use coven_merge::Audience;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Stages the database for a run from the live connection, whose schema and
 /// rows it copies.
@@ -59,6 +60,7 @@ impl AudienceDatabase {
         observer: &crate::observation::CommitObserver,
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
+        whole: &Arc<crate::read_capture::WholeViews>,
         live: &DatabaseConnection,
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
@@ -66,7 +68,7 @@ impl AudienceDatabase {
         let database = DatabaseConnection::open(
             &directory.audience_database_path(),
             false,
-            SqlAuthorization::new(tables),
+            SqlAuthorization::new(tables, Arc::clone(whole)),
             sqlite,
             functions,
         )?;

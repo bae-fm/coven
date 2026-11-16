@@ -310,7 +310,7 @@ pub(crate) fn followed(name: &str) -> bool {
 
 #[path = "internal_schema_views.rs"]
 mod views;
-pub(crate) use views::app_readable;
+pub(crate) use views::{app_readable, whole_views};
 
 #[path = "input_database_schema.rs"]
 mod input;

@@ -229,6 +229,7 @@ impl DatabaseBuilder {
             functions: self.functions.clone(),
         };
         let path = self.directory.database_path();
+        let whole = crate::internal_schema::whole_views();
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
         let observer = CommitObserver::new(self.directory.bugs().clone());
@@ -240,7 +241,7 @@ impl DatabaseBuilder {
         let mut writer = DatabaseConnection::open(
             &path,
             false,
-            SqlAuthorization::new(&tables),
+            SqlAuthorization::new(&tables, Arc::clone(&whole)),
             &self.sqlite,
             &self.functions,
         )?;
@@ -273,6 +274,7 @@ impl DatabaseBuilder {
                             &observer,
                             settings.device_id,
                             &tables,
+                            &whole,
                             live,
                         )
                     }),
@@ -303,7 +305,7 @@ impl DatabaseBuilder {
                 DatabaseConnection::open(
                     &path,
                     false,
-                    SqlAuthorization::new(&tables),
+                    SqlAuthorization::new(&tables, Arc::clone(&whole)),
                     &self.sqlite,
                     &self.functions,
                 )?
@@ -359,7 +361,7 @@ impl DatabaseBuilder {
             let checkpointing = DatabaseConnection::open(
                 &path,
                 false,
-                SqlAuthorization::new(&[]),
+                SqlAuthorization::new(&[], Arc::clone(&whole)),
                 &self.sqlite,
                 &crate::SqlFunctions::default(),
             )?;
@@ -375,7 +377,7 @@ impl DatabaseBuilder {
                 DatabaseConnection::open(
                     &path,
                     false,
-                    SqlAuthorization::new(&tables),
+                    SqlAuthorization::new(&tables, Arc::clone(&whole)),
                     &self.sqlite,
                     &self.functions,
                 )?,
@@ -394,7 +396,7 @@ impl DatabaseBuilder {
             let mut reader = DatabaseConnection::open(
                 &path,
                 true,
-                SqlAuthorization::new(&tables),
+                SqlAuthorization::new(&tables, Arc::clone(&whole)),
                 &self.sqlite,
                 &self.functions,
             )?;
@@ -458,6 +460,7 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
+        let whole = crate::internal_schema::whole_views();
         // Only the cache connection commits, and nothing subscribes to it.
         let observer = CommitObserver::new(self.directory.bugs().clone());
         // A read-only handle transfers nothing: every file reads as waiting.
@@ -467,7 +470,7 @@ impl DatabaseBuilder {
         let mut first = DatabaseConnection::open(
             &path,
             true,
-            SqlAuthorization::read_only(&tables),
+            SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
             &self.sqlite,
             &self.functions,
         )?;
@@ -494,7 +497,7 @@ impl DatabaseBuilder {
             let mut reader = DatabaseConnection::open(
                 &path,
                 true,
-                SqlAuthorization::read_only(&tables),
+                SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
                 &self.sqlite,
                 &self.functions,
             )?;
@@ -505,7 +508,7 @@ impl DatabaseBuilder {
         let mut writer = DatabaseConnection::open(
             &path,
             false,
-            SqlAuthorization::read_only(&tables),
+            SqlAuthorization::read_only(&tables, Arc::clone(&whole)),
             &self.sqlite,
             &self.functions,
         )?;
@@ -642,7 +645,7 @@ fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnect
     DatabaseConnection::open(
         path,
         read_only,
-        SqlAuthorization::new(&[]),
+        SqlAuthorization::new(&[], crate::internal_schema::whole_views()),
         // The input database is a cache held to its byte budget (§21.1), and
         // the next received range reuses its freed pages; giving them back
         // would shrink and regrow the file.
