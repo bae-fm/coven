@@ -46,6 +46,7 @@ mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;
 mod load_step;
+mod local_write;
 mod loss_record;
 mod lost;
 mod members;

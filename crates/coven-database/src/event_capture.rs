@@ -3,8 +3,8 @@
 //! Sessions record only net changes. A write's steps need each operation, in
 //! order (§9.6, D5). A connection has one pre-update hook, which a session
 //! would otherwise own, so the app phase records through this hook and no
-//! session runs until it ends. Only a synced table's operations are kept
-//! whole; a device-local table's are kept as live queries need them.
+//! session runs until it ends. Only a recorded table's operations are kept
+//! whole; another table's are kept as live queries need them.
 
 use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 /// One row operation of the app phase.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Event {
+pub(crate) struct Operation {
     /// The table, as SQLite names it.
     pub(crate) table: String,
     /// Insert, update or delete.
@@ -31,7 +31,7 @@ pub(crate) struct Event {
 }
 
 struct CapturedEvents {
-    operations: Vec<(i32, Event)>,
+    operations: Vec<(i32, Operation)>,
     local: super::pre_update_changes::PreUpdateChanges,
 }
 
@@ -46,26 +46,26 @@ pub(super) struct EventCapture {
 impl EventCapture {
     /// Record `transaction`'s row operations until it stops observing them.
     pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
-        let (tables, synced, scoped) = transaction.within(|database| {
-            let synced = Arc::clone(
+        let (tables, recorded, scoped) = transaction.within(|database| {
+            let recorded = Arc::clone(
                 &database
                     .observation
                     .as_ref()
                     .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
-                    .synced,
+                    .recorded,
             );
             let tables = database.table_shapes()?;
             let scoped = match &database.handle {
                 Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
                 None => std::collections::HashMap::new(),
             };
-            Ok::<_, DbError>((tables, synced, scoped))
+            Ok::<_, DbError>((tables, recorded, scoped))
         })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
             local: super::pre_update_changes::PreUpdateChanges::new(scoped),
         }));
-        let recorded = Arc::clone(&events);
+        let captured = Arc::clone(&events);
         let shapes = Arc::clone(&tables);
         transaction.observe_operations(
             move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
@@ -73,12 +73,12 @@ impl EventCapture {
                     return Ok(());
                 }
                 match tables.position(table) {
-                    Some(position) if synced.contains(&tables.shape(position).name) => {}
+                    Some(position) if recorded.contains(&tables.shape(position).name) => {}
                     Some(position) => {
-                        return lock_unpoisoned(&recorded).local.record(&tables, position, case);
+                        return lock_unpoisoned(&captured).local.record(&tables, position, case);
                     }
                     None => {
-                        lock_unpoisoned(&recorded).local.unshaped(table);
+                        lock_unpoisoned(&captured).local.unshaped(table);
                         return Ok(());
                     }
                 }
@@ -102,21 +102,21 @@ impl EventCapture {
                         .collect::<Result<Vec<_>, DbError>>()
                 };
                 let event = match case {
-                    PreUpdateCase::Insert(accessor) => Event {
+                    PreUpdateCase::Insert(accessor) => Operation {
                         table: table.to_owned(),
                         action,
                         old: Vec::new(),
                         new: new(accessor)?,
                         rowids: (accessor.get_new_row_id(), accessor.get_new_row_id()),
                     },
-                    PreUpdateCase::Delete(accessor) => Event {
+                    PreUpdateCase::Delete(accessor) => Operation {
                         table: table.to_owned(),
                         action,
                         old: old(accessor)?,
                         new: Vec::new(),
                         rowids: (accessor.get_old_row_id(), accessor.get_old_row_id()),
                     },
-                    PreUpdateCase::Update { old_value_accessor, new_value_accessor } => Event {
+                    PreUpdateCase::Update { old_value_accessor, new_value_accessor } => Operation {
                         table: table.to_owned(),
                         action,
                         old: old(old_value_accessor)?,
@@ -128,7 +128,7 @@ impl EventCapture {
                     },
                     PreUpdateCase::Unknown => return Ok(()),
                 };
-                lock_unpoisoned(&recorded).operations.push((depth, event));
+                lock_unpoisoned(&captured).operations.push((depth, event));
                 Ok(())
             },
         )?;
@@ -140,8 +140,8 @@ impl EventCapture {
         std::mem::take(&mut lock_unpoisoned(&self.events).local).finish(&self.shapes)
     }
 
-    /// The synced tables' operations so far, in order.
-    pub(super) fn events(&self) -> Vec<Event> {
+    /// The recorded tables' operations so far, in order.
+    pub(super) fn events(&self) -> Vec<Operation> {
         lock_unpoisoned(&self.events).operations.iter().map(|(_, event)| event.clone()).collect()
     }
 }

@@ -240,7 +240,7 @@ fn value(
 /// Tables with no primary key report table-wide changes.
 pub(crate) fn event_changes(
     database: &DatabaseConnection,
-    events: &[crate::sqlite::Event],
+    events: &[crate::sqlite::Operation],
     scoped: &ScopedColumns,
 ) -> Result<Vec<RowChange>, DbError> {
     let shapes = database.table_shapes()?;

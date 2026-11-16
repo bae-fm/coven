@@ -397,7 +397,7 @@ impl<'a> FileWrite<'a> {
     /// completed (§17.3).
     pub(crate) fn finish_app(
         &self,
-        events: impl Fn() -> Vec<crate::sqlite::Event>,
+        events: impl Fn() -> Vec<crate::sqlite::Operation>,
     ) -> Result<(), DbError> {
         self.finish_uploads()?;
         let captured = crate::write_capture::capture(self.files.schema, &events())?;

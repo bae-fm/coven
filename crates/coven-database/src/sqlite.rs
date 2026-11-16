@@ -12,8 +12,6 @@ mod database_file_sync;
 mod event_capture;
 #[path = "live_judging.rs"]
 mod live_judging;
-#[path = "local_write.rs"]
-mod local_write;
 #[path = "page_cache.rs"]
 mod page_cache;
 #[path = "pre_update_changes.rs"]
@@ -34,8 +32,10 @@ mod transaction_capture;
 mod transaction_constants;
 #[path = "write_transaction.rs"]
 mod write_transaction;
+#[path = "write_with.rs"]
+mod write_with;
 use app_statements::StepsOf;
-pub(crate) use event_capture::Event;
+pub(crate) use event_capture::Operation;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
 
@@ -120,9 +120,8 @@ pub(crate) struct DatabaseConnection {
 
 struct WriterObservation {
     device: DeviceId,
-    /// The synced tables, lowercase: a local write keeps their operations
-    /// whole.
-    synced: Arc<BTreeSet<String>>,
+    /// The tables whose operations a write keeps whole, lowercase.
+    recorded: Arc<BTreeSet<String>>,
 }
 
 impl DatabaseConnection {
@@ -794,20 +793,17 @@ impl DatabaseConnection {
         self.handle = Some(handle);
     }
 
-    /// Serve the handle as its writer, capturing each commit's row changes.
+    /// Serve the handle as its writer, capturing each commit's row changes and
+    /// keeping a write's operations on the `recorded` tables whole.
     pub(crate) fn observe_commits(
         &mut self,
         handle: CommitObserver,
         device: DeviceId,
-        synced: &[SyncedTable],
+        recorded: BTreeSet<String>,
     ) {
         assert!(self.observation.is_none(), "commit observation installed once");
-        let synced = crate::file_table::synced(synced)
-            .iter()
-            .map(|table| table.name.to_ascii_lowercase())
-            .collect();
         self.serve(handle);
-        self.observation = Some(WriterObservation { device, synced: Arc::new(synced) });
+        self.observation = Some(WriterObservation { device, recorded: Arc::new(recorded) });
     }
 
     pub(crate) fn lost_values(&self) -> Result<Vec<crate::LostValue>, DbError> {
@@ -819,7 +815,12 @@ impl DatabaseConnection {
         records.into_iter().map(crate::LostValue::from_record).collect()
     }
 
-    fn require_transaction(&self) -> Result<(), DbError> {
+    /// The scope in which the app's write SQL runs.
+    pub(crate) fn write_scope(&self) -> crate::authorization::WriteSql<'_> {
+        self.authorization.write()
+    }
+
+    pub(crate) fn require_transaction(&self) -> Result<(), DbError> {
         if self.connection.is_autocommit() {
             Err(DbError::TransactionEnded)
         } else {

@@ -345,7 +345,11 @@ impl DatabaseBuilder {
         coven_foundation::task::operation_step(
             "starting the writer's commit capture and upkeep threads",
         );
-        writer.observe_commits(observer.clone(), settings.device_id, &tables);
+        let recorded = crate::file_table::synced(&tables)
+            .iter()
+            .map(|table| table.name.to_ascii_lowercase())
+            .collect();
+        writer.observe_commits(observer.clone(), settings.device_id, recorded);
         #[cfg(any(test, feature = "test-utils"))]
         if self.refuse_close {
             writer.leave_statement_open();

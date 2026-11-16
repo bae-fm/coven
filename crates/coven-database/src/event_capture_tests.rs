@@ -15,7 +15,7 @@ fn tables() -> Vec<SyncedTable> {
     ]
 }
 
-fn summary(events: &[Event]) -> Vec<(&str, Action)> {
+fn summary(events: &[Operation]) -> Vec<(&str, Action)> {
     events.iter().map(|event| (event.table.as_str(), event.action)).collect()
 }
 

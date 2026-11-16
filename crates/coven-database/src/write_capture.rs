@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::hooks::Action;
 
-use crate::sqlite::Event;
+use crate::sqlite::Operation;
 use crate::write_encoding::{sql_value, value};
 use crate::write_rows::{key_columns, row_key, AppKey, AppValues};
 use crate::write_schema::WriteSchema;
@@ -39,7 +39,7 @@ pub(crate) fn values(
 /// key ends the old key's row and starts the new one's.
 pub(crate) fn capture(
     schema: &WriteSchema,
-    events: &[Event],
+    events: &[Operation],
 ) -> Result<BTreeMap<AppKey, CapturedRow>, DbError> {
     let mut changes = BTreeMap::<AppKey, Option<AppValues>>::new();
     for event in events {

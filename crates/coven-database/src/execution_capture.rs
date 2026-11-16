@@ -13,7 +13,7 @@
 use crate::declaration::AudienceSource;
 use crate::merge_store::MergeStore;
 use crate::schema::{SchemaForeignKey, TableSchema};
-use crate::sqlite::{DatabaseConnection, Event};
+use crate::sqlite::DatabaseConnection;
 use crate::write_capture::values;
 use crate::write_rows::{
     column_audience, column_name, row_key, target_columns, AppKey, AppValues, AppView,
@@ -330,7 +330,7 @@ pub(crate) fn capture(
     store: &MergeStore<'_>,
     before: &AppView<'_>,
     after: &AppView<'_>,
-    events: &[Event],
+    events: &[crate::sqlite::Operation],
 ) -> Result<BTreeMap<RowId, Vec<Step>>, DbError> {
     let mut tracker = Tracker {
         db,
