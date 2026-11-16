@@ -23,6 +23,7 @@ api_crate = "coven"
 
 # Appendix F.1: the crates in dependency order.
 crate_order = [
+    "caught",
     "coven-foundation",
     "coven-crypto",
     "coven-merge",

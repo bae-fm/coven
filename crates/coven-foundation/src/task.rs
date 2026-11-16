@@ -8,20 +8,17 @@
 //! a long-lived worker or work its caller stopped waiting for, reports its
 //! panic to a [`BugSink`] instead, the app's own reporter.
 
-use std::any::Any;
 use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-#[path = "task_location.rs"]
-mod location;
 
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "task_in_flight.rs"]
 mod in_flight;
 
-pub use location::{catching_operation, SourceLocation};
+pub use ::caught::{
+    catching_operation, caught, caught_sync, panic_message, Bug, BugKind, SourceLocation,
+};
 
 /// Name the step the blocking operation running on this thread has reached.
 /// A test's hang report prints the latest step of each operation still
@@ -44,51 +41,6 @@ pub enum TaskFailed {
     /// finished. Not a bug: the process is ending the work.
     #[error(transparent)]
     Shutdown(Shutdown),
-}
-
-/// Work that panicked: a bug in it, not a failure its caller can act on
-/// (E15). The caller reports it wherever it reports its own bugs, and the
-/// call that ran the work returns it as its error.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{operation} panicked: {message}")]
-pub struct Bug {
-    /// What the work was doing, as its caller named it.
-    pub operation: &'static str,
-    /// The text the panic carried ([`panic_message`]).
-    pub message: String,
-    /// Where the bug showed itself: where the panic began, or where the code
-    /// that found the bug made it ([`Bug::new`]). `None` for a panic no catch
-    /// of coven's saw begin: one that reached a join uncaught
-    /// ([`TaskFailed::of_join`]), or one resumed with
-    /// `std::panic::resume_unwind` from a panic elsewhere.
-    pub location: Option<SourceLocation>,
-    /// Whether the bug showed itself as a panic or code found it.
-    pub kind: BugKind,
-}
-
-/// How a bug showed itself (E15).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BugKind {
-    /// Work panicked. The process's panic hook saw the panic begin, so an
-    /// app whose own hook reports every panic has reported this one.
-    Panic,
-    /// Code found state its guarantee rules out, without a panic
-    /// ([`Bug::new`]). No hook saw it: whoever the bug reaches reports it.
-    Found,
-}
-
-impl Bug {
-    /// The bug code found in `operation` without a panic, such as state a
-    /// `Drop` finds wrong, located where this is called.
-    #[track_caller]
-    pub fn new(operation: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            operation,
-            message: message.into(),
-            location: Some(SourceLocation::of(std::panic::Location::caller())),
-            kind: BugKind::Found,
-        }
-    }
 }
 
 /// Work its runtime dropped as it shut down, before the work finished. Not a
@@ -134,7 +86,7 @@ impl TaskFailed {
     /// join uncaught gives a bug that can't say where it began.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
         if error.is_panic() {
-            failed_with(operation, error.into_panic())
+            Self::Panicked(caught::bug_of_unlocated(operation, error.into_panic()))
         } else {
             Self::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::Unknown })
         }
@@ -161,18 +113,6 @@ impl TaskFailed {
     /// Whether the work panicked, rather than being dropped by its runtime.
     pub fn is_panic(&self) -> bool {
         matches!(self, Self::Panicked(_))
-    }
-}
-
-/// The text a panic carried: what `panic!` and `expect` were given, or a
-/// placeholder for a payload that is not text.
-pub fn panic_message(payload: &(dyn Any + Send)) -> String {
-    if let Some(text) = payload.downcast_ref::<&'static str>() {
-        (*text).to_string()
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        text.clone()
-    } else {
-        "a panic whose payload is not text".to_string()
     }
 }
 
@@ -205,26 +145,6 @@ pub async fn joined<T: Send + 'static>(
         Ok(caught) => caught.map_err(TaskFailed::Panicked),
         Err(error) => Err(TaskFailed::of_join(operation, error)),
     }
-}
-
-/// Run `work` inline, catching a panic in any of its polls. For one message of
-/// a long-lived loop: the panic fails that message and the loop serves the
-/// next. Run inline, the work can't be dropped by its runtime, so a panic is
-/// its only failure.
-///
-/// After a panic `work` is dropped at once, inside a catch of its own, so a
-/// drop that panics on what the first panic left behind does not unwind into
-/// the caller either.
-pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -> Result<T, Bug> {
-    Caught { operation, work: Some(Box::pin(work)) }.await
-}
-
-/// [`caught`] for a synchronous call: an FFI callback, a dedicated thread's
-/// body, a `Drop`. Unwinding out of an `extern "C"` function aborts the
-/// process, so such a function catches here and answers with its own failure
-/// value.
-pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
-    location::catch_located(operation, work).map_err(|(payload, at)| bug_of(operation, payload, at))
 }
 
 /// Where a bug in work nobody waits for goes (E15): a store's long-lived
@@ -580,80 +500,6 @@ impl<T> Future for CompletingTask<T> {
             // The runtime dropped the work as it shut down.
             Err(_dropped) => Err(TaskFailed::Shutdown(Shutdown { operation, outcome })),
         })
-    }
-}
-
-/// The failure a panic that reached a join uncaught, with `payload`, stands
-/// for. No catch of coven's saw it begin, so its bug can't say where.
-fn failed_with(operation: &'static str, payload: Box<dyn Any + Send>) -> TaskFailed {
-    TaskFailed::Panicked(bug_of(operation, payload, None))
-}
-
-/// The bug a caught panic's `payload`, begun at `location`, stands for. The
-/// payload is dropped here inside a catch of its own: a payload whose `Drop`
-/// panics would otherwise unwind out of the helper that caught the first
-/// panic.
-fn bug_of(
-    operation: &'static str,
-    payload: Box<dyn Any + Send>,
-    location: Option<SourceLocation>,
-) -> Bug {
-    let bug =
-        Bug { operation, message: panic_message(payload.as_ref()), location, kind: BugKind::Panic };
-    if bug.location.is_none() {
-        tracing::warn!(
-            operation,
-            "{bug}, where no catch of coven's saw the panic begin, so its bug names no place in \
-             the code"
-        );
-    }
-    if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-        tracing::error!(
-            operation,
-            "dropping the payload of a panic panicked again: {}",
-            panic_message(again.as_ref())
-        );
-        // This payload's own drop may panic too; leaking it is what keeps
-        // the unwind from reaching the caller.
-        std::mem::forget(again);
-    }
-    bug
-}
-
-struct Caught<F: Future> {
-    operation: &'static str,
-    /// `None` once `work` has finished or panicked.
-    work: Option<Pin<Box<F>>>,
-}
-
-impl<F: Future> Future for Caught<F> {
-    type Output = Result<F::Output, Bug>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let operation = self.operation;
-        let Some(work) = self.work.as_mut() else {
-            panic!("{operation} polled after it finished");
-        };
-        match location::catch_located(operation, || work.as_mut().poll(cx)) {
-            Ok(Poll::Pending) => Poll::Pending,
-            Ok(Poll::Ready(value)) => {
-                self.work = None;
-                Poll::Ready(Ok(value))
-            }
-            Err((payload, at)) => {
-                let bug = bug_of(operation, payload, at);
-                let work = self.work.take();
-                if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(work))) {
-                    tracing::error!(
-                        operation,
-                        "dropping work that panicked panicked again: {}",
-                        panic_message(payload.as_ref())
-                    );
-                    std::mem::forget(payload);
-                }
-                Poll::Ready(Err(bug))
-            }
-        }
     }
 }
 

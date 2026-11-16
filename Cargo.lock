@@ -742,6 +742,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "caught"
+version = "0.1.0"
+dependencies = [
+ "futures-lite",
+ "tracing",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1023,6 +1031,7 @@ name = "coven-foundation"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "caught",
  "futures-lite",
  "icu_casemap",
  "icu_normalizer",

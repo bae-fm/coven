@@ -1,0 +1,14 @@
+[package]
+name = "caught"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+
+[dev-dependencies]
+futures-lite = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

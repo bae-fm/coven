@@ -8,6 +8,7 @@ license.workspace = true
 test-utils = []
 
 [dependencies]
+caught.workspace = true
 futures-lite = { workspace = true, features = ["std"] }
 icu_casemap.workspace = true
 icu_normalizer.workspace = true

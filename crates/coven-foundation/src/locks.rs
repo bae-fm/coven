@@ -14,35 +14,11 @@
 //!   change can leave half-made. That store's handle fails, and every later
 //!   call on it says so.
 
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, RwLock};
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard};
 
-/// Lock `mutex`, whose value no panic can leave half-changed.
-pub fn lock_unpoisoned<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Read `lock`, whose value no panic can leave half-changed.
-pub fn read_unpoisoned<T: ?Sized>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Write `lock`, whose value no panic can leave half-changed.
-pub fn write_unpoisoned<T: ?Sized>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The value of `mutex`, whose value no panic can leave half-changed, as it
-/// goes.
-pub fn into_unpoisoned<T>(mutex: Mutex<T>) -> T {
-    mutex.into_inner().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Wait on `condvar` with `guard`, the guard of a lock whose value no panic
-/// can leave half-changed.
-pub fn wait_unpoisoned<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
-    condvar.wait(guard).unwrap_or_else(PoisonError::into_inner)
-}
+pub use caught::locks::{
+    into_unpoisoned, lock_unpoisoned, read_unpoisoned, wait_unpoisoned, write_unpoisoned,
+};
 
 /// Lock `mutex`, named `what`: state the whole process shares. A panic while
 /// it was held may have left it half-changed, and nothing narrower than the

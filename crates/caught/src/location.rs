@@ -1,8 +1,8 @@
-//! Where a panic coven catches began (api.md E15).
+//! Where a panic this crate catches began.
 //!
 //! A panic's payload holds only its text: `std::panic::Location` reaches the
-//! panic hook alone. So each of coven's catches marks its thread as catching
-//! while its work runs, and a hook coven adds in front of the process's own
+//! panic hook alone. So each catch of this crate's marks its thread as catching
+//! while its work runs, and a hook this crate adds in front of the process's own
 //! writes where a panic began into the innermost mark on the panicking
 //! thread. The catch takes it back with the payload, so the location is part
 //! of what the catch returns. Work run as its own task or on the blocking
@@ -14,7 +14,7 @@
 //! before, which it calls in turn, and it touches only the panicking thread's
 //! own mark. A panic unwinds only on the thread that raised it, so the mark it
 //! writes is the one the catch around it reads. A panic outside every catch
-//! of coven's finds no mark and is left to the hooks after coven's.
+//! of this crate's finds no mark and is left to the hooks after this crate's.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -46,9 +46,9 @@ impl std::fmt::Display for SourceLocation {
     }
 }
 
-/// What a thread's innermost catch of coven's has seen.
+/// What a thread's innermost catch of this crate's has seen.
 enum Mark {
-    /// No catch of coven's is running on this thread.
+    /// No catch of this crate's is running on this thread.
     Unmarked,
     /// One is, running `operation`, and `location` is where the latest panic
     /// inside it began, once one has.
@@ -56,20 +56,20 @@ enum Mark {
 }
 
 thread_local! {
-    /// This thread's innermost catch of coven's, which the hook writes and
+    /// This thread's innermost catch of this crate's, which the hook writes and
     /// the catch reads back. A catch inside another keeps the outer one's
     /// mark aside and puts it back as it ends.
     static MARK: Cell<Mark> = const { Cell::new(Mark::Unmarked) };
 }
 
-/// Adds coven's hook in front of the process's, once.
+/// Adds this crate's hook in front of the process's, once.
 static CHAINED: Once = Once::new();
 
 /// `work`'s value, or the payload of its panic and where that panic began.
 /// While `work` runs, this catch is the thread's innermost, named
 /// `operation`.
 ///
-/// The location is `None` only for an unwind coven's hook didn't see begin:
+/// The location is `None` only for an unwind this crate's hook didn't see begin:
 /// one resumed with `std::panic::resume_unwind` from a panic elsewhere, or a
 /// panic after the app replaced the process's hook with one that doesn't call
 /// the hook it replaced.
@@ -89,7 +89,7 @@ pub(crate) fn catch_located<R>(
     })
 }
 
-/// The operation of the innermost catch of coven's running on this thread,
+/// The operation of the innermost catch of this crate's running on this thread,
 /// or `None` outside every one: for the app's own panic hook, to say what
 /// the panicking work was doing. A panic a catch inside that work handles
 /// itself, such as a task tokio runs on this thread and catches, still
@@ -115,7 +115,7 @@ fn swap_mark(mark: Mark) -> Option<Mark> {
     MARK.try_with(|place| place.replace(mark)).ok()
 }
 
-/// Add coven's hook in front of the process's, once. A thread that is
+/// Add this crate's hook in front of the process's, once. A thread that is
 /// panicking can't set a hook, and std would panic again inside the unwind,
 /// which ends the process, so a catch entered during an unwind leaves it to
 /// the next catch.
@@ -133,7 +133,7 @@ fn chain_hook() {
 }
 
 /// Write where `panic` began into this thread's innermost catch, if one of
-/// coven's is running. A panic inside the hook ends the process, so nothing
+/// this crate's is running. A panic inside the hook ends the process, so nothing
 /// here can panic: the mark is a `Cell`, taken and put back whole.
 fn mark_panic(panic: &PanicHookInfo<'_>) {
     let Some(location) = panic.location() else {
@@ -141,7 +141,7 @@ fn mark_panic(panic: &PanicHookInfo<'_>) {
     };
     #[expect(
         clippy::let_underscore_must_use,
-        reason = "a thread whose locals are gone is exiting, and runs no catch of coven's"
+        reason = "a thread whose locals are gone is exiting, and runs no catch of this crate's"
     )]
     let _ = MARK.try_with(|place| {
         if let Mark::Catching { operation, .. } = place.replace(Mark::Unmarked) {
