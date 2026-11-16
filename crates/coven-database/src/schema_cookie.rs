@@ -6,6 +6,7 @@
 //! once.
 
 use super::DatabaseConnection;
+use crate::authorization::Policy;
 use std::cell::Cell;
 
 /// The cookie as a transaction read it. The connection keeps the value until
@@ -40,7 +41,7 @@ impl Drop for CookieScope<'_> {
     }
 }
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// Read the schema cookie once until the returned scope drops. The
     /// caller's transaction runs no DDL.
     pub(crate) fn keep_schema_cookie(&self) -> CookieScope<'_> {

@@ -5,8 +5,8 @@
 //! would free what that statement still calls.
 
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
@@ -14,8 +14,8 @@ use sqlive::RowChange;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
-pub(super) struct WriteTransaction<'a> {
-    database: &'a mut DatabaseConnection,
+pub(super) struct WriteTransaction<'a, P: Policy> {
+    database: &'a mut DatabaseConnection<P>,
     /// Whether it has yet to commit or roll back.
     open: Cell<bool>,
     /// Whether its pre-update hook is set.
@@ -29,16 +29,16 @@ pub(super) struct WriteTransaction<'a> {
     /// hook's panic, so a hook call that failed left what it observes
     /// incomplete: the transaction rolls back with it rather than committing
     /// what its observers missed (E15).
-    hook_failure: Arc<Mutex<Option<sqlive::Error<StoreFailure, DbError>>>>,
+    hook_failure: Arc<Mutex<Option<PolicyError<P>>>>,
 }
 
-impl<'a> WriteTransaction<'a> {
+impl<'a, P: Policy> WriteTransaction<'a, P> {
     /// Begin a write on `database`. A streamed one keeps its page cache
     /// bounded as it goes (`stream_capture.rs`).
     pub(super) fn begin(
-        database: &'a mut DatabaseConnection,
+        database: &'a mut DatabaseConnection<P>,
         streaming: bool,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<Self, PolicyError<P>> {
         database.batch("BEGIN IMMEDIATE")?;
         database.streaming.set(streaming);
         Ok(Self {
@@ -65,15 +65,10 @@ impl<'a> WriteTransaction<'a> {
     /// session takes the same hook, so none may begin meanwhile.
     pub(super) fn observe_operations(
         &mut self,
-        mut hook: impl FnMut(
-                Action,
-                &str,
-                &str,
-                &PreUpdateCase,
-            ) -> Result<(), sqlive::Error<StoreFailure, DbError>>
+        mut hook: impl FnMut(Action, &str, &str, &PreUpdateCase) -> Result<(), PolicyError<P>>
             + Send
             + 'static,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<(), PolicyError<P>> {
         let failed = self.hook_failure.clone();
         #[cfg(test)]
         let fault = self.database.hook_panics.clone();
@@ -88,16 +83,14 @@ impl<'a> WriteTransaction<'a> {
                         );
                         hook(action, schema, table, case)
                     });
-                keep_failure(&failed, observed);
+                keep_failure::<P>(&failed, observed);
             },
         ))?;
         self.operations = true;
         Ok(())
     }
 
-    pub(super) fn stop_observing_operations(
-        &mut self,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(super) fn stop_observing_operations(&mut self) -> Result<(), PolicyError<P>> {
         if self.operations {
             self.database
                 .connection
@@ -111,17 +104,15 @@ impl<'a> WriteTransaction<'a> {
     /// transaction ends.
     pub(super) fn observe_rows(
         &mut self,
-        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), sqlive::Error<StoreFailure, DbError>>
-            + Send
-            + 'static,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), PolicyError<P>> + Send + 'static,
+    ) -> Result<(), PolicyError<P>> {
         let failed = self.hook_failure.clone();
         self.database.connection.update_hook(Some(
             move |action, schema: &str, table: &str, rowid| {
                 let observed = coven_foundation::task::caught_sync("observe a changed row", || {
                     hook(action, schema, table, rowid)
                 });
-                keep_failure(&failed, observed);
+                keep_failure::<P>(&failed, observed);
             },
         ))?;
         self.rows = true;
@@ -130,13 +121,13 @@ impl<'a> WriteTransaction<'a> {
 
     /// Run `run` on the transaction's connection, which it keeps; `run`
     /// can't change the transaction's hooks.
-    pub(super) fn within<T>(&self, run: impl FnOnce(&DatabaseConnection) -> T) -> T {
+    pub(super) fn within<T>(&self, run: impl FnOnce(&DatabaseConnection<P>) -> T) -> T {
         run(self.database)
     }
 
     /// Judge `outcome`'s changes for the handle's live queries, commit and
     /// report them; or roll back, when `outcome` or any of that fails.
-    pub(super) fn commit<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(super) fn commit<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &self,
         outcome: Result<(T, Vec<RowChange>), E>,
     ) -> Result<T, E> {
@@ -192,9 +183,9 @@ impl<'a> WriteTransaction<'a> {
 }
 
 /// Keep a hook call's failure, the first one, for the commit to fail with.
-fn keep_failure(
-    failed: &Mutex<Option<sqlive::Error<StoreFailure, DbError>>>,
-    observed: Result<Result<(), sqlive::Error<StoreFailure, DbError>>, Bug>,
+fn keep_failure<P: Policy>(
+    failed: &Mutex<Option<PolicyError<P>>>,
+    observed: Result<Result<(), PolicyError<P>>, Bug>,
 ) {
     let failure = match observed {
         Ok(Ok(())) => return,
@@ -209,7 +200,7 @@ fn keep_failure(
 /// failed rollback is logged and fails the handle, so every later call
 /// reports it. Its hooks go either way; one SQLite won't let go fails the
 /// handle too, since the connection's hooks are then unknown.
-impl Drop for WriteTransaction<'_> {
+impl<P: Policy> Drop for WriteTransaction<'_, P> {
     fn drop(&mut self) {
         self.database.streaming.set(false);
         if self.cookie {

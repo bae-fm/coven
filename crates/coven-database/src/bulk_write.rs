@@ -8,27 +8,26 @@
 //! prepared, triggers and foreign-key actions included.
 
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     pub(crate) fn bulk_write<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
-        E: sqlive::RollbackJoin<StoreFailure, DbError>,
-        F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
+        E: sqlive::RollbackJoin<P::Failure, P::Refusal>,
+        F: FnOnce(&Self) -> Result<R, E>,
     {
         self.with_profile(|db| db.bulk_transaction(sql))
     }
 
     fn bulk_transaction<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
-        E: sqlive::RollbackJoin<StoreFailure, DbError>,
-        F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
+        E: sqlive::RollbackJoin<P::Failure, P::Refusal>,
+        F: FnOnce(&Self) -> Result<R, E>,
     {
         let transaction = super::write_transaction::WriteTransaction::begin(self, false)?;
         let outcome = transaction.within(|database| {
             let scope = database.authorization.bulk();
-            let result = sql(crate::BulkSqlContext::new(database))?;
+            let result = sql(database)?;
             database.require_transaction()?;
             let changed = scope.changed();
             drop(scope);

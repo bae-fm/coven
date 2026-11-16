@@ -26,7 +26,7 @@ pub(crate) struct ProfiledStatement {
     pub(crate) reprepares: i32,
 }
 
-impl DatabaseConnection {
+impl<P: crate::authorization::Policy> DatabaseConnection<P> {
     pub(crate) fn fail_at(&self, name: &str, event: &str, message: &str) {
         self.batch(&format!(
             "CREATE TRIGGER {} {event} BEGIN SELECT RAISE(ABORT,'{}'); END",

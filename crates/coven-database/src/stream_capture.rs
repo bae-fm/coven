@@ -6,8 +6,8 @@ use super::pre_update_changes::{ImageColumns, PreUpdateChanges};
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
 use std::collections::BTreeSet;
@@ -42,11 +42,11 @@ impl StreamCapture {
     /// knows its tables' shapes and the columns waiting live queries narrow
     /// by; it keeps those values of each changed row, up to a bound per
     /// table, as a local write does.
-    pub(super) fn begin(
-        transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+    pub(super) fn begin<P: Policy>(
+        transaction: &mut WriteTransaction<'_, P>,
+    ) -> Result<Self, PolicyError<P>> {
         let recorded = Arc::new(Mutex::new(transaction.within(|database| {
-            Ok::<_, sqlive::Error<StoreFailure, DbError>>(match &database.observation {
+            Ok::<_, PolicyError<P>>(match &database.observation {
                 Some(_) => {
                     let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {
@@ -92,7 +92,7 @@ impl StreamCapture {
     }
 }
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// Keep a streamed transaction's page cache bounded: past 4 MiB of
     /// retained pages, spill and release them without committing.
     pub(super) fn bound_stream_cache(&self) -> rusqlite::Result<()> {

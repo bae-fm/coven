@@ -175,7 +175,10 @@ async fn local_table_writes_against_plain_sqlite() {
 /// never a missing value.
 #[test]
 fn only_a_virtual_generated_column_reads_as_absent() {
-    use crate::sqlite::pre_update_changes::column_value;
+    let column_value = crate::sqlite::pre_update_changes::column_value::<
+        crate::store_failure::StoreFailure,
+        crate::DbError,
+    >;
     let failure = |code| Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None));
     assert_eq!(column_value(failure(rusqlite::ffi::SQLITE_RANGE)).unwrap(), None);
     assert!(column_value(failure(rusqlite::ffi::SQLITE_MISUSE)).is_err());

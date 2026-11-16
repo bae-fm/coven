@@ -3,8 +3,9 @@
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::HostError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
 use sqlive::UnrecordedTables;
@@ -13,9 +14,9 @@ use std::sync::{Arc, Mutex};
 
 // rusqlite does not expose the session ROWID option. Keep raw handles here,
 // inside the SQLite owner; the borrow prevents the connection outliving capture.
-pub(super) struct ChangeCapture<'a> {
+pub(super) struct ChangeCapture<'a, P: Policy> {
     session: *mut rusqlite::ffi::sqlite3_session,
-    database: &'a DatabaseConnection,
+    database: &'a DatabaseConnection<P>,
     supplemental: SupplementalChanges,
     /// The tables the session doesn't record. The session's filter reads
     /// them through a pointer, so the capture keeps them until after it
@@ -35,10 +36,10 @@ pub(super) struct SupplementalChanges {
 impl SupplementalChanges {
     /// Watch the tables of `transaction`'s schema that no key names; none
     /// are watched where there are none.
-    pub(super) fn observe(
-        transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
-        let shapes = transaction.within(DatabaseConnection::table_shapes)?;
+    pub(super) fn observe<P: Policy>(
+        transaction: &mut WriteTransaction<'_, P>,
+    ) -> Result<Self, PolicyError<P>> {
+        let shapes = transaction.within(DatabaseConnection::<P>::table_shapes)?;
         let changed = Arc::new(Mutex::new(BTreeSet::new()));
         if shapes.iter().any(|(_, shape)| shape.whole) {
             // A session's pre-update hook disables SQLite's truncate-delete
@@ -60,11 +61,11 @@ impl SupplementalChanges {
     }
 }
 
-impl<'a> ChangeCapture<'a> {
+impl<'a, P: Policy> ChangeCapture<'a, P> {
     pub(super) fn begin(
-        database: &'a DatabaseConnection,
+        database: &'a DatabaseConnection<P>,
         supplemental: SupplementalChanges,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<Self, PolicyError<P>> {
         let unrecorded = Arc::clone(
             database
                 .handle
@@ -105,17 +106,11 @@ impl<'a> ChangeCapture<'a> {
         Ok(capture)
     }
 
-    pub(super) fn take_changes(
-        &mut self,
-    ) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
+    pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, PolicyError<P>> {
         let _scope = self.database.authorization.internal();
         let copied = self.changeset()?;
-        let scoped = self
-            .database
-            .handle
-            .as_ref()
-            .map(crate::store_failure::StoreHandle::scoped_columns)
-            .unwrap_or_default();
+        let scoped =
+            self.database.handle.as_ref().map(sqlive::Handle::scoped_columns).unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
         for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {
             let shape = self.supplemental.shapes.shape(position);
@@ -136,9 +131,9 @@ impl<'a> ChangeCapture<'a> {
     }
 }
 
-impl ChangeCapture<'_> {
+impl<P: Policy> ChangeCapture<'_, P> {
     /// The session's changeset so far, inside the transaction it captures.
-    fn changeset(&mut self) -> Result<Vec<u8>, sqlive::Error<StoreFailure, DbError>> {
+    fn changeset(&mut self) -> Result<Vec<u8>, PolicyError<P>> {
         self.database.require_transaction()?;
         let mut length = 0;
         let mut bytes = std::ptr::null_mut();
@@ -160,7 +155,7 @@ impl ChangeCapture<'_> {
     }
 }
 
-impl Drop for ChangeCapture<'_> {
+impl<P: Policy> Drop for ChangeCapture<'_, P> {
     fn drop(&mut self) {
         // SAFETY: the guard owns this session and still borrows its live connection.
         unsafe { rusqlite::ffi::sqlite3session_delete(self.session) };
@@ -180,7 +175,7 @@ unsafe extern "C" fn recorded_table(
     table.to_str().map_or(1, |name| std::ffi::c_int::from(unrecorded.recorded(name)))
 }
 
-fn sqlite_ok(code: std::ffi::c_int) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+fn sqlite_ok<F: HostError, R: HostError>(code: std::ffi::c_int) -> Result<(), sqlive::Error<F, R>> {
     if code == rusqlite::ffi::SQLITE_OK {
         Ok(())
     } else {

@@ -4,14 +4,13 @@
 //! transaction.
 
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::store_failure::StoreHandle;
-use crate::DbError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use sqlive::{Judging, Lookups, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// A live query's run on one snapshot. What its statements read goes
     /// to `judge` before the snapshot ends, which judges the writes that
     /// committed during the run by lookups in that snapshot (§4).
@@ -22,7 +21,7 @@ impl DatabaseConnection {
     ) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<sqlive::Error<StoreFailure, DbError>>,
+        E: From<PolicyError<P>>,
     {
         let mut finished = false;
         let result = self.read_transaction(|| {
@@ -50,9 +49,9 @@ impl DatabaseConnection {
     /// the write leaves (§4).
     pub(super) fn judge(
         &self,
-        handle: &StoreHandle,
+        handle: &sqlive::Handle<P::Failure>,
         changes: Vec<sqlive::RowChange>,
-    ) -> Result<sqlive::Judged, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<sqlive::Judged, PolicyError<P>> {
         let _reading = self.authorization.reading();
         handle
             .judge(changes, sqlive::committing(), &mut |judging| {

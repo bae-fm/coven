@@ -9,8 +9,8 @@
 
 use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use sqlive::SqlValue;
@@ -47,9 +47,9 @@ pub(super) struct EventCapture {
 
 impl EventCapture {
     /// Record `transaction`'s row operations until it stops observing them.
-    pub(super) fn begin(
-        transaction: &mut WriteTransaction<'_>,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+    pub(super) fn begin<P: Policy>(
+        transaction: &mut WriteTransaction<'_, P>,
+    ) -> Result<Self, PolicyError<P>> {
         let (tables, recorded, scoped) = transaction.within(|database| {
             let recorded = Arc::clone(
                 &database
@@ -65,7 +65,7 @@ impl EventCapture {
                 Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
                 None => std::collections::HashMap::new(),
             };
-            Ok::<_, sqlive::Error<StoreFailure, DbError>>((tables, recorded, scoped))
+            Ok::<_, PolicyError<P>>((tables, recorded, scoped))
         })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
@@ -100,12 +100,12 @@ impl EventCapture {
                 let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(old_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, sqlive::Error<StoreFailure, DbError>>>()
+                        .collect::<Result<Vec<_>, PolicyError<P>>>()
                 };
                 let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
                     count(accessor.get_column_count())
                         .map(|i| Ok(new_value(accessor, i)?.map(SqlValue::from)))
-                        .collect::<Result<Vec<_>, sqlive::Error<StoreFailure, DbError>>>()
+                        .collect::<Result<Vec<_>, PolicyError<P>>>()
                 };
                 let event = match case {
                     PreUpdateCase::Insert(accessor) => Operation {

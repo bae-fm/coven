@@ -384,7 +384,7 @@ impl DatabaseBuilder {
             )?);
         }
         let statistics =
-            crate::upkeep::UpkeepThread::<crate::planner_statistics::PlannerStatistics>::start(
+            crate::upkeep::UpkeepThread::<crate::planner_statistics::PlannerStatistics<_>>::start(
                 CovenPolicy::new(&tables).open(
                     &path,
                     false,

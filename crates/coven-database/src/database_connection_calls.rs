@@ -34,7 +34,7 @@ impl<L> DatabaseAccess<L> {
     /// Run `run` on the reader `lease` reserved, with constants of its own.
     pub(super) fn with_leased<R>(
         &self,
-        lease: &read_pool::ReaderLease<'_>,
+        lease: &read_pool::ReaderLease<'_, crate::app_policy::CovenPolicy>,
         run: impl FnOnce(&DatabaseConnection, &StoreCall<'_>) -> R,
     ) -> R {
         lease.with_reader(|reader| run(reader, &StoreCall::new(None, &self.tests)))

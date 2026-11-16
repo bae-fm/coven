@@ -13,11 +13,9 @@
 //! starts a run. A run gathers the statistics as an open does, holding
 //! coven's writer so no write of coven's finds the database locked meanwhile.
 
+use crate::authorization::{Policy, PolicyError};
 use crate::sqlite::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::store_failure::StoreHandle;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
-use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
@@ -30,27 +28,27 @@ use std::sync::{Arc, Mutex, Weak};
 pub(crate) const CHECKED_CHANGES: u64 = 1_000;
 
 /// The upkeep of the planner's statistics of a store's database.
-pub(crate) struct PlannerStatistics {
+pub(crate) struct PlannerStatistics<P: Policy> {
     /// The thread's own connection, held through each check and run.
-    connection: Mutex<DatabaseConnection>,
+    connection: Mutex<DatabaseConnection<P>>,
     /// The writer, held only during a run, so the store's close can take it
     /// back once the thread stops.
-    writer: Weak<Mutex<DatabaseConnection>>,
+    writer: Weak<Mutex<DatabaseConnection<P>>>,
     /// Where a test hears of each run, told once it committed.
     #[cfg(test)]
     runs: Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
-impl UpkeepThread<PlannerStatistics> {
+impl<P: Policy> UpkeepThread<PlannerStatistics<P>> {
     /// Keep the planner's statistics of `writer`'s database from its commits
     /// on, on `connection`, a writable connection of its own to the same
     /// database with the app's functions, as an open's run has, failing
     /// `handle` if a check or run fails.
     pub(crate) fn start(
-        connection: DatabaseConnection,
-        writer: &Arc<Mutex<DatabaseConnection>>,
-        handle: StoreHandle,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+        connection: DatabaseConnection<P>,
+        writer: &Arc<Mutex<DatabaseConnection<P>>>,
+        handle: sqlive::Handle<P::Failure>,
+    ) -> Result<Self, PolicyError<P>> {
         let statistics = Self::spawn(
             PlannerStatistics {
                 connection: Mutex::new(connection),
@@ -69,18 +67,20 @@ impl UpkeepThread<PlannerStatistics> {
     }
 
     /// Stop, after any check or run in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn stop(self) -> Result<(), PolicyError<P>> {
         coven_foundation::locks::into_unpoisoned(self.join().connection).close()
     }
 }
 
-impl Upkeep for PlannerStatistics {
+impl<P: Policy> Upkeep for PlannerStatistics<P> {
+    type Policy = P;
+
     const THREAD: &'static str = "coven planner statistics";
 
     /// One wake's check, and the run it calls for. A store whose open failed
     /// may let its writer go before the thread stops; there is then nothing
     /// to keep statistics for.
-    fn run(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    fn run(&self) -> Result<(), PolicyError<P>> {
         let mut connection = lock_unpoisoned(&self.connection);
         if !connection.statistics_wanted()? {
             return Ok(());
@@ -98,14 +98,12 @@ impl Upkeep for PlannerStatistics {
         Ok(())
     }
 
-    fn failure(
-        error: sqlive::Error<StoreFailure, DbError>,
-    ) -> sqlive::EngineFailure<StoreFailure, DbError> {
+    fn failure(error: PolicyError<P>) -> sqlive::EngineFailure<P::Failure, P::Refusal> {
         sqlive::EngineFailure::Statistics(error)
     }
 }
 
-impl PlannerStatistics {
+impl<P: Policy> PlannerStatistics<P> {
     /// Tell a test that asked of each run.
     #[cfg(test)]
     fn report(&self) {
@@ -128,7 +126,7 @@ pub(crate) struct ChangeWake {
 }
 
 impl ChangeWake {
-    fn new(wake: Wake, writer: &DatabaseConnection) -> Self {
+    fn new<P: Policy>(wake: Wake, writer: &DatabaseConnection<P>) -> Self {
         Self { wake, woken_at: Cell::new(writer.changed_rows()) }
     }
 

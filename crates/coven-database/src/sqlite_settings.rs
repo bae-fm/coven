@@ -1,8 +1,9 @@
 //! The SQLite settings an app may choose for its store's connections, the ones
 //! coven keeps fixed, and the WAL commands an app may run (§4, api.md E1).
 
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::HostError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -291,7 +292,7 @@ impl PageSize {
         }
     }
 
-    fn from_bytes(bytes: i64) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+    fn from_bytes<F: HostError, R: HostError>(bytes: i64) -> Result<Self, sqlive::Error<F, R>> {
         Ok(match bytes {
             512 => PageSize::Bytes512,
             1024 => PageSize::Bytes1024,
@@ -350,7 +351,9 @@ impl SqliteSettings {
     }
 
     /// The PRAGMAs that set these choices on any connection.
-    fn connection_pragmas(&self) -> Result<Vec<String>, sqlive::Error<StoreFailure, DbError>> {
+    fn connection_pragmas<F: HostError, R: HostError>(
+        &self,
+    ) -> Result<Vec<String>, sqlive::Error<F, R>> {
         let mut pragmas = Vec::new();
         if let Some(timeout) = self.busy_timeout {
             let milliseconds = int("busy_timeout", timeout.as_millis())?;
@@ -446,7 +449,7 @@ impl SqliteSettings {
 /// at 2 rows, over an index lookup at 2, and over an index range at 8 to 50.
 const SMALL_TABLE: i64 = 100;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// Set the settings coven fixes, then the app's choices, on a connection
     /// that has run no statement yet. Changing `temp_store` drops temporary
     /// objects, so this precedes coven's temporary triggers. A writable
@@ -456,7 +459,7 @@ impl DatabaseConnection {
         &self,
         settings: &SqliteSettings,
         read_only: bool,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<(), PolicyError<P>> {
         self.batch(
             "PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;",
         )?;
@@ -474,7 +477,7 @@ impl DatabaseConnection {
     }
 
     /// Put the database in WAL mode and make every commit durable (§4).
-    pub(crate) fn enable_wal(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn enable_wal(&self) -> Result<(), PolicyError<P>> {
         let mode: String = self.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(sqlive::Error::WalUnavailable { mode });
@@ -482,10 +485,8 @@ impl DatabaseConnection {
         self.batch("PRAGMA synchronous = FULL;")
     }
 
-    pub(crate) fn sqlite_settings(
-        &self,
-    ) -> Result<SqliteSettingsInEffect, sqlive::Error<StoreFailure, DbError>> {
-        let read = |pragma: &str| -> Result<i64, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, PolicyError<P>> {
+        let read = |pragma: &str| -> Result<i64, PolicyError<P>> {
             self.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
         };
         let positive = |value: i64| u32::try_from(value).ok().and_then(NonZeroU32::new);
@@ -550,7 +551,7 @@ impl DatabaseConnection {
     pub(crate) fn wal_checkpoint(
         &self,
         mode: CheckpointMode,
-    ) -> Result<WalCheckpoint, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<WalCheckpoint, PolicyError<P>> {
         let mode = match mode {
             CheckpointMode::Noop => "NOOP",
             CheckpointMode::Passive => "PASSIVE",
@@ -591,7 +592,7 @@ impl DatabaseConnection {
     /// plans each table as a large one, which a small table answers as
     /// quickly. The connection keeps planning with the counts it found, so a
     /// writable open runs this on a connection of its own.
-    pub(crate) fn optimize(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn optimize(&self) -> Result<(), PolicyError<P>> {
         self.batch("PRAGMA optimize=0x10012")?;
         let analyzed: bool = self.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_stat1')",
@@ -615,7 +616,7 @@ impl DatabaseConnection {
     /// and each one with rows and an index that has none: one never
     /// analyzed, and every one under [`SMALL_TABLE`] rows. Reading at most
     /// that many rows of each tells which a run would keep statistics for.
-    pub(crate) fn statistics_wanted(&self) -> Result<bool, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn statistics_wanted(&self) -> Result<bool, PolicyError<P>> {
         let named = self.query("PRAGMA optimize=0x10013", [], |r| r.get::<_, String>(0))?;
         for analyze in named {
             let table = analyze.strip_prefix("ANALYZE ").ok_or(sqlive::Error::Invariant {
@@ -639,9 +640,7 @@ impl DatabaseConnection {
     /// the schema, so every connection, the read-only readers among them,
     /// plans with the new ones from its next statement, this one included,
     /// which so loads no count of a table whose statistics it forgot.
-    pub(crate) fn gather_statistics_for_every_connection(
-        &mut self,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn gather_statistics_for_every_connection(&mut self) -> Result<(), PolicyError<P>> {
         self.transaction(|connection| {
             connection.optimize()?;
             connection.batch(
@@ -652,7 +651,7 @@ impl DatabaseConnection {
     }
 
     /// Gather the statistics on this connection of their own, then close it.
-    pub(crate) fn gather_statistics(self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn gather_statistics(self) -> Result<(), PolicyError<P>> {
         self.optimize()?;
         self.close()
     }
@@ -662,7 +661,7 @@ impl DatabaseConnection {
     pub(crate) fn incremental_vacuum(
         &self,
         pages: IncrementalVacuum,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<(), PolicyError<P>> {
         let sql = match pages {
             IncrementalVacuum::All => "PRAGMA main.incremental_vacuum".to_owned(),
             IncrementalVacuum::Pages(pages) => format!(
@@ -677,8 +676,8 @@ impl DatabaseConnection {
     /// Give back the free pages of an incrementally vacuumed database past
     /// [`KEPT_FREE_BYTES`]; any other auto-vacuum mode is the app's choice
     /// and keeps its meaning.
-    pub(crate) fn give_back_free_pages(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
-        let pragma = |name: &str| -> Result<u64, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn give_back_free_pages(&self) -> Result<(), PolicyError<P>> {
+        let pragma = |name: &str| -> Result<u64, PolicyError<P>> {
             let value: i64 = self.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0))?;
             unsigned(value)
         };
@@ -696,10 +695,10 @@ impl DatabaseConnection {
 }
 
 /// `value` as one of SQLite's 32-bit integer settings.
-fn int(
+fn int<F: HostError, R: HostError>(
     setting: &'static str,
     value: impl Into<u128>,
-) -> Result<i32, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<i32, sqlive::Error<F, R>> {
     i32::try_from(value.into()).map_err(|_overflow| sqlive::Error::SqliteSettingOutOfRange {
         setting,
         maximum: i32::MAX as u64,
@@ -707,19 +706,24 @@ fn int(
 }
 
 /// `value` as one of SQLite's 64-bit integer settings.
-fn int64(setting: &'static str, value: u64) -> Result<i64, sqlive::Error<StoreFailure, DbError>> {
+fn int64<F: HostError, R: HostError>(
+    setting: &'static str,
+    value: u64,
+) -> Result<i64, sqlive::Error<F, R>> {
     i64::try_from(value).map_err(|_overflow| sqlive::Error::SqliteSettingOutOfRange {
         setting,
         maximum: i64::MAX as u64,
     })
 }
 
-fn unsigned<T: TryFrom<i64>>(value: i64) -> Result<T, sqlive::Error<StoreFailure, DbError>> {
+fn unsigned<T: TryFrom<i64>, F: HostError, R: HostError>(
+    value: i64,
+) -> Result<T, sqlive::Error<F, R>> {
     T::try_from(value).map_err(|_overflow| unreported())
 }
 
 /// SQLite reported a setting outside the values it documents.
-fn unreported() -> sqlive::Error<StoreFailure, DbError> {
+fn unreported<F: HostError, R: HostError>() -> sqlive::Error<F, R> {
     sqlive::Error::Invariant { what: "SQLite reports a setting within its documented values" }
 }
 

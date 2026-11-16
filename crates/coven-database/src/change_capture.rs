@@ -1,9 +1,10 @@
 //! Convert transaction changes into read dependencies before commit.
 
+use crate::authorization::HostError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 use crate::sqlite::table_shapes::{TableShape, TableShapes};
 use crate::sqlite::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
 use rusqlite::{
     fallible_streaming_iterator::FallibleStreamingIterator, hooks::Action, session::ChangesetIter,
 };
@@ -33,11 +34,11 @@ fn image_columns(
 
 /// The shape of `table`, as SQLite names it in one of the transaction's
 /// changes, noting the change of the virtual table a shadow table belongs to.
-fn changed_table<'a>(
+fn changed_table<'a, F: HostError, R: HostError>(
     shapes: &'a TableShapes,
     table: &str,
     changes: &mut Vec<RowChange>,
-) -> Result<&'a TableShape, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<&'a TableShape, sqlive::Error<F, R>> {
     let shape = shapes.position(table).map(|position| shapes.shape(position)).ok_or(
         sqlive::Error::Invariant { what: "every table a transaction changes has a shape" },
     )?;
@@ -50,10 +51,10 @@ fn changed_table<'a>(
 /// A whole-table change to each of `tables`, as a transaction that records
 /// only which tables it changed reports them: a shadow table's change is its
 /// virtual table's too.
-pub(crate) fn table_changes(
-    database: &DatabaseConnection,
+pub(crate) fn table_changes<P: Policy>(
+    database: &DatabaseConnection<P>,
     mut tables: BTreeSet<String>,
-) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, PolicyError<P>> {
     let shapes = database.table_shapes()?;
     for table in tables.clone() {
         if let Some(parent) = shapes.parent(&table) {
@@ -66,11 +67,11 @@ pub(crate) fn table_changes(
         .collect())
 }
 
-pub(crate) fn changes(
-    database: &DatabaseConnection,
+pub(crate) fn changes<P: Policy>(
+    database: &DatabaseConnection<P>,
     bytes: &[u8],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, PolicyError<P>> {
     let mut input = bytes;
     let input: &mut dyn std::io::Read = &mut input;
     let mut items = ChangesetIter::start_strm(&input)?;
@@ -186,14 +187,14 @@ pub(crate) fn changes(
 
 /// The current values of the `wanted` columns of the row whose key `before`
 /// holds; `None` each when no row has that key, as one with a NULL in it.
-fn current(
-    database: &DatabaseConnection,
+fn current<P: Policy>(
+    database: &DatabaseConnection<P>,
     table: &str,
     names: &[&str],
     pk: &[u8],
     before: &[Option<SqlValue>],
     wanted: &[usize],
-) -> Result<Vec<Option<SqlValue>>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Vec<Option<SqlValue>>, PolicyError<P>> {
     let keys: Vec<usize> = (0..names.len()).filter(|index| pk[*index] != 0).collect();
     let sql = format!(
         "SELECT {} FROM main.{} WHERE {}",
@@ -241,11 +242,11 @@ fn value(
 /// deletes change the whole row, updates each column whose value changed,
 /// and a primary-key update deletes the old key's row and inserts the new.
 /// Tables with no primary key report table-wide changes.
-pub(crate) fn event_changes(
-    database: &DatabaseConnection,
+pub(crate) fn event_changes<P: Policy>(
+    database: &DatabaseConnection<P>,
     events: &[crate::sqlite::Operation],
     scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Vec<RowChange>, PolicyError<P>> {
     let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();

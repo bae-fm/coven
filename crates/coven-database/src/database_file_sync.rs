@@ -1,18 +1,19 @@
 //! Syncing the database file through SQLite's own handle to it (§4).
 
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::HostError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// Sync the database file as this connection's checkpoints do: with
     /// `F_FULLFSYNC` on macOS and iOS when `checkpoint_fullfsync` or
     /// `fullfsync` is on, as SQLite's own checkpoint sync is, and a plain sync
     /// otherwise. It goes through SQLite's own handle to the file, because
     /// closing any other handle to it would drop every lock SQLite holds on
     /// it in this process.
-    pub(crate) fn sync_database_file(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
-        let flush = |pragma: &str| -> Result<bool, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn sync_database_file(&self) -> Result<(), PolicyError<P>> {
+        let flush = |pragma: &str| -> Result<bool, PolicyError<P>> {
             Ok(self.query_row::<i64, _>(&format!("PRAGMA {pragma}"), [], |r| r.get(0))? != 0)
         };
         let flags = if flush("checkpoint_fullfsync")? || flush("fullfsync")? {
@@ -44,7 +45,7 @@ impl DatabaseConnection {
 }
 
 /// SQLite's result `code` as a result.
-fn failed(code: std::ffi::c_int) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+fn failed<F: HostError, R: HostError>(code: std::ffi::c_int) -> Result<(), sqlive::Error<F, R>> {
     if code == rusqlite::ffi::SQLITE_OK {
         return Ok(());
     }

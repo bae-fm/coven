@@ -22,6 +22,7 @@ struct Recording {
 
 impl Policy for Recording {
     type Refusal = DbError;
+    type Failure = crate::store_failure::StoreFailure;
 
     fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError> {
         if let AuthAction::Insert { table_name } = action.action {
@@ -55,7 +56,7 @@ impl Policy for Recording {
 
     fn refresh(
         &self,
-        _sql: &crate::sqlite::DatabaseConnection,
+        _sql: &crate::sqlite::DatabaseConnection<Self>,
         _extent: Refresh,
     ) -> rusqlite::Result<()> {
         Ok(())

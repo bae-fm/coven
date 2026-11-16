@@ -2,7 +2,7 @@ use crate::tests::TestStore;
 use coven_foundation::clock::HANG_GUARD;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-impl super::UpkeepThread<super::PlannerStatistics> {
+impl super::UpkeepThread<super::PlannerStatistics<crate::app_policy::CovenPolicy>> {
     /// Each run from now on, told once it committed.
     pub(crate) fn report_runs(&self) -> UnboundedReceiver<()> {
         let (runs, reported) = unbounded_channel();

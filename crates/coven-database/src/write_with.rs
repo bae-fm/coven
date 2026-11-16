@@ -7,20 +7,19 @@ use super::stream_capture::{StreamCapture, StreamChanges};
 use super::transaction_capture::{ChangeCapture, SupplementalChanges};
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
 use sqlive::RowChange;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// Run `app` while the pre-update hook keeps each operation on the
     /// recorded tables, then `host` with those operations under a session,
     /// judge the live queries, commit and tell the subscriptions. `app` gets
     /// a call that returns the operations so far. `host` gets what `app`
     /// returned.
-    pub(crate) fn write_with<A, T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn write_with<A, T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &mut self,
-        app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
-        host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,
+        app: impl FnOnce(&DatabaseConnection<P>, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
+        host: impl FnOnce(&DatabaseConnection<P>, &[Operation], A) -> Result<T, E>,
     ) -> Result<T, E> {
         let mut transaction = WriteTransaction::begin(self, false)?;
         transaction.keep_schema_cookie();
@@ -33,11 +32,11 @@ impl DatabaseConnection {
     /// transaction. When they do, the app phase takes the hook the stream's
     /// capture held, which has seen every change of `stream`; both commit, or
     /// neither.
-    pub(crate) fn stream_then_write<S, A, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn stream_then_write<S, A, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &mut self,
-        stream: impl FnOnce(&DatabaseConnection) -> Result<(S, bool), E>,
-        app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
-        host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<(), E>,
+        stream: impl FnOnce(&DatabaseConnection<P>) -> Result<(S, bool), E>,
+        app: impl FnOnce(&DatabaseConnection<P>, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
+        host: impl FnOnce(&DatabaseConnection<P>, &[Operation], A) -> Result<(), E>,
     ) -> Result<S, E> {
         let mut transaction = WriteTransaction::begin(self, true)?;
         let outcome = StreamCapture::begin(&mut transaction).map_err(E::from).and_then(|capture| {
@@ -67,10 +66,10 @@ impl DatabaseConnection {
 /// transaction and whose hooks this sets. Returns the host's result and the
 /// row changes that the commit sends to the live queries; `transaction`
 /// commits or rolls back with them.
-fn phases<A, T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
-    transaction: &mut WriteTransaction<'_>,
-    app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
-    host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,
+fn phases<P: Policy, A, T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
+    transaction: &mut WriteTransaction<'_, P>,
+    app: impl FnOnce(&DatabaseConnection<P>, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
+    host: impl FnOnce(&DatabaseConnection<P>, &[Operation], A) -> Result<T, E>,
 ) -> Result<(T, Vec<RowChange>), E> {
     let recording = EventCapture::begin(transaction);
     let begun = recording.map_err(E::from).and_then(|recording| {
@@ -103,7 +102,7 @@ fn phases<A, T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
                 let scoped = database
                     .handle
                     .as_ref()
-                    .map(crate::store_failure::StoreHandle::scoped_columns)
+                    .map(sqlive::Handle::scoped_columns)
                     .unwrap_or_default();
                 let mut app = crate::change_capture::event_changes(database, &operations, &scoped)?;
                 app.append(&mut changes);

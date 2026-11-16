@@ -8,18 +8,16 @@ use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 
 use crate::authorization::{FunctionCall, HostFunctions, Policy, SqlAuthorization};
-use crate::DbError;
-
 /// What a connection's setup may register.
-pub(crate) struct Setup<'a> {
+pub(crate) struct Setup<'a, P: Policy = crate::app_policy::CovenPolicy> {
     connection: &'a rusqlite::Connection,
-    functions: HostFunctions,
+    functions: HostFunctions<P>,
 }
 
-impl<'a> Setup<'a> {
+impl<'a, P: Policy> Setup<'a, P> {
     pub(crate) fn new(
         connection: &'a rusqlite::Connection,
-        authorization: &SqlAuthorization<impl Policy<Refusal = DbError>>,
+        authorization: &SqlAuthorization<P>,
     ) -> Self {
         Self { connection, functions: authorization.functions() }
     }
@@ -27,13 +25,13 @@ impl<'a> Setup<'a> {
     /// Register `function` as `name`. rusqlite turns a function's panic into
     /// an error that names no bug, so the authorizer catches the panic and
     /// records it as a bug: the statement fails with the bug's text, and the
-    /// app's call fails with `DbError::Bug` (E15).
+    /// app's call fails with `Error::Bug` (E15).
     pub(crate) fn scalar_function<T: ToSql>(
         &self,
         name: &'static str,
         arguments: i32,
         flags: FunctionFlags,
-        function: impl Fn(&FunctionCall<'_>) -> rusqlite::Result<T> + Send + 'static,
+        function: impl Fn(&FunctionCall<'_, P>) -> rusqlite::Result<T> + Send + 'static,
     ) -> rusqlite::Result<()> {
         self.connection.create_scalar_function(
             name,

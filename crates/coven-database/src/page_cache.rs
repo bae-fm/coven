@@ -1,8 +1,9 @@
 //! A connection's page cache: how much it holds, and giving it back (§4).
 
 use super::DatabaseConnection;
+use crate::authorization::Policy;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// The bytes this connection's page cache holds now, SQLite's
     /// `SQLITE_DBSTATUS_CACHE_USED`. It counts retained pages even when
     /// global memory accounting is disabled.

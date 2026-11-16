@@ -2,16 +2,16 @@
 //! snapshot, and checks whose scratch writes are discarded.
 
 use super::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::Policy;
+use crate::authorization::PolicyError;
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// A one-shot read of one snapshot. Nothing runs it again, so it records
     /// nothing of what it reads, and narrows nothing (§4).
     pub(crate) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
-        E: From<sqlive::Error<StoreFailure, DbError>>,
+        E: From<PolicyError<P>>,
     {
         self.read_transaction(|| {
             let _reading = self.authorization.reading();
@@ -19,7 +19,7 @@ impl DatabaseConnection {
         })
     }
 
-    pub(crate) fn read_transaction<R, E: From<sqlive::Error<StoreFailure, DbError>>>(
+    pub(crate) fn read_transaction<R, E: From<PolicyError<P>>>(
         &self,
         read: impl FnOnce() -> Result<R, E>,
     ) -> Result<R, E> {
@@ -54,7 +54,7 @@ impl DatabaseConnection {
     /// Run checks that write scratch state, such as temporary tables, in a
     /// transaction that always rolls back, so nothing they write is kept or
     /// observed. It takes no write lock until something writes the main schema.
-    pub(crate) fn discarded_transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn discarded_transaction<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
@@ -68,14 +68,17 @@ impl DatabaseConnection {
     /// with `SQLITE_BUSY` if another connection holds it even for a moment,
     /// where `BEGIN IMMEDIATE` waits out the busy timeout.
     #[cfg(test)]
-    pub(crate) fn discarded_write_transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn discarded_write_transaction<
+        T,
+        E: sqlive::RollbackJoin<P::Failure, P::Refusal>,
+    >(
         &self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.discarded("BEGIN IMMEDIATE", run)
     }
 
-    fn discarded<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    fn discarded<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &self,
         begin: &str,
         run: impl FnOnce(&Self) -> Result<T, E>,
@@ -108,7 +111,7 @@ impl DatabaseConnection {
         };
         if result.is_err() {
             if let Some(handle) = &self.handle {
-                handle.fail(StoreFailure::from(sqlive::EngineFailure::Rollback));
+                handle.fail_engine(sqlive::EngineFailure::Rollback);
             }
         }
         result
@@ -116,15 +119,15 @@ impl DatabaseConnection {
 }
 
 /// A read or a discarded transaction, rolled back if its callback panics.
-struct SqlTransaction<'a> {
-    database: &'a DatabaseConnection,
+struct SqlTransaction<'a, P: Policy> {
+    database: &'a DatabaseConnection<P>,
     active: bool,
 }
 
 // Still active only while a callback's panic unwinds, when a second panic
 // would abort the process. The panic propagates; a failed rollback is logged
 // and fails the handle, so every later call reports it.
-impl Drop for SqlTransaction<'_> {
+impl<P: Policy> Drop for SqlTransaction<'_, P> {
     fn drop(&mut self) {
         if self.active {
             if let Err(rollback) = self.database.roll_back() {

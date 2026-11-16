@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 use std::sync::{Condvar, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-impl super::WalCheckpointer {
+impl super::WalCheckpointer<crate::app_policy::CovenPolicy> {
     /// Visit the checkpointer's connection, after any checkpoint in progress.
     pub(crate) fn with_connection(
         &self,

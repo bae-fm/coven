@@ -170,10 +170,11 @@ pub struct WriterParts {
 pub struct DatabaseInner {
     /// Coven's checkpointers of the input database and, unless the app
     /// checkpoints it, the store's (§4); stopped before their writers close.
-    checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer>,
+    checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer<CovenPolicy>>,
     /// The thread keeping the planner's statistics of the store's database
     /// while it stays open (§4); stopped before the writer closes.
-    statistics: crate::upkeep::UpkeepThread<crate::planner_statistics::PlannerStatistics>,
+    statistics:
+        crate::upkeep::UpkeepThread<crate::planner_statistics::PlannerStatistics<CovenPolicy>>,
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
@@ -743,7 +744,9 @@ impl StoreDatabase {
     {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.bulk_write(|bulk| sql(bulk).map_err(Hosted)).map_err(Hosted::into_inner)
+                writer
+                    .bulk_write(|bulk| sql(crate::BulkSqlContext::new(bulk)).map_err(Hosted))
+                    .map_err(Hosted::into_inner)
             })
         })
         .await

@@ -1,5 +1,13 @@
 use super::*;
+use crate::store_failure::StoreFailure;
 use crate::tests::TestStore;
+use crate::DbError;
+use std::borrow::Cow;
+
+/// The path SQLite opens for `path`, with coven's error types.
+fn plain_path(path: &Path) -> Result<Cow<'_, Path>, sqlive::Error<StoreFailure, DbError>> {
+    sqlite_path(path)
+}
 
 /// SQLite names the store's database by the path coven gives it, which on
 /// Windows doesn't start `\\`, so SQLite locks it as a local file.
@@ -14,7 +22,7 @@ async fn sqlite_opens_the_database_by_its_plain_path() {
             .unwrap();
     });
     let database = store.database_path();
-    assert_eq!(Path::new(&file), sqlite_path(&database).unwrap());
+    assert_eq!(Path::new(&file), plain_path(&database).unwrap());
     assert!(!file.starts_with(r"\\"), "{file}");
     db.close().await.unwrap();
 }
@@ -30,7 +38,7 @@ fn a_verbatim_path_goes_to_sqlite_in_its_plain_form() {
         (r"\\?\D:\COM0\store.db", r"D:\COM0\store.db"),
         (r"\\?\D:\lpt0.music\store.db", r"D:\lpt0.music\store.db"),
     ] {
-        assert_eq!(sqlite_path(Path::new(verbatim)).unwrap(), Path::new(plain));
+        assert_eq!(plain_path(Path::new(verbatim)).unwrap(), Path::new(plain));
     }
 }
 
@@ -44,6 +52,9 @@ fn a_name_windows_reads_otherwise_without_the_prefix_is_refused() {
         r"\\?\D:\com1.music\store.db",
         r"\\?\D:\stores\..\store.db",
     ] {
-        assert!(matches!(sqlite_path(Path::new(verbatim)), Err(DbError::Disk(_))), "{verbatim}");
+        assert!(
+            matches!(plain_path(Path::new(verbatim)), Err(sqlive::Error::Path { .. })),
+            "{verbatim}"
+        );
     }
 }

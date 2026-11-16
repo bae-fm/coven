@@ -203,6 +203,7 @@ pub(crate) enum CovenScope {
 
 impl Policy for CovenPolicy {
     type Refusal = DbError;
+    type Failure = crate::store_failure::StoreFailure;
 
     fn judge(&self, action: &PolicyAction<'_>) -> Result<(), DbError> {
         lock_unpoisoned(&self.state).judge(action)

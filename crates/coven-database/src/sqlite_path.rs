@@ -12,16 +12,15 @@
 //! a local verbatim path goes to SQLite in its plain form, where each
 //! connection locks through a handle of its own.
 
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::HostError;
 use std::borrow::Cow;
 use std::path::Path;
 
 /// The path SQLite opens for the file at `path`: elsewhere `path` itself.
 #[cfg(not(windows))]
-pub(crate) fn sqlite_path(
+pub(crate) fn sqlite_path<F: HostError, R: HostError>(
     path: &Path,
-) -> Result<Cow<'_, Path>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Cow<'_, Path>, sqlive::Error<F, R>> {
     Ok(Cow::Borrowed(path))
 }
 
@@ -32,9 +31,9 @@ pub(crate) fn sqlite_path(
 /// space, and a device's name such as `NUL`; a verbatim path holding one
 /// would open another file, so it is refused.
 #[cfg(windows)]
-pub(crate) fn sqlite_path(
+pub(crate) fn sqlite_path<F: HostError, R: HostError>(
     path: &Path,
-) -> Result<Cow<'_, Path>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Cow<'_, Path>, sqlive::Error<F, R>> {
     use std::ffi::OsString;
     use std::path::{Component, PathBuf, Prefix};
     let mut components = path.components();

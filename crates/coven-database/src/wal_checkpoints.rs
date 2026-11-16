@@ -20,11 +20,9 @@
 //! other failure fails the handle rather than leave the store open while
 //! its WAL grows without bound.
 
+use crate::authorization::{Policy, PolicyError};
 use crate::sqlite::DatabaseConnection;
-use crate::store_failure::StoreFailure;
-use crate::store_failure::StoreHandle;
 use crate::upkeep::{Upkeep, UpkeepThread};
-use crate::DbError;
 use crate::{CheckpointMode, WalCheckpoint};
 use coven_foundation::locks::lock_unpoisoned;
 use std::num::NonZeroU32;
@@ -37,17 +35,17 @@ use std::time::{Duration, Instant};
 /// still holds on, the WAL starts over once it grows by the threshold again.
 const READER_WAIT: Duration = Duration::from_millis(100);
 
-pub(crate) struct Checkpoints {
+pub(crate) struct Checkpoints<P: Policy> {
     /// The checkpointer's own connection, held through each checkpoint.
-    connection: Mutex<DatabaseConnection>,
+    connection: Mutex<DatabaseConnection<P>>,
     /// The writer, held only during a checkpoint, so the store's close can
     /// take it back once the checkpointer stops.
-    writer: Weak<Mutex<DatabaseConnection>>,
+    writer: Weak<Mutex<DatabaseConnection<P>>>,
     /// The frames not yet checkpointed past which a wake checkpoints.
     threshold: NonZeroU32,
     /// A test's fault, run as each checkpoint's last step begins.
     #[cfg(test)]
-    fault: Mutex<Option<Fault>>,
+    fault: Mutex<Option<Fault<P>>>,
     /// A test's step, run as each pass's copy returns, before its sync.
     #[cfg(test)]
     copied: Mutex<Option<Box<dyn FnMut() + Send>>>,
@@ -58,25 +56,25 @@ pub(crate) struct Checkpoints {
 }
 
 #[cfg(test)]
-type Fault = Box<dyn FnMut() -> Result<(), sqlive::Error<StoreFailure, DbError>> + Send>;
+type Fault<P> = Box<dyn FnMut() -> Result<(), PolicyError<P>> + Send>;
 
 /// A database's checkpointer: a thread of the store's own, woken by the
 /// writer's commits, which runs each checkpoint on its own connection. It
 /// stops as the store closes, before the writer.
-pub(crate) type WalCheckpointer = UpkeepThread<Checkpoints>;
+pub(crate) type WalCheckpointer<P> = UpkeepThread<Checkpoints<P>>;
 
-impl UpkeepThread<Checkpoints> {
+impl<P: Policy> UpkeepThread<Checkpoints<P>> {
     /// Take checkpointing `writer`'s database over from its commits, once
     /// the WAL holds `threshold` frames not yet checkpointed, on
     /// `connection`, a connection of its own to the same database, failing
     /// `handle` if checkpointing fails. Coven's checkpoints read and write
     /// none of the app's tables, so it needs none of the app's functions.
     pub(crate) fn start(
-        connection: DatabaseConnection,
-        writer: &Arc<Mutex<DatabaseConnection>>,
+        connection: DatabaseConnection<P>,
+        writer: &Arc<Mutex<DatabaseConnection<P>>>,
         threshold: NonZeroU32,
-        handle: StoreHandle,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+        handle: sqlive::Handle<P::Failure>,
+    ) -> Result<Self, PolicyError<P>> {
         connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
         // Made before the writer's steps, so a step that fails stops the
         // thread as this drops.
@@ -104,33 +102,33 @@ impl UpkeepThread<Checkpoints> {
     }
 
     /// Stop, after any checkpoint in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn stop(self) -> Result<(), PolicyError<P>> {
         coven_foundation::locks::into_unpoisoned(self.join().connection).close()
     }
 }
 
-impl Upkeep for Checkpoints {
+impl<P: Policy> Upkeep for Checkpoints<P> {
+    type Policy = P;
+
     const THREAD: &'static str = "coven WAL checkpoint";
 
-    fn run(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    fn run(&self) -> Result<(), PolicyError<P>> {
         self.checkpoint()
     }
 
-    fn failure(
-        error: sqlive::Error<StoreFailure, DbError>,
-    ) -> sqlive::EngineFailure<StoreFailure, DbError> {
+    fn failure(error: PolicyError<P>) -> sqlive::EngineFailure<P::Failure, P::Refusal> {
         sqlive::EngineFailure::Checkpoint(error)
     }
 }
 
-impl Checkpoints {
+impl<P: Policy> Checkpoints<P> {
     /// One wake's checkpoint, on the checkpointer's connection, once the WAL
     /// holds `threshold` frames not yet in the database file. A checkpoint
     /// the readers held up leaves the WAL copied but not started over; it is
     /// tried again once the WAL grows by the threshold. A store whose open
     /// failed may let its writer go before its checkpointer stops; there is
     /// then nothing to checkpoint.
-    fn checkpoint(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    fn checkpoint(&self) -> Result<(), PolicyError<P>> {
         let connection = lock_unpoisoned(&self.connection);
         let Some(writer) = self.writer.upgrade() else {
             return Ok(());
@@ -189,7 +187,7 @@ impl Checkpoints {
 
     /// Run the fault a test set, as the checkpoint's last step begins.
     #[cfg(test)]
-    fn fault(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    fn fault(&self) -> Result<(), PolicyError<P>> {
         lock_unpoisoned(&self.fault).as_mut().map_or(Ok(()), |f| f())
     }
 
@@ -217,9 +215,9 @@ impl Checkpoints {
 /// The frames the WAL holds that the database file doesn't, or None when
 /// SQLite couldn't read the WAL now: another connection was checkpointing it
 /// or committing to it.
-fn uncopied_frames(
-    connection: &DatabaseConnection,
-) -> Result<Option<u32>, sqlive::Error<StoreFailure, DbError>> {
+fn uncopied_frames<P: Policy>(
+    connection: &DatabaseConnection<P>,
+) -> Result<Option<u32>, PolicyError<P>> {
     Ok(match connection.wal_checkpoint(CheckpointMode::Noop)? {
         WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } => {
             Some(log_frames.saturating_sub(checkpointed_frames))

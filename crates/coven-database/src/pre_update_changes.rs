@@ -6,8 +6,7 @@
 //! scope tests, only where a waiting live query narrows that table.
 
 use super::table_shapes::{TableShape, TableShapes};
-use crate::store_failure::StoreFailure;
-use crate::DbError;
+use crate::authorization::HostError;
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
 use sqlive::{RowChange, RowImage, SqlValue, ROWS_PER_TABLE};
@@ -48,29 +47,29 @@ impl ImageColumns {
             .collect()
     }
 
-    fn before(
+    fn before<F: HostError, R: HostError>(
         &self,
         old: &PreUpdateOldValueAccessor,
-    ) -> Result<RowImage, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<RowImage, sqlive::Error<F, R>> {
         self.image(|index| old_value(old, index))
     }
 
-    fn after(
+    fn after<F: HostError, R: HostError>(
         &self,
         new: &PreUpdateNewValueAccessor,
-    ) -> Result<RowImage, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<RowImage, sqlive::Error<F, R>> {
         self.image(|index| new_value(new, index))
     }
 
-    fn image<'a>(
+    fn image<'a, F: HostError, R: HostError>(
         &self,
-        value: impl Fn(usize) -> Result<Option<ValueRef<'a>>, sqlive::Error<StoreFailure, DbError>>,
-    ) -> Result<RowImage, sqlive::Error<StoreFailure, DbError>> {
+        value: impl Fn(usize) -> Result<Option<ValueRef<'a>>, sqlive::Error<F, R>>,
+    ) -> Result<RowImage, sqlive::Error<F, R>> {
         let values = self
             .positions
             .iter()
             .map(|index| Ok(value(*index)?.map(SqlValue::from)))
-            .collect::<Result<_, sqlive::Error<StoreFailure, DbError>>>()?;
+            .collect::<Result<_, sqlive::Error<F, R>>>()?;
         Ok(RowImage::new(Arc::clone(&self.names), values))
     }
 }
@@ -79,9 +78,9 @@ impl ImageColumns {
 /// which keeps no value and for which SQLite answers `SQLITE_RANGE`. Any
 /// other failure is a failed read, which fails the write, so no capture
 /// takes it for a value that isn't there.
-pub(crate) fn column_value(
+pub(crate) fn column_value<F: HostError, R: HostError>(
     read: rusqlite::Result<ValueRef<'_>>,
-) -> Result<Option<ValueRef<'_>>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Option<ValueRef<'_>>, sqlive::Error<F, R>> {
     match read {
         Ok(value) => Ok(Some(value)),
         Err(rusqlite::Error::SqliteFailure(error, _))
@@ -94,18 +93,18 @@ pub(crate) fn column_value(
 }
 
 /// The row's value in column `index` before the operation.
-pub(crate) fn old_value(
+pub(crate) fn old_value<F: HostError, R: HostError>(
     old: &PreUpdateOldValueAccessor,
     index: usize,
-) -> Result<Option<ValueRef<'_>>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Option<ValueRef<'_>>, sqlive::Error<F, R>> {
     column_value(old.get_old_column_value(at(index)))
 }
 
 /// The row's value in column `index` after the operation.
-pub(crate) fn new_value(
+pub(crate) fn new_value<F: HostError, R: HostError>(
     new: &PreUpdateNewValueAccessor,
     index: usize,
-) -> Result<Option<ValueRef<'_>>, sqlive::Error<StoreFailure, DbError>> {
+) -> Result<Option<ValueRef<'_>>, sqlive::Error<F, R>> {
     column_value(new.get_new_column_value(at(index)))
 }
 
@@ -145,12 +144,12 @@ impl PreUpdateChanges {
     }
 
     /// Record one row operation on the table at `position`.
-    pub(crate) fn record(
+    pub(crate) fn record<F: HostError, R: HostError>(
         &mut self,
         shapes: &TableShapes,
         position: usize,
         case: &PreUpdateCase,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<(), sqlive::Error<F, R>> {
         let shape = shapes.shape(position);
         let before = self.rows.len();
         self.record_rows(shape, position, case)?;
@@ -172,12 +171,12 @@ impl PreUpdateChanges {
         Ok(())
     }
 
-    fn record_rows(
+    fn record_rows<F: HostError, R: HostError>(
         &mut self,
         shape: &TableShape,
         position: usize,
         case: &PreUpdateCase,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<(), sqlive::Error<F, R>> {
         let image = self.scoped.get(&position);
         match case {
             PreUpdateCase::Insert(new) => match image {
@@ -194,7 +193,7 @@ impl PreUpdateChanges {
                 }
             },
             PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
-                let changed = |index: usize| -> Result<bool, sqlive::Error<StoreFailure, DbError>> {
+                let changed = |index: usize| -> Result<bool, sqlive::Error<F, R>> {
                     Ok(old_value(old, index)? != new_value(new, index)?)
                 };
                 let mut key_changed = false;

@@ -9,6 +9,7 @@
 
 use super::DatabaseConnection;
 use crate::authorization::AppContext;
+use crate::authorization::Policy;
 use rusqlite::{CachedStatement, Statement};
 use sqlive::{ReadFrame, ScopePlan};
 use std::cell::{Cell, RefCell};
@@ -33,7 +34,7 @@ pub(super) struct AppStatements {
     pub(super) fresh: Cell<usize>,
 }
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     /// One app statement, from the cache when this connection prepared it
     /// before in the same context and schema. A connection opening, or
     /// migrating, prepares each one afresh: its statements change the schema.

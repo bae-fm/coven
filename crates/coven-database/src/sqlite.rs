@@ -33,7 +33,6 @@ mod transaction_capture;
 mod write_transaction;
 #[path = "write_with.rs"]
 mod write_with;
-use crate::DbError;
 use app_statements::StepsOf;
 pub(crate) use app_triggers::check_followed_triggers;
 pub(crate) use event_capture::Operation;
@@ -47,12 +46,12 @@ use std::sync::Arc;
 
 use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags, Params, Row};
 
-use crate::app_policy::{CovenPolicy, CovenScope};
+use crate::app_policy::CovenPolicy;
+use crate::authorization::PolicyError;
 use crate::authorization::SqlAuthorization;
 use crate::authorization::{Policy, Refresh};
 use crate::connection_setup::Setup;
-use crate::store_failure::StoreFailure;
-use crate::store_failure::StoreHandle;
+use crate::DbError;
 
 /// Statements kept prepared per connection, coven's and the app's: a local
 /// write runs about a hundred distinct ones of coven's, which a smaller cache
@@ -67,16 +66,16 @@ pub(crate) enum Recorded {
     No,
 }
 
-pub(crate) struct DatabaseConnection {
+pub(crate) struct DatabaseConnection<P: Policy = CovenPolicy> {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     /// Where this connection's reads push the statements they run.
     #[cfg(any(test, feature = "test-utils"))]
     statement_log: std::cell::RefCell<Option<crate::test_utils::StatementLog>>,
     connection: Connection,
-    authorization: SqlAuthorization<CovenPolicy>,
-    /// What coven adds to the authorizer's rules.
-    policy: CovenPolicy,
+    authorization: SqlAuthorization<P>,
+    /// What the host adds to the authorizer's rules.
+    policy: P,
     /// Stops a lookup that runs too long (`live_judging.rs`).
     lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
@@ -85,7 +84,7 @@ pub(crate) struct DatabaseConnection {
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
-    handle: Option<StoreHandle>,
+    handle: Option<sqlive::Handle<P::Failure>>,
     observation: Option<WriterObservation>,
     /// The main schema's tables as last read, with the schema they were
     /// read in (table_shapes.rs).
@@ -115,7 +114,7 @@ struct WriterObservation {
     recorded: Arc<BTreeSet<String>>,
 }
 
-impl DatabaseConnection {
+impl<P: Policy> DatabaseConnection<P> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn test_track_work(&self, counter: crate::test_utils::WorkCounter) {
         *self.work.borrow_mut() = Some(counter);
@@ -136,11 +135,11 @@ impl DatabaseConnection {
     pub(crate) fn open(
         path: &Path,
         read_only: bool,
-        authorization: SqlAuthorization<CovenPolicy>,
-        policy: CovenPolicy,
+        authorization: SqlAuthorization<P>,
+        policy: P,
         settings: &crate::SqliteSettings,
-        setup: &dyn Fn(&Setup<'_>) -> rusqlite::Result<()>,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+        setup: &dyn Fn(&Setup<'_, P>) -> rusqlite::Result<()>,
+    ) -> Result<Self, PolicyError<P>> {
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } else {
@@ -201,9 +200,7 @@ impl DatabaseConnection {
 
     /// The most arguments an SQL function call can pass on this connection.
     #[cfg(test)]
-    pub(crate) fn function_argument_limit(
-        &self,
-    ) -> Result<usize, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn function_argument_limit(&self) -> Result<usize, PolicyError<P>> {
         Ok(self.connection.limit(rusqlite::limits::Limit::SQLITE_LIMIT_FUNCTION_ARG)? as usize)
     }
 
@@ -228,7 +225,7 @@ impl DatabaseConnection {
     /// Fail the handle this connection serves with `failure`, so every later
     /// call and live query reports it. A connection that serves no handle
     /// yet fails nothing.
-    pub(crate) fn fail_handle(&self, failure: StoreFailure) {
+    pub(crate) fn fail_handle(&self, failure: P::Failure) {
         if let Some(handle) = &self.handle {
             handle.fail(failure);
         }
@@ -236,12 +233,12 @@ impl DatabaseConnection {
 
     /// Run `run` with this connection's policy in `scope`, leaving the scope
     /// on every path out of `run`, a panic's included.
-    pub(crate) fn within<T>(&self, scope: CovenScope, run: impl FnOnce() -> T) -> T {
-        struct EnteredScope<'a> {
-            policy: &'a CovenPolicy,
-            scope: CovenScope,
+    pub(crate) fn within<T>(&self, scope: P::Scope, run: impl FnOnce() -> T) -> T {
+        struct EnteredScope<'a, P: Policy> {
+            policy: &'a P,
+            scope: P::Scope,
         }
-        impl Drop for EnteredScope<'_> {
+        impl<P: Policy> Drop for EnteredScope<'_, P> {
             fn drop(&mut self) {
                 self.policy.leave(&self.scope);
             }
@@ -274,8 +271,8 @@ impl DatabaseConnection {
         return run(self);
         #[cfg(test)]
         {
-            struct Profiled<'a>(&'a mut DatabaseConnection);
-            impl Drop for Profiled<'_> {
+            struct Profiled<'a, P: Policy>(&'a mut DatabaseConnection<P>);
+            impl<P: Policy> Drop for Profiled<'_, P> {
                 fn drop(&mut self) {
                     self.0.end_profile();
                 }
@@ -292,11 +289,11 @@ impl DatabaseConnection {
     pub(crate) fn removed_hook(&self, hook: &'static str, removed: rusqlite::Result<()>) {
         if let Err(error) = removed {
             tracing::error!(hook, %error, "removing a transaction's hook failed");
-            self.fail_handle(StoreFailure::from(sqlive::EngineFailure::Hook(error.into())));
+            self.fail_handle(P::Failure::from(sqlive::EngineFailure::Hook(error.into())));
         }
     }
 
-    pub(crate) fn batch(&self, sql: &str) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn batch(&self, sql: &str) -> Result<(), PolicyError<P>> {
         let _scope = self.authorization.internal();
         self.connection.execute_batch(sql).map_err(Into::into)
     }
@@ -306,7 +303,7 @@ impl DatabaseConnection {
         &self,
         table: &str,
         column: &str,
-    ) -> Result<String, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<String, PolicyError<P>> {
         let _scope = self.authorization.internal();
         let (_, collation, _, _, _) =
             self.connection.column_metadata(Some("main"), table, column)?;
@@ -318,18 +315,14 @@ impl DatabaseConnection {
     pub(crate) fn reads(
         &self,
         sql: &str,
-    ) -> Result<crate::authorization::StatementReads, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<crate::authorization::StatementReads, PolicyError<P>> {
         let _scope = self.authorization.internal();
         let reads = self.authorization.observe_reads();
         self.connection.prepare(sql)?;
         Ok(reads.reads())
     }
 
-    pub(crate) fn execute<P: Params>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> Result<usize, sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn execute<Q: Params>(&self, sql: &str, params: Q) -> Result<usize, PolicyError<P>> {
         let _scope = self.authorization.internal();
         let changed = self.with_statement(sql, |statement| {
             statement.execute(params).map_err(sqlive::Error::from)
@@ -338,12 +331,12 @@ impl DatabaseConnection {
         Ok(changed)
     }
 
-    pub(crate) fn query_row<T, P: Params>(
+    pub(crate) fn query_row<T, Q: Params>(
         &self,
         sql: &str,
-        params: P,
+        params: Q,
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> Result<T, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<T, PolicyError<P>> {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
         let result = self.with_statement(sql, |statement| {
@@ -353,14 +346,14 @@ impl DatabaseConnection {
         result
     }
 
-    pub(crate) fn query<T, P: Params>(
+    pub(crate) fn query<T, Q: Params>(
         &self,
         sql: &str,
-        params: P,
+        params: Q,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ) -> Result<Vec<T>, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<Vec<T>, PolicyError<P>> {
         let mut values = Vec::new();
-        self.for_each::<_, sqlive::Error<StoreFailure, DbError>>(sql, params, |row| {
+        self.for_each::<_, PolicyError<P>>(sql, params, |row| {
             values.push(map(row)?);
             Ok(())
         })?;
@@ -368,10 +361,10 @@ impl DatabaseConnection {
     }
 
     /// Stream rows to a consumer with its own error type.
-    pub(crate) fn for_each<P: Params, E: From<sqlive::Error<StoreFailure, DbError>>>(
+    pub(crate) fn for_each<Q: Params, E: From<PolicyError<P>>>(
         &self,
         sql: &str,
-        params: P,
+        params: Q,
         mut visit: impl FnMut(&Row<'_>) -> Result<(), E>,
     ) -> Result<(), E> {
         let _scope = self.authorization.internal();
@@ -388,17 +381,14 @@ impl DatabaseConnection {
     }
 
     /// `prepared`, or the error the authorizer refused it with.
-    fn judged<T>(
-        &self,
-        prepared: rusqlite::Result<T>,
-    ) -> Result<T, sqlive::Error<StoreFailure, DbError>> {
+    fn judged<T>(&self, prepared: rusqlite::Result<T>) -> Result<T, PolicyError<P>> {
         Ok(self.authorization.app_result(prepared)?)
     }
 
     /// Run coven's own SQL on the connection's cached statement, parsed once per
     /// connection. The authorizer records reads only while a statement is
     /// prepared, so while it records, the statement is prepared afresh.
-    fn with_statement<T, E: From<sqlive::Error<StoreFailure, DbError>>>(
+    fn with_statement<T, E: From<PolicyError<P>>>(
         &self,
         sql: &str,
         run: impl FnOnce(&mut rusqlite::Statement<'_>) -> Result<T, E>,
@@ -422,7 +412,7 @@ impl DatabaseConnection {
         self.authorization.app_result(self.connection.prepare(sql)).map(drop)
     }
 
-    pub(crate) fn app_execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    pub(crate) fn app_execute<Q: Params>(&self, sql: &str, params: Q) -> rusqlite::Result<usize> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         let mut statement = self.authorization.app_result(self.app_statement(sql))?;
@@ -482,7 +472,7 @@ impl DatabaseConnection {
 
     /// Run one migration step inside the open migration transaction. Which
     /// tables its statements write is decided as they are prepared (§18.1).
-    pub(crate) fn migrating<T, E: From<sqlive::Error<StoreFailure, DbError>>>(
+    pub(crate) fn migrating<T, E: From<PolicyError<P>>>(
         &self,
         run: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
@@ -492,11 +482,11 @@ impl DatabaseConnection {
         Ok(result)
     }
 
-    pub(crate) fn app_query_row<T, P: Params>(
+    pub(crate) fn app_query_row<T, Q: Params>(
         &self,
         recorded: Recorded,
         sql: &str,
-        params: P,
+        params: Q,
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
         let mut map = Some(map);
@@ -509,11 +499,11 @@ impl DatabaseConnection {
         value.ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
-    pub(crate) fn app_query<T, P: Params>(
+    pub(crate) fn app_query<T, Q: Params>(
         &self,
         recorded: Recorded,
         sql: &str,
-        params: P,
+        params: Q,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         let mut values = Vec::new();
@@ -527,11 +517,11 @@ impl DatabaseConnection {
     /// Run an app statement and hand `each` its rows in order, under the
     /// authorizer's read and step scopes, until the rows end or `each`
     /// answers false.
-    fn app_rows<P: Params>(
+    fn app_rows<Q: Params>(
         &self,
         recorded: Recorded,
         sql: &str,
-        params: P,
+        params: Q,
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         self.authorization.check_sql(sql)?;
@@ -597,7 +587,7 @@ impl DatabaseConnection {
     }
 
     /// Serve an open handle once opening succeeds (§4).
-    pub(crate) fn serve(&mut self, handle: StoreHandle) {
+    pub(crate) fn serve(&mut self, handle: sqlive::Handle<P::Failure>) {
         assert!(self.handle.is_none(), "a connection serves one handle");
         self.authorization.serve(handle.clone());
         self.handle = Some(handle);
@@ -605,18 +595,22 @@ impl DatabaseConnection {
 
     /// Serve the handle as its writer, capturing each commit's row changes and
     /// keeping a write's operations on the `recorded` tables whole.
-    pub(crate) fn observe_commits(&mut self, handle: StoreHandle, recorded: BTreeSet<String>) {
+    pub(crate) fn observe_commits(
+        &mut self,
+        handle: sqlive::Handle<P::Failure>,
+        recorded: BTreeSet<String>,
+    ) {
         assert!(self.observation.is_none(), "commit observation installed once");
         self.serve(handle);
         self.observation = Some(WriterObservation { recorded: Arc::new(recorded) });
     }
 
     /// The scope in which the app's write SQL runs.
-    pub(crate) fn write_scope(&self) -> crate::authorization::WriteSql<'_> {
+    pub(crate) fn write_scope(&self) -> crate::authorization::WriteSql<'_, P> {
         self.authorization.write()
     }
 
-    pub(crate) fn require_transaction(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn require_transaction(&self) -> Result<(), PolicyError<P>> {
         if self.connection.is_autocommit() {
             Err(sqlive::Error::TransactionEnded)
         } else {
@@ -637,7 +631,7 @@ impl DatabaseConnection {
 
     /// Run `run` in a write transaction, whose failures are `E`: a failed
     /// rollback joins the run's own error.
-    pub(crate) fn transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn transaction<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &mut self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
@@ -646,14 +640,14 @@ impl DatabaseConnection {
 
     /// Streaming transfers publish table invalidations without a session's
     /// retained before/after BLOB values growing with the transferred object.
-    pub(crate) fn stream_transaction<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    pub(crate) fn stream_transaction<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &mut self,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
         self.transaction_captured(true, run)
     }
 
-    fn transaction_captured<T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
+    fn transaction_captured<T, E: sqlive::RollbackJoin<P::Failure, P::Refusal>>(
         &mut self,
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
@@ -698,7 +692,7 @@ impl DatabaseConnection {
         transaction.commit(outcome)
     }
 
-    pub(crate) fn close(self) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    pub(crate) fn close(self) -> Result<(), PolicyError<P>> {
         self.connection.close().map_err(|(_connection, error)| error.into())
     }
 

@@ -17,25 +17,26 @@
 //! `sqlive::Error::HandleFailed` carrying it, so the thread never ends in a way no
 //! one hears of.
 
-use crate::store_failure::StoreFailure;
-use crate::store_failure::StoreHandle;
-use crate::DbError;
+use crate::authorization::{Policy, PolicyError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// One kind of upkeep, run at each wake of its thread.
 pub(crate) trait Upkeep: Send + Sync + 'static {
+    /// The policy of the connection the upkeep runs on.
+    type Policy: Policy;
+
     /// The thread's name.
     const THREAD: &'static str;
 
     /// One wake's upkeep. A wake may come with no commit.
-    fn run(&self) -> Result<(), sqlive::Error<StoreFailure, DbError>>;
+    fn run(&self) -> Result<(), PolicyError<Self::Policy>>;
 
     /// What the handle fails with once a run fails with `error` other than
     /// on a busy or locked database.
     fn failure(
-        error: sqlive::Error<StoreFailure, DbError>,
-    ) -> sqlive::EngineFailure<StoreFailure, DbError>;
+        error: PolicyError<Self::Policy>,
+    ) -> sqlive::EngineFailure<<Self::Policy as Policy>::Failure, <Self::Policy as Policy>::Refusal>;
 }
 
 /// Wakes an upkeep thread. Waking only leaves the thread's permit, which
@@ -70,8 +71,8 @@ impl<U: Upkeep> UpkeepThread<U> {
     /// fails.
     pub(crate) fn spawn(
         upkeep: U,
-        handle: StoreHandle,
-    ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
+        handle: sqlive::Handle<<U::Policy as Policy>::Failure>,
+    ) -> Result<Self, PolicyError<U::Policy>> {
         #[cfg(test)]
         if handle.upkeep_thread_refused() {
             return Err(sqlive::Error::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
@@ -134,9 +135,9 @@ impl<U: Upkeep> Drop for UpkeepThread<U> {
 
 /// The upkeep's thread: the upkeep it runs, and the handle it fails once it
 /// can't.
-struct Serving<U> {
+struct Serving<U: Upkeep> {
     shared: Arc<Shared<U>>,
-    handle: StoreHandle,
+    handle: sqlive::Handle<<U::Policy as Policy>::Failure>,
 }
 
 impl<U: Upkeep> Serving<U> {
@@ -156,7 +157,7 @@ impl<U: Upkeep> Serving<U> {
                     tracing::debug!(?error, thread = U::THREAD, "upkeep found the database busy");
                 }
                 Err(error) => {
-                    self.handle.fail(StoreFailure::from(U::failure(error)));
+                    self.handle.fail_engine(U::failure(error));
                     return;
                 }
             }
@@ -170,7 +171,7 @@ impl<U: Upkeep> Serving<U> {
 
 /// Whether `error` is SQLite finding the database busy or locked: another
 /// connection held on past the busy timeout.
-fn busy(error: &sqlive::Error<StoreFailure, DbError>) -> bool {
+fn busy<F, R>(error: &sqlive::Error<F, R>) -> bool {
     matches!(
         error,
         sqlive::Error::Sqlite(rusqlite::Error::SqliteFailure(failure, _))

@@ -1,8 +1,6 @@
 //! The authorizer: the rules the engine enforces on every statement, then
 //! the policy its host supplies.
 
-use crate::store_failure::StoreFailure;
-use crate::DbError;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -40,10 +38,19 @@ pub(crate) struct PolicyAction<'a> {
     pub(crate) scope: StatementScope,
 }
 
+/// What the engine's error asks of the host's failure and refusal types:
+/// errors that cross threads, which the engine finds again inside SQLite's.
+pub(crate) trait HostError: std::error::Error + Send + Sync + 'static {}
+
+impl<T: std::error::Error + Send + Sync + 'static> HostError for T {}
+
 /// What the host adds to the authorizer's rules.
-pub(crate) trait Policy: Send + Sync + 'static {
+pub(crate) trait Policy: Sized + Send + Sync + 'static {
     /// What the policy refuses a statement with.
-    type Refusal: std::error::Error + Send + Sync + 'static;
+    type Refusal: HostError;
+    /// What the host's handle fails with: the host's own failures, and
+    /// sqlive's, which the host holds in its own terms.
+    type Failure: HostError + Clone + From<sqlive::EngineFailure<Self::Failure, Self::Refusal>>;
     /// Judge an action the authorizer's rules allowed; `Err` refuses the
     /// statement with it. A host statement's actions come here too, so the
     /// policy sees every action allowed.
@@ -69,10 +76,13 @@ pub(crate) trait Policy: Send + Sync + 'static {
     /// app statement, and the host through `refresh_policy`.
     fn refresh(
         &self,
-        sql: &crate::sqlite::DatabaseConnection,
+        sql: &crate::sqlite::DatabaseConnection<Self>,
         extent: Refresh,
     ) -> rusqlite::Result<()>;
 }
+
+/// The error a connection judged by `P` returns.
+pub(crate) type PolicyError<P> = sqlive::Error<<P as Policy>::Failure, <P as Policy>::Refusal>;
 
 /// How much of the schema the policy reads again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,13 +108,13 @@ pub(crate) struct AppContext {
 }
 
 /// One call of a SQL function registered through a connection's setup.
-pub(crate) struct FunctionCall<'a> {
+pub(crate) struct FunctionCall<'a, P: Policy = crate::app_policy::CovenPolicy> {
     context: &'a rusqlite::functions::Context<'a>,
     owner: Owner,
-    state: &'a Mutex<AuthorizationState>,
+    state: &'a Mutex<AuthorizationState<P>>,
 }
 
-impl<'a> FunctionCall<'a> {
+impl<'a, P: Policy> FunctionCall<'a, P> {
     /// The function's arguments.
     pub(crate) fn context(&self) -> &'a rusqlite::functions::Context<'a> {
         self.context
@@ -117,7 +127,7 @@ impl<'a> FunctionCall<'a> {
 
     /// Refuse the statement running the function with `refusal`, in place
     /// of the message the function's own failure carries.
-    pub(crate) fn deny(&self, refusal: DbError) {
+    pub(crate) fn deny(&self, refusal: P::Refusal) {
         lock_unpoisoned(self.state).denied = Some(sqlive::Error::Refused(refusal));
     }
 }
@@ -125,11 +135,11 @@ impl<'a> FunctionCall<'a> {
 /// Every change to the state but the authorizer's own is whole before it
 /// can panic, and the authorizer catches its own panic (`callback`), so the
 /// lock is taken as it is.
-pub(crate) struct SqlAuthorization<P> {
-    state: Arc<Mutex<AuthorizationState>>,
+pub(crate) struct SqlAuthorization<P: Policy> {
+    state: Arc<Mutex<AuthorizationState<P>>>,
     /// The handle the connection serves, once it serves one, which a panic
     /// in the authorizer fails.
-    handle: Arc<OnceLock<crate::store_failure::StoreHandle>>,
+    handle: Arc<OnceLock<sqlive::Handle<P::Failure>>>,
     /// The views and tables a live query reads whole.
     whole: Arc<WholeViews>,
     /// What the host adds to the rules. The authorizer asks it after its own
@@ -137,7 +147,7 @@ pub(crate) struct SqlAuthorization<P> {
     policy: Arc<P>,
 }
 
-struct AuthorizationState {
+struct AuthorizationState<P: Policy> {
     internal: bool,
     writing: bool,
     stepping: bool,
@@ -151,7 +161,7 @@ struct AuthorizationState {
     /// What a live query's statements read, while one of its runs reads.
     reads: Option<ReadCapture>,
     altering: bool,
-    denied: Option<sqlive::Error<StoreFailure, DbError>>,
+    denied: Option<PolicyError<P>>,
     /// The authorizer panicked with this: the state may be half-changed, so
     /// it refuses every later statement with it (E15).
     broken: Option<Bug>,
@@ -164,7 +174,7 @@ struct AuthorizationState {
     panic_next_function: bool,
 }
 
-impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
+impl<P: Policy> SqlAuthorization<P> {
     /// An authorizer that asks `policy` about each action its own rules
     /// allow.
     pub(crate) fn new(whole: Arc<WholeViews>, policy: Arc<P>) -> Self {
@@ -209,13 +219,13 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
     }
 
     /// What wraps the host's SQL functions as the connection registers them.
-    pub(crate) fn functions(&self) -> HostFunctions {
+    pub(crate) fn functions(&self) -> HostFunctions<P> {
         HostFunctions { state: Arc::clone(&self.state) }
     }
 
     /// The connection now serves `handle`, which a panic in its authorizer
     /// fails.
-    pub(crate) fn serve(&self, handle: crate::store_failure::StoreHandle) {
+    pub(crate) fn serve(&self, handle: sqlive::Handle<P::Failure>) {
         if self.handle.set(handle).is_err() {
             unreachable!("a connection serves one handle");
         }
@@ -252,21 +262,21 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
         }
     }
 
-    pub(crate) fn internal(&self) -> InternalSql<'_> {
+    pub(crate) fn internal(&self) -> InternalSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         let previous = state.internal;
         state.internal = true;
         InternalSql { state: &self.state, previous }
     }
 
-    pub(crate) fn observe_reads(&self) -> ObservedReads<'_> {
+    pub(crate) fn observe_reads(&self) -> ObservedReads<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(state.observed.is_none(), "read observation cannot nest");
         state.observed = Some(StatementReads::default());
         ObservedReads(&self.state)
     }
 
-    pub(crate) fn write(&self) -> WriteSql<'_> {
+    pub(crate) fn write(&self) -> WriteSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
@@ -275,7 +285,7 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
 
     /// A bulk write's SQL: a write's, refused any change to a synced table,
     /// recording instead each table of `main` its statements change.
-    pub(crate) fn bulk(&self) -> BulkSql<'_> {
+    pub(crate) fn bulk(&self) -> BulkSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
@@ -283,7 +293,7 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
         BulkSql(&self.state)
     }
 
-    pub(crate) fn step(&self) -> StepSql<'_> {
+    pub(crate) fn step(&self) -> StepSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.stepping, "SQL step scope cannot nest");
         state.stepping = true;
@@ -300,7 +310,7 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
 
     /// A one-shot read's SQL: it may only read, and records nothing of
     /// what it reads, since nothing runs it again.
-    pub(crate) fn reading(&self) -> ReadingSql<'_> {
+    pub(crate) fn reading(&self) -> ReadingSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.reading, "read scopes cannot nest");
         state.reading = true;
@@ -309,7 +319,7 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
 
     /// A live query's run's SQL: it may only read, and records what it
     /// reads, so a commit that changes it runs the query again (§4).
-    pub(crate) fn live_reading(&self) -> ReadingSql<'_> {
+    pub(crate) fn live_reading(&self) -> ReadingSql<'_, P> {
         let reading = self.reading();
         lock_unpoisoned(&self.state).reads = Some(ReadCapture::new(Arc::clone(&self.whole)));
         reading
@@ -419,13 +429,12 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
         // while keeping direct app PRAGMAs outside the SQL capability.
         let tokens = sqlive::sql::tokens(sql)?;
         if tokens.first().is_some_and(|token| token.word("pragma")) {
-            let error: sqlive::Error<StoreFailure, DbError> =
-                sqlive::Error::StatementForbidden { operation: "PRAGMA" };
+            let error: PolicyError<P> = sqlive::Error::StatementForbidden { operation: "PRAGMA" };
             return Err(rusqlite::Error::UserFunctionError(Box::new(error)));
         }
         self.policy.check_sql(&tokens).map_err(|refusal| {
             rusqlite::Error::UserFunctionError(Box::new(
-                sqlive::Error::<StoreFailure, DbError>::Refused(refusal),
+                sqlive::Error::<P::Failure, P::Refusal>::Refused(refusal),
             ))
         })
     }
@@ -442,11 +451,11 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
 /// Wraps the host's SQL functions, sharing the authorizer's state: the
 /// function learns whose statement runs it, and its refusal or panic fails
 /// that statement.
-pub(crate) struct HostFunctions {
-    state: Arc<Mutex<AuthorizationState>>,
+pub(crate) struct HostFunctions<P: Policy> {
+    state: Arc<Mutex<AuthorizationState<P>>>,
 }
 
-impl HostFunctions {
+impl<P: Policy> HostFunctions<P> {
     /// `function`, one of the host's SQL functions named `name`, as the
     /// connection registers it. rusqlite turns a function's panic into an
     /// error that names no bug, so the function keeps it: the statement
@@ -455,7 +464,7 @@ impl HostFunctions {
     pub(crate) fn function<T: rusqlite::types::ToSql>(
         &self,
         name: &'static str,
-        function: impl Fn(&FunctionCall<'_>) -> rusqlite::Result<T> + Send + 'static,
+        function: impl Fn(&FunctionCall<'_, P>) -> rusqlite::Result<T> + Send + 'static,
     ) -> impl Fn(&mut rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static
     {
         let state = Arc::clone(&self.state);
@@ -471,15 +480,15 @@ impl HostFunctions {
             });
             called.unwrap_or_else(|bug| {
                 lock_unpoisoned(&state).denied = Some(sqlive::Error::Bug(bug.clone()));
-                let error: sqlive::Error<StoreFailure, DbError> = sqlive::Error::Bug(bug);
+                let error: PolicyError<P> = sqlive::Error::Bug(bug);
                 Err(rusqlite::Error::UserFunctionError(Box::new(error)))
             })
         }
     }
 }
 
-pub(crate) struct InternalSql<'a> {
-    state: &'a Mutex<AuthorizationState>,
+pub(crate) struct InternalSql<'a, P: Policy> {
+    state: &'a Mutex<AuthorizationState<P>>,
     previous: bool,
 }
 
@@ -491,32 +500,32 @@ pub(crate) struct StatementReads {
     pub(crate) functions: BTreeSet<String>,
 }
 
-pub(crate) struct ObservedReads<'a>(&'a Mutex<AuthorizationState>);
+pub(crate) struct ObservedReads<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
-impl ObservedReads<'_> {
+impl<P: Policy> ObservedReads<'_, P> {
     pub(crate) fn reads(&self) -> StatementReads {
         lock_unpoisoned(self.0).observed.as_ref().expect("observing reads").clone()
     }
 }
 
-impl Drop for ObservedReads<'_> {
+impl<P: Policy> Drop for ObservedReads<'_, P> {
     fn drop(&mut self) {
         lock_unpoisoned(self.0).observed = None;
     }
 }
 
-pub(crate) struct WriteSql<'a>(&'a Mutex<AuthorizationState>);
+pub(crate) struct WriteSql<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
-impl Drop for WriteSql<'_> {
+impl<P: Policy> Drop for WriteSql<'_, P> {
     fn drop(&mut self) {
         lock_unpoisoned(self.0).writing = false;
     }
 }
 
 /// A bulk write's SQL scope; it ends with the write's SQL.
-pub(crate) struct BulkSql<'a>(&'a Mutex<AuthorizationState>);
+pub(crate) struct BulkSql<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
-impl BulkSql<'_> {
+impl<P: Policy> BulkSql<'_, P> {
     /// The tables of `main` the write's statements changed so far, as live
     /// queries name them.
     pub(crate) fn changed(&self) -> BTreeSet<String> {
@@ -524,7 +533,7 @@ impl BulkSql<'_> {
     }
 }
 
-impl Drop for BulkSql<'_> {
+impl<P: Policy> Drop for BulkSql<'_, P> {
     fn drop(&mut self) {
         let mut state = lock_unpoisoned(self.0);
         state.writing = false;
@@ -532,17 +541,17 @@ impl Drop for BulkSql<'_> {
     }
 }
 
-pub(crate) struct StepSql<'a>(&'a Mutex<AuthorizationState>);
+pub(crate) struct StepSql<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
-impl Drop for StepSql<'_> {
+impl<P: Policy> Drop for StepSql<'_, P> {
     fn drop(&mut self) {
         lock_unpoisoned(self.0).stepping = false;
     }
 }
 
-pub(crate) struct ReadingSql<'a>(&'a Mutex<AuthorizationState>);
+pub(crate) struct ReadingSql<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
-impl Drop for ReadingSql<'_> {
+impl<P: Policy> Drop for ReadingSql<'_, P> {
     fn drop(&mut self) {
         let mut state = lock_unpoisoned(self.0);
         state.reading = false;
@@ -550,16 +559,16 @@ impl Drop for ReadingSql<'_> {
     }
 }
 
-impl Drop for InternalSql<'_> {
+impl<P: Policy> Drop for InternalSql<'_, P> {
     fn drop(&mut self) {
         lock_unpoisoned(self.state).internal = self.previous;
     }
 }
 
-impl AuthorizationState {
+impl<P: Policy> AuthorizationState<P> {
     /// Whose statement `accessor`, the innermost trigger or view being
     /// prepared, if any, belongs to.
-    fn owner(&self, accessor: Option<&str>, policy: &impl Policy) -> Owner {
+    fn owner(&self, accessor: Option<&str>, policy: &P) -> Owner {
         match accessor {
             _ if !self.internal => Owner::App,
             Some(name) if !policy.host_object(name) => Owner::AppTriggerOfHost,
@@ -569,11 +578,7 @@ impl AuthorizationState {
 
     /// Judge the statement being prepared, `context`, recording what it
     /// reads and changes.
-    fn judge(
-        &mut self,
-        context: AuthContext<'_>,
-        policy: &impl Policy<Refusal = DbError>,
-    ) -> Authorization {
+    fn judge(&mut self, context: AuthContext<'_>, policy: &P) -> Authorization {
         #[cfg(test)]
         assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
         if let (
@@ -628,10 +633,7 @@ impl AuthorizationState {
 
     /// The error that refuses `context` by the authorizer's own rules, if
     /// any.
-    fn refusal(
-        &mut self,
-        context: AuthContext<'_>,
-    ) -> Result<(), sqlive::Error<StoreFailure, DbError>> {
+    fn refusal(&mut self, context: AuthContext<'_>) -> Result<(), PolicyError<P>> {
         use AuthAction::*;
         // FTS5 reads the database's data version as it prepares a statement
         // over its table, in a read or in a write that changes its index, as
