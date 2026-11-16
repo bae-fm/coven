@@ -52,15 +52,20 @@ mod fixture {
             Ok(Vec::<u8>::new())
         })
         .unwrap();
+        let authorization = crate::authorization::SqlAuthorization::new(
+            crate::internal_schema::whole_views(),
+            std::sync::Arc::new(crate::app_policy::CovenPolicy::new(&[])),
+        );
+        let setup = crate::connection_setup::Setup::new(&db, &authorization);
         crate::transfers_in_flight::TransfersInFlight::new(
             crate::observation::CommitObserver::new(coven_foundation::task::HeardBugs::shared()),
         )
-        .register(&db)
+        .register(&setup)
         .unwrap();
         crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::new(
             coven_foundation::task::HeardBugs::shared(),
         ))
-        .register(&db)
+        .register(&setup)
         .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;").unwrap();
         let schema = crate::internal_schema::initial_schema();

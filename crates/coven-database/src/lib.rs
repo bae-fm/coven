@@ -12,6 +12,7 @@ mod author_judgement;
 mod authorization;
 mod authorship;
 mod change_capture;
+mod connection_setup;
 mod coven_functions;
 mod sql_functions;
 mod sql_versions;

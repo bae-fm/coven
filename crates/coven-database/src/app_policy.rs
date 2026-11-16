@@ -9,6 +9,7 @@ use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::AuthAction;
 
 use crate::authorization::{Owner, Policy, PolicyAction, SqlAuthorization};
+use crate::coven_functions::Views;
 use crate::read_capture::WholeViews;
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, SyncedTable};
@@ -141,9 +142,18 @@ impl CovenPolicy {
         whole: &Arc<WholeViews>,
         settings: &crate::SqliteSettings,
         functions: &crate::SqlFunctions,
+        views: Option<&Views<'_>>,
     ) -> Result<DatabaseConnection, DbError> {
         let authorization = SqlAuthorization::new(Arc::clone(whole), Arc::new(self.clone()));
-        DatabaseConnection::open(path, read_only, authorization, self, settings, functions)
+        let policy = self.clone();
+        DatabaseConnection::open(path, read_only, authorization, self, settings, &|setup| {
+            crate::coven_functions::register(setup, &policy)?;
+            functions.register(setup)?;
+            match views {
+                Some(views) => views(setup),
+                None => Ok(()),
+            }
+        })
     }
 
     /// Whether materialized SQL is running, as `coven_applying()` says.

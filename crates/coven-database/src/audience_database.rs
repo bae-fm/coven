@@ -8,6 +8,7 @@
 //! result with the real run's finds every read across audiences.
 
 use crate::app_policy::CovenPolicy;
+use crate::connection_setup::Setup;
 use crate::migration_snapshot::{key_sql, MigrationCapture};
 use crate::schema::{Schema, TableSchema};
 use crate::sql::identifier;
@@ -65,12 +66,18 @@ impl AudienceDatabase {
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
         let before = Schema::read(live, &crate::file_table::registered_columns(live)?)?;
+        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
+        let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        let views = |setup: &Setup<'_>| {
+            crate::coven_functions::register_views(setup, device, &transfers, &network)
+        };
         let database = CovenPolicy::new(tables).open(
             &directory.audience_database_path(),
             false,
             whole,
             sqlite,
             functions,
+            Some(&views),
         )?;
         // From here every way out removes the files.
         let mut result = Self {
@@ -80,10 +87,7 @@ impl AudienceDatabase {
             staged: Vec::new(),
             triggers: before.triggers(),
         };
-        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
-        let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let database = result.database.as_mut().expect("open");
-        database.serve_views(device, &transfers, &network)?;
         database.batch(&crate::internal_schema::initial_schema())?;
         let synced = MigrationCapture::new(live, tables)?.synced().clone();
         let before_run = synced_before(live)?;

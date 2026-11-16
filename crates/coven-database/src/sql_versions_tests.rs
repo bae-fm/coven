@@ -329,6 +329,7 @@ fn a_new_database_records_the_sqlite_that_created_it() {
             &crate::internal_schema::whole_views(),
             &crate::SqliteSettings::default(),
             &SqlFunctions::default(),
+            None,
         )
         .unwrap();
     connection.prepare_internal_schema().unwrap();

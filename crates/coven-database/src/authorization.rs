@@ -70,6 +70,31 @@ pub(crate) struct AppContext {
     policy: u64,
 }
 
+/// One call of a SQL function registered through a connection's setup.
+pub(crate) struct FunctionCall<'a> {
+    context: &'a rusqlite::functions::Context<'a>,
+    owner: Owner,
+    state: &'a Mutex<AuthorizationState>,
+}
+
+impl<'a> FunctionCall<'a> {
+    /// The function's arguments.
+    pub(crate) fn context(&self) -> &'a rusqlite::functions::Context<'a> {
+        self.context
+    }
+
+    /// Whose statement runs the function: the host's own, or the app's.
+    pub(crate) fn owner(&self) -> Owner {
+        self.owner
+    }
+
+    /// Fail the statement running the function with `error`, in place of the
+    /// message the function's own failure carries.
+    pub(crate) fn deny(&self, error: DbError) {
+        lock_unpoisoned(self.state).denied = Some(error);
+    }
+}
+
 /// Every change to the state but the authorizer's own is whole before it
 /// can panic, and the authorizer catches its own panic (`callback`), so the
 /// lock is taken as it is.
@@ -143,23 +168,6 @@ impl SqlAuthorization {
         &self.whole
     }
 
-    /// A SQL function of the host's that is true in the host's own
-    /// statements and fails an app's with `operation`.
-    pub(crate) fn host_only_function(
-        &self,
-        operation: &'static str,
-    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
-        let state = Arc::clone(&self.state);
-        move |_| {
-            let mut state = lock_unpoisoned(&state);
-            if state.internal {
-                return Ok(true);
-            }
-            state.denied = Some(DbError::StatementForbidden { operation });
-            Err(rusqlite::Error::UserFunctionError(operation.into()))
-        }
-    }
-
     /// Panic in the next judgment, as a bug in the authorizer would.
     #[cfg(test)]
     pub(crate) fn panic_next(&self) {
@@ -177,10 +185,10 @@ impl SqlAuthorization {
     /// error that names no bug, so the function keeps it: the statement
     /// fails with the bug's text, and the app's call with `DbError::Bug`
     /// (E15). A function changes nothing, so the connection goes on.
-    pub(crate) fn function<T>(
+    pub(crate) fn function<T: rusqlite::types::ToSql>(
         &self,
         name: &'static str,
-        function: impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
+        function: impl Fn(&FunctionCall<'_>) -> rusqlite::Result<T> + Send + 'static,
     ) -> impl Fn(&mut rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static
     {
         let state = Arc::clone(&self.state);
@@ -191,7 +199,8 @@ impl SqlAuthorization {
                     !std::mem::take(&mut lock_unpoisoned(&state).panic_next_function),
                     "{name} lost its argument"
                 );
-                function(context)
+                let owner = if lock_unpoisoned(&state).internal { Owner::Host } else { Owner::App };
+                function(&FunctionCall { context: &*context, owner, state: &state })
             });
             called.unwrap_or_else(|bug| {
                 lock_unpoisoned(&state).denied = Some(DbError::Bug(bug.clone()));

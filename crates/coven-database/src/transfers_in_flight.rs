@@ -8,6 +8,7 @@
 //! ends. How far each has got is progress no table holds: a `TransferWatch`
 //! hears it, by file, and how each ended (E7, E8).
 
+use crate::connection_setup::Setup;
 use crate::observation::{CommitObserver, RowChange};
 use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
@@ -87,9 +88,9 @@ impl TransfersInFlight {
 
     /// Register both ways' functions on a connection to the store's
     /// database. None is deterministic; all are safe in coven's views.
-    pub(crate) fn register(&self, connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-        self.uploads.register(connection)?;
-        self.downloads.register(connection)
+    pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
+        self.uploads.register(setup)?;
+        self.downloads.register(setup)
     }
 }
 
@@ -293,17 +294,17 @@ impl InFlight {
         );
     }
 
-    fn register(&self, connection: &rusqlite::Connection) -> rusqlite::Result<()> {
+    fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
         let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
         if let Some(name) = self.shared.direction.contains {
             let owner = self.clone();
-            connection.create_scalar_function(name, 1, flags, move |ctx| {
+            setup.scalar_function(name, 1, flags, move |call| {
                 // Anything but an object id fails the statement.
-                Ok(owner.state().objects.contains_key(&ctx.get::<ObjectId>(0)?))
+                Ok(owner.state().objects.contains_key(&call.context().get::<ObjectId>(0)?))
             })?;
         }
         let owner = self.clone();
-        connection.create_scalar_function(self.shared.direction.objects, 0, flags, move |_| {
+        setup.scalar_function(self.shared.direction.objects, 0, flags, move |_| {
             let objects: Vec<String> = owner
                 .state()
                 .objects

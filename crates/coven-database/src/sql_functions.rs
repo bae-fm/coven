@@ -4,13 +4,13 @@
 //! calls by name.
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::{FromSql, Value, ValueRef};
 
+use crate::connection_setup::Setup;
 use crate::DbError;
 
 /// SQLite's own collations. Coven's tables use only these, so an app name is
@@ -169,22 +169,24 @@ impl SqlFunctions {
     }
 
     /// Register every collation and scalar function on a connection that
-    /// has run no app statement, after coven's own functions.
-    pub(crate) fn register(&self, connection: &rusqlite::Connection) -> Result<(), DbError> {
+    /// has run no app statement, after coven's own functions. A name coven
+    /// refuses fails the open, as `DbError` inside the error returned.
+    pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
+        let refused = |error: DbError| rusqlite::Error::UserFunctionError(Box::new(error));
         for (position, collation) in self.collations.iter().enumerate() {
             let name = &collation.name;
             if SQLITE_COLLATIONS.iter().any(|own| own.eq_ignore_ascii_case(name)) {
-                return Err(DbError::ReservedCollation { name: name.clone() });
+                return Err(refused(DbError::ReservedCollation { name: name.clone() }));
             }
             if self.collations[..position]
                 .iter()
                 .any(|earlier| earlier.name.eq_ignore_ascii_case(name))
             {
-                return Err(DbError::DuplicateCollation { name: name.clone() });
+                return Err(refused(DbError::DuplicateCollation { name: name.clone() }));
             }
             let compare = collation.compare.clone();
             let collation = name.clone();
-            connection.create_collation(name.as_str(), move |left, right| {
+            setup.collation(name.as_str(), move |left, right| {
                 unless_panicked(
                     &collation,
                     "the app's collation panicked; no order is safe to return",
@@ -197,22 +199,19 @@ impl SqlFunctions {
         }
         // SQLite's built-in functions and coven's, read before any of the
         // app's is registered.
-        let existing = connection
-            .prepare("SELECT DISTINCT lower(name) FROM pragma_function_list")?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<BTreeSet<String>>>()?;
+        let existing = setup.function_names()?;
         for (position, scalar) in self.scalars.iter().enumerate() {
             let name = &scalar.name;
             if existing.contains(&name.to_ascii_lowercase())
                 || crate::internal_schema::reserved_name(name)
             {
-                return Err(DbError::ReservedFunction { name: name.clone() });
+                return Err(refused(DbError::ReservedFunction { name: name.clone() }));
             }
             if self.scalars[..position]
                 .iter()
                 .any(|earlier| earlier.name.eq_ignore_ascii_case(name))
             {
-                return Err(DbError::DuplicateFunction { name: name.clone() });
+                return Err(refused(DbError::DuplicateFunction { name: name.clone() }));
             }
             let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
             let flags = match scalar.determinism {
@@ -225,14 +224,14 @@ impl SqlFunctions {
                 // build. Refuse such a function until rusqlite takes an
                 // empty slice for no arguments.
                 Determinism::Deterministic { .. } if scalar.arguments == 0 => {
-                    return Err(DbError::ConstantFunction { name: name.clone() });
+                    return Err(refused(DbError::ConstantFunction { name: name.clone() }));
                 }
                 Determinism::Deterministic { .. } => flags | FunctionFlags::SQLITE_DETERMINISTIC,
                 Determinism::Nondeterministic => flags,
             };
             let compute = scalar.compute.clone();
             let function = name.clone();
-            connection.create_scalar_function(
+            setup.named_function(
                 name.as_str(),
                 i32::from(scalar.arguments),
                 flags,

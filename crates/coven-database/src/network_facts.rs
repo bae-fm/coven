@@ -6,6 +6,7 @@
 //! reads one runs again as the network changes, as if a write had changed
 //! what it read.
 
+use crate::connection_setup::Setup;
 use crate::observation::{CommitObserver, RowChange};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::network_watch::NetworkState;
@@ -81,14 +82,12 @@ impl NetworkFacts {
 
     /// Register the functions on a connection to the store's database. None
     /// is deterministic; both are safe in coven's views.
-    pub(crate) fn register(&self, connection: &rusqlite::Connection) -> rusqlite::Result<()> {
+    pub(crate) fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {
         let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
         let facts = self.clone();
-        connection
-            .create_scalar_function(FUNCTIONS[0], 0, flags, move |_| Ok(facts.current().usable))?;
+        setup.scalar_function(FUNCTIONS[0], 0, flags, move |_| Ok(facts.current().usable))?;
         let facts = self.clone();
-        connection
-            .create_scalar_function(FUNCTIONS[1], 0, flags, move |_| Ok(facts.current().metered))
+        setup.scalar_function(FUNCTIONS[1], 0, flags, move |_| Ok(facts.current().metered))
     }
 }
 

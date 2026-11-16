@@ -237,11 +237,20 @@ impl DatabaseBuilder {
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        let views = |setup: &Setup<'_>| {
+            crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
+        };
         coven_foundation::task::operation_step("opening the writer's connection");
-        let mut writer =
-            CovenPolicy::new(&tables).open(&path, false, &whole, &self.sqlite, &self.functions)?;
-        // Before the app's migrations, which may read coven's views.
-        writer.serve_views(settings.device_id, &transfers, &network)?;
+        // Coven's views, which the app's migrations may read, are served from
+        // the start.
+        let mut writer = CovenPolicy::new(&tables).open(
+            &path,
+            false,
+            &whole,
+            &self.sqlite,
+            &self.functions,
+            Some(&views),
+        )?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
             writer.with_profile(|writer| -> Result<_, OpenError> {
                 coven_foundation::task::operation_step("switching the store's database to WAL");
@@ -298,7 +307,7 @@ impl DatabaseBuilder {
                 // count, and forgetting the statistics afterwards doesn't unload it.
                 // The writer then reads what that connection kept.
                 CovenPolicy::new(&tables)
-                    .open(&path, false, &whole, &self.sqlite, &self.functions)?
+                    .open(&path, false, &whole, &self.sqlite, &self.functions, None)?
                     .gather_statistics()?;
                 // SQLite reads its statistics again only when told to.
                 writer.batch("ANALYZE sqlite_schema")?;
@@ -307,7 +316,7 @@ impl DatabaseBuilder {
                 // or function reaches.
                 coven_foundation::task::operation_step("opening the input database");
                 let input_path = self.directory.input_database_path();
-                let mut input_writer = coven_only(&input_path, false)?;
+                let mut input_writer = coven_only(&input_path, false, None)?;
                 input_writer.enable_wal()?;
                 let version: u32 =
                     input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
@@ -318,7 +327,7 @@ impl DatabaseBuilder {
                     1 => (),
                     _ => return Err(DbError::DamagedDatabase.into()),
                 }
-                let mut input_reader = coven_only(&input_path, true)?;
+                let mut input_reader = coven_only(&input_path, true, None)?;
                 input_writer.serve(observer.clone());
                 input_reader.serve(observer.clone());
                 let input_writer = Arc::new(Mutex::new(input_writer));
@@ -326,7 +335,7 @@ impl DatabaseBuilder {
                 // each on a connection of its own (§4); opening, with no reader yet,
                 // checkpointed as it committed.
                 let checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
-                    coven_only(&input_path, false)?,
+                    coven_only(&input_path, false, None)?,
                     &input_writer,
                     crate::sqlite_settings::CHECKPOINT_PAGES,
                     observer.clone(),
@@ -354,6 +363,7 @@ impl DatabaseBuilder {
                 &whole,
                 &self.sqlite,
                 &crate::SqlFunctions::default(),
+                None,
             )?;
             checkpoints.push(crate::wal_checkpoints::WalCheckpointer::start(
                 checkpointing,
@@ -370,6 +380,7 @@ impl DatabaseBuilder {
                     &whole,
                     &self.sqlite,
                     &self.functions,
+                    None,
                 )?,
                 &writer,
                 observer.clone(),
@@ -389,8 +400,8 @@ impl DatabaseBuilder {
                 &whole,
                 &self.sqlite,
                 &self.functions,
+                Some(&views),
             )?;
-            reader.serve_views(settings.device_id, &transfers, &network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -457,14 +468,17 @@ impl DatabaseBuilder {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        let views = |setup: &Setup<'_>| {
+            crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
+        };
         let mut first = CovenPolicy::read_only(&tables).open(
             &path,
             true,
             &whole,
             &self.sqlite,
             &self.functions,
+            Some(&views),
         )?;
-        first.serve_views(settings.device_id, &transfers, &network)?;
         // A read-only open runs no step, so nothing reaches `progress`.
         let clock = match self.clock {
             Some(clock) => clock,
@@ -490,8 +504,8 @@ impl DatabaseBuilder {
                 &whole,
                 &self.sqlite,
                 &self.functions,
+                Some(&views),
             )?;
-            reader.serve_views(settings.device_id, &transfers, &network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -501,8 +515,8 @@ impl DatabaseBuilder {
             &whole,
             &self.sqlite,
             &self.functions,
+            Some(&views),
         )?;
-        writer.serve_views(settings.device_id, &transfers, &network)?;
         writer.serve(observer.clone());
         Ok(Database {
             observer: observer.clone(),
@@ -536,7 +550,7 @@ pub async fn discarded_operations(
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
         blocking_completing("read the discarded operations", bugs.clone(), move || {
-            let db = coven_only(&path, true)?;
+            let db = coven_only(&path, true, None)?;
             crate::operation::read(&db)
         })
         .await,
@@ -556,7 +570,7 @@ pub async fn read_device_id_in_use(
 ) -> Result<Option<coven_merge::Slot>, DbError> {
     finish_blocking(
         blocking_completing("read the device id in use record", bugs.clone(), move || {
-            let db = coven_only(&path, true)?;
+            let db = coven_only(&path, true, None)?;
             crate::device_reset::read_in_use(&db)
         })
         .await,
@@ -573,7 +587,7 @@ pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
     finish_blocking(
         blocking_completing("read the store name", bugs, move || {
             let _lock = directory.lock_read_only()?;
-            let database = coven_only(&directory.database_path(), true)?;
+            let database = coven_only(&directory.database_path(), true, None)?;
             Ok(crate::store_state_tables::name(&database)?)
         })
         .await,
@@ -598,12 +612,19 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
         blocking_completing("read the closed store's sync status", bugs, move || {
             let _lock = lock;
             let settings = directory.settings()?;
-            let mut database = coven_only(&directory.database_path(), true)?;
-            database.prepare_internal_schema()?;
             let observer = CommitObserver::new(directory.bugs().clone());
             let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
             let network = crate::network_facts::NetworkFacts::new(observer);
-            database.serve_views(settings.device_id, &transfers, &network)?;
+            let views = |setup: &Setup<'_>| {
+                crate::coven_functions::register_views(
+                    setup,
+                    settings.device_id,
+                    &transfers,
+                    &network,
+                )
+            };
+            let mut database = coven_only(&directory.database_path(), true, Some(&views))?;
+            database.prepare_internal_schema()?;
             database.read_snapshot(|sql| Ok::<_, OpenError>(sql.sync_facts()?))
         })
         .await,
@@ -621,7 +642,7 @@ pub async fn discarded_store_name(
 ) -> Result<String, DbError> {
     finish_blocking(
         blocking_completing("read the discarded store name", bugs.clone(), move || {
-            let database = coven_only(&path, true)?;
+            let database = coven_only(&path, true, None)?;
             crate::store_state_tables::name(&database)
         })
         .await,
@@ -631,7 +652,11 @@ pub async fn discarded_store_name(
 /// A connection to a database of coven's own tables only, such as the input
 /// database or a discarded one: no app table, SQLite setting or function
 /// reaches it.
-fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnection, DbError> {
+fn coven_only(
+    path: &std::path::Path,
+    read_only: bool,
+    views: Option<&crate::coven_functions::Views<'_>>,
+) -> Result<DatabaseConnection, DbError> {
     CovenPolicy::new(&[]).open(
         path,
         read_only,
@@ -641,6 +666,7 @@ fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnect
         // would shrink and regrow the file.
         &crate::SqliteSettings { auto_vacuum: Some(AutoVacuum::Off), ..Default::default() },
         &crate::SqlFunctions::default(),
+        views,
     )
 }
 

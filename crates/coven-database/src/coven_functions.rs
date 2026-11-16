@@ -4,11 +4,11 @@
 
 use coven_foundation::id_source::DeviceId;
 use rusqlite::functions::FunctionFlags;
-use rusqlite::types::{Value, ValueRef};
-use rusqlite::Connection;
+use rusqlite::types::{ToSql, Value, ValueRef};
 
 use crate::app_policy::CovenPolicy;
-use crate::authorization::SqlAuthorization;
+use crate::authorization::Owner;
+use crate::connection_setup::Setup;
 
 /// A function whose result depends on its arguments alone, which views and
 /// indexes may call.
@@ -39,30 +39,29 @@ pub(crate) fn path_text_sql(value: ValueRef<'_>) -> rusqlite::Result<Value> {
     })
 }
 
-pub(crate) fn register(
-    connection: &Connection,
-    authorization: &SqlAuthorization,
-    policy: &CovenPolicy,
-) -> rusqlite::Result<()> {
+pub(crate) fn register(setup: &Setup<'_>, policy: &CovenPolicy) -> rusqlite::Result<()> {
     add(
-        connection,
-        authorization,
+        setup,
         "coven_applying",
         0,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
         policy.applying_function(),
     )?;
-    add(
-        connection,
-        authorization,
+    // True in coven's own statements, a refusal in the app's.
+    setup.scalar_function(
         "_coven_rowid_changed",
         0,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        authorization.host_only_function("changing a hidden rowid"),
+        |call| {
+            if call.owner() == Owner::Host {
+                return Ok(true);
+            }
+            call.deny(crate::DbError::StatementForbidden { operation: "changing a hidden rowid" });
+            Err(rusqlite::Error::UserFunctionError("changing a hidden rowid".into()))
+        },
     )?;
     add(
-        connection,
-        authorization,
+        setup,
         "_coven_loss_order",
         2,
         FunctionFlags::SQLITE_UTF8
@@ -72,10 +71,10 @@ pub(crate) fn register(
     )?;
     // A row's key as coven encodes it (format.md D3), so app SQL can join
     // its rows to coven's views and migrations can compare keys.
-    add(connection, authorization, "coven_key", -1, PURE, coven_key)?;
+    add(setup, "coven_key", -1, PURE, coven_key)?;
     // The device a device-only file is on, as `coven_devices.device` holds
     // device ids, or NULL for a file in storage (§17.2).
-    add(connection, authorization, "coven_file_device", 1, PURE, |ctx| {
+    add(setup, "coven_file_device", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Text(text) => {
                 let text = std::str::from_utf8(text).map_err(|_utf8| invalid_coordinates())?;
@@ -93,9 +92,7 @@ pub(crate) fn register(
     })?;
     // The text that shows a path from the bytes `coven_user_files.path`
     // holds, as `path_bytes_text` gives it (§17.3).
-    add(connection, authorization, "coven_path_text", 1, PURE, |ctx| {
-        path_text_sql(ctx.get_raw(0))
-    })?;
+    add(setup, "coven_path_text", 1, PURE, |ctx| path_text_sql(ctx.get_raw(0)))?;
     // What a file record and an app's file reference protect (§17.2,
     // §17.10), for coven's own statements that bring protection up to date a
     // table at a time: the file a reference names, canonical UUID text or
@@ -103,28 +100,28 @@ pub(crate) fn register(
     // store its file, as the uploader's device id, the stored object's id
     // and the object's path `<uploader>/<object>`, the cache's name for it,
     // each NULL for a file on one device only.
-    add(connection, authorization, "_coven_file_id", 1, INTERNAL, |ctx| {
+    add(setup, "_coven_file_id", 1, INTERNAL, |ctx| {
         let value = crate::write_encoding::value(ctx.get_raw(0))?;
         Ok(crate::file_table::id(&value).map(|file| file.0.to_string()))
     })?;
-    add(connection, authorization, "_coven_file_of_key", 1, INTERNAL, |ctx| {
+    add(setup, "_coven_file_of_key", 1, INTERNAL, |ctx| {
         crate::file_table::file_of_key(&ctx.get::<Vec<u8>>(0)?)
             .map(|file| file.0.to_string())
             .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
     })?;
-    add(connection, authorization, "_coven_stored_device", 1, INTERNAL, |ctx| {
+    add(setup, "_coven_stored_device", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| location.uploader().0.to_be_bytes().to_vec()))
     })?;
-    add(connection, authorization, "_coven_stored_object", 1, INTERNAL, |ctx| {
+    add(setup, "_coven_stored_object", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| location.object()))
     })?;
-    add(connection, authorization, "_coven_stored_object_path", 1, INTERNAL, |ctx| {
+    add(setup, "_coven_stored_object_path", 1, INTERNAL, |ctx| {
         Ok(stored(ctx)?.map(|location| {
             crate::database::file_database::object_path(location.uploader(), location.object())
         }))
     })?;
     // A stored time as milliseconds since the Unix epoch, for coven's views.
-    add(connection, authorization, "_coven_unix_ms", 1, PURE, |ctx| {
+    add(setup, "_coven_unix_ms", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Null => Value::Null,
             ValueRef::Blob(bytes) => Value::Integer(unix_ms(bytes)?),
@@ -135,22 +132,18 @@ pub(crate) fn register(
     // down and the nanoseconds past that second, as POSIX's timespec splits
     // it, for `coven_user_files`. No one SQL integer holds every
     // modification time in nanoseconds: Windows gives times back to 1601.
-    add(connection, authorization, "_coven_unix_seconds", 1, PURE, |ctx| {
-        Ok(Value::Integer(unix_time(ctx)?.0))
-    })?;
-    add(connection, authorization, "_coven_unix_nanos", 1, PURE, |ctx| {
-        Ok(Value::Integer(unix_time(ctx)?.1.into()))
-    })?;
+    add(setup, "_coven_unix_seconds", 1, PURE, |ctx| Ok(Value::Integer(unix_time(ctx)?.0)))?;
+    add(setup, "_coven_unix_nanos", 1, PURE, |ctx| Ok(Value::Integer(unix_time(ctx)?.1.into())))?;
     // What a record's JSON names, for `coven_pending`: the variant of an
     // enum value and the bytes of a path written as an array of numbers.
-    add(connection, authorization, "_coven_variant_kind", 1, PURE, |ctx| {
+    add(setup, "_coven_variant_kind", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Null => Value::Null,
             ValueRef::Text(text) => Value::Text(variant_kind(text)?),
             _ => return Err(damaged()),
         })
     })?;
-    add(connection, authorization, "_coven_json_bytes", 1, PURE, |ctx| {
+    add(setup, "_coven_json_bytes", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Null => Value::Null,
             ValueRef::Text(text) => Value::Blob(json_bytes(text)?),
@@ -160,14 +153,14 @@ pub(crate) fn register(
     // What a join request's encoded bytes name, for `coven_invites`: the
     // member the invite fixed, as canonical UUID text, and the name a new
     // person typed, NULL for a recovery.
-    add(connection, authorization, "_coven_request_member", 1, PURE, |ctx| {
+    add(setup, "_coven_request_member", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Null => Value::Null,
             ValueRef::Blob(bytes) => Value::Text(join_request(bytes)?.member.to_string()),
             _ => return Err(damaged()),
         })
     })?;
-    add(connection, authorization, "_coven_request_joiner", 1, PURE, |ctx| {
+    add(setup, "_coven_request_joiner", 1, PURE, |ctx| {
         Ok(match ctx.get_raw(0) {
             ValueRef::Null => Value::Null,
             ValueRef::Blob(bytes) => match join_request(bytes)?.joiner.person() {
@@ -219,22 +212,15 @@ fn json_bytes(json: &[u8]) -> rusqlite::Result<Vec<u8>> {
     serde_json::from_slice(json).map_err(|_| damaged())
 }
 
-/// Register `function` as `name` on `connection`, as `authorization` keeps
-/// coven's SQL functions.
-fn add<T: rusqlite::functions::SqlFnOutput>(
-    connection: &Connection,
-    authorization: &SqlAuthorization,
+/// Register `function`, which reads only its arguments, as `name`.
+fn add<T: ToSql>(
+    setup: &Setup<'_>,
     name: &'static str,
-    arguments: std::ffi::c_int,
+    arguments: i32,
     flags: FunctionFlags,
     function: impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
 ) -> rusqlite::Result<()> {
-    connection.create_scalar_function(
-        name,
-        arguments,
-        flags,
-        authorization.function(name, function),
-    )
+    setup.scalar_function(name, arguments, flags, move |call| function(call.context()))
 }
 
 /// Where the coordinates in the function's argument store their file, or
@@ -265,11 +251,29 @@ fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>
         .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
 }
 
+/// What a connection to the store's database serves of this process, for
+/// coven's views to read: registers `register_views` with the installation,
+/// the files it is transferring and the network it last heard of.
+pub(crate) type Views<'a> = dyn Fn(&Setup<'_>) -> rusqlite::Result<()> + 'a;
+
+/// Register what coven's views call: the device id, the transfers in flight
+/// and the network (§4).
+pub(crate) fn register_views(
+    setup: &Setup<'_>,
+    device: DeviceId,
+    transfers: &crate::transfers_in_flight::TransfersInFlight,
+    network: &crate::network_facts::NetworkFacts,
+) -> rusqlite::Result<()> {
+    register_device(setup, device)?;
+    transfers.register(setup)?;
+    network.register(setup)
+}
+
 /// Register `_coven_device()`, this installation's device id as coven
-/// stores device ids, on a connection to the store's database. Coven's
-/// member and device views call it to say which ones are this device's.
-pub(crate) fn register_device(connection: &Connection, device: DeviceId) -> rusqlite::Result<()> {
-    connection.create_scalar_function(
+/// stores device ids. Coven's member and device views call it to say which
+/// ones are this device's.
+fn register_device(setup: &Setup<'_>, device: DeviceId) -> rusqlite::Result<()> {
+    setup.scalar_function(
         "_coven_device",
         0,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,

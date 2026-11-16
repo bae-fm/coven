@@ -53,6 +53,7 @@ use rusqlite::{fallible_iterator::FallibleIterator, Batch, Connection, OpenFlags
 
 use crate::app_policy::CovenPolicy;
 use crate::authorization::SqlAuthorization;
+use crate::connection_setup::Setup;
 use crate::internal_schema;
 use crate::migration::validate_versions;
 use crate::observation::CommitObserver;
@@ -171,7 +172,7 @@ impl DatabaseConnection {
         authorization: SqlAuthorization,
         policy: CovenPolicy,
         settings: &crate::SqliteSettings,
-        functions: &crate::SqlFunctions,
+        setup: &dyn Fn(&Setup<'_>) -> rusqlite::Result<()>,
     ) -> Result<Self, DbError> {
         let flags = if read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -197,8 +198,7 @@ impl DatabaseConnection {
         // SQLite parse and plan it again on its next use, once per row of a
         // commit's lookups.
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
-        crate::coven_functions::register(&connection, &authorization, &policy)?;
-        functions.register(&connection)?;
+        setup(&Setup::new(&connection, &authorization))?;
         connection.authorizer(Some(authorization.callback()))?;
         let lookups = live_judging::LookupLimit::install(&mut connection)?;
         let db = Self {
@@ -463,24 +463,6 @@ impl DatabaseConnection {
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction(run).map_err(|error| self.pending_failure(error))
-    }
-
-    /// Give this connection to the store's database what coven's views read
-    /// of this process: the installation it serves, for the views of members
-    /// and devices (Appendix C.1); the files it is transferring, for
-    /// `coven_uploads.sending`, `coven_sending` and `coven_downloading`; and
-    /// the device's network as it last heard of it, for `coven_network` and
-    /// `coven_uploads.metered` (§4).
-    pub(crate) fn serve_views(
-        &self,
-        device: DeviceId,
-        transfers: &crate::transfers_in_flight::TransfersInFlight,
-        network: &crate::network_facts::NetworkFacts,
-    ) -> Result<(), DbError> {
-        crate::coven_functions::register_device(&self.connection, device)?;
-        transfers.register(&self.connection)?;
-        network.register(&self.connection)?;
-        Ok(())
     }
 
     pub(crate) fn local_device(&self) -> Option<DeviceId> {

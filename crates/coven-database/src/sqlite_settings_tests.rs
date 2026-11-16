@@ -447,6 +447,7 @@ fn wal_refusal_names_the_selected_journal_mode() {
             &crate::internal_schema::whole_views(),
             &SqliteSettings::default(),
             &crate::SqlFunctions::default(),
+            None,
         )
         .unwrap();
     assert!(matches!(sql.enable_wal(), Err(DbError::WalUnavailable { mode }) if mode == "memory"));
