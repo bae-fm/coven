@@ -10,8 +10,10 @@
 //! A test module here is a source's own tests: a module only `cfg(test)`
 //! compiles. A module gated on a test-support feature is test code too
 //! (`syntax::is_test_only`), but other crates' tests build it as an ordinary
-//! module, so it is declared and named as one. The rule looks for test modules
-//! in no test file, those only such modules reach among them.
+//! module, so its crate declares and names it as one, and this rule leaves it
+//! alone. The rule looks for test modules in every file except test code: a
+//! `<name>_tests.rs`, an integration test, or a file that only test-only
+//! modules reach.
 
 use std::collections::BTreeSet;
 

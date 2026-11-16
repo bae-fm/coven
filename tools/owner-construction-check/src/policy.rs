@@ -118,8 +118,8 @@ pub(crate) struct Policy {
     /// Every callable allowed to construct owners or start background work (Appendix F.3),
     /// including owner constructors; test code needs none (`test_code.rs`).
     /// The file lists them by source file: `Type::method`, or a free
-    /// function's or a static's name; a static's value is built at the root
-    /// it names.
+    /// function's or a static's name; for a static, the code that builds its
+    /// value is the root.
     #[serde(default, deserialize_with = "composition_roots")]
     pub(crate) composition_roots: Vec<CompositionRoot>,
     /// Runtime acquisition and background work starts require an entry in

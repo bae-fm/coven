@@ -118,8 +118,8 @@ fn a_test_module_declared_elsewhere_than_the_sibling_is_rejected() {
 }
 
 /// A test module is a source's own tests, which only `cfg(test)` compiles. A
-/// module gated on a feature, test support among them, is declared as any
-/// module is.
+/// module gated on a feature, test support included, is no test module, so
+/// the rule accepts it wherever its crate declares it, as it does any module.
 #[test]
 fn modules_a_feature_compiles_are_not_test_modules() {
     assert!(conventions(&[(

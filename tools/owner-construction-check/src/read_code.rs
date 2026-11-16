@@ -33,7 +33,7 @@
 //!   callback at that place takes a read closure.
 //!
 //! The files the policy lists in `plumbing` (`ReadShapes::plumbing`) and test
-//! code, test support among it (`test_code.rs`), are no read code. A closure
+//! code, including test support (`test_code.rs`), are not read code. A closure
 //! counts with its enclosing item, and a closure inside read code is part of
 //! it. `read_code/process.rs` finds the items that only a live query's
 //! `process` runs: the rule lets them sort, filter, group, count or pick

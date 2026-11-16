@@ -158,7 +158,8 @@ fn attributes_a_cfg_attr_adds_only_in_tests_are_test_code() {
         "#,
     );
     // Attribute arguments are tokens, which a syntax tree's identifiers
-    // leave out, so the file is read back as text.
+    // leave out, so the test prints the kept syntax back as text and
+    // searches that.
     let text = |features: &[String]| {
         quote::ToTokens::to_token_stream(
             &production_code(std::slice::from_ref(&file), features)[0].syntax,
