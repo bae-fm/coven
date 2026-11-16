@@ -19,7 +19,7 @@ impl FileDatabase {
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
                 inner.with_files("end a pin request", |writer, _, _| {
-                    crate::store_call::state_transaction(writer, |db| {
+                    crate::pending::state_transaction(writer, |db| {
                         crate::file_pins::end_request(db, id).map(drop)
                     })
                 })
@@ -63,7 +63,7 @@ impl FileDatabase {
     ) -> Result<(), DbError> {
         let (id, file) = (request.id, request.file);
         self.run(move |db, _, _, _, _| {
-            crate::store_call::state_transaction(db, |db| {
+            crate::pending::state_transaction(db, |db| {
                 if record.pin_of() != Some(file) {
                     return Err(DbError::Invariant {
                         what: "a kept pin's failure is its own record",

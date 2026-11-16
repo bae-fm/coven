@@ -120,7 +120,7 @@ impl Database {
         let kind = kind.to_owned();
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     let (updates, concluded) = step(&crate::operation::of_kind(db, &kind)?)?;
                     for update in &updates {
                         crate::operation::advance(db, update)?;
@@ -148,7 +148,7 @@ impl Database {
         let kind = kind.to_owned();
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     let (updates, finished, concluded) =
                         step(&crate::operation::of_kind(db, &kind)?)?;
                     for update in &updates {
@@ -325,7 +325,7 @@ impl Database {
     pub async fn end_for_good(&self, stop: crate::DeviceStop) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     crate::operation::end_for_good(db, stop)
                 })
             })
@@ -340,7 +340,7 @@ impl Database {
     pub async fn end_for_copy(&self, slot: coven_merge::Slot) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     crate::operation::end_for_copy(db, slot)
                 })
             })

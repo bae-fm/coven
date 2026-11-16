@@ -99,7 +99,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
                 let cells: Vec<_> =
                     cells.iter().map(|(column, _, write)| (*column, *write)).collect();
                 crate::write_commit::tests::restore_first_generation(db, &parent, &cells)?;
-                crate::store_call::materialize(db, |db| {
+                crate::removal::applying(db, |db| {
                     db.execute("INSERT INTO parents VALUES('parent')", [])?;
                     Ok(())
                 })?;

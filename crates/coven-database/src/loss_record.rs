@@ -27,6 +27,11 @@ pub(crate) fn select_listed() -> String {
     )
 }
 
+pub(crate) fn lost_values(sql: &DatabaseConnection) -> Result<Vec<crate::LostValue>, DbError> {
+    let records = sql.query(&format!("{SELECT} ORDER BY l.id"), [], read)?;
+    records.into_iter().map(crate::LostValue::from_record).collect()
+}
+
 /// A table holding loss records: this device's, or the losses a snapshot
 /// view gathers for the counted state it publishes (`snapshot_view::losses`).
 #[derive(Clone, Copy)]

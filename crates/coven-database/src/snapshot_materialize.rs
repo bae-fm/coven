@@ -34,7 +34,7 @@ pub(crate) fn materialize(
     }
     let layout = SnapshotLayout::new(schema);
     let order = crate::snapshot_conflicts::parents_first(schema);
-    crate::store_call::materialize(db, |db| {
+    crate::removal::applying(db, |db| {
         let mut deferred = Deferral::new(db);
         for name in &order {
             insert(db, schema, layout.table(name), &mut deferred)?;

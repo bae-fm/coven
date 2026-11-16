@@ -259,7 +259,7 @@ impl FileDatabase {
         record: P,
     ) -> Result<(), DbError> {
         self.run(move |db, _, _, _, _| {
-            crate::store_call::state_transaction(db, |db| {
+            crate::pending::state_transaction(db, |db| {
                 let Some(of) = record.move_of() else {
                     return Err(DbError::Invariant {
                         what: "a failed move's record names the move",
@@ -294,7 +294,7 @@ impl FileDatabase {
         P::Subject: Send + 'static,
     {
         self.run(move |db, _, _, _, _| {
-            crate::store_call::state_transaction(db, |db| {
+            crate::pending::state_transaction(db, |db| {
                 let original: Option<Option<Vec<u8>>> = db
                     .query("SELECT original FROM _coven_file_uploads WHERE id=?1", [upload], |r| {
                         r.get(0)
@@ -406,7 +406,7 @@ impl FileDatabase {
         E: From<DbError> + CarriesBug + Send + 'static,
     {
         self.run(move |db, _, _, _, _| {
-            crate::store_call::state_transaction(db, |db| {
+            crate::pending::state_transaction(db, |db| {
                 let Some(id) = file_queue::upload_of(db, file)? else {
                     return Ok(Ok(None));
                 };

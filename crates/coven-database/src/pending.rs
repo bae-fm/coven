@@ -5,6 +5,7 @@ use crate::store_call::StoreCall;
 use crate::{DbError, OperationId};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
 
 /// Which of this device's work on a file's stored bytes a record is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,7 +167,7 @@ pub(crate) fn positioned<P: PendingValue>(
 }
 
 pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
         let (work, device, object) = match stored_object(record) {
@@ -202,7 +203,7 @@ pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Resul
 
 /// Clear the record of a subject already encoded for its key.
 pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE subject=?1", [subject])?;
         Ok(())
     })
@@ -210,7 +211,7 @@ pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result
 
 /// Clear the record of the move `id`, whatever it says.
 pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
         Ok(())
     })
@@ -220,7 +221,7 @@ pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(
 /// finishing or an explicit retry ends both (§6.7).
 pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         db.execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
         Ok(())
     })
@@ -299,7 +300,7 @@ pub(crate) fn retry<P: PendingValue>(
 /// build of coven finds the records an earlier one wrote.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         db.execute("UPDATE _coven_pending SET build=?1", [build.to_be_bytes()])?;
         Ok(())
     })
@@ -329,7 +330,7 @@ fn stored_slot_key<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
 
 /// An applied reset clears data-related observations permanently (§19.4).
 pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         db.execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;
         Ok(())
     })
@@ -337,7 +338,7 @@ pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
 
 /// Kept progress removes only this installation's condition, in its transaction.
 pub(crate) fn clear_slot(db: &DatabaseConnection, slot: coven_merge::Slot) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         for covered in [false, true] {
             db.execute("DELETE FROM _coven_pending WHERE slot_key=?1", [slot_key(slot, covered)])?;
         }
@@ -357,7 +358,7 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
         return Ok(());
     }
     let applied = crate::sequence::applied(db)?;
-    crate::store_call::pending_change(db, || {
+    pending_change(db, || {
         for key in waiting {
             let slot = u64::from_be_bytes(key[1..].try_into().expect("eight-byte slot"));
             if slot <= applied {
@@ -366,6 +367,34 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
         }
         Ok(())
     })
+}
+
+pub(crate) fn pending_change<T>(
+    sql: &DatabaseConnection,
+    run: impl FnOnce() -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    run().map_err(|error| pending_failure(sql, error))
+}
+
+/// A transaction on `sql` that saves pending state: a failure fails the
+/// handle, so every later call reports it.
+pub(crate) fn state_transaction<T>(
+    sql: &mut DatabaseConnection,
+    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    let result = sql.transaction(run);
+    result.map_err(|error| pending_failure(sql, error))
+}
+
+/// Fail the handle `sql` serves when saving pending state failed, so every
+/// later call reports it.
+fn pending_failure(sql: &DatabaseConnection, error: DbError) -> DbError {
+    if matches!(error, DbError::StatePersistence(_)) {
+        return error;
+    }
+    let error = Arc::new(error);
+    sql.fail_handle(crate::store_failure::StoreFailure::State(error.clone()));
+    DbError::StatePersistence(error)
 }
 
 #[cfg(test)]

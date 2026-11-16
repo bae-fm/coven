@@ -389,13 +389,9 @@ async fn queued_value_errors_preserve_full_width_lengths() {
     let database = store.builder(tables(), migrations()).open().await.unwrap();
     database.inspect_writer(|db, _| {
         db.set_value_limit(4096);
-        assert_eq!(
-            crate::store_call::check_value_length(db, "write plaintext", 4096).unwrap(),
-            4096
-        );
+        assert_eq!(super::check_value_length(db, "write plaintext", 4096).unwrap(), 4096);
         for length in [4097, u64::from(u32::MAX) + 1, u64::MAX] {
-            let error =
-                crate::store_call::check_value_length(db, "write plaintext", length).unwrap_err();
+            let error = super::check_value_length(db, "write plaintext", length).unwrap_err();
             let crate::DbError::TooLarge { field, actual, maximum } = error else {
                 panic!("expected TooLarge, got {error:?}");
             };

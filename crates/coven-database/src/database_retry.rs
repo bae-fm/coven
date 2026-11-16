@@ -20,7 +20,7 @@ impl Database {
     {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     if let Some(record) = record {
                         crate::pending::save(db, &record)?;
                     } else {
@@ -49,7 +49,7 @@ impl Database {
                 return Ok(());
             }
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     retry::clear(db, RetrySubject::Sync)?;
                     crate::pending::clear(db, &connection)
                 })
@@ -69,7 +69,7 @@ impl Database {
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     retry::save_failure(db, &record, RetrySubject::Operation(id), wait.as_ref())
                 })
             })
@@ -95,7 +95,7 @@ impl Database {
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     if crate::operation::find(db, id)?.is_none_or(|row| row.last_step != step) {
                         return Ok(false);
                     }
@@ -124,7 +124,7 @@ impl Database {
                 return Ok(());
             }
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     if crate::operation::find(db, id)?.is_some_and(|row| row.last_step == step) {
                         crate::pending::clear_operation(db, id)?;
                     }

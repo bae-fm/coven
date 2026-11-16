@@ -99,7 +99,7 @@ pub(crate) fn materialize(
         }
     }
     let ordered = dependency_order(actions, &dependencies, &parents);
-    crate::store_call::materialize(database, |database| {
+    applying(database, |database| {
         let mut deferred = Deferral::new(database);
         for id in ordered {
             let table = schema.table(&id.table);
@@ -126,6 +126,16 @@ pub(crate) fn materialize(
         }
         record(database, call, view, result, stored)
     })
+}
+
+/// Mark ordinary materialization SQL so shared triggers stay suppressed.
+/// SQLite retains ownership of foreign keys, actions and deferred checks.
+pub(crate) fn applying<T>(
+    sql: &DatabaseConnection,
+    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    let _scope = sql.applying();
+    run(sql)
 }
 
 /// Whether foreign keys are deferred for the rest of the transaction, so the

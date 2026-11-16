@@ -434,7 +434,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, call| {
-                crate::store_call::state_transaction(writer, |db| save(db, call))
+                crate::pending::state_transaction(writer, |db| save(db, call))
             })
         })
         .await
@@ -475,7 +475,7 @@ impl Database {
     ) -> Result<T, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                let state = crate::store_call::state_transaction(writer, |db| {
+                let state = crate::pending::state_transaction(writer, |db| {
                     let state = retry_effect::stored(change(retry_effect::read(db)?))?;
                     retry_effect::save(db, state)?;
                     also(db)?;
@@ -497,7 +497,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     crate::retry::save(db, crate::RetrySubject::Provider, &wait)?;
                     let state = retry_effect::stored(change(retry_effect::read(db)?))?;
                     retry_effect::save(db, state)
@@ -516,7 +516,7 @@ impl Database {
                         return Err(DbError::OperationChanged(id));
                     }
                 }
-                crate::store_call::state_transaction(writer, |db| crate::pending::save(db, &record))
+                crate::pending::state_transaction(writer, |db| crate::pending::save(db, &record))
             })
         })
         .await
@@ -605,7 +605,7 @@ impl Database {
                 return Ok(None);
             }
             inner.access.with_writer(|writer, call| {
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     // Another writer may have replaced this condition since
                     // the committed read; deletion checks that current record.
                     if checked(db, call, &subject)? {
@@ -662,7 +662,7 @@ impl Database {
                 if previous.iter().map(encode).collect::<Result<BTreeSet<_>, _>>()? == next {
                     return Ok(());
                 }
-                crate::store_call::state_transaction(writer, |db| {
+                crate::pending::state_transaction(writer, |db| {
                     for record in &previous {
                         if !identities.contains(record.subject()) {
                             crate::pending::clear(db, record.subject())?;
@@ -700,9 +700,7 @@ impl Database {
     pub async fn set_pending_build(&self, build: u128) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                crate::store_call::state_transaction(writer, |db| {
-                    crate::pending::set_build(db, build)
-                })
+                crate::pending::state_transaction(writer, |db| crate::pending::set_build(db, build))
             })
         })
         .await

@@ -73,7 +73,7 @@ pub(crate) fn rebuilding(
 /// selected data has committed, so writes into it may proceed, or this device
 /// no longer reads it.
 pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    crate::store_call::pending_change(db, || {
+    crate::pending::pending_change(db, || {
         let subject = db
             .query("SELECT subject FROM _coven_data_reloads WHERE audience=?1", [audience], |r| {
                 r.get::<_, crate::pending::SubjectKey>(0)

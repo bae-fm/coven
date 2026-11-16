@@ -71,7 +71,7 @@ impl<'connection> SqlReadContext<'connection> {
     }
 
     pub(crate) fn lost_values(&self) -> Result<Vec<LostValue>, DbError> {
-        crate::store_call::lost_values(self.database)
+        crate::loss_record::lost_values(self.database)
     }
 
     pub(crate) fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {

@@ -101,15 +101,8 @@ impl Database {
         ) -> T,
     ) -> T {
         let slot = self.inner.read().unwrap();
-        let inner = slot.as_ref().unwrap();
-        let access = &inner.access;
-        let mut writer = access.writer.lock().unwrap();
-        let device = writer.observes_commits().then_some(access.device);
-        {
-            let call = &crate::store_call::StoreCall::new(device, &access.tests);
-            let writer = &mut writer;
-            inspect(writer, call, &access.write_schema)
-        }
+        let access = &slot.as_ref().unwrap().access;
+        access.inspect_writer(|writer, call| inspect(writer, call, &access.write_schema))
     }
 
     pub(crate) fn inspect_writer<T>(

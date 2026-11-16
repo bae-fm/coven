@@ -618,7 +618,7 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             (1, 2, 3)
         );
         db.commit_writer(|sql, _| {
-            let error = crate::store_call::materialize(sql, |sql| {
+            let error = crate::removal::applying(sql, |sql| {
                 Ok(sql.app_execute("UPDATE items SET oid=8", [])?)
             })
             .unwrap_err();

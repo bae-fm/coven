@@ -3,11 +3,8 @@
 //! start of each call and passes it beside the connection, so the constants
 //! live as long as the call.
 
-use crate::sqlite::DatabaseConnection;
 use crate::transaction_constants::TransactionConstants;
-use crate::DbError;
 use coven_foundation::id_source::DeviceId;
-use std::sync::Arc;
 
 /// Coven's state for one call on a connection, beside the connection.
 pub(crate) struct StoreCall<'a> {
@@ -114,71 +111,4 @@ impl<'a> StoreCall<'a> {
     pub(crate) fn merge_loads(&self) -> std::collections::BTreeMap<String, usize> {
         coven_foundation::locks::lock_unpoisoned(&self.tests.merge_loads).clone()
     }
-}
-
-/// Refuse a queued value before allocating it, using `sql`'s limit.
-pub(crate) fn check_value_length(
-    sql: &DatabaseConnection,
-    field: &'static str,
-    length: u64,
-) -> Result<usize, DbError> {
-    let maximum = sql.length_limit()? as u64;
-    if length > maximum {
-        return Err(DbError::TooLarge { field, actual: length, maximum });
-    }
-    Ok(length as usize)
-}
-
-pub(crate) fn upload_plaintext<'s>(
-    sql: &'s DatabaseConnection,
-    rowid: i64,
-) -> Result<crate::UploadBytes<'s>, DbError> {
-    Ok(crate::UploadBytes::new(sql.open_blob("_coven_uploads", "record", rowid, true)?))
-}
-
-pub(crate) fn pending_change<T>(
-    sql: &DatabaseConnection,
-    run: impl FnOnce() -> Result<T, DbError>,
-) -> Result<T, DbError> {
-    run().map_err(|error| pending_failure(sql, error))
-}
-
-/// A transaction on `sql` that saves pending state: a failure fails the
-/// handle, so every later call reports it.
-pub(crate) fn state_transaction<T>(
-    sql: &mut DatabaseConnection,
-    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
-) -> Result<T, DbError> {
-    let result = sql.transaction(run);
-    result.map_err(|error| pending_failure(sql, error))
-}
-
-pub(crate) fn lost_values(sql: &DatabaseConnection) -> Result<Vec<crate::LostValue>, DbError> {
-    let records = sql.query(
-        &format!("{} ORDER BY l.id", crate::loss_record::SELECT),
-        [],
-        crate::loss_record::read,
-    )?;
-    records.into_iter().map(crate::LostValue::from_record).collect()
-}
-
-/// Mark ordinary materialization SQL so shared triggers stay suppressed.
-/// SQLite retains ownership of foreign keys, actions and deferred checks.
-pub(crate) fn materialize<T>(
-    sql: &DatabaseConnection,
-    run: impl FnOnce(&DatabaseConnection) -> Result<T, DbError>,
-) -> Result<T, DbError> {
-    let _scope = sql.applying();
-    run(sql)
-}
-
-/// Fail the handle `sql` serves when saving pending state failed, so every
-/// later call reports it.
-fn pending_failure(sql: &DatabaseConnection, error: DbError) -> DbError {
-    if matches!(error, DbError::StatePersistence(_)) {
-        return error;
-    }
-    let error = Arc::new(error);
-    sql.fail_handle(crate::store_failure::StoreFailure::State(error.clone()));
-    DbError::StatePersistence(error)
 }

@@ -491,24 +491,29 @@ pub(crate) fn plaintext(
     database: &DatabaseConnection,
     encoder: WriteEncoder<'_>,
 ) -> Result<Vec<u8>, DbError> {
-    let length = crate::store_call::check_value_length(
-        database,
-        "write plaintext",
-        encoder.plaintext_length(),
-    )?;
+    let length = check_value_length(database, "write plaintext", encoder.plaintext_length())?;
     // D9's prefix records one store key and the counted part keys. SQLite's
     // row header and the two eight-byte identity fields need at most 32 bytes.
     let keys_length = coven_format::sealed_write::WriteObjectPrefix::encoded_length(
         encoder.header().parts.len(),
     )? as u64;
-    crate::store_call::check_value_length(
-        database,
-        "write queue row",
-        length as u64 + keys_length + 32,
-    )?;
+    check_value_length(database, "write queue row", length as u64 + keys_length + 32)?;
     let mut bytes = vec![0; length];
     encoded(encoder.encode_plaintext(&mut bytes))?;
     Ok(bytes)
+}
+
+/// Refuse a queued value before allocating it, using `sql`'s limit.
+fn check_value_length(
+    sql: &DatabaseConnection,
+    field: &'static str,
+    length: u64,
+) -> Result<usize, DbError> {
+    let maximum = sql.length_limit()? as u64;
+    if length > maximum {
+        return Err(DbError::TooLarge { field, actual: length, maximum });
+    }
+    Ok(length as usize)
 }
 
 #[cfg(test)]

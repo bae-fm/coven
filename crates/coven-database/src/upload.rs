@@ -241,7 +241,8 @@ fn plaintext<'a>(
     rowid: i64,
     write: WriteId,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
-    let mut bytes = crate::store_call::upload_plaintext(database, rowid)?;
+    let mut bytes =
+        UploadBytes::new(database.open_blob("_coven_uploads", "record", rowid, true)?);
     let prefix = bytes.read(0, coven_format::FRAME_PREFIX_LEN)?;
     let length = encoded(coven_format::frame_length(&prefix))?;
     let header_frame = bytes.read(0, length)?;
