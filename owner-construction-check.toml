@@ -553,6 +553,8 @@ ConnectionComing = "Files"
 CommitSubscription = "Handle"
 # Commits to the rows a worker waits on, coalesced (§4).
 DatabaseChanges = "Handle"
+# The main database file's size after each checkpoint, for the host.
+CheckpointedSize = "Database"
 # How far each file in flight one way has got (api.md E7, E8).
 TransferWatch = "InFlight"
 # The files in flight one way, which the worker moving them marks as each

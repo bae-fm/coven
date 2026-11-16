@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 pub use read_pool::Reader;
 
@@ -62,6 +63,10 @@ pub struct Database<P: Policy> {
     handle: crate::Handle<P::Failure>,
     checkpoints: Option<WalCheckpointer<P>>,
     statistics: Option<UpkeepThread<PlannerStatistics<P>>>,
+    /// The main file's size after the latest checkpoint. The database keeps
+    /// this receiver unread, so each view it hands out sees every change
+    /// since the open.
+    checkpointed_size: watch::Receiver<u64>,
 }
 
 impl<P: Policy> Database<P> {
@@ -86,18 +91,32 @@ impl<P: Policy> Database<P> {
                 options.setup,
             )
         };
+        // The watch starts at the main file's size as the writer opens. The
+        // writer holds the watch from then on, so the watch gets the size
+        // after each checkpoint the open runs; the checkpointer holds it too
+        // once it starts.
+        let open_writer = || -> Result<(HostSql<P>, watch::Sender<u64>), PolicyError<P>> {
+            let mut writer = open(false)?;
+            let sizes = watch::Sender::new(writer.database_file_size()?);
+            writer.send_checkpointed_sizes(sizes.clone());
+            Ok((writer, sizes))
+        };
         let statistics = options.statistics;
         let mut readers = Vec::with_capacity(options.readers.get());
-        let (mut writer, prepared) = if options.prepare_on_reader {
+        let (mut writer, sizes, prepared) = if options.prepare_on_reader {
             assert!(!statistics, "a database prepared on a reader gathers no statistics");
             let mut first = open(true)?;
             let prepared = first.with_profile(prepare)?;
             readers.push(first);
-            (open(false)?, prepared)
+            let (writer, sizes) = open_writer()?;
+            (writer, sizes, prepared)
         } else {
-            let mut writer = open(false)?;
+            let (mut writer, sizes) = open_writer()?;
             let prepared = writer.with_profile(|writer| -> Result<T, E> {
                 writer.enable_wal()?;
+                // Switching a new database to WAL writes its first page to
+                // the main file.
+                writer.send_checkpointed_size()?;
                 let prepared = prepare(writer)?;
                 if statistics {
                     // On a connection of its own: one that analyzes a small
@@ -110,7 +129,7 @@ impl<P: Policy> Database<P> {
                 }
                 Ok(prepared)
             })?;
-            (writer, prepared)
+            (writer, sizes, prepared)
         };
         match options.capture {
             Some(recorded) => writer.observe_commits(handle.clone(), recorded),
@@ -122,12 +141,15 @@ impl<P: Policy> Database<P> {
             handle: handle.clone(),
             checkpoints: None,
             statistics: None,
+            checkpointed_size: sizes.subscribe(),
         };
         // Each upkeep thread stops as `database` drops, should a later step
         // fail.
         if let Some(pages) = options.checkpoint_pages {
+            let mut checkpointer = open(false)?;
+            checkpointer.send_checkpointed_sizes(sizes);
             database.checkpoints = Some(WalCheckpointer::start(
-                open(false)?,
+                checkpointer,
                 &database.writer,
                 pages,
                 handle.clone(),
@@ -159,6 +181,24 @@ impl<P: Policy> Database<P> {
     /// lease drops.
     pub fn reader(&self) -> Reader<'_, P> {
         self.readers.acquire_reader()
+    }
+
+    /// A view of the main database file's size in bytes after the latest
+    /// checkpoint, which wakes when a later checkpoint changes the size.
+    /// Before the first checkpoint, the watch holds the file's size once the
+    /// writer opened and switched the database to WAL. The writer and the
+    /// checkpointer send the size after each checkpoint they run through
+    /// `HostSql::wal_checkpoint`: the checkpointer's own, and the host's on
+    /// the writer.
+    ///
+    /// Two kinds of checkpoint send nothing. SQLite checkpoints the WAL as
+    /// the database closes, and nothing reads the watch after that, because
+    /// the watch closes with the database. SQLite's own automatic
+    /// checkpoint, which runs inside a commit on a connection whose
+    /// `wal_autocheckpoint` is on, sends nothing either; while sqlive's
+    /// checkpointer runs, the writer's is off.
+    pub fn checkpointed_size(&self) -> crate::CheckpointedSize {
+        crate::CheckpointedSize::new(self.checkpointed_size.clone())
     }
 
     /// Stop the upkeep threads; gather the planner's statistics again if

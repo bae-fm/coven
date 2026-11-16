@@ -184,14 +184,88 @@ async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writ
     db.close();
 }
 
+/// The size a checkpoint sent since `sizes` last returned one, if any.
+fn sent_size(sizes: &mut crate::CheckpointedSize) -> Option<u64> {
+    futures_lite::future::block_on(futures_lite::future::poll_once(sizes.changed())).flatten()
+}
+
+/// The main database file's size, read from the file system.
+fn file_size(db: &TestDatabase) -> u64 {
+    std::fs::metadata(db.path()).unwrap().len()
+}
+
+/// Settings under which sqlive never checkpoints, leaving it to the host.
+fn checkpoints_off() -> SqliteSettings {
+    SqliteSettings { wal_autocheckpoint: Some(WalAutocheckpoint::Off), ..SqliteSettings::default() }
+}
+
+/// The database's watch starts at the main file's size as the database
+/// opens. Once sqlive's checkpointer copies the WAL into the file, the watch
+/// wakes with the file's new size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_watch_gets_the_files_size_after_the_checkpointer_copies_frames() {
+    let db = blobs(checkpointed_at_100_pages());
+    let mut sizes = db.with_database(|database| database.checkpointed_size());
+    let opened = sizes.bytes();
+    assert_eq!(opened, file_size(&db), "the watch starts at the file's size");
+    let mut restarts = db.with_database(|database| database.report_checkpoints());
+    checkpointed(&db, &mut restarts).await;
+    // The checkpointer sent the size before it reported its last step, and
+    // with the WAL copied, no later wake checkpoints.
+    db.host(|_writer| {
+        let checkpointed = sent_size(&mut sizes).expect("the checkpoint grew the file");
+        assert!(checkpointed > opened, "{checkpointed} after {opened}");
+        assert_eq!(checkpointed, file_size(&db));
+    });
+    db.close();
+}
+
+/// A checkpoint the host runs on the writer sends the file's size too, so
+/// the watch never holds a size from before the host's own checkpoint.
+#[test]
+fn the_watch_gets_the_files_size_after_the_hosts_checkpoint() {
+    let db = blobs(checkpoints_off());
+    let mut sizes = db.with_database(|database| database.checkpointed_size());
+    let opened = sizes.bytes();
+    for _ in 0..10 {
+        add(&db);
+    }
+    assert_eq!(sent_size(&mut sizes), None, "commits write the WAL, not the file");
+    let done = db.host(|writer| writer.wal_checkpoint(CheckpointMode::Truncate)).unwrap();
+    assert!(matches!(done, WalCheckpoint::Ran { busy: false, .. }), "{done:?}");
+    let checkpointed = sent_size(&mut sizes).expect("the host's checkpoint grew the file");
+    assert!(checkpointed > opened, "{checkpointed} after {opened}");
+    assert_eq!(checkpointed, file_size(&db));
+    db.close();
+}
+
+/// A checkpoint that copies nothing, because a reader still reads the file
+/// as it was, leaves the file's size as it was, so the watch doesn't wake.
+#[test]
+fn a_checkpoint_that_copies_nothing_leaves_the_watch_unchanged() {
+    let db = blobs(checkpoints_off());
+    db.host(|writer| writer.wal_checkpoint(CheckpointMode::Truncate)).unwrap();
+    let mut sizes = db.with_database(|database| database.checkpointed_size());
+    sizes.bytes();
+    // The WAL is empty, so this reader's snapshot is the file alone, and no
+    // checkpoint may copy a later frame over it.
+    let reader = rusqlite::Connection::open(db.path()).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0)).unwrap();
+    for _ in 0..10 {
+        add(&db);
+    }
+    let done = db.host(|writer| writer.wal_checkpoint(CheckpointMode::Passive)).unwrap();
+    assert!(matches!(done, WalCheckpoint::Ran { checkpointed_frames: 0, .. }), "{done:?}");
+    assert_eq!(sent_size(&mut sizes), None, "a checkpoint that copied nothing sends no size");
+    reader.execute_batch("COMMIT").unwrap();
+    db.close();
+}
+
 /// With `Off`, sqlive never checkpoints: the WAL grows until the host does.
 #[test]
 fn off_leaves_checkpoints_to_the_host() {
-    let settings = SqliteSettings {
-        wal_autocheckpoint: Some(WalAutocheckpoint::Off),
-        ..SqliteSettings::default()
-    };
-    let db = blobs(settings);
+    let db = blobs(checkpoints_off());
     assert!(
         !db.with_database(|database| database.checkpoints()),
         "no checkpointer runs for the database"
@@ -430,7 +504,8 @@ async fn hold_the_checkpoint_lock(db: &TestDatabase) -> std::thread::JoinHandle<
 /// checkpoint lock, and a checkpoint that finds the lock held reads nothing
 /// of the WAL: SQLite reports busy with no frames. SQLite reports a busy
 /// database, not a failure, so sqlive's checkpointer tries again at the next
-/// wake, and the handle keeps serving calls (§4).
+/// wake, and the handle keeps serving calls (§4). Such a checkpoint copied
+/// nothing, so the database's watch of its file's size doesn't wake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     let db = blobs(checkpointed_at_100_pages());
@@ -444,12 +519,18 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
         add(&db);
     }
     let holder = hold_the_checkpoint_lock(&db).await;
+    // Once the checkpointer's wake in progress, if any, ends, every later
+    // checkpoint finds the lock held.
+    db.with_database(|database| database.each_connection(|_connection| ()));
+    let mut sizes = db.with_database(|database| database.checkpointed_size());
+    sizes.bytes();
 
     let checkpoint = db.host(|writer| writer.wal_checkpoint(CheckpointMode::Passive)).unwrap();
     assert_eq!(checkpoint, WalCheckpoint::NotStarted);
     // The WAL is past the threshold, so `checkpoint_now` reads the WAL and
     // then tries to copy it, and the copy finds the lock held.
     db.with_database(|database| database.checkpoint_now()).unwrap();
+    assert_eq!(sent_size(&mut sizes), None, "a checkpoint SQLite didn't start sends no size");
 
     move_holder(|holder| holder.released = true);
     assert_eq!(holder.join().unwrap(), 1, "the other checkpoint gave up waiting for the reader");

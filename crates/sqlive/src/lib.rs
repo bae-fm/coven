@@ -11,9 +11,15 @@
 //! reads to tell whether the query's result could have changed. A [`Handle`]
 //! holds the subscriptions the judged commits wake, and the failure that ends
 //! every later call.
+//!
+//! A [`Database`] also tells its host the main database file's size after
+//! each checkpoint, its checkpointer's or the host's, through a
+//! [`CheckpointedSize`] ([`Database::checkpointed_size`]), so the host can show the file's size
+//! without reading the file itself.
 
 mod authorization;
 mod change_capture;
+mod checkpointed_size;
 mod commit_scope;
 mod connection;
 mod connection_setup;
@@ -58,6 +64,7 @@ pub use authorization::{
     StatementScope, WriteSql,
 };
 pub use caught;
+pub use checkpointed_size::CheckpointedSize;
 pub use commit_scope::{committing, enter, CommitScope};
 #[cfg(any(test, feature = "profiles"))]
 pub use connection::ProfiledStatement;

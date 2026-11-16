@@ -5,8 +5,8 @@
 mod app_statements;
 #[path = "bulk_write.rs"]
 mod bulk_write;
-#[path = "database_file_sync.rs"]
-mod database_file_sync;
+#[path = "database_file.rs"]
+mod database_file;
 #[path = "event_capture.rs"]
 mod event_capture;
 #[path = "live_judging.rs"]
@@ -98,6 +98,10 @@ pub struct HostSql<P: Policy> {
     shapes: std::cell::RefCell<Option<(i64, Arc<table_shapes::TableShapes>)>>,
     /// The writer's checkpointer, woken after each commit (§4).
     checkpoints: Option<crate::upkeep::Wake>,
+    /// The database's watch of its main file's size, to which this connection
+    /// sends the size after each checkpoint it runs through `wal_checkpoint`.
+    /// The writer and the checkpointer hold it; a reader holds none.
+    checkpointed_sizes: Option<tokio::sync::watch::Sender<u64>>,
     /// The writer's keeper of the planner's statistics, woken as its
     /// commits change rows (§4).
     statistics: Option<crate::planner_statistics::ChangeWake>,
@@ -202,6 +206,7 @@ impl<P: Policy> HostSql<P> {
             observation: None,
             shapes: std::cell::RefCell::new(None),
             checkpoints: None,
+            checkpointed_sizes: None,
             statistics: None,
             streaming: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "test-utils"))]
@@ -611,6 +616,12 @@ impl<P: Policy> HostSql<P> {
     /// Wake `checkpoints` after each commit this writer makes (§4).
     pub(crate) fn signal_commits(&mut self, checkpoints: crate::upkeep::Wake) {
         self.checkpoints = Some(checkpoints);
+    }
+
+    /// Send the main database file's size to `sizes` after each checkpoint
+    /// run through `wal_checkpoint`.
+    pub(crate) fn send_checkpointed_sizes(&mut self, sizes: tokio::sync::watch::Sender<u64>) {
+        self.checkpointed_sizes = Some(sizes);
     }
 
     /// Tell `statistics` of the rows each commit this writer makes changed

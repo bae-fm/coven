@@ -550,9 +550,13 @@ impl<P: Policy> HostSql<P> {
     /// Checkpoint the WAL outside any transaction, on a connection in WAL
     /// mode: the writer, or a checkpointer's own. SQLite reports the frames
     /// unless it read nothing of the WAL, which it reports as busy with no
-    /// frames.
+    /// frames. Every checkpoint sqlive runs on a database, its checkpointer's
+    /// or the host's, goes through here. After each one that read the WAL,
+    /// except a `Noop`, which copies nothing, this connection sends the main
+    /// file's size to the database's watch, when it holds the watch
+    /// (`Database::checkpointed_size`).
     pub fn wal_checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, PolicyError<P>> {
-        let mode = match mode {
+        let pragma = match mode {
             CheckpointMode::Noop => "NOOP",
             CheckpointMode::Passive => "PASSIVE",
             CheckpointMode::Full => "FULL",
@@ -560,7 +564,7 @@ impl<P: Policy> HostSql<P> {
             CheckpointMode::Truncate => "TRUNCATE",
         };
         let (busy, log, checkpointed): (i64, i64, i64) =
-            self.query_row(&format!("PRAGMA main.wal_checkpoint({mode})"), [], |r| {
+            self.query_row(&format!("PRAGMA main.wal_checkpoint({pragma})"), [], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
         if (busy, log, checkpointed) == (1, -1, -1) {
@@ -571,11 +575,15 @@ impl<P: Policy> HostSql<P> {
                 what: "a checkpoint that read the WAL reports its frames",
             })
         };
-        Ok(WalCheckpoint::Ran {
+        let ran = WalCheckpoint::Ran {
             busy: busy != 0,
             log_frames: frames(log)?,
             checkpointed_frames: frames(checkpointed)?,
-        })
+        };
+        if mode != CheckpointMode::Noop {
+            self.send_checkpointed_size()?;
+        }
+        Ok(ran)
     }
 
     /// Gather the query planner's statistics where they are missing or stale,
