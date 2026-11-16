@@ -218,7 +218,7 @@ fn a_bug_made_without_a_panic_names_where_it_was_made() {
     assert_eq!(bug.kind, BugKind::Found);
     assert_eq!(
         bug.to_string(),
-        "release reserved file names panicked: 2 released names were not reserved"
+        "release reserved file names found a bug: 2 released names were not reserved"
     );
 }
 

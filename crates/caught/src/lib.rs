@@ -20,9 +20,10 @@ pub mod locks;
 
 pub use location::{catching_operation, SourceLocation};
 
-/// Work that panicked: a bug in it, not a failure its caller can act on. The
-/// caller reports it wherever it reports its own bugs, and the call that ran
-/// the work returns it as its error.
+/// Work that panicked, or that code found wrong without a panic: a bug in it,
+/// not a failure its caller can act on. The caller reports it wherever it
+/// reports its own bugs, and the call that ran the work returns it as its
+/// error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bug {
     /// What the work was doing, as its caller named it.
@@ -41,7 +42,10 @@ pub struct Bug {
 
 impl std::fmt::Display for Bug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} panicked: {}", self.operation, self.message)
+        match self.kind {
+            BugKind::Panic => write!(f, "{} panicked: {}", self.operation, self.message),
+            BugKind::Found => write!(f, "{} found a bug: {}", self.operation, self.message),
+        }
     }
 }
 
