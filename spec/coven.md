@@ -13587,6 +13587,11 @@ new ids          coven-foundation's id source
 files on disk    coven-foundation's files
 ```
 
+Two modules of coven-database's SQLite engine are exceptions. The checkpointer times how long a
+checkpoint holds the writer with std's monotonic `Instant`, for a log line. The temporary-folder
+setting checks with `std::fs` that the folder the app names exists. Neither takes a clock or a
+files capability from coven-foundation, so neither module depends on coven-foundation for them.
+
 Everything else reaches a capability through the object that owns it, given to
 it when it is built. The snapshot writer never calls the system clock; it asks
 the clock it was given, and a test gives it a fixed one.
