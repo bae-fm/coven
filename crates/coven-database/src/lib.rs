@@ -42,9 +42,6 @@ mod interpretation;
 mod joining_write;
 mod judge;
 mod judge_view;
-mod live_query;
-#[cfg(any(test, feature = "test-utils"))]
-mod live_query_runs;
 mod live_results;
 mod load_step;
 mod local_write;
@@ -62,7 +59,6 @@ mod migration_references;
 mod migration_run;
 mod migration_snapshot;
 mod migration_state;
-mod observation;
 mod reported_engine_errors;
 pub use load_step::LoadStep;
 mod open_step;
@@ -194,12 +190,6 @@ pub use error::{sqlite_error_is_disk, CovenMigrationError, DbError, MigrationErr
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadCompletion, UploadProgress, UploadQueueState};
 pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream};
-pub use live_query::{
-    LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
-    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
-};
-#[cfg(any(test, feature = "test-utils"))]
-pub use live_query_runs::LiveQueryRuns;
 pub use live_results::next_result;
 pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,
@@ -217,6 +207,12 @@ pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{LoadedSnapshot, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
 pub use sql_read::SqlRead;
+#[cfg(any(test, feature = "test-utils"))]
+pub use sqlive::LiveQueryRuns;
+pub use sqlive::{
+    LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
+    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use upload::UploadReadError;
 pub use upload::{PreparedUploads, UploadBytes, UploadParts, UploadPlaintext, WaitingUpload};
@@ -246,15 +242,11 @@ pub use operation_outcome::{
     slot_json, DeviceStop, EntryTarget, OperationOutcome, OperationRejection, Removal, UndoCause,
 };
 
-mod commit_scope;
-pub use commit_scope::CommitScope;
 mod commit_task;
 pub use commit_task::in_commit_scope;
 mod prerequisite_rows;
-pub use observation::AttemptCommits;
 pub use prerequisite_rows::PrerequisiteRows;
-mod database_changes;
-pub use database_changes::DatabaseChanges;
+pub use sqlive::{AttemptCommits, CommitScope, DatabaseChanges};
 
 mod captured_changes;
 mod claim;

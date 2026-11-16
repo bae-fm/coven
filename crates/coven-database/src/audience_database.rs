@@ -60,7 +60,7 @@ impl AudienceDatabase {
         directory: &StoreDir,
         sqlite: &crate::SqliteSettings,
         functions: &crate::SqlFunctions,
-        observer: &crate::observation::CommitObserver,
+        observer: &crate::store_failure::StoreHandle,
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
         whole: &Arc<sqlive::WholeViews>,

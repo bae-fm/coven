@@ -1,15 +1,10 @@
-use super::*;
-use crate::tests::next_result;
-use crate::DbError;
-use crate::{
-    test_utils::{notes_migrations, notes_tables},
-    tests::TestStore,
-};
+use crate::test_utils::{notes_migrations, notes_tables};
+use crate::tests::{next, next_result, TestStore};
+use crate::{DbError, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRevision};
 use coven_foundation::clock::HANG_GUARD;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    mpsc,
-};
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 #[tokio::test]
 async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
@@ -402,7 +397,7 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
         (true, LiveQueryRevision(3), LiveQueryCause::RequestAndWrite, "new".into())
     );
     assert!(!query.is_marked_for_rerun());
-    assert!(query.lifetime.0.requests.lock().unwrap().pending.is_none());
+    assert!(!query.has_pending_request());
     drop(query);
     assert_eq!(requests.set(false), Err(LiveQueryClosed));
     db.close().await.unwrap();
@@ -593,7 +588,7 @@ async fn replacement_before_first_run_supersedes_the_initial_request() {
         (2, LiveQueryRevision(2), LiveQueryCause::Request, 2)
     );
     assert!(!query.is_marked_for_rerun());
-    assert!(query.lifetime.0.requests.lock().unwrap().pending.is_none());
+    assert!(!query.has_pending_request());
     db.close().await.unwrap();
 }
 
@@ -960,5 +955,44 @@ async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
     );
     db.commit_writer(|sql, _| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
     assert!(query.next_inline().await.is_none());
+    db.close().await.unwrap();
+}
+
+/// A run a write causes counts as one; one whose result is the same counts
+/// as equal too, and isn't returned. A write outside the query's scope runs
+/// nothing.
+#[tokio::test]
+async fn counts_runs_writes_and_equal_results() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1, 0), (2, 0)").await.unwrap();
+    let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+    let mut query: crate::LiveQuery<_, DbError> = db
+        .subscribe(move |sql| {
+            let read = sql.query_row("SELECT value > 0 FROM items WHERE id = 1", [], |r| {
+                r.get::<_, bool>(0)
+            })?;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a test that stopped listening has no use for it"
+            )]
+            let _ = ran.send(());
+            Ok(read)
+        })
+        .process(Ok);
+    assert!(!next(&mut query).await);
+    db.commit_writer(|sql, _| sql.batch("UPDATE items SET value = 1 WHERE id = 2").unwrap());
+    db.commit_writer(|sql, _| sql.batch("UPDATE items SET value = 2 WHERE id = 1").unwrap());
+    assert!(next(&mut query).await);
+    while runs.try_recv().is_ok() {}
+    db.commit_writer(|sql, _| sql.batch("UPDATE items SET value = 3 WHERE id = 1").unwrap());
+    // The run this write causes finds the same result, and returns nothing.
+    tokio::select! {
+        result = query.next_inline() => panic!("the query returned an equal result: {result:?}"),
+        read = runs.recv() => read.unwrap(),
+    }
+    db.commit_writer(|sql, _| sql.batch("UPDATE items SET value = 0 WHERE id = 1").unwrap());
+    assert!(!next(&mut query).await);
+    let runs = query.runs();
+    assert_eq!((runs.runs(), runs.writes(), runs.equal()), (4, 3, 1));
     db.close().await.unwrap();
 }

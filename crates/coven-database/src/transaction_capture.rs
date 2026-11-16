@@ -3,11 +3,11 @@
 use super::table_shapes::TableShapes;
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
-use crate::observation::UnrecordedTables;
 use crate::store_failure::StoreFailure;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::RowChange;
+use sqlive::UnrecordedTables;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
@@ -114,7 +114,7 @@ impl<'a> ChangeCapture<'a> {
             .database
             .handle
             .as_ref()
-            .map(crate::observation::CommitObserver::scoped_columns)
+            .map(crate::store_failure::StoreHandle::scoped_columns)
             .unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
         for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {

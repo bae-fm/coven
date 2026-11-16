@@ -1,7 +1,7 @@
 //! A commit scope that follows a task onto the blocking threads its database
 //! calls run on.
 
-use crate::commit_scope::{self, CommitScope};
+use sqlive::CommitScope;
 use std::future::Future;
 
 tokio::task_local! {
@@ -24,5 +24,5 @@ pub(crate) fn bind<R>(
     let scope = TASK.try_with(|scope| *scope).ok();
     #[cfg(any(test, feature = "test-utils"))]
     let run = coven_foundation::test_work::bind(run);
-    move || commit_scope::enter(scope, run)
+    move || sqlive::enter(scope, run)
 }

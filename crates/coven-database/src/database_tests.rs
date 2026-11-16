@@ -913,7 +913,7 @@ async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     db.observer.test_poison();
     assert!(matches!(
         db.read(|_| Ok(())).await,
-        Err(DbError::StoreFailed(bug)) if bug.operation == "the store's live queries"
+        Err(DbError::StoreFailed(bug)) if bug.operation == "the handle's live queries"
     ));
     assert!(matches!(query.next_inline().await, Some(Err(DbError::StoreFailed(_)))));
     assert!(query.next_inline().await.is_none());

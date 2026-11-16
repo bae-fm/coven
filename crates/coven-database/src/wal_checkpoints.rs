@@ -20,9 +20,9 @@
 //! other failure fails the handle rather than leave the store open while
 //! its WAL grows without bound.
 
-use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 use crate::upkeep::{Upkeep, UpkeepThread};
 use crate::DbError;
 use crate::{CheckpointMode, WalCheckpoint};
@@ -75,7 +75,7 @@ impl UpkeepThread<Checkpoints> {
         connection: DatabaseConnection,
         writer: &Arc<Mutex<DatabaseConnection>>,
         threshold: NonZeroU32,
-        handle: CommitObserver,
+        handle: StoreHandle,
     ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
         connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
         // Made before the writer's steps, so a step that fails stops the

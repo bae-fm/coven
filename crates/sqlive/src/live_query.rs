@@ -1,12 +1,10 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
+use crate::handle::{CommitSubscription, Failed, Handle, Stop};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
-use crate::observation::CommitSubscription;
-use crate::store_failure::StoreFailure;
-use crate::DbError;
-use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::task::{caught_sync, BugSinkRef, CarriesBug};
+use caught::locks::lock_unpoisoned;
+use caught::{caught_sync, BugSinkRef, CarriesBug};
 use futures_lite::future::block_on;
 use std::{
     future::{poll_fn, Future},
@@ -18,11 +16,7 @@ use tokio::sync::Notify;
 
 /// One run of the query for a request: it reads on a connection it releases
 /// before returning, and hands its reads to the subscription.
-type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send + Sync>;
-
-/// How a query's error type `E` holds an engine error: the handle's failure,
-/// or the bug a run's panic is.
-pub(crate) type Failed<E> = fn(sqlive::Error<StoreFailure, DbError>) -> E;
+pub type Run<Q, T, E> = Arc<dyn Fn(&Q, &CommitSubscription) -> Result<T, E> + Send + Sync>;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,13 +134,17 @@ where
     T: Send + 'static,
     E: CarriesBug + Send + 'static,
 {
-    pub(crate) fn new(
+    /// A query that answers `request` first, with `run`, on `handle`; its
+    /// error type holds the engine's errors through `failed`.
+    pub fn new<F: Clone + Send + Sync + 'static, R: 'static>(
         request: Q,
         run: Run<Q, T, E>,
-        failed: Failed<E>,
-        commits: CommitSubscription,
+        failed: fn(crate::Error<F, R>) -> E,
+        handle: &Handle<F>,
         bugs: BugSinkRef,
     ) -> Self {
+        let commits = handle.subscribe();
+        let failed = Handle::failed(failed);
         Self {
             lifetime: QueryLifetime(Arc::new(RequestState {
                 requests: Mutex::new(Requests {
@@ -185,8 +183,14 @@ where
     }
 
     /// Where a bug in a result nobody waits for any more goes (E15).
-    pub(crate) fn bugs(&self) -> &BugSinkRef {
+    pub fn bugs(&self) -> &BugSinkRef {
         &self.bugs
+    }
+
+    /// Whether a request waits for a run to answer it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn has_pending_request(&self) -> bool {
+        lock_unpoisoned(&self.lifetime.0.requests).pending.is_some()
     }
 
     /// Obtain a cloneable handle for replacing this query's request.
@@ -214,10 +218,11 @@ where
             #[cfg(any(test, feature = "test-utils"))]
             runs,
         } = self;
+        let failing = Arc::clone(&failed);
         let mapped: Run<Q, U, E> = Arc::new(move |request, commits| {
             let value = run(request, commits)?;
             caught_sync("process a read", || process(value))
-                .unwrap_or_else(|bug| Err(failed(sqlive::Error::Bug(bug))))
+                .unwrap_or_else(|bug| Err(failing(Stop::Bug(bug))))
         });
         // A new output type has no previous result to compare. Rerun the current
         // request so the transformed query answers it.
@@ -254,7 +259,7 @@ where
                 let commit = commits.observe();
                 if settled
                     || commit.changed
-                    || commit.error().is_some()
+                    || commit.stopped()
                     || lock_unpoisoned(&requests.requests).pending.is_some()
                 {
                     return;
@@ -288,7 +293,7 @@ where
             return None;
         }
         let commits = self.commits.state();
-        let failure = commits.error();
+        let failure = commits.stopped_by();
         let changed = commits.changed;
         let request = lock_unpoisoned(&self.lifetime.0.requests).pending.take();
         let next = match (request, changed) {
@@ -305,12 +310,12 @@ where
             (None, false) => None,
         };
         let ((request, revision), cause) = next?;
-        let result = if let Some(error) = failure {
-            Err((self.failed)(error))
+        let result = if let Some(stop) = failure {
+            Err((self.failed)(stop))
         } else {
             self.commits.begin();
             caught_sync("live query", || (self.run)(&request, &self.commits))
-                .unwrap_or_else(|bug| Err((self.failed)(sqlive::Error::Bug(bug))))
+                .unwrap_or_else(|bug| Err((self.failed)(Stop::Bug(bug))))
         };
         self.current = Some((request.clone(), revision));
         let equal = match &result {
@@ -336,7 +341,7 @@ where
         if bug {
             self.commits.stop();
         }
-        self.ended = bug || (result.is_err() && self.commits.state().error().is_some());
+        self.ended = bug || (result.is_err() && self.commits.state().stopped());
         Some(ReconfigurableLiveQueryEvent { request, revision, cause, result })
     }
 
@@ -352,7 +357,7 @@ where
     /// result equals the last. Once the store is closed, or the handle fails
     /// every call, one result reports why and every later call returns
     /// `None`. So does a run whose error carries a bug, as one that panicked
-    /// does with `sqlive::Error::Bug`: what it read is unknown, so no commit could
+    /// does with `Error::Bug`: what it read is unknown, so no commit could
     /// tell whether to run it again (E15).
     pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
@@ -391,7 +396,8 @@ pub struct LiveQuery<T, E> {
 }
 
 impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
-    pub(crate) fn new(inner: ReconfigurableLiveQuery<(), T, E>) -> Self {
+    /// The query `inner` runs, with no request to replace.
+    pub fn new(inner: ReconfigurableLiveQuery<(), T, E>) -> Self {
         Self { inner }
     }
 
@@ -443,7 +449,7 @@ impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
     }
 
     /// Where a bug in a result nobody waits for any more goes (E15).
-    pub(crate) fn bugs(&self) -> &BugSinkRef {
+    pub fn bugs(&self) -> &BugSinkRef {
         self.inner.bugs()
     }
 
@@ -471,7 +477,3 @@ impl<T: Send + 'static, E: CarriesBug + Send + 'static> LiveQuery<T, E> {
         LiveQuery { inner: self.inner.process(process) }
     }
 }
-
-#[cfg(test)]
-#[path = "live_query_tests.rs"]
-mod tests;

@@ -4,8 +4,8 @@
 //! transaction.
 
 use super::DatabaseConnection;
-use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 use crate::DbError;
 use sqlive::{Judging, Lookups, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,12 +50,12 @@ impl DatabaseConnection {
     /// the write leaves (§4).
     pub(super) fn judge(
         &self,
-        handle: &CommitObserver,
+        handle: &StoreHandle,
         changes: Vec<sqlive::RowChange>,
-    ) -> Result<crate::observation::Judged, sqlive::Error<StoreFailure, DbError>> {
+    ) -> Result<sqlive::Judged, sqlive::Error<StoreFailure, DbError>> {
         let _reading = self.authorization.reading();
         handle
-            .judge(changes, crate::commit_scope::committing(), &mut |judging| {
+            .judge(changes, sqlive::committing(), &mut |judging| {
                 self.authorization.judged_unrecorded(|| self.ask(judging))
             })
             .map_err(Into::into)

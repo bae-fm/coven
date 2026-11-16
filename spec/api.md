@@ -10651,7 +10651,7 @@ nothing half-changed, by how the state changes.
 - A panic while the handle's live-query state is held may have left a live
   query untold of a commit. The panic reaches whatever ran it, as any panic
   does. The next use of that state fails the handle with a bug naming it,
-  `Bug { operation: "the store's live queries", .. }`, and each live query
+  `Bug { operation: "the handle's live queries", .. }`, and each live query
   returns `StoreFailed` with it as its last result, as every later call
   does. A panic after a write commits, as it tells its live queries, fails
   the handle at once, with that panic's own bug. The write's changes stay

@@ -4,10 +4,10 @@
 //! and changes with each step of bytes, so no table holds it and no live
 //! query reads it.
 
-use crate::observation::CommitSubscription;
 use crate::transfers_in_flight::InFlight;
 use crate::TransferProgress;
 use coven_foundation::id_source::FileId;
+use sqlive::CommitSubscription;
 use std::collections::BTreeMap;
 use tokio::sync::watch;
 

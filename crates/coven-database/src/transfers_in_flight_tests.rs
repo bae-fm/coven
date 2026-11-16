@@ -357,7 +357,7 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
 #[test]
 fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
-    let handle = crate::observation::CommitObserver::recording_all(bugs.clone());
+    let handle = crate::store_failure::StoreHandle::recording_all(bugs.clone());
     let transfers = super::TransfersInFlight::new(handle.clone());
     let uploads = transfers.uploads();
     let object = ObjectId(uuid::Uuid::from_u128(1));
@@ -368,8 +368,8 @@ fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     drop(attempt);
     let heard = bugs.take();
     assert!(
-        matches!(handle.error(), Some(sqlive::Error::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "end a transfer in flight"),
+        matches!(handle.error::<crate::DbError>(), Some(sqlive::Error::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "end a transfer in flight"),
         "{:?}, heard {heard:?}",
-        handle.error()
+        handle.error::<crate::DbError>()
     );
 }

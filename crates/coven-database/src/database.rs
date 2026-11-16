@@ -33,10 +33,14 @@ mod operations;
 #[path = "database_provider_access.rs"]
 mod provider_access;
 
+#[path = "database_changes.rs"]
+mod changes;
 #[path = "circle_rebuild.rs"]
 mod circle_rebuild;
 #[path = "database_file_retention.rs"]
 pub(crate) mod file_retention;
+#[path = "database_live_queries.rs"]
+mod live_queries;
 #[path = "database_snapshots.rs"]
 mod snapshots;
 pub use circle_rebuild::{ExportStopped, RebuildDatabase, RebuildError};
@@ -52,13 +56,13 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::app_policy::CovenPolicy;
 use crate::connection_setup::Setup;
-use crate::observation::{CommitObserver, UnrecordedTables};
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 use crate::write_failure::Hosted;
 use crate::{DbError, Migration, MigrationOutcome, SyncedTable};
-use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
+use crate::{LiveQuery, LostValue, Read, SqlReadContext};
 
 #[path = "database_builder.rs"]
 mod builder;
@@ -113,7 +117,7 @@ pub(crate) use call::{finish_blocking, process, start_call};
 pub struct StoreDatabase<M: Mode = Writer> {
     /// Where every connection reports its commits (§4); it outlives them, and
     /// once they close makes only closed subscriptions.
-    observer: CommitObserver,
+    observer: StoreHandle,
     /// Where a bug in the store's work that nobody waits for goes (E15).
     bugs: coven_foundation::task::BugSinkRef,
     /// The open store, `None` once closed. Closing takes it before anything
@@ -223,7 +227,7 @@ pub struct DatabaseAccess<L> {
     writer: Arc<Mutex<DatabaseConnection>>,
     readers: ReadPool,
     // Every connection reports its commits and handle failures here (§4).
-    observer: CommitObserver,
+    observer: StoreHandle,
     write_schema: crate::write_schema::WriteSchema,
     directory: StoreDir,
     device: DeviceId,
@@ -429,7 +433,7 @@ impl DatabaseInner {
             // After a failed rollback the writer may still hold this write;
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(
-                self.access.observer.error(),
+                self.access.observer.error::<DbError>(),
                 Some(sqlive::Error::Host(StoreFailure::Rollback))
             );
             let chosen = usable.then(|| released(writer, call, self));
@@ -586,64 +590,11 @@ impl StoreDatabase {
     pub fn begin_close(&self) {
         self.closing.begin_close();
     }
-    /// Observe new local writes: rows inserted into the outgoing write queue.
-    /// Upload confirmation removing a row is this device's own bookkeeping
-    /// and wakes nothing (§6.7). Register before the first sync to
-    /// include writes committed while a pass is running.
-    pub fn sync_changes(&self) -> crate::DatabaseChanges<DbError> {
-        self.table_changes(&["_coven_uploads"], true, true)
-    }
-
-    /// Observe operations as they start: rows inserted into the journal,
-    /// such as an invite, whose expiry the handle wakes to write (§13.2).
-    pub fn started_operations(&self) -> crate::DatabaseChanges<DbError> {
-        self.table_changes(&["_coven_operations"], true, true)
-    }
-
     /// The handle's clock could not wait for an invite's expiry: every
     /// later call and live query fails with `DbError::WallTimer` until the
     /// store is reopened (§13.2).
     pub fn fail_expiry_wait(&self, error: coven_foundation::clock::WallTimerError) {
         self.observer.fail(StoreFailure::WallTimer(error));
-    }
-
-    /// `first` reports the initial state as a change; `inserted_only`
-    /// ignores updates and deletions.
-    fn table_changes(
-        &self,
-        tables: &[&str],
-        first: bool,
-        inserted_only: bool,
-    ) -> crate::DatabaseChanges<DbError> {
-        let reads: Vec<_> = tables
-            .iter()
-            .map(|table| sqlive::TableRead {
-                table: (*table).into(),
-                columns: BTreeSet::new(),
-                scope: sqlive::RowScope::All,
-                inserted_only,
-            })
-            .collect();
-        self.observer.changes(reads, first)
-    }
-
-    /// Observe, from now, every commit made outside `attempt`: an operation
-    /// attempt's own commits are no evidence against the wait it ends in,
-    /// and which rows matter is known only when it ends (§6.7).
-    pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
-        self.observer.attempt(attempt)
-    }
-
-    /// Observe `rows` from here on, after `attempt`. The result first reports
-    /// whether a commit since the attempt began changed one of them: such a
-    /// commit is evidence against the wait the attempt ends in (IO
-    /// `racing_commit_wakes`).
-    pub fn watch_attempt(
-        &self,
-        attempt: crate::AttemptCommits,
-        rows: &[crate::PrerequisiteRows],
-    ) -> crate::DatabaseChanges<DbError> {
-        self.observer.watch_attempt(attempt, rows)
     }
 
     /// The files this process is sending now: the upload worker marks each
@@ -664,68 +615,6 @@ impl StoreDatabase {
     /// (§4, §6.7).
     pub fn record_network(&self, network: coven_foundation::network_watch::NetworkState) {
         self.writer.network.set(network);
-    }
-
-    /// Observe the tables and columns a query reads, and the rows its
-    /// conditions allow. Its results fail with the closure's own error type.
-    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
-    where
-        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        LiveQuery::new(self.subscribe_reconfigurable((), move |(), sql| query(sql)))
-    }
-
-    /// Observe a query whose request can be replaced through a shared handle.
-    pub fn subscribe_reconfigurable<Q, F, R, E>(
-        &self,
-        initial_request: Q,
-        query: F,
-    ) -> ReconfigurableLiveQuery<Q, R, E>
-    where
-        Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
-        R: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        let commits = self.observer.subscribe();
-        // A subscription retains a database only for its active read.
-        // Idle queries and undelivered results cannot keep a closing lock held.
-        let database = Arc::downgrade(&self.inner);
-        let query = Arc::new(query);
-        ReconfigurableLiveQuery::new(
-            initial_request,
-            Arc::new(move |request, completion| {
-                let database = database.upgrade().ok_or(DbError::StoreClosed)?;
-                let slot = coven_foundation::locks::read_unpoisoned(&database);
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                inner.call(|inner| {
-                    inner.access.with_reader(|reader, call| {
-                        let _constants = crate::transaction_constants::keep_constants(reader, call);
-                        reader
-                            .live_read(
-                                &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                                |reader| {
-                                    query(request, SqlReadContext::new(reader)).map_err(Hosted)
-                                },
-                            )
-                            .map_err(Hosted::into_inner)
-                    })
-                })
-            }),
-            |error| E::from(DbError::from(error)),
-            commits,
-            self.bugs.clone(),
-        )
-    }
-
-    /// Observe the decoded lost cells and removed rows.
-    pub fn subscribe_lost_values<E>(&self) -> LiveQuery<Vec<LostValue>, E>
-    where
-        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
-    {
-        self.subscribe(|sql| sql.lost_values().map_err(E::from))
     }
 
     /// Run app SQL and coven's steps, and commit its unsigned write record
@@ -935,7 +824,7 @@ impl StoreDatabase {
                         // The statistics follow this session's writes, outside
                         // any captured transaction. A failed handle's writer may
                         // still hold a transaction, which closing rolls back.
-                        if inner.access.observer.error().is_none() {
+                        if inner.access.observer.error::<DbError>().is_none() {
                             if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
                                 failures.push(error.into());
                             }

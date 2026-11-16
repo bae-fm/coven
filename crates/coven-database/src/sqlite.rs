@@ -51,8 +51,8 @@ use crate::app_policy::{CovenPolicy, CovenScope};
 use crate::authorization::SqlAuthorization;
 use crate::authorization::{Policy, Refresh};
 use crate::connection_setup::Setup;
-use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 
 /// Statements kept prepared per connection, coven's and the app's: a local
 /// write runs about a hundred distinct ones of coven's, which a smaller cache
@@ -85,7 +85,7 @@ pub(crate) struct DatabaseConnection {
     /// The open handle this connection serves: it receives the commits and
     /// failures after which the handle refuses calls. None while opening, when
     /// a failure fails the open and drops the connection instead.
-    handle: Option<CommitObserver>,
+    handle: Option<StoreHandle>,
     observation: Option<WriterObservation>,
     /// The main schema's tables as last read, with the schema they were
     /// read in (table_shapes.rs).
@@ -597,7 +597,7 @@ impl DatabaseConnection {
     }
 
     /// Serve an open handle once opening succeeds (§4).
-    pub(crate) fn serve(&mut self, handle: CommitObserver) {
+    pub(crate) fn serve(&mut self, handle: StoreHandle) {
         assert!(self.handle.is_none(), "a connection serves one handle");
         self.authorization.serve(handle.clone());
         self.handle = Some(handle);
@@ -605,7 +605,7 @@ impl DatabaseConnection {
 
     /// Serve the handle as its writer, capturing each commit's row changes and
     /// keeping a write's operations on the `recorded` tables whole.
-    pub(crate) fn observe_commits(&mut self, handle: CommitObserver, recorded: BTreeSet<String>) {
+    pub(crate) fn observe_commits(&mut self, handle: StoreHandle, recorded: BTreeSet<String>) {
         assert!(self.observation.is_none(), "commit observation installed once");
         self.serve(handle);
         self.observation = Some(WriterObservation { recorded: Arc::new(recorded) });

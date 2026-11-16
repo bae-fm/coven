@@ -103,7 +103,7 @@ fn phases<A, T, E: sqlive::RollbackJoin<StoreFailure, DbError>>(
                 let scoped = database
                     .handle
                     .as_ref()
-                    .map(crate::observation::CommitObserver::scoped_columns)
+                    .map(crate::store_failure::StoreHandle::scoped_columns)
                     .unwrap_or_default();
                 let mut app = crate::change_capture::event_changes(database, &operations, &scoped)?;
                 app.append(&mut changes);

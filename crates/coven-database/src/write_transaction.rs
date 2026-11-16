@@ -170,7 +170,7 @@ impl<'a> WriteTransaction<'a> {
                 #[cfg(any(test, feature = "test-utils"))]
                 database.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
                 if let (Some(handle), Some(judged)) = (&database.handle, judged) {
-                    handle.commit(judged, crate::commit_scope::committing());
+                    handle.commit(judged, sqlive::committing());
                 }
                 #[cfg(any(test, feature = "test-utils"))]
                 database.checkpoint(crate::test_utils::WriteCheckpoint::Observed);

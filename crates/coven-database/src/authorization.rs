@@ -129,7 +129,7 @@ pub(crate) struct SqlAuthorization<P> {
     state: Arc<Mutex<AuthorizationState>>,
     /// The handle the connection serves, once it serves one, which a panic
     /// in the authorizer fails.
-    handle: Arc<OnceLock<crate::observation::CommitObserver>>,
+    handle: Arc<OnceLock<crate::store_failure::StoreHandle>>,
     /// The views and tables a live query reads whole.
     whole: Arc<WholeViews>,
     /// What the host adds to the rules. The authorizer asks it after its own
@@ -215,7 +215,7 @@ impl<P: Policy<Refusal = DbError>> SqlAuthorization<P> {
 
     /// The connection now serves `handle`, which a panic in its authorizer
     /// fails.
-    pub(crate) fn serve(&self, handle: crate::observation::CommitObserver) {
+    pub(crate) fn serve(&self, handle: crate::store_failure::StoreHandle) {
         if self.handle.set(handle).is_err() {
             unreachable!("a connection serves one handle");
         }

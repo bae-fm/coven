@@ -677,7 +677,7 @@ impl FileDatabase {
                 inserted_only: false,
             },
         ];
-        self.database.observer.changes(reads, true)
+        self.database.observer.changes(reads, true, DbError::from)
     }
 }
 

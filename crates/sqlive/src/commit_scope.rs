@@ -34,7 +34,7 @@ impl Default for CommitScope {
 }
 
 /// Run `run` with commits made on this thread attributed to `scope`, if any.
-pub(crate) fn enter<R>(scope: Option<CommitScope>, run: impl FnOnce() -> R) -> R {
+pub fn enter<R>(scope: Option<CommitScope>, run: impl FnOnce() -> R) -> R {
     struct Restore(Option<CommitScope>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -46,6 +46,6 @@ pub(crate) fn enter<R>(scope: Option<CommitScope>, run: impl FnOnce() -> R) -> R
 }
 
 /// The scope of the call committing on this thread.
-pub(crate) fn committing() -> Option<CommitScope> {
+pub fn committing() -> Option<CommitScope> {
     THREAD.with(Cell::get)
 }

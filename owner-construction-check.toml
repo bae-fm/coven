@@ -574,11 +574,11 @@ UploadRetryAnswer = "FilesInner"
 # mark of a running connection attempt that keeps them waiting (§17.7).
 StorageState = "StorageSlot"
 ConnectionComing = "Files"
-# One observation of the store's commits, shared by the observer that
-# tells it of each and what it watches for (§4).
-CommitSubscription = "CommitObserver"
+# One observation of the store's commits, shared by the handle that tells
+# it of each and what it watches for (§4).
+CommitSubscription = "Handle"
 # Commits to the rows a worker waits on, coalesced (§4).
-DatabaseChanges = "CommitObserver"
+DatabaseChanges = "Handle"
 # How far each file in flight one way has got (api.md E7, E8).
 TransferWatch = "InFlight"
 # The files in flight one way, which the worker moving them marks as each
@@ -1394,7 +1394,7 @@ tables = [
 # The statements a test records a database's reads running.
 "crates/coven-database/src/statement_log.rs" = ["StatementLog::new"]
 # The next commit scope's number, unique across the process.
-"crates/coven-database/src/commit_scope.rs" = ["NEXT"]
+"crates/sqlive/src/commit_scope.rs" = ["NEXT"]
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
 # holds for the whole process (§21.2).
 "crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
@@ -1427,10 +1427,10 @@ tables = [
 "crates/coven-database/src/database.rs" = [
     "StoreDatabase::call",
     "StoreDatabase::start_read",
-    "StoreDatabase::subscribe_reconfigurable",
     "StoreDatabase::close",
     "StoreDatabase::stage_files",
 ]
+"crates/coven-database/src/database_live_queries.rs" = ["StoreDatabase::subscribe_reconfigurable"]
 "crates/coven-database/src/database_builder.rs" = [
     "DatabaseBuilder::new",
     "DatabaseBuilder::open",
@@ -1481,7 +1481,7 @@ tables = [
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).
-"crates/coven-database/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
+"crates/sqlive/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
 # `next_result` takes a live query to the blocking pool and gives it back
 # with its result, so a caller that waits on one holds the query it got back
 # (api.md E4).
@@ -1501,9 +1501,13 @@ tables = [
 # Starts the planner statistics' keeper on the store's upkeep thread (§4).
 "crates/coven-database/src/planner_statistics.rs" = ["UpkeepThread::start"]
 # One per open store, which every connection tells of its commits (§4).
-"crates/coven-database/src/observation.rs" = [
-    "CommitObserver::new",
-    # Makes each subscription's state, which its observer reaches by a weak
+"crates/sqlive/src/handle.rs" = [
+    "Handle::new",
+    # A test's handle, and a test's panic on a thread of its own while it
+    # holds the handle's state.
+    "Handle::recording_all",
+    "Handle::test_poison",
+    # Makes each subscription's state, which its handle reaches by a weak
     # reference.
     "CommitSubscription::new",
 ]

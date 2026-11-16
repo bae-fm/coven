@@ -7,7 +7,7 @@
 //! what it read.
 
 use crate::connection_setup::Setup;
-use crate::observation::CommitObserver;
+use crate::store_failure::StoreHandle;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::network_watch::NetworkState;
 use rusqlite::functions::FunctionFlags;
@@ -36,12 +36,12 @@ pub(crate) struct NetworkFacts {
     state: Arc<Mutex<NetworkFact>>,
     /// Told of each change, as of a commit that changed what the live
     /// queries reading the views read.
-    observer: CommitObserver,
+    observer: StoreHandle,
 }
 
 impl NetworkFacts {
     /// Nothing heard yet: no usable network known, and none metered.
-    pub(crate) fn new(observer: CommitObserver) -> Self {
+    pub(crate) fn new(observer: StoreHandle) -> Self {
         Self { state: Arc::new(Mutex::new(NetworkFact::default())), observer }
     }
 

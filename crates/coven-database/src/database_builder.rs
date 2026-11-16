@@ -679,10 +679,10 @@ pub async fn discarded_store_name(
 
 /// The observer of a store's commits: no live query reads the tables coven
 /// keeps beside its rows (`internal_schema::UNRECORDED`).
-fn store_observer(bugs: &coven_foundation::task::BugSinkRef) -> CommitObserver {
-    CommitObserver::new(
+fn store_observer(bugs: &coven_foundation::task::BugSinkRef) -> StoreHandle {
+    StoreHandle::new(
         bugs.clone(),
-        Arc::new(UnrecordedTables::new(crate::internal_schema::UNRECORDED)),
+        crate::internal_schema::UNRECORDED.iter().map(|table| (*table).to_owned()).collect(),
     )
 }
 

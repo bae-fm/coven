@@ -17,8 +17,8 @@
 //! `sqlive::Error::HandleFailed` carrying it, so the thread never ends in a way no
 //! one hears of.
 
-use crate::observation::CommitObserver;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 use crate::DbError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -70,7 +70,7 @@ impl<U: Upkeep> UpkeepThread<U> {
     /// fails.
     pub(crate) fn spawn(
         upkeep: U,
-        handle: CommitObserver,
+        handle: StoreHandle,
     ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
         #[cfg(test)]
         if handle.upkeep_thread_refused() {
@@ -136,7 +136,7 @@ impl<U: Upkeep> Drop for UpkeepThread<U> {
 /// can't.
 struct Serving<U> {
     shared: Arc<Shared<U>>,
-    handle: CommitObserver,
+    handle: StoreHandle,
 }
 
 impl<U: Upkeep> Serving<U> {

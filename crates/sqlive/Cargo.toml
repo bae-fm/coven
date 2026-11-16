@@ -4,10 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# The hooks tests use to make the engine fail, and the counts they read back.
+test-utils = []
+
 [dependencies]
 caught.workspace = true
-rusqlite = { workspace = true, features = ["bundled"] }
+futures-lite = { workspace = true, features = ["std"] }
+rusqlite = { workspace = true, features = ["bundled", "functions"] }
 sqlite3-parser.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true

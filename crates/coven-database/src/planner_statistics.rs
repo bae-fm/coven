@@ -13,9 +13,9 @@
 //! starts a run. A run gathers the statistics as an open does, holding
 //! coven's writer so no write of coven's finds the database locked meanwhile.
 
-use crate::observation::CommitObserver;
 use crate::sqlite::DatabaseConnection;
 use crate::store_failure::StoreFailure;
+use crate::store_failure::StoreHandle;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
@@ -49,7 +49,7 @@ impl UpkeepThread<PlannerStatistics> {
     pub(crate) fn start(
         connection: DatabaseConnection,
         writer: &Arc<Mutex<DatabaseConnection>>,
-        handle: CommitObserver,
+        handle: StoreHandle,
     ) -> Result<Self, sqlive::Error<StoreFailure, DbError>> {
         let statistics = Self::spawn(
             PlannerStatistics {

@@ -1,6 +1,32 @@
 use super::*;
-use coven_foundation::task::HeardBugs;
-use sqlive::TableRead;
+use crate::TableRead;
+use caught::BugSink;
+use std::convert::Infallible;
+
+/// The bugs a test's handle hands its sink.
+#[derive(Default)]
+struct HeardBugs(Mutex<Vec<Bug>>);
+
+impl HeardBugs {
+    fn shared() -> Arc<Self> {
+        Arc::default()
+    }
+
+    fn take(&self) -> Vec<Bug> {
+        std::mem::take(&mut *lock_unpoisoned(&self.0))
+    }
+}
+
+impl BugSink for HeardBugs {
+    fn report(&self, bug: &Bug) {
+        lock_unpoisoned(&self.0).push(bug.clone());
+    }
+}
+
+/// A handle whose host fails with text, reporting to `bugs`.
+fn text_handle(bugs: &Arc<HeardBugs>) -> Handle<String> {
+    Handle::recording_all(Arc::clone(bugs) as BugSinkRef)
+}
 
 fn bug(message: &str) -> Bug {
     Bug::new("a test's work", message)
@@ -11,12 +37,12 @@ fn bug(message: &str) -> Bug {
 #[test]
 fn a_bug_inside_a_call_is_the_calls_own() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::recording_all(bugs.clone());
+    let handle = text_handle(&bugs);
     let ((), own) = handle.calling(|| handle.fail_with_bug(bug("torn")));
     assert_eq!(own, Some(bug("torn")));
     assert!(bugs.take().is_empty());
     assert!(
-        matches!(handle.error(), Some(sqlive::Error::HandleFailed(found)) if found == bug("torn"))
+        matches!(handle.error::<Infallible>(), Some(Error::HandleFailed(found)) if found == bug("torn"))
     );
 }
 
@@ -25,7 +51,7 @@ fn a_bug_inside_a_call_is_the_calls_own() {
 #[test]
 fn a_calls_second_bug_goes_to_the_sink() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::recording_all(bugs.clone());
+    let handle = text_handle(&bugs);
     let ((), own) = handle.calling(|| {
         handle.fail_with_bug(bug("first"));
         handle.fail_with_bug(bug("second"));
@@ -33,7 +59,7 @@ fn a_calls_second_bug_goes_to_the_sink() {
     assert_eq!(own, Some(bug("first")));
     assert_eq!(bugs.take(), [bug("second")]);
     assert!(
-        matches!(handle.error(), Some(sqlive::Error::HandleFailed(found)) if found == bug("first"))
+        matches!(handle.error::<Infallible>(), Some(Error::HandleFailed(found)) if found == bug("first"))
     );
 }
 
@@ -43,8 +69,8 @@ fn a_calls_second_bug_goes_to_the_sink() {
 #[test]
 fn only_the_outer_call_on_the_handle_claims_its_bug() {
     let bugs = HeardBugs::shared();
-    let handle = CommitObserver::recording_all(bugs.clone());
-    let other = CommitObserver::recording_all(bugs.clone());
+    let handle = text_handle(&bugs);
+    let other = text_handle(&bugs);
     let ((), outer) = handle.calling(|| {
         let ((), inner) = handle.calling(|| handle.fail_with_bug(bug("inner")));
         assert_eq!(inner, None);
@@ -53,7 +79,7 @@ fn only_the_outer_call_on_the_handle_claims_its_bug() {
     let ((), own) = other.calling(|| handle.fail_with_bug(bug("elsewhere")));
     assert_eq!(own, None);
     assert_eq!(bugs.take(), [bug("elsewhere")]);
-    assert!(other.error().is_none());
+    assert!(other.error::<Infallible>().is_none());
 }
 
 /// When a live query's run reads a table listed in `UnrecordedTables`, the
@@ -61,8 +87,7 @@ fn only_the_outer_call_on_the_handle_claims_its_bug() {
 /// the list finishes normally.
 #[test]
 fn a_run_that_reads_an_unrecorded_table_panics() {
-    let observer =
-        CommitObserver::new(HeardBugs::shared(), Arc::new(UnrecordedTables::new(["Hidden"])));
+    let observer: Handle<String> = Handle::new(HeardBugs::shared(), vec!["Hidden".to_owned()]);
     let read = |table: &str| {
         vec![TableRead {
             table: table.into(),

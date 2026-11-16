@@ -55,3 +55,7 @@ impl From<sqlive::EngineFailure<StoreFailure, DbError>> for StoreFailure {
         }
     }
 }
+
+/// The store's handle: the failure state and live queries that the store's
+/// databases share, failing with coven's `StoreFailure`.
+pub(crate) type StoreHandle = sqlive::Handle<StoreFailure>;

@@ -2,7 +2,7 @@
 //! write (Appendix C.3).
 
 use crate::file_removals::OwnedFile;
-use crate::observation::CommitObserver;
+use crate::store_failure::StoreHandle;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::Bug;
@@ -16,11 +16,11 @@ use std::sync::Mutex;
 pub(crate) struct ReservedNames {
     names: Mutex<BTreeSet<OwnedFile>>,
     /// The handle a release that finds the set wrong fails.
-    handle: CommitObserver,
+    handle: StoreHandle,
 }
 
 impl ReservedNames {
-    pub(crate) fn new(handle: CommitObserver) -> Self {
+    pub(crate) fn new(handle: StoreHandle) -> Self {
         Self { names: Mutex::new(BTreeSet::new()), handle }
     }
 

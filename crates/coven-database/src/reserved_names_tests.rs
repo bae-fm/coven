@@ -11,17 +11,17 @@ fn name(text: &str) -> OwnedFile {
 #[test]
 fn releasing_an_unreserved_name_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
-    let handle = CommitObserver::recording_all(bugs.clone());
+    let handle = StoreHandle::recording_all(bugs.clone());
     let reserved = ReservedNames::new(handle.clone());
     reserved.reserve([name("a")]);
     reserved.release([&name("a")]);
-    assert!(handle.error().is_none(), "a reserved name releases cleanly");
+    assert!(handle.error::<crate::DbError>().is_none(), "a reserved name releases cleanly");
     reserved.release([&name("a")]);
     let heard = bugs.take();
     assert!(
-        matches!(handle.error(), Some(sqlive::Error::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "release reserved file names"),
+        matches!(handle.error::<crate::DbError>(), Some(sqlive::Error::HandleFailed(bug)) if heard == [bug.clone()] && bug.operation == "release reserved file names"),
         "{:?}, heard {heard:?}",
-        handle.error()
+        handle.error::<crate::DbError>()
     );
     reserved.with_names(|names| assert!(names.is_empty()));
 }

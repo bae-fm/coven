@@ -1,84 +1,66 @@
-//! Commit notifications shared by file work and synchronization.
+//! The store's change watches: what wakes a worker waiting on the rows it
+//! names (§4, §6.7).
 
-use crate::store_failure::StoreFailure;
+use super::StoreDatabase;
 use crate::DbError;
+use std::collections::BTreeSet;
 
-/// A live commit observation. `DatabaseChanges` merges several commits into
-/// one change and ends when the writer closes. Its methods convert the
-/// handle's failure into `E` and return that.
-pub struct DatabaseChanges<E> {
-    commits: crate::observation::CommitSubscription,
-    reads: sqlive::ReadSet,
-    first: bool,
-    failed: crate::live_query::Failed<E>,
-}
+impl StoreDatabase {
+    /// Observe new local writes: rows inserted into the outgoing write queue.
+    /// Upload confirmation removing a row is this device's own bookkeeping
+    /// and wakes nothing (§6.7). Register before the first sync to
+    /// include writes committed while a pass is running.
+    pub fn sync_changes(&self) -> crate::DatabaseChanges<DbError> {
+        self.table_changes(&["_coven_uploads"], true, true)
+    }
 
-impl<E> DatabaseChanges<E> {
-    /// What `commits`, waiting on `reads`, reports; `first` reports the
-    /// state now as their first change.
-    pub(crate) fn new(
-        commits: crate::observation::CommitSubscription,
-        reads: sqlive::ReadSet,
+    /// Observe operations as they start: rows inserted into the journal,
+    /// such as an invite, whose expiry the handle wakes to write (§13.2).
+    pub fn started_operations(&self) -> crate::DatabaseChanges<DbError> {
+        self.table_changes(&["_coven_operations"], true, true)
+    }
+
+    /// `first` reports the initial state as a change; `inserted_only`
+    /// ignores updates and deletions.
+    fn table_changes(
+        &self,
+        tables: &[&str],
         first: bool,
-    ) -> Self
-    where
-        E: From<sqlive::Error<StoreFailure, DbError>>,
-    {
-        Self { commits, reads, first, failed: E::from }
+        inserted_only: bool,
+    ) -> crate::DatabaseChanges<DbError> {
+        let reads: Vec<_> = tables
+            .iter()
+            .map(|table| sqlive::TableRead {
+                table: (*table).into(),
+                columns: BTreeSet::new(),
+                scope: sqlive::RowScope::All,
+                inserted_only,
+            })
+            .collect();
+        self.observer.changes(reads, first, DbError::from)
     }
 
-    /// Whether a relevant commit happened since the previous observation,
-    /// without waiting; the first call reports the initial state.
-    pub fn take_changed(&mut self) -> Result<bool, E> {
-        let state = self.commits.state();
-        if let Some(error) = state.error() {
-            return Err((self.failed)(error));
-        }
-        if self.first || state.changed {
-            self.first = false;
-            self.commits.begin();
-            self.commits.finish(self.reads.clone());
-            return Ok(true);
-        }
-        Ok(false)
+    /// Observe, from now, every commit made outside `attempt`: an operation
+    /// attempt's own commits are no evidence against the wait it ends in,
+    /// and which rows matter is known only when it ends (§6.7).
+    pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
+        self.observer.attempt(attempt)
     }
 
-    /// Resolves once a relevant commit happened since the previous
-    /// observation, or the handle failed or closed. It owns its subscription,
-    /// so a worker can wait on it beside other wakes; `take_changed` then
-    /// consumes the change.
-    pub fn changed(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let mut commits = self.commits.clone();
-        let first = self.first;
-        async move {
-            loop {
-                let state = commits.state();
-                if first || state.changed || state.error().is_some() {
-                    return;
-                }
-                commits.changed().await;
-            }
-        }
-    }
-
-    /// The initial state, then each relevant commit. No timer or polling is used.
-    pub async fn next(&mut self) -> Result<(), E> {
-        loop {
-            let state = self.commits.state();
-            if let Some(error) = state.error() {
-                return Err((self.failed)(error));
-            }
-            if self.first || state.changed {
-                self.first = false;
-                self.commits.begin();
-                self.commits.finish(self.reads.clone());
-                return Ok(());
-            }
-            self.commits.changed().await;
-        }
+    /// Observe `rows` from here on, after `attempt`. The result first reports
+    /// whether a commit since the attempt began changed one of them: such a
+    /// commit is evidence against the wait the attempt ends in (IO
+    /// `racing_commit_wakes`).
+    pub fn watch_attempt(
+        &self,
+        attempt: crate::AttemptCommits,
+        rows: &[crate::PrerequisiteRows],
+    ) -> crate::DatabaseChanges<DbError> {
+        let reads = rows.iter().flat_map(crate::PrerequisiteRows::reads).collect();
+        self.observer.watch_attempt(attempt, reads, DbError::from)
     }
 }
 
 #[cfg(test)]
 #[path = "database_changes_tests.rs"]
-pub(crate) mod tests;
+mod tests;

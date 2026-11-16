@@ -1,6 +1,6 @@
 //! How often a live query has run, counted for tests and benchmarks (§4).
 
-use crate::LiveQueryCause;
+use crate::live_query::LiveQueryCause;
 
 /// How often a live query had run when asked, for tests and benchmarks
 /// that measure how many of its runs writes caused, and how many found
@@ -41,7 +41,3 @@ impl LiveQueryRuns {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "live_query_runs_tests.rs"]
-mod tests;

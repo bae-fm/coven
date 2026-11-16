@@ -3143,8 +3143,11 @@ name = "sqlive"
 version = "0.1.0"
 dependencies = [
  "caught",
+ "futures-lite",
  "rusqlite",
  "sqlite3-parser",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

@@ -9,7 +9,7 @@
 //! hears it, by file, and how each ended (E7, E8).
 
 use crate::connection_setup::Setup;
-use crate::observation::CommitObserver;
+use crate::store_failure::StoreHandle;
 use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
@@ -68,7 +68,7 @@ pub(crate) struct TransfersInFlight {
 }
 
 impl TransfersInFlight {
-    pub(crate) fn new(observer: CommitObserver) -> Self {
+    pub(crate) fn new(observer: StoreHandle) -> Self {
         Self {
             uploads: InFlight::new(&SENDING, observer.clone()),
             downloads: InFlight::new(&DOWNLOADING, observer),
@@ -107,7 +107,7 @@ struct InFlightShared {
     state: Mutex<InFlightState>,
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
-    observer: CommitObserver,
+    observer: StoreHandle,
     /// Tells each watch that a file started, moved or ended, after the state
     /// changed; a watch reads the change from the state.
     changed: watch::Sender<()>,
@@ -169,7 +169,7 @@ impl InFlightState {
 }
 
 impl InFlight {
-    fn new(direction: &'static Direction, observer: CommitObserver) -> Self {
+    fn new(direction: &'static Direction, observer: StoreHandle) -> Self {
         Self {
             shared: Arc::new(InFlightShared {
                 direction,
