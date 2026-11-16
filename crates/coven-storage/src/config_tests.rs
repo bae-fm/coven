@@ -1,6 +1,26 @@
 use super::*;
 use crate::*;
 
+/// A provider binds and reads as the name `coven_sync_status.provider`
+/// holds, its own, and parses from the same text, as a JSON array of the
+/// column holds it.
+#[test]
+fn a_provider_reads_as_the_name_its_column_holds() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for (provider, name) in [
+        (CloudProvider::S3, "S3"),
+        (CloudProvider::Dropbox, "Dropbox"),
+        (CloudProvider::OneDrive, "OneDrive"),
+        (CloudProvider::CloudKit, "CloudKit"),
+    ] {
+        assert_eq!(provider.name(), name);
+        assert_eq!(name.parse::<CloudProvider>(), Ok(provider));
+        let read: CloudProvider = db.query_row("SELECT ?1", [provider], |r| r.get(0)).unwrap();
+        assert_eq!(read, provider);
+    }
+    assert!("dropbox".parse::<CloudProvider>().is_err());
+}
+
 #[test]
 fn sign_out_instructions_depend_only_on_the_provider() {
     // The member's other devices share their S3 key: one device has

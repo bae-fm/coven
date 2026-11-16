@@ -19,7 +19,29 @@ pub enum MemberAccess {
     },
 }
 
+/// An account and an S3 key id read together as one member's access, which
+/// holds one or the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a member's access holds an account or an S3 key id, not both")]
+pub struct BothAccesses;
+
 impl MemberAccess {
+    /// The access the `account` and `access_key_id` columns of a
+    /// `coven_members` row hold, from the columns themselves or from the
+    /// text a JSON object of them holds (api.md E4): `None` when both are
+    /// NULL, as for the store's creator until Set up storage records theirs.
+    pub fn from_columns(
+        account: Option<String>,
+        access_key_id: Option<String>,
+    ) -> Result<Option<Self>, BothAccesses> {
+        match (account, access_key_id) {
+            (None, None) => Ok(None),
+            (Some(account), None) => Ok(Some(Self::ProviderAccount(account))),
+            (None, Some(access_key_id)) => Ok(Some(Self::S3AccessKey { access_key_id })),
+            (Some(_), Some(_)) => Err(BothAccesses),
+        }
+    }
+
     /// Whether both name the same credential: one account, compared without
     /// case or surrounding space, or one S3 key id.
     pub fn same_credential(&self, other: &Self) -> bool {

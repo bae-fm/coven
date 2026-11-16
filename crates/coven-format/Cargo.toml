@@ -9,9 +9,11 @@ test-utils = ["coven-foundation/test-utils", "coven-crypto/test-utils", "coven-m
 
 [dependencies]
 coven-foundation.workspace = true
+rusqlite.workspace = true
 coven-crypto.workspace = true
 coven-merge.workspace = true
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 hex.workspace = true

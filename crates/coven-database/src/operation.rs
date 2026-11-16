@@ -369,6 +369,7 @@ fn end(
 /// How the applied state stops this installation for good, if it does. One
 /// whose device isn't registered yet hasn't started.
 pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceStop>, DbError> {
+    use crate::DeviceState::{Active, Replaced};
     let held: bool =
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", [], |r| r.get(0))?;
     if !held {
@@ -376,20 +377,26 @@ pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceSto
             what: "an installation whose writes journal operations records the pairs it holds",
         });
     }
-    let found: Option<(String, bool, bool)> = db
+    let found: Option<(crate::DeviceState, bool, bool)> = db
         .query(
             "SELECT d.state,m.removed,h.signing IS NOT NULL FROM _coven_devices AS d
              JOIN _coven_members AS m ON m.member=d.member
              LEFT JOIN _coven_held_keys AS h ON h.signing=m.signing AND h.sealing=m.sealing
              WHERE d.device=_coven_device()",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    crate::write_encoding::stored(r, 0, rusqlite::types::Type::Text)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                ))
+            },
         )?
         .pop();
-    Ok(found.and_then(|(state, removed, held)| match (state.as_str(), removed, held) {
-        ("replaced", ..) => Some(crate::DeviceStop::Replaced),
-        ("active", false, true) => None,
-        ("active", false, false) => Some(crate::DeviceStop::MemberKeysReplaced),
+    Ok(found.and_then(|(state, removed, held)| match (state, removed, held) {
+        (Replaced, ..) => Some(crate::DeviceStop::Replaced),
+        (Active, false, true) => None,
+        (Active, false, false) => Some(crate::DeviceStop::MemberKeysReplaced),
         // Removing a member removes each of its devices, so a removed member
         // is the stop. A device removed by itself while its member stays is
         // the device's. A removal that came second finds the operations the

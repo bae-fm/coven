@@ -81,7 +81,7 @@ pub(crate) fn members(
                         id,
                         is_self: id == device,
                         name: r.get(1)?,
-                        state: crate::store_state_tables::device_state(r, 2)?,
+                        state: crate::write_encoding::stored(r, 2, rusqlite::types::Type::Text)?,
                     })
                 },
             )?;

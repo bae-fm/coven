@@ -6,7 +6,6 @@ use crate::{
     DbError,
 };
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
-use coven_format::admin::MemberRole;
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId, StoreId};
 use coven_merge::Slot;
 use rusqlite::{params, types::Type, Row};
@@ -54,11 +53,7 @@ pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreM
         member(row, 0)?,
         StoreMember {
             keys: member_keys(row, 1)?,
-            role: match stored::<String>(row, 3, Type::Text)?.as_str() {
-                "admin" => MemberRole::Admin,
-                "member" => MemberRole::Member,
-                _ => return Err(damaged(3, Type::Text)),
-            },
+            role: stored(row, 3, Type::Text)?,
             removed: stored(row, 4, Type::Integer)?,
             access: stored::<Option<Vec<u8>>>(row, 5, Type::Blob)?
                 .map(|bytes| serde_json::from_slice(&bytes))
@@ -67,16 +62,6 @@ pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreM
             joined,
         },
     ))
-}
-
-/// A `_coven_devices.state` value.
-pub(crate) fn device_state(row: &Row<'_>, column: usize) -> rusqlite::Result<DeviceState> {
-    match stored::<String>(row, column, Type::Text)?.as_str() {
-        "active" => Ok(DeviceState::Active),
-        "removed" => Ok(DeviceState::Removed),
-        "replaced" => Ok(DeviceState::Replaced),
-        _ => Err(damaged(column, Type::Text)),
-    }
 }
 
 /// A circle id as the membership and audience tables hold it: its canonical
@@ -189,7 +174,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
                 StoreDevice {
                     member: member(row, 1)?,
                     name: row.get(2)?,
-                    state: device_state(row, 3)?,
+                    state: stored(row, 3, Type::Text)?,
                 },
             ))
         })?
@@ -232,10 +217,6 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         database.execute(&format!("DELETE FROM {table}"), [])?;
     }
     for (id, member) in &state.members {
-        let role = match member.role {
-            MemberRole::Admin => "admin",
-            MemberRole::Member => "member",
-        };
         database.execute(
             "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -243,7 +224,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
                 id,
                 member.keys.signing.as_bytes().as_slice(),
                 member.keys.sealing.as_bytes().as_slice(),
-                role,
+                member.role,
                 member.removed,
                 member
                     .access
@@ -264,16 +245,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         crate::sequence::note_device(database, *id)?;
         database.execute(
             "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
-            params![
-                id,
-                device.member,
-                device.name,
-                match device.state {
-                    DeviceState::Active => "active",
-                    DeviceState::Removed => "removed",
-                    DeviceState::Replaced => "replaced",
-                }
-            ],
+            params![id, device.member, device.name, device.state],
         )?;
     }
     for (id, circle) in &state.circles {

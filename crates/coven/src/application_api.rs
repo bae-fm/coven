@@ -62,8 +62,9 @@ pub use coven_database::{LocalBytes, LocalBytesWatch, NamespaceBytes};
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::value::StorageTime;
-pub use coven_format::MemberAccess;
+pub use coven_format::{BothAccesses, MemberAccess};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock, WallTimerError};
+pub use coven_foundation::column_names::UnknownName;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::files::FileBudgetWatch;
 #[cfg(target_vendor = "apple")]

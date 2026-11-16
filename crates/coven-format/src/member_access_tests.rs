@@ -46,3 +46,22 @@ fn credentials_compare_by_account_or_key_id() {
         .same_credential(&MemberAccess::ProviderAccount("ana@example.test ".into())));
     assert!(!MemberAccess::ProviderAccount("a".into()).same_credential(&key("a")));
 }
+
+/// The `account` and `access_key_id` columns read as one access: an
+/// account, a key id, or none when both are NULL; both set is no access.
+#[test]
+fn the_two_access_columns_read_as_one_access() {
+    assert_eq!(MemberAccess::from_columns(None, None), Ok(None));
+    assert_eq!(
+        MemberAccess::from_columns(Some("ana@example.test".into()), None),
+        Ok(Some(MemberAccess::ProviderAccount("ana@example.test".into())))
+    );
+    assert_eq!(
+        MemberAccess::from_columns(None, Some("key".into())),
+        Ok(Some(MemberAccess::S3AccessKey { access_key_id: "key".into() }))
+    );
+    assert_eq!(
+        MemberAccess::from_columns(Some("ana@example.test".into()), Some("key".into())),
+        Err(BothAccesses)
+    );
+}

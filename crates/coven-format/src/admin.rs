@@ -15,6 +15,13 @@ pub enum MemberRole {
     /// Can write data and manage their own devices.
     Member,
 }
+
+// `coven_members.role` holds a role by its name (api.md E4).
+coven_foundation::column_names!(MemberRole, "member role", {
+    Admin => "admin",
+    Member => "member",
+});
+
 impl Wire for MemberRole {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         match self {

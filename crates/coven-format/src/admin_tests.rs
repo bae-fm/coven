@@ -495,3 +495,17 @@ fn an_admission_names_its_person() {
     *person = "a\0b".into();
     assert!(Object::Admin(admission).encode().is_err());
 }
+
+/// A role binds and reads as the name `coven_members.role` holds, and
+/// parses from the same text, as a JSON array of the column holds it.
+#[test]
+fn a_role_reads_as_the_name_its_column_holds() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for (role, name) in [(MemberRole::Admin, "admin"), (MemberRole::Member, "member")] {
+        assert_eq!(role.name(), name);
+        assert_eq!(name.parse::<MemberRole>(), Ok(role));
+        let read: MemberRole = db.query_row("SELECT ?1", [role], |r| r.get(0)).unwrap();
+        assert_eq!(read, role);
+    }
+    assert!("Admin".parse::<MemberRole>().is_err());
+}

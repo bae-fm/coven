@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 coven-foundation.workspace = true
+rusqlite.workspace = true
 coven-crypto.workspace = true
 coven-format.workspace = true
 coven-merge.workspace = true

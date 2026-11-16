@@ -575,26 +575,10 @@ pub async fn sync_status(database: &coven_database::Database) -> Result<SyncStat
     database.sync_facts(SyncStatus::computed).await
 }
 
-/// The name `coven_sync_status.provider` gives a provider: its own.
-fn provider_name(provider: CloudProvider) -> String {
-    match provider {
-        CloudProvider::S3 => "S3",
-        CloudProvider::Dropbox => "Dropbox",
-        CloudProvider::OneDrive => "OneDrive",
-        CloudProvider::CloudKit => "CloudKit",
-    }
-    .into()
-}
-
-/// The provider `coven_sync_status.provider` names.
+/// The provider `coven_sync_status.provider` names; a name no provider has
+/// is damage.
 fn named_provider(name: &str) -> Result<CloudProvider, DbError> {
-    match name {
-        "S3" => Ok(CloudProvider::S3),
-        "Dropbox" => Ok(CloudProvider::Dropbox),
-        "OneDrive" => Ok(CloudProvider::OneDrive),
-        "CloudKit" => Ok(CloudProvider::CloudKit),
-        _ => Err(DbError::DamagedDatabase),
-    }
+    name.parse().map_err(|_unknown| DbError::DamagedDatabase)
 }
 
 /// Write, as the store opens, whether a storage location is recorded here
@@ -606,7 +590,7 @@ pub async fn record_opened(
     location: RecordedLocation<CloudProvider>,
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {
-    database.record_opened(location.map(provider_name), finished).await
+    database.record_opened(location.map(|provider| provider.name().to_owned()), finished).await
 }
 
 /// Write whether a storage location is recorded here and its credentials
@@ -618,7 +602,7 @@ pub async fn record_location(
     location: RecordedLocation<CloudProvider>,
     finished: Option<SystemTime>,
 ) -> Result<(), DbError> {
-    database.record_location(location.map(provider_name), finished).await
+    database.record_location(location.map(|provider| provider.name().to_owned()), finished).await
 }
 
 #[path = "sync_status_facts.rs"]

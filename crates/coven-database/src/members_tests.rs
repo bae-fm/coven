@@ -400,6 +400,52 @@ async fn the_apps_sql_reads_each_members_keys_and_access() {
     db.close().await.unwrap();
 }
 
+/// The app reads `coven_members.role` as `MemberRole`, its `account` and
+/// `access_key_id` together as `MemberAccess`, and `coven_devices.state` as
+/// `DeviceState`, from the columns and from the text a JSON array of the
+/// column holds, as `members()` gives the members who remain (api.md E4).
+#[tokio::test]
+async fn the_apps_sql_reads_roles_access_and_states_as_covens_types() {
+    type Listed = (MemberId, MemberRole, Option<coven_format::MemberAccess>, Vec<DeviceState>);
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    let mut listed: Vec<Listed> = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query(
+                "SELECT m.member,m.role,m.account,m.access_key_id,
+                     (SELECT json_group_array(d.state ORDER BY d.device) FROM coven_devices AS d
+                      WHERE d.member=m.member)
+                 FROM coven_members AS m WHERE NOT m.removed",
+                [],
+                |r| {
+                    let states: Vec<String> =
+                        serde_json::from_str(&r.get::<_, String>(4)?).unwrap();
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        coven_format::MemberAccess::from_columns(r.get(2)?, r.get(3)?).unwrap(),
+                        states.iter().map(|state| state.parse().unwrap()).collect(),
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    let mut expected: Vec<Listed> = db
+        .members()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.id, m.role, m.access, m.devices.iter().map(|d| d.state).collect()))
+        .collect();
+    listed.sort_by_key(|row| row.0.to_string());
+    expected.sort_by_key(|row| row.0.to_string());
+    assert_eq!(listed, expected);
+    assert!(expected.iter().any(|(.., states)| states.contains(&DeviceState::Replaced)));
+    db.close().await.unwrap();
+}
+
 /// The app's SQL finds a circle this device's member is in by its name, and
 /// reads its members who remain in the store, as `circles()` and
 /// `circle_members()` list them: a deleted circle is in neither view

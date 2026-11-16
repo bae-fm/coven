@@ -216,6 +216,14 @@ pub enum DeviceState {
     Replaced,
 }
 
+// `_coven_devices.state` and `coven_devices.state` hold a state by its name
+// (api.md E4).
+coven_foundation::column_names!(DeviceState, "device state", {
+    Active => "active",
+    Removed => "removed",
+    Replaced => "replaced",
+});
+
 /// A circle and its current membership; deleted circles retain their name.
 /// Its keys come from received introductions, not this membership projection (§12.1).
 #[derive(Clone, Debug, PartialEq, Eq)]

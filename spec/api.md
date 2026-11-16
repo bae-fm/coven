@@ -609,6 +609,15 @@ pub struct CircleId(pub Uuid);
 /// ToSql/FromSql for canonical UUID text; bare rusqlite UUIDs bind as BLOBs.
 pub struct UuidText(pub Uuid);
 
+/// Text that names none of a type's values: what `FromStr` returns, and
+/// what `FromSql` fails with, for `MemberRole`, `DeviceState` and
+/// `CloudProvider`, which coven's columns hold by name (E4).
+pub struct UnknownName {
+    /// What the text was read as, such as "member role".
+    pub kind: &'static str,
+    pub text: String,
+}
+
 /// The wall clock used for timestamps (§7.2).
 pub trait Clock: Send + Sync {
     /// The wall clock's current time.
@@ -3702,6 +3711,15 @@ let moved = handle
   ([§18.1](coven.md#181-telling-an-addition-from-a-breaking-change)). Count or
   group the queue by what such a trigger keeps: `coven_uploads` joins what
   each file waits for into every row it reads.
+- A column that holds one of coven's values by name, `coven_members.role`,
+  `coven_devices.state` or `coven_sync_status.provider`, reads as its type,
+  and its `name()` gives the text the column holds. The type's `FromStr`
+  reads the same text, as a JSON array of the column holds it: Ben's music
+  app gathers each person's device states with `json_group_array(d.state)`
+  and parses each string, with no spelling of its own to fall behind
+  coven's. Text that names no value fails with `UnknownName`.
+  `MemberAccess::from_columns` reads `account` and `access_key_id` together,
+  from the columns or from a JSON object of them.
 - The file views and tables name files, not rows, by the file's id as
   canonical UUID text, read as `FileId`, the id the app's file reference
   columns hold ([§17.2](coven.md#172-files-and-references)). So a join reads
@@ -3799,7 +3817,7 @@ let moved = handle
 | | `state` | `moving` while its uploads are queued, `failed` once a changed original failed it: its files stay on this device only, none waits for an upload, and the move's pending record says which original until the app cancels it |
 | | `file` | the file's id; a file a failed move lists stays in it, and `move_to_cloud` refuses it with `FileInMove`, naming the move, until the app cancels the move |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
-| | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
+| | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`, read as `CloudProvider`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moved` | what a running pass moved last: `read` for a slot it hadn't read, `claimed` for a slot it claimed; NULL while it has moved nothing, and opening writes NULL |
 | | `halted` | 1 once the upload worker's panic has halted sync until the store reopens (E15): no pass writes the row from then on, so the failure the halt wrote stands; opening writes 0 |
@@ -3830,15 +3848,15 @@ let moved = handle
 | | `outcome_kind` | NULL while it runs; then the kind of `OperationOutcome` it ended with, in snake case: `landed`, `satisfied`, `rejected`, `stopped`, `cancelled`, `undone` or `sharing_refused` |
 | | `account` | for an invite that ended with a sharing refusal, the address it was to share with; NULL for every other outcome |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
-| | `role` | `admin` or `member` |
+| | `role` | `admin` or `member`, read as `MemberRole` |
 | | `removed` | 1 for a former member |
 | | `is_self` | 1 for the member using this device |
 | | `signing`, `sealing` | the member's current public keys, 32 bytes each, read as `[u8; 32]` for `SigningKey::from_bytes` and `SealingKey::from_bytes` |
-| | `account`, `access_key_id` | how they reach storage (§14.3): their provider account, or the id of their S3 key, never its secret; one is NULL, as `MemberAccess` holds one or the other, and both are NULL for the store's creator until Set up storage records theirs (§10.3) |
+| | `account`, `access_key_id` | how they reach storage (§14.3): their provider account, or the id of their S3 key, never its secret; one is NULL, as `MemberAccess` holds one or the other, and both are NULL for the store's creator until Set up storage records theirs (§10.3); read together as `Option<MemberAccess>` by `MemberAccess::from_columns` |
 | `coven_devices`: every device a member registered | `device` | the device id's eight big-endian bytes, read as `DeviceId` |
 | | `member` | its member, as in `coven_members` |
 | | `name` | its name from its registration |
-| | `state` | `active`, `removed` or `replaced` |
+| | `state` | `active`, `removed` or `replaced`, read as `DeviceState` |
 | | `is_self` | 1 for this installation |
 | `coven_circles`: each circle this device's member is in, as `Circles::list()` lists them; a deleted circle isn't listed (§15) | `circle` | the circle id as canonical UUID text, read as `CircleId` |
 | | `name` | its current name |
@@ -4915,7 +4933,9 @@ impl CovenHandle {
 ```
 
 ```rust
-/// The provider holding a store (§20.2).
+/// The provider holding a store (§20.2). ToSql/FromSql bind/read its name,
+/// as `coven_sync_status.provider` holds it: `S3`, `Dropbox`, `OneDrive` or
+/// `CloudKit` (E4).
 pub enum CloudProvider {
     /// S3, including compatible providers.
     S3,
@@ -4935,7 +4955,10 @@ impl CloudProvider {
     /// Whether a person signs in to it in a browser (OAuth): Dropbox and
     /// OneDrive.
     pub fn signs_in_with_oauth(self) -> bool;
+    /// The name `coven_sync_status.provider` holds for it.
+    pub fn name(self) -> &'static str;
 }
+impl FromStr for CloudProvider { type Err = UnknownName; }
 
 /// A store's location, with credentials kept separately (§20.3, E5).
 pub enum StorageConfig {
@@ -7907,6 +7930,20 @@ pub enum MemberAccess {
     S3AccessKey { access_key_id: String },
 }
 
+impl MemberAccess {
+    /// The access the `account` and `access_key_id` columns of a
+    /// `coven_members` row hold, from the columns or from a JSON object of
+    /// them (E4): `None` when both are NULL. Both set fails with
+    /// `BothAccesses`.
+    pub fn from_columns(
+        account: Option<String>,
+        access_key_id: Option<String>,
+    ) -> Result<Option<MemberAccess>, BothAccesses>;
+}
+
+/// An account and an S3 key id read together as one member's access.
+pub struct BothAccesses;
+
 pub struct MemberInfo {
     pub id: MemberId,
     pub keys: MemberPublicKeys,
@@ -7928,6 +7965,8 @@ pub struct DeviceInfo {
     pub is_self: bool,
 }
 
+/// ToSql/FromSql bind/read its name, as `coven_devices.state` holds it:
+/// `active`, `removed` or `replaced` (E4).
 pub enum DeviceState {
     Active,
     Removed,
@@ -7935,10 +7974,24 @@ pub enum DeviceState {
     Replaced,
 }
 
+/// ToSql/FromSql bind/read its name, as `coven_members.role` holds it:
+/// `admin` or `member` (E4).
 pub enum MemberRole {
     Admin,
     Member,
 }
+
+impl MemberRole {
+    /// The name `coven_members.role` holds for it.
+    pub fn name(self) -> &'static str;
+}
+impl FromStr for MemberRole { type Err = UnknownName; }
+
+impl DeviceState {
+    /// The name `coven_devices.state` holds for it.
+    pub fn name(self) -> &'static str;
+}
+impl FromStr for DeviceState { type Err = UnknownName; }
 
 /// How a removed device's member cuts off its provider access (§14.2).
 pub enum ProviderSignOut {

@@ -15,6 +15,14 @@ pub enum CloudProvider {
     CloudKit,
 }
 
+// `coven_sync_status.provider` holds a provider by its name (api.md E4).
+coven_foundation::column_names!(CloudProvider, "provider", {
+    S3 => "S3",
+    Dropbox => "Dropbox",
+    OneDrive => "OneDrive",
+    CloudKit => "CloudKit",
+});
+
 impl CloudProvider {
     /// Instructions for cutting off a removed device's provider access (§14.2).
     /// This depends on the provider kind, not on a connected account or request.

@@ -1,10 +1,12 @@
-//! Coven's clock, id source, atomic file writes, store directories and locks,
+//! Coven's clock, id source, the names its columns hold its values by,
+//! atomic file writes, store directories and locks,
 //! the watch of the device's network, the helpers that take a lock whose
 //! holder may have panicked, and the helpers that run coven's own
 //! work apart from its caller, turning a panic in it into a value or a report
 //! to the app's bug sink, and its runtime shutting down into a value.
 
 pub mod clock;
+pub mod column_names;
 pub mod files;
 pub mod id_source;
 #[cfg(target_os = "android")]
