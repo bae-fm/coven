@@ -203,8 +203,8 @@ async fn mismatched_affinities_keep_tables_whole_and_large_partners_narrow() {
     db.close();
 }
 
-/// The tracks [`credit`] credits, all of releases other than the timed
-/// query's.
+/// How many tracks [`credit`] credits an artist on. All of them belong to
+/// releases other than the one the timed query reads.
 const CREDITED: u32 = 1_000;
 
 /// The median of `runs` writes that each credit another artist on
@@ -233,14 +233,15 @@ async fn credit(
     times[times.len() / 2]
 }
 
-/// A joined query's live run against the same SQL read once: an album
-/// page's tracks with their credited artists, over 10,000 releases of 12
-/// tracks. A run reads nothing for its joins, so the two should match. And
-/// what the query costs a write that credits artists on 1,000 tracks of
-/// other releases: one lookup of each track. A credit's key columns are
-/// NOT NULL, so a changed credit names its row; a key that could hold NULL
-/// wouldn't, and every query reading the table would run again. Run
-/// explicitly, in the release profile.
+/// Compare a joined query's live run with a one-shot read of the same SQL:
+/// an album page's tracks with their credited artists, over 10,000 releases
+/// of 12 tracks. A live run does no extra reads for its joins, so the two
+/// times should match. Then measure what the open query adds to a write that
+/// credits artists on 1,000 tracks of other releases: one lookup of each
+/// track. A credit's key columns are NOT NULL, so sqlive finds the changed
+/// row by its key; with a key that could hold NULL it couldn't, and every
+/// query reading the table would run again. Run it explicitly, in the
+/// release profile.
 #[tokio::test]
 #[ignore = "one timing measurement, run explicitly"]
 async fn joined_runs_against_one_shot_reads() {

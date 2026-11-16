@@ -45,7 +45,8 @@ impl<P: Policy> HostSql<P> {
         self.hook_panics.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Have the authorizer refuse every COMMIT and ROLLBACK while `refuse`.
+    /// Have the authorizer refuse every COMMIT and ROLLBACK when `refuse` is
+    /// true.
     pub fn refuse_transaction_end(&mut self, refuse: bool) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         let mut authorize = self.authorization.callback();

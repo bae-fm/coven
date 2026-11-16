@@ -46,14 +46,14 @@ fn a_captured_transaction_records_analyzes_statistics() {
         let _internal = writer.authorization.internal();
         writer.batch("ANALYZE notes").unwrap();
     });
-    // More rows, so analyzing again changes the statistics.
+    // The test adds rows, so analyzing again changes the statistics.
     db.commit("INSERT INTO notes VALUES ('3','c'),('4','c')");
     assert_eq!(db.host(|writer| recorded(writer, "ANALYZE notes")), ["sqlite_stat1"]);
     db.close();
 }
 
 /// A captured transaction records the tables a live query can read, and
-/// none of the tables its handle names unrecorded, which no live query
+/// none of the tables its handle marks as unrecorded, which no live query
 /// reads (§4).
 #[test]
 fn a_captured_transaction_skips_tables_no_live_query_reads() {

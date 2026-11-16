@@ -124,8 +124,8 @@ async fn every_host_statement_path_is_observed_by_the_transaction() {
     db.close();
 }
 
-/// The tables an update hook watches beside the session are those of the
-/// schema no primary key names.
+/// Beside the session, an update hook watches the schema's tables that have
+/// no primary key.
 #[test]
 fn hook_tables_are_the_schemas_tables_with_no_primary_key() {
     let db = TestDatabase::open(

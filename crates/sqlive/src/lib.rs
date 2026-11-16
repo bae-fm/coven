@@ -2,8 +2,8 @@
 //!
 //! A [`Database`] holds one database's connections: a writer, readers beside
 //! it, and upkeep threads that checkpoint its WAL and keep its planner's
-//! statistics. Each connection is a [`HostSql`], judged by the host's
-//! [`Policy`] as SQLite prepares each statement; [`NoPolicy`] adds nothing to
+//! statistics. Each connection is a [`HostSql`], and the host's [`Policy`]
+//! judges each statement as SQLite prepares it; [`NoPolicy`] adds nothing to
 //! sqlive's own rules. A write transaction captures what it changed, and a
 //! live read records the tables, columns and rows its statements read: sqlive
 //! parses each statement's SQL into the conditions that narrow each table it

@@ -5,8 +5,8 @@ fn notes() -> TestDatabase {
     open("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)", "notes")
 }
 
-/// A database of `schema`, whose writes keep their operations on `captured`
-/// whole.
+/// A database of `schema` that records each operation of a write on
+/// `captured`, with every column's value before and after it.
 fn open(schema: &str, captured: &str) -> TestDatabase {
     TestDatabase::open_with(
         schema,

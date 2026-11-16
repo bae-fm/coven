@@ -95,7 +95,7 @@ fn assert_fixed(connection: &HostSql<NoPolicy>) {
     assert_eq!(read("foreign_keys"), 1);
     assert_eq!(read("recursive_triggers"), 1);
     assert_eq!(read("trusted_schema"), 0);
-    // Defensive mode keeps the schema from being written as a table.
+    // Defensive mode keeps a connection from writing the schema as a table.
     connection.batch("PRAGMA writable_schema = ON").unwrap();
     assert_eq!(read("writable_schema"), 0);
     let mode = |pragma: &str| -> String {
@@ -510,7 +510,8 @@ fn an_app_write_cant_analyze() {
     let db = indexed_notes();
     db.write("INSERT INTO notes VALUES ('1','a'),('2','b')").unwrap();
     let db = db.reopen(kept_statistics());
-    // New rows, so analyzing in the write would change the statistics.
+    // The test adds rows, so analyzing in the write would change the
+    // statistics.
     db.write("INSERT INTO notes VALUES ('3','c'),('4','c')").unwrap();
     match db.write("ANALYZE notes") {
         Err(crate::Error::StatementForbidden { operation }) => {
@@ -594,7 +595,8 @@ enum Reading {
 }
 
 /// How long `commits` small writes take, each adding four rows of 4 KB,
-/// while `reading`; and how large the WAL file grew, and ended.
+/// while reads run as `reading` says; the largest size the WAL file reached;
+/// and its size when the writes ended.
 async fn timed_writes(
     commits: usize,
     reading: Reading,

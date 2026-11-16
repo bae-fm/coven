@@ -206,9 +206,10 @@ impl TestDatabase {
         self.with_database(|database| database.reader().host(run))
     }
 
-    /// Run `sql` as the app's write: its row operations on the captured
-    /// tables kept one at a time, then nothing more of the host's, in one
-    /// transaction the live queries then judge.
+    /// Run `sql` as the app's write, in one transaction that the live queries
+    /// then judge. The write records each of its row operations on the
+    /// captured tables, one at a time, and the host adds nothing more to the
+    /// transaction.
     pub(crate) fn write(&self, sql: &str) -> Result<(), TestError> {
         self.write_app(|writer| writer.app_batch(sql))
     }
@@ -321,8 +322,8 @@ impl TestDatabase {
         Self::open_in(self.close_keeping_file(), "", options)
     }
 
-    /// Close the handle and every connection, keeping the directory; and
-    /// what closing failed with.
+    /// Close the handle and every connection, keep the directory, and return
+    /// it with the errors closing failed with.
     fn shut(self) -> (tempfile::TempDir, Vec<TestError>) {
         // As a host closes: its handle first, so no live query runs while
         // the connections close.

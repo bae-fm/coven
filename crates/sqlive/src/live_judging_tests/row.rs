@@ -72,9 +72,9 @@ fn cases() -> Vec<Case> {
 }
 
 /// A condition sqlive's comparison handling can't read narrows the table by
-/// the rows SQLite says pass it: a write to a row outside is spared, one to
-/// a row inside reruns the query, and so does one that moves a row in or
-/// out. Each rerun reads what a one-shot read does.
+/// the rows SQLite says pass it: sqlive doesn't rerun the query for a write
+/// to a row outside, and reruns it for a write to a row inside and for one
+/// that moves a row in or out. Each rerun reads what a one-shot read does.
 #[tokio::test]
 async fn any_condition_on_one_rows_columns_narrows() {
     let db = TestDatabase::open(ITEMS);
