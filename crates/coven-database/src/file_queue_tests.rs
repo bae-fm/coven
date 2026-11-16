@@ -18,7 +18,7 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
 /// Delete every third upload of the fixture and its files, so the audit can
 /// check that coven's triggers update the tables they write from the uploads
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn change_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "DELETE FROM _coven_upload_files WHERE upload%3=0;
          DELETE FROM _coven_file_uploads WHERE id%3=0;",

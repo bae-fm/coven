@@ -15,7 +15,7 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
 /// delete others, so the audit can check that coven's triggers update the
 /// tables they write from the stored files
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn change_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "UPDATE _coven_stored_files SET object=zeroblob(16) WHERE CAST(substr(file,6) AS INTEGER)%5=0;
          DELETE FROM _coven_stored_files WHERE CAST(substr(file,6) AS INTEGER)%7=0;",

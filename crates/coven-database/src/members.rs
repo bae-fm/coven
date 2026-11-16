@@ -78,7 +78,11 @@ pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>
                         id,
                         is_self: id == device,
                         name: r.get(1)?,
-                        state: crate::write_encoding::stored(r, 2, rusqlite::types::Type::Text)?,
+                        state: crate::write_encoding::stored(
+                            r,
+                            2,
+                            sqlive::rusqlite::types::Type::Text,
+                        )?,
                     })
                 },
             )?;

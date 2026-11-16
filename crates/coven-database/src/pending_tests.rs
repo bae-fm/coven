@@ -683,7 +683,7 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
 /// eleventh record, so the audit can check that coven's triggers update the
 /// tables they write from the records
 /// (`internal_schema_scan_reasons_tests.rs`).
-pub(crate) fn change_for_plans(db: &rusqlite::Connection) {
+pub(crate) fn change_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "UPDATE _coven_pending SET cause='changed' WHERE id%2=0;
          DELETE FROM _coven_pending WHERE id%11=0;",

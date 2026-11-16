@@ -369,7 +369,7 @@ pub(crate) fn stopped(db: &StoreSql) -> Result<Option<crate::DeviceStop>, DbErro
             [],
             |r| {
                 Ok((
-                    crate::write_encoding::stored(r, 0, rusqlite::types::Type::Text)?,
+                    crate::write_encoding::stored(r, 0, sqlive::rusqlite::types::Type::Text)?,
                     r.get(1)?,
                     r.get(2)?,
                 ))

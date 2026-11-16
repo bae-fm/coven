@@ -1,7 +1,7 @@
 use crate::file_write::tests::{namespaces, tables, SCHEMA};
 use crate::tests::TestStore;
 use crate::{
-    Database, DbError, FileDatabase, FileWork, Migration, MoveId, PendingValue, Provenance,
+    DbError, FileDatabase, FileWork, Migration, MoveId, PendingValue, Provenance, StoreDatabase,
 };
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ const FOLLOWING: &str = "CREATE TABLE heard(n INTEGER PRIMARY KEY, change TEXT N
      END;";
 
 /// Stage `bytes` for the cloud and point row `id` of `files` at them.
-async fn stage(db: &Database, id: &'static str, bytes: &'static [u8]) -> FileId {
+async fn stage(db: &StoreDatabase, id: &'static str, bytes: &'static [u8]) -> FileId {
     db.staged_write::<_, _, _, _, DbError>(
         move |batch| Ok(batch.put_file("files", bytes.to_vec(), crate::Place::Cloud)),
         move |sql, file| {
@@ -101,11 +101,11 @@ async fn stage(db: &Database, id: &'static str, bytes: &'static [u8]) -> FileId 
     .unwrap()
 }
 
-fn save(db: &Database, record: Record) {
+fn save(db: &StoreDatabase, record: Record) {
     db.inspect_writer(|sql, _| crate::pending::save(sql, &record).unwrap());
 }
 
-fn clear(db: &Database, about: About) {
+fn clear(db: &StoreDatabase, about: About) {
     db.inspect_writer(|sql, _| crate::pending::clear(sql, &about).unwrap());
 }
 
@@ -115,7 +115,7 @@ type Heard = (String, i64, Option<FileId>, Option<String>, Option<MoveId>);
 
 /// What the app's triggers heard since the last call, in order; the rows
 /// `coven_pending` shows now must be what its source says.
-fn heard(db: &Database) -> Vec<Heard> {
+fn heard(db: &StoreDatabase) -> Vec<Heard> {
     db.inspect_writer(|sql, _| {
         let heard = sql
             .query("SELECT change,position,file,cause,move FROM heard ORDER BY n", [], |r| {

@@ -49,7 +49,7 @@ mod fixture {
         // own `_coven_variant_kind` and `_coven_json_bytes` return NULL for
         // them, and these stand-ins return NULL too.
         for name in ["_coven_variant_kind", "_coven_json_bytes"] {
-            db.create_scalar_function(name, 1, flags, |_| Ok(rusqlite::types::Value::Null))
+            db.create_scalar_function(name, 1, flags, |_| Ok(sqlive::rusqlite::types::Value::Null))
                 .unwrap();
         }
         // Like coven's own, this varies, so SQLite never evaluates it while

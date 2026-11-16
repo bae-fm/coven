@@ -3,6 +3,15 @@
 //! writes and reads that name, and the app reads it from the column or
 //! parses it from a JSON array of the column's values (api.md E4).
 
+/// The SQL value conversions [`column_names!`] implements. The macro names
+/// them through this crate, so a crate that calls it needs no rusqlite
+/// dependency of its own.
+#[doc(hidden)]
+pub mod sql {
+    pub use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
+    pub use rusqlite::{Result, ToSql};
+}
+
 /// Text that names none of a type's values.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("`{text}` names no {kind}")]
@@ -44,24 +53,23 @@ macro_rules! column_names {
             }
         }
 
-        impl ::rusqlite::ToSql for $type {
-            fn to_sql(&self) -> ::rusqlite::Result<::rusqlite::types::ToSqlOutput<'_>> {
-                Ok(::rusqlite::types::ToSqlOutput::Borrowed(::rusqlite::types::ValueRef::Text(
-                    self.name().as_bytes(),
-                )))
-            }
-        }
+        const _: () = {
+            use $crate::column_names::sql::{
+                FromSql, FromSqlError, FromSqlResult, Result, ToSql, ToSqlOutput, ValueRef,
+            };
 
-        impl ::rusqlite::types::FromSql for $type {
-            fn column_result(
-                value: ::rusqlite::types::ValueRef<'_>,
-            ) -> ::rusqlite::types::FromSqlResult<Self> {
-                value
-                    .as_str()?
-                    .parse()
-                    .map_err(|error| ::rusqlite::types::FromSqlError::Other(Box::new(error)))
+            impl ToSql for $type {
+                fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
+                    Ok(ToSqlOutput::Borrowed(ValueRef::Text(self.name().as_bytes())))
+                }
             }
-        }
+
+            impl FromSql for $type {
+                fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                    value.as_str()?.parse().map_err(|error| FromSqlError::Other(Box::new(error)))
+                }
+            }
+        };
     };
 }
 
