@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// The folder an app names for SQLite's temporary tables (§21.2), outside
-/// coven's directories. It is made where the app's call names it.
+/// coven's directories. The app creates it and names its path to
+/// `set_temporary_directory`.
 #[derive(Debug, PartialEq, Eq)]
 struct TemporaryFolder {
     path: PathBuf,

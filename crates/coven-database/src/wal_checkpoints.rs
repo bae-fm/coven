@@ -131,7 +131,8 @@ impl Checkpoints {
         let Some(writer) = self.writer.upgrade() else {
             return Ok(());
         };
-        // A WAL SQLite couldn't read now is read again at the next wake.
+        // When SQLite can't read the WAL now, the checkpointer reads it at the
+        // next wake.
         let Some(uncopied) = uncopied_frames(&connection)? else {
             return Ok(());
         };
@@ -140,18 +141,19 @@ impl Checkpoints {
         }
         // Copy what no reader needs while coven's writes go on, and sync
         // it. SQLite syncs the database file only when a checkpoint
-        // copies the whole WAL, and a commit landing during the copy
+        // copies the whole WAL, and a commit made during the copy
         // leaves it short; without a sync of its own, the checkpoint that
         // holds the writer would sync every page copied here. The frames
         // committed during a pass get a pass of their own while each pass
         // leaves fewer, so the checkpoint holding the writer copies and
         // syncs only the frames committed during the last pass and since,
-        // none when no commit landed.
+        // none when no commit was made.
         let (mut passes, mut left) = (0, uncopied);
         loop {
-            // A copy SQLite couldn't start now, as another connection was
-            // checkpointing the WAL or committing to it, is tried again at
-            // the next wake rather than made whole while writes wait.
+            // When SQLite can't start a copy now, because another connection
+            // is checkpointing the WAL or committing to it, the checkpointer
+            // tries the copy again at the next wake instead of finishing it
+            // while writes wait.
             if let WalCheckpoint::NotStarted = connection.wal_checkpoint(CheckpointMode::Passive)? {
                 return Ok(());
             }
