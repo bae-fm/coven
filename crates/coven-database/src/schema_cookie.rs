@@ -19,7 +19,7 @@ impl SchemaCookie {
     }
 
     pub(super) fn release(&self) {
-        let holders = self.holders.get().saturating_sub(1);
+        let holders = self.holders.get().checked_sub(1).expect("a cookie release follows its hold");
         self.holders.set(holders);
         if holders == 0 {
             self.value.set(None);

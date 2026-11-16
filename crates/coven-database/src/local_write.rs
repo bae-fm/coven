@@ -45,7 +45,7 @@ impl DatabaseConnection {
         let Some(registering) = registering else {
             return self.stream_transaction(|db| run(db).map(|(result, _)| result));
         };
-        let (result, _) = registering.make(|schema, device, now, files, sql| {
+        registering.make(|schema, device, now, files, sql| {
             self.stream_then_write(
                 run,
                 |database, operations| app_phase(database, operations, files, sql),
@@ -53,8 +53,7 @@ impl DatabaseConnection {
                     host_phase(database, operations, applied, schema, device, now, files)
                 },
             )
-        })?;
-        Ok(result)
+        })
     }
 }
 

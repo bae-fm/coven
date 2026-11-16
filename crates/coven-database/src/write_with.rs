@@ -30,13 +30,13 @@ impl DatabaseConnection {
     /// which `stream` says whether `write_with`'s phases follow in the same
     /// transaction. When they do, the app phase takes the hook the stream's
     /// capture held, which has seen every change of `stream`; both commit, or
-    /// neither. The write's result is none when `stream` said no.
-    pub(crate) fn stream_then_write<S, A, T, E: crate::WriteFailure>(
+    /// neither.
+    pub(crate) fn stream_then_write<S, A, E: crate::WriteFailure>(
         &mut self,
         stream: impl FnOnce(&DatabaseConnection) -> Result<(S, bool), E>,
         app: impl FnOnce(&DatabaseConnection, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
-        host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<T, E>,
-    ) -> Result<(S, Option<T>), E> {
+        host: impl FnOnce(&DatabaseConnection, &[Operation], A) -> Result<(), E>,
+    ) -> Result<S, E> {
         let mut transaction = WriteTransaction::begin(self, true)?;
         let outcome = StreamCapture::begin(&mut transaction).map_err(E::from).and_then(|capture| {
             let (result, writes) = transaction.within(|database| {
@@ -49,16 +49,13 @@ impl DatabaseConnection {
                 StreamChanges::Tables(tables) => transaction
                     .within(|database| crate::change_capture::table_changes(database, tables))?,
             };
-            let written = if writes {
+            if writes {
                 transaction.stop_observing_operations()?;
                 transaction.keep_schema_cookie();
-                let (written, rows) = phases(&mut transaction, app, host)?;
+                let ((), rows) = phases(&mut transaction, app, host)?;
                 changes.extend(rows);
-                Some(written)
-            } else {
-                None
-            };
-            Ok(((result, written), changes))
+            }
+            Ok((result, changes))
         });
         transaction.commit(outcome)
     }
