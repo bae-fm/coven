@@ -9,7 +9,7 @@
 //! hears it, by file, and how each ended (E7, E8).
 
 use crate::connection_setup::Setup;
-use crate::observation::{CommitObserver, RowChange};
+use crate::observation::CommitObserver;
 use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
@@ -277,21 +277,7 @@ impl InFlight {
     /// Tell live queries after the files changed, so a query that ran
     /// before the change runs again, and one that runs after it reads them.
     fn changed(&self) {
-        self.shared.observer.commit(
-            crate::observation::Judged::unjudged(
-                self.shared
-                    .direction
-                    .read_as
-                    .iter()
-                    .map(|(table, column)| RowChange {
-                        table: (*table).into(),
-                        column: (*column).into(),
-                        rows: None,
-                    })
-                    .collect(),
-            ),
-            None,
-        );
+        self.shared.observer.changed_without_write(self.shared.direction.read_as);
     }
 
     fn register(&self, setup: &Setup<'_>) -> rusqlite::Result<()> {

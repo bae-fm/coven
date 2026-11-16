@@ -7,7 +7,7 @@
 //! what it read.
 
 use crate::connection_setup::Setup;
-use crate::observation::{CommitObserver, RowChange};
+use crate::observation::CommitObserver;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::network_watch::NetworkState;
 use rusqlite::functions::FunctionFlags;
@@ -64,19 +64,7 @@ impl NetworkFacts {
             changed
         };
         if changed {
-            self.observer.commit(
-                crate::observation::Judged::unjudged(
-                    READ_AS
-                        .iter()
-                        .map(|(table, column)| RowChange {
-                            table: (*table).into(),
-                            column: (*column).into(),
-                            rows: None,
-                        })
-                        .collect(),
-                ),
-                None,
-            );
+            self.observer.changed_without_write(&READ_AS);
         }
     }
 

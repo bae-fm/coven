@@ -401,7 +401,7 @@ pub(crate) struct Judged {
 impl Judged {
     /// Changes no live query judged, as those that name no row: each
     /// waiting query judges them as they reach it, without lookups.
-    pub(crate) fn unjudged(changes: Vec<RowChange>) -> Self {
+    fn unjudged(changes: Vec<RowChange>) -> Self {
         Self { changes: Arc::new(changes), verdicts: Vec::new() }
     }
 }
@@ -619,6 +619,20 @@ impl CommitObserver {
             verdicts.push((Arc::downgrade(&subscription), epoch, found));
         }
         Ok(Judged { changes: Arc::new(changes), verdicts })
+    }
+
+    /// Tell live queries that each of `columns`, a (table, column) pair of a
+    /// view, changed with no write: each query that read one runs again.
+    pub(crate) fn changed_without_write(&self, columns: &[(&str, &str)]) {
+        let changes = columns
+            .iter()
+            .map(|(table, column)| RowChange {
+                table: (*table).into(),
+                column: (*column).into(),
+                rows: None,
+            })
+            .collect();
+        self.commit(Judged::unjudged(changes), None);
     }
 
     /// Report a commit made within `scope`, if any. A query still waiting on
