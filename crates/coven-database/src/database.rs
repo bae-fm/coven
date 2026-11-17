@@ -14,6 +14,9 @@ pub(crate) mod file_database;
 #[path = "database_local_bytes.rs"]
 pub(crate) mod local_bytes;
 
+#[path = "library_bytes.rs"]
+mod library_bytes;
+
 #[path = "database_mode.rs"]
 mod mode;
 pub use mode::{Mode, ReadOnly, Writer};

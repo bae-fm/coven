@@ -51,3 +51,49 @@ async fn a_budget_past_sqlites_integers_is_refused() {
     assert_eq!(db.cache_bytes().await.unwrap().namespaces[0].budget, 1 << 30);
     db.close().await.unwrap();
 }
+
+/// The database file's size, read from `coven_library_bytes`.
+fn database_bytes(sql: SqlReadContext<'_>) -> Result<i64, DbError> {
+    Ok(sql.query_row("SELECT bytes FROM coven_library_bytes WHERE part='database'", [], |r| {
+        r.get(0)
+    })?)
+}
+
+/// The size of the store's database file on disk.
+fn file_size(store: &TestStore) -> i64 {
+    let path = store.database_path();
+    i64::try_from(std::fs::metadata(path).unwrap().len()).unwrap()
+}
+
+/// `coven_library_bytes` holds the database file's size as the store opens,
+/// and a write that grows the file changes it only once a checkpoint has
+/// moved the write into the file: a live query of it then runs once more,
+/// with the file's size on disk (§17.8).
+#[tokio::test]
+async fn a_checkpoint_that_grows_the_database_file_writes_its_size() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let mut sizes: LiveQuery<_, DbError> = db.subscribe(database_bytes).process(Ok);
+    let opened = sizes.next_inline().await.unwrap().unwrap();
+    assert_eq!(opened, file_size(&store));
+    db.write(|sql| {
+        for row in 0..64 {
+            sql.execute(
+                "INSERT INTO files(id,title) VALUES(?1,?2)",
+                (format!("grow-{row}"), "x".repeat(16 * 1024)),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // The write is in the WAL: the file and the row keep their size.
+    assert_eq!(file_size(&store), opened);
+    let before = sizes.runs().runs();
+    db.checkpoint(crate::CheckpointMode::Truncate).await.unwrap();
+    let grown = sizes.next_inline().await.unwrap().unwrap();
+    assert!(grown > opened, "{grown} > {opened}");
+    assert_eq!(grown, file_size(&store));
+    assert_eq!(sizes.runs().runs(), before + 1);
+    db.close().await.unwrap();
+}

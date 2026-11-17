@@ -8,9 +8,10 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 17] = [
+const VIEWS: [&str; 18] = [
     "coven_upload_pause",
     "coven_cache_bytes",
+    "coven_library_bytes",
     "coven_uploads",
     "coven_upload_queue",
     "coven_sending",
@@ -50,8 +51,13 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         .await
         .unwrap();
     for view in VIEWS {
-        // The pause view always holds its one row.
-        let expected = usize::from(view == "coven_upload_pause");
+        // The pause view always holds its one row, and the library's table
+        // a row for each database file.
+        let expected = match view {
+            "coven_upload_pause" => 1,
+            "coven_library_bytes" => 2,
+            _ => 0,
+        };
         let statement = format!("SELECT * FROM {view}");
         let rows = db
             .read(move |sql| Ok::<_, DbError>(sql.query(&statement, [], |_| Ok(()))?))

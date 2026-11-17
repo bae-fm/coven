@@ -395,6 +395,13 @@ impl DatabaseBuilder {
                 }
             },
         )?;
+        // The database files' sizes as they opened, which a checkpoint
+        // changes from now on (§17.8).
+        let mut sizes = super::library_bytes::DatabaseSizes::new(
+            database.checkpointed_size(),
+            input.checkpointed_size(),
+        );
+        database.host(|writer| sizes.record_opened(writer))?;
         let inputs = input_database::InputDatabase::new(input)?;
         tracing::info!(
             migrations = migrations.len(),
@@ -403,7 +410,7 @@ impl DatabaseBuilder {
             total = ?(clock.elapsed() - started),
             "opened the database"
         );
-        Ok(StoreDatabase {
+        let store = StoreDatabase {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: WriterParts {
@@ -447,7 +454,9 @@ impl DatabaseBuilder {
                 #[cfg(any(test, feature = "test-utils"))]
                 applied_slot_failures: std::sync::atomic::AtomicUsize::new(0),
             }))),
-        })
+        };
+        store.follow_database_sizes(sizes);
+        Ok(store)
     }
     fn open_read_graph(self) -> Result<StoreDatabase<ReadOnly>, OpenError> {
         let tables =

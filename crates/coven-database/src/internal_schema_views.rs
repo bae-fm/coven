@@ -11,13 +11,14 @@
 //! statement reached through a view, so a view never only counts a table's
 //! rows.
 
-/// What app SQL may read of coven's: these views, the files table, and the
+/// What app SQL may read of coven's: these views, the files table, the
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_pin_requests.rs`,
 /// `internal_schema_moves.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
-/// `internal_schema_retry_effect.rs`).
-pub(crate) const READABLE: [&str; 22] = [
+/// `internal_schema_retry_effect.rs`), and the sizes of the store's own
+/// files (`local_bytes_schema.rs`).
+pub(crate) const READABLE: [&str; 23] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -26,6 +27,7 @@ pub(crate) const READABLE: [&str; 22] = [
     "coven_sending",
     "coven_downloading",
     "coven_cache_bytes",
+    "coven_library_bytes",
     super::UPLOAD_QUEUE,
     super::PINS,
     super::PIN_REQUESTS,

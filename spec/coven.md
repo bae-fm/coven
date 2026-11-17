@@ -483,10 +483,10 @@ So the app's SQL can read it through fourteen views, `coven_uploads`,
 `coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
 `coven_user_files`,
 `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
-and eight tables,
+and nine tables,
 `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
-`coven_upload_queue`, `coven_pending`, `coven_sync_status` and
-`coven_retry_effect`
+`coven_upload_queue`, `coven_pending`, `coven_sync_status`,
+`coven_retry_effect` and `coven_library_bytes`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -8837,7 +8837,13 @@ are counted apart, as `pinning`. The app's SQL reads each namespace's budget,
 query sums them with its own rows. The store's own files in its directory,
 the database and its journals, the settings, the key files and coven's copies
 of app files, and the folder of a rebuild while one runs (§18.3), count as
-`library`.
+`library`. The app's SQL reads the store's database file's size and the
+input database's from the table `coven_library_bytes`, each as its last
+checkpoint left it: coven writes both as the store opens and each again
+after a checkpoint changes it. Until that write commits, the row holds the
+size before the checkpoint. The WAL beside each file doesn't count: once a
+checkpoint lets it start over it shrinks back to 4 MiB (§4), it changes with
+every commit, and writing its size would itself add to it.
 One read, `local_bytes`, returns these from a
 single snapshot of the database and a walk of the store's directory. It leaves
 out the cache's folder, since the entries count it, and the archives resets
@@ -12363,7 +12369,8 @@ device consistent with the database.
   coven writes as what the sync state is computed from changes (§19.1), and
   `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes
-  (§6.7). They are coven's objects: the app's
+  (§6.7), and `coven_library_bytes`, the sizes of the store's own files that
+  coven writes as each changes (§17.8). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,

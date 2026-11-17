@@ -135,6 +135,9 @@ mod file_table_schema;
 #[path = "forget_records_schema.rs"]
 mod forget_records_schema;
 #[macro_use]
+#[path = "local_bytes_schema.rs"]
+mod local_bytes_schema;
+#[macro_use]
 #[path = "loss_record_schema.rs"]
 mod loss_record_schema;
 #[macro_use]
@@ -242,6 +245,7 @@ macro_rules! coven_tables {
         coven_file_uploads_tables!($visit);
         coven_file_retention_tables!($visit);
         coven_cache_tables!($visit);
+        coven_local_bytes_tables!($visit);
         coven_provider_access_tables!($visit);
         coven_operations_tables!($visit);
         coven_object_removals_tables!($visit);

@@ -3690,10 +3690,10 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads thirteen views of coven's own tables and
-  eight tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
-  `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`
-  and `coven_retry_effect`, in reads,
+- *Coven's state in SQL.* App SQL reads thirteen views of coven's own tables
+  and nine tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
+  `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
+  `coven_retry_effect` and `coven_library_bytes`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -3852,6 +3852,8 @@ let moved = handle
 | | `cached` | the bytes of its cached chunks and headers, which the budget counts |
 | | `pinned` | the bytes of its pinned whole copies, which the budget doesn't count |
 | | `pinning` | the bytes of the partial downloads stopped pins left in it, which the cache neither counts nor evicts |
+| `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file, or `inputs`, the input database's |
+| | `bytes` | the part's size in bytes: a database file's as its last checkpoint left it, written as the store opens and after each checkpoint that changes it; the WAL beside it isn't counted |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
 | | `metered` | 1 while that network is metered, and while coven can't tell after the platform failed to answer since opening; 0 with none, and where the platform never tells; never stored |
 | | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |

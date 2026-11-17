@@ -614,6 +614,7 @@ table_macros = [
     "coven_user_originals_tables",
     "coven_file_removals_tables",
     "coven_cache_tables",
+    "coven_local_bytes_tables",
     "coven_creations_tables",
     "coven_authored_sources_tables",
     "coven_forgetting_tables",
@@ -1107,6 +1108,17 @@ tables = [
 ]
 
 [[database.domains]]
+name = "local bytes"
+owner = "StoreDatabase"
+homes = [
+    "crates/coven-database/src/library_bytes.rs",
+    "crates/coven-database/src/local_bytes_schema.rs",
+]
+tables = [
+    "coven_library_bytes",
+]
+
+[[database.domains]]
 name = "cache"
 owner = "StoreDatabase"
 # The pins' triggers on the cache keep the pins table, the cache's schema.
@@ -1391,6 +1403,13 @@ tables = [
 # with its result, so a caller that waits on one holds the query it got back
 # (api.md E4).
 "crates/coven-database/src/database_local_bytes.rs" = ["LocalBytesWatch::next"]
+# The views of a store's two database files' sizes, taken as it opens, and
+# the follower that writes each size a checkpoint sends until the store's
+# close ends it (§17.8).
+"crates/coven-database/src/library_bytes.rs" = [
+    "DatabaseSizes::new",
+    "StoreDatabase::follow_database_sizes",
+]
 # A live query's run goes to the blocking pool and runs to its end even when
 # its caller stops waiting; then its bug goes to the store's sink (E15).
 "crates/coven-database/src/live_results.rs" = ["next_result"]
