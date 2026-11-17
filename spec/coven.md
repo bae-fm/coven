@@ -8849,8 +8849,11 @@ recorded for removal, isn't counted, as the cache's bytes in flight
 aren't. The row `rebuild` is there while a rebuild runs (§18.3): coven
 makes it, at no bytes, before the rebuild makes its folder, then writes
 the sum of the rebuild's store's own `coven_library_bytes` each time that
-sum changes. To remove the folder, coven moves it aside in one rename and
-deletes the row under the writer, then removes the folder. The archives
+sum changes. When a read of that sum fails, coven logs the failure and
+fails the rebuild's store with it, so the rebuild's owner meets the failure
+on its next call and discards the rebuild, which deletes the row. To
+remove the folder, coven moves it aside in one rename and deletes the row
+under the writer, then removes the folder. The archives
 resets kept are in `coven_archive_bytes` instead, and their sum is
 `before_reset` while there is one (§19.3).
 

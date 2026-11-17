@@ -7,6 +7,7 @@
 
 use crate::database::{finish_blocking, process, start_call, DatabaseInner, StoreDatabase};
 use crate::sqlite::StoreSql;
+use crate::store_failure::{StoreFailure, StoreHandle};
 use crate::{next_result, DbError, LiveQuery, SqlReadContext};
 use coven_foundation::files::{FileError, StoreDirAccess};
 use coven_foundation::task::BugSinkRef;
@@ -179,8 +180,7 @@ impl StoreDatabase {
 
     /// Count `rebuild`, the rebuild's store, just opened, in this store's
     /// `rebuild` row: the sizes of its own files together now, then after
-    /// each write that changes them, until it closes. A run of the rebuild's
-    /// query that fails leaves the row as it was until the next run.
+    /// each write that changes them, until it closes.
     pub(crate) async fn count_rebuild(&self, rebuild: &StoreDatabase) -> Result<(), DbError> {
         let (total, first) = next_result(rebuild.subscribe(own_files)).await;
         let bytes = first.ok_or(DbError::StoreClosed)??;
@@ -190,15 +190,20 @@ impl StoreDatabase {
             })
         })
         .await?;
-        self.follow_rebuild(total);
+        self.follow_rebuild(total, rebuild.observer.clone());
         Ok(())
     }
 
     /// Write each total `total` gives into the `rebuild` row until the
     /// rebuild's store closes, which ends the query. The follower holds this
     /// store only while it writes, so dropping its last handle still closes
-    /// it; a write that fails has failed the handle, and the follower stops.
-    fn follow_rebuild(&self, mut total: LiveQuery<u64, DbError>) {
+    /// it; a write that fails has failed this store's handle, and the
+    /// follower stops. A run of the query that fails would leave the row
+    /// wrong, so the follower logs the failure, fails `rebuild`, the
+    /// rebuild's handle, with it, and stops: the rebuild's owner meets the
+    /// failure on its next call and discards the rebuild, which deletes the
+    /// row.
+    fn follow_rebuild(&self, mut total: LiveQuery<u64, DbError>, rebuild: StoreHandle) {
         let store = Arc::downgrade(&self.inner);
         let bugs = self.bugs.clone();
         let operation = "record the rebuild store's size";
@@ -209,7 +214,11 @@ impl StoreDatabase {
                 let bytes = match run {
                     None => break,
                     Some(Ok(bytes)) => bytes,
-                    Some(Err(_)) => continue,
+                    Some(Err(error)) => {
+                        tracing::error!(%error, "reading the rebuild store's size failed");
+                        rebuild.fail(StoreFailure::State(Arc::new(error)));
+                        break;
+                    }
                 };
                 let write = move |db: &StoreSql| record_rebuild(db, bytes);
                 if !record_on(&store, &bugs, operation, write).await {
