@@ -9,15 +9,18 @@ use sqlive::rusqlite::Connection;
 /// any store, every object of coven's that app SQL may read, as every store
 /// makes it: the tables the app's local triggers may follow,
 /// `coven_sync_status` and `coven_retry_effect` with their one row, and
-/// coven's views, with the tables of coven's own that they read. The
-/// function registers coven's SQL functions too, with `device` as this
-/// device's id and `sync_state` as the sync state's computation, which the
-/// coven crate passes from sync as its builder does. Nothing transfers there
-/// and nothing watches the network, as on a read-only handle. The test runs this before the app's schema, so the
-/// app's triggers and views apply and run as in a store. Nothing of coven's
-/// writes the objects there, and coven's triggers that keep the followed
-/// tables in a store aren't made: the test writes the followed tables' rows
-/// that coven would, and records a user's original with `record_user_file`.
+/// coven's views. The function also makes the tables of coven's own that
+/// the views read or that the outside-store writes fill, all empty
+/// (`readable_schema`). The function registers coven's SQL functions, with
+/// `device` as this device's id and `sync_state` as the sync state's
+/// computation, which the coven crate passes from sync as its builder does. Nothing transfers files there and
+/// nothing watches the network, as on a read-only handle. The test runs
+/// this function before the app's schema, so the app's triggers and views
+/// apply and run as in a store. coven writes no rows on that connection.
+/// coven's triggers that keep `coven_pending` run there, and the test saves
+/// pending records with `save_outside_store`. The test writes the rows that
+/// coven would write in the other followed tables, and records a user's
+/// original with `record_user_file`.
 pub fn make_readable_objects(
     connection: &Connection,
     device: DeviceId,
