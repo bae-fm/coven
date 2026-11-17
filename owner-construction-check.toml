@@ -1395,10 +1395,12 @@ tables = [
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).
 "crates/sqlive/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
-# The views of a store's two database files' sizes, taken as it opens; the
-# followers that write each size a checkpoint sends, and each total of a
-# rebuild's store, until that store's close ends them; and the write each
-# follower runs under the store's writer (§17.8).
+# `DatabaseSizes::new` takes the views of a store's two database files'
+# sizes as the store opens (§17.8). `follow_database_sizes` starts the task
+# that writes each size a checkpoint reports, and `follow_rebuild` starts
+# the task that writes each total of a rebuild's store; each task ends when
+# the store it follows closes. `record_on` runs each of those writes under
+# the store's writer.
 "crates/coven-database/src/library_bytes.rs" = [
     "DatabaseSizes::new",
     "StoreDatabase::follow_database_sizes",

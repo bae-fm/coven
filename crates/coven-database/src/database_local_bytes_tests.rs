@@ -17,8 +17,9 @@ fn cache_rows(sql: SqlReadContext<'_>) -> Result<Vec<CacheRow>, DbError> {
 }
 
 /// The app's SQL reads each namespace's budget and cache counters, and the
-/// partial downloads pins left in it, from `coven_cache_bytes`, and a live
-/// query of it runs again as they change (§17.8).
+/// bytes of the partial downloads that pins left in the namespace, from
+/// `coven_cache_bytes`, and a live query of the view runs again as they
+/// change (§17.8).
 #[tokio::test]
 async fn coven_cache_bytes_reads_each_namespaces_counters() {
     let store = TestStore::new();
@@ -40,8 +41,8 @@ async fn coven_cache_bytes_reads_each_namespaces_counters() {
     db.close().await.unwrap();
 }
 
-/// A budget past SQLite's largest integer is refused, and the budget stays
-/// as it was.
+/// `set_cache_budget` refuses a budget past SQLite's largest integer and
+/// leaves the budget as it was.
 #[tokio::test]
 async fn a_budget_past_sqlites_integers_is_refused() {
     let store = TestStore::new();

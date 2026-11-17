@@ -15,8 +15,8 @@ use sqlive::CheckpointedSize;
 use std::sync::{Arc, RwLock, Weak};
 
 /// Write the store's database file's size, `database`, and its input
-/// database's, `inputs`, in the transaction under way. A row already
-/// holding its size is left alone, so a live query that reads it doesn't
+/// database's, `inputs`, in the transaction under way. The UPDATE skips a
+/// row that already holds its size, so a live query that reads it does not
 /// run again.
 fn record(db: &StoreSql, database: u64, inputs: u64) -> Result<(), DbError> {
     for (part, bytes) in [("database", database), ("inputs", inputs)] {
@@ -28,8 +28,8 @@ fn record(db: &StoreSql, database: u64, inputs: u64) -> Result<(), DbError> {
     Ok(())
 }
 
-/// The `rebuild` row's size, in the transaction under way, while there is
-/// one.
+/// Write `bytes` into the `rebuild` row, in the transaction under way, when
+/// that row exists.
 fn record_rebuild(db: &StoreSql, bytes: u64) -> Result<(), DbError> {
     db.execute(
         "UPDATE coven_library_bytes SET bytes=?1 WHERE part='rebuild' AND bytes<>?1",
@@ -236,10 +236,11 @@ impl StoreDatabase {
         ));
     }
 
-    /// Remove the rebuild's folder and its row: the folder moves aside and
-    /// the row goes in one step, then its files go, on the blocking pool.
-    /// What a failure leaves is either still the folder with its row, or in
-    /// the folder moved aside, which the next removal removes.
+    /// Delete the rebuild's folder and its row. One step moves the folder
+    /// aside and deletes the row; then the method deletes the folder it
+    /// moved aside, on the blocking pool. After a failure, either the folder
+    /// and its row remain, or the folder moved aside remains and the next
+    /// removal deletes it.
     pub(crate) async fn remove_rebuild(&self) -> Result<(), DbError> {
         let directory = self
             .call(|inner| {

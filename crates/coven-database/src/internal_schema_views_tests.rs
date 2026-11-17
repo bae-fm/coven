@@ -53,7 +53,8 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         .unwrap();
     for view in VIEWS {
         // The pause view always holds its one row, and the library's table
-        // a row for each database file.
+        // holds a row for each part of the store's own files: the database,
+        // the input database and coven's copies.
         let expected = match view {
             "coven_upload_pause" => 1,
             "coven_library_bytes" => 3,

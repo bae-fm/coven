@@ -369,8 +369,8 @@ async fn the_local_bytes_query_runs_for_what_it_counts_and_not_a_reads_recency()
     assert_eq!(cached, header.len() as u64);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), Some(header));
     assert!(bytes.run_changed().is_none(), "a read's recency starts no run");
-    // The fixture writes the partial past the store's commits, which tell
-    // no live query, so a read of its own counts it.
+    // The fixture inserts the partial row through the writer directly, so
+    // no live query runs again; the test calls `local_bytes` to read it.
     db.inspect_writer(|sql, _| partial(sql, "partial_object", "partial_file", 4096));
     assert_eq!(db.local_bytes().await.unwrap().pinning, 4096);
     db.close().await.unwrap();

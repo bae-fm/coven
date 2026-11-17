@@ -335,8 +335,8 @@ pub(crate) fn declare_budgets(
         Ok(())
     })
 }
-/// A budget as its table stores it: SQLite's integers stop at `i64::MAX`
-/// bytes, so a larger budget is refused as `TooLarge`.
+/// A budget as its table stores it. SQLite's integers stop at `i64::MAX`,
+/// so this function refuses a larger budget as `TooLarge`.
 fn stored_budget(bytes: u64) -> Result<i64, DbError> {
     crate::sqlite::integer("cache budget", bytes)
 }

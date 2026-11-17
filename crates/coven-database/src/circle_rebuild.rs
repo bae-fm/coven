@@ -91,8 +91,8 @@ impl StoreDatabase {
             })
             .await?;
         let first = first_past(&inputs, &circle, version)?;
-        // A leftover rebuild's folder goes with its row, then the new one's
-        // row starts at no bytes as the rebuild makes its folder (§17.8).
+        // Delete a leftover rebuild's folder and its row, then add the new
+        // rebuild's row at no bytes before making its folder (§17.8).
         self.remove_rebuild().await?;
         self.begin_counting_rebuild().await?;
         let scratch = match real.rebuild_directory().await {

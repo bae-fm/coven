@@ -519,7 +519,8 @@ fn rebuild_row(app: &StoreDatabase) -> Option<i64> {
 
 /// The real store's `coven_library_bytes` has a `rebuild` row from the
 /// rebuild's opening, holding the sum of the rebuild's store's own rows,
-/// until the rebuild's folder goes with it (§17.8, §18.3).
+/// and coven deletes the row when it deletes the rebuild's folder (§17.8,
+/// §18.3).
 #[tokio::test]
 async fn the_rebuilds_store_has_a_row_while_its_folder_is_there() {
     let store = TestStore::new();

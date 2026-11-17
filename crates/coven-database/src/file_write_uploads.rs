@@ -39,9 +39,10 @@ pub(super) fn keep_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Resul
     Ok(())
 }
 
-/// The part of `keep_source` that must precede anything naming the copy:
-/// a copy's staging cleanup record goes and its size counts among the
-/// store's own files, a user's original is recorded.
+/// The part of `keep_source` that must precede anything naming the copy.
+/// For a copy, it deletes the copy's staging cleanup record and counts its
+/// size among the store's own files; for a user's original, it records the
+/// original.
 pub(super) fn release_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Result<(), DbError> {
     match &file.source {
         StagedSource::Copy(name) => {

@@ -1,7 +1,8 @@
-//! The archives resets kept in the store's directory, with their sizes, in
-//! `coven_archive_bytes` (§17.8, §19.3): each archive's row is written as
-//! the store opens after the swap that kept it, and deleted in the step
-//! that moves the archive out of the store's directory to remove it.
+//! The archives that resets kept in the store's directory, with their
+//! sizes, in `coven_archive_bytes` (§17.8, §19.3): coven writes each
+//! archive's row as the store opens after the swap that kept it, and
+//! deletes the row in the step that moves the archive out of the store's
+//! directory to delete it.
 
 use crate::database::{process, StoreDatabase};
 use crate::sqlite::StoreSql;
@@ -39,7 +40,8 @@ pub(crate) fn record_opened(writer: &mut StoreSql, directory: &StoreDir) -> Resu
     })
 }
 
-/// The archives' sizes together, while there is one.
+/// Return the total size of the archives that resets kept, or `None` when
+/// there are none.
 pub(crate) fn kept(db: &StoreSql) -> Result<Option<u64>, DbError> {
     let (archives, bytes) =
         db.query_row("SELECT count(*),coalesce(sum(bytes),0) FROM coven_archive_bytes", [], |r| {
@@ -69,11 +71,12 @@ fn retire_archive(writer: &mut StoreSql, directory: &StoreDir, name: &str) -> Re
 }
 
 impl StoreDatabase {
-    /// Remove every archive resets kept in the store's directory (§19.3):
-    /// each leaves the directory with its row in one step, then their
-    /// folder goes, on the blocking pool. A failure returns; what it left
-    /// is either still an archive with its row, or in the folder being
-    /// removed, which the next call removes.
+    /// Delete every archive that resets kept in the store's directory
+    /// (§19.3). For each archive, one step moves it into the removal folder
+    /// and deletes its row; then the method deletes the removal folder on
+    /// the blocking pool. On a failure the method returns the error. Each
+    /// archive is then either still in the store's directory with its row,
+    /// or in the removal folder, which the next call deletes.
     pub async fn delete_discarded_devices(&self) -> Result<(), DbError> {
         let directory = self
             .call(|inner| {
@@ -95,8 +98,9 @@ impl StoreDatabase {
         process(&self.bugs, move || Ok(directory.remove_retired_devices()?)).await
     }
 
-    /// Remove the archive `name` the way `delete_discarded_devices` removes
-    /// each: a restore's of the installation it replaced (§13.1).
+    /// Delete the archive `name` the way `delete_discarded_devices` deletes
+    /// each archive. A restore calls it to delete the archive of the
+    /// installation it replaced (§13.1).
     pub async fn remove_discarded_device(&self, name: String) -> Result<(), DbError> {
         let directory = self
             .call(move |inner| {

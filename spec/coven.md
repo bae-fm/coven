@@ -8831,8 +8831,8 @@ in the statement that changes an entry, so they cannot disagree with the
 entries: `cached`, the bytes of its chunks and headers, which the budget
 counts, and `pinned`, the bytes of its whole copies, which it doesn't.
 Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
-namespace: `pinned` is 3 GB, `cached` 1 GB. The partial downloads pins left
-are counted apart, as `pinning`. The app's SQL reads each namespace's budget,
+namespace: `pinned` is 3 GB, `cached` 1 GB. The cache counts the partial
+downloads that pins left apart, as `pinning`. The app's SQL reads each namespace's budget,
 `cached`, `pinned` and `pinning` from the view `coven_cache_bytes`, so a live
 query sums them with its own rows.
 
@@ -8844,9 +8844,9 @@ after a checkpoint changes it. Until that write commits, the row holds the
 size before the checkpoint. The row `copies` holds the sizes of coven's
 copies of app files that a row names, a copy files share counted once:
 the write that keeps a staged copy adds its size, and the write that
-records it for removal subtracts it. A copy still being written, or one
-recorded for removal, isn't counted, as the cache's bytes in flight
-aren't. The row `rebuild` is there while a rebuild runs (§18.3): coven
+records it for removal subtracts it. The `copies` row leaves out a copy
+still being written or recorded for removal, as the cache leaves out its
+bytes in flight. The row `rebuild` is there while a rebuild runs (§18.3): coven
 makes it, at no bytes, before the rebuild makes its folder, then writes
 the sum of the rebuild's store's own `coven_library_bytes` each time that
 sum changes. When a read of that sum fails, coven logs the failure and

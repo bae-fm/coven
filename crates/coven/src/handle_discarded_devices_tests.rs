@@ -147,8 +147,9 @@ async fn deleting_with_no_archive_succeeds_and_can_repeat() {
 }
 
 /// A folder in the archive that refuses removal of its contents stops the
-/// removal after part of the archive has gone. The archive and its row left
-/// the store's directory first, and the next call removes the rest.
+/// removal after coven has deleted part of the archive. Coven moved the
+/// archive out of the store's directory and deleted its row first, and the
+/// next call removes the rest.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_deletion_that_stops_partway_leaves_the_rest_for_the_next_call() {
@@ -205,9 +206,9 @@ fn tree(path: &std::path::Path) -> i64 {
     std::fs::read_dir(path).unwrap().map(|entry| tree(&entry.unwrap().path())).sum()
 }
 
-/// A reset's archive appears in `coven_archive_bytes` with its size as the
-/// reset's notice commits, and leaves it as coven removes the archive
-/// (§17.8, §19.3).
+/// After a reset, the store's opening writes a row for its archive in
+/// `coven_archive_bytes` with the archive's size, and coven deletes the row
+/// when it removes the archive (§17.8, §19.3).
 #[tokio::test]
 async fn each_archive_has_a_row_with_its_size_until_it_is_removed() {
     let f = Fixture::new().await;

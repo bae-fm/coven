@@ -481,9 +481,9 @@ fn walk(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     found
 }
 
-/// Each archive a reset kept is listed with its size. Removing one moves
-/// it out of the store's directory in one rename, which moving it back
-/// undoes, and its files go with the folder of archives being removed.
+/// The store lists each archive a reset kept and measures its size.
+/// Removing one moves it out of the store's directory in one rename, which
+/// moving it back undoes, and deleting the removal folder deletes its files.
 #[tokio::test]
 async fn an_archive_leaves_the_directory_in_one_rename_before_its_files_go() {
     let f = store(2);

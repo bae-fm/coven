@@ -601,7 +601,8 @@ pub(crate) fn enqueue_all(
 }
 
 /// Count coven's copy at `path`, of `size` bytes, among the store's own
-/// files as a row comes to name it (§17.8). A copy already counted stays.
+/// files as a row comes to name it (§17.8). When the copy is already
+/// counted, `count_copy` keeps the size it recorded first.
 pub(crate) fn count_copy(db: &StoreSql, path: &str, size: u64) -> Result<(), DbError> {
     db.execute(
         "INSERT INTO _coven_copy_sizes(path,size) VALUES(?1,?2) ON CONFLICT(path) DO NOTHING",

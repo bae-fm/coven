@@ -336,14 +336,14 @@ pub trait StoreDirAccess: Sized {
     /// Remove the folder `rebuild` whole, with its locks; absent is removed.
     fn remove_rebuild_directory(&self) -> Result<(), FileError>;
     /// Move the folder `rebuild` aside, in one rename, so it leaves the
-    /// store's directory before its files go, after removing what an earlier
-    /// removal left there. Returns whether there was one to move.
+    /// store's directory before coven deletes its files, after deleting what
+    /// an earlier removal left there. Returns whether there was one to move.
     fn retire_rebuild_directory(&self) -> Result<bool, FileError>;
     /// Move the folder `retire_rebuild_directory` moved aside back.
     fn return_rebuild_directory(&self) -> Result<(), FileError>;
-    /// Remove the folder `retire_rebuild_directory` moved aside, whole;
-    /// absent is removed. Nothing names what is in it. Blocks while it
-    /// removes the folder.
+    /// Delete the folder `retire_rebuild_directory` moved aside, whole. When
+    /// that folder is absent, the call does nothing and succeeds. Nothing
+    /// names what is in it. Blocks while it deletes the folder.
     fn remove_retired_rebuild(&self) -> Result<(), FileError>;
     /// The record of a replacement whose swap is under way (§19.3). A record
     /// that remains only because publication was interrupted after removing

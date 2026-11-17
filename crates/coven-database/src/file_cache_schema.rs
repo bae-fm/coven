@@ -26,11 +26,12 @@ macro_rules! coven_cache_tables {
                 WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
             END;
         ");
-        // Each declared namespace's budget in bytes and the bytes the cache
-        // records hold, kept with them so a budget check needs no sum:
-        // `cached` is the bytes of the chunks and headers, which the budget
-        // counts, and `pinned` the bytes of the whole copies, which are the
-        // pinned files and which it doesn't. Cache records live only in
+        // Each row holds a declared namespace's budget in bytes and the bytes
+        // its cache records hold, which the triggers below update with the
+        // records, so a budget check needs no sum: `cached` is the bytes of
+        // the chunks and headers, which the budget counts, and `pinned` the
+        // bytes of the whole copies, which are the pinned files and which it
+        // doesn't. Cache records live only in
         // declared namespaces (FileRef validation). The app's SQL reads
         // them through `coven_cache_bytes` (`internal_schema_views.rs`).
         $visit!(_coven_cache_budgets, "

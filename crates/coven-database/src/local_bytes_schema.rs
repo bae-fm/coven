@@ -6,9 +6,10 @@ macro_rules! coven_local_bytes_tables {
     ($visit:ident) => {
         // The store's own files by part, each row holding the part's size in
         // bytes: `database` is the store's database file and `inputs` the
-        // input database's (§4), each as its last checkpoint left it,
-        // written after each checkpoint that changes it and as the store
-        // opens. Neither counts its WAL, which a checkpoint lets start over.
+        // input database's (§4), each as its last checkpoint left it: coven
+        // writes each row as the store opens and after each checkpoint that
+        // changes it. Neither row counts its WAL, which a checkpoint lets
+        // start over.
         // `copies` is coven's copies of app bytes that a row names, which
         // the triggers below keep in the statement that counts or releases a
         // copy. `rebuild` is there while a rebuild's folder is (§18.3): the
@@ -31,9 +32,10 @@ macro_rules! coven_local_bytes_tables {
         "
         );
         // Each archive a reset kept in the store's directory (§19.3), by
-        // name, with the size of everything in it: written as the store
-        // opens after the swap that kept the archive, and deleted in the
-        // step that moves the archive out of the directory to remove it.
+        // name, with the size of everything in it: coven writes the row as
+        // the store opens after the swap that kept the archive, and deletes
+        // it in the step that moves the archive out of the directory to
+        // delete it.
         $visit!(
             coven_archive_bytes,
             "

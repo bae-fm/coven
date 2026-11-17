@@ -25,7 +25,8 @@ use crate::id_source::{DeviceId, StoreId};
 pub(crate) const RECORD: &str = "device-reset.json";
 const ARCHIVE_PREFIX: &str = "discarded-device-";
 /// The folder each archive moves into as its removal begins, so the archive
-/// leaves the store's directory in one rename while its tree goes (§19.3).
+/// leaves the store's directory in one rename while coven deletes the files
+/// under it (§19.3).
 const REMOVING: &str = "removing-discarded-devices";
 /// The directory inside a store's directory where its replacement loads.
 pub(super) const AREA: &str = ".coven-replacement";
@@ -213,7 +214,7 @@ pub(super) fn discarded_devices(directory: &Path) -> Result<Vec<String>, FileErr
             archive
                 .file_name()
                 .and_then(|name| name.to_str())
-                .expect("an archive is listed by its UTF-8 name")
+                .expect("`archives` lists only UTF-8 names")
                 .to_owned()
         })
         .collect())
@@ -256,8 +257,8 @@ pub(super) fn remove_retired(directory: &Path) -> Result<(), FileError> {
     set_aside::delete(&directory.join(REMOVING))
 }
 
-/// The size of a file, or of everything under a folder. Links are not
-/// followed, and what disappears while the walk runs counts for nothing.
+/// The size of a file, or of everything under a folder. The function does
+/// not follow links, and counts nothing for what disappears while it walks.
 pub(super) fn tree_size(path: &Path) -> Result<u64, FileError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,

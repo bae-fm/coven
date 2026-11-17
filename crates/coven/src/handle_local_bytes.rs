@@ -6,8 +6,8 @@ use crate::*;
 impl CovenHandle {
     /// What the store keeps on this device, from one snapshot of coven's
     /// tables: each declared namespace's budget and counters, the partial
-    /// downloads pins left, the store's own files and the archives resets
-    /// kept.
+    /// downloads that pins left, the store's own files and the archives
+    /// that resets kept.
     pub async fn local_bytes(&self) -> CovenResult<LocalBytes> {
         Ok(self.database.local_bytes().await?)
     }
@@ -15,7 +15,8 @@ impl CovenHandle {
     /// The same read as a live query: it runs again after each write that
     /// changes what it reads, such as the cache's committed entries, a
     /// budget, a database file's size after a checkpoint, or an archive
-    /// deleted. A cached read's recency starts no run.
+    /// deleted. A read that only updates a cache entry's last-read time does
+    /// not run the query again.
     pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes, CovenError> {
         self.database.subscribe_local_bytes()
     }

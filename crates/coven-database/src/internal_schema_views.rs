@@ -132,9 +132,10 @@ pub(super) const SCHEMA: &str = concat!(
     // Each namespace's cache on this device, in bytes (§17.8): its budget,
     // its chunks and headers (`cached`), which the budget counts, its
     // pinned whole copies (`pinned`), which it doesn't, and the partial
-    // downloads pins left in it (`pinning`), which the cache neither counts
-    // nor evicts. Each namespace the app has declared in this store has a
-    // row, one a later version no longer declares included.
+    // downloads that pins left in it (`pinning`), which the cache neither
+    // counts nor evicts. Each namespace the app has declared in this store
+    // has a row, and a namespace keeps its row when a later version of the
+    // app no longer declares it.
     "CREATE VIEW coven_cache_bytes(namespace,budget,cached,pinned,pinning) AS
         SELECT b.namespace,b.budget,b.cached,b.pinned,coalesce(sum(p.size),0)
         FROM _coven_cache_budgets AS b
