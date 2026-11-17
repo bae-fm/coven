@@ -20,8 +20,8 @@ macro_rules! coven_local_bytes_tables {
         "
         );
         // Each archive a reset kept in the store's directory (§19.3), by
-        // name, with the size of everything in it: written in the
-        // transaction that commits the reset's notice, and deleted in the
+        // name, with the size of everything in it: written as the store
+        // opens after the swap that kept the archive, and deleted in the
         // step that moves the archive out of the directory to remove it.
         $visit!(
             coven_archive_bytes,
