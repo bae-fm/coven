@@ -44,8 +44,8 @@ fn forget_rebuild(db: &StoreSql) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Sum the sizes of the store's own files that `coven_library_bytes` holds:
-/// the figure `library` reports.
+/// Sum the sizes of the store's own files in `coven_library_bytes`: the
+/// value of `LocalBytes::library`.
 pub(crate) fn library(db: &StoreSql) -> Result<u64, DbError> {
     crate::sqlite::unsigned(db.query_row(
         "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes",
@@ -202,9 +202,9 @@ impl StoreDatabase {
     /// it; a write that fails has failed this store's handle, and the
     /// follower stops. A run of the query that fails would leave the row
     /// wrong, so the follower logs the failure, fails `rebuild`, the
-    /// rebuild's handle, with it, and stops: the rebuild's owner meets the
-    /// failure on its next call and discards the rebuild, which deletes the
-    /// row.
+    /// rebuild's handle, with it, and stops. The owner's next call on the
+    /// rebuild returns the failure, and the owner discards the rebuild,
+    /// which deletes the row.
     fn follow_rebuild(&self, mut total: LiveQuery<u64, DbError>, rebuild: StoreHandle) {
         let store = Arc::downgrade(&self.inner);
         let bugs = self.bugs.clone();
