@@ -548,3 +548,36 @@ async fn the_view_names_the_pending_record_behind_its_state() {
     assert_eq!((Some(joined.0), joined.1.as_str()), (pending, "upload"));
     network.close().await;
 }
+
+/// A read-only handle can't tell whether the writer that last wrote the
+/// sync state's facts still runs, so a read of `coven_sync_state` there
+/// fails, as a read of `coven_sync_status` does, and gives no state (E4,
+/// E5).
+#[tokio::test]
+async fn a_read_only_handle_cant_read_the_sync_state() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+    let handle =
+        builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let reader = builder().open_read_only(handle.store_id()).await.unwrap();
+    let error = reader
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row("SELECT state FROM coven_sync_state", [], |row| {
+                row.get::<_, String>(0)
+            })?)
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            CovenError::Database(DbError::StatementForbidden {
+                operation: "reading the writer's sync state through a read-only handle",
+            })
+        ),
+        "{error:?}"
+    );
+    reader.close().await.unwrap();
+    handle.close().await.unwrap();
+}

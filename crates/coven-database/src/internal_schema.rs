@@ -335,7 +335,9 @@ pub(crate) const FOLLOWED: [FollowedTable; 8] = [
 ];
 
 /// Coven's tables that describe this process's own sync, which only the
-/// handle holding the store's writer lock may read.
+/// handle holding the store's writer lock may read. A read-only handle's
+/// policy refuses app SQL that reads either, directly or through a view such
+/// as `coven_sync_state`.
 pub(crate) const WRITER_STATE: [&str; 2] = [SYNC_STATUS, RETRY_EFFECT];
 
 /// Whether `name` is one of the tables the app's triggers may follow.

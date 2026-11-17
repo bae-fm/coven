@@ -634,9 +634,13 @@ whole state as coven encodes it. Ana's notes app shows its sync line from the
 same live query as her list of notes, joined to it, so the line and the list
 never disagree, and the query runs again whenever a fact the state reads
 changes: a write queued, a pass ending, an upload starting. The view reads
-those facts from coven's tables and from `coven_sending`, and hands them to
+those facts from coven's tables and from `coven_sending`, and passes them to
 `_coven_sync_state`, a function of coven's that computes the state in the
-read with the code the model checks (Appendix H.3). Computing it in SQL instead
+read with the code the model checks (Appendix H.3). The view reads neither
+`coven_downloading` nor `coven_network`: downloads, and the network's hold on
+trailing files, never change the state. A read of the view on a read-only
+handle fails with `StatementForbidden`, as a read of `coven_sync_status`
+does, since the view reads that table (api.md E5). Computing it in SQL instead
 would give the state a second definition, which could drift from the one the
 model proves.
 

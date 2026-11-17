@@ -3759,8 +3759,9 @@ let moved = handle
   beside its own rows in its live query, which runs again whenever one of
   those facts changes, a transfer starting or ending included, and gives the
   current state as its first value. `SyncStatus::read` reads the view's row
-  as a `SyncStatus`. Like `coven_sync_status`, it isn't readable on a
-  read-only handle.
+  as a `SyncStatus`. A read of it on a read-only handle fails with
+  `StatementForbidden`, as a read of `coven_sync_status` does (E5), and
+  gives no state.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -4814,8 +4815,9 @@ loop {
   holds the store's writer lock. A read-only handle can't tell whether the
   writer that last wrote it still runs: one that ended mid-pass left its move
   behind, and no write marks its end. So app SQL on a read-only handle may
-  not read either row, directly or through the app's own view:
-  `StatementForbidden`; and `CovenReadHandle` has no `sync_status`. The
+  not read either row, directly, through the app's own view or through
+  `coven_sync_state`: each read fails with `StatementForbidden`; and
+  `CovenReadHandle` has no `sync_status`. The
   app's trigger on them still lets a read-only handle open, since it never
   runs there.
 - A closed store's state is read under its writer lock, which shows that no

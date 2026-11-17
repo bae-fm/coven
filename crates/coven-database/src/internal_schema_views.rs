@@ -59,7 +59,12 @@ pub(super) const SCHEMA: &str = concat!(
     // and the Rust code stays the one definition the Lean model checks
     // (`sync_state_function.rs`). OFFSET 0 keeps SQLite from merging the
     // subquery into the outer SELECT, which would call the function once
-    // for each column.
+    // for each column. The subquery reads the files being sent through
+    // `coven_sending`, so a live query of this view runs again as a send
+    // starts or ends. The subquery also reads `coven_sync_status` and
+    // `coven_retry_effect`, so on a read-only handle the policy refuses each
+    // read of this view with `StatementForbidden` (`WRITER_STATE`), and the
+    // read returns no state.
     "CREATE VIEW coven_sync_state(state,last_synced,pending,detail) AS
         SELECT x.state->>'$.state',x.last_synced,x.state->>'$.pending',
             x.state->'$.detail'
