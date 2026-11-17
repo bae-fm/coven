@@ -993,6 +993,8 @@ pub(crate) mod shares;
 mod steps;
 pub use steps::NewInvite;
 pub(crate) use steps::{approve_request, end_invite, make_invite};
+#[cfg(any(test, feature = "test-utils"))]
+pub use steps::{invite_operation, RecordedInvite, RecordedInviteStage, RecordedJoiner};
 
 #[path = "invite_expiry.rs"]
 pub(crate) mod expiry;

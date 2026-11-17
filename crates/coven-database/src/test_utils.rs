@@ -4,7 +4,10 @@ use crate::{Migration, RowIdentity, SyncedTable};
 
 #[path = "readable_objects.rs"]
 mod readable_objects;
-pub use readable_objects::{make_readable_objects, record_user_file};
+pub use crate::operation::OutcomeListing;
+pub use readable_objects::{
+    finish_operation, journal_operation, make_readable_objects, record_pending, record_user_file,
+};
 /// The connection an app's test opens outside any store, for the coven crate
 /// to name in its own `make_readable_objects`.
 pub use sqlive::rusqlite::Connection;

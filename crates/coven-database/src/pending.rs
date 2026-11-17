@@ -171,8 +171,12 @@ pub(crate) fn positioned<P: PendingValue>(db: &StoreSql) -> Result<Vec<(i64, P)>
         .collect()
 }
 
-pub(crate) fn save<P: PendingValue>(db: &StoreSql, record: &P) -> Result<(), DbError> {
-    pending_change(db, || {
+/// Save `$record` on `$db`, a store's open write or a test's connection
+/// outside any store. Both expand this one body, so a test records a
+/// pending record as a store does.
+macro_rules! save_record {
+    ($db:expr, $record:expr) => {{
+        let (db, record) = ($db, $record);
         let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
         let (work, device, object) = match stored_object(record) {
@@ -190,8 +194,22 @@ pub(crate) fn save<P: PendingValue>(db: &StoreSql, record: &P) -> Result<(), DbE
              WHERE value!=excluded.value OR build!=excluded.build OR cause IS NOT excluded.cause",
             sqlive::rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_slot_key(record), work, device, object, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
         )?;
-        Ok(())
-    })
+        Ok::<(), DbError>(())
+    }};
+}
+
+pub(crate) fn save<P: PendingValue>(db: &StoreSql, record: &P) -> Result<(), DbError> {
+    pending_change(db, || save_record!(db, record))
+}
+
+/// Save `record` on `connection`, a test's connection outside any store, as
+/// `save` does (`test_utils::record_pending`).
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn save_outside_store<P: PendingValue>(
+    connection: &sqlive::rusqlite::Connection,
+    record: &P,
+) -> Result<(), DbError> {
+    save_record!(connection, record)
 }
 
 /// Opening clears every record's cause: a cause names an error the run that
@@ -227,9 +245,24 @@ pub(crate) fn clear_move(db: &StoreSql, id: crate::MoveId) -> Result<(), DbError
 pub(crate) fn clear_operation(db: &StoreSql, id: OperationId) -> Result<(), DbError> {
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
     pending_change(db, || {
-        db.execute("DELETE FROM _coven_pending WHERE operation=?1", [id.0])?;
+        db.execute(CLEAR_OPERATION, [id.0])?;
         Ok(())
     })
+}
+
+/// Deletes the pending record of the operation with this id.
+const CLEAR_OPERATION: &str = "DELETE FROM _coven_pending WHERE operation=?1";
+
+/// Clear the pending record of the operation `id` on `connection`, a test's
+/// connection outside any store, as `clear_operation` does. No test write
+/// makes a retry wait outside a store, so none is cleared.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn clear_operation_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    id: OperationId,
+) -> Result<(), DbError> {
+    connection.execute(CLEAR_OPERATION, [id.0])?;
+    Ok(())
 }
 
 /// Whether the operation `id` has a pending record.

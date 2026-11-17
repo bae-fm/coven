@@ -3773,22 +3773,43 @@ let moved = handle
   connection a test opened itself, outside any store, as every store makes
   it: the eight tables above, `coven_sync_status` and `coven_retry_effect`
   with their one row, and the thirteen views, with the tables of coven's own
-  that they read, empty. The function registers coven's SQL functions on
-  the connection too, `coven_key`, `coven_file_device` and `coven_path_text`
-  among them, with the device the test names as this device. Nothing is
-  being transferred there and nothing watches the network, so the transfer
-  and network views show what a read-only handle shows. `coven_sync_state`
-  shows the state that sync's own computation, the one every store
-  registers, gives from the facts there. A test that runs the app's schema there
-  calls it first, so the app's triggers and views apply and run as in a
-  store, and the app keeps no copy of coven's objects or functions that
-  could fall behind them. Nothing of coven's writes the objects there, and
-  coven's triggers that keep the eight tables in a store aren't made: the
-  test writes the rows coven would in those tables. To give
-  `coven_user_files` a row, the test calls `record_user_file` with the
-  file's id, the original's path and modification time, and the bytes it
-  holds. `record_user_file` records the original as staging it for the
-  cloud does, with the size, content hash and chunk hashes of those bytes.
+  that they read and that the test writes below write, empty. The function
+  registers coven's SQL functions on the connection too, `coven_key`,
+  `coven_file_device` and `coven_path_text` among them, with the device the
+  test names as this device. Nothing is being transferred there and nothing
+  watches the network, so the transfer and network views show what a
+  read-only handle shows. `coven_sync_state` shows the state that sync's own
+  computation, the one every store registers, gives from the facts there. A
+  test that runs the app's schema there calls it first, so the app's
+  triggers and views apply and run as in a store, and the app keeps no copy
+  of coven's objects or functions that could fall behind them. Nothing of
+  coven's writes the objects there. Of coven's triggers that keep the eight
+  tables in a store, those that keep `coven_pending` run there too: the
+  test writes the rows coven would in the other seven. The test gives
+  coven's views and `coven_pending` their rows with test writes, each
+  running the statements coven's own code runs:
+  - `record_user_file` takes a file's id, the original's path and
+    modification time, and the bytes it holds, and records the original as
+    staging it for the cloud does, with the size, content hash and chunk
+    hashes of those bytes, so `coven_user_files` lists it.
+  - `record_invite` journals an invite as creating it does, at the stage a
+    `RecordedInvite` names: granting, waiting with or without a request, or
+    approving a request, each request from a new person with the name they
+    typed or from a member recovering. `coven_invites` shows it.
+    `refuse_invite` ends it as a provider's sharing refusal does:
+    `coven_operations` lists its outcome under the kind `Invite`, with the
+    refused address, and it leaves `coven_invites`.
+  - `record_change` journals an administrative change as the app's write
+    does, and `coven_operations` lists it running under its kind.
+    `finish_operation` ends it with an outcome, which `coven_operations`
+    then shows.
+  - `record_pending` saves a `PendingRecord` as coven saves one, and
+    coven's triggers show it in `coven_pending`, as an app's triggers on
+    that table see it.
+
+  Ben's test of his invite screen records Dan's invite waiting with his
+  request, and a pending record holding Carol's invite for want of storage,
+  and checks the screen's rows.
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -4275,6 +4296,44 @@ impl LiveQueryRuns {
 /// test that runs the app's schema there (E4).
 #[cfg(feature = "test-utils")]
 pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId) -> rusqlite::Result<()>;
+
+/// Journals `invite` on a connection `make_readable_objects` prepared, as
+/// creating an invite and its later steps do, returning its operation (E4).
+#[cfg(feature = "test-utils")]
+pub fn record_invite(connection: &rusqlite::Connection, invite: RecordedInvite) -> Result<OperationId, CovenError>;
+
+/// Ends `invite` as the provider's refusal to share with `account` does (E4).
+#[cfg(feature = "test-utils")]
+pub fn refuse_invite(connection: &rusqlite::Connection, invite: OperationId, account: &str, refusal: SharingRefusal) -> Result<(), CovenError>;
+
+/// Journals `change` as the app's write does, listed in `coven_operations`
+/// (E4).
+#[cfg(feature = "test-utils")]
+pub fn record_change(connection: &rusqlite::Connection, change: StoreChange) -> Result<OperationId, CovenError>;
+
+/// Ends the operation `id` the app's write journaled with `outcome` (E4).
+#[cfg(feature = "test-utils")]
+pub fn finish_operation(connection: &rusqlite::Connection, id: OperationId, outcome: &OperationOutcome) -> Result<(), CovenError>;
+
+/// Saves `record` as coven saves a pending record (E4).
+#[cfg(feature = "test-utils")]
+pub fn record_pending(connection: &rusqlite::Connection, record: &PendingRecord) -> Result<(), CovenError>;
+
+/// An invite a test records: its id, the member it fixes, and its stage.
+#[cfg(feature = "test-utils")]
+pub struct RecordedInvite { pub id: InviteId, pub member: MemberId, pub stage: RecordedInviteStage }
+
+/// Where a recorded invite is, with the request it holds.
+#[cfg(feature = "test-utils")]
+pub enum RecordedInviteStage {
+    Granting,
+    Waiting { joiner: Option<RecordedJoiner> },
+    Approving { joiner: RecordedJoiner, binding: OperationId },
+}
+
+/// Who asks in a recorded invite's request.
+#[cfg(feature = "test-utils")]
+pub enum RecordedJoiner { NewPerson(String), Recovering }
 
 /// Records on a connection `make_readable_objects` prepared the original at
 /// `path`, modified at `modified_at` and holding `bytes`, as `file`'s, as

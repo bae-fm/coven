@@ -80,15 +80,43 @@ pub struct OperationUpdate {
     pub data: Vec<u8>,
 }
 
+/// Journal `$new` on `$db`, a store's open write or a test's connection
+/// outside any store, returning its id. Both expand this one body, so a
+/// test journals an operation as a store does.
+macro_rules! journal {
+    ($db:expr, $new:expr) => {{
+        let (db, new): (_, &NewOperation) = ($db, $new);
+        let id = db.query_row(
+            "INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
+            (&new.kind, &new.data, &new.started_by),
+            |r| Ok(OperationId(r.get(0)?)),
+        )?;
+        if new.pauses_writes {
+            // Finishing or discarding the operation deletes its row and with
+            // it the pause, in that same transaction.
+            db.execute("INSERT INTO _coven_write_pause(paused,operation) VALUES(1,?1)", [id.0])?;
+        }
+        Ok::<_, DbError>(id)
+    }};
+}
+
+/// Lists an operation the app's write journals in `coven_operations`, by
+/// its id and kind.
+const LIST: &str = "INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)";
+
+/// Lists an operation the app's write didn't journal, by its id, kind and
+/// outcome.
+const LIST_OUTCOME: &str =
+    "INSERT INTO _coven_app_operations(operation,kind,outcome) VALUES(?1,?2,?3)";
+
+/// Sets the outcome of the listed operation with this id.
+const SET_OUTCOME: &str = "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1";
+
+/// Deletes the journal row of the operation with this id.
+const DELETE: &str = "DELETE FROM _coven_operations WHERE id=?1";
+
 pub(crate) fn insert(db: &StoreSql, new: &NewOperation) -> Result<OperationId, DbError> {
-    let id = db.query_row("INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES(?1,0,?2,?3) RETURNING id",
-        (&new.kind, &new.data, &new.started_by), |r| Ok(OperationId(r.get(0)?)))?;
-    if new.pauses_writes {
-        // Finishing or discarding the operation deletes its row and with it
-        // the pause, in that same transaction.
-        db.execute("INSERT INTO _coven_write_pause(paused,operation) VALUES(1,?1)", [id.0])?;
-    }
-    Ok(id)
+    journal!(db, new)
 }
 
 /// Journal an operation the app's write asks for, of `kind` as sync names
@@ -100,7 +128,7 @@ pub(crate) fn insert_for_app(
     kind: &str,
 ) -> Result<OperationId, DbError> {
     let id = insert(db, new)?;
-    db.execute("INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)", (id.0, kind))?;
+    db.execute(LIST, (id.0, kind))?;
     Ok(id)
 }
 
@@ -113,11 +141,66 @@ pub(crate) fn list_outcome(
     kind: &str,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
-    db.execute(
-        "INSERT INTO _coven_app_operations(operation,kind,outcome) VALUES(?1,?2,?3)",
-        (id.0, kind, outcome.encode()),
-    )?;
+    db.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?;
     Ok(())
+}
+
+/// Journal `new` on `connection`, a test's connection outside any store, as
+/// `insert` does, and list it in `coven_operations` as `insert_for_app`
+/// does when `listed_as` names its kind (`test_utils::journal_operation`).
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn journal_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    new: &NewOperation,
+    listed_as: Option<&str>,
+) -> Result<OperationId, DbError> {
+    let id = journal!(connection, new)?;
+    if let Some(kind) = listed_as {
+        connection.execute(LIST, (id.0, kind))?;
+    }
+    Ok(id)
+}
+
+/// End the operation `id` on `connection`, a test's connection outside any
+/// store, with `outcome`: as `finish_with_outcome` does for an operation
+/// `coven_operations` lists, or, given its `kind`, as an invite a refusal
+/// ends lists its outcome first (`list_outcome`). Outside a store no
+/// operation holds a claim, so nothing checks one.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn finish_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    id: OperationId,
+    listing: OutcomeListing<'_>,
+) -> Result<(), DbError> {
+    match listing {
+        OutcomeListing::Listed(outcome) => {
+            connection.execute(SET_OUTCOME, (id.0, outcome.encode()))?
+        }
+        OutcomeListing::Unlisted { kind, outcome } => {
+            connection.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?
+        }
+    };
+    crate::pending::clear_operation_outside_store(connection, id)?;
+    if connection.execute(DELETE, [id.0])? != 1 {
+        return Err(DbError::OperationChanged(id));
+    }
+    Ok(())
+}
+
+/// How an operation a test ends outside a store reaches `coven_operations`:
+/// listed from its start, which the outcome then completes, or listed only
+/// as it ends, under `kind`.
+#[cfg(any(test, feature = "test-utils"))]
+pub enum OutcomeListing<'a> {
+    /// The app's write journaled it, so `coven_operations` lists it already.
+    Listed(&'a crate::OperationOutcome),
+    /// Sync journaled it, and its outcome lists it under `kind`.
+    Unlisted {
+        /// The kind `coven_operations` lists it under.
+        kind: &'a str,
+        /// How it ended.
+        outcome: &'a crate::OperationOutcome,
+    },
 }
 
 /// End the app's record of a finished operation: it leaves
@@ -247,10 +330,7 @@ pub(crate) fn finish_with_outcome(
     id: OperationId,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
-    db.execute(
-        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
-        (id.0, outcome.encode()),
-    )?;
+    db.execute(SET_OUTCOME, (id.0, outcome.encode()))?;
     if finish(db, id)? != 1 {
         return Err(DbError::OperationChanged(id));
     }
@@ -266,7 +346,7 @@ pub(crate) fn finish(db: &StoreSql, id: OperationId) -> Result<usize, DbError> {
         return Err(DbError::Invariant { what: "an operation ends after its claim" });
     }
     crate::pending::clear_operation(db, id)?;
-    Ok(db.execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?)
+    Ok(db.execute(DELETE, [id.0])?)
 }
 
 /// End every operation an app's write journaled that still runs, and every

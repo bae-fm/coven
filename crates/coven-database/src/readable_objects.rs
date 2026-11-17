@@ -64,6 +64,42 @@ pub fn record_user_file(
     crate::user_file::record_outside_store(connection, file, &original, &hasher.finish())
 }
 
+/// Journal `new` on `connection`, where `make_readable_objects` made coven's
+/// objects, as a store journals an operation, and list it in
+/// `coven_operations` under `listed_as` when given, as a store lists one
+/// the app's write journals (§11.4). An invite's row shows in
+/// `coven_invites` at the stage its data holds.
+pub fn journal_operation(
+    connection: &Connection,
+    new: &crate::NewOperation,
+    listed_as: Option<&str>,
+) -> Result<crate::OperationId, crate::DbError> {
+    crate::operation::journal_outside_store(connection, new, listed_as)
+}
+
+/// End the operation `id` on `connection`, where `make_readable_objects`
+/// made coven's objects, as a store ends it with an outcome: its outcome
+/// reaches `coven_operations` as `listing` says, its pending record goes,
+/// and its journal row goes. An operation that has ended already fails with
+/// `OperationChanged`.
+pub fn finish_operation(
+    connection: &Connection,
+    id: crate::OperationId,
+    listing: crate::operation::OutcomeListing<'_>,
+) -> Result<(), crate::DbError> {
+    crate::operation::finish_outside_store(connection, id, listing)
+}
+
+/// Save `record` on `connection`, where `make_readable_objects` made coven's
+/// objects, as a store saves a pending record: coven's triggers then show
+/// it in `coven_pending`, as in a store (§19.1).
+pub fn record_pending<P: crate::PendingValue>(
+    connection: &Connection,
+    record: &P,
+) -> Result<(), crate::DbError> {
+    crate::pending::save_outside_store(connection, record)
+}
+
 #[cfg(test)]
 #[path = "readable_objects_tests.rs"]
 mod tests;

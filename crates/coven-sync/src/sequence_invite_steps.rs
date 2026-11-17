@@ -295,3 +295,111 @@ fn invite_record(
 #[cfg(test)]
 #[path = "sequence_invite_steps_tests.rs"]
 mod tests;
+
+/// An invite a test records outside a store, as `make_invite` journals one
+/// and later steps advance it (api.md E4): its id, the member it fixes, and
+/// its stage.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct RecordedInvite {
+    /// The invite's id.
+    pub id: InviteId,
+    /// The member id the invite fixes, which its request repeats.
+    pub member: MemberId,
+    /// Where the invite is, with the request it holds.
+    pub stage: RecordedInviteStage,
+}
+
+/// Where an invite a test records is, as `coven_invites.stage` names it.
+#[cfg(any(test, feature = "test-utils"))]
+pub enum RecordedInviteStage {
+    /// Checked and granted before its code shows.
+    Granting,
+    /// Its code shows, and the request that arrived, if any, waits for the
+    /// app.
+    Waiting {
+        /// Who asks, once a request arrived.
+        joiner: Option<RecordedJoiner>,
+    },
+    /// The app approved the request, and `binding` is the operation that
+    /// claims its admission.
+    Approving {
+        /// Who asks.
+        joiner: RecordedJoiner,
+        /// The operation that claims the request's admission.
+        binding: OperationId,
+    },
+}
+
+/// Who asks in the request of an invite a test records.
+#[cfg(any(test, feature = "test-utils"))]
+pub enum RecordedJoiner {
+    /// A new person, with the name they typed; the invite adds a member.
+    NewPerson(String),
+    /// A member recovering after losing every device; the request carries
+    /// no name, and the invite binds the member's new keys.
+    Recovering,
+}
+
+/// The journal row of `invite`, as `make_invite` journals an invite and
+/// later steps record its state: the invite made by device 1 for an
+/// account, with a fixed secret and an expiry in 2096, and the request as
+/// coven-format's fixture request with `invite`'s id, member and joiner
+/// (api.md E4).
+#[cfg(any(test, feature = "test-utils"))]
+pub fn invite_operation(invite: RecordedInvite) -> Result<NewOperation, SyncError> {
+    let request = |joiner: &RecordedJoiner| -> Result<Vec<u8>, SyncError> {
+        let mut request = coven_format::test_utils::join_request();
+        request.invite = invite.id;
+        request.member = invite.member;
+        if let RecordedJoiner::NewPerson(name) = joiner {
+            request.joiner = coven_format::objects::Joiner::NewPerson {
+                name: name.clone(),
+                circle: coven_format::objects::JoiningCircle {
+                    circle: coven_format::test_utils::recovered_circle(),
+                    copy: coven_format::test_utils::recovered_circle_copy(),
+                },
+            };
+        }
+        Ok(Object::JoinRequest(request).encode()?)
+    };
+    let binding = |joiner: Option<&RecordedJoiner>| match joiner {
+        Some(RecordedJoiner::Recovering) => {
+            InviteBinding::Replace { expected: coven_format::test_utils::replacement() }
+        }
+        Some(RecordedJoiner::NewPerson(_)) | None => {
+            InviteBinding::Add { role: MemberRole::Member }
+        }
+    };
+    let code = || SecretText::new("code".into());
+    let (binding, state) = match &invite.stage {
+        RecordedInviteStage::Granting => (binding(None), InviteState::Requested),
+        RecordedInviteStage::Waiting { joiner } => (
+            binding(joiner.as_ref()),
+            InviteState::Waiting {
+                code: code(),
+                request: joiner.as_ref().map(request).transpose()?,
+            },
+        ),
+        RecordedInviteStage::Approving { joiner, binding: claim } => (
+            binding(Some(joiner)),
+            InviteState::Approving { code: code(), request: request(joiner)?, binding: *claim },
+        ),
+    };
+    let work = InviteWork {
+        id: invite.id,
+        device: DeviceId(1),
+        member: invite.member,
+        inviter: "Ana".into(),
+        binding,
+        access: InviteGrant::Account { email: "invited@example.com".into() },
+        secret: SecretText::new(serde_json::to_string(&[7_u8; 32])?),
+        expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(4_000_000_000),
+        state,
+    };
+    Ok(NewOperation {
+        kind: operation_kind::INVITE.into(),
+        data: serde_json::to_vec(&work)?,
+        started_by: "record_invite".into(),
+        pauses_writes: false,
+    })
+}

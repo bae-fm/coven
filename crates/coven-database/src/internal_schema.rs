@@ -279,12 +279,19 @@ pub(crate) fn initial_schema() -> String {
 }
 
 /// Coven's own tables that `readable_schema` makes: each table coven's
-/// views read, and `_coven_user_chunks`, which recording a user's original
-/// writes beside the original's row (`user_file::record_original!`).
+/// views read; `_coven_user_chunks`, which recording a user's original
+/// writes beside the original's row (`user_file::record_original!`);
+/// `_coven_write_pause`, which journaling an operation that pauses writes
+/// writes (`operation::journal!`); and `_coven_moves` and
+/// `_coven_pin_requests`, which the pending records, the uploads and the
+/// retry waits reference, so that their foreign keys hold.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) const BEHIND_READABLE: [&str; 17] = [
+pub(crate) const BEHIND_READABLE: [&str; 20] = [
     "_coven_user_files",
     "_coven_user_chunks",
+    "_coven_write_pause",
+    "_coven_moves",
+    "_coven_pin_requests",
     "_coven_uploads",
     "_coven_file_uploads",
     "_coven_upload_files",
@@ -304,9 +311,12 @@ pub(crate) const BEHIND_READABLE: [&str; 17] = [
 
 /// The SQL that makes each object app SQL may read as every store makes it,
 /// with the tables of coven's own behind them (`BEHIND_READABLE`), for an
-/// app's test outside any store (`test_utils::make_readable_objects`). The
-/// SQL makes none of coven's triggers that keep the followed tables: outside
-/// a store the test writes their rows.
+/// app's test outside any store (`test_utils::make_readable_objects`). Of
+/// coven's triggers that keep the followed tables, the SQL makes those that
+/// keep `coven_pending`, since a test saves pending records as a store does
+/// (`test_utils::record_pending`), and those that a table it makes holds in
+/// its own SQL, such as `_coven_pin_requests`'s, which no test write fires:
+/// outside a store the test writes the other followed tables' rows.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn readable_schema() -> String {
     let mut sql = String::new();
@@ -321,6 +331,7 @@ pub(crate) fn readable_schema() -> String {
     for followed in FOLLOWED {
         sql.push_str(followed.table);
     }
+    sql.push_str(pending::SOURCE);
     sql.push_str(views::SCHEMA);
     sql
 }

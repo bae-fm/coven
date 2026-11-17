@@ -101,7 +101,13 @@ pub use saved_code::{
 pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::NewInvite;
+#[cfg(any(test, feature = "test-utils"))]
+pub use sequence_sync::sequence_invites::{
+    invite_operation, RecordedInvite, RecordedInviteStage, RecordedJoiner,
+};
 pub use sequence_sync::sequence_join::{ApprovalWaits, JoinOutcome, JoinPoll};
+#[cfg(any(test, feature = "test-utils"))]
+pub use sequence_sync::sequence_operations::change_operation;
 pub use sequence_sync::sequence_pairings::{pairing_status, pairings_opened};
 pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};

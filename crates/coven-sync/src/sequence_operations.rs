@@ -791,6 +791,16 @@ impl SequenceSync {
         Ok(outcome)
     }
 }
+
+/// The journal row of `change` as the app's write journals it, and the kind
+/// `coven_operations` lists it under, for a test that journals it outside a
+/// store (api.md E4).
+#[cfg(any(test, feature = "test-utils"))]
+pub fn change_operation(change: StoreChange) -> Result<(NewOperation, String), SyncError> {
+    let operation = SequenceOperation::change(change);
+    Ok((operation.journaled("record_change")?, operation.kind().listed()))
+}
+
 #[cfg(test)]
 impl SequenceSync {
     /// Run one of the app's journal steps in a write of its own, then a

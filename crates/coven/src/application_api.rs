@@ -21,7 +21,10 @@ pub use crate::handle::{Circles, CovenHandle, IfUnsent};
 pub use crate::member_write::MemberWrite;
 pub use crate::read_handle::CovenReadHandle;
 #[cfg(any(test, feature = "test-utils"))]
-pub use crate::readable_objects::make_readable_objects;
+pub use crate::readable_objects::{
+    finish_operation, make_readable_objects, record_change, record_invite, record_pending,
+    refuse_invite,
+};
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
 pub use crate::storage::{
@@ -52,6 +55,8 @@ pub use coven_database::{
     ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile,
     WriteBatch, WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_sync::{RecordedInvite, RecordedInviteStage, RecordedJoiner};
 
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
