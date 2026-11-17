@@ -4,8 +4,8 @@
 //!
 //! Each view reads each of its tables through a column, in a join or a
 //! subquery: SQLite names the view to the authorizer for each column the
-//! view reads, which is how a read through a view is told from a read of
-//! coven's tables themselves. A table whose columns a statement leaves
+//! view reads, which is how coven's authorizer tells a read through a view
+//! from a read of coven's tables themselves. A table whose columns a statement leaves
 //! unused, as in `SELECT count(*) FROM coven_uploads`, SQLite reports with no
 //! column and no view; that read is allowed only for a table the same
 //! statement reached through a view, so a view never only counts a table's

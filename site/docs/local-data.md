@@ -535,8 +535,9 @@ and `id` as a `FileId`. The API reference lists every column.
 such as `synced` or `storage_full`, when sync last finished, and the whole
 state in `detail`, which reads as a `SyncState` with what it waits for and its
 cause. Coven computes it in the read, from the facts its tables hold, with the
-same code its model checks. A screen that lists notes under its sync line
-reads both in one live query, so the line never lags the list:
+same Rust code that coven's tests check against its formal model of sync,
+written in the Lean proof language. A screen that lists notes under its sync
+line reads both in one live query, so the line never lags the list:
 
 ```rust
 let screen: LiveQuery<_, CovenError> = handle.subscribe(|sql| {

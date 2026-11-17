@@ -10413,9 +10413,9 @@ The state is one of, in the order an app lists them:
   failed until the store reopens, its queued files waiting with sync not
   running ([api.md E15](api.md#e15-background-work-panics-and-shutdown)).
 
-The state is computed each time it is read, never stored: the app reads it
-from `coven_sync_state` (§4), whose function runs coven's own computation over
-facts that are each true on their own: whether a location is recorded and its
+Coven computes the state each time the app reads it and never stores it: the
+app reads it from `coven_sync_state` (§4), whose function runs coven's own
+computation over facts that are each true on their own: whether a location is recorded and its
 credentials held, how the last pass ended, what the running pass moved last,
 each bound file in the upload queue, whether the send queue holds a write, and
 the pending records the state reads: those about the sequence,
@@ -12330,9 +12330,10 @@ device consistent with the database.
   `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads every table it reads through
   a column, in a join or a subquery: SQLite names the view to the authorizer
-  for each column the view reads, and reports a table only counted with no
-  view. `coven_pins`, `coven_pin_requests`, `coven_moves`,
-  `coven_upload_queue` and `coven_pending` have the same prefix: tables
+  for each column the view reads, and when a statement only counts a table's
+  rows, SQLite reports that table without the view's name. `coven_pins`,
+  `coven_pin_requests`, `coven_moves`, `coven_upload_queue` and
+  `coven_pending` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source`, from
   `_coven_pin_requests`, from `_coven_move_files` with each move's state, from
   the files each upload stores, and from the internal view

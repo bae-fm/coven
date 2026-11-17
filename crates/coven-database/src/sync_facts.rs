@@ -7,23 +7,24 @@
 //! `_coven_sync_state` as its arguments (`sync_state_function.rs`), and coven
 //! reads them as a row where sync computes the state in Rust: a closed
 //! store's state, and each upload's phase (`QueueFacts`). Both decode them
-//! with `SyncFacts::decode`. Sync computes the state; this reads what it
-//! needs.
+//! with `SyncFacts::decode`. Sync computes the state; this module reads
+//! what sync needs.
 //!
-//! A trailing upload, a download and a pin coven keeps are not sync's: no
-//! upload of theirs and no record about them is read here, and the state
+//! A trailing upload, a download and a pin coven keeps are not sync's: this
+//! module reads no upload of theirs and no record about them, and the state
 //! never sees them (§17.4, §19.1). Which upload is bound comes from the
-//! queue's own column (`holds`), and a record is left out when its row names
-//! such an upload, a download or a pin, or a move none of whose uploads is
-//! bound. Nor does the state read the pause, the network or a
+//! queue's own column (`holds`), and the read leaves a record out when its
+//! row names such an upload, a download or a pin, or a move none of whose
+//! uploads is bound. Nor does the state read the pause, the network or a
 //! self-replacement's write pause, which hold trailing uploads only: an
 //! upload's phase reads them beside the facts (`TransferHolds`).
 //!
 //! A live query over these facts runs again whenever one of them changes:
 //! the files in flight are read through `coven_sending`, the view their
-//! starts and ends change (`transfers_in_flight.rs`). Each table is read
-//! through a column, never only counted, so that SQLite names the view to
-//! the authorizer for each read the view makes (`internal_schema_views.rs`).
+//! starts and ends change (`transfers_in_flight.rs`). `facts!` reads each
+//! table through a column and never only counts its rows, so that SQLite
+//! names the view to the authorizer for each read the view makes
+//! (`internal_schema_views.rs`).
 
 use crate::sqlite::StoreSql;
 use crate::DbError;
@@ -39,11 +40,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// array; the pending records the state reads, as a JSON array; the sync
 /// scope's backoff; and each operation's backoff, as a JSON array.
 ///
-/// The bound uploads the state can show are each read from where its kind
-/// is small: the uploads with a record from the pending records, the first
-/// one sending from the files in flight, the first queued one with no record
-/// and no retry by walking the bound queue in id order to the first match,
-/// and the first with no record that waits out a retry from the retry rows.
+/// `facts!` reads each kind of bound upload the state can show from the
+/// table where that kind has the fewest rows: the uploads with a record from
+/// the pending records, the first one sending from the files in flight, the
+/// first queued one with no record and no retry by walking the bound queue
+/// in id order to the first match, and the first with no record that waits
+/// out a retry from the retry rows.
 /// The outer read then reads only those rows, and only bound ones. Each is
 /// `[id, stored, sending, retry seconds, retry nanos, record position]`, the
 /// retry time as `_coven_unix_seconds` and `_coven_unix_nanos` give it, since

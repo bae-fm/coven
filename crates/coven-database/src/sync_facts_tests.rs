@@ -82,9 +82,9 @@ async fn the_upload_read_does_not_scan_the_queue() {
     // LIMIT 1 over the unstored bound uploads alone, `p` first the pending
     // records with an object, then every record the state reads, and `j` the
     // files in flight, read once by each of the two walks that leave out the
-    // upload being sent and once to mark the uploads being sent; `u`, the
-    // outer read of the queue, is only ever searched by its primary key, and
-    // the retry rows are searched through their upload index.
+    // upload being sent and once to mark the uploads being sent. SQLite
+    // searches `u`, the outer read of the queue, only by its primary key, and
+    // the retry rows through their upload index.
     assert_eq!(
         scans,
         [

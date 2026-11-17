@@ -187,8 +187,8 @@ impl DatabaseBuilder {
         self
     }
 
-    /// The sync state's function the store was opened with, or none, for a
-    /// rebuild that opens a copy as the store was opened.
+    /// The sync state function that `open` received, or none, which a
+    /// rebuild passes again when it opens its copy of the store.
     pub(crate) fn sync_state_as_opened(
         mut self,
         function: Option<crate::SyncStateFunction>,

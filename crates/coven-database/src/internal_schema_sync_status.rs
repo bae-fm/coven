@@ -146,8 +146,8 @@ pub(crate) fn read(db: &StoreSql) -> Result<SyncStatusRow, DbError> {
 }
 
 /// The row from `storage`, `provider`, `last_pass`, `moved` and
-/// `last_synced`, in that order from `first` on. Values the table's checks
-/// would refuse are `DamagedDatabase`.
+/// `last_synced`, in that order from `first` on. For a value the table's
+/// checks would refuse, `decode` returns `DamagedDatabase`.
 pub(crate) fn decode(
     values: &impl crate::sync_facts::FactValues,
     first: usize,

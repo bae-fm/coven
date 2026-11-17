@@ -184,7 +184,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
             "the state counts every waiting write and file: a removed or replaced device says how many it never sent",
         ),
         ("coven_sync_state", "SELECT * FROM coven_sync_state", "p") => Some(
-            "the pending records with an object, which the state lists with their bound uploads, and every record once, to leave out those about trailing uploads, downloads, pins and moves of trailing uploads",
+            "the state lists the pending records that have an object with their bound uploads, and it reads every pending record once to leave out those about trailing uploads, downloads, pins and moves of trailing uploads",
         ),
         ("coven_sync_state", "SELECT * FROM coven_sync_state", "f") => Some(
             "the walk to the first queued bound upload with no record and no retry, in id order over the unstored bound ones, stops at its first match",

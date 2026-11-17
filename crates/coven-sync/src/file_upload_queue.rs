@@ -85,9 +85,9 @@ pub enum UploadWait {
 impl UploadQueue {
     /// The queue as one committed snapshot read it: each upload's phase from
     /// the facts the sync state reads, what holds trailing uploads, the
-    /// upload's retry wait and what is recorded about it. A move's record names an original, and shows as the
-    /// record of the upload that uploads that original, as the upload's own
-    /// record does for its bytes.
+    /// upload's retry wait and what coven records about it. A move's record
+    /// names an original, and shows as the record of the upload that uploads
+    /// that original, as the upload's own record does for its bytes.
     pub fn from_facts(facts: QueueFacts<PendingRecord>) -> Result<Self, DbError> {
         let QueueFacts { sync, holds, queue, recorded } = facts;
         let (state, _) = crate::sync_status::Facts::read(sync)?;

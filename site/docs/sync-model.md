@@ -269,11 +269,12 @@ pub enum SyncState {
 }
 ```
 
-The state is computed in each read from what coven knows: whether storage is
+Coven computes the state in each read from what it knows: whether storage is
 set up and its credentials held, how the last pass ended, what is moving, the
 send queue, the bound files in the upload queue and the pending records. The
-view hands those facts to coven's own code, so the state has one definition,
-the one coven's model checks. When several
+view passes those facts to a SQL function that runs coven's Rust code, so the
+state has one definition, which coven's tests check against its formal model
+of sync, written in the Lean proof language. When several
 facts hold, the most urgent shows: the device's own standing first, then
 signing in, then what storage said of the account, then reachability, then
 failures, then activity. The cause is the last pass or the first pending

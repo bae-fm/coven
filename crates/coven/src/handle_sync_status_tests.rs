@@ -461,9 +461,10 @@ fn follow_row(device: &Device) -> coven_database::test_utils::Followed<ShownRow,
     }))
 }
 
-/// Each failure storage gives a whole pass that names a state reads from
-/// `coven_sync_state` as that state: its kind, the pass as its cause, no
-/// pending record, and the last synced time the status row keeps (§19.1).
+/// When storage fails a whole pass with a failure that names a state,
+/// `coven_sync_state` reads as that state: its kind, the pass as its cause,
+/// no pending record, and the last synced time the status row keeps
+/// (§19.1).
 #[tokio::test]
 async fn the_view_shows_each_state_a_pass_failure_names() {
     for (failure, kind) in [

@@ -207,8 +207,9 @@ pub enum SyncCause {
     Pending(#[serde(with = "with_cause")] PendingRecord),
 }
 
-/// A pending record as a cause encodes it: beside the cause it keeps, which
-/// the record's own encoding leaves to `coven_pending.cause`.
+/// Encodes a pending record that names a state together with its cause,
+/// because the record's own encoding leaves the cause to
+/// `coven_pending.cause`.
 mod with_cause {
     use crate::PendingRecord;
 

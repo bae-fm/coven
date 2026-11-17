@@ -266,10 +266,10 @@ pub(crate) type Views<'a> =
     dyn Fn(&Setup<'_, crate::app_policy::CovenPolicy>) -> sqlive::rusqlite::Result<()> + 'a;
 
 /// Register what coven's views call: the device id, the transfers in flight,
-/// the network (§4), and sync's computation of the sync state, when the
-/// store was opened with it (§19.1). A store opened without it, as a test
-/// of the database crate alone opens one, fails each read of
-/// `coven_sync_state`.
+/// the network (§4), and sync's computation of the sync state, when the code
+/// that opens the store passes it (§19.1). A test of the database crate
+/// alone opens a store without it, and each read of `coven_sync_state` then
+/// fails.
 pub(crate) fn register_views(
     setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     device: DeviceId,

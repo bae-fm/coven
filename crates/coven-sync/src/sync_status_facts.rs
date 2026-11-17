@@ -34,10 +34,10 @@ pub(crate) struct Upload {
     pub(crate) record: Option<PendingRecord>,
 }
 
-/// What the state is computed from, as the model's `Facts` names it but for
-/// what holds trailing uploads (`TransferHolds`), which no state reads and
-/// an upload's phase reads beside these; the time of the last finished sync
-/// is read beside them.
+/// The facts `Facts::state` computes the state from, the same as the
+/// model's `Facts` except what holds trailing uploads (`TransferHolds`). No
+/// state reads `TransferHolds`, and an upload's phase reads it separately.
+/// `Facts::read` also returns the time sync last finished.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Facts {
     pub(crate) location: RecordedLocation<CloudProvider>,

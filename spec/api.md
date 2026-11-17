@@ -3753,9 +3753,9 @@ let moved = handle
   direct call in the same way. A read-only handle watches nothing: it shows
   `usable` NULL and nothing metered, with the setting as stored.
 - `coven_sync_state` is the one view whose row coven's own code computes: it
-  reads the facts the sync state is computed from and hands them to
-  `_coven_sync_state`, which runs the computation the model checks
-  ([§19.1](coven.md#191-what-the-app-sees)). A status screen reads the view
+  reads the facts coven computes the sync state from and passes them to
+  `_coven_sync_state`, which runs the computation that the Lean model of
+  [§19.1](coven.md#191-what-the-app-sees) checks. A status screen reads the view
   beside its own rows in its live query, which runs again whenever one of
   those facts changes, a transfer starting or ending included, and gives the
   current state as its first value. `SyncStatus::read` reads the view's row
@@ -4766,16 +4766,15 @@ loop {
   current state, read at once from what opening wrote, so the app shows no
   placeholder before it. `sync_status()` reads the row once. Coven names the
   states; the app picks the words.
-  - The state is computed in the read, by coven's own code that the view
-    calls, from the rows of `coven_sync_status` and `coven_retry_effect`
-    (E4), the send queue, the bound files in the upload queue with their
-    retry waits, the files being sent and the pending records, so the live
-    query runs again whenever one of them changes: a write committed while
-    offline makes it offline with unsent changes in that transaction. The
-    pause and the network hold trailing files only, and the state doesn't
-    read them. With several candidates, the first in
-    §19.1's order shows; Appendix H.3 of coven.md lists which state each
-    fact names.
+  - Coven's own code, which the view calls, computes the state in the read
+    from the rows of `coven_sync_status` and `coven_retry_effect` (E4), the
+    send queue, the bound files in the upload queue with their retry waits,
+    the files being sent and the pending records, so the live query runs
+    again whenever one of them changes: a write committed while offline
+    makes it offline with unsent changes in that transaction. The pause and
+    the network hold trailing files only, and the state doesn't read them.
+    With several candidates, the first in §19.1's order shows; Appendix H.3
+    of coven.md lists which state each fact names.
   - Synced means nothing waits, data or files: a pass held back at a slot
     for a key or a snapshot or by a provider's cooldown waits to sync, with
     what holds it (`SyncWait`); while a file waits in the upload queue the state
@@ -6216,8 +6215,8 @@ pub struct SyncStatus {
 
 impl SyncStatus {
     /// The sync state and when sync last finished, as `coven_sync_state`
-    /// shows them in the caller's read, for a live query that follows the
-    /// view by itself.
+    /// shows them in the caller's read, for a live query that reads only the
+    /// view.
     pub fn read(sql: SqlReadContext<'_>) -> Result<SyncStatus, DbError>;
 }
 

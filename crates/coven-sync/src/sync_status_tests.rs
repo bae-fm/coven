@@ -446,8 +446,8 @@ pub(super) fn connected() -> Facts {
     }
 }
 
-/// Nothing holds trailing uploads: the holds the state's cases give the
-/// model, since no state reads them.
+/// No hold is set. The differential test gives the model these holds with
+/// each state case, because the state never reads them.
 pub(super) const UNHELD: TransferHolds =
     TransferHolds { paused: false, unmetered_only: false, metered: false, keys_changing: false };
 

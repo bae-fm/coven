@@ -787,8 +787,11 @@ async fn the_sync_facts_list_the_first_waiting_upload_only() {
 
 /// A live query of `coven_sync_state` runs again once as a cover's upload
 /// starts and once as it ends, with no write: with sync stopped the queued
-/// cover waits, while it moves the state is uploading a bound file, and once
-/// it stops moving the cover waits again (§19.1).
+/// cover waits, while coven uploads the cover the view shows Syncing
+/// (uploading a bound file), and once the upload ends the cover waits again
+/// (§19.1). The test stops sync because with sync running a queued bound
+/// cover already shows Syncing (uploading a bound file), for its turn, so an
+/// upload starting or ending changes nothing the view shows.
 #[tokio::test]
 async fn the_sync_state_view_runs_again_as_a_transfer_starts_and_ends() {
     use crate::{SyncActivity, SyncState, SyncWait};

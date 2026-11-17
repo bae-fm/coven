@@ -46,10 +46,10 @@ pub struct SyncStateFunction {
 
 impl SyncStateFunction {
     /// The function that decodes its arguments as the facts, with the
-    /// pending records as `P`, and computes the state with `compute`. It must
-    /// read only the facts and return at once: SQLite calls it inside a read,
-    /// and coven runs a live query again only when a table the query reads
-    /// changes.
+    /// pending records as `P`, and computes the state with `compute`. The
+    /// computation must read only the facts and return at once: SQLite calls
+    /// it inside a read, and coven runs a live query again only when a table
+    /// the query reads changes.
     pub fn new<P: crate::PendingValue + Clone>(
         compute: fn(SyncFacts<P>) -> Result<SyncStateRow, DbError>,
     ) -> Self {
@@ -57,9 +57,9 @@ impl SyncStateFunction {
     }
 
     /// Register the function on a connection to the store's database. Its
-    /// result depends on its arguments alone, but SQLite isn't told so: it
-    /// changes with coven's code, so no index, CHECK or generated column may
-    /// keep one.
+    /// result depends on its arguments alone, but coven doesn't mark it
+    /// deterministic: the result changes with coven's code, so no index,
+    /// CHECK or generated column may store one.
     pub(crate) fn register(
         &self,
         setup: &Setup<'_, crate::app_policy::CovenPolicy>,
