@@ -1,9 +1,9 @@
 //! The sizes of the store's own files in `coven_library_bytes` (§17.8):
-//! each database file's size as its last checkpoint left it, written as the
-//! store opens and again after each checkpoint that changes it, and a
-//! rebuild's store's own files while one runs (§18.3). Between a change and
-//! the write after it, a row holds the size before it; opening writes each
-//! database file's row again.
+//! each database file's size as its last checkpoint left it, which coven
+//! writes as the store opens and again after each checkpoint that changes
+//! it, and a rebuild's store's own files while one runs (§18.3). Between a
+//! change and the write after it, a row holds the size before it; opening
+//! writes each database file's row again.
 
 use crate::database::{finish_blocking, process, start_call, DatabaseInner, StoreDatabase};
 use crate::sqlite::StoreSql;

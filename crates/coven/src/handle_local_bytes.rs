@@ -14,8 +14,8 @@ impl CovenHandle {
 
     /// The same read as a live query: it runs again after each write that
     /// changes what it reads, such as the cache's committed entries, a
-    /// budget, a database file's size after a checkpoint, or an archive
-    /// deleted. A read that only updates a cache entry's last-read time does
+    /// budget, a database file's size after a checkpoint, or the deletion of
+    /// an archive. A read that only updates a cache entry's last-read time does
     /// not run the query again.
     pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes, CovenError> {
         self.database.subscribe_local_bytes()
