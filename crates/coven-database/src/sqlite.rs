@@ -33,6 +33,12 @@ pub(crate) fn integer(field: &'static str, value: u64) -> Result<i64, DbError> {
     })
 }
 
+/// `value`, read from a column coven writes only with values of 0 or more,
+/// as a `u64`; a negative value is `DamagedDatabase`.
+pub(crate) fn unsigned(value: i64) -> Result<u64, DbError> {
+    u64::try_from(value).map_err(|_negative| DbError::DamagedDatabase)
+}
+
 /// `total` plus `addend`; a sum past `u64::MAX` is `TotalTooLarge`, naming
 /// the running total and the addend that did not fit.
 pub(crate) fn add_total(field: &'static str, total: u64, addend: u64) -> Result<u64, DbError> {

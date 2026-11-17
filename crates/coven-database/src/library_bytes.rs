@@ -8,7 +8,7 @@
 use crate::database::{finish_blocking, process, start_call, DatabaseInner, StoreDatabase};
 use crate::sqlite::StoreSql;
 use crate::store_failure::{StoreFailure, StoreHandle};
-use crate::{next_result, DbError, LiveQuery, SqlReadContext};
+use crate::{next_result, DbError, LiveQuery};
 use coven_foundation::files::{FileError, StoreDirAccess};
 use coven_foundation::task::BugSinkRef;
 use sqlive::CheckpointedSize;
@@ -44,12 +44,14 @@ fn forget_rebuild(db: &StoreSql) -> Result<(), DbError> {
     Ok(())
 }
 
-/// The sizes of a store's own files together, as its `coven_library_bytes`
-/// holds them.
-fn own_files(sql: SqlReadContext<'_>) -> Result<u64, DbError> {
-    let bytes: i64 =
-        sql.query_row("SELECT coalesce(sum(bytes),0) FROM coven_library_bytes", [], |r| r.get(0))?;
-    u64::try_from(bytes).map_err(|_negative| DbError::DamagedDatabase)
+/// Sum the sizes of the store's own files that `coven_library_bytes` holds:
+/// the figure `library` reports.
+pub(crate) fn library(db: &StoreSql) -> Result<u64, DbError> {
+    crate::sqlite::unsigned(db.query_row(
+        "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?)
 }
 
 /// Move a folder whose bytes a row counts out of the store's directory with
@@ -182,7 +184,7 @@ impl StoreDatabase {
     /// `rebuild` row: the sizes of its own files together now, then after
     /// each write that changes them, until it closes.
     pub(crate) async fn count_rebuild(&self, rebuild: &StoreDatabase) -> Result<(), DbError> {
-        let (total, first) = next_result(rebuild.subscribe(own_files)).await;
+        let (total, first) = next_result(rebuild.follow(library)).await;
         let bytes = first.ok_or(DbError::StoreClosed)??;
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {

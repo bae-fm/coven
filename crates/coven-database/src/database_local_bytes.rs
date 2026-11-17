@@ -4,7 +4,7 @@
 //! the archives resets kept.
 
 use super::{Mode, StoreDatabase};
-use crate::sqlite::StoreSql;
+use crate::sqlite::{unsigned, StoreSql};
 use crate::{DbError, LiveQuery};
 use coven_foundation::locks::read_unpoisoned;
 use coven_foundation::task::CarriesBug;
@@ -45,10 +45,6 @@ pub struct LocalBytes {
     pub library: u64,
     /// The archives resets kept, while there is one.
     pub before_reset: Option<u64>,
-}
-
-fn unsigned(value: i64) -> Result<u64, DbError> {
-    u64::try_from(value).map_err(|_negative| DbError::DamagedDatabase)
 }
 
 /// Every namespace's budget and counters, by name.
@@ -95,15 +91,10 @@ pub(crate) fn read(db: &StoreSql, declared: &[String]) -> Result<LocalBytes, DbE
             kept.iter().position(|bytes| &bytes.namespace == name).map(|at| kept.swap_remove(at))
         })
         .collect();
-    let library = unsigned(db.query_row(
-        "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes",
-        [],
-        |r| r.get::<_, i64>(0),
-    )?)?;
     Ok(LocalBytes {
         namespaces,
         pinning: partials(db)?,
-        library,
+        library: crate::database::library_bytes::library(db)?,
         before_reset: crate::database::archive_bytes::kept(db)?,
     })
 }

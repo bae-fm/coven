@@ -347,7 +347,7 @@ pub(super) fn budget(db: &StoreSql, namespace: &str) -> Result<u64, DbError> {
         })?
         .pop()
         .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
-    u64::try_from(bytes).map_err(|_negative| DbError::DamagedDatabase)
+    crate::sqlite::unsigned(bytes)
 }
 /// Set a declared namespace's budget, in the transaction under way.
 pub(crate) fn set_budget(db: &StoreSql, namespace: &str, bytes: u64) -> Result<(), DbError> {

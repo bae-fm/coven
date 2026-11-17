@@ -48,7 +48,7 @@ pub(crate) fn kept(db: &StoreSql) -> Result<Option<u64>, DbError> {
     if archives == 0 {
         return Ok(None);
     }
-    Ok(Some(u64::try_from(bytes).map_err(|_negative| DbError::DamagedDatabase)?))
+    Ok(Some(crate::sqlite::unsigned(bytes)?))
 }
 
 /// Delete the archive `name`'s row, in the transaction under way.
