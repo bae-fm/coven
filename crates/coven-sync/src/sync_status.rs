@@ -651,10 +651,19 @@ impl SyncStatus {
             .collect();
         let (facts, _last_synced) = Facts::read(facts)?;
         let state = facts.state();
+        // The cause's record is one of the facts' records, and its subject
+        // is the key `coven_pending` holds it under.
         let pending = match state.cause() {
-            Some(SyncCause::Pending(record)) => positions
-                .iter()
-                .find_map(|(position, subject)| (*subject == record.subject).then_some(*position)),
+            Some(SyncCause::Pending(record)) => Some(
+                positions
+                    .iter()
+                    .find_map(|(position, subject)| {
+                        (*subject == record.subject).then_some(*position)
+                    })
+                    .ok_or(DbError::Invariant {
+                        what: "the state's pending record is among the facts' records",
+                    })?,
+            ),
             Some(SyncCause::Pass(_)) | None => None,
         };
         Ok(SyncStateRow {
