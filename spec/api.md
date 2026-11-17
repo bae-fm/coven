@@ -3855,8 +3855,8 @@ let moved = handle
 | | `pinned` | the bytes of its pinned whole copies, which the budget doesn't count |
 | | `pinning` | the bytes of the partial downloads stopped pins left in it, which the cache neither counts nor evicts |
 | `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file; `inputs`, the input database's; `copies`, coven's copies of app files that a row names; or `rebuild`, a rebuild's store while one runs |
-| | `bytes` | the part's size in bytes. For a database file, its size as its last checkpoint left it: coven writes it as the store opens and after each checkpoint that changes it, and leaves out the WAL beside it. For `copies`, coven writes it in the write that keeps or releases a copy, and counts a copy that files share once. For `rebuild`, the sizes of the rebuild's store's own files together: coven makes the row before the rebuild makes its folder and deletes it when it moves the folder aside to delete it |
-| `coven_archive_bytes`: each archive a reset kept in the store's directory ([§19.3](coven.md#193-another-copy-of-the-same-device)); a table coven writes: a row appears as the store opens after the swap that kept the archive, and goes as the archive moves out of the directory to be removed | `archive` | the archive's name in the store's directory |
+| | `bytes` | the part's size in bytes. For a database file, its size as its last checkpoint left it: coven writes it as the store opens and after each checkpoint that changes it, and leaves out the WAL beside it. For `copies`, coven writes it in the write that keeps or releases a copy, and counts a copy that files share once. For `rebuild`, the sizes of the rebuild's store's own files together: coven makes the row before the rebuild makes its folder, and deletes the row when it moves the rebuild's folder aside to delete the folder |
+| `coven_archive_bytes`: each archive a reset kept in the store's directory ([§19.3](coven.md#193-another-copy-of-the-same-device)); a table coven writes: coven writes a row as the store opens after the swap that kept the archive, and deletes it as coven moves the archive out of the directory to delete it | `archive` | the archive's name in the store's directory |
 | | `bytes` | the size of everything in it, in bytes |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
 | | `metered` | 1 while that network is metered, and while coven can't tell after the platform failed to answer since opening; 0 with none, and where the platform never tells; never stored |
@@ -6239,8 +6239,8 @@ impl CovenHandle {
 
     /// Deletes the installations `reset_device` kept in the store's
     /// directory, one per reset, and syncs the directory (§19.3). Nothing
-    /// reads them once the reset's notice is stored, and the store's own files
-    /// are never touched. In one step, coven moves each archive out of the
+    /// reads them once the reset's notice is stored, and coven never touches
+    /// the store's own files. In one step, coven moves each archive out of the
     /// directory into a removal folder and deletes its row in
     /// `coven_archive_bytes`, then it deletes that folder. The call returns
     /// once coven has deleted them. A failure midway returns its `CovenError::File`

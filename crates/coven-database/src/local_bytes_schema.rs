@@ -10,9 +10,9 @@ macro_rules! coven_local_bytes_tables {
         // writes each row as the store opens and after each checkpoint that
         // changes it. Neither row counts its WAL, which a checkpoint lets
         // start over.
-        // `copies` is coven's copies of app bytes that a row names, which
-        // the triggers below keep in the statement that counts or releases a
-        // copy. `rebuild` is there while a rebuild's folder is (§18.3): the
+        // `copies` is coven's copies of app bytes that a row names: the
+        // triggers below add or subtract a copy's size in the statement that
+        // counts or releases the copy. `rebuild` is there while a rebuild's folder is (§18.3): the
         // sizes of the rebuild's store's own files together.
         $visit!(
             coven_library_bytes,

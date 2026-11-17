@@ -12,10 +12,11 @@ use coven_foundation::files::{StoreDir, StoreDirAccess};
 /// Record each archive in `directory` that has no row yet, with its size,
 /// as the store opens, failing the handle if the write fails. A reset's
 /// swap moves the old installation into its archive while no database is
-/// open and the store refuses opens, and the opening of the swapped store
-/// follows it, or the next reset's after a stop, so no reader sees an
-/// archive without its row. Nothing writes into an archive once it is
-/// kept, so its size stays right.
+/// open and the store refuses opens. The opening of the swapped store comes
+/// next and records the archive. When the process stops between the two,
+/// the next reset's opening of the swapped store records it, so no reader
+/// sees an archive without its row. Nothing writes into an archive once a
+/// reset keeps it, so its size stays right.
 pub(crate) fn record_opened(writer: &mut StoreSql, directory: &StoreDir) -> Result<(), DbError> {
     let recorded =
         writer.query("SELECT archive FROM coven_archive_bytes", [], |r| r.get::<_, String>(0))?;

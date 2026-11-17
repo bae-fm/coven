@@ -515,7 +515,8 @@ async fn an_archive_leaves_the_directory_in_one_rename_before_its_files_go() {
     assert!(!f.store.retire_discarded_device(&name).unwrap());
     f.store.remove_retired_devices().unwrap();
     assert!(!f.path.join("removing-discarded-devices").exists());
-    // With nothing being removed, removing succeeds.
+    // When the removal folder is gone, the store deletes nothing and
+    // succeeds.
     f.store.remove_retired_devices().unwrap();
     replacement.publish().unwrap();
 }
