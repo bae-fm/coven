@@ -117,15 +117,17 @@ follow it
 
 ## What the device keeps
 
-`handle.local_bytes()` measures what a store takes on the device: for each
+`handle.local_bytes()` reads what a store takes on the device: for each
 declared namespace its budget, the bytes of its cached chunks and headers
 (`cached`, which the budget counts) and of its pinned files (`pinned`, which it
 doesn't); the partial downloads stopped pins left (`pinning`); the store's own
 files (`library`); and, while a reset's old installation is still there, its
 size (`before_reset`, removed by `handle.delete_discarded_devices()`).
-`handle.subscribe_local_bytes()` gives a measurement at once and a new one
-after each change to a namespace's bytes or budget; reading a cached file or a
-partial download growing starts none.
+`handle.subscribe_local_bytes()` is the same read as a live query, which runs
+again after each write that changes one of these; reading a cached file
+starts no run. Coven reads every figure from tables the app's SQL can read
+too, so a query can sum them with the app's own rows
+([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 
 ## Progress and failures
 

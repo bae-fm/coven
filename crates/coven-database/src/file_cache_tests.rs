@@ -344,35 +344,34 @@ async fn cache_bytes_are_the_counters_in_declaration_order() {
     db.close().await.unwrap();
 }
 
-/// The budgets query delivers its first value, then a value after a change
-/// to a counter or a budget, and nothing for a cached read's recency or a
-/// partial download's size (§17.8).
+/// The live query of what the store keeps delivers its first value, then a
+/// value after a change to a counter or a budget, and nothing for a cached
+/// read's recency; a read counts the partial downloads (§17.8).
 #[tokio::test]
-async fn the_budgets_query_runs_only_for_counter_and_budget_changes() {
+async fn the_local_bytes_query_runs_for_what_it_counts_and_not_a_reads_recency() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
     let owner = FileDatabase::new(db.clone());
-    let mut budgets = db.subscribe_cache_budgets::<DbError>();
-    let first = budgets.next_inline().await.unwrap().unwrap();
-    assert_eq!(first[0].cached, 0);
+    let mut bytes = db.subscribe_local_bytes::<DbError>();
+    let first = crate::tests::next(&mut bytes).await;
+    assert_eq!(first.namespaces[0].cached, 0);
     owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
-    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, 100);
+    assert_eq!(crate::tests::next(&mut bytes).await.namespaces[0].cached, 100);
     db.write(|sql| sql.set_cache_budget("files", 50)).await.unwrap();
-    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].budget, 50);
-    fn quiet(budgets: &mut crate::LiveQuery<Vec<NamespaceBytes>, DbError>) -> bool {
-        budgets.run_changed().is_none()
-    }
+    assert_eq!(crate::tests::next(&mut bytes).await.namespaces[0].budget, 50);
     // A read of the cached range updates only its recency.
     db.write(|sql| sql.set_cache_budget("files", 1 << 30)).await.unwrap();
-    budgets.next_inline().await.unwrap().unwrap();
+    crate::tests::next(&mut bytes).await;
     let header = vec![1; coven_format::file::FILE_HEADER_LEN];
     owner.cache_range(&file, -1, 1, FileName::new("again").unwrap(), header.clone()).await.unwrap();
-    assert_eq!(budgets.next_inline().await.unwrap().unwrap()[0].cached, header.len() as u64);
+    let cached = crate::tests::next(&mut bytes).await.namespaces[0].cached;
+    assert_eq!(cached, header.len() as u64);
     assert_eq!(owner.cached(&file, -1).await.unwrap(), Some(header));
-    assert!(quiet(&mut budgets), "a read's recency starts no run");
+    assert!(bytes.run_changed().is_none(), "a read's recency starts no run");
+    // The fixture writes the partial past the store's commits, which tell
+    // no live query, so a read of its own counts it.
     db.inspect_writer(|sql, _| partial(sql, "partial_object", "partial_file", 4096));
-    db.write(|_| Ok(())).await.unwrap();
-    assert!(quiet(&mut budgets), "a partial download starts no run");
+    assert_eq!(db.local_bytes().await.unwrap().pinning, 4096);
     db.close().await.unwrap();
 }

@@ -1,11 +1,13 @@
-//! The bytes the cache and pins keep on this device, read from the counters
-//! the cache keeps with its entries (§17.8, Appendix C.3).
+//! What the store keeps on this device, read from coven's tables (§17.8,
+//! §19.3, Appendix C.3): the counters the cache keeps with its entries, the
+//! partial downloads pins left, the sizes of the store's own files and of
+//! the archives resets kept.
 
 use super::{Mode, StoreDatabase};
 use crate::sqlite::StoreSql;
-use crate::{next_result, DbError, LiveQuery};
+use crate::{DbError, LiveQuery};
+use coven_foundation::locks::read_unpoisoned;
 use coven_foundation::task::CarriesBug;
-use std::future::Future;
 
 /// One namespace's cache, in bytes on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,9 +39,9 @@ pub struct LocalBytes {
     pub namespaces: Vec<NamespaceBytes>,
     /// Partial downloads pins left, kept apart from the cache.
     pub pinning: u64,
-    /// The store's database and its journals, its settings and key files, and
-    /// coven's own copies of files: every file in the store's directory but
-    /// the cache and the archives.
+    /// The store's own files: its database files as their last checkpoints
+    /// left them, coven's copies of app files, and a rebuild's database
+    /// files while one runs.
     pub library: u64,
     /// The archives resets kept, while there is one.
     pub before_reset: Option<u64>,
@@ -82,134 +84,69 @@ pub(crate) fn partials(db: &StoreSql) -> Result<u64, DbError> {
     })?)
 }
 
+/// What the store keeps on this device, from the transaction under way:
+/// the namespaces named in `declared`, in that order, the partial
+/// downloads, the store's own files and the archives resets kept.
+pub(crate) fn read(db: &StoreSql, declared: &[String]) -> Result<LocalBytes, DbError> {
+    let mut kept = budgets(db)?;
+    let namespaces = declared
+        .iter()
+        .filter_map(|name| {
+            kept.iter().position(|bytes| &bytes.namespace == name).map(|at| kept.swap_remove(at))
+        })
+        .collect();
+    let library = unsigned(db.query_row(
+        "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?)?;
+    Ok(LocalBytes {
+        namespaces,
+        pinning: partials(db)?,
+        library,
+        before_reset: crate::database::archive_bytes::kept(db)?,
+    })
+}
+
 impl<M: Mode> StoreDatabase<M> {
+    /// The names of the namespaces declared at open, in declaration order;
+    /// none once the store has closed.
+    fn declared_namespaces(&self) -> Vec<String> {
+        read_unpoisoned(&self.inner).as_ref().map_or_else(Vec::new, |open| {
+            M::access(open).write_schema.namespaces.iter().map(|n| n.name.clone()).collect()
+        })
+    }
+
     /// The cache's counters and the partial downloads' sizes, from one
     /// snapshot, for the namespaces declared at open, in declaration order.
     pub async fn cache_bytes(&self) -> Result<CacheBytes, DbError> {
-        let declared: Vec<String> = self
-            .call(|open| {
-                Ok::<_, DbError>(
-                    M::access(open)
-                        .write_schema
-                        .namespaces
-                        .iter()
-                        .map(|namespace| namespace.name.clone())
-                        .collect(),
-                )
-            })
-            .await?;
-        // Every namespace's counters and the partials' sum, in one snapshot.
-        let (mut kept, pinning) =
-            self.read_committed(|db| Ok::<_, DbError>((budgets(db)?, partials(db)?))).await?;
-        let namespaces = declared
-            .into_iter()
-            .filter_map(|name| {
-                kept.iter().position(|bytes| bytes.namespace == name).map(|at| kept.swap_remove(at))
-            })
-            .collect();
-        Ok(CacheBytes { namespaces, pinning })
+        let declared = self.declared_namespaces();
+        let bytes = self.read_committed(move |db| read(db, &declared)).await?;
+        Ok(CacheBytes { namespaces: bytes.namespaces, pinning: bytes.pinning })
     }
 }
 
 impl StoreDatabase {
-    /// The namespaces' budgets and counters, now and after each change to
-    /// either. Reads nothing else, so a cached read's recency or a pin
-    /// download's partial growing starts no run.
-    pub fn subscribe_cache_budgets<E>(&self) -> LiveQuery<Vec<NamespaceBytes>, E>
+    /// What the store keeps on this device, from one snapshot of its tables
+    /// (§17.8, §19.3): each declared namespace's cache, the partial
+    /// downloads pins left, the store's own files and the archives resets
+    /// kept.
+    pub async fn local_bytes(&self) -> Result<LocalBytes, DbError> {
+        let declared = self.declared_namespaces();
+        self.read_committed(move |db| read(db, &declared)).await
+    }
+
+    /// `local_bytes` now and after each write that changes what it reads: a
+    /// namespace's counters or budget, a partial download, a database
+    /// file's size after a checkpoint, a copy kept or released, a rebuild's
+    /// folder or an archive. A cached read's recency changes none of them.
+    pub fn subscribe_local_bytes<E>(&self) -> LiveQuery<LocalBytes, E>
     where
         E: From<DbError> + CarriesBug + Send + 'static,
     {
-        self.follow(|db| budgets(db).map_err(E::from))
+        let declared = self.declared_namespaces();
+        self.follow(move |db| read(db, &declared).map_err(E::from))
     }
-}
-
-impl StoreDatabase {
-    /// One measurement of what the store keeps on this device: the cache's
-    /// counters, budgets and partials from one snapshot, then the store's
-    /// directory walked for its own files and the archives resets kept. The
-    /// cache's folder is left out of the walk, since its entries count it.
-    pub async fn local_bytes(&self) -> Result<LocalBytes, DbError> {
-        let cache = self.cache_bytes().await?;
-        let before_reset = self.read_committed(super::archive_bytes::kept).await?;
-        let directory = self.call(|open| Ok::<_, DbError>(open.access.directory.clone())).await?;
-        let walked = super::call::process(&self.bugs, move || {
-            directory.local_bytes().map_err(DbError::from)
-        })
-        .await?;
-        Ok(LocalBytes {
-            namespaces: cache.namespaces,
-            pinning: cache.pinning,
-            library: walked.library,
-            before_reset,
-        })
-    }
-
-    /// The first measurement at once, then a new one after each write that
-    /// changes a namespace's counters or budget, and after each
-    /// `local_bytes_changed`. Partial downloads are measured with each but
-    /// start none.
-    pub fn subscribe_local_bytes(&self) -> LocalBytesWatch {
-        let mut changed = self.writer.local_bytes_changes.subscribe();
-        changed.mark_unchanged();
-        LocalBytesWatch {
-            database: self.clone(),
-            budgets: Some(Box::pin(next_result(self.subscribe_cache_budgets()))),
-            changed,
-        }
-    }
-
-    /// Say that the store's directory changed in a way its database doesn't
-    /// report, such as the archives resets kept going.
-    pub fn local_bytes_changed(&self) {
-        self.writer.local_bytes_changes.send_modify(|count| *count += 1);
-    }
-}
-
-type NextBudgets = std::pin::Pin<
-    Box<
-        dyn Future<
-                Output = (
-                    LiveQuery<Vec<NamespaceBytes>, DbError>,
-                    Option<Result<Vec<NamespaceBytes>, DbError>>,
-                ),
-            > + Send,
-    >,
->;
-
-/// The measurements of what the store keeps on this device, as they change.
-pub struct LocalBytesWatch {
-    database: StoreDatabase,
-    /// The pending read of the budgets query's next result, kept until the
-    /// result arrives, so a cancelled `next` loses nothing. The field is
-    /// `None` once the query has ended.
-    budgets: Option<NextBudgets>,
-    changed: tokio::sync::watch::Receiver<u64>,
-}
-
-impl LocalBytesWatch {
-    /// The first measurement at once, then the latest one after each change.
-    /// A reader slower than the changes gets one measurement of the state
-    /// now, not one per change. `None` once the store has closed.
-    pub async fn next(&mut self) -> Option<Result<LocalBytes, DbError>> {
-        let running = self.budgets.as_mut()?;
-        tokio::select! {
-            (budgets, run) = running => {
-                if run.is_none() {
-                    self.budgets = None;
-                    return None;
-                }
-                self.budgets = Some(Box::pin(next_result(budgets)));
-                if let Some(Err(error)) = run {
-                    return Some(Err(error));
-                }
-            }
-            changed = self.changed.changed() => changed.ok()?,
-        }
-        Some(self.database.local_bytes().await)
-    }
-
-    /// Stop measuring.
-    pub fn cancel(self) {}
 }
 
 #[cfg(test)]

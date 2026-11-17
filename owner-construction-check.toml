@@ -507,9 +507,6 @@ closed_session_types = [
 # the app, which keeps it as long as it follows the results (api.md E4).
 LiveQuery = "StoreDatabase"
 ReconfigurableLiveQuery = "StoreDatabase"
-# The measurements of what the store keeps on this device, repeated as the
-# cache's counters, a budget or the archives change (api.md E8).
-LocalBytesWatch = "StoreDatabase"
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"
@@ -1398,10 +1395,6 @@ tables = [
 # A reconfigurable live query makes the request state its handles share;
 # dropping the query closes it (api.md E4).
 "crates/sqlive/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
-# `next_result` takes a live query to the blocking pool and gives it back
-# with its result, so a caller that waits on one holds the query it got back
-# (api.md E4).
-"crates/coven-database/src/database_local_bytes.rs" = ["LocalBytesWatch::next"]
 # The views of a store's two database files' sizes, taken as it opens; the
 # followers that write each size a checkpoint sends, and each total of a
 # rebuild's store, until that store's close ends them; and the write each

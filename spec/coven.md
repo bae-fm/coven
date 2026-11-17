@@ -8834,11 +8834,11 @@ Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
 namespace: `pinned` is 3 GB, `cached` 1 GB. The partial downloads pins left
 are counted apart, as `pinning`. The app's SQL reads each namespace's budget,
 `cached`, `pinned` and `pinning` from the view `coven_cache_bytes`, so a live
-query sums them with its own rows. The store's own files in its directory,
-the database and its journals, the settings, the key files and coven's copies
-of app files, and the folder of a rebuild while one runs (§18.3), count as
-`library`. The app's SQL reads the store's database file's size and the
-input database's from the table `coven_library_bytes`, each as its last
+query sums them with its own rows.
+
+The store's own files count as `library`, the sum of `coven_library_bytes`,
+which holds one row for each part. `database` and `inputs` are the store's
+database file and the input database's, each at the size its last
 checkpoint left it: coven writes both as the store opens and each again
 after a checkpoint changes it. Until that write commits, the row holds the
 size before the checkpoint. The row `copies` holds the sizes of coven's
@@ -8850,21 +8850,25 @@ aren't. The row `rebuild` is there while a rebuild runs (§18.3): coven
 makes it, at no bytes, before the rebuild makes its folder, then writes
 the sum of the rebuild's store's own `coven_library_bytes` each time that
 sum changes. To remove the folder, coven moves it aside in one rename and
-deletes the row under the writer, then removes the folder. The WAL beside
-each file doesn't count: once a checkpoint lets it start over it shrinks
-back to 4 MiB (§4), it changes with every commit, and writing its size
-would itself add to it.
-One read, `local_bytes`, returns these from a
-single snapshot of the database and a walk of the store's directory. It leaves
-out the cache's folder, since the entries count it, and the archives resets
-kept, which it reports as `before_reset` while there is one (§19.3). A watch
-on it measures once at once, then again after each change to a namespace's
-counters or budget and after each deletion of the archives. A cached read's
-recency and a pin download's growing partial change neither, so they start no
-measurement; a reader slower than the changes gets one measurement of the
-state now ([api.md E8](api.md#e8-files-and-the-cache)). A rebuild's folder
-counts in full, its own cache folder included, since all of it is on the disk;
-the watch measures again when a rebuild opens, loads and ends.
+deletes the row under the writer, then removes the folder. The archives
+resets kept are in `coven_archive_bytes` instead, and their sum is
+`before_reset` while there is one (§19.3).
+
+The rest of the store's directory doesn't count. The WAL beside each
+database file shrinks back to 4 MiB once a checkpoint lets it start over
+(§4), changes with every commit, and writing its size would itself add to
+it. The settings, the key files and the lock files each hold a few
+kilobytes or nothing. The audience database a breaking migration's check
+uses (§18.3) and a replacement's loading installation (§19.3) exist only
+while coven can't open the store, so no figure could show them. A folder
+moved aside for removal holds what nothing names any more, until its
+removal ends.
+
+So the figures come from tables alone. One read, `local_bytes`, returns
+them from a single snapshot, and `subscribe_local_bytes` is a live query
+of the same read, which runs again after each write that changes a table
+it reads ([api.md E8](api.md#e8-files-and-the-cache)). A cached read's
+recency changes none of them, so it starts no run.
 
 #### 17.9 Uploads
 

@@ -166,7 +166,7 @@ pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
     StagedDigest, UnprovenFiles,
 };
-pub use database::local_bytes::{CacheBytes, LocalBytes, LocalBytesWatch, NamespaceBytes};
+pub use database::local_bytes::{CacheBytes, LocalBytes, NamespaceBytes};
 pub use database::{
     closed_sync_facts, discarded_operations, discarded_store_name, read_device_id_in_use,
     read_store_name, DatabaseBuilder, ExportStopped, Mode, ReadOnly, RebuildDatabase, RebuildError,

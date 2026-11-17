@@ -7442,18 +7442,18 @@ impl CovenHandle {
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
 
-    /// One measurement of what the store keeps on this device (§17.8,
-    /// §19.3): each declared namespace's budget and counters, the partial
-    /// downloads, and the bytes of the store's directory. The counters,
-    /// budgets and partials come from one read of the database; the
-    /// directory is walked after. A failed read or walk is the call's error.
+    /// What the store keeps on this device (§17.8, §19.3), from one read of
+    /// coven's tables: each declared namespace's budget and counters, the
+    /// partial downloads, the store's own files and the archives resets
+    /// kept. A failed read is the call's error.
     pub async fn local_bytes(&self) -> CovenResult<LocalBytes>;
 
-    /// A measurement at once, then a new one after each write that changes a
-    /// namespace's counters or budget, and after each
-    /// `delete_discarded_devices`. Partial downloads are measured with each
-    /// but start none, and neither does a cached read.
-    pub fn subscribe_local_bytes(&self) -> LocalBytesWatch;
+    /// The same read as a live query: it runs again after each write that
+    /// changes a table it reads, such as a namespace's counters or budget, a
+    /// partial download, a database file's size after a checkpoint, a copy
+    /// kept or released, a rebuild's store or an archive. A cached read's
+    /// recency starts no run.
+    pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes>;
 }
 
 /// What a store keeps on this device, in bytes on disk (§17.8, §19.3).
@@ -7462,9 +7462,9 @@ pub struct LocalBytes {
     pub namespaces: Vec<NamespaceBytes>,
     /// Partial downloads pins left, kept apart from the cache.
     pub pinning: u64,
-    /// The store's database and its journals, its settings and key files, and
-    /// coven's own copies of files: every file in the store's directory but
-    /// the cache and the archives.
+    /// The store's own files: its database files as their last checkpoints
+    /// left them, coven's copies of app files, and a rebuild's store while
+    /// one runs; the sum of `coven_library_bytes`.
     pub library: u64,
     /// The archives resets kept, while there is one.
     pub before_reset: Option<u64>,
@@ -7480,19 +7480,6 @@ pub struct NamespaceBytes {
     pub cached: u64,
     /// Pinned whole copies.
     pub pinned: u64,
-}
-
-/// The measurements of `subscribe_local_bytes`.
-pub struct LocalBytesWatch { /* private fields */ }
-
-impl LocalBytesWatch {
-    /// The first measurement at once, then the latest after each change. A
-    /// reader slower than the changes gets one measurement of the state now.
-    /// `None` once the store has closed.
-    pub async fn next(&mut self) -> Option<Result<LocalBytes, DbError>>;
-
-    /// Stops measuring.
-    pub fn cancel(self);
 }
 
 impl FileRef {

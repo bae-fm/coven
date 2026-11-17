@@ -101,7 +101,6 @@ impl StoreDatabase {
         };
         let opened =
             at_version(&inputs, first, &scratch, &clock, &ids).loading_store().open().await;
-        self.local_bytes_changed();
         let database = match opened {
             Ok(database) => database,
             Err(operation) => return Err(removed_after(self, operation.into()).await),
@@ -171,7 +170,6 @@ impl RebuildDatabase {
                 .collect(),
         };
         let loaded = database.load_through::<P, W>(reload, None, Some(rebuilding), None).await;
-        self.parent.local_bytes_changed();
         loaded
     }
 
@@ -188,7 +186,6 @@ impl RebuildDatabase {
             None => Ok(()),
         };
         let removed = self.parent.remove_rebuild().await;
-        self.parent.local_bytes_changed();
         match (closed, removed) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(cleanup)) => Err(cleanup.into()),

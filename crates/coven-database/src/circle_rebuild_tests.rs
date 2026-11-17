@@ -336,13 +336,13 @@ async fn writes_above_the_rebuilds_version_are_kept_as_lost_values_not_waited_fo
 async fn the_rebuilds_files_count_in_the_storage_figures_while_it_lives() {
     let store = TestStore::new();
     let app = open_app(&store).await;
-    let mut watch = app.subscribe_local_bytes();
-    let before = watch.next().await.unwrap().unwrap().library;
+    let mut bytes = app.subscribe_local_bytes::<DbError>();
+    let before = crate::tests::next(&mut bytes).await.library;
     let rebuild = app.open_rebuild(Audience::Circle(garden()), 1).await.unwrap();
-    let during = watch.next().await.unwrap().unwrap().library;
+    let during = crate::tests::next(&mut bytes).await.library;
     assert!(during > before, "the rebuild's database is on disk: {during} against {before}");
     rebuild.discard().await.unwrap();
-    let after = watch.next().await.unwrap().unwrap().library;
+    let after = crate::tests::next(&mut bytes).await.library;
     assert!(after < during, "its bytes go with it: {after} against {during}");
     app.close().await.unwrap();
 }

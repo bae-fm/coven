@@ -48,7 +48,6 @@ impl RebuildDatabase {
                 }
             },
         };
-        self.parent.local_bytes_changed();
         match result {
             Ok(database) => self.reopened(database).await,
             Err(operation) => Err(removed_after(&self.parent, operation).await),
@@ -88,7 +87,6 @@ impl RebuildDatabase {
                 .await
                 .map_err(RebuildError::from),
         };
-        self.parent.local_bytes_changed();
         match result {
             Ok(database) => self.reopened(database).await,
             Err(operation) => Err(removed_after(&self.parent, operation).await),

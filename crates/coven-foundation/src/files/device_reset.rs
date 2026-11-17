@@ -349,12 +349,6 @@ fn stays(name: &str) -> bool {
         || name.starts_with(ARCHIVE_PREFIX)
 }
 
-/// Whether `name` in the store's directory holds what resets kept: an
-/// archive, or the folder of those being removed.
-pub(super) fn is_kept_by_resets(name: &str) -> bool {
-    name == REMOVING || name.starts_with(ARCHIVE_PREFIX)
-}
-
 /// Move every local entry of `from` into `to`, then sync both directories.
 fn move_local_state(from: &Path, to: &Path) -> Result<(), FileError> {
     let entries = fs::read_dir(from)

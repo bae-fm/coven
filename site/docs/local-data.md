@@ -511,6 +511,26 @@ tables like these, so the list stays one query over the database:
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 
+The storage views and tables hold every byte coven keeps on the device
+outside the app's own files: `coven_cache_bytes` the cache's, by namespace;
+`coven_library_bytes` the store's own files, by part (`database` and `inputs`,
+the two database files as their last checkpoints left them, without their
+WALs; `copies`, coven's copies of app files; and `rebuild` while a rebuild
+runs); and `coven_archive_bytes` the old installations resets kept. A settings
+screen sums them in one live query:
+
+```rust
+let device_bytes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
+    Ok(sql.query_row(
+        "SELECT (SELECT coalesce(sum(cached+pinned+pinning),0) FROM coven_cache_bytes)
+              + (SELECT sum(bytes) FROM coven_library_bytes)
+              + (SELECT coalesce(sum(bytes),0) FROM coven_archive_bytes)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?)
+});
+```
+
 The file views and tables name a file by its id, the id the app's file
 reference columns hold, so a join reads `u.file = p.file`:
 

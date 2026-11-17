@@ -63,7 +63,7 @@ pub use coven_database::{
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
-pub use coven_database::{LocalBytes, LocalBytesWatch, NamespaceBytes};
+pub use coven_database::{LocalBytes, NamespaceBytes};
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::value::StorageTime;

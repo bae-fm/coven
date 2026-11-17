@@ -1,6 +1,6 @@
-//! What the store keeps on this device, measured (§17.8, §19.3): the
-//! directory's own files, the declared namespaces with their budgets, and
-//! the archives resets kept, as one measurement and as they change.
+//! What the store keeps on this device, read from coven's tables (§17.8,
+//! §19.3): the store's database files, the declared namespaces with their
+//! budgets, and the archives resets kept, as one read and as they change.
 use crate::*;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::test_utils::MemoryStorage;
@@ -86,6 +86,16 @@ impl Fixture {
     }
 }
 
+/// The live query's next value, failing the test if it doesn't come in time
+/// or comes as an error.
+async fn next(bytes: &mut LiveQuery<LocalBytes, CovenError>) -> LocalBytes {
+    tokio::time::timeout(coven_foundation::clock::HANG_GUARD, bytes.next_inline())
+        .await
+        .expect("the live query answers in time")
+        .expect("the live query is open")
+        .unwrap()
+}
+
 /// The sizes of every file under `path`.
 fn tree(path: &std::path::Path) -> u64 {
     let metadata = std::fs::symlink_metadata(path).unwrap();
@@ -95,24 +105,13 @@ fn tree(path: &std::path::Path) -> u64 {
     std::fs::read_dir(path).unwrap().map(|entry| tree(&entry.unwrap().path())).sum()
 }
 
-/// The sizes of the directory's files outside the cache and the archives.
+/// The sizes of the store's two database files on disk, without their WALs.
 fn library(folder: &std::path::Path) -> u64 {
-    std::fs::read_dir(folder)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            let name = path.file_name().unwrap().to_str().unwrap();
-            name != "cache"
-                && name != ".coven-replacement"
-                && !name.starts_with("discarded-device-")
-                && name != "removing-discarded-devices"
-        })
-        .map(|path| tree(&path))
-        .sum()
+    ["store.db", "inputs.db"].iter().map(|file| tree(&folder.join(file))).sum()
 }
 
 #[tokio::test]
-async fn the_library_is_the_directorys_files_outside_the_cache_and_the_archives() {
+async fn the_library_is_the_database_files_as_their_checkpoints_left_them() {
     let f = Fixture::new().await;
     let handle = f.open().await;
     std::fs::write(f.folder().join("cache").join("cached"), vec![0; 1000]).unwrap();
@@ -139,25 +138,23 @@ async fn the_archives_a_reset_kept_are_measured_until_they_are_deleted() {
     let measured = handle.local_bytes().await.unwrap();
     assert_eq!(measured.before_reset, Some(kept));
     assert_eq!(measured.library, library(&f.folder()), "the archives are not the library");
-    let mut watch = handle.subscribe_local_bytes();
-    let first = watch.next().await.unwrap().unwrap();
+    let mut bytes = handle.subscribe_local_bytes();
+    let first = next(&mut bytes).await;
     assert_eq!(first.before_reset, Some(kept));
     handle.delete_discarded_devices().await.unwrap();
-    let after = watch.next().await.unwrap().unwrap();
+    let after = next(&mut bytes).await;
     assert_eq!(after.before_reset, None);
     assert_eq!(handle.local_bytes().await.unwrap().before_reset, None);
-    watch.cancel();
     handle.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn a_budget_change_reaches_the_watch() {
+async fn a_budget_change_reaches_the_live_query() {
     let f = Fixture::new().await;
     let handle = f.open().await;
-    let mut watch = handle.subscribe_local_bytes();
-    assert_eq!(watch.next().await.unwrap().unwrap().namespaces[0].budget, 123);
+    let mut bytes = handle.subscribe_local_bytes();
+    assert_eq!(next(&mut bytes).await.namespaces[0].budget, 123);
     handle.set_cache_budget("files", 77).await.unwrap();
-    assert_eq!(watch.next().await.unwrap().unwrap().namespaces[0].budget, 77);
-    watch.cancel();
+    assert_eq!(next(&mut bytes).await.namespaces[0].budget, 77);
     handle.close().await.unwrap();
 }

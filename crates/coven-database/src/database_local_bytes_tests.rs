@@ -25,18 +25,18 @@ async fn coven_cache_bytes_reads_each_namespaces_counters() {
     let db = open(&store, Provenance::AppProvided).await;
     let mut rows: LiveQuery<_, DbError> = db.subscribe(cache_rows).process(Ok);
     let budget = 1 << 30;
-    assert_eq!(rows.next_inline().await.unwrap().unwrap(), [("files".into(), budget, 0, 0, 0)]);
+    assert_eq!(crate::tests::next(&mut rows).await, [("files".into(), budget, 0, 0, 0)]);
     let file = stored(&db, vec![5; 2 * 64 * 1024]).await;
     let owner = FileDatabase::new(db.clone());
     owner.cache_range(&file, 0, 1, FileName::new("chunk").unwrap(), vec![2; 100]).await.unwrap();
-    assert_eq!(rows.next_inline().await.unwrap().unwrap(), [("files".into(), budget, 100, 0, 0)]);
+    assert_eq!(crate::tests::next(&mut rows).await, [("files".into(), budget, 100, 0, 0)]);
     db.commit_writer(|sql, _| {
         cache::tests::partial(sql, "partial-a", "partial-a", 30);
         cache::tests::partial(sql, "partial-b", "partial-b", 12);
     });
-    assert_eq!(rows.next_inline().await.unwrap().unwrap(), [("files".into(), budget, 100, 0, 42)]);
+    assert_eq!(crate::tests::next(&mut rows).await, [("files".into(), budget, 100, 0, 42)]);
     db.write(|sql| sql.set_cache_budget("files", 1_000)).await.unwrap();
-    assert_eq!(rows.next_inline().await.unwrap().unwrap(), [("files".into(), 1_000, 100, 0, 42)]);
+    assert_eq!(crate::tests::next(&mut rows).await, [("files".into(), 1_000, 100, 0, 42)]);
     db.close().await.unwrap();
 }
 
@@ -74,7 +74,7 @@ async fn a_checkpoint_that_grows_the_database_file_writes_its_size() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let mut sizes: LiveQuery<_, DbError> = db.subscribe(database_bytes).process(Ok);
-    let opened = sizes.next_inline().await.unwrap().unwrap();
+    let opened = crate::tests::next(&mut sizes).await;
     assert_eq!(opened, file_size(&store));
     db.write(|sql| {
         for row in 0..64 {
@@ -91,7 +91,7 @@ async fn a_checkpoint_that_grows_the_database_file_writes_its_size() {
     assert_eq!(file_size(&store), opened);
     let before = sizes.runs().runs();
     db.checkpoint(crate::CheckpointMode::Truncate).await.unwrap();
-    let grown = sizes.next_inline().await.unwrap().unwrap();
+    let grown = crate::tests::next(&mut sizes).await;
     assert!(grown > opened, "{grown} > {opened}");
     assert_eq!(grown, file_size(&store));
     assert_eq!(sizes.runs().runs(), before + 1);
@@ -113,13 +113,13 @@ async fn a_kept_copy_counts_until_it_is_released() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let mut copies: LiveQuery<_, DbError> = db.subscribe(copy_bytes).process(Ok);
-    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 0);
+    assert_eq!(crate::tests::next(&mut copies).await, 0);
     stage(&db, vec![5; 3000], true).await.unwrap();
     let on_disk: u64 =
         owned_paths(&store).iter().map(|path| std::fs::metadata(path).unwrap().len()).sum();
     assert_eq!(on_disk, 3000);
-    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 3000);
+    assert_eq!(crate::tests::next(&mut copies).await, 3000);
     complete_uploads(&db).await;
-    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 0);
+    assert_eq!(crate::tests::next(&mut copies).await, 0);
     db.close().await.unwrap();
 }

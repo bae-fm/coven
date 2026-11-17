@@ -12,10 +12,7 @@ impl CovenHandle {
     /// its error and leaves the rest for the next call, which removes what
     /// remains; with none left it succeeds.
     pub async fn delete_discarded_devices(&self) -> CovenResult<()> {
-        let result = self.database.delete_discarded_devices().await;
-        // Whatever it removed before a failure changes what the store keeps.
-        self.database.local_bytes_changed();
-        result.map_err(|error| match error {
+        self.database.delete_discarded_devices().await.map_err(|error| match error {
             DbError::Disk(file) => CovenError::File(file),
             error => error.into(),
         })
