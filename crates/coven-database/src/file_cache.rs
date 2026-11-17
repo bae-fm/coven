@@ -327,32 +327,33 @@ pub(crate) fn declare_budgets(
     db.transaction(|db| {
         for namespace in namespaces {
             db.execute(
-                "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
+                "INSERT INTO _coven_cache_budgets(namespace,budget) VALUES(?1,?2)
                  ON CONFLICT(namespace) DO NOTHING",
-                (&namespace.name, namespace.cache_budget.to_be_bytes().as_slice()),
+                (&namespace.name, stored_budget(namespace.cache_budget)?),
             )?;
         }
         Ok(())
     })
 }
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
+/// A budget as its table stores it: SQLite's integers stop at `i64::MAX`
+/// bytes, so a larger budget is refused as `TooLarge`.
+fn stored_budget(bytes: u64) -> Result<i64, DbError> {
+    crate::sqlite::integer("cache budget", bytes)
+}
 pub(super) fn budget(db: &StoreSql, namespace: &str) -> Result<u64, DbError> {
     let bytes = db
-        .query("SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
-            r.get::<_, Vec<u8>>(0)
+        .query("SELECT budget FROM _coven_cache_budgets WHERE namespace=?1", [namespace], |r| {
+            r.get::<_, i64>(0)
         })?
         .pop()
         .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
-    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
+    u64::try_from(bytes).map_err(|_negative| DbError::DamagedDatabase)
 }
 /// Set a declared namespace's budget, in the transaction under way.
 pub(crate) fn set_budget(db: &StoreSql, namespace: &str, bytes: u64) -> Result<(), DbError> {
     let changed = db.execute(
-        "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
-        (namespace, bytes.to_be_bytes().as_slice()),
+        "UPDATE _coven_cache_budgets SET budget=?2 WHERE namespace=?1",
+        (namespace, stored_budget(bytes)?),
     )?;
     if changed == 0 {
         return Err(DbError::UndeclaredNamespace { namespace: namespace.to_owned() });

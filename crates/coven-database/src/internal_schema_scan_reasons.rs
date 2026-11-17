@@ -41,6 +41,9 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z" | "w") => Some(
             "the view lists every queued file, which its link to its upload enumerates; the pause and setting tables hold at most one row each",
         ),
+        ("coven_cache_bytes", "SELECT * FROM coven_cache_bytes", "b" | "coven_cache_bytes") => {
+            Some("the view lists every namespace the app declared, each grouped with its partials")
+        }
         ("coven_files", "SELECT * FROM coven_files", "coven_files") => {
             Some("the table lists every file this device has a record of")
         }
@@ -92,7 +95,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         }
         (
             "database_local_bytes.rs",
-            "SELECT namespace,bytes,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
+            "SELECT namespace,budget,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
             "_coven_cache_budgets",
         ) => Some("every namespace's budget and counters, one row per namespace the app declared"),
         (

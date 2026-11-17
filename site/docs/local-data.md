@@ -497,6 +497,7 @@ tables like these, so the list stays one query over the database:
 | `coven_uploads` | file waiting in this device's upload queue | `file`, `position`, `paused`, `metered`, `retry_at`, `pending`, `bytes_confirmed`, `bytes_total`, `sending`, `move` |
 | `coven_sending` | queued file this process is sending now | `file`, `position` |
 | `coven_upload_pause` | store, always exactly one row | `paused` |
+| `coven_cache_bytes` | namespace the app has declared | `namespace`, `budget`, `cached`, `pinned`, `pinning` |
 | `coven_network` | store, always exactly one row | `usable`, `metered`, `unmetered_only` |
 | `coven_sync_state` | store, always exactly one row | `state`, `last_synced`, `pending`, `detail` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |

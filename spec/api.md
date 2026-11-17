@@ -2732,7 +2732,8 @@ pub struct Namespace { /* private fields */ }
 
 impl Namespace {
     /// A namespace of this kind. The budget applies when the namespace is
-    /// first declared; `set_cache_budget` changes it after (E8).
+    /// first declared; `set_cache_budget` changes it after (E8). Opening
+    /// refuses a budget over `i64::MAX` bytes with `TooLarge`.
     pub fn new(name: impl Into<String>, kind: Provenance, cache_budget: u64) -> Self;
 
     /// The name exactly as declared.
@@ -3846,6 +3847,11 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
+| `coven_cache_bytes`: each namespace the app has declared in this store, one a later version no longer declares included, and its cache on this device ([§17.8](coven.md#178-cache-and-pinning)) | `namespace` | the namespace's name |
+| | `budget` | its budget in bytes, declared or since set (`set_cache_budget`) |
+| | `cached` | the bytes of its cached chunks and headers, which the budget counts |
+| | `pinned` | the bytes of its pinned whole copies, which the budget doesn't count |
+| | `pinning` | the bytes of the partial downloads stopped pins left in it, which the cache neither counts nor evicts |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
 | | `metered` | 1 while that network is metered, and while coven can't tell after the platform failed to answer since opening; 0 with none, and where the platform never tells; never stored |
 | | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |
@@ -7266,7 +7272,8 @@ impl CovenWrite<'_> {
     /// recently read first, until the unpinned ones are within it; pinned
     /// bytes don't count toward it. The evicted bytes go once the write
     /// has committed. An undeclared namespace fails with
-    /// `UndeclaredNamespace`.
+    /// `UndeclaredNamespace`, and a budget over `i64::MAX` bytes, past
+    /// SQLite's integers, with `TooLarge`.
     pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
 }
 

@@ -475,12 +475,13 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
 which files each move to the cloud holds, which files this device keeps
-pinned, what can't proceed, how sync is going,
-how the app's admin operations ended, who the members are, and which circles
-this member is in.
-So the app's SQL can read it through thirteen views, `coven_uploads`,
+pinned, how many bytes each namespace's cache holds, what can't proceed, how
+sync is going, how the app's admin operations ended, who the members are, and
+which circles this member is in.
+So the app's SQL can read it through fourteen views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
-`coven_sync_state`, `coven_invites`, `coven_operations`, `coven_user_files`,
+`coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
+`coven_user_files`,
 `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
 and eight tables,
 `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
@@ -8831,9 +8832,12 @@ entries: `cached`, the bytes of its chunks and headers, which the budget
 counts, and `pinned`, the bytes of its whole copies, which it doesn't.
 Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
 namespace: `pinned` is 3 GB, `cached` 1 GB. The partial downloads pins left
-are counted apart, as `pinning`, and the store's own files in its directory,
+are counted apart, as `pinning`. The app's SQL reads each namespace's budget,
+`cached`, `pinned` and `pinning` from the view `coven_cache_bytes`, so a live
+query sums them with its own rows. The store's own files in its directory,
 the database and its journals, the settings, the key files and coven's copies
-of app files, and the folder of a rebuild while one runs (§18.3), as `library`.
+of app files, and the folder of a rebuild while one runs (§18.3), count as
+`library`.
 One read, `local_bytes`, returns these from a
 single snapshot of the database and a walk of the store's directory. It leaves
 out the cache's folder, since the entries count it, and the archives resets
@@ -12344,14 +12348,14 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
-  `coven_sync_state`, `coven_invites`, `coven_operations`, `coven_user_files`,
-  `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`
-  ([api.md E4](api.md#e4-reading)). Each reads every table it reads through
-  a column, in a join or a subquery: SQLite names the view to the authorizer
-  for each column the view reads, and when a statement only counts a table's
-  rows, SQLite reports that table without the view's name. `coven_pins`,
-  `coven_pin_requests`, `coven_moves`, `coven_upload_queue` and
-  `coven_pending` have the same prefix: tables
+  `coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
+  `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
+  `coven_circle_members` ([api.md E4](api.md#e4-reading)). Each reads every
+  table it reads through a column, in a join or a subquery: SQLite names the
+  view to the authorizer for each column the view reads, and when a statement
+  only counts a table's rows, SQLite reports that table without the view's
+  name. `coven_pins`, `coven_pin_requests`, `coven_moves`,
+  `coven_upload_queue` and `coven_pending` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source`, from
   `_coven_pin_requests`, from `_coven_move_files` with each move's state, from
   the files each upload stores, and from the internal view

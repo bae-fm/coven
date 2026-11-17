@@ -82,6 +82,7 @@ async fn only_the_spec_tables_are_created() {
                 ("table".into(), "coven_retry_effect".into()),
                 ("table".into(), "coven_sync_status".into()),
                 ("table".into(), "coven_upload_queue".into()),
+                ("view".into(), "coven_cache_bytes".into()),
                 ("view".into(), "coven_circle_members".into()),
                 ("view".into(), "coven_circles".into()),
                 ("view".into(), "coven_devices".into()),

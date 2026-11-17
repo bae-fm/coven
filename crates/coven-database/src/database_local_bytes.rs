@@ -50,18 +50,14 @@ fn unsigned(value: i64) -> Result<u64, DbError> {
 }
 
 /// Every namespace's budget and counters, by name.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 pub(crate) fn budgets(db: &StoreSql) -> Result<Vec<NamespaceBytes>, DbError> {
     db.query(
-        "SELECT namespace,bytes,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
+        "SELECT namespace,budget,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
         [],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, i64>(3)?,
             ))
@@ -71,7 +67,7 @@ pub(crate) fn budgets(db: &StoreSql) -> Result<Vec<NamespaceBytes>, DbError> {
     .map(|(namespace, budget, cached, pinned)| {
         Ok(NamespaceBytes {
             namespace,
-            budget: u64::from_be_bytes(budget.try_into().map_err(|_| DbError::DamagedDatabase)?),
+            budget: unsigned(budget)?,
             cached: unsigned(cached)?,
             pinned: unsigned(pinned)?,
         })
@@ -214,3 +210,7 @@ impl LocalBytesWatch {
     /// Stop measuring.
     pub fn cancel(self) {}
 }
+
+#[cfg(test)]
+#[path = "database_local_bytes_tests.rs"]
+mod tests;

@@ -39,7 +39,7 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
            SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
                   65536,i,
                   CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
-         INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
+         INSERT INTO _coven_cache_budgets(namespace,budget) SELECT 'audience_' || i,1048576 FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET budget=excluded.budget;
          INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
          INSERT INTO _coven_cache_partials(namespace,object_path,path,size)
            SELECT audience,'partial_' || i,'partial_' || i,65536 FROM fixture;",

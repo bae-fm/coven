@@ -17,7 +17,7 @@
 /// `internal_schema_moves.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`).
-pub(crate) const READABLE: [&str; 21] = [
+pub(crate) const READABLE: [&str; 22] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -25,6 +25,7 @@ pub(crate) const READABLE: [&str; 21] = [
     "coven_network",
     "coven_sending",
     "coven_downloading",
+    "coven_cache_bytes",
     super::UPLOAD_QUEUE,
     super::PINS,
     super::PIN_REQUESTS,
@@ -125,6 +126,17 @@ pub(super) const SCHEMA: &str = concat!(
         FROM json_each(_coven_downloading_objects()) AS j
         CROSS JOIN _coven_stored_files AS f
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
+    // Each namespace's cache on this device, in bytes (§17.8): its budget,
+    // its chunks and headers (`cached`), which the budget counts, its
+    // pinned whole copies (`pinned`), which it doesn't, and the partial
+    // downloads pins left in it (`pinning`), which the cache neither counts
+    // nor evicts. Each namespace the app has declared in this store has a
+    // row, one a later version no longer declares included.
+    "CREATE VIEW coven_cache_bytes(namespace,budget,cached,pinned,pinning) AS
+        SELECT b.namespace,b.budget,b.cached,b.pinned,coalesce(sum(p.size),0)
+        FROM _coven_cache_budgets AS b
+        LEFT JOIN _coven_cache_partials AS p ON p.namespace=b.namespace
+        GROUP BY b.namespace;",
     // This device's invites that haven't ended, in the order they were made,
     // from the operations journal: each from the write that makes it, while
     // its share is recorded and its access granted, its request is awaited
