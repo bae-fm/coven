@@ -462,9 +462,8 @@ fn follow_row(device: &Device) -> coven_database::test_utils::Followed<ShownRow,
 }
 
 /// When storage fails a whole pass with a failure that names a state,
-/// `coven_sync_state` reads as that state: its kind, the pass as its cause,
-/// no pending record, and the last synced time the status row keeps
-/// (§19.1).
+/// `coven_sync_state` shows that state: its kind, the pass as its cause, no
+/// pending record, and the last synced time the status row keeps (§19.1).
 #[tokio::test]
 async fn the_view_shows_each_state_a_pass_failure_names() {
     for (failure, kind) in [
@@ -511,7 +510,7 @@ async fn the_view_shows_each_state_a_pass_failure_names() {
     }
 }
 
-/// Storage refuses Ana's cover, a bound file, for want of access: the
+/// Storage refuses Ana's cover, a bound file, with a permission error: the
 /// upload's pending record names no access, and `coven_sync_state.pending`
 /// gives the record's position, which a join to `coven_pending` reads
 /// (§19.1).

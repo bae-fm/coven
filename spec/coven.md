@@ -10417,14 +10417,15 @@ The state is one of, in the order an app lists them:
   failed until the store reopens, its queued files waiting with sync not
   running ([api.md E15](api.md#e15-background-work-panics-and-shutdown)).
 
-Coven computes the state each time the app reads it and never stores it: the
-app reads it from `coven_sync_state` (§4), whose function runs coven's own
-computation over facts that are each true on their own: whether a location is recorded and its
-credentials held, how the last pass ended, what the running pass moved last,
-each bound file in the upload queue, whether the send queue holds a write, and
-the pending records the state reads: those about the sequence,
-a bound file, coven's own operations and the connection's, never one about
-a trailing file, its move, a download or a pin coven keeps. Each fact names one
+Coven computes the state each time the app reads it and never stores it. The
+app reads the state from `coven_sync_state` (§4), whose function runs coven's
+own computation over facts that are each true on their own. The facts are
+whether a location is recorded and its credentials held, how the last pass
+ended, what the running pass moved last, each bound file in the upload queue,
+whether the send queue holds a write, and the pending records the state
+reads. Those records are the ones about the sequence, a bound file, coven's
+own operations and the connection's, never one about a trailing file, its
+move, a download or a pin coven keeps. Each fact names one
 candidate state or none, and when several hold, the one shown is the first
 of: removed, needs reset, update needed, signed out, no access, folder
 missing, clock wrong, storage full, offline with unsent changes, offline,

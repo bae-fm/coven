@@ -20,8 +20,8 @@
 //! upload's phase reads them beside the facts (`TransferHolds`).
 //!
 //! A live query over these facts runs again whenever one of them changes:
-//! the files in flight are read through `coven_sending`, the view their
-//! starts and ends change (`transfers_in_flight.rs`). `facts!` reads each
+//! `facts!` reads the files in flight through `coven_sending`, the view
+//! that a transfer's start and end change (`transfers_in_flight.rs`). `facts!` reads each
 //! table through a column and never only counts its rows, so that SQLite
 //! names the view to the authorizer for each read the view makes
 //! (`internal_schema_views.rs`).
