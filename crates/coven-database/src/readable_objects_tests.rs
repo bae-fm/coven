@@ -1,15 +1,15 @@
 use super::*;
-use crate::internal_schema::{BEHIND_READABLE, FOLLOWED, READABLE};
+use crate::internal_schema::{FOLLOWED, OUTSIDE_STORE_TABLES, READABLE};
 use crate::tests::TestStore;
 
-/// Each object of the readable objects and the tables behind them, as
+/// Each object of the readable objects and of `OUTSIDE_STORE_TABLES`, as
 /// `(type, name, sql)`, with no SQL for an index SQLite made for a
 /// constraint, and each followed table's row count, in order.
 type Readable = (Vec<(String, String, Option<String>)>, Vec<(String, i64)>);
 
 /// The tables, indexes and views SQLite keeps for one object, leaving out
 /// triggers: in a store, coven's triggers that keep the followed tables are
-/// on the tables behind the views.
+/// on the tables the views read.
 const OBJECTS: &str = "SELECT type,name,sql FROM sqlite_schema
     WHERE type IN ('table','index','view') AND tbl_name=?1 ORDER BY type,name";
 
@@ -32,14 +32,15 @@ fn outside_store() -> Connection {
     connection
 }
 
-/// Every readable object, and every table behind one.
+/// Every readable object, and every table in `OUTSIDE_STORE_TABLES`.
 fn readable_names() -> impl Iterator<Item = &'static str> {
-    READABLE.into_iter().chain(BEHIND_READABLE)
+    READABLE.into_iter().chain(OUTSIDE_STORE_TABLES)
 }
 
-/// Each readable object, and each table of coven's own behind one, is made
-/// outside a store as a new store holds it: its columns, constraints and
-/// indexes, and the one row of the sync status and the retry effect.
+/// `make_readable_objects` makes each readable object, and each table of
+/// coven's own it makes them with, outside a store as a new store holds it:
+/// its columns, constraints and indexes, and the one row of the sync status
+/// and the retry effect.
 #[tokio::test]
 async fn the_readable_objects_are_made_as_a_store_holds_them() {
     let outside = outside_store();
@@ -80,7 +81,7 @@ async fn the_readable_objects_are_made_as_a_store_holds_them() {
         .filter(|(kind, ..)| kind != "index")
         .map(|(_, name, _)| name.as_str())
         .collect();
-    assert_eq!(made.len(), READABLE.len() + BEHIND_READABLE.len());
+    assert_eq!(made.len(), READABLE.len() + OUTSIDE_STORE_TABLES.len());
 }
 
 /// App SQL reads every readable object outside a store: each view finds the

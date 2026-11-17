@@ -677,17 +677,17 @@ retry that fails the same way with a different error changes the `cause` while
 the record stays as it was, and the live query runs again for it.
 
 An app's tests can run its schema outside a store, on a connection they open
-themselves. Ben's music app keeps the track of each album whose move failed
-on a changed original in a local table, which a trigger on `coven_pending`
-fills by joining `coven_user_files`. Without coven's objects on that
-connection, the trigger fails, since it reads a view that isn't there. So
-with coven's test-utils feature, `make_readable_objects` makes every table
-and view app SQL reads, with the tables of coven's own that the views read,
-and registers coven's SQL functions, each as a store makes it
-([api.md E4](api.md#e4-reading)). Nothing of coven's writes them there: Ben's
-test writes the rows coven would in the tables his triggers follow, and
-records each track's original with `record_user_file`, which writes what
-staging the original writes.
+themselves. Ben's music app has a local table of the tracks whose move failed
+because their original changed. A trigger on `coven_pending` fills it by
+joining `coven_user_files`. Without coven's objects on that connection, the
+trigger fails, since it reads a view that isn't there. So with coven's
+test-utils feature, `make_readable_objects` makes every table and view app
+SQL reads, with the tables of coven's own that the views read, and registers
+coven's SQL functions, each as a store makes it
+([api.md E4](api.md#e4-reading)). coven writes no rows on that connection.
+Ben's test writes the rows coven would write in the tables his triggers fire
+on, and records each track's original with `record_user_file`, which writes
+what staging the original writes.
 
 A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a

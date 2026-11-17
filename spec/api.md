@@ -3772,18 +3772,18 @@ let moved = handle
   feature, `make_readable_objects` makes every object app SQL reads, on a
   connection a test opened itself, outside any store, as every store makes
   it: the eight tables above, `coven_sync_status` and `coven_retry_effect`
-  with their one row, and the thirteen views, with the tables of coven's own
-  that they read and that the test writes below write, empty. The function
-  registers coven's SQL functions on the connection too, `coven_key`,
-  `coven_file_device` and `coven_path_text` among them, with the device the
-  test names as this device. Nothing is being transferred there and nothing
-  watches the network, so the transfer and network views show what a
+  with their one row, and the thirteen views. The function also makes the
+  tables of coven's own that the views read or that the test writes below
+  fill, all empty. The function registers coven's SQL functions there too,
+  `coven_key`, `coven_file_device` and `coven_path_text` among them, with
+  the device the test names as this device. coven transfers no files there
+  and watches no network, so the transfer and network views show what a
   read-only handle shows. `coven_sync_state` shows the state that sync's own
   computation, the one every store registers, gives from the facts there. A
   test that runs the app's schema there calls it first, so the app's
   triggers and views apply and run as in a store, and the app keeps no copy
-  of coven's objects or functions that could fall behind them. Nothing of
-  coven's writes the objects there. Of coven's triggers that keep the eight
+  of coven's objects or functions that could fall behind them. coven writes
+  no rows on that connection. Of coven's triggers that keep the eight
   tables in a store, those that keep `coven_pending` run there too: the
   test writes the rows coven would in the other seven. The test gives
   coven's views and `coven_pending` their rows with test writes, each
@@ -3808,8 +3808,8 @@ let moved = handle
     that table see it.
 
   Ben's test of his invite screen records Dan's invite waiting with his
-  request, and a pending record holding Carol's invite for want of storage,
-  and checks the screen's rows.
+  request, and a pending record that holds Carol's invite because no
+  storage is connected, and checks the screen's rows.
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -4335,8 +4335,8 @@ pub enum RecordedInviteStage {
 #[cfg(feature = "test-utils")]
 pub enum RecordedJoiner { NewPerson(String), Recovering }
 
-/// Records on a connection `make_readable_objects` prepared the original at
-/// `path`, modified at `modified_at` and holding `bytes`, as `file`'s, as
+/// Records the original of `file` at `path`, modified at `modified_at` and
+/// holding `bytes`, on a connection `make_readable_objects` prepared, as
 /// staging it for the cloud records it (E4).
 #[cfg(feature = "test-utils")]
 pub fn record_user_file(

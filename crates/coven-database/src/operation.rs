@@ -195,10 +195,13 @@ pub fn journal_outside_store(
 }
 
 /// End the operation `id` on `connection`, a test's connection outside any
-/// store, with `outcome`: as `finish_with_outcome` does for an operation
-/// `coven_operations` lists, or, given its `kind`, as an invite a refusal
-/// ends lists its outcome first (`list_outcome`). Outside a store no
-/// operation holds a claim, so nothing checks one.
+/// store, with the outcome `listing` holds. For an operation that
+/// `coven_operations` lists already, the function sets its outcome, as
+/// `finish_with_outcome` does. For one it doesn't list, the function lists
+/// the outcome under `kind` first, as `list_outcome` does when a refusal
+/// ends an invite. The function then deletes the operation's pending record
+/// and its journal row, as `finish` does. Outside a store no operation
+/// holds a claim, so the function checks none.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn finish_outside_store(
     connection: &sqlive::rusqlite::Connection,

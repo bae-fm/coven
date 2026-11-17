@@ -255,7 +255,8 @@ const CLEAR_OPERATION: &str = "DELETE FROM _coven_pending WHERE operation=?1";
 
 /// Clear the pending record of the operation `id` on `connection`, a test's
 /// connection outside any store, as `clear_operation` does. No test write
-/// makes a retry wait outside a store, so none is cleared.
+/// makes a retry wait outside a store, so this function clears no retry
+/// wait.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn clear_operation_outside_store(
     connection: &sqlive::rusqlite::Connection,

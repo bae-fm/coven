@@ -278,15 +278,17 @@ pub(crate) fn initial_schema() -> String {
     sql
 }
 
-/// Coven's own tables that `readable_schema` makes: each table coven's
-/// views read; `_coven_user_chunks`, which recording a user's original
-/// writes beside the original's row (`user_file::record_original!`);
-/// `_coven_write_pause`, which journaling an operation that pauses writes
-/// writes (`operation::journal!`); and `_coven_moves` and
-/// `_coven_pin_requests`, which the pending records, the uploads and the
-/// retry waits reference, so that their foreign keys hold.
+/// Coven's own tables that `readable_schema` makes:
+/// - each table coven's views read;
+/// - `_coven_user_chunks`, which `user_file::record_original!` writes when
+///   it records a user's original;
+/// - `_coven_write_pause`, which `operation::journal!` writes when it
+///   journals an operation that pauses writes;
+/// - `_coven_moves` and `_coven_pin_requests`, which the pending records,
+///   the uploads and the retry waits reference: their foreign keys need
+///   the tables.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) const BEHIND_READABLE: [&str; 20] = [
+pub(crate) const OUTSIDE_STORE_TABLES: [&str; 20] = [
     "_coven_user_files",
     "_coven_user_chunks",
     "_coven_write_pause",
@@ -310,24 +312,26 @@ pub(crate) const BEHIND_READABLE: [&str; 20] = [
 ];
 
 /// The SQL that makes each object app SQL may read as every store makes it,
-/// with the tables of coven's own behind them (`BEHIND_READABLE`), for an
-/// app's test outside any store (`test_utils::make_readable_objects`). Of
-/// coven's triggers that keep the followed tables, the SQL makes those that
-/// keep `coven_pending`, since a test saves pending records as a store does
-/// (`pending::save_outside_store`), and those that a table it makes holds in
-/// its own SQL, such as `_coven_pin_requests`'s, which no test write fires:
-/// outside a store the test writes the other followed tables' rows.
+/// and the tables of coven's own in `OUTSIDE_STORE_TABLES`, for an app's
+/// test outside any store (`test_utils::make_readable_objects`).
+///
+/// The SQL makes coven's triggers that keep `coven_pending`, because a test
+/// saves pending records as a store does (`pending::save_outside_store`).
+/// It also makes each trigger that a made table's own SQL holds, such as
+/// those of `_coven_pin_requests`; no test write fires them. The SQL makes
+/// no other trigger that keeps a followed table: outside a store the test
+/// writes those tables' rows.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn readable_schema() -> String {
     let mut sql = String::new();
-    macro_rules! behind_readable {
+    macro_rules! outside_store_table {
         ($table:ident, $sql:literal) => {
-            if BEHIND_READABLE.contains(&stringify!($table)) {
+            if OUTSIDE_STORE_TABLES.contains(&stringify!($table)) {
                 sql.push_str($sql);
             }
         };
     }
-    coven_tables!(behind_readable);
+    coven_tables!(outside_store_table);
     for followed in FOLLOWED {
         sql.push_str(followed.table);
     }

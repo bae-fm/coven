@@ -312,7 +312,7 @@ pub struct RecordedInvite {
 /// Where an invite a test records is, as `coven_invites.stage` names it.
 #[cfg(any(test, feature = "test-utils"))]
 pub enum RecordedInviteStage {
-    /// Checked and granted before its code shows.
+    /// coven checks the invite and grants its access before its code shows.
     Granting,
     /// Its code shows, and the request that arrived, if any, waits for the
     /// app.
