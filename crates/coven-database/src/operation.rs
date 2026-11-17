@@ -115,6 +115,39 @@ const SET_OUTCOME: &str = "UPDATE _coven_app_operations SET outcome=?2 WHERE ope
 /// Deletes the journal row of the operation with this id.
 const DELETE: &str = "DELETE FROM _coven_operations WHERE id=?1";
 
+/// Delete the journal row of the operation `$id` on `$db` and its pending
+/// record, returning how many journal rows the statement deleted. The
+/// caller passes whether the operation's claim is still open as `$claimed`,
+/// which ends the call with an invariant failure, and its pending record's
+/// clearing as `$clear_pending`. `finish` and `finish_outside_store` both
+/// expand this one body.
+macro_rules! finish {
+    ($db:expr, $id:expr, $claimed:expr, $clear_pending:expr) => {{
+        let (db, id): (_, OperationId) = ($db, $id);
+        if $claimed {
+            return Err(DbError::Invariant { what: "an operation ends after its claim" });
+        }
+        $clear_pending?;
+        db.execute(DELETE, [id.0])?
+    }};
+}
+
+/// Set the outcome of the listed operation `$id` on `$db` to `$outcome`,
+/// then end it with `$finish`, which returns how many journal rows it
+/// deleted. An operation that had ended already fails with
+/// `OperationChanged`. `finish_with_outcome` and `finish_outside_store` both
+/// expand this one body.
+macro_rules! finish_with_outcome {
+    ($db:expr, $id:expr, $outcome:expr, $finish:expr) => {{
+        let (db, id, outcome): (_, OperationId, &crate::OperationOutcome) = ($db, $id, $outcome);
+        db.execute(SET_OUTCOME, (id.0, outcome.encode()))?;
+        if $finish != 1 {
+            return Err(DbError::OperationChanged(id));
+        }
+        Ok(())
+    }};
+}
+
 pub(crate) fn insert(db: &StoreSql, new: &NewOperation) -> Result<OperationId, DbError> {
     journal!(db, new)
 }
@@ -172,19 +205,26 @@ pub(crate) fn finish_outside_store(
     id: OperationId,
     listing: OutcomeListing<'_>,
 ) -> Result<(), DbError> {
+    let finished = || -> Result<usize, DbError> {
+        Ok(finish!(
+            connection,
+            id,
+            false,
+            crate::pending::clear_operation_outside_store(connection, id)
+        ))
+    };
     match listing {
         OutcomeListing::Listed(outcome) => {
-            connection.execute(SET_OUTCOME, (id.0, outcome.encode()))?
+            finish_with_outcome!(connection, id, outcome, finished()?)
         }
         OutcomeListing::Unlisted { kind, outcome } => {
-            connection.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?
+            connection.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?;
+            if finished()? != 1 {
+                return Err(DbError::OperationChanged(id));
+            }
+            Ok(())
         }
-    };
-    crate::pending::clear_operation_outside_store(connection, id)?;
-    if connection.execute(DELETE, [id.0])? != 1 {
-        return Err(DbError::OperationChanged(id));
     }
-    Ok(())
 }
 
 /// How an operation a test ends outside a store reaches `coven_operations`:
@@ -330,11 +370,7 @@ pub(crate) fn finish_with_outcome(
     id: OperationId,
     outcome: &crate::OperationOutcome,
 ) -> Result<(), DbError> {
-    db.execute(SET_OUTCOME, (id.0, outcome.encode()))?;
-    if finish(db, id)? != 1 {
-        return Err(DbError::OperationChanged(id));
-    }
-    Ok(())
+    finish_with_outcome!(db, id, outcome, finish(db, id)?)
 }
 
 /// Delete the row and its condition, returning how many rows were deleted.
@@ -342,11 +378,7 @@ pub(crate) fn finish_with_outcome(
 /// that claim, and the device, one claim at a time, would claim no slot
 /// again (§5.1).
 pub(crate) fn finish(db: &StoreSql, id: OperationId) -> Result<usize, DbError> {
-    if crate::claim::held_by(db, id)? {
-        return Err(DbError::Invariant { what: "an operation ends after its claim" });
-    }
-    crate::pending::clear_operation(db, id)?;
-    Ok(db.execute(DELETE, [id.0])?)
+    Ok(finish!(db, id, crate::claim::held_by(db, id)?, crate::pending::clear_operation(db, id)))
 }
 
 /// End every operation an app's write journaled that still runs, and every
