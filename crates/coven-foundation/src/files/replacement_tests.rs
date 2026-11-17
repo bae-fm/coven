@@ -496,14 +496,13 @@ async fn an_archive_leaves_the_directory_in_one_rename_before_its_files_go() {
     replacement.swap("Household".into()).unwrap();
     let archived = archive(&f, &replacement);
     let name = replacement.discarded_device_name();
-    fn tree(path: &std::path::Path) -> u64 {
-        if path.is_file() {
-            return std::fs::metadata(path).unwrap().len();
-        }
-        std::fs::read_dir(path).unwrap().map(|entry| tree(&entry.unwrap().path())).sum()
-    }
-    let size = tree(&archived);
-    assert!(size > 0);
+    // The test writes the archive's files itself, one of them in a folder,
+    // so it knows the size they add up to.
+    std::fs::remove_dir_all(&archived).unwrap();
+    std::fs::create_dir_all(archived.join("cache")).unwrap();
+    std::fs::write(archived.join("store.db"), vec![1; 1000]).unwrap();
+    std::fs::write(archived.join("cache").join("chunk"), vec![2; 234]).unwrap();
+    let size = 1234;
     assert_eq!(f.store.discarded_devices().unwrap(), std::slice::from_ref(&name));
     assert_eq!(f.store.discarded_device_size(&name).unwrap(), size);
     assert!(f.store.retire_discarded_device(&name).unwrap());
