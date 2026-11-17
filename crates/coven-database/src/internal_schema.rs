@@ -314,7 +314,7 @@ pub(crate) const BEHIND_READABLE: [&str; 20] = [
 /// app's test outside any store (`test_utils::make_readable_objects`). Of
 /// coven's triggers that keep the followed tables, the SQL makes those that
 /// keep `coven_pending`, since a test saves pending records as a store does
-/// (`test_utils::record_pending`), and those that a table it makes holds in
+/// (`pending::save_outside_store`), and those that a table it makes holds in
 /// its own SQL, such as `_coven_pin_requests`'s, which no test write fires:
 /// outside a store the test writes the other followed tables' rows.
 #[cfg(any(test, feature = "test-utils"))]

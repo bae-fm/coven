@@ -203,9 +203,9 @@ pub(crate) fn save<P: PendingValue>(db: &StoreSql, record: &P) -> Result<(), DbE
 }
 
 /// Save `record` on `connection`, a test's connection outside any store, as
-/// `save` does (`test_utils::record_pending`).
+/// `save` does, so that coven's triggers show it in `coven_pending`.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn save_outside_store<P: PendingValue>(
+pub fn save_outside_store<P: PendingValue>(
     connection: &sqlive::rusqlite::Connection,
     record: &P,
 ) -> Result<(), DbError> {

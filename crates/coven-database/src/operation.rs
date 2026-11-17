@@ -180,9 +180,9 @@ pub(crate) fn list_outcome(
 
 /// Journal `new` on `connection`, a test's connection outside any store, as
 /// `insert` does, and list it in `coven_operations` as `insert_for_app`
-/// does when `listed_as` names its kind (`test_utils::journal_operation`).
+/// does when `listed_as` names its kind.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn journal_outside_store(
+pub fn journal_outside_store(
     connection: &sqlive::rusqlite::Connection,
     new: &NewOperation,
     listed_as: Option<&str>,
@@ -200,7 +200,7 @@ pub(crate) fn journal_outside_store(
 /// ends lists its outcome first (`list_outcome`). Outside a store no
 /// operation holds a claim, so nothing checks one.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn finish_outside_store(
+pub fn finish_outside_store(
     connection: &sqlive::rusqlite::Connection,
     id: OperationId,
     listing: OutcomeListing<'_>,

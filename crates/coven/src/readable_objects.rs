@@ -26,7 +26,7 @@ pub fn record_invite(
     invite: coven_sync::RecordedInvite,
 ) -> Result<coven_database::OperationId, crate::CovenError> {
     let new = coven_sync::invite_operation(invite)?;
-    Ok(coven_database::test_utils::journal_operation(connection, &new, None)?)
+    Ok(coven_database::test_utils::journal_outside_store(connection, &new, None)?)
 }
 
 /// End the invite `invite` on `connection` as a store ends one that the
@@ -42,7 +42,7 @@ pub fn refuse_invite(
     let outcome =
         coven_database::OperationOutcome::SharingRefused { account: account.to_owned(), refusal };
     let kind = coven_sync::OperationKind::Invite.listed();
-    Ok(coven_database::test_utils::finish_operation(
+    Ok(coven_database::test_utils::finish_outside_store(
         connection,
         invite,
         coven_database::test_utils::OutcomeListing::Unlisted { kind: &kind, outcome: &outcome },
@@ -57,7 +57,7 @@ pub fn record_change(
     change: coven_format::admin::StoreChange,
 ) -> Result<coven_database::OperationId, crate::CovenError> {
     let (new, kind) = coven_sync::change_operation(change)?;
-    Ok(coven_database::test_utils::journal_operation(connection, &new, Some(&kind))?)
+    Ok(coven_database::test_utils::journal_outside_store(connection, &new, Some(&kind))?)
 }
 
 /// End the operation `id`, which the app's write journaled, on `connection`
@@ -68,7 +68,7 @@ pub fn finish_operation(
     id: coven_database::OperationId,
     outcome: &coven_database::OperationOutcome,
 ) -> Result<(), crate::CovenError> {
-    Ok(coven_database::test_utils::finish_operation(
+    Ok(coven_database::test_utils::finish_outside_store(
         connection,
         id,
         coven_database::test_utils::OutcomeListing::Listed(outcome),
@@ -82,7 +82,7 @@ pub fn record_pending(
     connection: &coven_database::test_utils::Connection,
     record: &coven_sync::PendingRecord,
 ) -> Result<(), crate::CovenError> {
-    Ok(coven_database::test_utils::record_pending(connection, record)?)
+    Ok(coven_database::test_utils::save_outside_store(connection, record)?)
 }
 
 #[cfg(test)]
