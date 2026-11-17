@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    atomic_file, bootstrap, settings, DirectoryCreationError, FileError, SettingsError, StoreFile,
+    atomic_file, bootstrap, set_aside, settings, DirectoryCreationError, FileError, SettingsError,
+    StoreFile,
 };
 use crate::id_source::{DeviceId, StoreId};
 
@@ -235,60 +236,24 @@ fn named_archive(directory: &Path, name: &str) -> Result<PathBuf, FileError> {
     Ok(directory.join(name))
 }
 
-/// Move the archive `name` into the removal folder, syncing both folders,
-/// so it leaves the store's directory in one step. Returns whether it was
-/// there to move.
+/// Move the archive `name` into the removal folder, in one rename, so it
+/// leaves the store's directory in one step. Returns whether it was there
+/// to move.
 pub(super) fn retire(directory: &Path, name: &str) -> Result<bool, FileError> {
-    let archive = named_archive(directory, name)?;
-    if !atomic_file::exists("inspect discarded device archive", &archive)? {
-        return Ok(false);
-    }
-    let removing = directory.join(REMOVING);
-    if !atomic_file::exists("inspect the archives' removal folder", &removing)? {
-        fs::create_dir(&removing).map_err(|source| {
-            FileError::at("create the archives' removal folder", &removing, source)
-        })?;
-    }
-    let retired = removing.join(name);
-    atomic_file::rename_new(&archive, &retired)
-        .map_err(|source| FileError::at("move a discarded device archive", &archive, source))?;
-    sync_folders(directory, &removing)?;
-    Ok(true)
+    set_aside::move_aside(&named_archive(directory, name)?, &directory.join(REMOVING).join(name))
 }
 
 /// Move the archive `name` back from the removal folder, as `retire` found it.
 pub(super) fn unretire(directory: &Path, name: &str) -> Result<(), FileError> {
-    let archive = named_archive(directory, name)?;
-    let removing = directory.join(REMOVING);
-    let retired = removing.join(name);
-    atomic_file::rename_new(&retired, &archive).map_err(|source| {
-        FileError::at("move a discarded device archive back", &retired, source)
-    })?;
-    sync_folders(directory, &removing)
+    set_aside::move_back(&named_archive(directory, name)?, &directory.join(REMOVING).join(name))
 }
 
-/// Remove the removal folder and everything in it, then sync the store's
-/// directory. Nothing names what is in it, so a removal that stops partway
-/// leaves the rest for the next call. An absent folder is removed.
+/// Delete the removal folder and everything in it, then sync the store's
+/// directory. Nothing names what is in it, so a deletion that stops partway
+/// leaves the rest for the next call. When the folder is absent, the call
+/// does nothing and succeeds.
 pub(super) fn remove_retired(directory: &Path) -> Result<(), FileError> {
-    let removing = directory.join(REMOVING);
-    match fs::remove_dir_all(&removing) {
-        Ok(()) => atomic_file::sync_publication(&removing),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => {
-            Err(FileError::at("remove the discarded device archives", &removing, source))
-        }
-    }
-}
-
-#[cfg_attr(not(unix), expect(unused_variables, reason = "Windows renames write through"))]
-fn sync_folders(directory: &Path, removing: &Path) -> Result<(), FileError> {
-    #[cfg(unix)]
-    for path in [directory, removing] {
-        atomic_file::sync_directory(path)
-            .map_err(|source| FileError::at("sync the archives' folders", path, source))?;
-    }
-    Ok(())
+    set_aside::delete(&directory.join(REMOVING))
 }
 
 /// The size of a file, or of everything under a folder. Links are not

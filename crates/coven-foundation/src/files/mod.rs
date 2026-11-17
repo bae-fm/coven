@@ -32,6 +32,7 @@ mod protection;
 mod reached;
 mod relative_path;
 mod replacement;
+mod set_aside;
 mod settings;
 #[cfg(any(test, feature = "test-utils"))]
 mod tree_copy;
