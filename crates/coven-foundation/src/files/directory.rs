@@ -342,8 +342,9 @@ pub trait StoreDirAccess: Sized {
     /// Move the folder `retire_rebuild_directory` moved aside back.
     fn return_rebuild_directory(&self) -> Result<(), FileError>;
     /// Delete the folder `retire_rebuild_directory` moved aside, whole. When
-    /// that folder is absent, the call does nothing and succeeds. Nothing
-    /// names what is in it. Blocks while it deletes the folder.
+    /// that folder is absent, the call does nothing and succeeds. The
+    /// database has no row for the files in that folder. Blocks while it
+    /// deletes the folder.
     fn remove_retired_rebuild(&self) -> Result<(), FileError>;
     /// The record of a replacement whose swap is under way (§19.3). A record
     /// that remains only because publication was interrupted after removing

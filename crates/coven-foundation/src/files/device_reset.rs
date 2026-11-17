@@ -304,7 +304,7 @@ pub(super) fn archives(directory: &Path) -> Result<Vec<PathBuf>, FileError> {
 /// Whether an entry stays where it is while installations swap: the custody
 /// files the replacement keeps, the settings, which change last, the swap's
 /// own record and marker, the replacement's area, earlier archives and the
-/// folder of those being removed.
+/// folder where coven deletes archives.
 fn stays(name: &str) -> bool {
     KEPT.iter().any(|file| file.name() == name)
         || name == settings::SETTINGS_FILE

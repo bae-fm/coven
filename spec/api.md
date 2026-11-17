@@ -3849,11 +3849,11 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
-| `coven_cache_bytes`: each namespace the app has declared in this store, one a later version no longer declares included, and its cache on this device ([§17.8](coven.md#178-cache-and-pinning)) | `namespace` | the namespace's name |
+| `coven_cache_bytes`: each namespace the app has declared in this store, including one that a later version no longer declares, and its cache on this device ([§17.8](coven.md#178-cache-and-pinning)) | `namespace` | the namespace's name |
 | | `budget` | its budget in bytes, declared or since set (`set_cache_budget`) |
 | | `cached` | the bytes of its cached chunks and headers, which the budget counts |
 | | `pinned` | the bytes of its pinned whole copies, which the budget doesn't count |
-| | `pinning` | the bytes of the partial downloads stopped pins left in it, which the cache neither counts nor evicts |
+| | `pinning` | the bytes of the partial downloads that stopped pins left in it, which the cache neither counts nor evicts |
 | `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file; `inputs`, the input database's; `copies`, coven's copies of app files that a row names; or `rebuild`, a rebuild's store while one runs |
 | | `bytes` | the part's size in bytes. For a database file, its size as its last checkpoint left it: coven writes it as the store opens and after each checkpoint that changes it, and leaves out the WAL beside it. For `copies`, coven writes it in the write that keeps or releases a copy, and counts a copy that files share once. For `rebuild`, the sizes of the rebuild's store's own files together: coven makes the row before the rebuild makes its folder, and deletes the row when it moves the rebuild's folder aside to delete the folder |
 | `coven_archive_bytes`: each archive a reset kept in the store's directory ([§19.3](coven.md#193-another-copy-of-the-same-device)); a table coven writes: coven writes a row as the store opens after the swap that kept the archive, and deletes it as coven moves the archive out of the directory to delete it | `archive` | the archive's name in the store's directory |
