@@ -2,18 +2,12 @@
 
 use crate::{Migration, RowIdentity, SyncedTable};
 
-#[path = "followed_tables.rs"]
-mod followed_tables;
-pub use followed_tables::followed_tables_sql;
-
-/// What `coven_path_text` returns for its argument, for an app's test that
-/// registers the function on a connection it opened itself, outside any
-/// store: the body every store registers.
-pub fn path_text_sql(
-    value: sqlive::rusqlite::types::ValueRef<'_>,
-) -> sqlive::rusqlite::Result<sqlive::rusqlite::types::Value> {
-    crate::coven_functions::path_text_sql(value)
-}
+#[path = "readable_objects.rs"]
+mod readable_objects;
+pub use readable_objects::{make_readable_objects, record_user_file};
+/// The connection an app's test opens outside any store, for the coven crate
+/// to name in its own `make_readable_objects`.
+pub use sqlive::rusqlite::Connection;
 
 #[path = "work_counts.rs"]
 mod work_counts;

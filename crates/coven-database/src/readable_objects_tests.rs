@@ -1,0 +1,170 @@
+use super::*;
+use crate::internal_schema::{BEHIND_READABLE, FOLLOWED, READABLE};
+use crate::tests::TestStore;
+
+/// Each object of the readable objects and the tables behind them, as
+/// `(type, name, sql)`, with no SQL for an index SQLite made for a
+/// constraint, and each followed table's row count, in order.
+type Readable = (Vec<(String, String, Option<String>)>, Vec<(String, i64)>);
+
+/// The tables, indexes and views SQLite keeps for one object, leaving out
+/// triggers: in a store, coven's triggers that keep the followed tables are
+/// on the tables behind the views.
+const OBJECTS: &str = "SELECT type,name,sql FROM sqlite_schema
+    WHERE type IN ('table','index','view') AND tbl_name=?1 ORDER BY type,name";
+
+/// This device's id outside a store.
+const DEVICE: DeviceId = DeviceId(7);
+
+/// A sync state computation that decodes the facts the view passes and
+/// shows every state as synced: sync's own computation is in coven-sync,
+/// which this crate can't reach.
+fn sync_state() -> crate::SyncStateFunction {
+    crate::SyncStateFunction::new::<crate::sync_facts::tests::Record>(|_facts| {
+        Ok(crate::SyncStateRow { state: "synced", pending: None, detail: serde_json::json!({}) })
+    })
+}
+
+/// A connection outside any store, with coven's readable objects made on it.
+fn outside_store() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    make_readable_objects(&connection, DEVICE, &sync_state()).unwrap();
+    connection
+}
+
+/// Every readable object, and every table behind one.
+fn readable_names() -> impl Iterator<Item = &'static str> {
+    READABLE.into_iter().chain(BEHIND_READABLE)
+}
+
+/// Each readable object, and each table of coven's own behind one, is made
+/// outside a store as a new store holds it: its columns, constraints and
+/// indexes, and the one row of the sync status and the retry effect.
+#[tokio::test]
+async fn the_readable_objects_are_made_as_a_store_holds_them() {
+    let outside = outside_store();
+    let mut objects = Vec::new();
+    let mut rows = Vec::new();
+    for name in readable_names() {
+        let mut statement = outside.prepare(OBJECTS).unwrap();
+        let found = statement.query_map([name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        objects.extend(found.map(Result::unwrap));
+    }
+    for followed in FOLLOWED {
+        let count = format!("SELECT count(*) FROM {}", followed.name);
+        rows.push((followed.name.to_owned(), outside.query_row(&count, [], |r| r.get(0)).unwrap()));
+    }
+    let outside: Readable = (objects, rows);
+
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let in_store: Readable = db.inspect_writer(|sql, _| {
+        let mut objects = Vec::new();
+        let mut rows = Vec::new();
+        for name in readable_names() {
+            objects.extend(
+                sql.query(OBJECTS, [name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap(),
+            );
+        }
+        for followed in FOLLOWED {
+            let count = format!("SELECT count(*) FROM {}", followed.name);
+            rows.push((followed.name.to_owned(), sql.query_row(&count, [], |r| r.get(0)).unwrap()));
+        }
+        (objects, rows)
+    });
+    db.close().await.unwrap();
+    assert_eq!(outside, in_store);
+    let made: Vec<&str> = outside
+        .0
+        .iter()
+        .filter(|(kind, ..)| kind != "index")
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    assert_eq!(made.len(), READABLE.len() + BEHIND_READABLE.len());
+}
+
+/// App SQL reads every readable object outside a store: each view finds the
+/// tables and functions it reads.
+#[test]
+fn every_readable_object_reads_outside_a_store() {
+    let outside = outside_store();
+    for name in READABLE {
+        let mut statement = outside.prepare(&format!("SELECT * FROM {name}")).unwrap();
+        let mut rows = statement.query([]).unwrap();
+        while rows.next().unwrap().is_some() {}
+    }
+    let network: (Option<bool>, bool, bool) = outside
+        .query_row("SELECT usable,metered,unmetered_only FROM coven_network", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(network, (None, false, false));
+    let state: String =
+        outside.query_row("SELECT state FROM coven_sync_state", [], |r| r.get(0)).unwrap();
+    assert_eq!(state, "synced");
+}
+
+/// An app's trigger on each followed table applies outside a store, and
+/// fires on the rows a test writes there.
+#[test]
+fn an_app_trigger_on_each_followed_table_fires_outside_a_store() {
+    let outside = outside_store();
+    outside.execute_batch("CREATE TABLE heard(what TEXT NOT NULL);").unwrap();
+    for followed in FOLLOWED {
+        outside
+            .execute_batch(&format!(
+                "CREATE TRIGGER heard_{name} AFTER UPDATE ON {name}
+                 BEGIN INSERT INTO heard VALUES('{name}'); END;",
+                name = followed.name,
+            ))
+            .unwrap();
+    }
+    outside
+        .execute_batch(
+            "UPDATE coven_sync_status SET starts=starts+1;
+             UPDATE coven_retry_effect SET syncing=1;",
+        )
+        .unwrap();
+    let heard: Vec<String> = outside
+        .prepare("SELECT what FROM heard ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(heard, ["coven_sync_status", "coven_retry_effect"]);
+}
+
+/// An app's schema whose trigger joins `coven_user_files` applies outside a
+/// store, and a row that fires the trigger reads the original the test
+/// recorded there, as `coven_user_files` shows it in a store.
+#[test]
+fn an_app_trigger_reads_a_recorded_original_outside_a_store() {
+    let outside = outside_store();
+    outside
+        .execute_batch(
+            "CREATE TABLE tracks(id INTEGER PRIMARY KEY, file TEXT NOT NULL);
+             CREATE TABLE track_originals(
+                 track INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+                 modified_seconds INTEGER NOT NULL, modified_nanos INTEGER NOT NULL);
+             CREATE TRIGGER track_original AFTER INSERT ON tracks BEGIN
+                 INSERT INTO track_originals
+                 SELECT NEW.id,coven_path_text(u.path),u.size,u.modified_seconds,
+                     u.modified_nanos
+                 FROM coven_user_files AS u WHERE u.file=NEW.file;
+             END;",
+        )
+        .unwrap();
+    let file = FileId(uuid::Uuid::from_bytes([3; 16]));
+    let modified_at = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 250);
+    let path = std::path::Path::new("/music/track 1.flac");
+    record_user_file(&outside, file, path, modified_at, b"track one's bytes").unwrap();
+
+    outside.execute("INSERT INTO tracks(file) VALUES(?1)", [file]).unwrap();
+    let original: (i64, String, i64, i64, i64) = outside
+        .query_row("SELECT * FROM track_originals", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap();
+    assert_eq!(original, (1, "/music/track 1.flac".to_owned(), 17, 1_700_000_000, 250));
+}

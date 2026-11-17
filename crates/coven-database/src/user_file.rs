@@ -117,6 +117,35 @@ pub(crate) fn encode_time(time: SystemTime) -> Vec<u8> {
     bytes
 }
 
+/// Record `$original` as `$file`'s original on this device, with the
+/// content hash and chunk hashes in `$hashes`, running each statement on
+/// `$db`: a store's open write, or a test's connection outside any store.
+/// Both callers expand this one body, so a test records an original as a
+/// store does.
+macro_rules! record_original {
+    ($db:expr, $file:expr, $original:expr, $hashes:expr) => {{
+        let (db, file, original, hashes) = ($db, $file, $original, $hashes);
+        let size = crate::sqlite::integer("file size", original.size)?;
+        db.execute(
+            "INSERT INTO _coven_user_files(file,path,size,modified_at,hash) VALUES(?1,?2,?3,?4,?5)",
+            sqlive::rusqlite::params![
+                file,
+                coven_foundation::files::path_bytes(&original.path),
+                size,
+                encode_time(original.modified_at),
+                hashes.content.as_bytes().as_slice()
+            ],
+        )?;
+        for (index, hash) in hashes.chunks().iter().enumerate() {
+            db.execute(
+                "INSERT INTO _coven_user_chunks(file,chunk,hash) VALUES(?1,?2,?3)",
+                sqlive::rusqlite::params![file, index as i64, hash.as_bytes().as_slice()],
+            )?;
+        }
+        Ok(())
+    }};
+}
+
 /// Record `original` as `file`'s original on this device, with the content
 /// hash and chunk hashes of the bytes its read found (§17.3).
 pub(crate) fn record(
@@ -125,24 +154,20 @@ pub(crate) fn record(
     original: &UserFile,
     hashes: &FileHashes,
 ) -> Result<(), DbError> {
-    let size = crate::sqlite::integer("file size", original.size)?;
-    db.execute(
-        "INSERT INTO _coven_user_files(file,path,size,modified_at,hash) VALUES(?1,?2,?3,?4,?5)",
-        sqlive::rusqlite::params![
-            file,
-            coven_foundation::files::path_bytes(&original.path),
-            size,
-            encode_time(original.modified_at),
-            hashes.content.as_bytes().as_slice()
-        ],
-    )?;
-    for (index, hash) in hashes.chunks().iter().enumerate() {
-        db.execute(
-            "INSERT INTO _coven_user_chunks(file,chunk,hash) VALUES(?1,?2,?3)",
-            sqlive::rusqlite::params![file, index as i64, hash.as_bytes().as_slice()],
-        )?;
-    }
-    Ok(())
+    record_original!(db, file, original, hashes)
+}
+
+/// Record `original` as `file`'s original, with the content hash and chunk
+/// hashes in `hashes`, on `connection`, a test's connection outside any store
+/// (`test_utils::record_user_file`).
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn record_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    file: coven_foundation::id_source::FileId,
+    original: &UserFile,
+    hashes: &FileHashes,
+) -> Result<(), DbError> {
+    record_original!(connection, file, original, hashes)
 }
 
 /// Forget `file`'s original here, and its chunk hashes with it: the file

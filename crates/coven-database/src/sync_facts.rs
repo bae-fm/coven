@@ -398,4 +398,4 @@ pub(crate) fn read_queue<P: crate::PendingValue + Clone>(
 
 #[cfg(test)]
 #[path = "sync_facts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

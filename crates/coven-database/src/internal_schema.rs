@@ -278,6 +278,53 @@ pub(crate) fn initial_schema() -> String {
     sql
 }
 
+/// Coven's own tables that `readable_schema` makes: each table coven's
+/// views read, and `_coven_user_chunks`, which recording a user's original
+/// writes beside the original's row (`user_file::record_original!`).
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) const BEHIND_READABLE: [&str; 17] = [
+    "_coven_user_files",
+    "_coven_user_chunks",
+    "_coven_uploads",
+    "_coven_file_uploads",
+    "_coven_upload_files",
+    "_coven_upload_pause",
+    "_coven_unmetered_only",
+    "_coven_retries",
+    "_coven_pending",
+    "_coven_stored_files",
+    "_coven_operations",
+    "_coven_app_operations",
+    "_coven_members",
+    "_coven_devices",
+    "_coven_circles",
+    "_coven_circle_deletions",
+    "_coven_circle_members",
+];
+
+/// The SQL that makes each object app SQL may read as every store makes it,
+/// with the tables of coven's own behind them (`BEHIND_READABLE`), for an
+/// app's test outside any store (`test_utils::make_readable_objects`). The
+/// SQL makes none of coven's triggers that keep the followed tables: outside
+/// a store the test writes their rows.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn readable_schema() -> String {
+    let mut sql = String::new();
+    macro_rules! behind_readable {
+        ($table:ident, $sql:literal) => {
+            if BEHIND_READABLE.contains(&stringify!($table)) {
+                sql.push_str($sql);
+            }
+        };
+    }
+    coven_tables!(behind_readable);
+    for followed in FOLLOWED {
+        sql.push_str(followed.table);
+    }
+    sql.push_str(views::SCHEMA);
+    sql
+}
+
 #[path = "internal_schema_files.rs"]
 mod files;
 pub(crate) use files::FILES;
@@ -312,7 +359,7 @@ pub(crate) use retry_effect::RETRY_EFFECT;
 
 /// One of coven's tables the app's local triggers may follow: its name, and
 /// the SQL that makes it as every store holds it, which an app's test of its
-/// own schema runs too (`followed_tables_sql`).
+/// own schema makes outside any store too (`make_readable_objects`).
 pub(crate) struct FollowedTable {
     pub(crate) name: &'static str,
     pub(crate) table: &'static str,
@@ -347,6 +394,8 @@ pub(crate) fn followed(name: &str) -> bool {
 
 #[path = "internal_schema_views.rs"]
 mod views;
+#[cfg(test)]
+pub(crate) use views::READABLE;
 pub(crate) use views::{app_readable, whole_views};
 
 #[path = "input_database_schema.rs"]

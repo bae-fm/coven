@@ -3769,19 +3769,26 @@ let moved = handle
   for it, written with the record. Opening clears every cause: one an earlier
   run wrote names a failure nothing has met since (E5).
 - *The app's schema outside a store, in tests.* With the test-utils
-  feature, `followed_tables_sql` gives the SQL that makes the eight tables
-  above as every store makes them, `coven_sync_status` and
-  `coven_retry_effect` with their one row. A test that runs the app's schema
-  on a connection it opened itself, outside any store, runs it first, so the
-  app's triggers on those tables apply and fire as in a store, and the app
-  keeps no copy of coven's tables that could fall behind them. Nothing of
-  coven's writes them there: the test writes the rows coven would.
-- *`coven_path_text`, in tests.* With the test-utils feature, `path_text_sql`
-  gives what `coven_path_text` returns for one argument as SQLite holds it:
-  NULL for NULL, the text of a path's bytes (a byte that isn't part of a valid
-  path shows as `\xNN`), and an error for any other value. A test that
-  registers the function on a connection it opened itself, outside any store,
-  calls it, so the app keeps no copy of it that could fall behind.
+  feature, `make_readable_objects` makes every object app SQL reads, on a
+  connection a test opened itself, outside any store, as every store makes
+  it: the eight tables above, `coven_sync_status` and `coven_retry_effect`
+  with their one row, and the thirteen views, with the tables of coven's own
+  that they read, empty. The function registers coven's SQL functions on
+  the connection too, `coven_key`, `coven_file_device` and `coven_path_text`
+  among them, with the device the test names as this device. Nothing is
+  being transferred there and nothing watches the network, so the transfer
+  and network views show what a read-only handle shows. `coven_sync_state`
+  shows the state that sync's own computation, the one every store
+  registers, gives from the facts there. A test that runs the app's schema there
+  calls it first, so the app's triggers and views apply and run as in a
+  store, and the app keeps no copy of coven's objects or functions that
+  could fall behind them. Nothing of coven's writes the objects there, and
+  coven's triggers that keep the eight tables in a store aren't made: the
+  test writes the rows coven would in those tables. To give
+  `coven_user_files` a row, the test calls `record_user_file` with the
+  file's id, the original's path and modification time, and the bytes it
+  holds. `record_user_file` records the original as staging it for the
+  cloud does, with the size, content hash and chunk hashes of those bytes.
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -4262,16 +4269,24 @@ impl LiveQueryRuns {
     pub fn equal(&self) -> u64;
 }
 
-/// The SQL that makes each table the app's local triggers may follow, as
-/// every store makes it, for a test that runs the app's schema outside any
-/// store (E4).
+/// Makes every object app SQL reads on `connection`, outside any store, as
+/// every store makes it, and registers coven's SQL functions there with
+/// `device` as this device and sync's computation of the sync state, for a
+/// test that runs the app's schema there (E4).
 #[cfg(feature = "test-utils")]
-pub fn followed_tables_sql() -> impl Iterator<Item = &'static str>;
+pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId) -> rusqlite::Result<()>;
 
-/// What `coven_path_text` returns for its argument, for a test that
-/// registers the function outside any store.
+/// Records on a connection `make_readable_objects` prepared the original at
+/// `path`, modified at `modified_at` and holding `bytes`, as `file`'s, as
+/// staging it for the cloud records it (E4).
 #[cfg(feature = "test-utils")]
-pub fn path_text_sql(value: rusqlite::types::ValueRef<'_>) -> rusqlite::Result<rusqlite::types::Value>;
+pub fn record_user_file(
+    connection: &rusqlite::Connection,
+    file: FileId,
+    path: &Path,
+    modified_at: SystemTime,
+    bytes: &[u8],
+) -> Result<(), DbError>;
 
 /// Counts the work a store's connections run; clones count into the same
 /// counts, and no other store's.

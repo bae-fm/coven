@@ -17,7 +17,7 @@
 /// `internal_schema_moves.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`).
-const READABLE: [&str; 21] = [
+pub(crate) const READABLE: [&str; 21] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",

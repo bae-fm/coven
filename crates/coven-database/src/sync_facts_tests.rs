@@ -106,7 +106,7 @@ async fn the_upload_read_does_not_scan_the_queue() {
 
 /// A pending record about an upload's stored bytes or about a move.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-enum Record {
+pub(crate) enum Record {
     Upload(DeviceId, ObjectId),
     Move(crate::MoveId),
 }

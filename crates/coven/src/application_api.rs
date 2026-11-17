@@ -20,6 +20,8 @@ pub use crate::error::{
 pub use crate::handle::{Circles, CovenHandle, IfUnsent};
 pub use crate::member_write::MemberWrite;
 pub use crate::read_handle::CovenReadHandle;
+#[cfg(any(test, feature = "test-utils"))]
+pub use crate::readable_objects::make_readable_objects;
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
 pub use crate::storage::{
@@ -33,9 +35,7 @@ pub use coven_crypto::{
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_database::test_utils::{
-    followed_tables_sql, path_text_sql, StatementLog, WorkCounter, WorkCounts,
-};
+pub use coven_database::test_utils::{record_user_file, StatementLog, WorkCounter, WorkCounts};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{

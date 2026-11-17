@@ -21,6 +21,9 @@ mod member_write;
 mod read_handle;
 mod saved_restore;
 
+#[cfg(any(test, feature = "test-utils"))]
+mod readable_objects;
+
 #[cfg(feature = "dev-tools")]
 mod dev_tools;
 
