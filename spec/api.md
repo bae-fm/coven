@@ -7281,8 +7281,8 @@ impl CovenWrite<'_> {
     /// recently read first, until the unpinned ones are within it; pinned
     /// bytes don't count toward it. The evicted bytes go once the write
     /// has committed. An undeclared namespace fails with
-    /// `UndeclaredNamespace`, and a budget over `i64::MAX` bytes, past
-    /// SQLite's integers, with `TooLarge`.
+    /// `UndeclaredNamespace`, and a budget over `i64::MAX` bytes, larger than
+    /// the largest integer SQLite stores, with `TooLarge`.
     pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
 }
 

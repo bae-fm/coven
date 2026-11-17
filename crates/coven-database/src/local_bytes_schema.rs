@@ -12,8 +12,9 @@ macro_rules! coven_local_bytes_tables {
         // start over.
         // `copies` is coven's copies of app bytes that a row names: the
         // triggers below add or subtract a copy's size in the statement that
-        // counts or releases the copy. `rebuild` is there while a rebuild's folder is (§18.3): the
-        // sizes of the rebuild's store's own files together.
+        // counts or releases the copy. coven keeps a `rebuild` row while a
+        // rebuild's folder exists (§18.3), and the row holds the total size
+        // of the rebuild's store's own files.
         $visit!(
             coven_library_bytes,
             "
