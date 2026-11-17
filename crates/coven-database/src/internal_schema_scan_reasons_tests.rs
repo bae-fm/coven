@@ -289,6 +289,7 @@ mod source {
                     | "forget_records_schema.rs"
                     | "ownership_schema.rs"
                     | "file_cache_schema.rs"
+                    | "local_bytes_schema.rs"
                     | "file_removals_schema.rs"
                     | "user_file_schema.rs"
                     | "migration_run_schema.rs"

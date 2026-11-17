@@ -40,10 +40,14 @@ pub(super) fn keep_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Resul
 }
 
 /// The part of `keep_source` that must precede anything naming the copy:
-/// a copy's staging cleanup record goes, a user's original is recorded.
+/// a copy's staging cleanup record goes and its size counts among the
+/// store's own files, a user's original is recorded.
 pub(super) fn release_source(db: &StoreSql, id: FileId, file: &StagedFile) -> Result<(), DbError> {
     match &file.source {
-        StagedSource::Copy(name) => crate::file_removals::keep(db, "files", name.as_str()),
+        StagedSource::Copy(name) => {
+            crate::file_removals::keep(db, "files", name.as_str())?;
+            crate::file_queue::count_copy(db, name.as_str(), file.size)
+        }
         StagedSource::Original(original) => {
             crate::user_file::record(db, id, original, &file.hashes)
         }

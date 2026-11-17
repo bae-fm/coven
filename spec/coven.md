@@ -8841,7 +8841,12 @@ of app files, and the folder of a rebuild while one runs (§18.3), count as
 input database's from the table `coven_library_bytes`, each as its last
 checkpoint left it: coven writes both as the store opens and each again
 after a checkpoint changes it. Until that write commits, the row holds the
-size before the checkpoint. The WAL beside each file doesn't count: once a
+size before the checkpoint. The row `copies` holds the sizes of coven's
+copies of app files that a row names, a copy files share counted once:
+the write that keeps a staged copy adds its size, and the write that
+records it for removal subtracts it. A copy still being written, or one
+recorded for removal, isn't counted, as the cache's bytes in flight
+aren't. The WAL beside each file doesn't count: once a
 checkpoint lets it start over it shrinks back to 4 MiB (§4), it changes with
 every commit, and writing its size would itself add to it.
 One read, `local_bytes`, returns these from a
@@ -12458,6 +12463,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
+| `_coven_copy_sizes` | the size of each of coven's copies of app files that a row names, by the copy, once for a copy files share: written by the write that keeps a staged copy, as it deletes the copy's cleanup record, and deleted by the write that records the copy for removal; triggers keep the sum in `coven_library_bytes`'s `copies` row (§17.8) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |

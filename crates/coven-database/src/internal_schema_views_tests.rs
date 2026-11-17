@@ -56,7 +56,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         // a row for each database file.
         let expected = match view {
             "coven_upload_pause" => 1,
-            "coven_library_bytes" => 2,
+            "coven_library_bytes" => 3,
             _ => 0,
         };
         let statement = format!("SELECT * FROM {view}");

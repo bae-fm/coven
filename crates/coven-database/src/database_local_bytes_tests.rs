@@ -97,3 +97,29 @@ async fn a_checkpoint_that_grows_the_database_file_writes_its_size() {
     assert_eq!(sizes.runs().runs(), before + 1);
     db.close().await.unwrap();
 }
+
+/// The bytes of coven's copies of app files, read from `coven_library_bytes`.
+fn copy_bytes(sql: SqlReadContext<'_>) -> Result<i64, DbError> {
+    Ok(sql
+        .query_row("SELECT bytes FROM coven_library_bytes WHERE part='copies'", [], |r| r.get(0))?)
+}
+
+/// A staged copy counts among the store's own files from the write that
+/// keeps it, at its size on disk, until the write that releases it, and a
+/// live query of the copies' bytes runs again for each (§17.8).
+#[tokio::test]
+async fn a_kept_copy_counts_until_it_is_released() {
+    use crate::file_write::tests::{complete_uploads, owned_paths, stage};
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let mut copies: LiveQuery<_, DbError> = db.subscribe(copy_bytes).process(Ok);
+    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 0);
+    stage(&db, vec![5; 3000], true).await.unwrap();
+    let on_disk: u64 =
+        owned_paths(&store).iter().map(|path| std::fs::metadata(path).unwrap().len()).sum();
+    assert_eq!(on_disk, 3000);
+    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 3000);
+    complete_uploads(&db).await;
+    assert_eq!(copies.next_inline().await.unwrap().unwrap(), 0);
+    db.close().await.unwrap();
+}

@@ -141,6 +141,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_copies",
                 "_coven_copy_chunks",
                 "_coven_copy_folders",
+                "_coven_copy_sizes",
                 "_coven_creations",
                 "_coven_cutoffs",
                 "_coven_data_reloads",

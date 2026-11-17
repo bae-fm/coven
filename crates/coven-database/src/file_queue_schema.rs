@@ -20,6 +20,17 @@ macro_rules! coven_file_uploads_tables {
                 WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
             END;
         ");
+        // The size of each of coven's copies of app bytes that a row names
+        // (§17.8), by path: the write that keeps a staged copy inserts its
+        // row as it deletes the copy's cleanup record, and the write that
+        // records the copy for removal deletes it. Files over the same bytes
+        // share one copy and one row.
+        $visit!(_coven_copy_sizes, "
+            CREATE TABLE _coven_copy_sizes (
+                path TEXT PRIMARY KEY NOT NULL,
+                size INTEGER NOT NULL CHECK(size>=0)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_copy_chunks, "
             CREATE TABLE _coven_copy_chunks (
                 path TEXT NOT NULL,

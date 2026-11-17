@@ -977,6 +977,7 @@ homes = [
 ]
 tables = [
     "_coven_copy_chunks",
+    "_coven_copy_sizes",
     "_coven_device_files",
     "_coven_file_chunks",
     "_coven_file_uploads",

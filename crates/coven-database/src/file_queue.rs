@@ -477,6 +477,7 @@ pub(crate) fn release_copy(db: &StoreSql, path: &str) -> Result<(), DbError> {
         return Ok(());
     }
     db.execute("DELETE FROM _coven_copy_chunks WHERE path=?1", [path])?;
+    db.execute("DELETE FROM _coven_copy_sizes WHERE path=?1", [path])?;
     crate::file_removals::record_released(db, path)?;
     Ok(())
 }
@@ -596,6 +597,16 @@ pub(crate) fn enqueue_all(
         |_| Ok(()),
     )?;
     crate::file_moves::list_all(db, &listed)?;
+    Ok(())
+}
+
+/// Count coven's copy at `path`, of `size` bytes, among the store's own
+/// files as a row comes to name it (§17.8). A copy already counted stays.
+pub(crate) fn count_copy(db: &StoreSql, path: &str, size: u64) -> Result<(), DbError> {
+    db.execute(
+        "INSERT INTO _coven_copy_sizes(path,size) VALUES(?1,?2) ON CONFLICT(path) DO NOTHING",
+        (path, crate::sqlite::integer("copy size", size)?),
+    )?;
     Ok(())
 }
 
