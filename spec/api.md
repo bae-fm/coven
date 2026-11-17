@@ -3690,12 +3690,11 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads thirteen views of coven's own tables
+- *Coven's state in SQL.* App SQL reads fourteen views of coven's own tables
   and ten tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
   `coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`, in
-  reads,
-  writes and migrations alike
+  reads, writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
   that changes the tables behind it, and a live query that reads one reruns
@@ -3773,8 +3772,9 @@ let moved = handle
 - *The app's schema outside a store, in tests.* With the test-utils
   feature, `make_readable_objects` makes every object app SQL reads, on a
   connection a test opened itself, outside any store, as every store makes
-  it: the eight tables above, `coven_sync_status` and `coven_retry_effect`
-  with their one row, and the thirteen views. The function also makes the
+  it: the ten tables above, `coven_sync_status` and `coven_retry_effect`
+  with their one row, `coven_library_bytes` with its rows at no bytes, and
+  the fourteen views. The function also makes the
   tables of coven's own that the views read or that the test writes below
   fill, all empty. The function registers coven's SQL functions there too,
   `coven_key`, `coven_file_device` and `coven_path_text` among them, with
@@ -3786,8 +3786,9 @@ let moved = handle
   triggers and views apply and run as in a store, and the app keeps no copy
   of coven's objects or functions that could fall behind them. coven writes
   no rows on that connection. Of coven's triggers that keep the eight
-  tables in a store, those that keep `coven_pending` run there too: the
-  test writes the rows coven would in the other seven. The test gives
+  tables an app's triggers may follow in a store, those that keep
+  `coven_pending` run there too: the test writes the rows coven would in
+  the other seven. The test gives
   coven's views and `coven_pending` their rows with test writes, each
   running the statements coven's own code runs:
   - `record_user_file` takes a file's id, the original's path and

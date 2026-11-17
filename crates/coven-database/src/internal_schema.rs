@@ -290,9 +290,13 @@ pub(crate) fn initial_schema() -> String {
 ///   journals an operation that pauses writes;
 /// - `_coven_moves` and `_coven_pin_requests`, which the pending records,
 ///   the uploads and the retry waits reference: their foreign keys need
-///   the tables.
+///   the tables;
+/// - `_coven_cache`, whose rows the triggers of `_coven_cache_budgets`
+///   count, and `_coven_copy_sizes`, whose rows the triggers of
+///   `coven_library_bytes` count: SQLite makes a trigger only on a table
+///   that exists.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) const OUTSIDE_STORE_TABLES: [&str; 20] = [
+pub(crate) const OUTSIDE_STORE_TABLES: [&str; 24] = [
     "_coven_user_files",
     "_coven_user_chunks",
     "_coven_write_pause",
@@ -313,6 +317,10 @@ pub(crate) const OUTSIDE_STORE_TABLES: [&str; 20] = [
     "_coven_circles",
     "_coven_circle_deletions",
     "_coven_circle_members",
+    "_coven_cache",
+    "_coven_cache_budgets",
+    "_coven_cache_partials",
+    "_coven_copy_sizes",
 ];
 
 /// The SQL that makes each object app SQL may read as every store makes it,
@@ -329,8 +337,15 @@ pub(crate) const OUTSIDE_STORE_TABLES: [&str; 20] = [
 pub(crate) fn readable_schema() -> String {
     let mut sql = String::new();
     macro_rules! outside_store_table {
+        (_coven_cache, $sql:literal) => {
+            sql.push_str(&format!($sql));
+        };
+        (_coven_cache_budgets, $sql:literal) => {
+            sql.push_str(&format!($sql));
+        };
         ($table:ident, $sql:literal) => {
-            if OUTSIDE_STORE_TABLES.contains(&stringify!($table)) {
+            let table = stringify!($table);
+            if OUTSIDE_STORE_TABLES.contains(&table) || views::READABLE.contains(&table) {
                 sql.push_str($sql);
             }
         };
