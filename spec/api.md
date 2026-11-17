@@ -6239,7 +6239,7 @@ impl CovenHandle {
 
     /// Deletes the installations `reset_device` kept in the store's
     /// directory, one per reset, and syncs the directory (§19.3). Nothing
-    /// reads them once the reset's notice is stored, and coven never touches
+    /// reads them once coven stores the reset's notice, and coven never touches
     /// the store's own files. In one step, coven moves each archive out of the
     /// directory into a removal folder and deletes its row in
     /// `coven_archive_bytes`, then it deletes that folder. The call returns

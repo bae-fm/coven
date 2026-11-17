@@ -8831,8 +8831,8 @@ in the statement that changes an entry, so they cannot disagree with the
 entries: `cached`, the bytes of its chunks and headers, which the budget
 counts, and `pinned`, the bytes of its whole copies, which it doesn't.
 Ben's phone has 3 GB of pinned albums and 1 GB of played tracks in a 20 GB
-namespace: `pinned` is 3 GB, `cached` 1 GB. The cache counts the partial
-downloads that pins left apart, as `pinning`. The app's SQL reads each namespace's budget,
+namespace: `pinned` is 3 GB, `cached` 1 GB. The cache counts separately
+the partial downloads that pins left, as `pinning`. The app's SQL reads each namespace's budget,
 `cached`, `pinned` and `pinning` from the view `coven_cache_bytes`, so a live
 query sums them with its own rows.
 
