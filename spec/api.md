@@ -3802,8 +3802,9 @@ let moved = handle
     `refuse_invite` ends it as a provider's sharing refusal does:
     `coven_operations` lists its outcome under the kind `Invite`, with the
     refused address, and it leaves `coven_invites`.
-  - `record_change` journals an administrative change as the app's write
-    does, and `coven_operations` lists it running under its kind.
+  - `record_change` journals a `StoreChange`, the change of an admin
+    entry, as the app's write does, and `coven_operations` lists it running
+    under its kind.
     `finish_operation` ends it with an outcome, which `coven_operations`
     then shows.
   - `record_pending` saves a `PendingRecord` as coven saves one, and
@@ -4322,6 +4323,12 @@ pub fn refuse_invite(connection: &rusqlite::Connection, invite: OperationId, acc
 /// (E4).
 #[cfg(feature = "test-utils")]
 pub fn record_change(connection: &rusqlite::Connection, change: StoreChange) -> Result<OperationId, CovenError>;
+
+/// The change of an admin entry (D6), one variant per change, such as
+/// `RenameStore { name }`: what `record_change` journals. Re-exported from
+/// coven-format, so a test names it through coven.
+#[cfg(feature = "test-utils")]
+pub use coven_format::admin::StoreChange;
 
 /// Ends the operation `id` the app's write journaled with `outcome` (E4).
 #[cfg(feature = "test-utils")]

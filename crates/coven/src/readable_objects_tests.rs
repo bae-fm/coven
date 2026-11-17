@@ -43,7 +43,7 @@ fn recorded_invites_show_their_stage_and_request() {
     let connection = outside_store();
     let binding = super::record_change(
         &connection,
-        coven_format::admin::StoreChange::RenameStore { name: "Household".into() },
+        crate::StoreChange::RenameStore { name: "Household".into() },
     )
     .unwrap();
     let granting = super::record_invite(&connection, invite(1, Stage::Granting)).unwrap();
@@ -97,7 +97,7 @@ fn recorded_operations_list_their_outcomes() {
         crate::SharingRefusal::TooManyMembers,
     )
     .unwrap();
-    let rename = || coven_format::admin::StoreChange::RenameStore { name: "Household".into() };
+    let rename = || crate::StoreChange::RenameStore { name: "Household".into() };
     let renamed = super::record_change(&connection, rename()).unwrap();
     super::finish_operation(&connection, renamed, &crate::OperationOutcome::Satisfied).unwrap();
     let running = super::record_change(&connection, rename()).unwrap();

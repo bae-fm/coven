@@ -56,6 +56,8 @@ pub use coven_database::{
     WriteBatch, WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]
+pub use coven_format::admin::StoreChange;
+#[cfg(any(test, feature = "test-utils"))]
 pub use coven_sync::{RecordedInvite, RecordedInviteStage, RecordedJoiner};
 
 pub use coven_database::{
