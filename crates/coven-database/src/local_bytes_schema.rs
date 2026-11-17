@@ -19,5 +19,18 @@ macro_rules! coven_local_bytes_tables {
             INSERT INTO coven_library_bytes(part,bytes) VALUES('database',0),('inputs',0);
         "
         );
+        // Each archive a reset kept in the store's directory (§19.3), by
+        // name, with the size of everything in it: written in the
+        // transaction that commits the reset's notice, and deleted in the
+        // step that moves the archive out of the directory to remove it.
+        $visit!(
+            coven_archive_bytes,
+            "
+            CREATE TABLE coven_archive_bytes (
+                archive TEXT PRIMARY KEY NOT NULL,
+                bytes INTEGER NOT NULL CHECK(bytes>=0)
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
     };
 }

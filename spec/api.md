@@ -3691,9 +3691,10 @@ let moved = handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads thirteen views of coven's own tables
-  and nine tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
+  and ten tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
-  `coven_retry_effect` and `coven_library_bytes`, in reads,
+  `coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`, in
+  reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -3854,6 +3855,8 @@ let moved = handle
 | | `pinning` | the bytes of the partial downloads stopped pins left in it, which the cache neither counts nor evicts |
 | `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file, or `inputs`, the input database's |
 | | `bytes` | the part's size in bytes: a database file's as its last checkpoint left it, written as the store opens and after each checkpoint that changes it; the WAL beside it isn't counted |
+| `coven_archive_bytes`: each archive a reset kept in the store's directory ([§19.3](coven.md#193-another-copy-of-the-same-device)); a table coven writes: a row appears as the store opens after the swap that kept the archive, and goes as the archive moves out of the directory to be removed | `archive` | the archive's name in the store's directory |
+| | `bytes` | the size of everything in it, in bytes |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
 | | `metered` | 1 while that network is metered, and while coven can't tell after the platform failed to answer since opening; 0 with none, and where the platform never tells; never stored |
 | | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |
@@ -6236,10 +6239,12 @@ impl CovenHandle {
     /// Deletes the installations `reset_device` kept in the store's
     /// directory, one per reset, and syncs the directory (§19.3). Nothing
     /// reads them once the reset's notice is stored, and the store's own files
-    /// are never touched. It returns once they are gone. A failure midway
-    /// returns its `CovenError::File` and leaves the rest, part of one
-    /// perhaps, for the next call, which removes what remains; with none left
-    /// it succeeds. While one is there, `local_bytes` reports its size.
+    /// are never touched. Each archive leaves the directory and its row in
+    /// `coven_archive_bytes` in one step, then their files go. It returns
+    /// once they are gone. A failure midway returns its `CovenError::File`
+    /// and leaves the rest for the next call, which removes what remains;
+    /// with none left it succeeds. While one is there, `local_bytes` reports
+    /// its size.
     pub async fn delete_discarded_devices(&self) -> CovenResult<()>;
 
     /// This device's pending work, in the order the records arose, as

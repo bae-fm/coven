@@ -483,10 +483,10 @@ So the app's SQL can read it through fourteen views, `coven_uploads`,
 `coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
 `coven_user_files`,
 `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
-and nine tables,
+and ten tables,
 `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
 `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
-`coven_retry_effect` and `coven_library_bytes`
+`coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -10903,16 +10903,30 @@ laptop in place from her current restore code instead (§13.1).
 - A reset of a store that never set up storage is refused with `NoStorage`,
   changing nothing: there is nothing in storage to load, and the creation names
   the device a reset would replace (§10.3).
+- **What resets kept, in SQL.** As the store opens, coven writes a row
+  into `coven_archive_bytes` for each archive in the store's directory that
+  has none, this reset's and those earlier resets kept, with the size of
+  everything in it. The swap moves the old installation into its archive
+  while the store refuses opens, and the swapped store's opening writes
+  its row before any reader sees the store. Nothing writes into an archive
+  after the swap, so its size stays right. The app's SQL reads the table,
+  so the device's storage figures sum it with the rest, and `local_bytes`
+  reports the sum as `before_reset` (§17.8).
 - **Deleting what resets kept.** `CovenHandle::delete_discarded_devices`
   ([api.md E5](api.md#e5-storage-and-sync)) removes every archive, each
   installation an earlier reset moved aside, then syncs the store's
   directory. Nothing reads an archive once the reset's notice is in the
   database, so an archive is data nothing references, not state. Removing a
-  directory tree is not atomic, so a failure or an interruption can leave
-  an archive part-removed under its name. The call returns the failure to
-  its caller and the next call removes what remains; with no archive it
-  succeeds. The store's own files never go. While an archive is there,
-  `local_bytes` reports its size as `before_reset` (§17.8).
+  directory tree is not atomic, and a row that a part-removed archive kept
+  would name bytes that are gone. So coven first moves each archive, in one
+  rename, into the folder `removing-discarded-devices`, then deletes its row
+  under the writer. If the deletion fails, coven moves the archive back and
+  the call fails, so the archive and its row stay as they were. Once every
+  archive has moved, coven removes the folder; nothing names what is in it,
+  and a removal that fails partway returns its failure and leaves the rest
+  for the next call. With no archive the call succeeds. The store's
+  own files never go. A restore removes the archive of the installation it
+  replaced the same way, before it publishes (§13.1).
 
 Ana's laptop has uploaded through write 12, but its damaged database may hold
 write 13. Resetting loads the stored history through 12 under a new device id.
@@ -12369,8 +12383,9 @@ device consistent with the database.
   coven writes as what the sync state is computed from changes (§19.1), and
   `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes
-  (§6.7), and `coven_library_bytes`, the sizes of the store's own files that
-  coven writes as each changes (§17.8). They are coven's objects: the app's
+  (§6.7), and `coven_library_bytes` and `coven_archive_bytes`, the sizes of
+  the store's own files and of the archives resets kept, which coven writes
+  as each changes (§17.8, §19.3). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,

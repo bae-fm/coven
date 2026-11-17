@@ -23,6 +23,9 @@ use crate::id_source::{DeviceId, StoreId};
 
 pub(crate) const RECORD: &str = "device-reset.json";
 const ARCHIVE_PREFIX: &str = "discarded-device-";
+/// The folder each archive moves into as its removal begins, so the archive
+/// leaves the store's directory in one rename while its tree goes (§19.3).
+const REMOVING: &str = "removing-discarded-devices";
 /// The directory inside a store's directory where its replacement loads.
 pub(super) const AREA: &str = ".coven-replacement";
 /// Files describing the store's location and this installation's custody,
@@ -164,7 +167,7 @@ pub(super) fn loading(directory: &Path, id: StoreId) -> PathBuf {
 
 /// The discarded installation's local state, kept for inspection after a reset.
 fn archive(directory: &Path, old_device: DeviceId) -> PathBuf {
-    directory.join(format!("{ARCHIVE_PREFIX}{}", old_device.0))
+    directory.join(archive_name(old_device))
 }
 
 /// Under the writer, bootstrap and excluded reader locks, move the old local
@@ -196,15 +199,123 @@ pub(super) fn forward(
     name_device(directory, id, reset.new_device)
 }
 
-/// Remove a swap's archive: a restore keeps no old copy (§13.1).
-pub(super) fn discard(directory: &Path, old_device: DeviceId) -> Result<(), FileError> {
-    let archive = archive(directory, old_device);
-    if atomic_file::exists("inspect discarded device archive", &archive)? {
-        fs::remove_dir_all(&archive)
-            .map_err(|source| FileError::at("remove discarded device archive", &archive, source))?;
-        atomic_file::sync_publication(&archive)?;
+/// The name of the archive a swap keeps of `old_device`'s installation.
+pub(super) fn archive_name(old_device: DeviceId) -> String {
+    format!("{ARCHIVE_PREFIX}{}", old_device.0)
+}
+
+/// The name of every archive in the store's directory, in order.
+pub(super) fn discarded_devices(directory: &Path) -> Result<Vec<String>, FileError> {
+    Ok(archives(directory)?
+        .iter()
+        .map(|archive| {
+            archive
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("an archive is listed by its UTF-8 name")
+                .to_owned()
+        })
+        .collect())
+}
+
+/// The size of everything in the archive `name`.
+pub(super) fn discarded_device_size(directory: &Path, name: &str) -> Result<u64, FileError> {
+    tree_size(&named_archive(directory, name)?)
+}
+
+/// The path of the archive `name`, refusing a name that is not one.
+fn named_archive(directory: &Path, name: &str) -> Result<PathBuf, FileError> {
+    if !name.starts_with(ARCHIVE_PREFIX) || name.contains(['/', '\\']) || name.contains("..") {
+        return Err(FileError::at(
+            "name a discarded device archive",
+            &directory.join(name),
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not an archive's name"),
+        ));
+    }
+    Ok(directory.join(name))
+}
+
+/// Move the archive `name` into the removal folder, syncing both folders,
+/// so it leaves the store's directory in one step. Returns whether it was
+/// there to move.
+pub(super) fn retire(directory: &Path, name: &str) -> Result<bool, FileError> {
+    let archive = named_archive(directory, name)?;
+    if !atomic_file::exists("inspect discarded device archive", &archive)? {
+        return Ok(false);
+    }
+    let removing = directory.join(REMOVING);
+    if !atomic_file::exists("inspect the archives' removal folder", &removing)? {
+        fs::create_dir(&removing).map_err(|source| {
+            FileError::at("create the archives' removal folder", &removing, source)
+        })?;
+    }
+    let retired = removing.join(name);
+    atomic_file::rename_new(&archive, &retired)
+        .map_err(|source| FileError::at("move a discarded device archive", &archive, source))?;
+    sync_folders(directory, &removing)?;
+    Ok(true)
+}
+
+/// Move the archive `name` back from the removal folder, as `retire` found it.
+pub(super) fn unretire(directory: &Path, name: &str) -> Result<(), FileError> {
+    let archive = named_archive(directory, name)?;
+    let removing = directory.join(REMOVING);
+    let retired = removing.join(name);
+    atomic_file::rename_new(&retired, &archive).map_err(|source| {
+        FileError::at("move a discarded device archive back", &retired, source)
+    })?;
+    sync_folders(directory, &removing)
+}
+
+/// Remove the removal folder and everything in it, then sync the store's
+/// directory. Nothing names what is in it, so a removal that stops partway
+/// leaves the rest for the next call. An absent folder is removed.
+pub(super) fn remove_retired(directory: &Path) -> Result<(), FileError> {
+    let removing = directory.join(REMOVING);
+    match fs::remove_dir_all(&removing) {
+        Ok(()) => atomic_file::sync_publication(&removing),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => {
+            Err(FileError::at("remove the discarded device archives", &removing, source))
+        }
+    }
+}
+
+#[cfg_attr(not(unix), expect(unused_variables, reason = "Windows renames write through"))]
+fn sync_folders(directory: &Path, removing: &Path) -> Result<(), FileError> {
+    #[cfg(unix)]
+    for path in [directory, removing] {
+        atomic_file::sync_directory(path)
+            .map_err(|source| FileError::at("sync the archives' folders", path, source))?;
     }
     Ok(())
+}
+
+/// The size of a file, or of everything under a folder. Links are not
+/// followed, and what disappears while the walk runs counts for nothing.
+pub(super) fn tree_size(path: &Path) -> Result<u64, FileError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => return Err(FileError::at("measure a store file", path, source)),
+    };
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => return Err(FileError::at("list a store folder", path, source)),
+    };
+    let mut total = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|source| FileError::at("list a store folder", path, source))?;
+        total = total.saturating_add(tree_size(&entry.path())?);
+    }
+    Ok(total)
 }
 
 /// The archives of earlier resets in the store's directory, by name. Nothing
@@ -224,36 +335,24 @@ pub(super) fn archives(directory: &Path) -> Result<Vec<PathBuf>, FileError> {
     Ok(found)
 }
 
-/// Remove every archive, then sync the directory. Removing a directory tree
-/// is not atomic, so a failure leaves the archive part-removed under its name,
-/// listed by `archives`, and a later call removes the rest.
-pub(super) fn delete_archives(directory: &Path) -> Result<(), FileError> {
-    let archives = archives(directory)?;
-    for archive in &archives {
-        match fs::remove_dir_all(archive) {
-            Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(FileError::at("remove discarded device archive", archive, source))
-            }
-        }
-    }
-    if let Some(last) = archives.last() {
-        atomic_file::sync_publication(last)?;
-    }
-    Ok(())
-}
-
 /// Whether an entry stays where it is while installations swap: the custody
 /// files the replacement keeps, the settings, which change last, the swap's
-/// own record and marker, the replacement's area and earlier archives.
+/// own record and marker, the replacement's area, earlier archives and the
+/// folder of those being removed.
 fn stays(name: &str) -> bool {
     KEPT.iter().any(|file| file.name() == name)
         || name == settings::SETTINGS_FILE
         || name == RECORD
         || name == bootstrap::MARKER
         || name == AREA
+        || name == REMOVING
         || name.starts_with(ARCHIVE_PREFIX)
+}
+
+/// Whether `name` in the store's directory holds what resets kept: an
+/// archive, or the folder of those being removed.
+pub(super) fn is_kept_by_resets(name: &str) -> bool {
+    name == REMOVING || name.starts_with(ARCHIVE_PREFIX)
 }
 
 /// Move every local entry of `from` into `to`, then sync both directories.

@@ -1,5 +1,4 @@
 use super::*;
-use crate::clock::HANG_GUARD;
 use crate::files::{
     FileArea, FileName, StoreDirAccess, StoreDirectories, StoreFile, StoreLockProbe,
 };
@@ -129,7 +128,9 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
             b"unsent"
         );
         if discard {
-            replacement.remove_replaced().await.unwrap();
+            let name = replacement.discarded_device_name();
+            assert!(f.store.retire_discarded_device(&name).unwrap());
+            f.store.remove_retired_devices().unwrap();
         }
         replacement.publish().unwrap();
         assert_eq!(archive(&f, &replacement).exists(), !discard);
@@ -480,45 +481,42 @@ fn walk(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     found
 }
 
-/// Removing the old installation, a folder of any size, runs on the
-/// blocking pool: with its one thread busy, the removal waits and the
-/// runtime's own thread stays free; once the thread frees, it finishes.
-#[test]
-fn removing_the_replaced_installation_leaves_the_runtime_thread_free() {
-    use std::{future::Future, task::Poll};
-    let runtime =
-        tokio::runtime::Builder::new_current_thread().max_blocking_threads(1).build().unwrap();
-    runtime.block_on(async {
-        let f = store(2);
-        let replacement = f
-            .layout
-            .begin_replacement(
-                f.store.id(),
-                ReplacedBy::Restore,
-                Registration::ReplacesOld,
-                &UuidIds,
-            )
-            .await
-            .unwrap();
-        load(&replacement);
-        replacement.swap("Household".into()).unwrap();
-        let archived = archive(&f, &replacement);
-        assert!(archived.exists());
-        let (started, ready) = std::sync::mpsc::channel();
-        let (release, gate) = std::sync::mpsc::channel::<()>();
-        let blocker = tokio::task::spawn_blocking(move || {
-            started.send(()).unwrap();
-            gate.recv_timeout(HANG_GUARD).unwrap();
-        });
-        ready.recv().unwrap();
-        let mut removing = std::pin::pin!(replacement.remove_replaced());
-        let first = std::future::poll_fn(|cx| Poll::Ready(removing.as_mut().poll(cx))).await;
-        assert!(first.is_pending(), "{first:?}");
-        assert!(archived.exists());
-        release.send(()).unwrap();
-        blocker.await.unwrap();
-        removing.await.unwrap();
-        assert!(!archived.exists());
-        replacement.publish().unwrap();
-    });
+/// Each archive a reset kept is listed with its size. Removing one moves
+/// it out of the store's directory in one rename, which moving it back
+/// undoes, and its files go with the folder of archives being removed.
+#[tokio::test]
+async fn an_archive_leaves_the_directory_in_one_rename_before_its_files_go() {
+    let f = store(2);
+    let replacement = f
+        .layout
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, Registration::ReplacesOld, &UuidIds)
+        .await
+        .unwrap();
+    load(&replacement);
+    replacement.swap("Household".into()).unwrap();
+    let archived = archive(&f, &replacement);
+    let name = replacement.discarded_device_name();
+    fn tree(path: &std::path::Path) -> u64 {
+        if path.is_file() {
+            return std::fs::metadata(path).unwrap().len();
+        }
+        std::fs::read_dir(path).unwrap().map(|entry| tree(&entry.unwrap().path())).sum()
+    }
+    let size = tree(&archived);
+    assert!(size > 0);
+    assert_eq!(f.store.discarded_devices().unwrap(), std::slice::from_ref(&name));
+    assert_eq!(f.store.discarded_device_size(&name).unwrap(), size);
+    assert!(f.store.retire_discarded_device(&name).unwrap());
+    assert!(!archived.exists());
+    assert!(f.store.discarded_devices().unwrap().is_empty());
+    f.store.return_discarded_device(&name).unwrap();
+    assert!(archived.exists());
+    assert!(f.store.retire_discarded_device(&name).unwrap());
+    // An archive already moved is not there to move again.
+    assert!(!f.store.retire_discarded_device(&name).unwrap());
+    f.store.remove_retired_devices().unwrap();
+    assert!(!f.path.join("removing-discarded-devices").exists());
+    // With nothing being removed, removing succeeds.
+    f.store.remove_retired_devices().unwrap();
+    replacement.publish().unwrap();
 }

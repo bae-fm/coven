@@ -275,7 +275,9 @@ pub(super) async fn replace_installation(
         return combine(Err(error), close(database).await);
     }
     if by == ReplacedBy::Restore {
-        if let Err(error) = replacement.remove_replaced().await {
+        if let Err(error) =
+            database.remove_discarded_device(replacement.discarded_device_name()).await
+        {
             return combine(Err(error.into()), close(database).await);
         }
     }

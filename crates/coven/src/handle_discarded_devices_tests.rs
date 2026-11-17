@@ -1,6 +1,6 @@
-//! The installations resets kept: how many there are, that deleting them
-//! leaves the store working, and that a deletion that stops partway finishes
-//! on the next call (§19.3).
+//! The installations resets kept: how many there are, their sizes in
+//! `coven_archive_bytes`, that deleting them leaves the store working, and
+//! that a deletion that stops partway finishes on the next call (§19.3).
 use crate::*;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::test_utils::MemoryStorage;
@@ -147,10 +147,11 @@ async fn deleting_with_no_archive_succeeds_and_can_repeat() {
 }
 
 /// A folder in the archive that refuses removal of its contents stops the
-/// removal after part of the archive has gone.
+/// removal after part of the archive has gone. The archive and its row left
+/// the store's directory first, and the next call removes the rest.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_deletion_that_stops_partway_leaves_the_archive_for_the_next_call() {
+async fn a_deletion_that_stops_partway_leaves_the_rest_for_the_next_call() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new().await;
     f.connect().await;
@@ -168,12 +169,61 @@ async fn a_deletion_that_stops_partway_leaves_the_archive_for_the_next_call() {
         return;
     }
     assert!(matches!(first, Err(CovenError::File(_))), "{first:?}");
-    assert_eq!(f.archives(), std::slice::from_ref(&archive));
+    assert!(f.archives().is_empty());
+    assert!(archive_rows(&handle).await.is_empty());
+    let removing = archive.parent().unwrap().join("removing-discarded-devices");
+    let stuck = removing.join(archive.file_name().unwrap()).join("stuck");
     assert!(stuck.join("inside").exists());
     // The store itself is untouched by the failed call.
     note(&handle, "still writes").await;
     std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).unwrap();
     handle.delete_discarded_devices().await.unwrap();
     assert!(f.archives().is_empty());
+    assert!(!removing.exists());
+    handle.close().await.unwrap();
+}
+
+/// Each archive's row in `coven_archive_bytes`, by name.
+async fn archive_rows(handle: &CovenHandle) -> Vec<(String, i64)> {
+    handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query(
+                "SELECT archive,bytes FROM coven_archive_bytes ORDER BY archive",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+/// The size of everything under `path`.
+fn tree(path: &std::path::Path) -> i64 {
+    if path.is_file() {
+        return i64::try_from(std::fs::metadata(path).unwrap().len()).unwrap();
+    }
+    std::fs::read_dir(path).unwrap().map(|entry| tree(&entry.unwrap().path())).sum()
+}
+
+/// A reset's archive appears in `coven_archive_bytes` with its size as the
+/// reset's notice commits, and leaves it as coven removes the archive
+/// (§17.8, §19.3).
+#[tokio::test]
+async fn each_archive_has_a_row_with_its_size_until_it_is_removed() {
+    let f = Fixture::new().await;
+    f.connect().await;
+    f.reset().await.close().await.unwrap();
+    let handle = f.reset().await;
+    let archives = f.archives();
+    assert_eq!(archives.len(), 2);
+    let expected: Vec<(String, i64)> = archives
+        .iter()
+        .map(|path| (path.file_name().unwrap().to_str().unwrap().to_owned(), tree(path)))
+        .collect();
+    assert!(expected.iter().all(|(_, bytes)| *bytes > 0));
+    assert_eq!(archive_rows(&handle).await, expected);
+    handle.delete_discarded_devices().await.unwrap();
+    assert!(f.archives().is_empty());
+    assert!(archive_rows(&handle).await.is_empty());
     handle.close().await.unwrap();
 }

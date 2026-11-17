@@ -47,6 +47,9 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_library_bytes", "SELECT * FROM coven_library_bytes", "coven_library_bytes") => {
             Some("the table holds a row for each part of the store's own files")
         }
+        ("coven_archive_bytes", "SELECT * FROM coven_archive_bytes", "coven_archive_bytes") => {
+            Some("the table holds a row for each archive resets kept, which are few")
+        }
         ("coven_files", "SELECT * FROM coven_files", "coven_files") => {
             Some("the table lists every file this device has a record of")
         }

@@ -74,6 +74,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             views,
             [
+                ("table".into(), "coven_archive_bytes".into()),
                 ("table".into(), "coven_files".into()),
                 ("table".into(), "coven_library_bytes".into()),
                 ("table".into(), "coven_moves".into()),
@@ -104,7 +105,7 @@ async fn only_the_spec_tables_are_created() {
                 "SELECT name FROM sqlite_schema WHERE type='table'
                  AND name NOT IN('coven_files','coven_pins','coven_pin_requests','coven_moves',
                      'coven_upload_queue','coven_pending','coven_sync_status','coven_retry_effect',
-                     'coven_library_bytes')
+                     'coven_library_bytes','coven_archive_bytes')
                  ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),

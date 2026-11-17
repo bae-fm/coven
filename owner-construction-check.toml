@@ -1111,10 +1111,12 @@ tables = [
 name = "local bytes"
 owner = "StoreDatabase"
 homes = [
+    "crates/coven-database/src/archive_bytes.rs",
     "crates/coven-database/src/library_bytes.rs",
     "crates/coven-database/src/local_bytes_schema.rs",
 ]
 tables = [
+    "coven_archive_bytes",
     "coven_library_bytes",
 ]
 
@@ -1280,12 +1282,8 @@ tables = [
     "LockRegistration::acquire_file",
 ]
 # A replacement composes the new installation beside the old one, holding
-# the store's writer lock until it is in place. Removing the old one runs on
-# a blocking task to its end, even once its caller stops waiting.
-"crates/coven-foundation/src/files/replacement.rs" = [
-    "begin",
-    "ReplacementStore::remove_replaced",
-]
+# the store's writer lock until it is in place.
+"crates/coven-foundation/src/files/replacement.rs" = ["begin"]
 # A store's writer, reader or bootstrap lock, taken through the registry.
 "crates/coven-foundation/src/files/lock.rs" = [
     "acquire_for_open",

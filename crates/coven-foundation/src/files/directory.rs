@@ -246,15 +246,8 @@ impl StoreDir {
         Ok(())
     }
 
-    /// Remove the installations resets kept in this store's directory
-    /// (§19.3). The store's own files stay. A failure midway leaves the rest
-    /// for the next call; with none left it succeeds.
-    pub fn delete_discarded_devices(&self) -> Result<(), FileError> {
-        super::device_reset::delete_archives(&self.path)
-    }
-
-    /// What this store's directory holds, in file sizes (§17.8, §19.3): its
-    /// own files, apart from the cache, and the installations resets kept.
+    /// What this store's directory holds, in file sizes (§17.8): its own
+    /// files, apart from the cache and what resets kept.
     pub fn local_bytes(&self) -> Result<super::DirectoryBytes, FileError> {
         super::local_bytes::measure(&self.path, FileArea::Cache.name())
     }
@@ -362,6 +355,22 @@ pub trait StoreDirAccess: Sized {
     /// Remove the record of a deletion that ended before it journaled the
     /// device's removal. An absent record succeeds.
     fn forget_deletion(&self) -> Result<(), FileError>;
+    /// The name of each archive resets kept in the store's directory, in
+    /// order (§19.3).
+    fn discarded_devices(&self) -> Result<Vec<String>, FileError>;
+    /// The size of everything in the archive `name`. Blocks while it walks
+    /// the archive.
+    fn discarded_device_size(&self, name: &str) -> Result<u64, FileError>;
+    /// Move the archive `name` out of the store's directory into the folder
+    /// of archives being removed, in one rename. Returns whether it was
+    /// there to move.
+    fn retire_discarded_device(&self, name: &str) -> Result<bool, FileError>;
+    /// Move the archive `name` back, as `retire_discarded_device` found it.
+    fn return_discarded_device(&self, name: &str) -> Result<(), FileError>;
+    /// Remove the folder of archives being removed, then sync the store's
+    /// directory. Nothing names what is in it; a removal that stops partway
+    /// leaves the rest for the next call. Blocks while it removes them.
+    fn remove_retired_devices(&self) -> Result<(), FileError>;
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
     fn settings(&self) -> Result<StoreSettings, SettingsError>;
@@ -540,6 +549,21 @@ impl StoreDirAccess for StoreDir {
     }
     fn forget_deletion(&self) -> Result<(), FileError> {
         super::deletion::forget(&self.path)
+    }
+    fn discarded_devices(&self) -> Result<Vec<String>, FileError> {
+        super::device_reset::discarded_devices(&self.path)
+    }
+    fn discarded_device_size(&self, name: &str) -> Result<u64, FileError> {
+        super::device_reset::discarded_device_size(&self.path, name)
+    }
+    fn retire_discarded_device(&self, name: &str) -> Result<bool, FileError> {
+        super::device_reset::retire(&self.path, name)
+    }
+    fn return_discarded_device(&self, name: &str) -> Result<(), FileError> {
+        super::device_reset::unretire(&self.path, name)
+    }
+    fn remove_retired_devices(&self) -> Result<(), FileError> {
+        super::device_reset::remove_retired(&self.path)
     }
     fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.path, self.id)

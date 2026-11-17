@@ -402,6 +402,8 @@ impl DatabaseBuilder {
             input.checkpointed_size(),
         );
         database.host(|writer| sizes.record_opened(writer))?;
+        // The archives resets kept that no row names yet (§19.3).
+        database.host(|writer| super::archive_bytes::record_opened(writer, &self.directory))?;
         let inputs = input_database::InputDatabase::new(input)?;
         tracing::info!(
             migrations = migrations.len(),

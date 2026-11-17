@@ -130,6 +130,7 @@ impl StoreDatabase {
     /// cache's folder is left out of the walk, since its entries count it.
     pub async fn local_bytes(&self) -> Result<LocalBytes, DbError> {
         let cache = self.cache_bytes().await?;
+        let before_reset = self.read_committed(super::archive_bytes::kept).await?;
         let directory = self.call(|open| Ok::<_, DbError>(open.access.directory.clone())).await?;
         let walked = super::call::process(&self.bugs, move || {
             directory.local_bytes().map_err(DbError::from)
@@ -139,7 +140,7 @@ impl StoreDatabase {
             namespaces: cache.namespaces,
             pinning: cache.pinning,
             library: walked.library,
-            before_reset: walked.archives,
+            before_reset,
         })
     }
 

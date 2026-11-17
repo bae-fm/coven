@@ -18,7 +18,7 @@
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`), and the sizes of the store's own
 /// files (`local_bytes_schema.rs`).
-pub(crate) const READABLE: [&str; 23] = [
+pub(crate) const READABLE: [&str; 24] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -28,6 +28,7 @@ pub(crate) const READABLE: [&str; 23] = [
     "coven_downloading",
     "coven_cache_bytes",
     "coven_library_bytes",
+    "coven_archive_bytes",
     super::UPLOAD_QUEUE,
     super::PINS,
     super::PIN_REQUESTS,

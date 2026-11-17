@@ -105,6 +105,7 @@ fn library(folder: &std::path::Path) -> u64 {
             name != "cache"
                 && name != ".coven-replacement"
                 && !name.starts_with("discarded-device-")
+                && name != "removing-discarded-devices"
         })
         .map(|path| tree(&path))
         .sum()
