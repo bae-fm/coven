@@ -630,9 +630,7 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
                 crate::schema_preparation::prepare_internal_schema(database)?;
                 let db = &*database;
                 let _constants = crate::transaction_constants::keep_constants(db, call);
-                db.read_snapshot(|db| {
-                    Ok::<_, OpenError>(crate::SqlReadContext::new(db).sync_facts()?)
-                })
+                db.read_snapshot(|db| Ok::<_, OpenError>(crate::sync_facts::read(db)?))
             })
         })
         .await,

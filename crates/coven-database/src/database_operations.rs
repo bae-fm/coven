@@ -22,6 +22,25 @@ impl StoreDatabase {
         .await
     }
 
+    /// The journal's rows of `kind`, oldest first, in one committed state.
+    pub async fn operations_of_kind(&self, kind: &str) -> Result<Vec<OperationRecord>, DbError> {
+        let kind = kind.to_owned();
+        self.read_committed(move |db| crate::operation::of_kind(db, &kind)).await
+    }
+
+    /// The same rows, live: a status that follows one operation reads them
+    /// (E4).
+    pub fn subscribe_operations_of_kind<E>(
+        &self,
+        kind: &str,
+    ) -> crate::LiveQuery<Vec<OperationRecord>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        let kind = kind.to_owned();
+        self.follow(move |db| crate::operation::of_kind(db, &kind).map_err(E::from))
+    }
+
     /// Read the earliest unfinished row of a sync-owned kind, including failures.
     pub async fn first_operation(&self, kind: &str) -> Result<Option<OperationRecord>, DbError> {
         let kind = kind.to_owned();

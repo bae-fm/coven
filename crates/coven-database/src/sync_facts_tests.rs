@@ -56,7 +56,7 @@ async fn queue(owner: &FileDatabase) -> Vec<crate::FileUpload> {
 
 /// The facts as one read of the database gives them.
 async fn read_facts(db: &crate::StoreDatabase) -> crate::SyncFacts<Record> {
-    db.read(|sql| sql.sync_facts::<Record>()).await.unwrap()
+    db.read_committed(super::read::<Record>).await.unwrap()
 }
 
 /// The upload read starts from the pending records, the bound files in

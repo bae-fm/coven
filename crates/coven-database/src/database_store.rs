@@ -54,14 +54,14 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.subscribe(|sql| sql.store_name().map_err(E::from))
+        self.follow(|db| crate::store_state_tables::name(db).map_err(E::from))
     }
 
     /// The committed name and the slot that set it, including a local
     /// creation's name, which slot 1 will set. A saved restore code keeps
     /// whichever name has the later slot (§13.1).
     pub async fn named_store(&self) -> Result<(String, coven_merge::Slot), crate::DbError> {
-        self.read(|sql| sql.named_store()).await
+        self.read_committed(crate::store_state_tables::named).await
     }
 }
 
@@ -69,6 +69,6 @@ impl<M: Mode> StoreDatabase<M> {
     /// The name in this device's committed state, including a local creation
     /// on the writer (E9).
     pub async fn store_name(&self) -> Result<String, crate::DbError> {
-        self.read(|sql| sql.store_name()).await
+        self.read_committed(crate::store_state_tables::name).await
     }
 }

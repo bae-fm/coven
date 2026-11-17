@@ -11,7 +11,7 @@ use crate::DbError;
 pub struct OperationId(pub i64);
 
 /// A journal row read as one committed value.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct OperationRecord {
     /// Its local identity.
     pub id: OperationId,

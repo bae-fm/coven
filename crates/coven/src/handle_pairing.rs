@@ -28,10 +28,9 @@ impl CovenHandle {
         &self,
         pairing: AddDeviceId,
     ) -> CovenResult<Option<AddDeviceStatus>> {
-        self.database
-            .read(move |sql| coven_sync::pairing_status(sql, pairing))
-            .await
-            .map_err(CovenError::from)
+        let records =
+            self.database.operations_of_kind(coven_database::operation_kind::PAIRING).await?;
+        Ok(coven_sync::pairing_status(&records, pairing)?)
     }
 
     /// The same internal query, live (E4), for the screen that shows the code.
@@ -39,9 +38,9 @@ impl CovenHandle {
         &self,
         pairing: AddDeviceId,
     ) -> LiveQuery<Option<AddDeviceStatus>, CovenError> {
-        self.database.subscribe(move |sql| {
-            coven_sync::pairing_status(sql, pairing).map_err(CovenError::from)
-        })
+        self.database
+            .subscribe_operations_of_kind(coven_database::operation_kind::PAIRING)
+            .process(move |records| Ok(coven_sync::pairing_status(&records, pairing)?))
     }
 
     /// Approves exactly this checked request, in a write of its own

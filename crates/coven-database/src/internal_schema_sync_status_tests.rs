@@ -11,8 +11,8 @@ const LOGGED: &str = "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TE
          INSERT INTO status_log(storage,moved) VALUES(NEW.storage,NEW.moved);
      END;";
 
-fn row(sql: crate::SqlReadContext<'_>) -> Result<SyncStatusRow, DbError> {
-    sql.sync_status_row()
+fn row(db: &crate::sqlite::StoreSql) -> Result<SyncStatusRow, DbError> {
+    crate::internal_schema::sync_status::read(db)
 }
 
 fn at(millis: u64) -> SystemTime {
@@ -31,7 +31,7 @@ async fn a_new_store_reads_no_storage_set_up() {
     let store = TestStore::new();
     let db =
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
-    let mut rows = db.subscribe(row);
+    let mut rows = db.follow(row);
     assert_eq!(
         rows.next_inline().await.unwrap().unwrap(),
         SyncStatusRow {
@@ -60,16 +60,16 @@ async fn the_last_synced_time_never_goes_backward() {
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
     db.record_location(connected(), Some(at(5_000))).await.unwrap();
     db.record_moved(PassMove::Read).await.unwrap();
-    assert_eq!(db.read(row).await.unwrap().moved, Some(PassMove::Read));
+    assert_eq!(db.read_committed(row).await.unwrap().moved, Some(PassMove::Read));
     db.record_pass_end(b"\"Synced\"".to_vec(), Some(at(4_000))).await.unwrap();
-    let read = db.read(row).await.unwrap();
+    let read = db.read_committed(row).await.unwrap();
     assert_eq!((read.moved, read.last_synced), (None, Some(at(5_000))));
     db.record_pass_end(b"\"Synced\"".to_vec(), Some(at(9_000))).await.unwrap();
-    assert_eq!(db.read(row).await.unwrap().last_synced, Some(at(9_000)));
+    assert_eq!(db.read_committed(row).await.unwrap().last_synced, Some(at(9_000)));
     let offline = br#"{"Offline":{"failure":"Network","error":"one"}}"#.to_vec();
     db.record_pass_end(offline.clone(), None).await.unwrap();
     assert_eq!(
-        db.read(row).await.unwrap(),
+        db.read_committed(row).await.unwrap(),
         SyncStatusRow {
             location: connected(),
             last_pass: Some(offline),
@@ -78,10 +78,10 @@ async fn the_last_synced_time_never_goes_backward() {
         }
     );
     db.record_location(connected(), Some(at(7_000))).await.unwrap();
-    assert_eq!(db.read(row).await.unwrap().last_synced, Some(at(9_000)));
+    assert_eq!(db.read_committed(row).await.unwrap().last_synced, Some(at(9_000)));
     db.record_moved(PassMove::Claimed).await.unwrap();
     db.record_opened(connected(), None).await.unwrap();
-    assert_eq!(db.read(row).await.unwrap().moved, None);
+    assert_eq!(db.read_committed(row).await.unwrap().moved, None);
     db.close().await.unwrap();
 }
 
@@ -189,7 +189,7 @@ async fn a_read_only_handle_cant_read_the_sync_status() {
     };
     let writer = store.builder(notes_tables(), migrations()).open().await.unwrap();
     writer.record_moved(PassMove::Read).await.unwrap();
-    assert_eq!(writer.read(row).await.unwrap().moved, Some(PassMove::Read));
+    assert_eq!(writer.read_committed(row).await.unwrap().moved, Some(PassMove::Read));
     let reader = store.builder(notes_tables(), migrations()).open_read_only().await.unwrap();
     for statement in ["SELECT storage FROM coven_sync_status", "SELECT storage FROM sync_state"] {
         let error = reader

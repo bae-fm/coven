@@ -299,7 +299,9 @@ impl<L> DatabaseAccess<L> {
         place: coven_foundation::files::LeasePlace,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let file = reference.id();
-        let source = || self.read(|sql| sql.device_only_source(self.device, file));
+        let source = || {
+            self.with_committed(|db, _| crate::file_ref::device_only_source(db, self.device, file))
+        };
         let Some(found) = source()? else {
             return Ok(None);
         };
@@ -321,11 +323,11 @@ impl<L> DatabaseAccess<L> {
     }
 
     fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
-        self.read(|sql| sql.file_ref(file))
+        self.with_committed(|db, _| crate::file_ref::read(db, file))
     }
 
     fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
-        self.read(|sql| sql.user_file(file))
+        self.with_committed(|db, _| crate::user_file::read(db, file))
     }
 
     /// Run `read` in one snapshot on an idle reader, reading each constant
@@ -529,7 +531,20 @@ impl<M: Mode> StoreDatabase<M> {
 
     /// Decode every lost cell and removed row in one snapshot.
     pub async fn lost_values(&self) -> Result<Vec<LostValue>, DbError> {
-        self.read(|sql| sql.lost_values()).await
+        self.read_committed(crate::loss_record::lost_values).await
+    }
+
+    /// Run `read`, coven's own SQL on its tables, in one committed state on
+    /// an idle reader, on the blocking pool.
+    pub(crate) async fn read_committed<R, E>(
+        &self,
+        read: impl FnOnce(&StoreSql) -> Result<R, E> + Send + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
+        self.call(move |open| M::access(open).with_committed(|db, _| read(db))).await
     }
 
     pub(crate) fn start_read<F, R, E>(&self, read: F) -> RunningRead<R, E>

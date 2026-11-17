@@ -121,7 +121,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let owner = FileDatabase::new(db.clone());
-    let mut queue = db.subscribe(|sql| sql.upload_queue());
+    let mut queue = db.follow(crate::file_queue::state);
     let first = queue.next_inline().await.expect("the live query answers").unwrap();
     assert!(!first.paused);
     assert_eq!(first.uploads.len(), 1);

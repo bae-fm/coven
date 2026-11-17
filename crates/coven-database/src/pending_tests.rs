@@ -292,8 +292,8 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let entered = std::sync::Mutex::new(Some(entered));
     let (release, released) = std::sync::mpsc::channel();
     let released = std::sync::Mutex::new(released);
-    let live = db.subscribe(move |sql| {
-        let records = sql.pending::<Record>()?;
+    let live = db.follow(move |db| {
+        let records = crate::pending::read::<Record>(db)?;
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
         released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         Ok(records)

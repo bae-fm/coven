@@ -102,7 +102,9 @@ impl<M: Mode> StoreDatabase<M> {
                 )
             })
             .await?;
-        let (mut kept, pinning) = self.read(|sql| sql.cache_bytes()).await?;
+        // Every namespace's counters and the partials' sum, in one snapshot.
+        let (mut kept, pinning) =
+            self.read_committed(|db| Ok::<_, DbError>((budgets(db)?, partials(db)?))).await?;
         let namespaces = declared
             .into_iter()
             .filter_map(|name| {
@@ -121,7 +123,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + CarriesBug + Send + 'static,
     {
-        self.subscribe(|sql| sql.cache_budgets().map_err(E::from))
+        self.follow(|db| budgets(db).map_err(E::from))
     }
 }
 

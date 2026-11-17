@@ -142,7 +142,7 @@ fn calls_whose_runtime_is_shutting_down_return_shutdown() {
     let store = TestStore::new();
     let database =
         runtime.block_on(store.builder(notes_tables(), notes_migrations()).open()).unwrap();
-    let query = database.subscribe(|sql| sql.store_state());
+    let query = database.follow(crate::store_state_tables::read);
     drop(runtime);
     let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
     outlived.block_on(async {

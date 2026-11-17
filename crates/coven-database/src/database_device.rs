@@ -41,7 +41,7 @@ impl StoreDatabase {
     /// sequence prefix (E9). `subscribe_members` runs the same query.
     pub async fn members(&self) -> Result<Vec<crate::MemberInfo>, DbError> {
         let device = self.local_device()?;
-        self.read(move |sql| sql.members(device)).await
+        self.read_committed(move |db| crate::members::members(db, device)).await
     }
 
     /// The same members query, live (E4).
@@ -50,13 +50,15 @@ impl StoreDatabase {
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.members(device.ok_or(DbError::StoreClosed)?).map_err(E::from))
+        self.follow(move |db| {
+            crate::members::members(db, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
+        })
     }
 
     /// The circles this installation's member belongs to (E12).
     pub async fn circles(&self) -> Result<Vec<crate::Circle>, DbError> {
         let device = self.local_device()?;
-        self.read(move |sql| sql.circles(device)).await
+        self.read_committed(move |db| crate::members::circles(db, device)).await
     }
 
     /// The same circle-list query, live (E4).
@@ -65,7 +67,9 @@ impl StoreDatabase {
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.circles(device.ok_or(DbError::StoreClosed)?).map_err(E::from))
+        self.follow(move |db| {
+            crate::members::circles(db, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
+        })
     }
 
     /// A circle's members who remain in the store; none for an absent or
@@ -75,7 +79,7 @@ impl StoreDatabase {
         circle: coven_foundation::id_source::CircleId,
     ) -> Result<Vec<crate::CircleMemberInfo>, DbError> {
         let device = self.local_device()?;
-        self.read(move |sql| sql.circle_members(device, circle)).await
+        self.read_committed(move |db| crate::members::circle_members(db, device, circle)).await
     }
 
     /// The same circle-members query, live (E4).
@@ -87,14 +91,15 @@ impl StoreDatabase {
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| {
-            sql.circle_members(device.ok_or(DbError::StoreClosed)?, circle).map_err(E::from)
+        self.follow(move |db| {
+            crate::members::circle_members(db, device.ok_or(DbError::StoreClosed)?, circle)
+                .map_err(E::from)
         })
     }
 
     /// The latest completed replacement of this installation, or None (E5).
     pub async fn device_reset(&self) -> Result<Option<DeviceReset>, DbError> {
-        self.read(|sql| sql.device_reset()).await
+        self.read_committed(crate::device_reset::read).await
     }
 
     /// The same pre-built query, observing committed changes (E4).
@@ -102,7 +107,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.subscribe(|sql| sql.device_reset().map_err(E::from))
+        self.follow(|db| crate::device_reset::read(db).map_err(E::from))
     }
 }
 

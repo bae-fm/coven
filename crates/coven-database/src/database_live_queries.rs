@@ -2,6 +2,7 @@
 //! when a commit changes what it read (§4).
 
 use super::StoreDatabase;
+use crate::sqlite::StoreSql;
 use crate::write_failure::Hosted;
 use crate::{DbError, LiveQuery, LostValue, ReconfigurableLiveQuery, SqlReadContext};
 use coven_foundation::task::CarriesBug;
@@ -32,10 +33,34 @@ impl StoreDatabase {
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
+        self.live(initial_request, move |request, reader| {
+            query(request, SqlReadContext::new(reader))
+        })
+    }
+
+    /// Follow `query`, coven's own SQL on its tables, live: it runs again
+    /// after each commit that changes what it read.
+    pub(crate) fn follow<F, R, E>(&self, query: F) -> LiveQuery<R, E>
+    where
+        F: Fn(&StoreSql) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
+        LiveQuery::new(self.live((), move |(), reader| query(reader)))
+    }
+
+    /// A live query that runs `query` on the store's readers for each
+    /// request.
+    fn live<Q, F, R, E>(&self, initial_request: Q, query: F) -> ReconfigurableLiveQuery<Q, R, E>
+    where
+        Q: Clone + PartialEq + Send + Sync + 'static,
+        F: Fn(&Q, &StoreSql) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
         // A subscription retains a database only for its active read.
         // Idle queries and undelivered results cannot keep a closing lock held.
         let database = Arc::downgrade(&self.inner);
-        let query = Arc::new(query);
         ReconfigurableLiveQuery::new(
             initial_request,
             Arc::new(move |request, completion| {
@@ -48,9 +73,7 @@ impl StoreDatabase {
                         reader
                             .live_read(
                                 &mut |reads, lookups| completion.finish_judging(reads, lookups),
-                                |reader| {
-                                    query(request, SqlReadContext::new(reader)).map_err(Hosted)
-                                },
+                                |reader| query(request, reader).map_err(Hosted),
                             )
                             .map_err(Hosted::into_inner)
                     })
@@ -67,7 +90,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.subscribe(|sql| sql.lost_values().map_err(E::from))
+        self.follow(|db| crate::loss_record::lost_values(db).map_err(E::from))
     }
 }
 

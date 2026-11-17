@@ -335,18 +335,18 @@ impl PairingWork {
     }
 }
 
-/// The status of `pairing`, from its journal row: an internal query that a
-/// live query follows. `None` for a pairing this device never made or has
-/// forgotten (E10).
+/// The status of `pairing`, from `records`, the journal's pairing rows
+/// (`operation_kind::PAIRING`), which a one-shot read or a live query reads.
+/// `None` for a pairing this device never made or has forgotten (E10).
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored request that does not decode is a damaged journal row, whichever field failed"
 )]
 pub fn pairing_status(
-    sql: coven_database::SqlReadContext<'_>,
+    records: &[OperationRecord],
     pairing: AddDeviceId,
 ) -> Result<Option<AddDeviceStatus>, DbError> {
-    for record in sql.operations_of_kind(operation_kind::PAIRING)? {
+    for record in records {
         let work: PairingWork =
             serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
         if work.id == InviteId::from(pairing) {

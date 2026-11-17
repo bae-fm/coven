@@ -279,13 +279,13 @@ impl StoreDatabase {
 
     /// Current pending records, decoded as the sync owner's typed values.
     pub async fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {
-        self.read(|sql| sql.pending()).await
+        self.read_committed(crate::pending::read).await
     }
 
     /// Writes and files this device committed and has not uploaded, from one
     /// committed state.
     pub async fn unsent(&self) -> Result<crate::UnsentWork, DbError> {
-        self.read(|sql| sql.unsent()).await
+        self.read_committed(crate::file_queue::unsent).await
     }
 
     /// The same pre-built unsent-work query, observing committed changes.
@@ -293,7 +293,7 @@ impl StoreDatabase {
     where
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.subscribe(|sql| sql.unsent().map_err(E::from))
+        self.follow(|db| crate::file_queue::unsent(db).map_err(E::from))
     }
 
     /// The upload queue with what its uploads' phases are computed from
@@ -310,13 +310,13 @@ impl StoreDatabase {
         T: Send + 'static,
         E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
-        self.read(move |sql| compute(sql.queue_facts()?)).await
+        self.read_committed(move |db| compute(crate::sync_facts::read_queue(db)?)).await
     }
 
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> Result<crate::UploadQueueState, DbError> {
-        self.read(|sql| sql.upload_queue()).await
+        self.read_committed(crate::file_queue::state).await
     }
 
     /// Record, as the store opens, whether a storage location is recorded
@@ -723,7 +723,7 @@ impl StoreDatabase {
     /// it, such as to apply a raise.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState, DbError> {
-        self.subscribe(|sql| sql.store_state())
+        self.follow(crate::store_state_tables::read)
     }
 
     /// The store prefix whose complete effects have committed.
