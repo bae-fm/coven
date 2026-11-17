@@ -589,19 +589,22 @@ fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
 }
 
-/// Follow the sync state, as an app does.
+/// Follow the sync state through `coven_sync_state`, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
-    Followed::new(device.sync.database.subscribe_sync_facts(SyncStatus::computed))
+    Followed::new(device.sync.database.subscribe(SyncStatus::read))
 }
 
-/// Wait until the sync status row says the running pass last moved `moved`.
-async fn moved_is(device: &Device, moved: coven_database::PassMove) {
-    let mut row = Followed::new(device.sync.database.subscribe_sync_facts(
-        |facts: coven_database::SyncFacts<PendingRecord>| {
-            Ok::<_, coven_database::DbError>(facts.row.moved)
-        },
-    ));
-    row.wait_for(|row| *row == Some(moved)).await;
+/// Wait until the sync status row says the running pass last moved `moved`,
+/// as `coven_sync_status.moved` names it.
+async fn moved_is(device: &Device, moved: &'static str) {
+    let mut row = Followed::new(device.sync.database.subscribe(|sql| {
+        Ok::<_, coven_database::DbError>(sql.query_row(
+            "SELECT moved FROM coven_sync_status",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )?)
+    }));
+    row.wait_for(|row| row.as_deref() == Some(moved)).await;
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.
@@ -731,7 +734,7 @@ async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
     status
         .wait_for(|status| status.state == SyncState::Syncing(crate::SyncActivity::Receiving))
         .await;
-    moved_is(&ben, coven_database::PassMove::Read).await;
+    moved_is(&ben, "read").await;
     resume.send(()).unwrap();
     status.wait_for(|status| status.state == SyncState::Synced).await;
     assert_eq!(rows(ben.database()).await, [("a".into(), "read".into())]);
@@ -745,7 +748,7 @@ async fn a_pass_moving_a_slot_shows_syncing_until_it_ends() {
     status
         .wait_for(|status| status.state == SyncState::Syncing(crate::SyncActivity::Sending))
         .await;
-    moved_is(&ben, coven_database::PassMove::Claimed).await;
+    moved_is(&ben, "claimed").await;
     resume.send(()).unwrap();
     status.wait_for(|status| status.state == SyncState::Synced).await;
     ben_loop.close().await.unwrap();

@@ -761,7 +761,12 @@ async fn the_sync_facts_list_the_first_waiting_upload_only() {
     let f = Fixture::new(Provenance::AppProvided).await;
     f.files.stop_background_for_counts().await;
     let facts = || async {
-        f.database.sync_facts::<crate::PendingRecord, _, coven_database::DbError>(Ok).await.unwrap()
+        f.database
+            .upload_queue_facts::<crate::PendingRecord, _, coven_database::DbError>(|facts| {
+                Ok(facts.sync)
+            })
+            .await
+            .unwrap()
     };
     for (id, bytes) in [("a", 1), ("b", 2), ("c", 3)] {
         f.attach("files", id, photo(bytes)).await;
@@ -777,5 +782,52 @@ async fn the_sync_facts_list_the_first_waiting_upload_only() {
     let bound = facts().await;
     assert!(bound.queued);
     assert_eq!(bound.uploads.len(), 1);
+    f.close().await;
+}
+
+/// A live query of `coven_sync_state` runs again once as a cover's upload
+/// starts and once as it ends, with no write: with sync stopped the queued
+/// cover waits, while it moves the state is uploading a bound file, and once
+/// it stops moving the cover waits again (§19.1).
+#[tokio::test]
+async fn the_sync_state_view_runs_again_as_a_transfer_starts_and_ends() {
+    use crate::{SyncActivity, SyncState, SyncWait};
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    crate::record_opened(
+        &f.database,
+        coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+        None,
+    )
+    .await
+    .unwrap();
+    f.files.inner.waits.sync_stopped().await.unwrap();
+    f.attach("covers", "x", photo(1)).await;
+    let mut shown: coven_database::LiveQuery<_, coven_database::DbError> = f
+        .database
+        .subscribe(|sql| {
+            Ok(sql.query_row("SELECT state,pending,detail FROM coven_sync_state", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get(2)?))
+            })?)
+        })
+        .process(Ok);
+    let waiting =
+        ("waiting_to_sync".to_owned(), None, SyncState::WaitingToSync(SyncWait::NotSyncing));
+    assert_eq!(shown.next_inline().await.unwrap().unwrap(), waiting);
+    let cover = f.files.inner.database.uploads().await.unwrap().remove(0);
+    let attempt = f.database.uploads_in_flight().start(
+        cover.location.uploader(),
+        cover.location.object(),
+        cover.files.clone(),
+        coven_database::TransferProgress { bytes_transferred: 0, bytes_total: 1 },
+    );
+    assert_eq!(
+        shown.next_inline().await.unwrap().unwrap(),
+        ("syncing".to_owned(), None, SyncState::Syncing(SyncActivity::UploadingBoundFile))
+    );
+    assert_eq!(shown.runs().writes(), 1);
+    drop(attempt);
+    assert_eq!(shown.next_inline().await.unwrap().unwrap(), waiting);
+    assert_eq!(shown.runs().writes(), 2);
     f.close().await;
 }

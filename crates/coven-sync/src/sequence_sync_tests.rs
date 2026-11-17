@@ -207,7 +207,7 @@ impl Group {
     ) -> Device {
         let directory =
             StoreDirectories::new(temp.path().into(), self.bugs.clone()).store_dir(&self.store);
-        let mut database = DatabaseBuilder::new(directory.clone());
+        let mut database = DatabaseBuilder::new(directory).sync_state(crate::sync_state_function());
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
         }

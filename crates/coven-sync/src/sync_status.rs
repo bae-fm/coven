@@ -12,20 +12,30 @@
 //! phase in the upload queue, computed from the same facts by
 //! `Facts::upload_phase` as the model's `Upload.phase` in `Transfers.lean`
 //! computes it.
+//!
+//! The database registers `SyncStatus::row` as the SQL function
+//! `_coven_sync_state` (`sync_state_function`), which the `coven_sync_state`
+//! view calls over the facts it reads: an app's screen reads the state in
+//! its own live query, joined to its rows, and this code stays the one
+//! definition of the state that the Lean model checks. `sync_status` reads
+//! the view.
 
 use crate::{
     DeviceIdEvidence, KeyHolder, LastPass, LocalFailure, PendingReason, PendingRecord,
     Prerequisite, StatusFailure,
 };
-use coven_database::{DbError, RecordedLocation, Removal, RetrySync, UnsentWork};
+use coven_database::{
+    DbError, RecordedLocation, Removal, RetrySync, SqlReadContext, SyncFacts, SyncStateFunction,
+    SyncStateRow, UnsentWork,
+};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
 
 /// What a status screen shows (E5, §19.1): the sync state and when sync
-/// last finished, as `sync_status()` reads it and the handle's live query
-/// follows it.
+/// last finished, as `coven_sync_state` shows them and `sync_status()` reads
+/// them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyncStatus {
     /// The sync state.
@@ -39,8 +49,9 @@ pub struct SyncStatus {
 /// `NeedsReset`, `UpdateNeeded`, `SignedOut`, `NoAccess`, `FolderMissing`,
 /// `ClockWrong`, `StorageFull`, `OfflineWithUnsentChanges`, `Offline`,
 /// `Failed`, `Syncing`, `WaitingToSync`, `Synced` shows; `NotSynced` comes
-/// before them all.
-#[derive(Clone, Debug, PartialEq)]
+/// before them all. `coven_sync_state.detail` holds it as JSON, which this
+/// type reads.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SyncState {
     /// No storage location is recorded on this device.
     NotSynced,
@@ -104,7 +115,7 @@ pub enum SyncState {
 
 /// Why this installation can't send under its keys or id, as `NeedsReset`
 /// names it (§19.3, §12.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResetReason {
     /// A reset or restore registered another installation in this one's place
     /// (§19.3).
@@ -124,7 +135,7 @@ pub enum ResetReason {
 /// What Syncing is doing, as `Syncing` names it (§19.1): the first of what the
 /// running pass moved last, a bound file moving or next in line, a write next
 /// in line, and the next pass's turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SyncActivity {
     /// The running pass reads slots it hadn't, which are changes from other
     /// devices; or the next pass's turn has come, after a cooldown or a
@@ -142,7 +153,7 @@ pub enum SyncActivity {
 /// every transfer, the pass's and each file's alike, first; then, for a
 /// bound file waiting in the upload queue, what holds that file, then a
 /// write's own key (§19.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SyncWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
     NotSyncing,
@@ -157,6 +168,7 @@ pub enum SyncWait {
     /// comes in until the key arrives (§5.4).
     KeyCopy {
         /// The key's audience.
+        #[serde(with = "crate::pending_encoding::audience")]
         audience: Audience,
         /// The key.
         key: KeyId,
@@ -172,6 +184,7 @@ pub enum SyncWait {
     /// out or comes in until then.
     Snapshot {
         /// The audience whose snapshot is awaited.
+        #[serde(with = "crate::pending_encoding::audience")]
         audience: Audience,
     },
     /// A failure that clears by itself and names no state of its own, on the
@@ -186,12 +199,42 @@ pub enum SyncWait {
 
 /// What names a state: the last pass, or the first pending record, in the
 /// order they arose, that names it, with the cause `coven_pending` keeps.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SyncCause {
     /// How the last pass ended.
     Pass(LastPass),
     /// A pending record.
-    Pending(PendingRecord),
+    Pending(#[serde(with = "with_cause")] PendingRecord),
+}
+
+/// A pending record as a cause encodes it: beside the cause it keeps, which
+/// the record's own encoding leaves to `coven_pending.cause`.
+mod with_cause {
+    use crate::PendingRecord;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Recorded {
+        record: PendingRecord,
+        cause: Option<String>,
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        record: &PendingRecord,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(
+            &Recorded { record: record.clone(), cause: record.cause.clone() },
+            serializer,
+        )
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PendingRecord, D::Error> {
+        let Recorded { mut record, cause } = serde::Deserialize::deserialize(deserializer)?;
+        record.cause = cause;
+        Ok(record)
+    }
 }
 
 /// The states that name a cause, as the model's `State.named` lists them;
@@ -243,6 +286,48 @@ impl Named {
 }
 
 impl SyncState {
+    /// The state's kind, as `coven_sync_state.state` names it.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::NotSynced => "not_synced",
+            Self::Syncing(_) => "syncing",
+            Self::WaitingToSync(_) => "waiting_to_sync",
+            Self::Synced => "synced",
+            Self::Offline(_) => "offline",
+            Self::OfflineWithUnsentChanges(_) => "offline_with_unsent_changes",
+            Self::SignedOut { .. } => "signed_out",
+            Self::NoAccess(_) => "no_access",
+            Self::StorageFull(_) => "storage_full",
+            Self::FolderMissing(_) => "folder_missing",
+            Self::ClockWrong(_) => "clock_wrong",
+            Self::UpdateNeeded(_) => "update_needed",
+            Self::Removed { .. } => "removed",
+            Self::NeedsReset { .. } => "needs_reset",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// What names the state, where something does.
+    fn cause(&self) -> Option<&SyncCause> {
+        match self {
+            Self::Offline(cause)
+            | Self::OfflineWithUnsentChanges(cause)
+            | Self::NoAccess(cause)
+            | Self::StorageFull(cause)
+            | Self::FolderMissing(cause)
+            | Self::ClockWrong(cause)
+            | Self::UpdateNeeded(cause)
+            | Self::Failed(cause) => Some(cause),
+            Self::SignedOut { cause, .. } => cause.as_ref(),
+            Self::NotSynced
+            | Self::Syncing(_)
+            | Self::WaitingToSync(_)
+            | Self::Synced
+            | Self::Removed { .. }
+            | Self::NeedsReset { .. } => None,
+        }
+    }
+
     /// Which state shows when several hold: the highest. The device's own
     /// standing first, then signing in, then what storage said of the
     /// account or location, then reachability, then the catch-all failure,
@@ -544,13 +629,49 @@ impl LastPass {
     }
 }
 
+/// Reads `coven_sync_state.detail`.
+impl coven_database::types::FromSql for SyncState {
+    fn column_result(
+        value: coven_database::types::ValueRef<'_>,
+    ) -> coven_database::types::FromSqlResult<Self> {
+        serde_json::from_str(value.as_str()?)
+            .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))
+    }
+}
+
 impl SyncStatus {
-    /// The sync state and when sync last finished, from what one committed
-    /// snapshot of coven's rows holds (§19.1): what `StoreDatabase::sync_facts`
-    /// reads once and `StoreDatabase::subscribe_sync_facts` follows.
-    pub fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> Result<Self, DbError> {
-        let (facts, last_synced) = Facts::read(facts)?;
-        Ok(Self { state: facts.state(), last_synced })
+    /// The state as `coven_sync_state` shows it, from the facts its subquery
+    /// reads: what `_coven_sync_state` returns. The view reads when sync last
+    /// finished from the status row itself.
+    fn row(facts: SyncFacts<PendingRecord>) -> Result<SyncStateRow, DbError> {
+        let positions: Vec<(i64, crate::PendingSubject)> = facts
+            .records
+            .iter()
+            .map(|(position, record)| (*position, record.subject.clone()))
+            .collect();
+        let (facts, _last_synced) = Facts::read(facts)?;
+        let state = facts.state();
+        let pending = match state.cause() {
+            Some(SyncCause::Pending(record)) => positions
+                .iter()
+                .find_map(|(position, subject)| (*subject == record.subject).then_some(*position)),
+            Some(SyncCause::Pass(_)) | None => None,
+        };
+        Ok(SyncStateRow {
+            state: state.kind(),
+            pending,
+            detail: serde_json::to_value(&state).map_err(DbError::StateEncoding)?,
+        })
+    }
+
+    /// The sync state and when sync last finished, as `coven_sync_state`
+    /// shows them in the caller's read.
+    pub fn read(sql: SqlReadContext<'_>) -> Result<Self, DbError> {
+        let (state, last_synced) =
+            sql.query_row("SELECT detail,last_synced FROM coven_sync_state", [], |row| {
+                Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?))
+            })?;
+        Ok(Self { state, last_synced: last_synced.map(coven_database::stored_time).transpose()? })
     }
 
     /// A closed store's sync status (api.md E1, E5): the state opening shows
@@ -569,10 +690,18 @@ impl SyncStatus {
     }
 }
 
-/// The sync state and when sync last finished, computed from what coven
-/// knows in one committed snapshot (§19.1).
+/// The sync state and when sync last finished, as `coven_sync_state` shows
+/// them in one committed snapshot (§19.1).
 pub async fn sync_status(database: &coven_database::StoreDatabase) -> Result<SyncStatus, DbError> {
-    database.sync_facts(SyncStatus::computed).await
+    database.read(SyncStatus::read).await
+}
+
+/// `_coven_sync_state`, the function `coven_sync_state` calls, for the
+/// database to register on every connection: the state computed in this
+/// module's Rust code, so that it stays the one definition the Lean model
+/// checks while an app's screen reads it in SQL (§19.1).
+pub fn sync_state_function() -> SyncStateFunction {
+    SyncStateFunction::new(SyncStatus::row)
 }
 
 /// The provider that `coven_sync_status.provider` names, or

@@ -127,7 +127,7 @@ pub enum UploadCompletion {
 }
 
 /// What this device committed and has not uploaded: writes and files (E1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnsentWork {
     /// Committed writes waiting to upload.
     pub writes: u64,
@@ -142,14 +142,22 @@ impl UnsentWork {
     }
 }
 
+/// The writes waiting in the send queue and the uploads waiting in the
+/// upload queue, counted, as two SQL expressions. Each counts a column, not
+/// rows, so that SQLite names the `coven_sync_state` view to the authorizer
+/// for the read when the view counts them (`sync_facts.rs`).
+macro_rules! unsent_counts {
+    () => {
+        "(SELECT count(w.number) FROM _coven_uploads AS w),
+         (SELECT count(q.id) FROM _coven_file_uploads AS q)"
+    };
+}
+pub(crate) use unsent_counts;
+
 pub(crate) fn unsent(db: &StoreSql) -> Result<UnsentWork, DbError> {
-    Ok(db.query_row(
-        "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)",
-        [],
-        |r| {
-            Ok(UnsentWork { writes: r.get::<_, i64>(0)? as u64, files: r.get::<_, i64>(1)? as u64 })
-        },
-    )?)
+    Ok(db.query_row(concat!("SELECT ", unsent_counts!()), [], |r| {
+        Ok(UnsentWork { writes: r.get::<_, i64>(0)? as u64, files: r.get::<_, i64>(1)? as u64 })
+    })?)
 }
 
 pub(crate) fn state(db: &StoreSql) -> Result<UploadQueueState, DbError> {

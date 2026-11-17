@@ -296,40 +296,11 @@ impl StoreDatabase {
         self.subscribe(|sql| sql.unsent().map_err(E::from))
     }
 
-    /// What the sync state is computed from, in one committed snapshot
-    /// (§19.1): `coven_sync_status`'s row, `coven_retry_effect`'s, the send
-    /// and upload queues, the files moving and the pending records, decoded
-    /// as the sync owner's typed values, given to `compute` in the read.
-    pub async fn sync_facts<P, T, E>(
-        &self,
-        compute: impl FnOnce(crate::SyncFacts<P>) -> Result<T, E> + Send + 'static,
-    ) -> Result<T, E>
-    where
-        P: crate::PendingValue + Clone,
-        T: Send + 'static,
-        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
-    {
-        self.read(move |sql| compute(sql.sync_facts()?)).await
-    }
-
-    /// The same pre-built query, live: it runs again on each committed
-    /// change of what it reads, and as a file starts or ends a transfer.
-    pub fn subscribe_sync_facts<P, T, E>(
-        &self,
-        compute: impl Fn(crate::SyncFacts<P>) -> Result<T, E> + Send + Sync + 'static,
-    ) -> crate::LiveQuery<T, E>
-    where
-        P: crate::PendingValue + Clone,
-        T: Send + 'static,
-        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
-    {
-        self.subscribe(move |sql| compute(sql.sync_facts()?))
-    }
-
     /// The upload queue with what its uploads' phases are computed from
-    /// (§17.9): the facts the sync state reads, every queued file with its
-    /// recorded provider session, and what is recorded about each upload,
-    /// in one committed snapshot, available while disconnected (E7).
+    /// (§17.9): the facts the sync state reads, what holds trailing uploads,
+    /// every queued file with its recorded provider session, and what is
+    /// recorded about each upload, in one committed snapshot, available while
+    /// disconnected (E7).
     pub async fn upload_queue_facts<P, T, E>(
         &self,
         compute: impl FnOnce(crate::QueueFacts<P>) -> Result<T, E> + Send + 'static,

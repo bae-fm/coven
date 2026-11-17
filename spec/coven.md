@@ -478,10 +478,11 @@ which files each move to the cloud holds, which files this device keeps
 pinned, what can't proceed, how sync is going,
 how the app's admin operations ended, who the members are, and which circles
 this member is in.
-So the app's SQL can read it through twelve views, `coven_uploads`,
+So the app's SQL can read it through thirteen views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
-`coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
-`coven_devices`, `coven_circles` and `coven_circle_members`, and eight tables,
+`coven_sync_state`, `coven_invites`, `coven_operations`, `coven_user_files`,
+`coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
+and eight tables,
 `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
 `coven_upload_queue`, `coven_pending`, `coven_sync_status` and
 `coven_retry_effect`
@@ -626,6 +627,18 @@ network changes, as one reading `coven_sending` does as an upload starts.
 `paused` does for the pause. The network's facts come to SQL through a
 function of coven's, `_coven_network`, which refuses a direct call as the
 transfer functions do.
+
+The sync state (§19.1) is one row of `coven_sync_state`: the state's kind,
+when sync last finished, the pending record that names the state, and the
+whole state as coven encodes it. Ana's notes app shows its sync line from the
+same live query as her list of notes, joined to it, so the line and the list
+never disagree, and the query runs again whenever a fact the state reads
+changes: a write queued, a pass ending, an upload starting. The view reads
+those facts from coven's tables and from `coven_sending`, and hands them to
+`_coven_sync_state`, a function of coven's that computes the state in the
+read with the code the model checks (Appendix H.3). Computing it in SQL instead
+would give the state a second definition, which could drift from the one the
+model proves.
 
 So are the bytes the provider confirmed. Ben's music app draws each album's
 upload bar as `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its tracks in
@@ -10400,11 +10413,12 @@ The state is one of, in the order an app lists them:
   failed until the store reopens, its queued files waiting with sync not
   running ([api.md E15](api.md#e15-background-work-panics-and-shutdown)).
 
-The state is computed each time it is read, never stored, from facts that are
-each true on their own: whether a location is recorded and its credentials
-held, how the last pass ended, what the running pass moved last, each bound
-file in the upload queue, whether the send queue holds a
-write, and the pending records the state reads: those about the sequence,
+The state is computed each time it is read, never stored: the app reads it
+from `coven_sync_state` (§4), whose function runs coven's own computation over
+facts that are each true on their own: whether a location is recorded and its
+credentials held, how the last pass ended, what the running pass moved last,
+each bound file in the upload queue, whether the send queue holds a write, and
+the pending records the state reads: those about the sequence,
 a bound file, coven's own operations and the connection's, never one about
 a trailing file, its move, a download or a pin coven keeps. Each fact names one
 candidate state or none, and when several hold, the one shown is the first
@@ -12312,11 +12326,12 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
-  `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
-  `coven_devices`, `coven_circles` and `coven_circle_members`
-  ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
-  only, since SQLite names the view to the authorizer only for what a join
-  reads. `coven_pins`, `coven_pin_requests`, `coven_moves`,
+  `coven_sync_state`, `coven_invites`, `coven_operations`, `coven_user_files`,
+  `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`
+  ([api.md E4](api.md#e4-reading)). Each reads every table it reads through
+  a column, in a join or a subquery: SQLite names the view to the authorizer
+  for each column the view reads, and reports a table only counted with no
+  view. `coven_pins`, `coven_pin_requests`, `coven_moves`,
   `coven_upload_queue` and `coven_pending` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source`, from
   `_coven_pin_requests`, from `_coven_move_files` with each move's state, from

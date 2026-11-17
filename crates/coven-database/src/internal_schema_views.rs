@@ -2,13 +2,14 @@
 //! over coven's own tables, so they are true in every transaction that
 //! changes those tables. App SQL reads them and nothing writes them.
 //!
-//! Each view reads its tables only through joins, never through a subquery:
-//! SQLite names the view to the authorizer for each column its joins read,
-//! which is how a read through a view is told from a read of coven's tables
-//! themselves. A table whose columns a statement then leaves unused, as in
-//! `SELECT count(*) FROM coven_uploads`, SQLite reports once more with no
+//! Each view reads each of its tables through a column, in a join or a
+//! subquery: SQLite names the view to the authorizer for each column the
+//! view reads, which is how a read through a view is told from a read of
+//! coven's tables themselves. A table whose columns a statement leaves
+//! unused, as in `SELECT count(*) FROM coven_uploads`, SQLite reports with no
 //! column and no view; that read is allowed only for a table the same
-//! statement reached through a view.
+//! statement reached through a view, so a view never only counts a table's
+//! rows.
 
 /// What app SQL may read of coven's: these views, the files table, and the
 /// tables coven keeps for the app's triggers to follow
@@ -16,7 +17,7 @@
 /// `internal_schema_moves.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`).
-const READABLE: [&str; 20] = [
+const READABLE: [&str; 21] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -30,6 +31,7 @@ const READABLE: [&str; 20] = [
     super::MOVES,
     super::SYNC_STATUS,
     super::RETRY_EFFECT,
+    "coven_sync_state",
     super::PENDING,
     "coven_invites",
     "coven_operations",
@@ -49,6 +51,23 @@ pub(super) const SCHEMA: &str = concat!(
         SELECT u.file,u.path,u.size,_coven_unix_seconds(u.modified_at),
             _coven_unix_nanos(u.modified_at)
         FROM _coven_user_files AS u;",
+    // The sync state a status screen shows, in one row (§19.1): its kind,
+    // when sync last finished, the pending record that names it, and the
+    // whole state as sync encodes it. `_coven_sync_state` computes it from
+    // the facts the subquery reads (`sync_facts.rs`), in sync's own Rust
+    // code, so that an app's screen reads the state in its own live query
+    // and the Rust code stays the one definition the Lean model checks
+    // (`sync_state_function.rs`). OFFSET 0 keeps SQLite from merging the
+    // subquery into the outer SELECT, which would call the function once
+    // for each column.
+    "CREATE VIEW coven_sync_state(state,last_synced,pending,detail) AS
+        SELECT x.state->>'$.state',x.last_synced,x.state->>'$.pending',
+            x.state->'$.detail'
+        FROM (SELECT _coven_sync_state(",
+    crate::sync_facts::facts!(),
+    ") AS state,s.last_synced AS last_synced
+            FROM coven_sync_status AS s JOIN coven_retry_effect AS r
+            LIMIT 1 OFFSET 0) AS x;",
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.
     // Files sharing one upload share its place. The pause holds only

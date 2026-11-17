@@ -112,6 +112,7 @@ mod sql_read;
 mod sqlite;
 mod store_call;
 mod sync_facts;
+mod sync_state_function;
 mod transaction_constants;
 pub use sqlive::{set_temporary_directory, TemporaryDirectoryError};
 pub use sqlive::{
@@ -119,7 +120,8 @@ pub use sqlive::{
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
-pub use sync_facts::{QueueFacts, SyncFacts, UploadFacts, UploadRecords};
+pub use sync_facts::{QueueFacts, SyncFacts, TransferHolds, UploadFacts, UploadRecords};
+pub use sync_state_function::{SyncStateFunction, SyncStateRow};
 mod written_values;
 pub use file_hashes::{FileHasher, FileHashes};
 pub use file_moves::MoveId;

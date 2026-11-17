@@ -7,6 +7,7 @@
 use crate::files::{UploadPhase, UploadWait};
 use crate::sync_status::{Facts, Progress, Upload};
 use crate::SyncWait;
+use coven_database::TransferHolds;
 
 impl SyncWait {
     /// What the same hold shows as an upload's wait: only what holds every
@@ -27,10 +28,11 @@ impl Facts {
     /// model's `Upload.phase`): sending, stored, failed once its record
     /// names a state, else waiting for the first that holds. What holds
     /// every transfer comes first, then what holds a trailing upload only
-    /// (the pause, the network, a self-replacement's write pause), then its
-    /// backoff, then its turn. The network comes before the backoff, since an
-    /// upload whose backoff ends still can't go out on a metered network.
-    pub(crate) fn upload_phase(&self, upload: &Upload) -> UploadPhase {
+    /// (`holds`: the pause, the network, a self-replacement's write pause),
+    /// then its backoff, then its turn. The network comes before the backoff,
+    /// since an upload whose backoff ends still can't go out on a metered
+    /// network.
+    pub(crate) fn upload_phase(&self, holds: &TransferHolds, upload: &Upload) -> UploadPhase {
         match upload.progress {
             Progress::Moving => UploadPhase::Uploading,
             Progress::Stored => UploadPhase::Stored,
@@ -43,14 +45,14 @@ impl Facts {
                 UploadPhase::Waiting(
                     if let Some(held) = self.held_all().and_then(SyncWait::held_transfers) {
                         held
-                    } else if self.paused && !upload.bound {
+                    } else if holds.paused && !upload.bound {
                         UploadWait::Paused
-                    } else if self.unmetered_only
-                        && self.metered
+                    } else if holds.unmetered_only
+                        && holds.metered
                         && crate::files::held_on_metered(upload.bound)
                     {
                         UploadWait::Metered
-                    } else if self.keys_changing && !upload.bound {
+                    } else if holds.keys_changing && !upload.bound {
                         UploadWait::KeysChanging
                     } else if let Some(at) = upload.retry_at {
                         UploadWait::Retrying { at }

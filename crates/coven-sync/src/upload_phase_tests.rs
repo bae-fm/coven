@@ -4,7 +4,7 @@
 //! `sync_status::tests::io_differential_upload_phase`.
 use super::*;
 use crate::{FileSourceFailure, PendingReason, PendingRecord, PendingSubject};
-use coven_database::{RecordedLocation, RetrySync};
+use coven_database::{RecordedLocation, RetrySync, TransferHolds};
 use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::{Duration, UNIX_EPOCH};
@@ -20,13 +20,13 @@ fn connected() -> Facts {
         unsent: coven_database::UnsentWork { writes: 0, files: 0 },
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
-        paused: false,
-        unmetered_only: false,
-        metered: false,
-        keys_changing: false,
         pass_retry: None,
     }
 }
+
+/// Nothing holds trailing uploads.
+const UNHELD: TransferHolds =
+    TransferHolds { paused: false, unmetered_only: false, metered: false, keys_changing: false };
 
 /// A bound upload.
 fn upload(progress: Progress) -> Upload {
@@ -57,33 +57,35 @@ fn the_pause_holds_a_trailing_upload_and_never_a_bound_one() {
     let at = UNIX_EPOCH + Duration::from_secs(9);
     let trailing = Upload { bound: false, ..upload(Progress::Queued) };
     let bound = upload(Progress::Queued);
-    let held = Facts {
-        paused: true,
-        unmetered_only: true,
-        metered: true,
-        keys_changing: true,
-        ..connected()
-    };
-    assert_eq!(held.upload_phase(&trailing), UploadPhase::Waiting(UploadWait::Paused));
-    assert_eq!(held.upload_phase(&bound), UploadPhase::Waiting(UploadWait::Queued));
+    let all =
+        TransferHolds { paused: true, unmetered_only: true, metered: true, keys_changing: true };
+    let facts = connected();
+    assert_eq!(facts.upload_phase(&all, &trailing), UploadPhase::Waiting(UploadWait::Paused));
+    assert_eq!(facts.upload_phase(&all, &bound), UploadPhase::Waiting(UploadWait::Queued));
     let retrying = Upload { retry_at: Some(at), ..bound.clone() };
-    assert_eq!(held.upload_phase(&retrying), UploadPhase::Waiting(UploadWait::Retrying { at }));
-    let unpaused = Facts { paused: false, ..held.clone() };
-    assert_eq!(unpaused.upload_phase(&trailing), UploadPhase::Waiting(UploadWait::Metered));
-    let unmetered = Facts { metered: false, ..unpaused.clone() };
-    assert_eq!(unmetered.upload_phase(&trailing), UploadPhase::Waiting(UploadWait::KeysChanging));
-    let changed = Facts { keys_changing: false, ..unmetered };
-    let backoff = Upload { retry_at: Some(at), ..trailing.clone() };
-    assert_eq!(changed.upload_phase(&backoff), UploadPhase::Waiting(UploadWait::Retrying { at }));
-    assert_eq!(changed.upload_phase(&trailing), UploadPhase::Waiting(UploadWait::Queued));
-    let lost = Upload { record: Some(missing.clone()), ..trailing };
-    assert_eq!(held.upload_phase(&lost), UploadPhase::Failed(missing));
-    let stopped = Facts { sync: RetrySync::Stopped, ..held };
-    assert_eq!(stopped.upload_phase(&bound), UploadPhase::Waiting(UploadWait::NotSyncing));
     assert_eq!(
-        Facts { sync: RetrySync::Stopped, ..connected() }.upload_phase(&upload(Progress::Moving)),
-        UploadPhase::Uploading
+        facts.upload_phase(&all, &retrying),
+        UploadPhase::Waiting(UploadWait::Retrying { at })
     );
+    let unpaused = TransferHolds { paused: false, ..all };
+    assert_eq!(facts.upload_phase(&unpaused, &trailing), UploadPhase::Waiting(UploadWait::Metered));
+    let unmetered = TransferHolds { metered: false, ..unpaused };
+    assert_eq!(
+        facts.upload_phase(&unmetered, &trailing),
+        UploadPhase::Waiting(UploadWait::KeysChanging)
+    );
+    let changed = TransferHolds { keys_changing: false, ..unmetered };
+    let backoff = Upload { retry_at: Some(at), ..trailing.clone() };
+    assert_eq!(
+        facts.upload_phase(&changed, &backoff),
+        UploadPhase::Waiting(UploadWait::Retrying { at })
+    );
+    assert_eq!(facts.upload_phase(&changed, &trailing), UploadPhase::Waiting(UploadWait::Queued));
+    let lost = Upload { record: Some(missing.clone()), ..trailing };
+    assert_eq!(facts.upload_phase(&all, &lost), UploadPhase::Failed(missing));
+    let stopped = Facts { sync: RetrySync::Stopped, ..connected() };
+    assert_eq!(stopped.upload_phase(&all, &bound), UploadPhase::Waiting(UploadWait::NotSyncing));
+    assert_eq!(stopped.upload_phase(&UNHELD, &upload(Progress::Moving)), UploadPhase::Uploading);
 }
 
 /// A server error on a trailing upload waits for its backoff, as on a bound
@@ -106,9 +108,9 @@ fn a_failure_that_clears_by_itself_is_a_wait_not_a_failure() {
         ..upload(Progress::Queued)
     };
     assert_eq!(
-        connected().upload_phase(&trailing),
+        connected().upload_phase(&UNHELD, &trailing),
         UploadPhase::Waiting(UploadWait::Retrying { at })
     );
     let stored = Upload { progress: Progress::Stored, ..trailing };
-    assert_eq!(connected().upload_phase(&stored), UploadPhase::Stored);
+    assert_eq!(connected().upload_phase(&UNHELD, &stored), UploadPhase::Stored);
 }

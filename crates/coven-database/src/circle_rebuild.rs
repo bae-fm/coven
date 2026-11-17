@@ -211,6 +211,7 @@ fn at_version(
         .namespaces(inputs.namespaces.clone())
         .sqlite_settings(inputs.sqlite.clone())
         .sql_functions(inputs.functions.clone())
+        .sync_state_as_opened(inputs.sync_state.clone())
         .clock(clock.clone())
         .id_source(ids.clone())
 }

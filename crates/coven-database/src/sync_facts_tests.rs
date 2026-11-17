@@ -54,36 +54,50 @@ async fn queue(owner: &FileDatabase) -> Vec<crate::FileUpload> {
     owner.uploads().await.unwrap()
 }
 
+/// The facts as one read of the database gives them.
+async fn read_facts(db: &crate::StoreDatabase) -> crate::SyncFacts<Record> {
+    db.read(|sql| sql.sync_facts::<Record>()).await.unwrap()
+}
+
 /// The upload read starts from the pending records, the bound files in
 /// flight and an id-ordered walk that stops at its first match, and reads
 /// the queue's rows only through the primary key: no part scans the whole
-/// queue, whose table is `_coven_file_uploads` (§19.1).
+/// queue, whose table is `_coven_file_uploads` (§19.1). Beside it, the
+/// facts count both queues and list the records the state reads.
 #[tokio::test]
 async fn the_upload_read_does_not_scan_the_queue() {
     let store = TestStore::new();
     let db = open(&store).await;
     stage(&db, "covers", "a", vec![1]).await;
     let plan: Vec<String> = db.inspect_writer(|sql, _| {
-        sql.query(&format!("EXPLAIN QUERY PLAN {}", super::UPLOADS), [], |r| r.get(3)).unwrap()
+        sql.query(&format!("EXPLAIN QUERY PLAN {}", super::READ), [], |r| r.get(3)).unwrap()
     });
     let scans: Vec<&str> = plan
         .iter()
         .map(String::as_str)
         .filter(|line| line.starts_with("SCAN") && !line.starts_with("SCAN (subquery"))
         .collect();
-    // `f` is the id-ordered walk under LIMIT 1 over the unstored bound
-    // uploads alone, `p` the pending records with an object, `j` the files
-    // in flight, read once by each of the two walks that leave out the
-    // upload being sent; `u`, the outer read of the queue, is only ever
-    // searched by its primary key, and the retry rows are searched through
-    // their upload index.
+    // `s` and `r` are the status and retry rows, one each; `w` and `q` count
+    // the send queue and the upload queue; `f` is the id-ordered walk under
+    // LIMIT 1 over the unstored bound uploads alone, `p` first the pending
+    // records with an object, then every record the state reads, and `j` the
+    // files in flight, read once by each of the two walks that leave out the
+    // upload being sent and once to mark the uploads being sent; `u`, the
+    // outer read of the queue, is only ever searched by its primary key, and
+    // the retry rows are searched through their upload index.
     assert_eq!(
         scans,
         [
+            "SCAN s",
+            "SCAN r",
+            "SCAN w USING COVERING INDEX sqlite_autoindex__coven_uploads_1",
+            "SCAN q USING COVERING INDEX _coven_file_uploads_move",
             "SCAN p USING INDEX _coven_pending_object",
             "SCAN f USING INDEX _coven_file_uploads_bound_unstored",
             "SCAN j VIRTUAL TABLE INDEX 1:",
-            "SCAN j VIRTUAL TABLE INDEX 1:"
+            "SCAN j VIRTUAL TABLE INDEX 1:",
+            "SCAN j VIRTUAL TABLE INDEX 1:",
+            "SCAN p"
         ],
         "{plan:#?}"
     );
@@ -202,7 +216,7 @@ async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
     );
     let record = upload_record(&queue[4]);
     db.inspect_writer(|sql, _| crate::pending::save(sql, &record).unwrap());
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let facts = read_facts(&db).await;
     let listed: Vec<_> = facts
         .uploads
         .iter()
@@ -223,7 +237,7 @@ async fn the_facts_list_the_first_sending_the_first_waiting_and_each_record() {
             crate::retry::save(sql, crate::RetrySubject::Upload(upload.id), &wait).unwrap();
         }
     });
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let facts = read_facts(&db).await;
     let listed: Vec<_> = facts
         .uploads
         .iter()
@@ -261,7 +275,7 @@ async fn a_trailing_upload_and_the_records_about_it_leave_the_facts() {
         sending.files.clone(),
         crate::TransferProgress { bytes_transferred: 0, bytes_total: 1 },
     );
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let facts = read_facts(&db).await;
     assert!(facts.uploads.is_empty(), "{:?}", facts.uploads);
     assert!(facts.records.is_empty(), "{:?}", facts.records);
     assert!(!facts.queued);
@@ -297,8 +311,9 @@ async fn a_bound_upload_and_its_records_stay_in_the_facts_beside_a_trailing_one(
     for record in &records {
         db.inspect_writer(|sql, _| crate::pending::save(sql, record).unwrap());
     }
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
-    assert_eq!(facts.records, [records[2].clone(), records[3].clone()]);
+    let facts = read_facts(&db).await;
+    let listed: Vec<Record> = facts.records.iter().map(|(_, record)| record.clone()).collect();
+    assert_eq!(listed, [records[2].clone(), records[3].clone()]);
     assert_eq!(facts.uploads.len(), 1);
     assert!(facts.uploads[0].record.is_some());
     assert!(facts.queued);
@@ -312,11 +327,11 @@ async fn a_completed_bound_upload_is_not_queued_work() {
     let db = open(&store).await;
     attach(&db, "covers", &["a", "b"]).await;
     let owner = FileDatabase::new(db.clone());
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let facts = read_facts(&db).await;
     assert!(facts.queued);
     owner.complete_upload(1, ()).await.unwrap();
     owner.complete_upload(2, ()).await.unwrap();
-    let facts = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let facts = read_facts(&db).await;
     assert!(!facts.queued);
 }
 
@@ -327,7 +342,7 @@ async fn the_facts_hold_the_sync_scopes_backoff() {
     let store = TestStore::new();
     let db = open(&store).await;
     attach(&db, "covers", &["a"]).await;
-    let none = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let none = read_facts(&db).await;
     assert_eq!(none.pass_retry, None);
     assert!(none.operation_retries.is_empty());
     let wait = crate::RetryWait {
@@ -338,13 +353,13 @@ async fn the_facts_hold_the_sync_scopes_backoff() {
     db.inspect_writer(|sql, _| {
         crate::retry::save(sql, crate::RetrySubject::Upload(1), &wait).unwrap();
     });
-    let upload = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let upload = read_facts(&db).await;
     assert_eq!(upload.pass_retry, None);
     assert_eq!(upload.uploads[0].retry_at, Some(wait.not_before));
     db.inspect_writer(|sql, _| {
         crate::retry::save(sql, crate::RetrySubject::Sync, &wait).unwrap();
     });
-    let pass = db.sync_facts::<Record, _, DbError>(Ok).await.unwrap();
+    let pass = read_facts(&db).await;
     assert_eq!(pass.pass_retry, Some(wait.not_before));
     assert!(pass.operation_retries.is_empty());
 }

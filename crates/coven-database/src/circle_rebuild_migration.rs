@@ -83,6 +83,7 @@ impl RebuildDatabase {
                 .namespaces(self.inputs.namespaces.clone())
                 .sqlite_settings(self.inputs.sqlite.clone())
                 .sql_functions(self.inputs.functions.clone())
+                .sync_state_as_opened(self.inputs.sync_state.clone())
                 .clock(self.clock.clone())
                 .id_source(self.ids.clone())
                 .rebuilding(header)

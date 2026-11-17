@@ -88,12 +88,17 @@ pub(crate) fn read(db: &StoreSql) -> Result<RetryState, DbError> {
         [],
         |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?, row.get::<_, Option<i64>>(2)?)),
     )?;
-    let sync = if syncing {
+    Ok(RetryState { sync: sync(syncing, cooling_until)?, held })
+}
+
+/// Whether a started connection will plan, from `syncing` and
+/// `cooling_until` as the row holds them.
+pub(crate) fn sync(syncing: bool, cooling_until: Option<i64>) -> Result<RetrySync, DbError> {
+    Ok(if syncing {
         RetrySync::Started { cooling_until: cooling_until.map(stored_time).transpose()? }
     } else {
         RetrySync::Stopped
-    };
-    Ok(RetryState { sync, held })
+    })
 }
 
 /// Write the state whole, leaving the row alone when it already says this.

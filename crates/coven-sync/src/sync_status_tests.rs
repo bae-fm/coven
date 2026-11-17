@@ -4,7 +4,9 @@ use crate::{
     Refusal, RequiredUpdate,
 };
 use crate::{HolderDevice, KeyHolder, PendingSubject, UploadPhase, UploadWait};
-use coven_database::{EntryTarget, OperationRejection, PassMove, Removal, UnsentWork, WriteCutoff};
+use coven_database::{
+    EntryTarget, OperationRejection, PassMove, Removal, TransferHolds, UnsentWork, WriteCutoff,
+};
 use coven_foundation::id_source::{DeviceId, KeyId, MemberId, ObjectId, StoreId};
 use coven_merge::slot;
 use coven_merge::Audience;
@@ -440,13 +442,14 @@ pub(super) fn connected() -> Facts {
         unsent: writes(false),
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
-        paused: false,
-        unmetered_only: false,
-        metered: false,
-        keys_changing: false,
         pass_retry: None,
     }
 }
+
+/// Nothing holds trailing uploads: the holds the state's cases give the
+/// model, since no state reads them.
+pub(super) const UNHELD: TransferHolds =
+    TransferHolds { paused: false, unmetered_only: false, metered: false, keys_changing: false };
 
 /// A bound upload: the state reads these.
 pub(super) fn upload(progress: Progress) -> Upload {
@@ -472,10 +475,11 @@ fn upload_json(upload: &Upload) -> Value {
     })
 }
 
-/// The model's encoding of `facts`, with `trailing` uploads beside the bound
-/// ones the facts hold: the database reads none for the state, and the model
-/// says they change nothing it shows (`trailing_keeps_state`).
-fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
+/// The model's encoding of `facts` and `holds`, with `trailing` uploads
+/// beside the bound ones the facts hold: the database reads none for the
+/// state, and the model says they change nothing it shows
+/// (`trailing_keeps_state`).
+fn facts_json(facts: &Facts, holds: &TransferHolds, trailing: &[Upload]) -> Value {
     let storage = match facts.location {
         RecordedLocation::None => "none",
         RecordedLocation::SignedOut(_) => "signedOut",
@@ -502,10 +506,10 @@ fn facts_json(facts: &Facts, trailing: &[Upload]) -> Value {
         "unsentFiles": facts.unsent.files > 0,
         "running": running,
         "cooling": cooling,
-        "paused": facts.paused,
-        "unmeteredOnly": facts.unmetered_only,
-        "metered": facts.metered,
-        "keysChanging": facts.keys_changing,
+        "paused": holds.paused,
+        "unmeteredOnly": holds.unmetered_only,
+        "metered": holds.metered,
+        "keysChanging": holds.keys_changing,
         "writeKey": facts.write_key().is_some(),
         "passRetrying": facts.pass_retry.is_some(),
         "records": records,
@@ -568,9 +572,11 @@ fn shown(facts: &Facts) -> Value {
 /// unmetered networks and the network set any way, with a write queued
 /// beside them or not; and a pass held at a slot or by a cooldown, with
 /// nothing queued, and a write queued alone, under each way sync can be
-/// held.
-fn cases() -> Vec<Facts> {
+/// held. Each comes with what holds trailing uploads, which the model reads
+/// beside the facts and the state never does.
+fn cases() -> Vec<(Facts, TransferHolds)> {
     let mut cases = Vec::new();
+    let mut held = Vec::new();
     let backoff = Some(UNIX_EPOCH + Duration::from_secs(5));
     for last in passes() {
         for (unsent, stored) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
@@ -648,16 +654,15 @@ fn cases() -> Vec<Facts> {
                     for uploads in
                         [vec![first.clone()], vec![upload(Progress::Stored), first, second]]
                     {
-                        cases.push(Facts {
+                        let facts = Facts {
                             sync,
                             last: last.clone(),
                             unsent: writes(unsent),
-                            paused,
-                            unmetered_only,
-                            metered,
                             uploads,
                             ..connected()
-                        });
+                        };
+                        let holds = TransferHolds { paused, unmetered_only, metered, ..UNHELD };
+                        held.push((facts, holds));
                     }
                 }
             }
@@ -755,7 +760,7 @@ fn cases() -> Vec<Facts> {
     for case in &mut cases {
         case.queued = case.uploads.iter().any(|upload| upload.progress != Progress::Stored);
     }
-    cases
+    cases.into_iter().map(|facts| (facts, UNHELD)).chain(held).collect()
 }
 
 /// The computed state agrees with the Lean model's `state`, and waiting to
@@ -772,15 +777,16 @@ fn io_differential_sync_state() {
     // trailing ones; its count is what a stopped state says is unsent, so each
     // run's cases carry it, with and without trailing uploads.
     for trailing in [trailing_uploads(), Vec::new()] {
-        let cases: Vec<Facts> = cases()
+        let cases: Vec<(Facts, TransferHolds)> = cases()
             .into_iter()
-            .map(|mut facts| {
+            .map(|(mut facts, holds)| {
                 facts.unsent.files = (facts.uploads.len() + trailing.len()) as u64;
-                facts
+                (facts, holds)
             })
             .collect();
-        let inputs: Vec<Value> = cases.iter().map(|facts| facts_json(facts, &trailing)).collect();
-        let actual: Vec<Value> = cases.iter().map(shown).collect();
+        let inputs: Vec<Value> =
+            cases.iter().map(|(facts, holds)| facts_json(facts, holds, &trailing)).collect();
+        let actual: Vec<Value> = cases.iter().map(|(facts, _)| shown(facts)).collect();
         let expected = crate::tests::io_runner(&inputs);
         assert_eq!(actual.len(), expected.len());
         for ((input, actual), expected) in inputs.iter().zip(&actual).zip(&expected) {
@@ -820,24 +826,27 @@ fn phase_uploads() -> Vec<Upload> {
 /// pause, the setting to move files only on unmetered networks, the network
 /// and a self-replacement's write pause each on or off, over every upload of
 /// `phase_uploads`.
-fn phase_cases() -> Vec<Facts> {
+fn phase_cases() -> Vec<(Facts, TransferHolds)> {
     let cooling = RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(60)) };
     let blocked = Some(LastPass::Blocked { slot: slot(7), reason: key_unavailable(), error: None });
     let mut cases = Vec::new();
     for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
         for last in [None, blocked.clone(), offline()] {
             for bits in 0..16_u8 {
-                cases.push(Facts {
+                let facts = Facts {
                     sync,
                     last: last.clone(),
+                    uploads: phase_uploads(),
+                    queued: true,
+                    ..connected()
+                };
+                let holds = TransferHolds {
                     paused: bits & 1 != 0,
                     unmetered_only: bits & 2 != 0,
                     metered: bits & 4 != 0,
                     keys_changing: bits & 8 != 0,
-                    uploads: phase_uploads(),
-                    queued: true,
-                    ..connected()
-                });
+                };
+                cases.push((facts, holds));
             }
         }
     }
@@ -852,17 +861,20 @@ fn io_differential_upload_phase() {
     let cases = phase_cases();
     let inputs: Vec<Value> = cases
         .iter()
-        .map(|facts| {
-            let mut input = facts_json(facts, &[]);
+        .map(|(facts, holds)| {
+            let mut input = facts_json(facts, holds, &[]);
             input["check"] = json!("upload_phase");
             input
         })
         .collect();
     let expected = crate::tests::io_runner(&inputs);
     assert_eq!(cases.len(), expected.len());
-    for ((facts, input), expected) in cases.iter().zip(&inputs).zip(&expected) {
-        let actual: Vec<Value> =
-            facts.uploads.iter().map(|upload| phase_json(&facts.upload_phase(upload))).collect();
+    for (((facts, holds), input), expected) in cases.iter().zip(&inputs).zip(&expected) {
+        let actual: Vec<Value> = facts
+            .uploads
+            .iter()
+            .map(|upload| phase_json(&facts.upload_phase(holds, upload)))
+            .collect();
         assert_eq!(&Value::Array(actual), expected, "{input}");
     }
 }

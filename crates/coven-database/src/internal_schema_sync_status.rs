@@ -135,21 +135,27 @@ fn columns(location: &RecordedLocation<String>) -> (&'static str, Option<&str>) 
 }
 
 /// The row as it stands.
+#[cfg(test)]
 pub(crate) fn read(db: &StoreSql) -> Result<SyncStatusRow, DbError> {
-    let (storage, provider, last_pass, moved, last_synced) = db.query_row(
+    db.query_row(
         "SELECT storage,provider,last_pass,moved,last_synced FROM coven_sync_status
          WHERE singleton=1",
         [],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-            ))
-        },
-    )?;
+        |row| Ok(decode(row, 0)),
+    )?
+}
+
+/// The row from `storage`, `provider`, `last_pass`, `moved` and
+/// `last_synced`, in that order from `first` on. Values the table's checks
+/// would refuse are `DamagedDatabase`.
+pub(crate) fn decode(
+    values: &impl crate::sync_facts::FactValues,
+    first: usize,
+) -> Result<SyncStatusRow, DbError> {
+    let storage: String = values.get(first)?;
+    let provider: Option<String> = values.get(first + 1)?;
+    let moved: Option<String> = values.get(first + 3)?;
+    let last_synced: Option<i64> = values.get(first + 4)?;
     let location = match (storage.as_str(), provider) {
         ("none", None) => RecordedLocation::None,
         ("signed_out", Some(provider)) => RecordedLocation::SignedOut(provider),
@@ -158,7 +164,7 @@ pub(crate) fn read(db: &StoreSql) -> Result<SyncStatusRow, DbError> {
     };
     Ok(SyncStatusRow {
         location,
-        last_pass,
+        last_pass: values.get(first + 2)?,
         moved: moved.as_deref().map(PassMove::from_column).transpose()?,
         last_synced: last_synced.map(crate::stored_millis::stored_time).transpose()?,
     })

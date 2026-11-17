@@ -159,7 +159,7 @@ starts syncing. Her note goes out in the next pass. On later launches,
 ## Show what sync is doing
 
 ```rust
-let mut status = handle.subscribe_sync_status();
+let mut status = handle.subscribe(|sql| Ok::<_, CovenError>(SyncStatus::read(sql)?));
 while let Some(result) = status.next().await {
     let SyncStatus { state, last_synced } = result?;
     show_last_synced(last_synced);

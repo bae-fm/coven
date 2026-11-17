@@ -91,6 +91,7 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_network".into()),
                 ("view".into(), "coven_operations".into()),
                 ("view".into(), "coven_sending".into()),
+                ("view".into(), "coven_sync_state".into()),
                 ("view".into(), "coven_upload_pause".into()),
                 ("view".into(), "coven_uploads".into()),
                 ("view".into(), "coven_user_files".into()),

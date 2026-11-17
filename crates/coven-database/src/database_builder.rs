@@ -21,6 +21,7 @@ pub(crate) struct OpenInputs {
     pub(crate) namespaces: Vec<crate::Namespace>,
     pub(crate) sqlite: crate::SqliteSettings,
     pub(crate) functions: crate::SqlFunctions,
+    pub(crate) sync_state: Option<crate::SyncStateFunction>,
 }
 
 /// Choices needed to open the database part of a store.
@@ -36,6 +37,7 @@ pub struct DatabaseBuilder {
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
+    sync_state: Option<crate::SyncStateFunction>,
     progress: ProgressChannel<OpenStep>,
     #[cfg(test)]
     upkeep_threads: Option<usize>,
@@ -58,6 +60,7 @@ impl DatabaseBuilder {
             ids: None,
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
+            sync_state: None,
             progress: ProgressChannel::new(),
             #[cfg(test)]
             upkeep_threads: None,
@@ -175,6 +178,25 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Sync's computation of the sync state, which `coven_sync_state` calls
+    /// as `_coven_sync_state`, registered on every connection with the
+    /// functions coven's views call (§19.1). coven's own builder always
+    /// gives it; a store opened without it fails each read of the view.
+    pub fn sync_state(mut self, function: crate::SyncStateFunction) -> Self {
+        self.sync_state = Some(function);
+        self
+    }
+
+    /// The sync state's function the store was opened with, or none, for a
+    /// rebuild that opens a copy as the store was opened.
+    pub(crate) fn sync_state_as_opened(
+        mut self,
+        function: Option<crate::SyncStateFunction>,
+    ) -> Self {
+        self.sync_state = function;
+        self
+    }
+
     /// Open one writer under the store lock and four read-only connections.
     /// Always migrate coven's internal tables, then rebuild the indexes a new
     /// version of SQLite or of the app's collations and functions changes,
@@ -233,6 +255,7 @@ impl DatabaseBuilder {
             namespaces: self.namespaces.clone(),
             sqlite: self.sqlite.clone(),
             functions: self.functions.clone(),
+            sync_state: self.sync_state.clone(),
         };
         let path = self.directory.database_path();
         let whole = crate::internal_schema::whole_views();
@@ -244,7 +267,13 @@ impl DatabaseBuilder {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
-            crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
+            crate::coven_functions::register_views(
+                setup,
+                settings.device_id,
+                &transfers,
+                &network,
+                self.sync_state.as_ref(),
+            )
         };
         let recorded = crate::file_table::synced(&tables)
             .iter()
@@ -295,6 +324,7 @@ impl DatabaseBuilder {
                             &self.directory,
                             &self.sqlite,
                             &self.functions,
+                            self.sync_state.as_ref(),
                             &observer,
                             settings.device_id,
                             &tables,
@@ -435,7 +465,13 @@ impl DatabaseBuilder {
         // Nor does it watch the network: none is known (api.md E4).
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
-            crate::coven_functions::register_views(setup, settings.device_id, &transfers, &network)
+            crate::coven_functions::register_views(
+                setup,
+                settings.device_id,
+                &transfers,
+                &network,
+                self.sync_state.as_ref(),
+            )
         };
         // A read-only open runs no step, so nothing reaches `progress`.
         let clock = match self.clock {
@@ -578,11 +614,14 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
             let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
             let network = crate::network_facts::NetworkFacts::new(observer);
             let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
+                // Sync computes a closed store's state from the facts in
+                // Rust, and no app SQL reads the view here.
                 crate::coven_functions::register_views(
                     setup,
                     settings.device_id,
                     &transfers,
                     &network,
+                    None,
                 )
             };
             let mut database = coven_only(&directory.database_path(), true, Some(&views))?;

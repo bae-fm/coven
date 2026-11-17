@@ -1,11 +1,12 @@
-//! The sync state an app shows (§19.1, E5), as `subscribe_sync_status`
-//! follows it: synced means data and bound files are in storage, a queued
-//! bound file names what it waits for, a queued write waits for the next
-//! pass, a trailing file never reaches the state and shows what it waits for
-//! or its failure as its phase in the upload queue, offline with a bound
-//! file or a write queued is offline with unsent changes, a location
-//! without credentials is signed out, and the last synced time survives
-//! every state and every reopen without going backward.
+//! The sync state an app shows (§19.1, E5), as a live query of
+//! `coven_sync_state` follows it: synced means data and bound files are in
+//! storage, a queued bound file names what it waits for, a queued write
+//! waits for the next pass, a trailing file never reaches the state and
+//! shows what it waits for or its failure as its phase in the upload queue,
+//! offline with a bound file or a write queued is offline with unsent
+//! changes, a location without credentials is signed out, and the last
+//! synced time survives every state and every reopen without going
+//! backward.
 use crate::tests::{file_stored, stage, upload_path, wait_for_sent, Device, Network};
 use crate::*;
 use coven_storage::test_utils::{Faults, MemoryRequest, MemoryStorage};
@@ -441,5 +442,108 @@ async fn a_removed_device_names_its_removal_and_what_it_never_sent() {
         SyncState::Removed { removal: Removal::Device, unsent: UnsentWork { writes: 2, files: 0 } }
     );
     assert_eq!(ben.handle.unsent_work().await.unwrap().writes, 2);
+    network.close().await;
+}
+
+/// The state's row in `coven_sync_state`, as an app's SQL reads it: its
+/// kind, when sync last finished, the pending record that names it, and the
+/// whole state.
+type ShownRow = (String, Option<i64>, Option<i64>, SyncState);
+
+/// Follow `coven_sync_state`'s row with a live query, as an app does.
+fn follow_row(device: &Device) -> coven_database::test_utils::Followed<ShownRow, CovenError> {
+    coven_database::test_utils::Followed::new(device.handle.subscribe(|sql| {
+        Ok(sql.query_row(
+            "SELECT state,last_synced,pending,detail FROM coven_sync_state",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?)
+    }))
+}
+
+/// Each failure storage gives a whole pass that names a state reads from
+/// `coven_sync_state` as that state: its kind, the pass as its cause, no
+/// pending record, and the last synced time the status row keeps (§19.1).
+#[tokio::test]
+async fn the_view_shows_each_state_a_pass_failure_names() {
+    for (failure, kind) in [
+        (StorageFailure::Authentication, "signed_out"),
+        (StorageFailure::PermissionDenied, "no_access"),
+        (StorageFailure::QuotaExceeded, "storage_full"),
+        (StorageFailure::ContainerNotFound, "folder_missing"),
+        (StorageFailure::ClockSkew, "clock_wrong"),
+    ] {
+        let network = household().await;
+        let ben = &network.devices[0];
+        let mut shown = follow_row(ben);
+        shown.wait_for(|row| row.0 == "synced").await;
+        ben.storage
+            .set_faults(Faults { fail_next: 1, failure, response: Some(403), ..Faults::none() })
+            .await;
+        ben.handle.sync_now();
+        let (state, last_synced, pending, detail) = shown.wait_for(|row| row.0 == kind).await;
+        assert_eq!(state, kind);
+        assert_eq!(pending, None, "{failure:?}");
+        let cause = match &detail {
+            SyncState::SignedOut { cause, .. } => cause.clone(),
+            SyncState::NoAccess(cause)
+            | SyncState::StorageFull(cause)
+            | SyncState::FolderMissing(cause)
+            | SyncState::ClockWrong(cause) => Some(cause.clone()),
+            other => panic!("{failure:?} shows {other:?}"),
+        };
+        assert!(
+            matches!(
+                cause,
+                Some(SyncCause::Pass(LastPass::Failed { failure: StatusFailure::Storage(named), .. }))
+                    if named == failure
+            ),
+            "{failure:?}: {detail:?}"
+        );
+        let status = ben.handle.sync_status().await.unwrap();
+        assert_eq!(status.state, detail);
+        assert_eq!(
+            status.last_synced,
+            last_synced.map(|millis| std::time::UNIX_EPOCH + Duration::from_millis(millis as u64))
+        );
+        network.close().await;
+    }
+}
+
+/// Storage refuses Ana's cover, a bound file, for want of access: the
+/// upload's pending record names no access, and `coven_sync_state.pending`
+/// gives the record's position, which a join to `coven_pending` reads
+/// (§19.1).
+#[tokio::test]
+async fn the_view_names_the_pending_record_behind_its_state() {
+    let network = household().await;
+    let ana = &network.devices[0];
+    ana.handle.stop_sync().await.unwrap();
+    let cover = stage(ana, "covers", "album", vec![6; 4096]).await;
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::PermissionDenied, 403));
+    ana.storage.set_faults(faults).await;
+    ana.handle.start_sync().await.unwrap();
+    let mut shown = follow_row(ana);
+    let (_, _, pending, detail) = shown.wait_for(|row| row.0 == "no_access").await;
+    let SyncState::NoAccess(SyncCause::Pending(record)) = &detail else {
+        panic!("the cover's record names no access: {detail:?}");
+    };
+    assert!(matches!(record.subject, PendingSubject::Upload { .. }), "{record:?}");
+    let joined: (i64, String) = ana
+        .handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT p.position,p.subject_kind FROM coven_sync_state AS s
+                 JOIN coven_pending AS p ON p.position=s.pending",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((Some(joined.0), joined.1.as_str()), (pending, "upload"));
     network.close().await;
 }

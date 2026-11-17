@@ -498,6 +498,7 @@ tables like these, so the list stays one query over the database:
 | `coven_sending` | queued file this process is sending now | `file`, `position` |
 | `coven_upload_pause` | store, always exactly one row | `paused` |
 | `coven_network` | store, always exactly one row | `usable`, `metered`, `unmetered_only` |
+| `coven_sync_state` | store, always exactly one row | `state`, `last_synced`, `pending`, `detail` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
 | `coven_pins` (a table) | file this device keeps pinned | `file` |
 | `coven_pin_requests` (a table) | file a switch to the cloud asked this device to keep whole, not yet pinned | `file` |
@@ -529,6 +530,24 @@ finishing, a pin, a member removed. The views are read-only, and coven's tables
 themselves stay out of reach. `pending` and `record` read as a
 `PendingRecord`, `member` as a `MemberId`, `device` as a `DeviceId`, and `file`
 and `id` as a `FileId`. The API reference lists every column.
+
+`coven_sync_state` is the sync state a status line shows: its kind in `state`,
+such as `synced` or `storage_full`, when sync last finished, and the whole
+state in `detail`, which reads as a `SyncState` with what it waits for and its
+cause. Coven computes it in the read, from the facts its tables hold, with the
+same code its model checks. A screen that lists notes under its sync line
+reads both in one live query, so the line never lags the list:
+
+```rust
+let screen: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
+    let state: String =
+        sql.query_row("SELECT state FROM coven_sync_state", [], |row| row.get(0))?;
+    let titles = sql.query("SELECT title FROM notes ORDER BY title", [], |row| {
+        row.get::<_, String>(0)
+    })?;
+    Ok((state, titles))
+});
+```
 
 `coven_pins` is a table rather than a view so the app can follow it: a local
 trigger declared `AFTER INSERT` or `AFTER DELETE ON coven_pins` keeps a count

@@ -183,22 +183,6 @@ pub(crate) fn read_all(db: &StoreSql) -> Result<Vec<(RetrySubject, RetryWait)>, 
     .collect()
 }
 
-/// The waits of the journal operations, with the operation each delays.
-pub(crate) fn operations(db: &StoreSql) -> Result<Vec<(OperationId, RetryWait)>, DbError> {
-    db.query(
-        "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries
-         WHERE operation>0",
-        [],
-        read_row,
-    )?
-    .into_iter()
-    .map(|row| match row.decode()? {
-        (RetrySubject::Operation(id), wait) => Ok((id, wait)),
-        _ => Err(DbError::DamagedDatabase),
-    })
-    .collect()
-}
-
 pub(crate) fn find(db: &StoreSql, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
     let key = key(subject);
     db.query(key.statements().find, [key.value()], read_row)?

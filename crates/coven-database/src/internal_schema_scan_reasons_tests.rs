@@ -41,6 +41,7 @@ mod fixture {
             ("_coven_stored_device", 1),
             ("_coven_stored_object", 1),
             ("_coven_stored_object_path", 1),
+            ("_coven_sync_state", crate::sync_facts::FACTS),
         ] {
             db.create_scalar_function(name, arguments, flags, |_| Ok(Vec::<u8>::new())).unwrap();
         }

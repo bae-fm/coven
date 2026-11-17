@@ -485,6 +485,7 @@ fn builder(
     namespaces: &[Namespace],
 ) -> DatabaseBuilder {
     DatabaseBuilder::new(directory.clone())
+        .sync_state(crate::sync_state_function())
         .id_source(ids.clone())
         .clock(clock.clone())
         .synced_tables(tables())

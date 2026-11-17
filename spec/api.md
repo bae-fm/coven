@@ -3689,7 +3689,7 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads twelve views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads thirteen views of coven's own tables and
   eight tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`
   and `coven_retry_effect`, in reads,
@@ -3752,6 +3752,15 @@ let moved = handle
   network changes. The function behind them, `_coven_network`, refuses a
   direct call in the same way. A read-only handle watches nothing: it shows
   `usable` NULL and nothing metered, with the setting as stored.
+- `coven_sync_state` is the one view whose row coven's own code computes: it
+  reads the facts the sync state is computed from and hands them to
+  `_coven_sync_state`, which runs the computation the model checks
+  ([§19.1](coven.md#191-what-the-app-sees)). A status screen reads the view
+  beside its own rows in its live query, which runs again whenever one of
+  those facts changes, a transfer starting or ending included, and gives the
+  current state as its first value. `SyncStatus::read` reads the view's row
+  as a `SyncStatus`. Like `coven_sync_status`, it isn't readable on a
+  read-only handle.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -3818,7 +3827,7 @@ let moved = handle
 | `coven_moves`: each file of each move to the cloud that is still moving or has failed ([§17.3](coven.md#173-staging-a-file)), one row per file, since a file is in at most one move; a table, which local triggers can follow: a move's rows appear in the write that records it, a file's as it joins a moving move as a new file over a moving file's bytes, their state changes in the transaction that fails the move, a file's row goes with its record, and the rest go in the write that cancels or switches the move | `move` | the move, read as `MoveId`: the id `move_to_cloud` returned, or the move of the write that staged the file; a bound file's move is listed too, though `cancel_move` refuses it with `MoveBound` ([§17.4](coven.md#174-bound-and-trailing-references)) |
 | | `state` | `moving` while its uploads are queued, `failed` once a changed original failed it: its files stay on this device only, none waits for an upload, and the move's pending record says which original until the app cancels it |
 | | `file` | the file's id; a file a failed move lists stays in it, and `move_to_cloud` refuses it with `FileInMove`, naming the move, until the app cancels the move |
-| `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
+| `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state from `coven_sync_state` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`, read as `CloudProvider`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moved` | what a running pass moved last: `read` for a slot it hadn't read, `claimed` for a slot it claimed; NULL while it has moved nothing, and opening writes NULL |
@@ -3829,6 +3838,10 @@ let moved = handle
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
 | | `cooling_until` | while syncing, when the provider cooldown holding every pass ends, in milliseconds since the Unix epoch by the store's clock, rounded up; NULL with no cooldown, and while stopped |
+| `coven_sync_state`: the sync state a status screen shows, in one row (E5, [§19.1](coven.md#191-what-the-app-sees)); computed in the read by coven's own code, never stored; not readable on a read-only handle | `state` | the state's kind, in snake case: `not_synced`, `syncing`, `waiting_to_sync`, `synced`, `offline`, `offline_with_unsent_changes`, `signed_out`, `no_access`, `storage_full`, `folder_missing`, `clock_wrong`, `update_needed`, `removed`, `needs_reset` or `failed` |
+| | `last_synced` | when sync last finished, as `coven_sync_status.last_synced` holds it |
+| | `pending` | the pending record that names the state, by its `coven_pending.position`; NULL when the last pass names it, or nothing does |
+| | `detail` | the whole state, read as `SyncState`: what syncing does, what waiting waits for, the provider, the cause with its error's text, the removal or reset and what is unsent |
 | `coven_pending`: every pending record (§19.1), once for each file it names, or once with no file; a table, which local triggers can follow: a record's rows appear in the transaction that records it, change as what the record says changes, a file's row appears as the record comes to name the file and goes as it stops naming it, and the rest go in the transaction that ends the record | `record` | the record, read as `PendingRecord`, without its cause |
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload switches, or, while it switches none, the stored files, so a file the upload switches keeps its row as it is stored; for a record about a pin, its file; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
@@ -4748,16 +4761,19 @@ loop {
 
 - The sync state is what a status screen shows: one of the states of
   [§19.1](coven.md#191-what-the-app-sees), its cause where it has one, and
-  when sync last finished. `sync_status()` reads it, and
-  `subscribe_sync_status()` follows it: its first value is the
+  when sync last finished. `coven_sync_state` (E4) shows it in one row, which
+  the app's live query reads beside its own rows: its first value is the
   current state, read at once from what opening wrote, so the app shows no
-  placeholder before it. Coven names the states; the app picks the words.
-  - The state is computed in the read from the rows of `coven_sync_status`
-    and `coven_retry_effect` (E4), the send queue, the upload queue with its
-    pause and retry waits, `coven_network`, the files being sent or
-    downloaded and the pending records, so the live query runs again
-    whenever one of them changes: a write committed while offline makes it offline with unsent
-    changes in that transaction. With several candidates, the first in
+  placeholder before it. `sync_status()` reads the row once. Coven names the
+  states; the app picks the words.
+  - The state is computed in the read, by coven's own code that the view
+    calls, from the rows of `coven_sync_status` and `coven_retry_effect`
+    (E4), the send queue, the bound files in the upload queue with their
+    retry waits, the files being sent and the pending records, so the live
+    query runs again whenever one of them changes: a write committed while
+    offline makes it offline with unsent changes in that transaction. The
+    pause and the network hold trailing files only, and the state doesn't
+    read them. With several candidates, the first in
     §19.1's order shows; Appendix H.3 of coven.md lists which state each
     fact names.
   - Synced means nothing waits, data or files: a pass held back at a slot
@@ -6148,16 +6164,10 @@ impl CovenHandle {
     /// the cause the view keeps beside it (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
-    /// The sync state and when sync last finished, computed from
-    /// `coven_sync_status`, `coven_retry_effect`, the send queue, the upload
-    /// queue, `coven_network`, the files moving and the pending records in
-    /// one committed
-    /// snapshot (§19.1). `CovenReadHandle` has none.
+    /// The sync state and when sync last finished, as `coven_sync_state`
+    /// shows them in one committed snapshot (§19.1). An app's screen follows
+    /// the view in its own live query (E4). `CovenReadHandle` has none.
     pub async fn sync_status(&self) -> CovenResult<SyncStatus>;
-
-    /// The same pre-built query, live (E4): its first value is the current
-    /// state.
-    pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus>;
 
     /// How many file uploads and file downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
@@ -6195,13 +6205,20 @@ pub enum SyncFailure {
 }
 
 /// What a status screen shows (E5, §19.1): the sync state and when sync
-/// last finished, as `sync_status()` reads it and `subscribe_sync_status()`
-/// follows it.
+/// last finished, as `coven_sync_state` shows them and `sync_status()` reads
+/// them.
 pub struct SyncStatus {
     pub state: SyncState,
     /// When a pass last reached the end of the sequence, by the store's
     /// clock; kept across every state and never earlier than before.
     pub last_synced: Option<SystemTime>,
+}
+
+impl SyncStatus {
+    /// The sync state and when sync last finished, as `coven_sync_state`
+    /// shows them in the caller's read, for a live query that follows the
+    /// view by itself.
+    pub fn read(sql: SqlReadContext<'_>) -> Result<SyncStatus, DbError>;
 }
 
 /// A closed store's sync status, as `Coven::closed_sync_status` reads it
@@ -6537,9 +6554,9 @@ match handle.setup_s3_storage(storage, access_key_id, secret, show_setup_step).a
     Err(error) => return show_setup_error(error),
 }
 
-// The sync state, as a live query follows it; the first value is the
-// current state.
-let mut status = handle.subscribe_sync_status();
+// The sync state, as a live query of `coven_sync_state` follows it; the
+// first value is the current state.
+let mut status = handle.subscribe(|sql| Ok::<_, CovenError>(SyncStatus::read(sql)?));
 loop {
     status.changed().await;
     let (status_next, answer) = tokio::task::spawn_blocking(move || {

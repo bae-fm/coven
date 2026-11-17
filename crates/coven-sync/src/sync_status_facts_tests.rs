@@ -1,7 +1,7 @@
 use super::*;
 use crate::sync_status::tests::{
     connected, holder, key_unavailable, offline, record, upload, upload_record, write_key_record,
-    writes,
+    writes, UNHELD,
 };
 use crate::{
     FileMissingReason, KeyHolder, LocalFailure, PendingReason, PendingRecord, PendingSubject,
@@ -124,17 +124,16 @@ fn a_queued_write_is_never_synced() {
             SyncState::WaitingToSync(SyncWait::CoolingDown { until })
         );
         // The pause holds trailing uploads only, which the state never
-        // reads: a write beside a paused bound upload is next in line behind
-        // the upload.
-        let paused = Facts {
+        // reads: a write beside a bound upload is next in line behind the
+        // upload, whether or not uploads are paused.
+        let behind = Facts {
             last: last.clone(),
             unsent: writes(true),
-            paused: true,
             uploads: vec![upload(Progress::Queued)],
             queued: true,
             ..connected()
         };
-        assert_eq!(paused.state(), SyncState::Syncing(SyncActivity::UploadingBoundFile));
+        assert_eq!(behind.state(), SyncState::Syncing(SyncActivity::UploadingBoundFile));
         let claimed = Facts {
             last: last.clone(),
             unsent: writes(true),
@@ -177,10 +176,7 @@ fn a_closed_store_shows_what_opening_shows() {
             moved: Some(PassMove::Read),
             last_synced: Some(UNIX_EPOCH + Duration::from_secs(30)),
         },
-        retry: coven_database::RetryState {
-            sync: RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(90)) },
-            held: false,
-        },
+        sync: RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(90)) },
         unsent: writes(true),
         uploads: vec![coven_database::UploadFacts {
             sending: false,
@@ -190,15 +186,11 @@ fn a_closed_store_shows_what_opening_shows() {
         }],
         queued: true,
         records: Vec::new(),
-        paused: false,
-        unmetered_only: false,
-        metered: false,
-        keys_changing: false,
         pass_retry: None,
         operation_retries: Vec::new(),
     };
     assert_eq!(
-        SyncStatus::computed(facts.clone()).unwrap().state,
+        Facts::read(facts.clone()).unwrap().0.state(),
         SyncState::Syncing(SyncActivity::Receiving)
     );
     let closed = |location| SyncStatus::closed(facts.clone(), location).unwrap();
@@ -513,7 +505,10 @@ fn a_blocked_slot_names_its_wait() {
         queued: true,
         ..blocked(key_unavailable())
     };
-    assert_eq!(held.upload_phase(&held.uploads[0]), UploadPhase::Waiting(UploadWait::Sync));
+    assert_eq!(
+        held.upload_phase(&UNHELD, &held.uploads[0]),
+        UploadPhase::Waiting(UploadWait::Sync)
+    );
 }
 
 /// A key no other member holds is never sent, so it is no wait: a slot blocked

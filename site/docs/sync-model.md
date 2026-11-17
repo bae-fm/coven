@@ -238,10 +238,11 @@ provider client is released, keeping keys, credentials and the storage
 location. A `start_sync` asked meanwhile starts after it.
 Neither touches what's in storage.
 
-A status screen shows one *sync state* and when sync last finished.
-`handle.sync_status().await?` reads them, and `handle.subscribe_sync_status()`
-follows them: its first value is the current state, so the screen needs no
-placeholder. Coven names the states; the app picks the words:
+A status screen shows one *sync state* and when sync last finished. The
+`coven_sync_state` view gives them in one row, so the screen's own live query
+reads them beside its rows: its first value is the current state, so the
+screen needs no placeholder. `handle.sync_status().await?` reads them once.
+Coven names the states; the app picks the words:
 
 ```rust
 pub struct SyncStatus {
@@ -270,7 +271,9 @@ pub enum SyncState {
 
 The state is computed in each read from what coven knows: whether storage is
 set up and its credentials held, how the last pass ended, what is moving, the
-send and upload queues, the network and the pending records. When several
+send queue, the bound files in the upload queue and the pending records. The
+view hands those facts to coven's own code, so the state has one definition,
+the one coven's model checks. When several
 facts hold, the most urgent shows: the device's own standing first, then
 signing in, then what storage said of the account, then reachability, then
 failures, then activity. The cause is the last pass or the first pending

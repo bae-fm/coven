@@ -533,6 +533,7 @@ impl CovenBuilder {
             .ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
         let database = DatabaseBuilder::new(directory)
             .migration_operation(coven_sync::SequenceSync::migration_operation)
+            .sync_state(coven_sync::sync_state_function())
             .synced_tables(tables)
             .namespaces(self.namespaces.clone())
             .migrations(migrations)

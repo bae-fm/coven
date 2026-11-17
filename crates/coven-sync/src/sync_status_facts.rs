@@ -34,8 +34,10 @@ pub(crate) struct Upload {
     pub(crate) record: Option<PendingRecord>,
 }
 
-/// What the state is computed from, as the model's `Facts` names it; the
-/// time of the last finished sync is read beside it.
+/// What the state is computed from, as the model's `Facts` names it but for
+/// what holds trailing uploads (`TransferHolds`), which no state reads and
+/// an upload's phase reads beside these; the time of the last finished sync
+/// is read beside them.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Facts {
     pub(crate) location: RecordedLocation<CloudProvider>,
@@ -66,14 +68,6 @@ pub(crate) struct Facts {
     /// Whether a started connection will plan, and the cooldown holding
     /// every request.
     pub(crate) sync: RetrySync,
-    /// The app paused trailing uploads.
-    pub(crate) paused: bool,
-    /// The app moves files only on unmetered networks.
-    pub(crate) unmetered_only: bool,
-    /// The store's watch says the device's network is metered.
-    pub(crate) metered: bool,
-    /// A self-replacement of this member's keys pauses writes (§12.3).
-    pub(crate) keys_changing: bool,
     /// When the next try of the pass's failure is, if its backoff is armed:
     /// the sync scope's, or, for coven's own operation, the operation's.
     pub(crate) pass_retry: Option<SystemTime>,
@@ -321,13 +315,10 @@ impl Facts {
             records: facts
                 .records
                 .into_iter()
+                .map(|(_position, record)| record)
                 .filter(|record| record.subject != crate::PendingSubject::Connection)
                 .collect(),
-            sync: facts.retry.sync,
-            paused: facts.paused,
-            unmetered_only: facts.unmetered_only,
-            metered: facts.metered,
-            keys_changing: facts.keys_changing,
+            sync: facts.sync,
             pass_retry,
         };
         Ok((facts, row.last_synced))

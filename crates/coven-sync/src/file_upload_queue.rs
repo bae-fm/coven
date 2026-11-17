@@ -84,12 +84,12 @@ pub enum UploadWait {
 
 impl UploadQueue {
     /// The queue as one committed snapshot read it: each upload's phase from
-    /// the facts the sync state reads, the upload's retry wait and what is
-    /// recorded about it. A move's record names an original, and shows as the
+    /// the facts the sync state reads, what holds trailing uploads, the
+    /// upload's retry wait and what is recorded about it. A move's record names an original, and shows as the
     /// record of the upload that uploads that original, as the upload's own
     /// record does for its bytes.
     pub fn from_facts(facts: QueueFacts<PendingRecord>) -> Result<Self, DbError> {
-        let QueueFacts { sync, queue, recorded } = facts;
+        let QueueFacts { sync, holds, queue, recorded } = facts;
         let (state, _) = crate::sync_status::Facts::read(sync)?;
         let mut files = Vec::new();
         for upload in queue.uploads {
@@ -102,18 +102,21 @@ impl UploadQueue {
                 })
             });
             let sending = upload.files.iter().any(|file| queue.sending.contains(file));
-            let phase = state.upload_phase(&crate::sync_status::Upload {
-                progress: if sending {
-                    crate::sync_status::Progress::Moving
-                } else if upload.stored {
-                    crate::sync_status::Progress::Stored
-                } else {
-                    crate::sync_status::Progress::Queued
+            let phase = state.upload_phase(
+                &holds,
+                &crate::sync_status::Upload {
+                    progress: if sending {
+                        crate::sync_status::Progress::Moving
+                    } else if upload.stored {
+                        crate::sync_status::Progress::Stored
+                    } else {
+                        crate::sync_status::Progress::Queued
+                    },
+                    bound: upload.holds.is_some(),
+                    retry_at: upload.retry.map(|retry| retry.not_before),
+                    record,
                 },
-                bound: upload.holds.is_some(),
-                retry_at: upload.retry.map(|retry| retry.not_before),
-                record,
-            });
+            );
             files.extend(upload.files.iter().map(|file| QueuedUpload {
                 phase: phase.clone(),
                 file: *file,
