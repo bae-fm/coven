@@ -8846,9 +8846,14 @@ copies of app files that a row names, a copy files share counted once:
 the write that keeps a staged copy adds its size, and the write that
 records it for removal subtracts it. A copy still being written, or one
 recorded for removal, isn't counted, as the cache's bytes in flight
-aren't. The WAL beside each file doesn't count: once a
-checkpoint lets it start over it shrinks back to 4 MiB (§4), it changes with
-every commit, and writing its size would itself add to it.
+aren't. The row `rebuild` is there while a rebuild runs (§18.3): coven
+makes it, at no bytes, before the rebuild makes its folder, then writes
+the sum of the rebuild's store's own `coven_library_bytes` each time that
+sum changes. To remove the folder, coven moves it aside in one rename and
+deletes the row under the writer, then removes the folder. The WAL beside
+each file doesn't count: once a checkpoint lets it start over it shrinks
+back to 4 MiB (§4), it changes with every commit, and writing its size
+would itself add to it.
 One read, `local_bytes`, returns these from a
 single snapshot of the database and a walk of the store's directory. It leaves
 out the cache's folder, since the entries count it, and the archives resets

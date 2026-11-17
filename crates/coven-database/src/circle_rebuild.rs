@@ -56,16 +56,15 @@ pub enum RebuildError {
 pub struct RebuildDatabase {
     /// None once `discard` took it to close.
     database: Option<StoreDatabase>,
-    /// The real store, whose folder holds the rebuild's.
-    real: StoreDir,
     /// The rebuild's own store, which `migrate` opens again.
     scratch: StoreDir,
     /// What the real store opened with.
     inputs: OpenInputs,
     clock: ClockRef,
     ids: IdSourceRef,
-    /// The real store's handle, told when the folder's bytes change: they
-    /// are on this device's disk, so its storage figures count them (§17.8).
+    /// The real store's handle, whose `coven_library_bytes` counts the
+    /// rebuild's store while its folder is there: the folder is on this
+    /// device's disk, so the storage figures count it (§17.8).
     parent: StoreDatabase,
 }
 
@@ -92,23 +91,39 @@ impl StoreDatabase {
             })
             .await?;
         let first = first_past(&inputs, &circle, version)?;
-        let scratch = real.rebuild_directory().await?;
+        // A leftover rebuild's folder goes with its row, then the new one's
+        // row starts at no bytes as the rebuild makes its folder (§17.8).
+        self.remove_rebuild().await?;
+        self.begin_counting_rebuild().await?;
+        let scratch = match real.rebuild_directory().await {
+            Ok(scratch) => scratch,
+            Err(operation) => return Err(removed_after(self, operation.into()).await),
+        };
         let opened =
             at_version(&inputs, first, &scratch, &clock, &ids).loading_store().open().await;
-        match opened {
-            Ok(database) => {
-                self.local_bytes_changed();
-                Ok(RebuildDatabase {
-                    database: Some(database),
-                    real,
-                    scratch,
-                    inputs,
-                    clock,
-                    ids,
-                    parent: self.clone(),
-                })
-            }
-            Err(operation) => Err(removed_after(&real, operation.into())),
+        self.local_bytes_changed();
+        let database = match opened {
+            Ok(database) => database,
+            Err(operation) => return Err(removed_after(self, operation.into()).await),
+        };
+        let counted = self.count_rebuild(&database).await;
+        let mut rebuild = RebuildDatabase {
+            database: Some(database),
+            scratch,
+            inputs,
+            clock,
+            ids,
+            parent: self.clone(),
+        };
+        match counted {
+            Ok(()) => Ok(rebuild),
+            Err(operation) => Err(match rebuild.discard_inner().await {
+                Ok(()) => operation.into(),
+                Err(cleanup) => RebuildError::Cleanup {
+                    operation: Box::new(operation.into()),
+                    cleanup: Box::new(cleanup),
+                },
+            }),
         }
     }
 }
@@ -160,8 +175,9 @@ impl RebuildDatabase {
         loaded
     }
 
-    /// Close the rebuild's store and remove its folder, reporting the first
-    /// failure (both, as `Cleanup`, when both fail).
+    /// Close the rebuild's store and remove its folder with its row in the
+    /// real store's `coven_library_bytes`, reporting the first failure
+    /// (both, as `Cleanup`, when both fail).
     pub async fn discard(mut self) -> Result<(), RebuildError> {
         self.discard_inner().await
     }
@@ -171,7 +187,7 @@ impl RebuildDatabase {
             Some(database) => database.close().await.map_err(RebuildError::from),
             None => Ok(()),
         };
-        let removed = self.real.remove_rebuild_directory();
+        let removed = self.parent.remove_rebuild().await;
         self.parent.local_bytes_changed();
         match (closed, removed) {
             (Ok(()), Ok(())) => Ok(()),
@@ -182,6 +198,14 @@ impl RebuildDatabase {
                 cleanup: Box::new(cleanup.into()),
             }),
         }
+    }
+
+    /// Count the rebuild's store, just opened again, in the real store's
+    /// `rebuild` row, and keep it.
+    async fn reopened(&mut self, database: StoreDatabase) -> Result<(), RebuildError> {
+        let counted = self.parent.count_rebuild(&database).await;
+        self.database = Some(database);
+        Ok(counted?)
     }
 }
 
@@ -216,9 +240,10 @@ fn at_version(
         .id_source(ids.clone())
 }
 
-/// `operation` after removing the rebuild's folder.
-fn removed_after(real: &StoreDir, operation: RebuildError) -> RebuildError {
-    match real.remove_rebuild_directory() {
+/// `operation` after removing the rebuild's folder and its row in the real
+/// store `parent`.
+async fn removed_after(parent: &StoreDatabase, operation: RebuildError) -> RebuildError {
+    match parent.remove_rebuild().await {
         Ok(()) => operation,
         Err(cleanup) => RebuildError::Cleanup {
             operation: Box::new(operation),

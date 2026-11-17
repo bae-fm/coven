@@ -51,28 +51,21 @@ pub(crate) fn kept(db: &StoreSql) -> Result<Option<u64>, DbError> {
     Ok(Some(u64::try_from(bytes).map_err(|_negative| DbError::DamagedDatabase)?))
 }
 
-/// Move the archive `name` out of `directory` and delete its row, on
-/// `writer`, the store's writer, which the caller holds. When the row's
-/// deletion fails, the archive moves back and the failure returns, so the
-/// archive and its row stay as they were; when the move back fails too,
-/// both failures return. An archive already moved deletes only its row.
+/// Delete the archive `name`'s row, in the transaction under way.
+fn forget_archive(db: &StoreSql, name: &str) -> Result<(), DbError> {
+    db.execute("DELETE FROM coven_archive_bytes WHERE archive=?1", [name])?;
+    Ok(())
+}
+
+/// Move the archive `name` out of `directory` and delete its row, in one
+/// step, on `writer`, the store's writer, which the caller holds.
 fn retire_archive(writer: &mut StoreSql, directory: &StoreDir, name: &str) -> Result<(), DbError> {
-    let moved = directory.retire_discarded_device(name)?;
-    let deleted = writer.transaction(|db| {
-        db.execute("DELETE FROM coven_archive_bytes WHERE archive=?1", [name])?;
-        Ok::<_, DbError>(())
-    });
-    match deleted {
-        Ok(()) => Ok(()),
-        Err(error) if !moved => Err(error),
-        Err(error) => match directory.return_discarded_device(name) {
-            Ok(()) => Err(error),
-            Err(returning) => Err(DbError::FileCleanup {
-                write: Err(Box::new(error)),
-                failures: vec![DbError::Disk(returning)],
-            }),
-        },
-    }
+    crate::database::library_bytes::uncount(
+        writer,
+        || directory.retire_discarded_device(name),
+        || directory.return_discarded_device(name),
+        |db| forget_archive(db, name),
+    )
 }
 
 impl StoreDatabase {

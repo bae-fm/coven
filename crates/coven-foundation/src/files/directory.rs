@@ -267,6 +267,17 @@ impl StoreDir {
 
 /// The folder of the store's folder that holds a rebuild's store (§18.3).
 const REBUILD: &str = "rebuild";
+/// Where the folder `rebuild` moves as its removal begins.
+const REMOVING_REBUILD: &str = "removing-rebuild";
+
+/// Sync the store's directory after a rename in it.
+#[cfg_attr(not(unix), expect(unused_variables, reason = "Windows renames write through"))]
+fn sync_store_directory(path: &std::path::Path) -> Result<(), FileError> {
+    #[cfg(unix)]
+    crate::files::atomic_file::sync_directory(path)
+        .map_err(|source| FileError::at("sync the store's directory", path, source))?;
+    Ok(())
+}
 
 pub(crate) fn initialize(
     path: &std::path::Path,
@@ -339,6 +350,16 @@ pub trait StoreDirAccess: Sized {
     ) -> impl std::future::Future<Output = Result<Self, SettingsError>> + Send;
     /// Remove the folder `rebuild` whole, with its locks; absent is removed.
     fn remove_rebuild_directory(&self) -> Result<(), FileError>;
+    /// Move the folder `rebuild` aside, in one rename, so it leaves the
+    /// store's directory before its files go, after removing what an earlier
+    /// removal left there. Returns whether there was one to move.
+    fn retire_rebuild_directory(&self) -> Result<bool, FileError>;
+    /// Move the folder `retire_rebuild_directory` moved aside back.
+    fn return_rebuild_directory(&self) -> Result<(), FileError>;
+    /// Remove the folder `retire_rebuild_directory` moved aside, whole;
+    /// absent is removed. Nothing names what is in it. Blocks while it
+    /// removes the folder.
+    fn remove_retired_rebuild(&self) -> Result<(), FileError>;
     /// The record of a replacement whose swap is under way (§19.3). A record
     /// that remains only because publication was interrupted after removing
     /// the bootstrap marker, with settings already naming the new device, is
@@ -534,6 +555,35 @@ impl StoreDirAccess for StoreDir {
         match std::fs::remove_dir_all(&root) {
             Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
                 Err(FileError::at("remove the rebuild store's folder", &root, source))
+            }
+            _ => Ok(()),
+        }
+    }
+    fn retire_rebuild_directory(&self) -> Result<bool, FileError> {
+        self.remove_retired_rebuild()?;
+        let root = self.path.join(REBUILD);
+        if !super::atomic_file::exists("inspect the rebuild store's folder", &root)? {
+            return Ok(false);
+        }
+        let removing = self.path.join(REMOVING_REBUILD);
+        super::atomic_file::rename_new(&root, &removing).map_err(|source| {
+            FileError::at("move the rebuild store's folder aside", &root, source)
+        })?;
+        sync_store_directory(&self.path)?;
+        Ok(true)
+    }
+    fn return_rebuild_directory(&self) -> Result<(), FileError> {
+        let removing = self.path.join(REMOVING_REBUILD);
+        super::atomic_file::rename_new(&removing, &self.path.join(REBUILD)).map_err(|source| {
+            FileError::at("move the rebuild store's folder back", &removing, source)
+        })?;
+        sync_store_directory(&self.path)
+    }
+    fn remove_retired_rebuild(&self) -> Result<(), FileError> {
+        let removing = self.path.join(REMOVING_REBUILD);
+        match std::fs::remove_dir_all(&removing) {
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                Err(FileError::at("remove the rebuild store's folder", &removing, source))
             }
             _ => Ok(()),
         }

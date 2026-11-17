@@ -507,3 +507,32 @@ async fn a_write_into_a_table_the_rebuilds_version_lacks_is_kept_as_a_lost_value
         db.close().await.unwrap();
     }
 }
+
+/// The real store's `rebuild` row, while there is one.
+fn rebuild_row(app: &StoreDatabase) -> Option<i64> {
+    app.inspect_writer(|db, _| {
+        db.query("SELECT bytes FROM coven_library_bytes WHERE part='rebuild'", [], |r| r.get(0))
+            .unwrap()
+            .pop()
+    })
+}
+
+/// The real store's `coven_library_bytes` has a `rebuild` row from the
+/// rebuild's opening, holding the sum of the rebuild's store's own rows,
+/// until the rebuild's folder goes with it (§17.8, §18.3).
+#[tokio::test]
+async fn the_rebuilds_store_has_a_row_while_its_folder_is_there() {
+    let store = TestStore::new();
+    let app = open_app(&store).await;
+    assert_eq!(rebuild_row(&app), None);
+    let rebuild = app.open_rebuild(Audience::Circle(garden()), 1).await.unwrap();
+    let own: i64 = rebuild.database.as_ref().unwrap().inspect_writer(|db, _| {
+        db.query_row("SELECT sum(bytes) FROM coven_library_bytes", [], |r| r.get(0)).unwrap()
+    });
+    assert!(own > 0);
+    assert_eq!(rebuild_row(&app), Some(own));
+    rebuild.discard().await.unwrap();
+    assert_eq!(rebuild_row(&app), None);
+    assert!(!rebuild_folder(&store).exists());
+    app.close().await.unwrap();
+}

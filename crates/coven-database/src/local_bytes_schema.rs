@@ -11,12 +11,13 @@ macro_rules! coven_local_bytes_tables {
         // opens. Neither counts its WAL, which a checkpoint lets start over.
         // `copies` is coven's copies of app bytes that a row names, which
         // the triggers below keep in the statement that counts or releases a
-        // copy.
+        // copy. `rebuild` is there while a rebuild's folder is (§18.3): the
+        // sizes of the rebuild's store's own files together.
         $visit!(
             coven_library_bytes,
             "
             CREATE TABLE coven_library_bytes (
-                part TEXT PRIMARY KEY NOT NULL CHECK(part IN ('database','inputs','copies')),
+                part TEXT PRIMARY KEY NOT NULL CHECK(part IN ('database','inputs','copies','rebuild')),
                 bytes INTEGER NOT NULL CHECK(bytes>=0)
             ) STRICT, WITHOUT ROWID;
             INSERT INTO coven_library_bytes(part,bytes)

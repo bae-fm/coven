@@ -50,11 +50,8 @@ impl RebuildDatabase {
         };
         self.parent.local_bytes_changed();
         match result {
-            Ok(database) => {
-                self.database = Some(database);
-                Ok(())
-            }
-            Err(operation) => Err(removed_after(&self.real, operation)),
+            Ok(database) => self.reopened(database).await,
+            Err(operation) => Err(removed_after(&self.parent, operation).await),
         }
     }
 
@@ -93,11 +90,8 @@ impl RebuildDatabase {
         };
         self.parent.local_bytes_changed();
         match result {
-            Ok(database) => {
-                self.database = Some(database);
-                Ok(())
-            }
-            Err(operation) => Err(removed_after(&self.real, operation)),
+            Ok(database) => self.reopened(database).await,
+            Err(operation) => Err(removed_after(&self.parent, operation).await),
         }
     }
 
