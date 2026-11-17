@@ -8,6 +8,7 @@ use crate::{
 use coven_database::DbError;
 use coven_storage::Storage;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// What the file layer's storage is. A reader goes ahead when it is
 /// connected, waits while a connection is coming, and fails at once when
@@ -131,7 +132,7 @@ impl Files {
     /// with no storage then reads as released.
     pub fn expect_connection(&self) -> ConnectionComing {
         self.inner.storage.send_modify(|slot| slot.attempting = true);
-        ConnectionComing { inner: self.inner.clone() }
+        ConnectionComing { storage: self.inner.storage.clone() }
     }
 }
 
@@ -148,11 +149,11 @@ impl Files {
 /// a connection is coming (§17.7).
 #[must_use = "the connection is expected only while this lives"]
 pub struct ConnectionComing {
-    inner: Arc<FilesInner>,
+    storage: watch::Sender<StorageSlot>,
 }
 
 impl Drop for ConnectionComing {
     fn drop(&mut self) {
-        self.inner.storage.send_if_modified(|slot| std::mem::take(&mut slot.attempting));
+        self.storage.send_if_modified(|slot| std::mem::take(&mut slot.attempting));
     }
 }
