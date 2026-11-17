@@ -7453,8 +7453,9 @@ impl CovenHandle {
     /// The same read as a live query: it runs again after each write that
     /// changes a table it reads, such as a namespace's counters or budget, a
     /// partial download, a database file's size after a checkpoint, a copy
-    /// kept or released, a rebuild's store or an archive. A cached read's
-    /// recency starts no run.
+    /// kept or released, a rebuild's store or an archive. Reading a cached
+    /// file updates when coven last read it, and the query does not run
+    /// again for that.
     pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes>;
 }
 
@@ -7468,7 +7469,7 @@ pub struct LocalBytes {
     /// left them, coven's copies of app files, and a rebuild's store while
     /// one runs; the sum of `coven_library_bytes`.
     pub library: u64,
-    /// The archives resets kept, while there is one.
+    /// The total size of the archives that resets kept, while there is one.
     pub before_reset: Option<u64>,
 }
 

@@ -8842,9 +8842,9 @@ database file and the input database's, each at the size its last
 checkpoint left it: coven writes both as the store opens and each again
 after a checkpoint changes it. Until that write commits, the row holds the
 size before the checkpoint. The row `copies` holds the sizes of coven's
-copies of app files that a row names, a copy files share counted once:
-the write that keeps a staged copy adds its size, and the write that
-records it for removal subtracts it. The `copies` row leaves out a copy
+copies of app files that a row names, and when several files share one
+copy, coven counts that copy once. The write that keeps a staged copy adds
+its size, and the write that records it for removal subtracts it. The `copies` row leaves out a copy
 still being written or recorded for removal, as the cache leaves out its
 bytes in flight. The row `rebuild` is there while a rebuild runs (§18.3): coven
 makes it, at no bytes, before the rebuild makes its folder, then writes
@@ -12401,7 +12401,7 @@ device consistent with the database.
   `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes
   (§6.7), and `coven_library_bytes` and `coven_archive_bytes`, the sizes of
-  the store's own files and of the archives resets kept, which coven writes
+  the store's own files and of the archives that resets kept, which coven writes
   as each changes (§17.8, §19.3). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).

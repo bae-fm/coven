@@ -511,14 +511,15 @@ tables like these, so the list stays one query over the database:
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 
-The storage views and tables hold every byte coven keeps on the device
-outside the app's own files. `coven_cache_bytes` holds the cache's bytes, one
-row per namespace. `coven_library_bytes` holds the store's own files, one row
-per part: `database` and `inputs` hold the two database files as their last
-checkpoints left them, without their WALs, `copies` holds coven's copies of
-app files, and `rebuild` holds a rebuild's store while one runs.
-`coven_archive_bytes` holds the old installations that resets kept. A settings
-screen sums them in one live query:
+The storage views and tables count every byte coven keeps on the device
+outside the app's own files. `coven_cache_bytes` gives the cache's bytes, one
+row per namespace. `coven_library_bytes` gives the size in bytes of each part
+of the store's own files, one row per part: `database` and `inputs` give the
+two database files as their last checkpoints left them, without their WALs,
+`copies` gives coven's copies of app files, and `rebuild` gives a rebuild's
+store while one runs. `coven_archive_bytes` gives the size in bytes of each
+old installation that a reset kept. A settings screen sums them in one live
+query:
 
 ```rust
 let device_bytes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {

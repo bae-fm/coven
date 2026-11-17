@@ -250,8 +250,8 @@ pub(super) fn unretire(directory: &Path, name: &str) -> Result<(), FileError> {
 }
 
 /// Delete the removal folder and everything in it, then sync the store's
-/// directory. Nothing names what is in it, so a deletion that stops partway
-/// leaves the rest for the next call. When the folder is absent, the call
+/// directory. No row in the database names the archives in it, so a
+/// deletion that stops partway leaves the rest for the next call. When the folder is absent, the call
 /// does nothing and succeeds.
 pub(super) fn remove_retired(directory: &Path) -> Result<(), FileError> {
     set_aside::delete(&directory.join(REMOVING))

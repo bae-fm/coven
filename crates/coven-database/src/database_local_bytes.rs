@@ -1,7 +1,7 @@
 //! What the store keeps on this device, read from coven's tables (§17.8,
 //! §19.3, Appendix C.3): the counters the cache keeps with its entries, the
 //! partial downloads pins left, the sizes of the store's own files and of
-//! the archives resets kept.
+//! the archives that resets kept.
 
 use super::{Mode, StoreDatabase};
 use crate::sqlite::{unsigned, StoreSql};
@@ -43,7 +43,7 @@ pub struct LocalBytes {
     /// left them, coven's copies of app files, and a rebuild's database
     /// files while one runs.
     pub library: u64,
-    /// The archives resets kept, while there is one.
+    /// The total size of the archives that resets kept, while there is one.
     pub before_reset: Option<u64>,
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn partials(db: &StoreSql) -> Result<u64, DbError> {
 
 /// What the store keeps on this device, from the transaction under way:
 /// the namespaces named in `declared`, in that order, the partial
-/// downloads, the store's own files and the archives resets kept.
+/// downloads, the store's own files and the archives that resets kept.
 pub(crate) fn read(db: &StoreSql, declared: &[String]) -> Result<LocalBytes, DbError> {
     let mut kept = budgets(db)?;
     let namespaces = declared

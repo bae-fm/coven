@@ -361,8 +361,8 @@ pub trait StoreDirAccess: Sized {
     /// Remove the record of a deletion that ended before it journaled the
     /// device's removal. An absent record succeeds.
     fn forget_deletion(&self) -> Result<(), FileError>;
-    /// The name of each archive resets kept in the store's directory, in
-    /// order (§19.3).
+    /// The name of each archive that a reset kept in the store's directory,
+    /// in order (§19.3).
     fn discarded_devices(&self) -> Result<Vec<String>, FileError>;
     /// The size of everything in the archive `name`. Blocks while it walks
     /// the archive.
@@ -374,8 +374,9 @@ pub trait StoreDirAccess: Sized {
     /// Move the archive `name` back, as `retire_discarded_device` found it.
     fn return_discarded_device(&self, name: &str) -> Result<(), FileError>;
     /// Remove the folder of archives being removed, then sync the store's
-    /// directory. Nothing names what is in it; a removal that stops partway
-    /// leaves the rest for the next call. Blocks while it removes them.
+    /// directory. The database has no row for the archives in that folder,
+    /// so a removal that stops partway leaves the rest for the next call.
+    /// Blocks while it removes them.
     fn remove_retired_devices(&self) -> Result<(), FileError>;
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
