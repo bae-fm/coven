@@ -22,7 +22,10 @@ first among values that compare equal (`max_keeps_first`), unless its
 argument is a column whose equal values are the same, and a GROUP BY term
 keeps the value it reads first among values that compare equal
 (`distinct_keeps_first`), so a result column that shows one follows that
-order, unless the term is such a column. A window numbers the
+order, unless the term is such a column. UNION, INTERSECT and EXCEPT keep one
+of each set of rows that compare equal in the same way, so a compound whose
+arms return anything but such columns follows the order SQLite reads its
+arms' rows in (`Statement.compoundFollowsOrder`). A window numbers the
 bindings its ORDER BY doesn't tell apart in that order too
 (`rowNumber_follows_order`), unless the ORDER BY sorts by the rowid of each
 of the core's tables. Such a core depends on every column of each table it
@@ -420,7 +423,9 @@ theorem max_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α} (h
 
 /-- SQLite's GROUP BY over values that `cmp` orders: one value of each set of
 values that compare equal, the one it reads first, in the order it reads
-them. -/
+them. UNION, INTERSECT and EXCEPT keep one row of each set of rows that
+compare equal too: the first they read, or the last, which is the first in
+the reverse order, as their plan decides. -/
 def keepDistinct {α : Type} (cmp : α → α → Ordering) (vs : List α) : List α :=
   vs.foldl (fun kept v => if kept.any (cmp · v == .eq) then kept else kept ++ [v]) []
 
@@ -430,7 +435,8 @@ NOCASE or `1` and `1.0`, give the group a different value read one way than
 the other. The model's values are integers, which compare equal only when
 they are the same, so a core that shows a GROUP BY term that can hold values
 that compare equal and differ follows the order SQLite reads its bindings in
-(`Statement.followsOrder`). -/
+(`Statement.followsOrder`), and so does a compound that combines such values
+(`Statement.compoundFollowsOrder`). -/
 theorem distinct_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α}
     (hab : cmp a b = .eq) (hba : cmp b a = .eq) :
     keepDistinct cmp [a, b] = [a] ∧ keepDistinct cmp [b, a] = [b] := by

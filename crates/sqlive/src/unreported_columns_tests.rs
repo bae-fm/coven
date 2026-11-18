@@ -254,6 +254,52 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
     }
 }
 
+/// UNION, INTERSECT and EXCEPT keep one of each set of rows that compare
+/// equal, which the order SQLite reads them in decides, so a compound reads
+/// every column of each table it reads unless each result column of each arm
+/// is a column whose equal values are the same.
+#[test]
+fn a_compound_of_values_that_compare_equal_and_differ_reads_every_column() {
+    let connection = connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE c(id INTEGER PRIMARY KEY, u, t TEXT COLLATE NOCASE, x TEXT, r REAL)",
+        )
+        .unwrap();
+    let a = [("a", "id"), ("a", "k"), ("a", "v")];
+    let b = [("b", "id"), ("b", "k"), ("b", "w")];
+    let c = [("c", "id"), ("c", "r"), ("c", "t"), ("c", "u"), ("c", "x")];
+    let a_b: Vec<_> = a.iter().chain(&b).copied().collect();
+    let a_c: Vec<_> = a.iter().chain(&c).copied().collect();
+    for (sql, expected) in [
+        ("SELECT c.t FROM c UNION SELECT a.v FROM a", &a_c[..]),
+        ("SELECT a.v FROM a INTERSECT SELECT c.u FROM c", &a_c[..]),
+        ("SELECT a.v + 1 FROM a EXCEPT SELECT b.w FROM b", &a_b[..]),
+        ("SELECT a.v FROM a UNION VALUES (1)", &a[..]),
+        ("SELECT * FROM a UNION SELECT * FROM a", &a[..]),
+        (
+            "SELECT a.v FROM a UNION ALL SELECT b.w FROM b UNION SELECT c.t FROM c",
+            &[&a_b[..], &c[..]].concat()[..],
+        ),
+        ("SELECT b.w FROM b WHERE b.k IN (SELECT a.v FROM a UNION SELECT c.t FROM c)", &a_c[..]),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+    for sql in [
+        "SELECT a.v FROM a UNION SELECT b.w FROM b",
+        "SELECT c.t FROM c UNION ALL SELECT a.v FROM a",
+        "SELECT c.x, c.r, c.id FROM c EXCEPT SELECT a.k, a.v, rowid FROM a",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[]), "{sql}");
+    }
+}
+
 /// A window function numbers or reads the rows of a partition in the order
 /// SQLite reads them among those its ORDER BY sorts the same, so a core that
 /// calls one reads every column of each table it reads, unless the window's

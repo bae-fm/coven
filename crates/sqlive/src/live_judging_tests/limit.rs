@@ -328,6 +328,40 @@ async fn a_grouped_value_that_compares_equal_to_another_and_differs_reruns_on_an
     }
 }
 
+/// UNION, INTERSECT and EXCEPT keep one of each set of rows that compare
+/// equal, which the order SQLite reads them in decides, so a write to `v.a`
+/// changes the value a compound of `v.b` or `v.t` returns, and a write to any
+/// column of `v` reruns the query. A compound of INTEGER columns depends only
+/// on the columns the statement names.
+#[tokio::test]
+async fn a_compound_of_values_that_compare_equal_and_differ_reruns_on_any_column() {
+    for sql in [
+        "SELECT x.b FROM v AS x UNION SELECT 5",
+        "SELECT x.t FROM v AS x UNION SELECT 'zzz'",
+        "SELECT x.t FROM v AS x INTERSECT SELECT 'abc'",
+        "SELECT x.t FROM v AS x EXCEPT SELECT 'zzz'",
+    ] {
+        let db = TestDatabase::open(EQUAL);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE v SET a = 3 WHERE id = 2", true), ("UPDATE v SET x = 1 WHERE id = 1", true)],
+        )
+        .await;
+        db.close();
+    }
+    let db = TestDatabase::open(EQUAL);
+    follows(
+        &db,
+        "SELECT x.a FROM v AS x UNION SELECT x.id FROM v AS x",
+        vec![],
+        &[("UPDATE v SET x = 1 WHERE id = 1", false), ("DELETE FROM v WHERE id = 2", true)],
+    )
+    .await;
+    db.close();
+}
+
 /// `row_number()` with no ORDER BY numbers the rows in the order SQLite
 /// reads them: here through the covering index on `u.a`, which the statement
 /// never names, so a write to `u.a` changes the numbers, and a write to any

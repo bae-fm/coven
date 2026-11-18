@@ -698,9 +698,10 @@ leaves out the columns a USING or NATURAL join compares, so coven adds them
 itself, for each table such a join compares in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
 query that joins `tracks` to `releases` with `USING (release_id)`. SQLite also
-leaves out the columns that decide which rows a LIMIT keeps, and which row an
-aggregate takes a value from, and coven adds them too, as the rules on LIMIT
-and aggregates below say. When coven
+leaves out the columns that decide which rows a LIMIT keeps, which row an
+aggregate takes a value from, and which of the rows that compare equal a
+compound keeps, and coven adds them too, as the rules on LIMIT, aggregates and
+compounds below say. When coven
 can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.
@@ -847,6 +848,15 @@ function depends on every column of each table it reads, unless the window's
 ORDER BY sorts by the rowid of each of the SELECT's tables and the SELECT
 neither groups its rows nor calls an aggregate. `row_number() OVER (PARTITION
 BY b.artist_id ORDER BY b.year, b.id)` depends only on the columns it names.
+
+UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal.
+Among rows whose values compare equal and still differ, the order SQLite reads
+them in decides which one the result shows, so `SELECT b.genre FROM albums AS
+b UNION SELECT s.genre FROM singles AS s`, where `genre` is a NOCASE column,
+can show `'Rock'` or `'rock'`. So a query that combines its SELECTs by any of
+them depends on every column of each table it reads, unless each result
+column of each SELECT is a column that the third case of the aggregate rules
+allows.
 
 A condition narrows only where coven compares values as SQLite does. One on a
 column whose collation isn't BINARY, or on a generated column, doesn't, and nor
@@ -14906,7 +14916,7 @@ Write-ups explain each model and state its assumptions:
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
-| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
+| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

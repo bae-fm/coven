@@ -36,6 +36,12 @@
 //! joins them, unless the call's own ORDER BY sorts by the rowid of each of
 //! the core's tables. The model states the rule as `Statement.followsOrder`.
 //!
+//! UNION, INTERSECT and EXCEPT keep one of each set of rows that compare
+//! equal, which the order SQLite reads them in decides, so every column of
+//! each table a compound reads counts as read unless each result column of
+//! each arm is a column whose equal values are the same. The model states the
+//! rule as `Statement.compoundFollowsOrder`.
+//!
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
 
@@ -50,8 +56,8 @@ use crate::select_syntax::{
 };
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, Over,
-    QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
+    As, CompoundOperator, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name,
+    OneSelect, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -204,7 +210,9 @@ impl Walk<'_> {
                 reads.extend(self.expr(offset)?);
             }
         }
-        if (select.limit.is_some() || first_row) && !self.fully_orders(select)? {
+        if (select.limit.is_some() || first_row) && !self.fully_orders(select)?
+            || self.compound_follows_order(select)?
+        {
             self.picked.push(reads.clone());
         }
         self.ctes.truncate(outer);
@@ -500,6 +508,41 @@ impl Walk<'_> {
             });
         }
         self.sorts_by_rowids(&items, &sorted)
+    }
+
+    /// Whether `select` combines its arms by UNION, INTERSECT or EXCEPT, which
+    /// keep one of each set of rows that compare equal, the one the order
+    /// SQLite reads them in decides, and a result column of an arm can hold
+    /// values that compare equal and differ: it is no column whose equal values
+    /// are the same (`returns_exactly`).
+    fn compound_follows_order(&self, select: &Select<'_>) -> rusqlite::Result<bool> {
+        let Some(compounds) = &select.body.compounds else { return Ok(false) };
+        if compounds.iter().all(|compound| compound.operator == CompoundOperator::UnionAll) {
+            return Ok(false);
+        }
+        let arms = std::iter::once(&select.body.select)
+            .chain(compounds.iter().map(|compound| &compound.select));
+        for arm in arms {
+            if !self.returns_exactly(arm)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether each result column of `core` is a column whose equal values
+    /// are the same (`compares_exactly`) of one of its FROM items, each a
+    /// table.
+    fn returns_exactly(&self, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
+        let OneSelect::Select { columns, from, .. } = core else { return Ok(false) };
+        let Some(items) = self.table_items(from.as_ref())? else { return Ok(false) };
+        for column in columns.iter() {
+            let ResultColumn::Expr(expr, _) = column else { return Ok(false) };
+            if !self.compares_exactly(&items, expr)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Each FROM item of `from`, by the name the statement qualifies its

@@ -5,8 +5,8 @@ import SqliveNarrowing.Plan
 deletes a row, or changes a column the statement reads, and the row before
 or after passes the table's scope. The columns a statement reads are those
 its clauses name, and every column of a table it reads in a query whose rows
-SQLite picks or a core whose rows follow the order SQLite reads its rows in
-(`unreported_columns.rs`). A join's lookups read the database the
+SQLite picks or a compound or core whose rows follow the order SQLite reads
+its rows in (`unreported_columns.rs`). A join's lookups read the database the
 write leaves, as sqlive judges a write in the write's own transaction before
 it commits. -/
 namespace SqliveNarrowing
@@ -114,6 +114,18 @@ def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
     | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (orderBy.map (·.1))
     | .count => false
 
+/-- Whether query `q`'s rows follow the order SQLite reads its arms' rows in:
+it combines its arms by UNION, INTERSECT or EXCEPT, which keep one of each set
+of rows that compare equal, the one that order decides, and a result column
+of an arm can hold values that compare equal and differ, as any but a column
+whose equal values are the same can (`Pick.distinct_keeps_first`). -/
+def Statement.compoundFollowsOrder (s : Statement) (q : Nat) : Bool :=
+  let query := s.query q
+  query.ops.any (· != .unionAll) && query.arms.any fun k =>
+    (s.core k).output.any fun
+      | .expr e => !s.comparesExactly k e
+      | .count | .max _ | .concat .. | .rowNumber .. => true
+
 /-- The subqueries whose first row a clause of the statement takes. -/
 def Statement.firstRowQueries (s : Statement) : List Nat := s.cores.flatMap Core.firstRows
 
@@ -145,10 +157,12 @@ where
     | 0, _ => []
     | f + 1, q => (s.query q).arms.flatMap (s.coreItemsWith (go f))
 
-/-- The tables that a query whose rows SQLite picks, or a core whose rows
-follow the order SQLite reads its bindings in, reads. -/
+/-- The tables that a query whose rows SQLite picks, a compound whose rows
+follow the order SQLite reads its arms' rows in, or a core whose rows follow
+the order SQLite reads its bindings in, reads. -/
 def Statement.pickedTables (s : Statement) : List Nat :=
-  let picked := ((List.range s.queries.length).filter s.picks).flatMap s.queryItems
+  let picked := ((List.range s.queries.length).filter fun q =>
+    s.picks q || s.compoundFollowsOrder q).flatMap s.queryItems
   let followed := ((List.range s.cores.length).filter s.followsOrder).flatMap
     (s.coreItemsWith s.queryItems)
   (picked ++ followed).filterMap s.table?
@@ -159,8 +173,8 @@ def Statement.width (s : Statement) (t : Nat) : Nat :=
 
 /-- Each table the statement reads, with the columns of it any of its
 clauses names, and every column of a table that a query whose rows SQLite
-picks, or a core whose rows follow the order SQLite reads its bindings in,
-reads: what its rows can depend on. -/
+picks, or a compound or core whose rows follow the order SQLite reads its
+rows in, reads: what its rows can depend on. -/
 def Statement.reads (s : Statement) : List (Nat × List Nat) :=
   let refs := s.cores.flatMap Core.refs
   (s.itemNumbers.filterMap s.table?).eraseDups.map fun t =>

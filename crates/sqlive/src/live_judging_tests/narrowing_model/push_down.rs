@@ -39,11 +39,23 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
             );
             select(core)
         }
-        3 => Query {
-            arms: vec![plain(rng, "x", first), plain(rng, "y", second)],
-            ops: vec![pick(rng, &["UNION ALL", "UNION", "EXCEPT", "INTERSECT"])],
-            ..Query::default()
-        },
+        3 => {
+            // UNION, EXCEPT and INTERSECT keep one of each set of rows that
+            // compare equal: of the untyped `b`, which can hold values that
+            // compare equal and differ, the one SQLite reads first or last;
+            // of the INTEGER `c` in its place, the only one.
+            let mut arms = vec![plain(rng, "x", first), plain(rng, "y", second)];
+            if rng.chance(50) {
+                for (arm, alias) in arms.iter_mut().zip(["x", "y"]) {
+                    arm.select[2] = Out::Expr(col(alias, "c"), Some("b".to_owned()));
+                }
+            }
+            Query {
+                arms,
+                ops: vec![pick(rng, &["UNION ALL", "UNION", "EXCEPT", "INTERSECT"])],
+                ..Query::default()
+            }
+        }
         4 => select(Core {
             from: vec![table("x", first)],
             conditions: Vec::new(),

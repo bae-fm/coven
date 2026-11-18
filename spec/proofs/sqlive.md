@@ -125,7 +125,11 @@ promise of whichever rule reads it.
   are the same. `distinct_keeps_first` proves the same of a GROUP BY term,
   which keeps one of each set of values that compare equal, the one it reads
   first, so the model counts a SELECT whose result column shows a GROUP BY
-  term as following the order unless the term is such a column. A SELECT that calls a window function picks rows too:
+  term as following the order unless the term is such a column. UNION,
+  INTERSECT and EXCEPT keep one of each set of rows that compare equal in the
+  same way, the first or the last they read as their plan decides, so the
+  model counts a compound as following the order unless each result column
+  of each of its SELECTs is such a column. A SELECT that calls a window function picks rows too:
   `rowNumber_follows_order` proves that `row_number()` whose window has no
   ORDER BY numbers two rows in the order SQLite reads them.
   `orderFree_rows_perm` proves that a SELECT with none of these, whose
