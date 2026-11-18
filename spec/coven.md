@@ -8462,7 +8462,9 @@ the id its row holds. A read uses the record as it stands when the file opens: a
 file that was uploading when the reference was taken reads from storage once
 stored. A file on this device only reads from its bytes here, uploading or not.
 A file on another device only fails with `DeviceOnly`, and a read fails with
-`DeviceOnly` for no other file. A file whose
+`DeviceOnly` for no other file. The app reads which of these a read of each
+file meets in `coven_file_reads` ([api.md E4](api.md#e4-reading)), so it can
+tell which files this device can read without opening them. A file whose
 record is gone reads its stored bytes while storage still holds them, and a file
 this device staged whose record is gone fails with `FileAbsent`.
 

@@ -8,7 +8,7 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 19] = [
+const VIEWS: [&str; 20] = [
     "coven_upload_pause",
     "coven_cache_bytes",
     "coven_library_bytes",
@@ -24,6 +24,7 @@ const VIEWS: [&str; 19] = [
     "coven_invites",
     "coven_operations",
     "coven_files",
+    "coven_file_reads",
     "coven_members",
     "coven_devices",
     "coven_circles",

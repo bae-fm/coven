@@ -18,8 +18,9 @@
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`), and the sizes of the store's own
 /// files (`local_bytes_schema.rs`).
-pub(crate) const READABLE: [&str; 25] = [
+pub(crate) const READABLE: [&str; 26] = [
     super::FILES,
+    "coven_file_reads",
     "coven_user_files",
     "coven_uploads",
     "coven_upload_phases",
@@ -47,6 +48,15 @@ pub(crate) const READABLE: [&str; 25] = [
 ];
 
 pub(super) const SCHEMA: &str = concat!(
+    // Where a read on this device takes each file's bytes from (§17.7), by
+    // the file's record: a stored file from the cache or storage, a file on
+    // this device only from its bytes here, its original or coven's copy, and
+    // a file on another device only from nowhere, since a read of it fails
+    // with `DeviceOnly`.
+    "CREATE VIEW coven_file_reads(file,source) AS
+        SELECT f.id,CASE WHEN coven_file_device(f.coordinates) IS NULL THEN 'stored'
+            WHEN coven_file_device(f.coordinates)=_coven_device() THEN 'here' END
+        FROM coven_files AS f;",
     // The user's originals this device records, by file: the path, as the
     // operating system's bytes, which `coven_path_text` shows, and the size
     // and exact modification time recorded when each was staged, as whole

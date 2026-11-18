@@ -105,6 +105,22 @@ fn names(folder: &Path) -> Vec<String> {
     names
 }
 
+/// Where a read on `device` takes `file`'s bytes from, as the app's SQL
+/// reads it from `coven_file_reads`: `stored`, `here`, or none (E4).
+async fn read_source(device: &Device, file: FileId) -> Option<String> {
+    device
+        .handle
+        .read(move |sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT source FROM coven_file_reads WHERE file=?1",
+                [file],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
 async fn member(device: &Device) -> MemberId {
     device.handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id
 }
@@ -125,6 +141,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     network.sync(0).await;
     network.sync(1).await;
     let stored = [ana.handle.file_ref(one).await.unwrap(), ana.handle.file_ref(two).await.unwrap()];
+    assert_eq!(read_source(ana, one).await.as_deref(), Some("stored"));
     ana.handle.pin(&stored[..1]).await.unwrap();
     assert_eq!(
         ana.handle.read_file(&stored[1], &crate::FileLease::for_test().await).await.unwrap(),
@@ -171,6 +188,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
         assert_eq!(std::fs::read(album.join(name)).unwrap(), bytes);
         let local = carol.handle.file_ref(file).await.unwrap();
         assert_eq!(local.place(), FilePlace::DeviceOnly { device });
+        assert_eq!(read_source(carol, file).await.as_deref(), Some("here"));
         assert_eq!(carol.handle.user_file(file).await.unwrap().unwrap().path, album.join(name));
         assert_eq!(
             carol.handle.read_file(&local, &crate::FileLease::for_test().await).await.unwrap(),
@@ -198,6 +216,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
             ana.handle.read_file(&elsewhere, &crate::FileLease::for_test().await).await,
             Err(FileReadError::DeviceOnly { .. })
         ));
+        assert_eq!(read_source(ana, file).await, None);
         assert_eq!(ana.handle.user_file(file).await.unwrap(), None);
     }
     assert_eq!(

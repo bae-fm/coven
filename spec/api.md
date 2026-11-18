@@ -3693,7 +3693,7 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads fifteen views of coven's own tables
+- *Coven's state in SQL.* App SQL reads sixteen views of coven's own tables
   and ten tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
   `coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`, in
@@ -3784,7 +3784,7 @@ let moved = handle
   connection a test opened itself, outside any store, as every store makes
   it: the ten tables above, `coven_sync_status` and `coven_retry_effect`
   with their one row, `coven_library_bytes` with its rows at no bytes, and
-  the fifteen views. The function also makes the
+  the sixteen views. The function also makes the
   tables of coven's own that the views read or that the test writes below
   fill, all empty. The function registers coven's SQL functions there too,
   `coven_key`, `coven_file_device` and `coven_path_text` among them, with
@@ -3841,6 +3841,8 @@ let moved = handle
 | | `hash` | its content hash, 32 bytes; NULL until it is stored |
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
+| `coven_file_reads`: each file this device has a record of, with where a read on this device takes its bytes from ([§17.7](coven.md#177-reading-a-file)), by its record | `file` | the file's id, as in `coven_files` |
+| | `source` | `stored` for a stored file, which a read takes from the cache or storage; `here` for a file on this device only, which a read takes from its original or coven's copy; NULL for a file on another device only, which a read here fails with `DeviceOnly` |
 | `coven_user_files`: each user original this device records, while its file's record exists here and doesn't put the file on another device only ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
 | | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |

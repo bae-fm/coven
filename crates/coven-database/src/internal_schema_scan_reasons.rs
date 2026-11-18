@@ -50,6 +50,9 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_archive_bytes", "SELECT * FROM coven_archive_bytes", "coven_archive_bytes") => {
             Some("the table holds a row for each archive that a reset kept, and resets keep few")
         }
+        ("coven_file_reads", "SELECT * FROM coven_file_reads", "f") => {
+            Some("the view lists every file this device has a record of")
+        }
         ("coven_files", "SELECT * FROM coven_files", "coven_files") => {
             Some("the table lists every file this device has a record of")
         }
