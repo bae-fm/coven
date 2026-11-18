@@ -3896,7 +3896,7 @@ let moved = handle
 | | `halted` | 1 once the upload worker's panic has halted sync until the store reopens (E15): no pass writes the row from then on, so the failure the halt wrote stands; opening writes 0 |
 | | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
 | | `starts` | how many times sync has started in this installation, the app's starts and the one setup makes alike; each start adds one in the step that starts it, so a trigger hears a start that holds for the reason the last one did, which changes no other column; 0 until sync first starts |
-| `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read` |
+| `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read`, or, in an app's own query that joins the view, with `RetryEffect::from_columns(effect, cooling_until)` |
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
 | | `cooling_until` | while syncing, when the provider cooldown holding every pass ends, in milliseconds since the Unix epoch by the store's clock, rounded up; NULL with no cooldown, and while stopped |
@@ -6605,7 +6605,17 @@ pub enum RetryEffect {
 impl RetryEffect {
     /// Reads `coven_retry_effect`: `handle.subscribe(RetryEffect::read)`.
     pub fn read(sql: SqlReadContext<'_>) -> Result<RetryEffect, DbError>;
+    /// The effect `coven_retry_effect`'s `effect` and `cooling_until` columns
+    /// name, for an app's own query that reads them; `read` calls it. A pair
+    /// the view never computes is an error.
+    pub fn from_columns(effect: &str, cooling_until: Option<i64>) -> Result<RetryEffect, DbError>;
 }
+
+/// The time a stored count of milliseconds since the Unix epoch names, as
+/// `coven_retry_effect.cooling_until` and `coven_sync_status.last_synced`
+/// hold it, for an app's own query that reads them. A count the clock can't
+/// name is `DamagedDatabase`.
+pub fn stored_time(millis: i64) -> Result<SystemTime, DbError>;
 
 /// Holds idle passes at most its interval apart; dropping it ends the request.
 pub struct SyncOftenGuard { /* private */ }

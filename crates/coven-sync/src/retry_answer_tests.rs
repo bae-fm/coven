@@ -480,3 +480,24 @@ async fn io_differential_retry_answer() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+/// The columns an app's own query reads decode as `read` decodes them, and a
+/// pair the view never computes is refused.
+#[test]
+fn the_effect_decodes_from_its_columns() {
+    let end = SystemTime::UNIX_EPOCH + Duration::from_millis(1_500);
+    assert_eq!(RetryEffect::from_columns("pass", None).unwrap(), RetryEffect::Pass);
+    assert_eq!(
+        RetryEffect::from_columns("cooling_down", Some(1_500)).unwrap(),
+        RetryEffect::CoolingDown { until: end }
+    );
+    assert_eq!(RetryEffect::from_columns("failed", None).unwrap(), RetryEffect::Failed);
+    assert_eq!(RetryEffect::from_columns("not_syncing", None).unwrap(), RetryEffect::NotSyncing);
+    for (effect, until) in [("pass", Some(1)), ("cooling_down", None), ("other", None)] {
+        assert!(matches!(RetryEffect::from_columns(effect, until), Err(DbError::Invariant { .. })));
+    }
+    assert!(matches!(
+        RetryEffect::from_columns("cooling_down", Some(-1)),
+        Err(DbError::DamagedDatabase)
+    ));
+}

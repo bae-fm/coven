@@ -37,6 +37,7 @@ pub use coven_crypto::{
     CircleKey, ConfirmationNumber, CryptoError, MaterialError, MemberIdentity, MemberKeys,
     MemberPublicKeys, SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
+pub use coven_database::stored_time;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::test_utils::{record_user_file, StatementLog, WorkCounter, WorkCounts};
 #[cfg(any(test, feature = "test-utils"))]

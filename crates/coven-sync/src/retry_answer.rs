@@ -128,7 +128,14 @@ impl RetryEffect {
             sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
             })?;
-        Ok(match (effect.as_str(), until) {
+        Self::from_columns(&effect, until)
+    }
+
+    /// The effect that `coven_retry_effect`'s `effect` and `cooling_until`
+    /// columns name, for an app that reads them in a query of its own. A
+    /// pair the view never computes is an invariant error.
+    pub fn from_columns(effect: &str, cooling_until: Option<i64>) -> Result<Self, DbError> {
+        Ok(match (effect, cooling_until) {
             ("pass", None) => Self::Pass,
             ("cooling_down", Some(until)) => {
                 Self::CoolingDown { until: coven_database::stored_time(until)? }
