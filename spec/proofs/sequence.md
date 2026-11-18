@@ -1579,17 +1579,23 @@ profile in a write of its own after the load, so a registered member exists
 without it until that write, and for good if the app quits first.
 
 [`JoiningWrite`](sequence/CovenSequence/JoiningWrite.lean) follows one
-member's devices through a join, a restore or a pairing's new device, a lost
-phone and a landed write. The join's facts, the name and the circle the
-admission made, live in the member's state in history, and the app's joining
-write runs as each device's registration applies.
+member's devices, a joiner's or the store's creator's, through the admission
+or the creation, a restore or a pairing's new device, a lost first device and
+a landed write. The join's facts, the name and the circle the admission made,
+live in the member's state in history, and the app's joining write runs as
+each device's registration applies. Slot 1 records the creator's facts, her
+name and her private circle, as an admission records a joiner's.
 
 - `every_device_has_profile`: each device of the member whose registration
-  applied has the profile, whichever devices were lost and whether or not
-  the first write landed.
+  applied has the profile, the creator's as a joiner's, whichever devices
+  were lost and whether or not the first write landed.
 - `device_record_lost`: with the facts kept only on the joining phone, a
   phone lost before its write lands leaves a restored device registered with
   the member and no profile, in every extension.
+- `creator_profile_lost`: with no facts in slot 1, the creator's profile is
+  only her first write's row; a creating laptop lost before that write lands
+  leaves a restored device registered with her and no profile, in every
+  extension.
 
 [`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
 models `reset_device` and `restore_device` past loading (§19.3, §13.1): the

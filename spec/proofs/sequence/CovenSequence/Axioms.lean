@@ -544,6 +544,7 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.acknowledged_profile_lags
 #print axioms CovenSequence.JoiningWrite.every_device_has_profile
 #print axioms CovenSequence.JoiningWrite.device_record_lost
+#print axioms CovenSequence.JoiningWrite.creator_profile_lost
 #print axioms CovenSequence.FirstInstallation.pairing_strands_join
 #print axioms CovenSequence.FirstInstallation.pairing_strands_restore
 #print axioms CovenSequence.FirstInstallation.pairing_unlisted
