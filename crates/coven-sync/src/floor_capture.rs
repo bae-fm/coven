@@ -128,7 +128,7 @@ impl SequenceSync {
     ) -> Result<FloorArtifact, SyncError> {
         // The capture is journaled before creating its file; this phase has sent
         // no provider request, so retry may replace an interrupted local capture.
-        self.artifact_file(&capture.name)?.remove()?;
+        self.remove_artifact(&capture.name).await?;
         let mut writer = self.artifact_writer(&capture.name)?;
         let mut originals: BTreeMap<_, _> = self
             .database

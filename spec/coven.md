@@ -8866,7 +8866,19 @@ copies of app files that a row names, and when several files share one
 copy, coven counts that copy once. The write that keeps a staged copy adds
 its size, and the write that records it for removal subtracts it. The `copies` row leaves out a copy
 still being written or recorded for removal, as the cache leaves out its
-bytes in flight. The row `rebuild` is there while a rebuild runs (§18.3): coven
+bytes in flight.
+
+The row `captures` holds the sizes of the snapshot and floor bodies this
+device captured to upload (§16.2, §16.6), which wait at the top of `files`
+until their operation ends. Ana's phone captures a 100 MB store snapshot;
+until its operation ends, `captures` holds 100 MB. Without the row, a
+snapshot as large as the library would take that much of the device again
+with no figure showing it. The transaction that journals a body's bytes
+adds its size, and coven subtracts it before it deletes the file, so the
+row never counts bytes that are gone. A body still being captured counts
+nothing, as a copy still being written doesn't.
+
+The row `rebuild` is there while a rebuild runs (§18.3): coven
 makes it, at no bytes, before the rebuild makes its folder, then writes
 the sum of the rebuild's store's own `coven_library_bytes` each time that
 sum changes. When a read of that sum fails, coven logs the failure and
@@ -12550,6 +12562,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_copy_sizes` | the size of each of coven's copies of app files that a row names, by the copy, once for a copy files share: the write that keeps a staged copy writes it, as it deletes the copy's cleanup record, and the write that records the copy for removal deletes it; triggers keep the sum in `coven_library_bytes`'s `copies` row (§17.8) |
+| `_coven_capture_sizes` | the size of each snapshot or floor body this device captured to upload, by its file's name at the top of `files`: the transaction that journals the body's bytes writes it, and coven deletes it before it deletes the file; triggers keep the sum in `coven_library_bytes`'s `captures` row (§17.8) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
 | `_coven_undoable_files` | each file whose record a change took off this device's bytes, while a reset may still undo the change, with the record's audience and the change: this device's write, by number, until it leaves the queue, then the slot it applied at or before (§17.11) |
 | `_coven_reset_bounds` | for each audience, the lowest coverage a later reset of it may name: the highest coverage announced for it, or the slot of its last raise or reset, whichever is later; it only rises (§16.3, §17.11) |

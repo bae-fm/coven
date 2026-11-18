@@ -1,7 +1,8 @@
 //! The sizes of the store's own files in `coven_library_bytes` (§17.8):
 //! each database file's size as its last checkpoint left it, which coven
 //! writes as the store opens and again after each checkpoint that changes
-//! it, and a rebuild's store's own files while one runs (§18.3). Between a
+//! it, the snapshot and floor bodies coven-sync captured to upload, and a
+//! rebuild's store's own files while one runs (§18.3). Between a
 //! change and the write after it, a row holds the size before it; opening
 //! writes each database file's row again.
 
@@ -41,6 +42,17 @@ fn record_rebuild(db: &StoreSql, bytes: u64) -> Result<(), DbError> {
 /// Delete the `rebuild` row, in the transaction under way.
 fn forget_rebuild(db: &StoreSql) -> Result<(), DbError> {
     db.execute("DELETE FROM coven_library_bytes WHERE part='rebuild'", [])?;
+    Ok(())
+}
+
+/// Count the body coven-sync captured into the file `name`, of `size`
+/// bytes, among the store's own files, in the transaction under way: the one
+/// that journals the capture's bytes.
+pub(crate) fn count_capture(db: &StoreSql, name: &str, size: u64) -> Result<(), DbError> {
+    db.execute(
+        "INSERT INTO _coven_capture_sizes(name,size) VALUES(?1,?2)",
+        (name, crate::sqlite::integer("captured body size", size)?),
+    )?;
     Ok(())
 }
 
@@ -162,6 +174,21 @@ impl StoreDatabase {
 }
 
 impl StoreDatabase {
+    /// Stop counting the captured body in the file `name` among the store's
+    /// own files, before coven-sync deletes the file. A name with no row,
+    /// such as a capture's that its journal hasn't recorded, changes nothing.
+    pub async fn forget_capture(&self, name: String) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, _| {
+                writer.transaction(|db| {
+                    db.execute("DELETE FROM _coven_capture_sizes WHERE name=?1", [&name])?;
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Make this store's `rebuild` row, at no bytes, as a rebuild is about
     /// to make its folder (§18.3).
     pub(crate) async fn begin_counting_rebuild(&self) -> Result<(), DbError> {
@@ -259,3 +286,7 @@ impl StoreDatabase {
         process(&self.bugs, move || Ok(directory.remove_retired_rebuild()?)).await
     }
 }
+
+#[cfg(test)]
+#[path = "library_bytes_tests.rs"]
+pub(crate) mod tests;

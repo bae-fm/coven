@@ -40,8 +40,9 @@ pub struct LocalBytes {
     /// Partial downloads pins left, kept apart from the cache.
     pub pinning: u64,
     /// The store's own files: its database files as their last checkpoints
-    /// left them, coven's copies of app files, and a rebuild's database
-    /// files while one runs.
+    /// left them, coven's copies of app files, the snapshot and floor bodies
+    /// this device captured to upload, and a rebuild's database files while
+    /// one runs.
     pub library: u64,
     /// The total size of the archives that resets kept, while there is one.
     pub before_reset: Option<u64>,
@@ -129,8 +130,9 @@ impl StoreDatabase {
 
     /// `local_bytes` now and after each write that changes what it reads: a
     /// namespace's counters or budget, a partial download, a database
-    /// file's size after a checkpoint, a copy kept or released, a rebuild's
-    /// folder or an archive. A cached read's recency changes none of them.
+    /// file's size after a checkpoint, a copy kept or released, a captured
+    /// body, a rebuild's folder or an archive. A cached read's recency
+    /// changes none of them.
     pub fn subscribe_local_bytes<E>(&self) -> LiveQuery<LocalBytes, E>
     where
         E: From<DbError> + CarriesBug + Send + 'static,

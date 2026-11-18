@@ -10,25 +10,45 @@ macro_rules! coven_local_bytes_tables {
         // writes each row as the store opens and after each checkpoint that
         // changes it. Neither row counts its WAL, which a checkpoint lets
         // start over.
+        // The size of each snapshot or floor body coven-sync captured into
+        // the top of `files` to upload (§16.2, §16.6, §17.8), by file name:
+        // the transaction that journals the capture's bytes inserts its row,
+        // and coven deletes the row before it deletes the file.
+        $visit!(
+            _coven_capture_sizes,
+            "
+            CREATE TABLE _coven_capture_sizes (
+                name TEXT PRIMARY KEY NOT NULL,
+                size INTEGER NOT NULL CHECK(size>=0)
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
         // `copies` is coven's copies of app bytes that a row names: the
         // triggers below add or subtract a copy's size in the statement that
-        // counts or releases the copy. coven keeps a `rebuild` row while a
-        // rebuild's folder exists (§18.3), and the row holds the total size
-        // of the rebuild's store's own files.
+        // counts or releases the copy. `captures` is the bodies in
+        // `_coven_capture_sizes`, which triggers count the same way. coven
+        // keeps a `rebuild` row while a rebuild's folder exists (§18.3), and
+        // the row holds the total size of the rebuild's store's own files.
         $visit!(
             coven_library_bytes,
             "
             CREATE TABLE coven_library_bytes (
-                part TEXT PRIMARY KEY NOT NULL CHECK(part IN ('database','inputs','copies','rebuild')),
+                part TEXT PRIMARY KEY NOT NULL CHECK(part IN ('database','inputs','copies','captures','rebuild')),
                 bytes INTEGER NOT NULL CHECK(bytes>=0)
             ) STRICT, WITHOUT ROWID;
             INSERT INTO coven_library_bytes(part,bytes)
-                VALUES('database',0),('inputs',0),('copies',0);
+                VALUES('database',0),('inputs',0),('copies',0),('captures',0);
             CREATE TRIGGER _coven_copy_counted AFTER INSERT ON _coven_copy_sizes BEGIN
                 UPDATE coven_library_bytes SET bytes=bytes+NEW.size WHERE part='copies';
             END;
             CREATE TRIGGER _coven_copy_released AFTER DELETE ON _coven_copy_sizes BEGIN
                 UPDATE coven_library_bytes SET bytes=bytes-OLD.size WHERE part='copies';
+            END;
+            CREATE TRIGGER _coven_capture_counted AFTER INSERT ON _coven_capture_sizes BEGIN
+                UPDATE coven_library_bytes SET bytes=bytes+NEW.size WHERE part='captures';
+            END;
+            CREATE TRIGGER _coven_capture_released AFTER DELETE ON _coven_capture_sizes BEGIN
+                UPDATE coven_library_bytes SET bytes=bytes-OLD.size WHERE part='captures';
             END;
         "
         );

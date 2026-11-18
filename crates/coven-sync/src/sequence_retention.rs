@@ -539,10 +539,11 @@ impl SequenceSync {
         }
         if let Retention::Capture(capture) = &work {
             let artifact = self.capture_floor(capture, ring, member).await?;
+            let (name, size) = (artifact.capture.name.clone(), artifact.size);
             work = Retention::Floor(artifact);
             let update = work.update(&record)?;
             let next = update.last_step;
-            self.database.advance_operation(update).await?;
+            self.database.advance_operation_counting_capture(update, name, size).await?;
             record.last_step = next;
         }
         if let Retention::Floor(artifact) = &mut work {
@@ -591,7 +592,7 @@ impl SequenceSync {
                         if let Some(session) = &artifact.session {
                             self.storage.abort_upload(session).await?;
                         }
-                        self.artifact_file(&artifact.capture.name)?.remove()?;
+                        self.remove_artifact(&artifact.capture.name).await?;
                         let number = Slot::from(self.database.reserve_snapshot_number().await?);
                         let capture = FloorCapture {
                             number,

@@ -95,7 +95,7 @@ impl SequenceSync {
         if !named {
             self.storage.delete(&artifact.capture.body_path(self.store(), self.device)).await?;
         }
-        self.artifact_file(&artifact.capture.name)?.remove()?;
+        self.remove_artifact(&artifact.capture.name).await?;
         Ok(())
     }
 }

@@ -3858,8 +3858,8 @@ let moved = handle
 | | `cached` | the bytes of its cached chunks and headers, which the budget counts |
 | | `pinned` | the bytes of its pinned whole copies, which the budget doesn't count |
 | | `pinning` | the bytes of the partial downloads that stopped pins left in it, which the cache neither counts nor evicts |
-| `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file; `inputs`, the input database's; `copies`, coven's copies of app files that a row names; or `rebuild`, a rebuild's store while one runs |
-| | `bytes` | the part's size in bytes. For a database file, its size as its last checkpoint left it: coven writes it as the store opens and after each checkpoint that changes it, and leaves out the WAL beside it. For `copies`, coven writes it in the write that keeps or releases a copy, and counts a copy that files share once. For `rebuild`, the sizes of the rebuild's store's own files together: coven makes the row before the rebuild makes its folder, and deletes the row when it moves the rebuild's folder aside to delete the folder |
+| `coven_library_bytes`: the store's own files on this device, one row per part, from the store's creation on ([§17.8](coven.md#178-cache-and-pinning)); a table coven writes | `part` | `database`, the store's database file; `inputs`, the input database's; `copies`, coven's copies of app files that a row names; `captures`, the snapshot and floor bodies this device captured to upload; or `rebuild`, a rebuild's store while one runs |
+| | `bytes` | the part's size in bytes. For a database file, its size as its last checkpoint left it: coven writes it as the store opens and after each checkpoint that changes it, and leaves out the WAL beside it. For `copies`, coven writes it in the write that keeps or releases a copy, and counts a copy that files share once. For `captures`, coven adds a body's size in the transaction that journals its bytes, and subtracts it before it deletes the body's file. For `rebuild`, the sizes of the rebuild's store's own files together: coven makes the row before the rebuild makes its folder, and deletes the row when it moves the rebuild's folder aside to delete the folder |
 | `coven_archive_bytes`: each archive a reset kept in the store's directory ([§19.3](coven.md#193-another-copy-of-the-same-device)); a table coven writes: coven writes a row as the store opens after the swap that kept the archive, and deletes it as coven moves the archive out of the directory to delete it | `archive` | the archive's name in the store's directory |
 | | `bytes` | the size of everything in it, in bytes |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
@@ -7478,7 +7478,7 @@ impl CovenHandle {
     /// The same read as a live query: it runs again after each write that
     /// changes a table it reads, such as a namespace's counters or budget, a
     /// partial download, a database file's size after a checkpoint, a copy
-    /// kept or released, a rebuild's store or an archive. Reading a cached
+    /// kept or released, a captured body, a rebuild's store or an archive. Reading a cached
     /// file updates when coven last read it, and the query does not run
     /// again for that.
     pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes>;
@@ -7491,8 +7491,9 @@ pub struct LocalBytes {
     /// Partial downloads pins left, kept apart from the cache.
     pub pinning: u64,
     /// The store's own files: its database files as their last checkpoints
-    /// left them, coven's copies of app files, and a rebuild's store while
-    /// one runs; the sum of `coven_library_bytes`.
+    /// left them, coven's copies of app files, the snapshot and floor bodies
+    /// this device captured to upload, and a rebuild's store while one runs;
+    /// the sum of `coven_library_bytes`.
     pub library: u64,
     /// The total size of the archives that resets kept, while there is one.
     pub before_reset: Option<u64>,

@@ -1117,6 +1117,7 @@ homes = [
     "crates/coven-database/src/local_bytes_schema.rs",
 ]
 tables = [
+    "_coven_capture_sizes",
     "coven_archive_bytes",
     "coven_library_bytes",
 ]

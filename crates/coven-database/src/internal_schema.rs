@@ -293,11 +293,11 @@ pub(crate) fn initial_schema() -> String {
 ///   the uploads and the retry waits reference: their foreign keys need
 ///   the tables;
 /// - `_coven_cache`, whose rows the triggers of `_coven_cache_budgets`
-///   count, and `_coven_copy_sizes`, whose rows the triggers of
-///   `coven_library_bytes` count: SQLite makes a trigger only on a table
-///   that exists.
+///   count, and `_coven_copy_sizes` and `_coven_capture_sizes`, whose rows
+///   the triggers of `coven_library_bytes` count: SQLite makes a trigger
+///   only on a table that exists.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) const OUTSIDE_STORE_TABLES: [&str; 25] = [
+pub(crate) const OUTSIDE_STORE_TABLES: [&str; 26] = [
     "_coven_user_files",
     "_coven_user_chunks",
     "_coven_undoable_files",
@@ -323,6 +323,7 @@ pub(crate) const OUTSIDE_STORE_TABLES: [&str; 25] = [
     "_coven_cache_budgets",
     "_coven_cache_partials",
     "_coven_copy_sizes",
+    "_coven_capture_sizes",
 ];
 
 /// The SQL that makes each object app SQL may read as every store makes it,

@@ -113,6 +113,16 @@ impl SequenceSync {
         Ok(self.directory.file(FileArea::AppProvided, &artifact_name(name)?))
     }
 
+    /// Delete a capture's artifact, deleting its size's row first, so
+    /// `coven_library_bytes` never counts bytes that are gone (§17.8,
+    /// Appendix C.3).
+    pub(crate) async fn remove_artifact(&self, name: &str) -> Result<(), SyncError> {
+        let file = self.artifact_file(name)?;
+        self.database.forget_capture(name.to_owned()).await?;
+        file.remove()?;
+        Ok(())
+    }
+
     /// Create a capture's artifact for writing, holding the store until the
     /// writer ends.
     pub(crate) fn artifact_writer(
@@ -139,7 +149,7 @@ impl SequenceSync {
     ) -> Result<Option<SnapshotArtifact>, SyncError> {
         // Capturing precedes any provider request. A partial local file from
         // this journal step has no remote identity and can be replaced.
-        self.artifact_file(&capture.name)?.remove()?;
+        self.remove_artifact(&capture.name).await?;
         if let Purpose::Raise(version) = capture.purpose {
             let audience = capture.id.audience.clone();
             if self.database.prepare_raise_capture(audience, version).await?.is_none() {
@@ -250,3 +260,7 @@ pub(crate) struct SnapshotRequest {
     #[serde(with = "purpose")]
     pub(crate) purpose: Purpose,
 }
+
+#[cfg(test)]
+#[path = "snapshot_capture_tests.rs"]
+pub(crate) mod tests;

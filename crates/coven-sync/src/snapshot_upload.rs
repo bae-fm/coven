@@ -105,7 +105,7 @@ impl SequenceSync {
         let SnapshotUploadSource { record, request, artifact, reader, _lock, .. } = source;
         drop(reader);
         drop(_lock);
-        self.artifact_file(&artifact.capture.name)?.remove()?;
+        self.remove_artifact(&artifact.capture.name).await?;
         let number = self.database.reserve_snapshot_number().await?.get();
         let capture = Capture {
             id: coven_format::admin::SnapshotId { number, ..artifact.capture.id },

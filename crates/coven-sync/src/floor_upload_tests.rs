@@ -311,3 +311,37 @@ async fn a_failed_body_deletion_keeps_the_record_and_prevents_deletion() {
     assert!(ana.database().operation(operation).await.unwrap().is_none());
     ana.database().close().await.unwrap();
 }
+
+/// Ana's floor write loses a part of its body's upload, so its journal keeps
+/// the captured body at the top of `files`. The body counts among the
+/// store's own files at its size until her retried write publishes the
+/// floor and deletes it (§17.8).
+#[tokio::test]
+async fn a_captured_floor_body_counts_until_its_write_deletes_it() {
+    use crate::sequence_sync::snapshot_capture::tests::captured_bytes;
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    assert_eq!(captured_bytes(&ana).await, 0);
+    ana.storage.set_faults(Faults { drop_part: true, ..Faults::none() }).await;
+    ana.sync.pass().await.unwrap();
+    let records = ana.database().operations().await.unwrap();
+    let record = records.iter().find(|record| super::is_floor_write(record)).unwrap();
+    let super::Retention::Floor(artifact) = serde_json::from_slice(&record.data).unwrap() else {
+        panic!("upload lost its artifact");
+    };
+    assert_eq!(captured_bytes(&ana).await, i64::try_from(artifact.size).unwrap());
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.retry_pending_operation(record.id).await.unwrap();
+    assert!(ana.sync.artifact_file(&artifact.capture.name).unwrap().open_reader().is_err());
+    assert_eq!(captured_bytes(&ana).await, 0);
+    ana.database().close().await.unwrap();
+}

@@ -155,7 +155,7 @@ impl SequenceSync {
     pub(super) async fn undo_step(&self, step: &OperationStep) -> Result<(), SyncError> {
         let artifact = match step {
             OperationStep::Capturing(capture) => {
-                self.artifact_file(&capture.name)?.remove()?;
+                self.remove_artifact(&capture.name).await?;
                 return Ok(());
             }
             OperationStep::Uploading(artifact)
@@ -173,7 +173,7 @@ impl SequenceSync {
                 .with_source("snapshot remains after deletion")
                 .into());
         }
-        self.artifact_file(&artifact.capture.name)?.remove()?;
+        self.remove_artifact(&artifact.capture.name).await?;
         Ok(())
     }
 

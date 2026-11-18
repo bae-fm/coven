@@ -556,7 +556,7 @@ impl SequenceSync {
                     return self.finish(&record, OperationOutcome::Satisfied).await
                 }
                 OperationStep::SnapshotApplied { artifact, slot } => {
-                    self.artifact_file(&artifact.capture.name)?.remove()?;
+                    self.remove_artifact(&artifact.capture.name).await?;
                     return self.finish(&record, OperationOutcome::Landed(*slot)).await;
                 }
                 _ => (),
@@ -746,9 +746,21 @@ impl SequenceSync {
                         }
                         Err(error) => return Err(error),
                     };
-                    self.database
-                        .advance_operation(SequenceOperation { request, progress }.update(&record)?)
-                        .await?;
+                    let captured = match &progress {
+                        OperationProgress::Running(OperationStep::Uploading(artifact)) => {
+                            Some((artifact.capture.name.clone(), artifact.size))
+                        }
+                        _ => None,
+                    };
+                    let update = SequenceOperation { request, progress }.update(&record)?;
+                    match captured {
+                        Some((name, size)) => {
+                            self.database
+                                .advance_operation_counting_capture(update, name, size)
+                                .await?
+                        }
+                        None => self.database.advance_operation(update).await?,
+                    }
                 }
                 OperationStep::Uploading(artifact) => {
                     self.upload_snapshot(record, request, artifact).await?;

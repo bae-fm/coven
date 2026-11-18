@@ -129,6 +129,7 @@ mod fixture {
         crate::database::operation_tests::fill_for_plans(&db);
         crate::database::file_retention::tests::fill_for_plans(&db);
         crate::file_queue::tests::fill_for_plans(&db);
+        crate::database::library_bytes::tests::fill_for_plans(&db);
         crate::operation::tests::fill_for_plans(&db);
         crate::write_commit::tests::fill_for_plans(&db);
         crate::file_protection::tests::fill_for_plans(&db);

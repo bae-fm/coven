@@ -123,6 +123,26 @@ impl StoreDatabase {
         .await
     }
 
+    /// Commit the step that journals a captured body, the file `name` of
+    /// `size` bytes, and count the file among the store's own files, in one
+    /// transaction (§17.8): the count starts as the journal takes the file.
+    pub async fn advance_operation_counting_capture(
+        &self,
+        update: OperationUpdate,
+        name: String,
+        size: u64,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer, _| {
+                writer.transaction(|db| {
+                    crate::operation::advance(db, &update)?;
+                    crate::database::library_bytes::count_capture(db, &name, size)
+                })
+            })
+        })
+        .await
+    }
+
     /// Read the journal's rows of `kind` and commit the transitions `step`
     /// makes from them, in one transaction on the writer: no other write
     /// comes between the read and the transitions. `step` also returns what
