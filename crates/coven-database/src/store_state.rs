@@ -164,13 +164,14 @@ pub struct StoreMember {
     /// Whether a kept removal removed this member.
     pub removed: bool,
     /// The facts of the member's latest admission, which their devices'
-    /// joining write reads as each registers (§13.2). `None` for the store's
-    /// creator, who no admission made.
-    pub joined: Option<Joined>,
+    /// joining write reads as each registers (§13.2). Slot 1 records the
+    /// store's creator's as an admission records a joiner's (§10.3).
+    pub joined: Joined,
 }
 
 /// What a member's latest admission recorded of them (§13.2): the person's
-/// name, which a new person's request carried, and the circle it made.
+/// name, which a new person's request carried, and the circle it made. For
+/// the store's creator, slot 1 records her name and her private circle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Joined {
     /// The name the member's request carried; none for a recovery, whose

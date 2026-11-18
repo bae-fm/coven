@@ -5,7 +5,23 @@ use coven_format::admin::StoreChange;
 /// Decide Ana's slot 1 in her database, as creating the store does, and let
 /// her owner see it.
 pub(crate) async fn decide_for(group: &Group, ana: &Device) -> Result<(), SyncError> {
-    ana.sync.decide_creation("sequence tests", "Ana", vec![], &group.ring).await
+    ana.sync.decide_creation("sequence tests", "Ana", vec![], &group.ring).await.map(drop)
+}
+
+/// The private circle `device`'s member's creation or admission made, from
+/// the join facts its applied state holds.
+pub(crate) async fn private_circle(device: &Device) -> coven_foundation::id_source::CircleId {
+    let state = device.database().store_state().await.unwrap();
+    state.members[&device.identity.member()].joined.circle
+}
+
+/// The format fixtures' store key and Ana's private circle, with a ring that
+/// holds both keys, for a creation decided outside a `Group`.
+pub(crate) fn fixture_keys() -> (coven_crypto::StoreKeyring, crate::NewCircle) {
+    let mut ring = coven_crypto::StoreKeyring::new(coven_format::test_utils::store_key());
+    ring.insert_circle_key(coven_format::test_utils::created_circle_key()).unwrap();
+    let circle = coven_format::test_utils::created_circle();
+    (ring, crate::NewCircle { circle: circle.circle, name: circle.name, key: circle.key })
 }
 
 use crate::sequence_sync::tests::insert;
@@ -93,14 +109,15 @@ async fn a_copy_of_the_device_sending_its_own_slot_1_first_stops_the_original() 
     }
 }
 
-/// Slot 1's clear prefix carries the creator's copy of the first store key,
-/// and a creation whose copy names another member or key is refused when it
-/// is read.
+/// Slot 1's clear prefix carries the creator's copy of the first store key
+/// and of her private circle's first key, and a creation whose copy names
+/// another member or key is refused when it is read.
 #[tokio::test]
 async fn a_creation_slot_carries_only_its_creators_copy_of_the_first_key() {
     let group = Group::new();
     let ana = group.device(1).await;
-    decide_for(&group, &ana).await.unwrap();
+    let private =
+        ana.sync.decide_creation("sequence tests", "Ana", vec![], &group.ring).await.unwrap();
     insert(ana.database(), "a", "kept").await;
     let kept = kept_attempt(&ana).await;
     let received = coven_format::sealed_slot::BoundedSlot::decode(&kept).unwrap();
@@ -109,11 +126,15 @@ async fn a_creation_slot_carries_only_its_creators_copy_of_the_first_key() {
     else {
         panic!("slot 1 is an admission");
     };
-    assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].routing.member, ana.identity.member());
-    assert_eq!(copies[0].routing.sealing, ana.identity.keys().public_keys().sealing);
+    assert_eq!(copies.len(), 2);
+    for copy in copies {
+        assert_eq!(copy.routing.member, ana.identity.member());
+        assert_eq!(copy.routing.sealing, ana.identity.keys().public_keys().sealing);
+    }
     assert_eq!(copies[0].routing.audience, coven_merge::Audience::Store);
     assert_eq!(copies[0].routing.key, group.ring.store_key_ids().next().unwrap());
+    assert_eq!(copies[1].routing.audience, coven_merge::Audience::Circle(private.circle));
+    assert_eq!(copies[1].routing.key, private.key);
 
     // Another member's copy in the same position is refused by validation.
     let history = crate::history::History::default();
@@ -124,6 +145,8 @@ async fn a_creation_slot_carries_only_its_creators_copy_of_the_first_key() {
         key: copies[0].routing.key,
         key_hash: group.ring.store_key(copies[0].routing.key).unwrap().hash(),
         device_name: "d".into(),
+        person: "Ana".into(),
+        circle: private,
         circles: vec![],
     };
     let header = coven_format::sequence::SlotHeader {
@@ -163,7 +186,7 @@ async fn a_creation_slot_makes_its_circles_and_carries_a_copy_of_each_key() {
         })
         .collect();
     let asked: Vec<_> = circles.iter().map(|c| (c.circle, c.key)).collect();
-    ana.sync.decide_creation("sequence tests", "Ana", circles, &ring).await.unwrap();
+    let private = ana.sync.decide_creation("sequence tests", "Ana", circles, &ring).await.unwrap();
 
     let state = ana.database().store_state().await.unwrap();
     for (circle, _) in &asked {
@@ -172,6 +195,7 @@ async fn a_creation_slot_makes_its_circles_and_carries_a_copy_of_each_key() {
     }
     assert_eq!(state.circles[&asked[0].0].name, "Private");
     assert_eq!(state.circles[&asked[1].0].name, "Shared");
+    assert_eq!(state.circles[&private.circle].members, [ana.identity.member()].into());
 
     let kept = kept_attempt(&ana).await;
     let received = coven_format::sealed_slot::BoundedSlot::decode(&kept).unwrap();
@@ -183,6 +207,7 @@ async fn a_creation_slot_makes_its_circles_and_carries_a_copy_of_each_key() {
     let mut expected =
         vec![(coven_merge::Audience::Store, group.ring.store_key_ids().next().unwrap())];
     expected.extend(asked.iter().map(|(c, k)| (coven_merge::Audience::Circle(*c), *k)));
+    expected.push((coven_merge::Audience::Circle(private.circle), private.key));
     expected.sort();
     let copied: Vec<_> =
         copies.iter().map(|c| (c.routing.audience.clone(), c.routing.key)).collect();
@@ -204,11 +229,12 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
     let circle = CircleId(uuid::Uuid::from_u128(0xc1));
     let key = KeyId(uuid::Uuid::from_u128(0xe1));
     ring.insert_circle_key(CircleKey::generate(circle, key).unwrap()).unwrap();
-    ana.sync
+    let private = ana
+        .sync
         .decide_creation(
             "sequence tests",
             "Ana",
-            vec![crate::NewCircle { circle, name: "Private".into(), key }],
+            vec![crate::NewCircle { circle, name: "Shared".into(), key }],
             &ring,
         )
         .await
@@ -228,9 +254,11 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
         key: store_key,
         key_hash: group.ring.store_key(store_key).unwrap().hash(),
         device_name: "d".into(),
+        person: "Ana".into(),
+        circle: private,
         circles: vec![coven_format::admin::NewCircle {
             circle,
-            name: "Private".into(),
+            name: "Shared".into(),
             breaking_version: 0,
             key,
             key_hash: ring.circle_key(circle, key).unwrap().hash(),
@@ -253,9 +281,9 @@ async fn a_creation_slot_whose_copies_miss_a_circles_key_is_refused() {
     ana.database().close().await.unwrap();
 }
 
-/// Creation makes each circle it names with its creator as the only member,
-/// and a circle id it names twice is refused, as `CreateCircle` refuses an
-/// id the state holds (§10.3).
+/// Creation makes each circle it names, the creator's private circle among
+/// them, with its creator as the only member, and a circle id it names twice
+/// is refused, as `CreateCircle` refuses an id the state holds (§10.3).
 #[test]
 fn creation_makes_its_circles_and_refuses_a_repeated_one() {
     let circle = |n: u128| coven_format::admin::NewCircle {
@@ -265,13 +293,15 @@ fn creation_makes_its_circles_and_refuses_a_repeated_one() {
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(100 + n)),
         key_hash: [n as u8; 32],
     };
-    let creation = |circles| StoreChange::CreateStore {
+    let creation = |private, circles| StoreChange::CreateStore {
         store: coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(10)),
         name: "household".into(),
         admin: coven_format::test_utils::keys_from_seed(1).public_keys(),
         device_name: "Ana".into(),
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(11)),
         key_hash: [1; 32],
+        person: "Ana".into(),
+        circle: private,
         circles,
     };
     let checked = |change| {
@@ -284,17 +314,21 @@ fn creation_makes_its_circles_and_refuses_a_repeated_one() {
             &[],
         )
     };
-    let made = checked(creation(vec![circle(1), circle(2)])).unwrap().unwrap().state;
-    assert_eq!(made.circles.len(), 2);
-    for n in [1, 2] {
+    let made = checked(creation(circle(3), vec![circle(1), circle(2)])).unwrap().unwrap().state;
+    assert_eq!(made.circles.len(), 3);
+    for n in [1, 2, 3] {
         let held = &made.circles[&coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(n))];
         assert_eq!(held.members, [crate::effects::tests::id(1)].into());
         assert_eq!(held.base, 3);
     }
-    assert_eq!(
-        checked(creation(vec![circle(1), circle(1)])).err(),
-        Some(crate::OperationRejection::TargetGone(crate::EntryTarget::Circle(
-            coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1))
-        )))
-    );
+    for (private, circles) in
+        [(circle(3), vec![circle(1), circle(1)]), (circle(1), vec![circle(1)])]
+    {
+        assert_eq!(
+            checked(creation(private, circles)).err(),
+            Some(crate::OperationRejection::TargetGone(crate::EntryTarget::Circle(
+                coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1))
+            )))
+        );
+    }
 }

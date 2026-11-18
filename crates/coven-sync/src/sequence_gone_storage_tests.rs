@@ -1,3 +1,4 @@
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::sequence_reload::tests::stored_floor;
 use crate::sequence_sync::tests::*;
 use coven_format::admin::StoreChange;
@@ -209,9 +210,10 @@ async fn announcements_the_floor_passed_are_forgotten() {
     ana.database().close().await.unwrap();
 }
 
-/// Ana's app raises the store to version 2: her raise's announcement and
-/// its entry land. Two ordinary snapshots later pass grace and her floor
-/// moves `first` past the raise's announcement. The raise's entry still
+/// Ana's app raises the store to version 2, and her private circle with it:
+/// each raise's announcement and entry land. Two ordinary snapshots of each
+/// later pass grace and her floor moves `first` past the store raise's
+/// announcement. The raise's entry still
 /// names it, so she keeps it, and reopening applies the raise again from it
 /// (§16.8).
 #[tokio::test]
@@ -224,15 +226,17 @@ async fn a_raises_announcement_stays_after_the_floor_passes_it() {
     let ana = group.reopen(ana).await;
     ana.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
+    let private = Audience::Circle(private_circle(&ana).await);
     let raised = {
         let session = ana.sync.session.lock().await;
-        assert_eq!(session.history.boundaries.len(), 1, "the raise applied");
+        assert_eq!(session.history.boundaries.len(), 2, "both raises applied");
         *session
             .history
             .announcements
             .iter()
             .find(|(_, announcement)| {
                 announcement.purpose == coven_format::sequence::Purpose::Raise(2)
+                    && announcement.snapshot.audience == Audience::Store
             })
             .expect("the raise's announcement")
             .0
@@ -242,6 +246,7 @@ async fn a_raises_announcement_stays_after_the_floor_passes_it() {
         insert(ana.database(), id, title).await;
         ana.sync.pass().await.unwrap();
         ordinary.push(ana.sync.snapshot(Audience::Store).await.unwrap());
+        ana.sync.snapshot(private.clone()).await.unwrap();
     }
     past_grace(&group);
     ana.sync.pass().await.unwrap();
@@ -255,7 +260,7 @@ async fn a_raises_announcement_stays_after_the_floor_passes_it() {
     let ana = group.reopen(ana).await;
     let session = ana.sync.session.lock().await;
     assert!(session.history.announcements.contains_key(&raised));
-    assert_eq!(session.history.boundaries.len(), 1, "rebuilding applies the raise again");
+    assert_eq!(session.history.boundaries.len(), 2, "rebuilding applies the raises again");
     drop(session);
     ana.database().close().await.unwrap();
 }

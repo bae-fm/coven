@@ -121,6 +121,8 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                     device_name: "D".into(),
                     key,
                     key_hash,
+                    person: "A".into(),
+                    circle: test_utils::created_circle(),
                     circles: vec![],
                 },
                 StoreChange::CreateCircle {
@@ -150,8 +152,19 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                 vec![15, 0],
                 [vec![15, 1], circle(1).0.as_bytes().to_vec()].concat(),
             ];
-            // Creation's circles follow its key: none here.
-            let suffixes = [b"\0\0\0\0".to_vec(), vec![], vec![], vec![]];
+            // Creation's person and private circle follow its key, then its
+            // circles: none here.
+            let own = test_utils::created_circle();
+            let creation_suffix = [
+                b"\0\0\0\x01A".to_vec(),
+                own.circle.0.as_bytes().to_vec(),
+                b"\0\0\0\x01A\0\0\0\x02".to_vec(),
+                own.key.0.as_bytes().to_vec(),
+                own.key_hash.to_vec(),
+                b"\0\0\0\0".to_vec(),
+            ]
+            .concat();
+            let suffixes = [creation_suffix, vec![], vec![], vec![]];
             for ((change, prefix), suffix) in changes.into_iter().zip(prefixes).zip(suffixes) {
                 let object = frame(change);
                 let bytes = object.encode().unwrap();

@@ -836,15 +836,18 @@ impl History {
 
 /// The keys `change` introduces, in the order its slot's copies list them
 /// (`(audience, key)`, format.md D9): a creation introduces the store's first
-/// key and each circle's first key.
+/// key and the first key of each circle it makes, the creator's private
+/// circle's among them.
 pub(crate) fn introductions(change: &StoreChange) -> Vec<(Audience, KeyId, [u8; 32])> {
     match change {
         StoreChange::AdmitMember { circle, .. } | StoreChange::RecoverMember { circle, .. } => {
             vec![(Audience::Circle(circle.circle), circle.key, circle.key_hash)]
         }
-        StoreChange::CreateStore { key, key_hash, circles, .. } => {
+        StoreChange::CreateStore { key, key_hash, .. } => {
             let mut keys = vec![(Audience::Store, *key, *key_hash)];
-            keys.extend(circles.iter().map(|c| (Audience::Circle(c.circle), c.key, c.key_hash)));
+            keys.extend(
+                change.created_circles().map(|c| (Audience::Circle(c.circle), c.key, c.key_hash)),
+            );
             keys
         }
         StoreChange::CreateCircle { circle, key, key_hash, .. } => {

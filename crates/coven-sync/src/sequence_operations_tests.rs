@@ -1,3 +1,4 @@
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_database::{DbError, Removal};
@@ -788,7 +789,10 @@ async fn writes_after_a_breaking_migration_wait_in_the_queue_until_the_raise_lan
     let waiting = ana.sync.database.waiting_snapshot_headers().await.unwrap();
     assert_eq!(waiting.len(), 1, "the new-version write stays queued");
 
+    // The marker waits for every audience Ana reads: the store and her
+    // private circle.
     ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    ana.sync.raise_schema(Audience::Circle(private_circle(&ana).await), 2).await.unwrap();
     ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     assert_eq!(

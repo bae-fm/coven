@@ -3739,12 +3739,14 @@ carries an open handle, so retaining an error cannot keep the store locked.
 
 Slot 1 creates the store. It registers the first admin and their first device,
 introduces the first store key, and makes each circle the app's first write
-asks for, each with the creator as its first member and its own first key. Since
-nobody is a member yet, slot 1 carries its author's public key, and that key
-verifies its signature. Its clear prefix carries the creator's copy of every key
-it introduces, sealed to the creator's sealing key, as an admission carries a
-joiner's (§13.2). The store id in slot 1 must match its path, and a circle id
-that repeats is refused.
+asks for, each with the creator as its first member and its own first key.
+Slot 1 also records the creator's join facts, as an admission records a
+joiner's (§13.2): her name, and her private circle, which slot 1 makes with her
+as its only member. Since nobody is a member yet, slot 1 carries its author's
+public key, and that key verifies its signature. Its clear prefix carries the
+creator's copy of every key it introduces, sealed to the creator's sealing key,
+as an admission carries a joiner's (§13.2). The store id in slot 1 must match
+its path, and a circle id that repeats is refused.
 
 Slot 1 is decided when the store is created, on the device, before any storage
 exists. Ana makes Household on her laptop, offline. `create_store` sets up her
@@ -3755,6 +3757,19 @@ and renames the store before Household has any storage. If creation fails at
 any step, no store is visible and custody holds nothing for it. No other device
 can claim slot 1 first, since none knows the store's id until slot 1 is
 published. A copy of the laptop's directory could, and §19.3's checks catch it.
+
+Ana's laptop runs the app's joining write as slot 1 applies, in the same
+transaction, as Dan's phone runs it when his admission applies (§13.2).
+`create_store` takes Ana's name, and a function with which the app names her
+private circle from the member id coven makes for her, as the app names a
+joiner's circle from the id the invite fixes. Household's joining write reads
+both from slot 1 and inserts Ana's row in `people`, in her private circle,
+before Household is visible. Each later device of Ana's, a restored laptop or a
+pairing's new phone, runs the same write at its own registration and finds the
+row or writes it. Without the facts in slot 1, Ana's profile would be one
+queued write on her laptop. If Ana loses the laptop before that write uploads,
+her restored phone registers with no profile, and nothing writes one
+([`creator_profile_lost`](proofs/sequence/CovenSequence/JoiningWrite.lean)).
 
 The app names the circles it wants when it creates the store, since slot 1
 makes them and no write can go into a circle before one has applied. Its first
@@ -3769,8 +3784,8 @@ exists on it. The store becomes visible once that write commits; if the write
 fails, or the circle names are refused, no store is visible and custody holds
 nothing for it. Without that, a crash between creating the store
 and the app's first write would leave a store the app never set up, which no
-later step would know to finish. Ana's app makes a private circle
-and its first row in that write, so Household never shows without them.
+later step would know to finish. Ana's app asks for the Gifts circle and
+writes its first row in that write, so Household never shows without them.
 
 Slot 1 records no storage access: the storage doesn't exist when the store is
 created. Setting up storage publishes slot 1, then records how its creator
@@ -4797,9 +4812,10 @@ Ana types her restore code on her new laptop and signs in to her Dropbox. Then:
 6. It finishes loading and hands the app the open store.
 
 Applying the new device's registration runs the app's joining write on it,
-when its member's admission recorded facts (§13.2): a laptop restored for Dan
-finds his profile, written by his phone, or writes it. The store's creator was
-made by no admission, so a device of hers runs none.
+with the facts its member's admission recorded (§13.2): a laptop restored for
+Dan finds his profile, written by his phone, or writes it. Slot 1 recorded the
+store creator's facts, so a laptop restored for Ana runs the same write with
+hers (§10.3).
 
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
@@ -5312,6 +5328,10 @@ nothing could write it
 ([`device_record_lost`](proofs/sequence/CovenSequence/JoiningWrite.lean)). The
 name gains no audience: Ana's phone showed it with his request, every member
 reads the profile row it makes, and history is readable by members only.
+
+The store's creator has the same facts. Slot 1 records Ana's name and her
+private circle, her laptop runs the joining write as slot 1 applies, and each
+later device of hers runs it at its own registration (§10.3).
 
 The app writes the joining write so that running it again changes nothing: it
 inserts the profile only when Dan has none, so a device whose history already
@@ -12586,7 +12606,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | Table | Holds |
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before a joined store has loaded, the name its invite carried, as set by the slot the invite names (§13.2) |
-| `_coven_members` | each member of the applied history, removed ones too: their pair, role and storage access, and the facts of their latest admission, the person's name (none after a recovery) and the circle it made, which the joining write reads as a device of theirs registers (§13.2); `coven_members` shows none of those facts |
+| `_coven_members` | each member of the applied history, removed ones too: their pair, role and storage access, and the facts of their latest admission, or of slot 1 for the store's creator, the person's name (none after a recovery) and the circle it made, which the joining write reads as a device of theirs registers (§10.3, §13.2); `coven_members` shows none of those facts |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |
@@ -14415,7 +14435,7 @@ Write-ups explain each model and state its assumptions:
 | The copies an audience still needs, of every key introduced for it to each current member's current sealing key, give every current member every older key once published; then none is needed, so a retry sends none, and they expose no key | `needed_complete`, `needed_after_none`, `needed_exposes_nothing` | `proofs/sequence/CovenSequence/Keys.lean` | §12.1 |
 | *Body.* In every history whose devices follow §12.1's order, whatever raced, a store key has a copy to each member's current sealing key below every slot that needs it, an admitted member's in the admission's own slot, and so has a circle's key while each replacement or recovery of one of its members comes from another of them. Store creation holds the rule in its one slot, whose prefix carries the creator's copy of the first store key and of each circle's first key (§12.1) | `audience_complete`, `store_copy_precedes_need`, `copy_precedes_need_inside` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §12.3 |
 | An admission or a recovery makes the member's circle in its own slot: the slot introduces the circle's key and carries the member's copy of it, so the circle's first reader has its copy from the slot that makes the circle | `admission_carries_own_copy` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §13.2, §15.5 |
-| Store creation makes the circles its creating write asked for in slot 1: the slot introduces the store's first key and each circle's first key and carries the creator's copy of every one, so each circle's first reader has its copy from the slot that makes it | `creation_carries_own_copies` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §10.3, §12.1 |
+| Store creation makes the creator's private circle and the circles her creating write asked for in slot 1: the slot introduces the store's first key and each circle's first key and carries the creator's copy of every one, so each circle's first reader has its copy from the slot that makes it | `creation_carries_own_copies` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §10.3, §12.1 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
 | *Body.* Only a member that holds a key, with a copy of it sealed to its current sealing key, can seal a copy of it, and a copy is legal only from such an author or for a key its author is about to introduce. A holder that reads the audience sends the copy on its next pass; a key with no copy at a stop gets none later, so with no holder and the reader holding no copy, the stop never ends: Ben's phone names Carol as the holder of the Gifts key, and with Carol removed after the recovery, before her pass sends his copy, it names none and never clears | `reader_holder_sends`, `holders_from_holders`, `no_holder_never_clears`, `recovery_holders`, `orphan_has_no_holder`, `orphan_never_clears` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1, §19.1 |
@@ -14473,8 +14493,9 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Publishing only once the store has loaded, a call that stops while it loads leaves the join listed with nothing left to do; without the stop, a store whose first load applied a refused admission syncs on unregistered with no step left that would end it | `loaded_first_lists_admitted`, `refused_syncs_forever` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
 | The joining write commits in the step that first applies the device's registration: in every reachable world whose loaded history registers the device, the person's profile is committed | `profile_with_registration` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
 | *Body.* With the profile written by the app after the load, a registered member exists without it between the load and that write, and for good if the app quits first | `acknowledged_profile_lags` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2 |
-| With the join's facts in the member's state in history, every device of the member whose registration applied has the profile, whichever devices were lost and whether or not the first write landed | `every_device_has_profile` | `proofs/sequence/CovenSequence/JoiningWrite.lean` | §13.1, §13.2, §19.3 |
+| With the join's facts in the member's state in history, recorded by an admission for a joiner or by slot 1 for the store's creator, every device of the member whose registration applied has the profile, whichever devices were lost and whether or not the first write landed | `every_device_has_profile` | `proofs/sequence/CovenSequence/JoiningWrite.lean` | §10.3, §13.1, §13.2, §19.3 |
 | *Body.* With the facts kept only on the joining phone, a phone lost before its write lands leaves a device restored from the person's code registered with the member and no profile, in every extension | `device_record_lost` | `proofs/sequence/CovenSequence/JoiningWrite.lean` | §13.2 |
+| *Body.* With no facts in slot 1, the creator's profile is only a queued write on the creating laptop: a laptop lost before that write lands leaves a device restored from her code registered with her and no profile, in every extension | `creator_profile_lost` | `proofs/sequence/CovenSequence/JoiningWrite.lean` | §10.3 |
 | An approval admits its member in one slot: in every history whose admissions were each checked against the slots before them, no copy names someone who isn't a member, every member has a registered device, and a removal after an admission makes the device it registered gone for good | `admission_never_exposes`, `member_has_device`, `removal_stops_admitted_device` | `proofs/sequence/CovenSequence/Admission.lean` | §12.2, §13.2, §14.1 |
 | An approval makes its member's circle with the admission: from its admission's slot, every admitted member of a history whose admissions were each checked is in a circle and holds its key | `admitted_has_circle` | `proofs/sequence/CovenSequence/Admission.lean` | §13.2, §15.5 |
 | *Body.* With copies in slots of their own before the entry, a demotion between them leaves a copy naming someone never admitted, in every extension; and a removal between the entry and the phone's own registration leaves the member with no device in every extension, so the join can neither finish nor end on the facts | `split_approval_exposes`, `removal_strands_admitted_join` | `proofs/sequence/CovenSequence/Admission.lean` | §13.2 |

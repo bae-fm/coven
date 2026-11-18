@@ -137,7 +137,14 @@ impl Network {
                     .id_source(ids.clone())
                     .synced_tables(tables.clone())
                     .migrations(migrations.clone())
-                    .create_store("Household", "Test device", &circles, creating)
+                    .create_store(
+                        "Household",
+                        "Test device",
+                        "Ana",
+                        |_| "Private".into(),
+                        &circles,
+                        creating,
+                    )
                     .await
                     .unwrap();
                 let directory = app.store_dir(&created.store_id());

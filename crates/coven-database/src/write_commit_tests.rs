@@ -46,7 +46,7 @@ fn leave_circle(db: &StoreDatabase) {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
-                    joined: None,
+                    joined: crate::tests::joined(2),
                 },
             );
             let circle = state.circles.get_mut(&circle()).expect("the circle exists");

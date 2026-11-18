@@ -18,6 +18,11 @@ pub(crate) fn member(n: u128) -> MemberId {
     MemberId(uuid::Uuid::from_u128(n))
 }
 
+/// What `member`'s admission recorded: no name, and a circle of the same id.
+fn joined(member: MemberId) -> coven_database::Joined {
+    coven_database::Joined { person: None, circle: CircleId(member.0) }
+}
+
 fn copy(history: &mut History, ring: &StoreKeyring, slot: u64, routing: KeyCopyPrefix) {
     let path = coven_format::path::ObjectPath::slot(
         StoreId(uuid::Uuid::from_u128(1)),
@@ -82,7 +87,7 @@ fn sequence_key_selection_matches_lean() {
                     access: Some(crate::sequence_sync::tests::access("fixture")),
                     role: MemberRole::Member,
                     removed: id == member(2) && matches!(mode, 1 | 4),
-                    joined: None,
+                    joined: joined(id),
                 },
             );
         }
@@ -231,7 +236,7 @@ fn key_holders_are_the_current_members_with_a_copy_for_their_current_pair() {
                 role: MemberRole::Member,
                 // Member 6 was removed.
                 removed: index == 5,
-                joined: None,
+                joined: joined(id),
             },
         );
     }
@@ -338,6 +343,8 @@ impl Household {
                 device_name: "Ana's phone".into(),
                 key: key(90),
                 key_hash: [1; 32],
+                person: "Ana".into(),
+                circle: crate::effects::tests::circle(1),
                 circles: vec![],
             },
         );
@@ -852,7 +859,7 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
                 access: Some(crate::sequence_sync::tests::access("fixture")),
                 role: MemberRole::Member,
                 removed,
-                joined: None,
+                joined: joined(id),
             },
         );
     }

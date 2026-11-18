@@ -16,6 +16,18 @@ fn fail_publication_sync(
     .into())
 }
 
+/// Household, which Ana creates on the test device with her private circle
+/// and no other.
+fn household() -> super::Asked<fn(MemberId) -> String> {
+    super::Asked {
+        name: "Household".into(),
+        device_name: "Test device".into(),
+        person: "Ana".into(),
+        circle_name: |_| "Private".into(),
+        circles: vec![],
+    }
+}
+
 #[tokio::test]
 async fn publication_sync_failure_releases_the_store_before_returning() {
     let root = tempfile::tempdir().unwrap();
@@ -31,9 +43,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     let expected = StoreId(SequentialIds::new().new_id());
     let error = super::create(
         builder().id_source(Arc::new(SequentialIds::new())),
-        "Household".into(),
-        "Test device".into(),
-        vec![],
+        household(),
         |_, _| Ok(()),
         fail_publication_sync,
     )
@@ -122,9 +132,7 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
             .synced_tables(vec![])
             .migrations(vec![])
             .identity_custody(CustodyChoice::Custom(identity.clone())),
-        "Household".into(),
-        "Test device".into(),
-        vec![],
+        household(),
         |_, _| Ok(()),
         fail_publication_sync,
     ));
@@ -164,7 +172,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         };
         let handle = builder()
             .identity_custody(custody)
-            .create_store("Created", "Test device", &[], |_, _| Ok(()))
+            .create_store("Created", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
             .await
             .unwrap();
         let id = handle.store_id();
@@ -237,7 +245,7 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
         let error = builder()
             .id_source(Arc::new(SequentialIds::new()))
             .identity_custody(CustodyChoice::Custom(identity.clone()))
-            .create_store("Refused", "Test device", &[], |_, _| Ok(()))
+            .create_store("Refused", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
             .await
             .unwrap_err();
         if fail_cleanup {
@@ -289,7 +297,7 @@ async fn a_close_failing_in_a_failed_creation_keeps_both_causes_and_leaves_no_st
         .id_source(Arc::new(SequentialIds::new()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
         .refuse_database_close()
-        .create_store("Refused", "Test device", &[], |_, _| Ok(()))
+        .create_store("Refused", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap_err();
     // The connection SQLite wouldn't close keeps its files open, and Windows
@@ -326,9 +334,7 @@ async fn a_close_failing_after_a_published_store_keeps_both_causes_and_the_store
     let expected = StoreId(SequentialIds::new().new_id());
     let error = super::create(
         builder().id_source(Arc::new(SequentialIds::new())).refuse_database_close(),
-        "Household".into(),
-        "Test device".into(),
-        vec![],
+        household(),
         |_, _| Ok(()),
         fail_publication_sync,
     )
@@ -357,7 +363,7 @@ async fn a_refused_network_watch_fails_creating_and_opening_and_changes_no_store
     let refused = NetworkWatchError::MonitorUnavailable;
     let error = builder()
         .refuse_network_watch(refused.clone())
-        .create_store("Refused", "Test device", &[], |_, _| Ok(()))
+        .create_store("Refused", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap_err();
     assert!(
@@ -370,8 +376,10 @@ async fn a_refused_network_watch_fails_creating_and_opening_and_changes_no_store
         "{error:?}"
     );
     assert!(app.stores().await.unwrap().is_empty());
-    let handle =
-        builder().create_store("Household", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let store = handle.store_id();
     handle.close().await.unwrap();
     let error = builder().refuse_network_watch(refused).open(store, |_| ()).await.err().unwrap();
@@ -390,8 +398,10 @@ async fn opening_removes_what_unfinished_writes_left_or_fails() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
     let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
-    let handle =
-        builder().create_store("Household", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let store = handle.store_id();
     handle.close().await.unwrap();
     let directory = app.store_dir(&store);
@@ -425,7 +435,7 @@ async fn creation_does_not_replace_an_existing_custom_identity() {
         .synced_tables(vec![])
         .migrations(vec![])
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("Refused", "Test device", &[], |_, _| Ok(()))
+        .create_store("Refused", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap_err();
     assert!(matches!(error, StoreCreationError::Identity(IdentityError::AlreadyInitialized)));
@@ -450,9 +460,7 @@ async fn a_panic_before_publication_undoes_the_stores_custody() {
             .id_source(Arc::new(SequentialIds::new()))
             .synced_tables(vec![])
             .migrations(vec![]),
-        "Household".into(),
-        "Test device".into(),
-        vec![],
+        household(),
         |_, _| Ok(()),
         |_pending: &coven_foundation::files::BootstrapStore| panic!("the marker is held open"),
     )
@@ -479,9 +487,7 @@ async fn a_panic_after_publication_keeps_the_published_store() {
     let expected = StoreId(SequentialIds::new().new_id());
     let error = super::create(
         builder().id_source(Arc::new(SequentialIds::new())),
-        "Household".into(),
-        "Test device".into(),
-        vec![],
+        household(),
         |_, _| Ok(()),
         |pending: &coven_foundation::files::BootstrapStore| {
             pending.publish()?;
@@ -559,9 +565,15 @@ async fn dropping_the_creation_future_still_finishes_creating_or_undoing_it() {
             closed: tokio::sync::Notify::new(),
         });
         let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
-        let creation = builder()
-            .identity_custody(CustodyChoice::Custom(identity.clone()))
-            .create_store("Household", "Test device", &[], |_, _| Ok(()));
+        let creation =
+            builder().identity_custody(CustodyChoice::Custom(identity.clone())).create_store(
+                "Household",
+                "Test device",
+                "Ana",
+                |_| "Private".into(),
+                &[],
+                |_, _| Ok(()),
+            );
         tokio::select! {
             _ = creation => panic!("creation returned while its custody was held"),
             () = identity.started.notified() => {}
@@ -607,8 +619,10 @@ fn notes(app: &Coven) -> CovenBuilder {
 async fn a_created_store_has_its_creator_as_admin_and_its_writes_read_through_slot_1() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
-    let handle =
-        notes(&app).create_store("Household", "Ana's laptop", &[], |_, _| Ok(())).await.unwrap();
+    let handle = notes(&app)
+        .create_store("Household", "Ana's laptop", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
 
     let members = handle.members().await.unwrap();
     assert_eq!(members.len(), 1, "{members:?}");
@@ -658,7 +672,7 @@ async fn a_store_key_custody_refuses_leaves_no_store_and_no_custody_entries() {
     let app = Coven::in_memory(root.path().into());
     let error = notes(&app)
         .key_custody(CustodyChoice::Custom(Arc::new(RefusesKeys)))
-        .create_store("Household", "Ana's laptop", &[], |_, _| Ok(()))
+        .create_store("Household", "Ana's laptop", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .map(drop)
         .unwrap_err();
@@ -673,8 +687,10 @@ async fn a_store_key_custody_refuses_leaves_no_store_and_no_custody_entries() {
 async fn an_invite_before_storage_is_set_up_fails_with_no_storage_and_journals_nothing() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
-    let handle =
-        notes(&app).create_store("Household", "Ana's laptop", &[], |_, _| Ok(())).await.unwrap();
+    let handle = notes(&app)
+        .create_store("Household", "Ana's laptop", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let made = handle
         .create_invite(
             MemberRole::Member,
@@ -711,10 +727,11 @@ fn circle_notes(app: &Coven) -> CovenBuilder {
         )])
 }
 
-/// Ana's first write makes her private circle's first row as the store is
-/// created: the circles are made by slot 1 and listed inside the write, the
-/// row goes into one, the write reads through slot 1, and no operation is
-/// journaled for the circles (§10.3).
+/// Ana's first write makes the first row of a circle it asked for as the
+/// store is created: slot 1 makes that circle beside her private one, both
+/// are listed inside the write, the row goes into the one asked for, the
+/// write reads through slot 1, and no operation is journaled for the circles
+/// (§10.3).
 #[tokio::test]
 async fn a_creating_write_writes_into_the_circles_slot_1_made() {
     let root = tempfile::tempdir().unwrap();
@@ -722,18 +739,26 @@ async fn a_creating_write_writes_into_the_circles_slot_1_made() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let inside = seen.clone();
     let handle = circle_notes(&app)
-        .create_store("Household", "Ana's laptop", &["Private", "Shared"], move |write, circles| {
-            let listed: Vec<(CircleId, String)> =
-                write.query("SELECT circle,name FROM coven_circles ORDER BY name", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?;
-            *inside.lock().unwrap() = listed;
-            write.execute(
+        .create_store(
+            "Household",
+            "Ana's laptop",
+            "Ana",
+            |_| "Private".into(),
+            &["Shared"],
+            move |write, circles| {
+                let listed: Vec<(CircleId, String)> = write.query(
+                    "SELECT circle,name FROM coven_circles ORDER BY name",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                *inside.lock().unwrap() = listed;
+                write.execute(
                 "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001','mine',?1)",
                 [circles[0].to_string()],
             )?;
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .await
         .unwrap();
 
@@ -745,7 +770,7 @@ async fn a_creating_write_writes_into_the_circles_slot_1_made() {
         listed.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>(),
         ["Private", "Shared"]
     );
-    let private = listed[0].0;
+    let shared = listed[1].0;
     let (row, audience, operations): (String, String, i64) = handle
         .read(|sql| {
             Ok::<_, CovenError>((
@@ -756,9 +781,9 @@ async fn a_creating_write_writes_into_the_circles_slot_1_made() {
         })
         .await
         .unwrap();
-    assert_eq!((row.as_str(), audience.as_str()), ("mine", private.to_string().as_str()));
+    assert_eq!((row.as_str(), audience.as_str()), ("mine", shared.to_string().as_str()));
     assert_eq!(operations, 0);
-    let members = handle.circles().members(private).await.unwrap();
+    let members = handle.circles().members(shared).await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
     let headers = handle.test_database().waiting_snapshot_headers().await.unwrap();
@@ -767,26 +792,97 @@ async fn a_creating_write_writes_into_the_circles_slot_1_made() {
     handle.close().await.unwrap();
 }
 
-/// A creating write that fails, or a circle the format refuses, leaves no
-/// store in `stores()` and nothing in custody: no member identity, device id
-/// or key, circle keys included (§10.3, §12.4).
+/// Slot 1 records Ana's name and her private circle, which `create_store`
+/// names from the member id coven makes for her, and applying it runs the
+/// app's joining write on her laptop, as an admission's application does on
+/// a joiner's phone: her profile is in the store before it is visible, queued
+/// as a write that reads through slot 1 (§10.3, §13.2).
+#[tokio::test]
+async fn creation_runs_the_joining_write_with_the_creators_facts() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let handle = app
+        .builder()
+        .id_source(Arc::new(SequentialIds::new()))
+        .synced_tables(vec![SyncedTable::new("profiles", RowIdentity::SharedKey)])
+        .migrations(vec![Migration::addition(
+            1,
+            "profiles",
+            "CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL,name TEXT,circle TEXT NOT NULL)",
+        )])
+        .joining_write(|sql, joining| {
+            sql.execute(
+                "INSERT INTO profiles VALUES(?1,?2,?3)",
+                (joining.member.to_string(), joining.person.clone(), joining.circle.to_string()),
+            )?;
+            Ok(())
+        })
+        .create_store(
+            "Household",
+            "Ana's laptop",
+            "Ana",
+            |member| format!("person:{member}"),
+            &["Shared"],
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+
+    let ana = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
+    let circles = handle.circles().list().await.unwrap();
+    let private = circles.iter().find(|circle| circle.name == format!("person:{}", ana.id));
+    let private = private.expect("slot 1 made Ana's private circle").id;
+    let members = handle.circles().members(private).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert!(members[0].is_self);
+    let profiles: Vec<(String, String, String)> = handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query("SELECT id,name,circle FROM profiles", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(profiles, [(ana.id.to_string(), "Ana".to_owned(), private.to_string())]);
+    let headers = handle.test_database().waiting_snapshot_headers().await.unwrap();
+    let reads: Vec<u64> = headers.iter().map(|header| header.header.read_through).collect();
+    assert_eq!(reads, [1]);
+    handle.close().await.unwrap();
+}
+
+/// A creating write that fails, or a name the format refuses (a circle's, the
+/// creator's or her private circle's), leaves no store in `stores()` and
+/// nothing in custody: no member identity, device id or key, circle keys
+/// included (§10.3, §12.4).
 #[tokio::test]
 async fn a_creating_write_that_fails_leaves_no_store_and_no_custody() {
     use coven_crypto::custody::KeyringCustody;
     let expected = StoreId(SequentialIds::new().new_id());
-    for refused_name in [false, true] {
+    let refused = "bad\0name";
+    for (person, private, circle) in [
+        ("Ana", "Private", "Shared"),
+        ("Ana", "Private", refused),
+        (refused, "Private", "Shared"),
+        ("Ana", refused, "Shared"),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
-        let circles: &[&str] = if refused_name { &["bad\0name"] } else { &["Private"] };
         let error = circle_notes(&app)
-            .create_store("Household", "Ana's laptop", circles, |write, circles| {
-                write.execute(
-                    "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001','mine',?1)",
-                    [circles[0].to_string()],
-                )?;
-                write.execute_batch("INSERT INTO no_such_table VALUES(1)")?;
-                Ok(())
-            })
+            .create_store(
+                "Household",
+                "Ana's laptop",
+                person,
+                move |_| private.to_owned(),
+                &[circle],
+                |write, circles| {
+                    write.execute(
+                        "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001','mine',?1)",
+                        [circles[0].to_string()],
+                    )?;
+                    write.execute_batch("INSERT INTO no_such_table VALUES(1)")?;
+                    Ok(())
+                },
+            )
             .await
             .map(drop)
             .unwrap_err();

@@ -31,8 +31,9 @@ pub struct NewCircle {
     pub key: KeyId,
 }
 
-/// What slot 1 sets up: the store, its first admin and device, the first
-/// store key and the circles' first keys `ring` holds.
+/// What slot 1 sets up: the store, its first admin with her join facts, her
+/// first device, the first store key and the circles' first keys `ring`
+/// holds.
 pub struct Creation<'a> {
     /// The new store's id.
     pub store: StoreId,
@@ -44,6 +45,10 @@ pub struct Creation<'a> {
     pub device_name: String,
     /// The first admin, who signs slot 1.
     pub member: &'a MemberIdentity,
+    /// The creator's name, which her devices' joining write reads (§13.2).
+    pub person: String,
+    /// The creator's private circle, whose only member she is.
+    pub circle: NewCircle,
     /// The circles the creator's first write asks for, each with the
     /// creator as its first member.
     pub circles: Vec<NewCircle>,
@@ -57,24 +62,26 @@ pub struct Creation<'a> {
 /// not published yet, so no other device can claim slot 1 first; setup
 /// later sends these bytes (§10.3). The creator's copy of each key slot 1
 /// introduces rides in its clear prefix, as an admission's copies do (§12.1).
+/// Applying slot 1 runs the app's joining write for the creator's device, as
+/// an admission's application does for a joiner's (§13.2).
 pub async fn decide_creation(
     database: &StoreDatabase,
     creation: Creation<'_>,
 ) -> Result<(), SyncError> {
-    let Creation { store, name, device, device_name, member, circles, ring } = creation;
+    let Creation { store, name, device, device_name, member, person, circle, circles, ring } =
+        creation;
     let breaking_version = database.breaking_version().await?;
-    let circles = circles
-        .into_iter()
-        .map(|new| {
-            Ok(coven_format::admin::NewCircle {
-                key_hash: ring.circle_key(new.circle, new.key)?.hash(),
-                circle: new.circle,
-                name: new.name,
-                breaking_version,
-                key: new.key,
-            })
+    let made = |new: NewCircle| {
+        Ok::<_, SyncError>(coven_format::admin::NewCircle {
+            key_hash: ring.circle_key(new.circle, new.key)?.hash(),
+            circle: new.circle,
+            name: new.name,
+            breaking_version,
+            key: new.key,
         })
-        .collect::<Result<Vec<_>, SyncError>>()?;
+    };
+    let circle = made(circle)?;
+    let circles = circles.into_iter().map(made).collect::<Result<Vec<_>, _>>()?;
     let key =
         ring.store_key_ids().next().ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
     let change = StoreChange::CreateStore {
@@ -84,6 +91,8 @@ pub async fn decide_creation(
         key,
         key_hash: ring.store_key(key)?.hash(),
         device_name,
+        person,
+        circle,
         circles,
     };
     let history = History::default();

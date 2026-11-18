@@ -221,7 +221,7 @@ async fn a_new_circle_takes_rows_once_its_slot_applies() {
     ana.start_sync().await.unwrap();
     crate::tests::landed(ana, Some(created)).await;
     ana.write(note(gifts.to_string())).await.unwrap();
-    assert_eq!(ana.circles().list().await.unwrap()[0].id, gifts);
+    assert!(ana.circles().list().await.unwrap().iter().any(|circle| circle.id == gifts));
     // A name that isn't one journals nothing.
     let unnamed = ana.circles().create("").await;
     assert!(matches!(unnamed, Err(SyncError::Format(_))), "{unnamed:?}");

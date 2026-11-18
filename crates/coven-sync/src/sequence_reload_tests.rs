@@ -1,3 +1,4 @@
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::admin::StoreChange;
@@ -359,6 +360,10 @@ async fn activation_whose_suffix_is_below_the_floor(raise: bool) {
         ben.sync.pass().await.unwrap();
         crate::sequence_sync::sequence_raises::tests::raise_admitted_circle(&ben, 2).await;
         ana.sync.pass().await.unwrap();
+        // Ana raises her private circle too, and the floor names its snapshot.
+        let private = Audience::Circle(private_circle(&ana).await);
+        ana.sync.raise_schema(private.clone(), 2).await.unwrap();
+        ana.sync.snapshot(private).await.unwrap();
     }
     let activated = ana.sync.database.applied_slot().await.unwrap();
     ana.sync.snapshot(Audience::Store).await.unwrap();

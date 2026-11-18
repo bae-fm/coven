@@ -100,12 +100,13 @@ impl Clock for JoinClock {
     }
 }
 
-/// Ana's first write, made as Household was created, puts a row in her
-/// private circle. A device restored from her code reads the circle's key
-/// from the copy slot 1 carries, and so reads that row (§10.3).
+/// Ana's first write, made as Household was created, puts a row in Gifts,
+/// which slot 1 made beside her private circle. A device restored from her
+/// code reads the circles' keys from the copies slot 1 carries, and so reads
+/// that row (§10.3).
 #[tokio::test]
 async fn a_restored_device_reads_the_row_the_creating_write_made_in_a_circle() {
-    let owner = Owner::created(&["Private"], |write, circles| {
+    let owner = Owner::created(&["Gifts"], |write, circles| {
         write.execute(
             "INSERT INTO circle_notes VALUES('00000000-0000-4000-8000-000000000001','mine',?1)",
             [circles[0].to_string()],
@@ -123,7 +124,9 @@ async fn a_restored_device_reads_the_row_the_creating_write_made_in_a_circle() {
         .unwrap();
     assert_eq!(titles, ["mine"]);
     let circles = restored.circles().list().await.unwrap();
-    assert_eq!(circles.iter().map(|circle| circle.name.as_str()).collect::<Vec<_>>(), ["Private"]);
+    let mut names: Vec<_> = circles.iter().map(|circle| circle.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["Gifts", "Private"]);
     restored.close().await.unwrap();
     owner.close().await;
 }

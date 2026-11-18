@@ -102,6 +102,7 @@ impl Fixture {
         let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
         // The store's creation is applied before any write: every write reads
         // through slot 1 (§7.1).
+        let (ring, private) = crate::creation::tests::fixture_keys();
         crate::decide_creation(
             &database,
             crate::Creation {
@@ -110,8 +111,10 @@ impl Fixture {
                 device: directory.settings().unwrap().device_id,
                 device_name: "Files".into(),
                 member: &coven_format::test_utils::identity(),
+                person: "Ana".into(),
+                circle: private,
                 circles: vec![],
-                ring: &coven_crypto::StoreKeyring::new(coven_format::test_utils::store_key()),
+                ring: &ring,
             },
         )
         .await

@@ -31,9 +31,9 @@ mid-rotation and a replacement landing among a rotation's copies are all
 histories of `Follows`, not cases of their own
 (`CopyOrderExamples.races_follow`). Store creation holds the rule in its one
 slot, as an admission does: slot 1 sets up the first member and key, makes the
-circles its creating write asked for, and carries the creator's copy of the
-store's first key and of each circle's first key (§10.3, §12.1,
-`creation_carries_own_copies`).
+creator's private circle and the circles her creating write asked for, and
+carries the creator's copy of the store's first key and of each circle's first
+key (§10.3, §12.1, `creation_carries_own_copies`).
 
 `CopyPrecedesNeed` fails. An admin outside a circle who recovers a member can
 send only the keys it holds (`required`, §12.1), so a circle's key has

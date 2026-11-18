@@ -86,13 +86,15 @@ let handle = Coven::builder(layout.clone())
     .synced_tables(tables())
     .namespaces(namespaces())
     .migrations(migrations())
-    .create_store("Household", "Ana's phone", &[], |_, _| Ok(()))
+    .create_store("Household", "Ana's phone", "Ana", |member| format!("person:{member}"), &[], |_, _| Ok(()))
     .await?;
 ```
 
 `create_store` makes Ana's member keys and the first store key and puts them in
 the OS keychain, then creates the store on the phone with Ana as its admin and
-her phone as its first device. It needs no network. On later launches the app
+her phone as its first device. The store records Ana's name and her private
+circle, which the app names from her member id, so each of her devices can
+write her profile from them. Creating needs no network. On later launches the app
 opens the same store:
 
 ```rust

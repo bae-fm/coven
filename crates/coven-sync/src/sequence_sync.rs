@@ -150,6 +150,9 @@ impl SequenceSync {
 
     /// Decide this device's slot 1 in its database, as creating the store
     /// does, and rebuild the session from the applied slots as opening does.
+    /// Slot 1 makes the creator's private circle, named "Private", whose
+    /// first key joins `ring` in this device's custody; it returns that
+    /// circle as slot 1 records it.
     #[cfg(test)]
     pub(crate) async fn decide_creation(
         &self,
@@ -157,8 +160,23 @@ impl SequenceSync {
         device_name: &str,
         circles: Vec<crate::NewCircle>,
         ring: &StoreKeyring,
-    ) -> Result<(), SyncError> {
+    ) -> Result<coven_format::admin::NewCircle, SyncError> {
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let circle = crate::NewCircle {
+            circle: coven_foundation::id_source::CircleId(self.ids.new_id()),
+            name: "Private".into(),
+            key: coven_foundation::id_source::KeyId(self.ids.new_id()),
+        };
+        let mut ring = ring.clone();
+        ring.insert_circle_key(coven_crypto::CircleKey::generate(circle.circle, circle.key)?)?;
+        self.keys.persist(&ring)?;
+        let recorded = coven_format::admin::NewCircle {
+            circle: circle.circle,
+            name: circle.name.clone(),
+            breaking_version: self.database.breaking_version().await?,
+            key: circle.key,
+            key_hash: ring.circle_key(circle.circle, circle.key)?.hash(),
+        };
         crate::decide_creation(
             &self.database,
             crate::Creation {
@@ -167,8 +185,10 @@ impl SequenceSync {
                 device: self.device,
                 device_name: device_name.into(),
                 member: &member,
+                person: "Ana".into(),
+                circle,
                 circles,
-                ring,
+                ring: &ring,
             },
         )
         .await?;
@@ -179,7 +199,7 @@ impl SequenceSync {
         let mut session = self.session.lock().await;
         session.through = self.database.applied_slot().await?;
         session.history = history;
-        Ok(())
+        Ok(recorded)
     }
 
     /// Use candidate credentials while retaining this installation's exact

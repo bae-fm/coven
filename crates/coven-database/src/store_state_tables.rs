@@ -42,10 +42,7 @@ fn member_keys(row: &Row<'_>, signing: usize) -> sqlive::rusqlite::Result<Member
 /// A fact that doesn't
 /// decode is `DamagedDatabase`.
 pub(crate) fn stored_member(row: &Row<'_>) -> sqlive::rusqlite::Result<(MemberId, StoreMember)> {
-    let joined = match stored::<Option<CircleId>>(row, 6, Type::Text)? {
-        Some(circle) => Some(Joined { person: stored(row, 7, Type::Text)?, circle }),
-        None => None,
-    };
+    let joined = Joined { person: stored(row, 7, Type::Text)?, circle: circle(row, 6)? };
     Ok((
         member(row, 0)?,
         StoreMember {
@@ -225,8 +222,8 @@ pub(crate) fn replace(database: &StoreSql, state: &StoreState) -> Result<(), DbE
                     .access
                     .as_ref()
                     .map(|access| serde_json::to_vec(access).expect("member access encoding")),
-                member.joined.as_ref().map(|joined| joined.circle),
-                member.joined.as_ref().and_then(|joined| joined.person.as_deref())
+                member.joined.circle,
+                member.joined.person.as_deref()
             ],
         )?;
     }

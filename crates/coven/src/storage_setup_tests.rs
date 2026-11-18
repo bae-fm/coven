@@ -33,7 +33,14 @@ impl Phone {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
         let created = builder(&app, &storage)
             .id_source(Arc::new(UuidIds))
-            .create_store("Household", "Ana's phone", &[], |_, _| Ok(()))
+            .create_store(
+                "Household",
+                "Ana's phone",
+                "Ana",
+                |_| "Private".into(),
+                &[],
+                |_, _| Ok(()),
+            )
             .await
             .unwrap();
         let directory = app.store_dir(&created.store_id());

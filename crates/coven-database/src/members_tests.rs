@@ -18,7 +18,13 @@ fn access(seed: u8) -> coven_format::MemberAccess {
 fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMember) {
     (
         member(seed),
-        StoreMember { keys: keys(seed), access: Some(access(seed)), role, removed, joined: None },
+        StoreMember {
+            keys: keys(seed),
+            access: Some(access(seed)),
+            role,
+            removed,
+            joined: crate::tests::joined(seed),
+        },
     )
 }
 
@@ -510,7 +516,7 @@ async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
             access: None,
             role: MemberRole::Admin,
             removed: false,
-            joined: None,
+            joined: crate::tests::joined(1),
         },
     )]
     .into();

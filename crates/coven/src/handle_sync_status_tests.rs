@@ -583,8 +583,10 @@ async fn a_read_only_handle_cant_read_the_sync_state() {
     let root = tempfile::tempdir().unwrap();
     let app = Coven::in_memory(root.path().into());
     let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
-    let handle =
-        builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Recipes", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let reader = builder().open_read_only(handle.store_id()).await.unwrap();
     for statement in ["SELECT state FROM coven_sync_state", "SELECT phase FROM coven_upload_phases"]
     {

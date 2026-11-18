@@ -2503,16 +2503,16 @@ impl CovenBuilder {
 
     /// The app's write for a member's device as its registration applies
     /// (§13.2). It runs in the transaction that first applies the
-    /// registration of one of the member's devices: a join's admission or the
-    /// snapshot that covers it, a restore's, a pairing's or a reset's add-device
-    /// entry. It is a local write made right after that slot or install,
-    /// reading the store as the transaction leaves it, whose `read_through`
-    /// is the slot the transaction applies through, queued for upload as any
-    /// write is. It runs once on each device of the member, so it is written
+    /// registration of one of the member's devices: slot 1 on the device that
+    /// creates the store, a join's admission or the snapshot that covers it, a
+    /// restore's, a pairing's or a reset's add-device entry. It is a local
+    /// write made right after that slot or install, reading the store as the
+    /// transaction leaves it, whose `read_through` is the slot the
+    /// transaction applies through, queued for upload as any write is. It runs once on each device of the member, so it is written
     /// to change nothing a second time: insert the profile only when the
     /// member has none, and for a recovery (`person: None`) point it at the
-    /// new circle only when it points elsewhere. It never runs for the
-    /// store's creator, whom no admission made. An error fails the
+    /// new circle only when it points elsewhere. For the store's creator it
+    /// reads the facts slot 1 recorded (§10.3). An error fails the
     /// transaction as a failed migration does (E13): the slot or install
     /// doesn't commit, the pass reports the error and the next pass tries
     /// again. Without one, nothing runs.
@@ -2604,27 +2604,35 @@ impl CovenBuilder {
         T: Into<types::Value>;
 
     /// Creates an open store before publication: its member, first store
-    /// key and one key for each of `circles` in the chosen custody, and slot
-    /// 1 sealed, kept as this device's attempt at it and applied, so the
-    /// creator is the store's first admin, `device_name` names its first
-    /// device and each of `circles`, named in order, exists with the creator
-    /// as its first member from the start (§10.3). Then `creating`, the app's
-    /// first write, runs on a `MemberWrite` with the circles' ids in that
-    /// order, in a write of its own that reads through slot 1; the store is
-    /// published only once it commits. A `circles` name the format refuses
-    /// fails before anything is made. Cancellation does not interrupt
-    /// creation or rollback. Errors carry no handle, and the closure's own
-    /// error is `StoreCreationError::Store`; a published store is closed
-    /// before returning, and a store that is not published, whether its
+    /// key and one key for her private circle and each of `circles` in the
+    /// chosen custody, and slot 1 sealed, kept as this device's attempt at it
+    /// and applied, so the creator is the store's first admin, `device_name`
+    /// names its first device and each of `circles`, named in order, exists
+    /// with the creator as its first member from the start (§10.3). Slot 1
+    /// records the creator's join facts as an admission records a joiner's:
+    /// `person`, her name, and her private circle, which `circle_name` names
+    /// from the member id coven makes for her and whose only member she is.
+    /// Applying slot 1 runs the app's joining write on this device with those
+    /// facts (§13.2). Then `creating`, the app's first write, runs on a
+    /// `MemberWrite` with the ids of `circles` in that order, in a write of
+    /// its own that reads through slot 1; the store is published only once
+    /// it commits. A `person` or circle name the format refuses fails before
+    /// anything is made. Cancellation does not interrupt creation or
+    /// rollback. Errors carry no handle, and the closure's own error is
+    /// `StoreCreationError::Store`; a published store is closed before
+    /// returning, and a store that is not published, whether its joining or
     /// creating write failed or not, leaves nothing in custody.
-    pub async fn create_store<F>(
+    pub async fn create_store<C, F>(
         self,
         name: &str,
         device_name: &str,
+        person: &str,
+        circle_name: C,
         circles: &[&str],
         creating: F,
     ) -> Result<CovenHandle, StoreCreationError>
     where
+        C: FnOnce(MemberId) -> String + Send + 'static,
         F: FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send + 'static;
 
     /// Opens the store for reading and writing, taking the store's lock.
@@ -3004,8 +3012,8 @@ let handle = coven.builder()
         Namespace::new("thumbnails", Provenance::AppProvided, 256 << 20),
     ])
     .migrations(migrations())                       // E13
-    .create_store("Household", "Ana's laptop", &["Private"], |write, circles| {
-        // Ana's first write: a row in her private circle (§10.3).
+    .create_store("Household", "Ana's laptop", "Ana", |member| format!("person:{member}"), &["Gifts"], |write, circles| {
+        // Ana's first write: a row in the Gifts circle (§10.3).
         write.execute("INSERT INTO notes VALUES('welcome', 'Hello', ?1)", [circles[0].to_string()])?;
         Ok(())
     })
@@ -3510,14 +3518,16 @@ impl BulkSqlContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
-/// The facts of a member's latest admission, which the app's joining write
-/// reads (§13.2).
+/// The facts of a member's latest admission, or of slot 1 for the store's
+/// creator, which the app's joining write reads (§10.3, §13.2).
 pub struct Joining {
     /// The member whose device registers.
     pub member: MemberId,
-    /// The name the member's join request carried; none after a recovery.
+    /// The name the member's join request carried, or the creator's
+    /// `create_store` was given; none after a recovery.
     pub person: Option<String>,
-    /// The circle their latest admission made.
+    /// The circle their latest admission made, or the creator's private
+    /// circle slot 1 made.
     pub circle: CircleId,
 }
 

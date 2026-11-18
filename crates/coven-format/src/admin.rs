@@ -53,8 +53,10 @@ wire_struct!(SnapshotId, audience, device, number);
 
 /// A circle that creating a store or admitting a member makes, with the
 /// commitment to the circle key it introduces (§10.3, §13.2, D6). A creation's
-/// circles are the creator's; an admission's is the admitted person's, its
-/// first and only member, and its key's one copy is the admission's own copy.
+/// circles are the creator's: her private circle, whose only member she is,
+/// and the circles her first write asks for. An admission's is the admitted
+/// person's, its first and only member, and its key's one copy is the
+/// admission's own copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewCircle {
     /// The new circle's id: no circle, live or deleted, has it.
@@ -97,6 +99,12 @@ pub enum StoreChange {
         key_hash: [u8; 32],
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
+        /// The creator's name, which every device of hers writes her profile
+        /// with, as an admission's `person` is a joiner's (§13.2).
+        person: String,
+        /// The creator's private circle, whose only member she is, as an
+        /// admission's circle is a joiner's.
+        circle: NewCircle,
         /// The circles the creator's first write asks for, each with the
         /// creator as its first member, in the order they were asked for.
         circles: Vec<NewCircle>,
@@ -303,12 +311,25 @@ impl StoreChange {
         }
     }
 
+    /// The circles a store's creation makes, in the order slot 1 makes
+    /// them: the creator's private circle, then each circle her first write
+    /// asks for. Every other change makes none of these.
+    pub fn created_circles(&self) -> impl Iterator<Item = &NewCircle> {
+        let (circle, circles) = match self {
+            Self::CreateStore { circle, circles, .. } => (Some(circle), circles.as_slice()),
+            _ => (None, [].as_slice()),
+        };
+        circle.into_iter().chain(circles)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::CreateStore { name: n, device_name, circles, .. } => {
+            Self::CreateStore { name: n, device_name, person, circle, circles, .. } => {
                 name(n)?;
                 name(device_name)?;
-                circles.iter().try_for_each(|circle| name(&circle.name))
+                name(person)?;
+                circle.validate()?;
+                circles.iter().try_for_each(NewCircle::validate)
             }
             Self::AdmitMember { device_name, person, circle, .. } => {
                 name(device_name)?;
@@ -369,7 +390,7 @@ macro_rules! store_changes {
     };
 }
 store_changes!(
-    0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash, circles },
+    0 => CreateStore { store, name => crate::wire::get_name, admin, device_name => crate::wire::get_name, key, key_hash, person => crate::wire::get_name, circle, circles },
     1 => AdmitMember { member, keys, role, access, device, device_name => crate::wire::get_name, person => crate::wire::get_name, circle },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },

@@ -1,6 +1,7 @@
 //! The app's write for a member's device as its registration applies (§13.2):
 //! the person's profile, written in the transaction that first applies the
-//! device's registration, from the facts of its member's latest admission.
+//! device's registration, from the facts of its member's latest admission, or
+//! of slot 1 for the store's creator (§10.3).
 
 use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
@@ -12,15 +13,17 @@ use crate::{
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 use sqlive::rusqlite::{Params, Row};
 
-/// The facts of a member's latest admission, which the joining write reads
-/// (§13.2).
+/// The facts of a member's latest admission, or of slot 1 for the store's
+/// creator, which the joining write reads (§10.3, §13.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Joining {
     /// The member whose device registers.
     pub member: MemberId,
-    /// The name the member's join request carried; none after a recovery.
+    /// The name the member's join request carried, or the creator's
+    /// `create_store` was given; none after a recovery.
     pub person: Option<String>,
-    /// The circle their latest admission made.
+    /// The circle their latest admission made, or the creator's private
+    /// circle slot 1 made.
     pub circle: CircleId,
 }
 
@@ -101,9 +104,8 @@ impl Registering<'_> {
 }
 
 /// The joining write the transaction that commits `state` owes, if any: the
-/// app registered one, this device is a device of an active member that holds
-/// the facts of an admission, and the state the database holds doesn't
-/// register it yet. Read before the transaction begins, so the write runs in
+/// app registered one, this device is a device of an active member, and the
+/// state the database holds doesn't register it yet. Read before the transaction begins, so the write runs in
 /// the one transaction that first applies the registration, and in none after
 /// it (§13.2).
 pub(crate) fn owed<'a>(
@@ -128,9 +130,7 @@ pub(crate) fn owed<'a>(
     else {
         return Ok(None);
     };
-    let Some(joined) = &member.joined else {
-        return Ok(None);
-    };
+    let joined = &member.joined;
     Ok(Some(Registering {
         hook,
         joining: Joining {

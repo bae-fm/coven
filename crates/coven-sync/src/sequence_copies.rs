@@ -60,15 +60,16 @@ pub(crate) fn required_copies(
             .filter(|route| route.member != *member)
             .collect(),
         // Store creation carries the creator's copy of the first store key
-        // and of each circle's first key (§10.3).
-        StoreChange::CreateStore { key, admin, circles, .. } => {
+        // and of each circle's first key, her private circle's among them
+        // (§10.3).
+        StoreChange::CreateStore { key, admin, .. } => {
             let mut copies = vec![KeyCopyPrefix {
                 audience: Audience::Store,
                 key: *key,
                 member: author,
                 sealing: admin.sealing,
             }];
-            copies.extend(circles.iter().map(|circle| KeyCopyPrefix {
+            copies.extend(change.created_circles().map(|circle| KeyCopyPrefix {
                 audience: Audience::Circle(circle.circle),
                 key: circle.key,
                 member: author,

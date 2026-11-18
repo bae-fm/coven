@@ -813,6 +813,38 @@ async fn a_device_restored_after_the_joining_phone_was_lost_writes_the_profile()
     owner.close().await;
 }
 
+/// Ana created Household, and no profile of hers reached storage: her
+/// creating device registered no joining write, as a laptop lost before its
+/// write landed leaves none. Slot 1 recorded her name and private circle, so
+/// a tablet restored from her code runs the joining write with them, as a
+/// joiner's restored device does (§10.3, §13.2).
+#[tokio::test]
+async fn a_device_restored_for_the_stores_creator_writes_her_profile() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let ana = owner.code.member.to_string();
+    let circles = owner.handle.circles().list().await.unwrap();
+    let private = circles.iter().find(|circle| circle.name == "Private").unwrap().id.to_string();
+    let install = Installation::joining();
+    let (_, cancel) = watch::channel(false);
+    let tablet = restore_from_code(
+        install.authenticated_builder(&owner, owner.storage.clone()).await,
+        &owner.code.to_text().unwrap(),
+        owner.s3_credentials(),
+        "Ana's tablet",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        joining_runs(&tablet).await,
+        [(ana.clone(), Some("Ana".to_owned()), private.clone())]
+    );
+    assert_eq!(profiles(&tablet).await, [(ana, "Ana".to_owned(), private)]);
+    tablet.close().await.unwrap();
+    owner.close().await;
+}
+
 /// Carol's phone sent her profile, and she restores Household on a tablet:
 /// the tablet's registration runs the joining write, which finds the profile
 /// and writes nothing, so no write waits to be sent (§13.2).

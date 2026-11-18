@@ -1,3 +1,4 @@
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::tests::*;
 use coven_foundation::id_source::IdSource;
 use coven_merge::slot;
@@ -109,6 +110,8 @@ async fn a_circle_below_the_store_keeps_the_stores_snapshot_at_its_version() {
         ana.sync.pass().await.unwrap();
     }
     ana.sync.snapshot(Audience::Store).await.unwrap();
+    // The raise reached Ana's private circle too, which the floor names.
+    ana.sync.snapshot(Audience::Circle(private_circle(&ana).await)).await.unwrap();
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.sync.database.store_state().await.unwrap().reached(&Audience::Store), 2);
     assert_eq!(
@@ -205,6 +208,8 @@ async fn the_bodies_a_rebuild_reads_survive_the_deletion_walk() {
         ana.sync.pass().await.unwrap();
     }
     ana.sync.snapshot(Audience::Store).await.unwrap();
+    // The raise reached Ana's private circle too, which the floor names.
+    ana.sync.snapshot(Audience::Circle(private_circle(&ana).await)).await.unwrap();
     ana.sync.pass().await.unwrap();
     let (old_body, reset_body) = {
         let session = ana.sync.session.lock().await;

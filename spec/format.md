@@ -892,7 +892,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
-| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes \| circles:[NewCircle]`; only in an admission slot |
+| 0 | Create store | `store:uuid \| name:name \| admin:MemberKeys \| device_name:name \| key:uuid \| key_hash:32 bytes \| person:name \| circle:NewCircle \| circles:[NewCircle]`; only in an admission slot |
 | 1 | Admit member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess \| device:DeviceId \| device_name:name \| person:name \| circle:NewCircle`; only in an admission slot |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
@@ -927,16 +927,21 @@ what it needs to check itself.
 - Check the slot's signature with that key, and check the store id against the
   path's.
 - It records no storage access. Set up storage does, once storage exists.
+- `person` and `circle` are the creator's join facts, as an admit-member's are
+  a joiner's: her name, which follows the `name` rule (D2), and her private
+  circle, which the entry makes before `circles`, with her as its only member.
 - `circles` lists the circles the creator's first write asked for, in the order
   it asked: each is made as a Create circle entry makes it, with the creator as
   its first member, and its `key` is the circle's first key. A circle id that
-  repeats, or that names a circle already made, is refused.
+  repeats, or that names a circle already made, `circle`'s among them, is
+  refused.
 - It is an admission slot: its clear prefix carries one box for each key the
   entry introduces, the creator's own copy of the store key and of each circle's
-  first key, all routed to the creator's id and the `admin` pair's sealing key
-  and in increasing `(audience, key)` order (D9). The slot's own body is sealed
-  with the store key. The device decides these bytes when it creates the store,
-  before any storage exists, and keeps them as its attempt at slot 1 (§10.3).
+  first key, her private circle's among them, all routed to the creator's id and
+  the `admin` pair's sealing key and in increasing `(audience, key)` order (D9).
+  The slot's own body is sealed with the store key. The device decides these
+  bytes when it creates the store, before any storage exists, and keeps them as
+  its attempt at slot 1 (§10.3).
 
 ### Rules for each change
 
@@ -961,10 +966,11 @@ follows the `name` rule (D2). Recover-member records none, since the member
 already has a profile.
 
 A member's state keeps the facts of their latest admission: `person`, absent
-after a recover-member, and the circle it made. The store's creator, whom no
-admission made, has none. The facts are no new field of a snapshot: it carries
-the original admissions (D7.6), and every device rebuilds the state, the facts
-among it, by applying them. They appear in no column of `coven_members`. The
+after a recover-member, and the circle it made. Create store records the same
+facts for the store's creator: her `person` and her private `circle`. The facts
+are no new field of a snapshot: it carries the original creation and admissions
+(D7.6), and every device rebuilds the state, the facts among it, by applying
+them. They appear in no column of `coven_members`. The
 app's joining write reads them as each device of the member registers (§13.2).
 
 `NewCircle` is `circle:uuid | name:name | breaking_version:u32 | key:uuid |

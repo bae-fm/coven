@@ -196,11 +196,14 @@ pub fn creation_change() -> StoreChange {
         key: store_key().id(),
         key_hash: store_key().hash(),
         device_name: "D".into(),
+        person: "A".into(),
+        circle: created_circle(),
         circles: vec![],
     }
 }
 /// The slot-one fixture creating the store: an admission-kind slot whose
-/// prefix carries the creator's copy of the first store key (D6, D9).
+/// prefix carries the creator's copy of the first store key and of her
+/// private circle's first key (D6, D9).
 pub fn creation_slot() -> Vec<u8> {
     hex::decode(include_str!("../fixtures/sealed-creation.hex").trim()).unwrap()
 }
@@ -699,6 +702,16 @@ pub fn store_changes() -> Vec<StoreChange> {
             access: crate::MemberAccess::S3AccessKey { access_key_id: "fixture-access-key".into() },
         },
     ]
+}
+/// Ana's private circle, which the store's creation makes: its key's bytes
+/// are 21 repeated, and its copy is in the creation fixture's prefix.
+pub fn created_circle() -> NewCircle {
+    new_circle(10, 11, 21, "A")
+}
+/// Ana's private circle's first key, whose copy the creation fixture carries.
+pub fn created_circle_key() -> coven_crypto::CircleKey {
+    let circle = created_circle();
+    coven_crypto::CircleKey::from_bytes(circle.circle, circle.key, [21; 32])
 }
 /// The circle Ben's admission makes: its key's bytes are 19 repeated, and its
 /// copy is Ben's own copy in the admission fixture.

@@ -171,8 +171,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let mut status = handle.test_sync_status();
     handle.test_hold_passes(false).await;
     status.wait_for(|s| s.last_synced >= Some(clock.now())).await;
-    let circle = handle.circles().list().await.unwrap().remove(0);
-    assert_eq!((circle.id, circle.name.as_str()), (interrupted, "Interrupted"));
+    let circles = handle.circles().list().await.unwrap();
+    let circle = circles.iter().find(|circle| circle.id == interrupted).expect("the circle");
+    assert_eq!(circle.name, "Interrupted");
     crate::tests::landed(&handle, handle.circles().rename(circle.id, "Family").await.unwrap())
         .await;
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
@@ -204,7 +205,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     ));
     assert!(keys.unlock().unwrap().unwrap().circle_key_ids(circle.id).next().is_some());
     crate::tests::landed(&handle, handle.circles().delete(circle.id).await.unwrap()).await;
-    assert!(handle.circles().list().await.unwrap().is_empty());
+    assert!(handle.circles().list().await.unwrap().iter().all(|kept| kept.id != circle.id));
     // A deleted circle has no members left to list.
     assert!(handle.circles().members(circle.id).await.unwrap().is_empty());
     handle.close().await.unwrap();
@@ -500,7 +501,7 @@ async fn a_builder_left_alone_runs_one_upload_and_one_download_at_a_time() {
         .synced_tables(tables())
         .namespaces(namespaces())
         .migrations(migrations())
-        .create_store("Household", "Test device", &[], |_, _| Ok(()))
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap();
     let limits = handle.transfer_limits();
@@ -571,8 +572,10 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     };
     let builder =
         || app.builder().synced_tables(vec![]).migrations(vec![]).sqlite_settings(settings.clone());
-    let handle =
-        builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Recipes", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let chosen = |effect: SqliteSettingsInEffect| {
         (effect.cache_size, effect.wal_autocheckpoint, effect.page_size, effect.auto_vacuum)
     };
@@ -607,8 +610,10 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
             )])
             .collation("reversed", 1, |left: &str, right: &str| right.cmp(left))
     };
-    let handle =
-        builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Recipes", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     handle
         .write(|sql| {
             sql.execute(
@@ -652,8 +657,10 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
                 Ok(arguments.get::<String>(0)?.to_lowercase())
             })
     };
-    let handle =
-        builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = builder()
+        .create_store("Recipes", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')", [])?;
@@ -745,7 +752,7 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
         }
     };
     let created = builder(FileProtection::CompleteUnlessOpen)
-        .create_store("Household", "Test device", &[], |_, _| Ok(()))
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await;
     if support == ProtectionSupport::Locked {
         // While the device is locked, the store's record, made
@@ -759,8 +766,10 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
         assert!(app.stores().await.unwrap().is_empty());
         // A store made without a class can't be opened for use with
         // `Complete` while the device is locked.
-        let plain_handle =
-            plain().create_store("Work", "Test device", &[], |_, _| Ok(())).await.unwrap();
+        let plain_handle = plain()
+            .create_store("Work", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+            .await
+            .unwrap();
         let id = plain_handle.store_id();
         plain_handle.close().await.unwrap();
         let opened = builder(FileProtection::Complete).open(id, |_| ()).await;
@@ -799,13 +808,15 @@ async fn refused_on_a_volume_without_classes(
     builder: impl Fn(FileProtection) -> CovenBuilder,
 ) {
     let created = builder(FileProtection::CompleteUnlessOpen)
-        .create_store("Household", "Test device", &[], |_, _| Ok(()))
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await;
     let error = created.map(drop).unwrap_err();
     assert!(refused_class(&error), "{error:?}");
     assert!(app.stores().await.unwrap().is_empty());
-    let handle =
-        plain().create_store("Household", "Test device", &[], |_, _| Ok(())).await.unwrap();
+    let handle = plain()
+        .create_store("Household", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
+        .await
+        .unwrap();
     let id = handle.store_id();
     handle.close().await.unwrap();
     let error = builder(FileProtection::Complete).open(id, |_| ()).await.map(drop).unwrap_err();

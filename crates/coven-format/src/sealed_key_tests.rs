@@ -303,8 +303,9 @@ fn admission_fixture_is_a_signed_slot_whose_box_opens_at_its_index() {
 }
 
 /// Ana's device creates the store at slot 1: the prefix is an admission's,
-/// carrying her own copy of the store key at index 0, and the body is the
-/// entry creating the store (D6, D9, D11).
+/// carrying her own copy of the store key at index 0 and of her private
+/// circle's first key at index 1, and the body is the entry creating the
+/// store (D6, D9, D11).
 #[test]
 fn creation_fixture_is_an_admission_slot_whose_box_opens_for_its_creator() {
     let bytes = f::creation_slot();
@@ -314,17 +315,21 @@ fn creation_fixture_is_an_admission_slot_whose_box_opens_for_its_creator() {
         let SlotKind::Admission { copies, own: None } = &envelope.prefix.kind else {
             return Err("expected an admission".into());
         };
-        let [copy] = copies.as_slice() else {
-            return Err("expected one copy".into());
+        let [store, circle] = copies.as_slice() else {
+            return Err("expected two copies".into());
         };
-        let context = SlotObjectPrefix::copy_context(
-            envelope.prefix.format,
-            envelope.prefix.key,
-            BoxPlace::Admission(0),
-            &copy.routing,
-        )?;
-        let key = copy.open_store_key(&f::identity(), path.as_str(), &context)?;
+        let context = |index, copy: &crate::sealed_key::CopyBox| {
+            SlotObjectPrefix::copy_context(
+                envelope.prefix.format,
+                envelope.prefix.key,
+                BoxPlace::Admission(index),
+                &copy.routing,
+            )
+        };
+        let key = store.open_store_key(&f::identity(), path.as_str(), &context(0, store)?)?;
         assert_eq!(key.id(), f::store_key().id());
+        let key = circle.open_circle_key(&f::identity(), path.as_str(), &context(1, circle)?)?;
+        assert_eq!(key.hash(), f::created_circle_key().hash());
         let mut hash = coven_crypto::ObjectHasher::new();
         hash.update(&bytes[..bytes.len() - 64]);
         f::member().signing.verify_object(path.as_str(), &hash.finish(), &envelope.signature)?;

@@ -170,7 +170,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session", "Test device", &[], |_, _| Ok(()))
+        .create_store("session", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap();
     let directory = app.store_dir(&handle.store_id());
@@ -336,15 +336,11 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
         handle.subscribe_members().next_inline().await.expect("the live query answers").unwrap(),
         members
     );
-    assert!(handle.circles().list().await.unwrap().is_empty());
-    assert!(handle
-        .circles()
-        .subscribe_list()
-        .next_inline()
-        .await
-        .expect("the live query answers")
-        .unwrap()
-        .is_empty());
+    // The creator's private circle, which slot 1 made, is her only circle.
+    let circles = handle.circles().list().await.unwrap();
+    assert_eq!(circles.iter().map(|circle| circle.name.as_str()).collect::<Vec<_>>(), ["Private"]);
+    let listed = handle.circles().subscribe_list().next_inline().await;
+    assert_eq!(listed.expect("the live query answers").unwrap(), circles);
     handle.close().await.unwrap();
     assert!(matches!(handle.members().await, Err(CovenError::Database(DbError::StoreClosed))));
 }
@@ -402,7 +398,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
         .storage_connector(connector.clone())
-        .create_store("session", "Test device", &[], |_, _| Ok(()))
+        .create_store("session", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap();
     let member = identity.keys.lock().unwrap().as_ref().unwrap().member();
@@ -502,7 +498,7 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     let handle = builder(&app)
         .key_custody(CustodyChoice::Custom(keys.clone()))
         .identity_custody(CustodyChoice::Custom(identity.clone()))
-        .create_store("session", "Test device", &[], |_, _| Ok(()))
+        .create_store("session", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap();
     let clone = handle.clone();
@@ -880,19 +876,21 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
         async move { handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id }
     };
     let (ben, carol) = (member(1).await, member(2).await);
+    let circles = ana.circles().list().await.unwrap();
+    let private = circles.iter().find(|circle| circle.name == "Private").expect("Ana's own").id;
     let gifts = crate::tests::circle(ana, "Gifts").await;
     let garden = crate::tests::circle(ana, "Garden").await;
     let bens = crate::tests::circle(&network.devices[1].handle, "Ben's own").await;
     let mut listed = ana.circles().subscribe_list();
     let mut gifts_members = ana.circles().subscribe_members(gifts);
-    assert_eq!(listed.next_inline().await.expect("answers").unwrap().len(), 2);
+    assert_eq!(listed.next_inline().await.expect("answers").unwrap().len(), 3);
     assert_eq!(gifts_members.next_inline().await.expect("answers").unwrap().len(), 1);
     for who in [&ben, &carol] {
         crate::tests::landed(ana, ana.circles().add_member(gifts, who).await.unwrap()).await;
     }
     network.sync(0).await;
     let circles = ana.circles().list().await.unwrap();
-    let mut expected = vec![gifts, garden];
+    let mut expected = vec![private, gifts, garden];
     expected.sort();
     assert_eq!(
         circles.iter().map(|c| c.id).collect::<Vec<_>>(),
@@ -931,7 +929,8 @@ async fn circle_lists_and_members_follow_applied_slots_live() {
             break value;
         }
     };
-    assert_eq!(live.iter().map(|c| c.id).collect::<Vec<_>>(), [gifts]);
+    let kept: std::collections::BTreeSet<_> = live.iter().map(|c| c.id).collect();
+    assert_eq!(kept, [private, gifts].into());
     network.close().await;
 }
 

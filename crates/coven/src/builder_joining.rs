@@ -9,11 +9,12 @@ pub(super) type JoiningHook =
 impl CovenBuilder {
     /// The app's write for a member's device as its registration applies
     /// (E1): it runs in the transaction that first applies the registration
-    /// of one of this person's devices, on a join's admission, a snapshot
-    /// that covers it, a restore, a pairing or a reset's installation, as a
-    /// local write whose `read_through` is the slot that transaction applies
-    /// through. It reads the store as that transaction leaves it, with the
-    /// facts of its member's latest admission (`Joining`), and runs on every
+    /// of one of this person's devices, on slot 1 as the store is created, a
+    /// join's admission, a snapshot that covers it, a restore, a pairing or a
+    /// reset's installation, as a local write whose `read_through` is the
+    /// slot that transaction applies through. It reads the store as that
+    /// transaction leaves it, with the facts of its member's latest admission
+    /// or, for the store's creator, of slot 1 (`Joining`), and runs on every
     /// device of the member once each, so the app writes it to change
     /// nothing a second time. An error fails the transaction: the slot
     /// doesn't apply, the pass reports it, and the next pass tries again.

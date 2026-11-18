@@ -368,8 +368,8 @@ before it, a slot below carries a copy to the member's current sealing key.
   (`circleFree`), and the member alone reads it. The circle's first reader has
   its copy from the slot that makes the circle, and the claims above are
   unchanged.
-- `creation_carries_own_copies`: creation makes the circles its creating write asked for, each read
-  by the creator alone, so slot 1 introduces the store's first key and each circle's first key and
+- `creation_carries_own_copies`: creation makes the creator's private circle and the circles her
+  creating write asked for, each read by the creator alone, so slot 1 introduces the store's first key and each circle's first key and
   carries the creator's copy of every one. A circle's first reader has its copy from the slot that
   makes it, and the claims above hold of the circles' keys from slot 1 on.
 - `leave_selects_new_key`: the entry that removes a member from a circle

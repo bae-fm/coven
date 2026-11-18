@@ -1,6 +1,7 @@
 //! A circle's rebuild in the pass: the history it starts from and the marker it
 //! restarts under (§16.6, §18.3).
 
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::sequence_raises::tests::refuse_snapshots;
 use crate::sequence_sync::tests::*;
 use coven_database::Replacement;
@@ -171,6 +172,8 @@ async fn a_floor_reload_leaves_a_circle_below_the_version_gated_for_its_rebuild(
     let state = ana.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&Audience::Store), 2);
     ana.sync.snapshot(Audience::Store).await.unwrap();
+    // The raise reached Ana's private circle too, which the floor names.
+    ana.sync.snapshot(Audience::Circle(private_circle(&ana).await)).await.unwrap();
     group.clock.set(floor_clock());
     {
         let mut session = ana.sync.session.lock().await;

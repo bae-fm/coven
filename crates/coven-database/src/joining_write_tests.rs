@@ -47,7 +47,7 @@ async fn open(
 
 /// The state after an admission that registered `store`'s device for a
 /// member whose admission recorded `joined`.
-fn registered(store: &TestStore, joined: Option<Joined>) -> StoreState {
+fn registered(store: &TestStore, joined: Joined) -> StoreState {
     let mut state = StoreState::default();
     state.members.insert(
         member(7),
@@ -66,8 +66,8 @@ fn registered(store: &TestStore, joined: Option<Joined>) -> StoreState {
     state
 }
 
-fn dan() -> Option<Joined> {
-    Some(Joined { person: Some("Dan".into()), circle: CIRCLE })
+fn dan() -> Joined {
+    Joined { person: Some("Dan".into()), circle: CIRCLE }
 }
 
 fn registration() -> StoreChange {
@@ -133,18 +133,6 @@ async fn a_failing_joining_write_leaves_the_registration_unapplied_until_it_succ
 }
 
 #[tokio::test]
-async fn a_member_no_admission_made_has_no_joining_write() {
-    let store = TestStore::new();
-    let runs = Arc::new(AtomicUsize::new(0));
-    let db = open(&store, recording(&runs)).await;
-    db.admin_fixture(registration(), registered(&store, None), None).await.unwrap();
-    assert_eq!(db.applied_slot().await.unwrap(), 1);
-    assert_eq!(runs.load(Ordering::SeqCst), 0);
-    assert!(records(&db).is_empty());
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn another_devices_registration_runs_no_joining_write_here() {
     let store = TestStore::new();
     let runs = Arc::new(AtomicUsize::new(0));
@@ -170,7 +158,7 @@ async fn a_recovery_runs_the_write_with_no_person_and_its_new_circle() {
     })
     .await;
     let recovered = Joined { person: None, circle: CIRCLE };
-    db.admin_fixture(registration(), registered(&store, Some(recovered)), None).await.unwrap();
+    db.admin_fixture(registration(), registered(&store, recovered), None).await.unwrap();
     assert_eq!(
         *seen.lock().unwrap(),
         [Joining { member: member(7), person: None, circle: CIRCLE }]

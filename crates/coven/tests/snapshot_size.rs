@@ -75,7 +75,7 @@ async fn notes_store_builder(
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, body TEXT NOT NULL);",
         )])
         .storage_connector(storage.clone())
-        .create_store("Notes", "Test device", &[], |_, _| Ok(()))
+        .create_store("Notes", "Test device", "Ana", |_| "Private".into(), &[], |_, _| Ok(()))
         .await
         .unwrap();
     handle

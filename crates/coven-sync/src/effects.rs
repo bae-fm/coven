@@ -169,8 +169,11 @@ pub(crate) fn checked_change(
     }
     let mut next = state.clone();
     match change {
-        CreateStore { store, name, admin, device_name, circles, .. } => {
+        CreateStore { store, name, admin, device_name, person, circle, .. } => {
             next.store = Some(StoreIdentity { id: *store, name: name.clone(), named_at: slot });
+            // Slot 1 records the creator's facts as an admission records a
+            // joiner's, so each device of hers runs the joining write (§13.2).
+            let joined = Joined { person: Some(person.clone()), circle: circle.circle };
             next.members.insert(
                 *author,
                 StoreMember {
@@ -178,7 +181,7 @@ pub(crate) fn checked_change(
                     access: None,
                     role: MemberRole::Admin,
                     removed: false,
-                    joined: None,
+                    joined,
                 },
             );
             next.bound_keys.insert(*admin);
@@ -190,7 +193,7 @@ pub(crate) fn checked_change(
                     state: DeviceState::Active,
                 },
             );
-            for circle in circles {
+            for circle in change.created_circles() {
                 circle_effects::create(
                     &mut next,
                     circle.circle,
@@ -245,7 +248,7 @@ pub(crate) fn checked_change(
                     access: Some(access.clone()),
                     role: *role,
                     removed: false,
-                    joined: Some(joined),
+                    joined,
                 },
             );
             next.bound_keys.insert(*keys);
@@ -283,7 +286,7 @@ pub(crate) fn checked_change(
             }
             let recovered = next.members.get_mut(id).expect("checked target");
             recovered.keys = *keys;
-            recovered.joined = Some(Joined { person: None, circle: circle.circle });
+            recovered.joined = Joined { person: None, circle: circle.circle };
             if let Some(access) = access {
                 recovered.access = Some(access.clone());
             }

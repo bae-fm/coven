@@ -433,6 +433,11 @@ def new_circle(circle, key, key_bytes, name):
             + hashlib.sha256(bytes([key_bytes]) * 32).digest())
 
 
+def created_circle():
+    """Ana's private circle, which the creation makes; its key's bytes are 21 repeated."""
+    return new_circle(10, 11, 21, b"A")
+
+
 def admitted_circle():
     """The circle Ben's admission makes; its key's bytes are 19 repeated."""
     return new_circle(6, 7, 19, b"B")
@@ -455,7 +460,7 @@ def changes(sodium):
     s3_key = b"\x01" + text(b"fixture-access-key")
     return [
         b"\x00" + STORE + text(b"S") + pair(sodium, 0x33) + text(b"D")
-        + bytes([1]) * 16 + initial_hash + collection([]),
+        + bytes([1]) * 16 + initial_hash + text(b"A") + created_circle() + collection([]),
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test")
         + u64(2) + text(b"D") + text(b"P") + admitted_circle(),
         b"\x02" + BEN,
@@ -687,7 +692,8 @@ def admission(sodium):
 
 def creation(sodium):
     """Ana's device creating the store at slot 1: the entry registers her and
-    her device, and the prefix carries her copy of the store key at index 0
+    her device and makes her private circle, and the prefix carries her copy
+    of the store key at index 0 and of her circle's first key at index 1
     (D6, D9, D11)."""
     path = STORE_TEXT + b"seq/1"
     key_id = bytes([1]) * 16
@@ -695,7 +701,14 @@ def creation(sodium):
     fixed = bytes([33, 0, 1, 4]) + key_id
     sealed = anonymous_box(sodium, b"store", path, fixed + u32(0) + routing,
                            key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
-    prefix = fixed + u32(1) + routing + sealed[:56] + u32(48) + sealed[56:] + b"\x00"
+    circle, circle_key = bytes([10]) * 16, bytes([11]) * 16
+    circle_routing = b"\x01" + circle + circle_key + ANA + sealing_public(sodium, 0x33)
+    circle_plain = circle + circle_key + bytes([21]) * 32
+    circle_sealed = anonymous_box(sodium, b"circle", path, fixed + u32(1) + circle_routing,
+                                  circle_plain, 0x33, 0x5A, 0x49)
+    prefix = (fixed + u32(2) + routing + sealed[:56] + u32(48) + sealed[56:]
+              + circle_routing + circle_sealed[:56] + u32(len(circle_plain))
+              + circle_sealed[56:] + b"\x00")
     plaintext = slot_header(1, 1) + frame(4, changes(sodium)[0])
     body = chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext)
     return signed(sodium, path, prefix + body)

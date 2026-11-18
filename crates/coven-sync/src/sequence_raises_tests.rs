@@ -1,6 +1,7 @@
 //! Which device raises a circle, and the writes that wait for a circle's
 //! raise.
 
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::tests::*;
 use coven_database::{DbError, Replacement, StoreDatabase};
 use coven_merge::Audience;
@@ -266,8 +267,13 @@ async fn an_addition_moves_a_raise_journaled_before_its_snapshot() {
 
     group.version.store(3, std::sync::atomic::Ordering::SeqCst);
     let ana = group.reopen(ana).await;
+    // The store's capture and Ana's private circle's each move to 3.
     let moved = ana.database().raise_captures().await.unwrap();
-    assert_eq!(moved.iter().map(|capture| capture.version).collect::<Vec<_>>(), [3]);
+    let moved: Vec<_> =
+        moved.iter().map(|capture| (capture.audience.clone(), capture.version)).collect();
+    let private = Audience::Circle(private_circle(&ana).await);
+    assert_eq!(moved.len(), 2);
+    assert!(moved.contains(&(Audience::Store, 3)) && moved.contains(&(private, 3)), "{moved:?}");
     ana.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     let state = ana.database().store_state().await.unwrap();
@@ -841,18 +847,7 @@ async fn a_second_breaking_migration_does_not_capture_a_circle_awaiting_its_rebu
 /// circle of his below the store's version: retention keeps what a rebuild of
 /// a circle below the store would read until he does (§16.6).
 pub(crate) async fn raise_admitted_circle(ben: &Device, version: u32) {
-    let own = {
-        let session = ben.sync.session.lock().await;
-        let state = &session.history.state;
-        let store = state.reached(&coven_merge::Audience::Store);
-        state
-            .circles
-            .keys()
-            .copied()
-            .find(|circle| state.reached(&coven_merge::Audience::Circle(*circle)) < store)
-            .expect("the circle Ben's admission made")
-    };
-    let audience = coven_merge::Audience::Circle(own);
+    let audience = coven_merge::Audience::Circle(private_circle(ben).await);
     ben.sync.raise_schema(audience.clone(), version).await.unwrap();
     ben.sync.snapshot(audience).await.unwrap();
 }

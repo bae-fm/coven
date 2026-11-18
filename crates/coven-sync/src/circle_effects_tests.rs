@@ -436,8 +436,8 @@ fn an_admission_repeated_with_its_circle_present_is_already_done() {
 }
 
 /// An admission records the person's name and circle in the member's state,
-/// which a device of theirs reads as it registers; a recovery records the
-/// new circle and no name (§13.2).
+/// which a device of theirs reads as it registers, as slot 1 records the
+/// creator's; a recovery records the new circle and no name (§10.3, §13.2).
 #[test]
 fn an_admission_records_its_members_facts_and_a_recovery_replaces_them() {
     use coven_database::Joined;
@@ -445,10 +445,13 @@ fn an_admission_records_its_members_facts_and_a_recovery_replaces_them() {
     let state = apply(&household(), 1, admission.clone()).unwrap().unwrap().state;
     assert_eq!(
         state.members[&id(4)].joined,
-        Some(Joined { person: Some("Person".into()), circle: admission_circle(4).circle })
+        Joined { person: Some("Person".into()), circle: admission_circle(4).circle }
     );
-    // The store's creator was made by no admission.
-    assert_eq!(state.members[&id(1)].joined, None);
+    // Slot 1 recorded the store's creator's facts as an admission does.
+    assert_eq!(
+        state.members[&id(1)].joined,
+        Joined { person: Some("Ana".into()), circle: admission_circle(1).circle }
+    );
     let recovery = StoreChange::RecoverMember {
         member: id(4),
         expected: keys(4),
@@ -461,7 +464,7 @@ fn an_admission_records_its_members_facts_and_a_recovery_replaces_them() {
     let recovered = apply(&state, 1, recovery).unwrap().unwrap().state;
     assert_eq!(
         recovered.members[&id(4)].joined,
-        Some(Joined { person: None, circle: admission_circle(9).circle })
+        Joined { person: None, circle: admission_circle(9).circle }
     );
 }
 

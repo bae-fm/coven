@@ -609,7 +609,8 @@ async fn no_ordinary_snapshot_is_captured_while_a_raise_of_its_audience_waits() 
         .unwrap();
     group.version.store(2, std::sync::atomic::Ordering::SeqCst);
     let ana = group.reopen(ana).await;
-    assert_eq!(ana.sync.database.raise_captures().await.unwrap().len(), 1);
+    // The store's raise, and her private circle's.
+    assert_eq!(ana.sync.database.raise_captures().await.unwrap().len(), 2);
     let announced = async |ana: &Device| ana.sync.session.lock().await.history.announcements.len();
     let before = announced(&ana).await;
 

@@ -1,3 +1,4 @@
+use crate::creation::tests::private_circle;
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_database::LoadStep;
@@ -935,8 +936,10 @@ async fn an_old_app_starting_from_a_newer_snapshot_needs_an_update() {
     let state = ana.sync.database.store_state().await.unwrap();
     assert_eq!(state.reached(&coven_merge::Audience::Store), 2);
     // Past the grace period, the floor names a snapshot after the raise, and
-    // the slots it covers go, the raise's own among them.
+    // the slots it covers go, the raise's own among them. Her private
+    // circle, raised with the store, needs its own snapshot too.
     ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Circle(private_circle(&ana).await)).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
             + crate::sequence_sync::sequence_retention::GRACE

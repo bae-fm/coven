@@ -30,6 +30,14 @@ pub(crate) fn keys(seed: u8) -> coven_format::admin::MemberPublicKeys {
 pub(crate) fn member(seed: u8) -> coven_foundation::id_source::MemberId {
     coven_foundation::id_source::MemberId(uuid::Uuid::from_bytes([seed; 16]))
 }
+/// What member `seed`'s admission recorded: a name, and a private circle
+/// whose id is `seed` repeated.
+pub(crate) fn joined(seed: u8) -> crate::Joined {
+    crate::Joined {
+        person: Some(format!("Person {seed}")),
+        circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_bytes([seed; 16])),
+    }
+}
 
 impl TestStore {
     pub(crate) fn new() -> Self {
@@ -99,7 +107,7 @@ impl TestStore {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
-                    joined: None,
+                    joined: crate::tests::joined(seed),
                 });
                 state.devices.entry(device).or_insert(crate::store_state::StoreDevice {
                     member,
@@ -130,7 +138,7 @@ impl TestStore {
                     }),
                     role: coven_format::admin::MemberRole::Admin,
                     removed: false,
-                    joined: None,
+                    joined: crate::tests::joined(1),
                 });
                 let device =
                     state.devices.entry(device).or_insert(crate::store_state::StoreDevice {

@@ -8,7 +8,7 @@ use coven_format::{
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     files::StoreDirectories,
-    id_source::{DeviceId, IdSource, MemberId, SequentialIds, StoreId},
+    id_source::{CircleId, DeviceId, IdSource, MemberId, SequentialIds, StoreId},
 };
 use coven_merge::slot;
 use coven_merge::{Audience, Change, ColumnValue, Operation, Timestamp};
@@ -504,7 +504,10 @@ async fn the_first_counted_creation_keeps_the_owner() {
                     }),
                     role: coven_format::admin::MemberRole::Member,
                     removed: false,
-                    joined: None,
+                    joined: Joined {
+                        person: None,
+                        circle: CircleId(uuid::Uuid::from_bytes([seed; 16])),
+                    },
                 },
             );
             state.devices.insert(
