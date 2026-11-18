@@ -150,10 +150,22 @@ theorem recovery_holders :
     holders household (keysAt household recovery 14) (rosterAt household recovery 14) giftsKey ben =
       [(carol, true)] := by decide +kernel
 
-/-- Ana removes Carol, Gifts' only other member, then recovers Ben. -/
+/-- **A recovery takes its member out of their lone circles.** Ben alone read
+his own circle, whose keys only his lost pair opened, so after Ana's recovery
+at slot 9 he no longer reads it; he reads Gifts, which Carol is in too, and
+his new circle, with his new sealing key (§13.3). -/
+theorem recovery_leaves_lone_circle :
+    (rosterAt household recovery 9).current benCircleKey.audience ben = none ∧
+      (rosterAt household recovery 9).current gifts ben = some 21 ∧
+      (rosterAt household recovery 9).current benNewCircleKey.audience ben = some 21 := by
+  decide +kernel
+
+/-- Ana recovers Ben, then removes Carol, Gifts' only other member, before
+Carol's pass sends Ben the Gifts key. Ben still reads Gifts: Carol was in it
+when the recovery applied, so the recovery kept him there. -/
 def orphan : Nat → CopyOrder.Slot Nat Nat
-  | 9 => .entry ana storeKey (.removeMember carol)
-  | 10 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
+  | 9 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
+  | 10 => .entry ana storeKey (.removeMember carol)
   | k => if k < 9 then recovery k else .writes storeKey []
 
 theorem orphan_follows : Follows household orphan 10 := by

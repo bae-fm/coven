@@ -394,8 +394,10 @@ before it, a slot below carries a copy to the member's current sealing key.
   holds, so no history creates a holder where none was. `no_holder_never_clears`:
   with no other holder at the stop and the asker holding no copy, it never holds
   the key, however the history goes on. `recovery_holders` is Ben's phone at
-  slot 14 naming Carol; `orphan_never_clears` is the same recovery with Carol
-  removed first: no holder, and no followed history ends the stop. A recovery by
+  slot 14 naming Carol; `orphan_never_clears` is the same recovery followed by
+  Carol's removal before her pass sends the copy: no holder, and no followed
+  history ends the stop. Ben still reads Gifts there, since Carol was in it
+  when the recovery applied. A recovery by
   an admin whose only copies of a key are sealed to a pair it replaced is not
   legal here: the admin can't seal it, though `required` lists it.
 - `races_follow`, `races_keep_order`, `stale_rotation_illegal`
@@ -426,6 +428,12 @@ before it, a slot below carries a copy to the member's current sealing key.
   prefix, scanning through it, finds a copy of every key its stop needs.
   The model doesn't say when that member's pass runs; until it does, the
   reader waits.
+- `recovery_leaves_lone_circle`: a recovery takes its member out of every
+  circle they alone read (`Roster.alone`), whose keys no device holds any more
+  once the recovery replaces the only pair that opened them (coven.md §13.3);
+  the member keeps reading every other audience, with the new pair. Ben,
+  recovered at slot 9, no longer reads his own old circle, and still reads
+  Gifts, which Carol is in too, and his new circle.
 
 `Follows` allows more than Rust does, as it asks nothing of fresh sealing keys
 or a write's authority, so `store_copy_precedes_need` and
@@ -603,13 +611,16 @@ others stay is refused as `NotAllowed` (`mayLeave`).
   and its deletion slot at every later prefix, so no later entry adds a member
   to it or takes the deletion back.
 - `admission_makes_circle`, `used_circle_refuses_admission`,
-  `admission_repeat_unchanged`, `recovery_keeps_old_circles`: an admission of
-  a new person or a recovery of a member makes the member's circle in its own
-  slot, with the member alone in it; an id already used, live or deleted,
-  refuses the entry; the same entry again changes nothing once the circle holds
-  the member under that name; and a recovery leaves the member's older
-  circles as they were. The Rust differential runs `admit` and `recover`
-  histories through the same reader.
+  `admission_repeat_unchanged`: an admission of a new person or a recovery of
+  a member makes the member's circle in its own slot, with the member alone in
+  it; an id already used, live or deleted, refuses the entry; and the same
+  entry again changes nothing once the circle holds the member under that
+  name.
+- `recovery_deletes_lone_circles`, `recovery_keeps_shared_circles`: a recovery
+  takes its member out of every live circle they alone are in, whose keys no
+  device holds any more, which deletes the circle at the recovery's slot; a
+  circle with another member keeps them (coven.md §13.3). The Rust
+  differential runs `admit` and `recover` histories through the same reader.
 
 These hold for every start whose circles keep `Wf`: a deleted circle was made
 and has no members, and a live one has a member. A store with no circles

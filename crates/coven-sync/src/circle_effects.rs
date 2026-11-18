@@ -1,7 +1,8 @@
 //! What a circle's own entries do once `checked_change` has admitted them, and
-//! what a member's removal from the store does to the circles it was in
-//! (§15.5, §15.8, §15.9). A circle left empty is deleted at that slot, whether
-//! its last member left it or was removed from the store.
+//! what a member's removal from the store, or a recovery of their keys, does
+//! to the circles it was in (§13.3, §15.5, §15.8, §15.9). A circle left empty
+//! is deleted at that slot, whether its last member left it, was removed from
+//! the store or was recovered with new keys.
 
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{StoreCircle, StoreState};
@@ -99,6 +100,25 @@ pub(crate) fn leave_all(next: &mut StoreState, member: &MemberId, slot: Slot) {
         .copied()
         .collect();
     for circle in live {
+        leave(next, circle, member, slot);
+    }
+}
+
+/// A recovery replaces `member`'s keys, and nobody else holds the keys of a
+/// live circle `member` alone is in, so no device could open it again: the
+/// member leaves each such circle at `slot`, which deletes it (§13.3).
+pub(crate) fn leave_lone(next: &mut StoreState, member: &MemberId, slot: Slot) {
+    let lone: Vec<CircleId> = next
+        .circles
+        .iter()
+        .filter(|(circle, record)| {
+            !next.circle_deletions.contains_key(circle)
+                && record.members.len() == 1
+                && record.members.contains(member)
+        })
+        .map(|(circle, _)| *circle)
+        .collect();
+    for circle in lone {
         leave(next, circle, member, slot);
     }
 }

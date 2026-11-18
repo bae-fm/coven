@@ -4298,8 +4298,9 @@ finds a copy of every key the stop needs
   first. Nobody becomes a holder while the phone waits: a key with no copy at
   the stop gets none later
   ([`holders_from_holders`](proofs/sequence/CovenSequence/CopyOrder.lean)). Ana
-  removes Carol, Gifts' only other member, and then recovers Ben. His new phone
-  has no holder to name and no copy of the Gifts key will ever land
+  recovers Ben, then removes Carol, Gifts' only other member, before Carol's
+  pass sends his copy. His new phone has no holder to name and no copy of the
+  Gifts key will ever land
   ([`no_holder_never_clears`](proofs/sequence/CovenSequence/CopyOrder.lean)),
   so its status says failed instead of waiting. The key's earlier history stays
   unreadable to Ben however he installs. The phone knows the holders only from
@@ -5000,8 +5001,8 @@ makes that key with the request and keeps it nowhere else: the saved request
 holds the copy, which Dan's member keys open, and a join that resumes sends the
 same circle. A new person's circle is their private one. A recovered member's
 old private circle has them as its only member, under a sealing key they lost,
-so no device can read or write it again (§13.3); the recovery gives them a new
-one. The device id is the joining installation's own, fixed when the join
+so the recovery takes them out of it, which deletes it, and gives them a new
+one (§13.3). The device id is the joining installation's own, fixed when the join
 begins. The provider sees only an encrypted object under the
 inviting device's id and the invite's id. Dan's phone reads from the code
 whether the invite admits a new person or a member's new keys, and refuses to
@@ -5632,7 +5633,8 @@ Dan is a member by then, or if one of its own invites names his account too
 provider's member list with history: that would take away a share the person
 made outside coven.
 
-Recovering an existing member keeps their role, circles and device records.
+Recovering an existing member keeps their role, device records and every circle
+someone else is in; it takes them out of each circle they alone are in (§13.3).
 The admission rebinds their pair and registers the new installation's fresh
 device; the member's earlier devices are gone for good from that slot
 (§14.1). Cleaning up an `add_device_for` invite takes back only what that invite newly
@@ -5847,11 +5849,14 @@ Ben loses every device and his restore code. An admin invites him again, to his
 *existing* member id, with `add_device_for`. Approving recovers him in one
 admission, which replaces his keys and registers his new device:
 
-- his role, circles and existing device ids stay attached to his id; those
-  devices are gone for good;
-- the admission also makes him a new circle, with him alone in it (§13.2): his
-  old private circle is under a sealing key he lost, and no device can read or
-  write it again;
+- his role, existing device ids and every circle someone else is in stay
+  attached to his id; those devices are gone for good;
+- the admission takes him out of every circle he alone is in, which deletes it
+  (§15.8). His old private circle is one: only the pair he lost opens its key,
+  and nobody else holds the key, so no device could read or write the circle
+  again. Kept, the circle would leave him a member of a circle whose key no one
+  can send him (§12.1);
+- the admission also makes him a new circle, with him alone in it (§13.2);
 - his old keys count as exposed (§12.2);
 - writes signed with his old keys that land after the replacement are refused
   (§14.1).
@@ -6546,9 +6551,10 @@ writes into Gifts fail with `NotInCircle`, and he no longer snapshots Gifts. A
 separate removal of his device or member, or a replacement of his keys, applies
 the full cut-off (§14.1).
 
-**A circle left empty is deleted** at that slot, whether its last member left it
-or was removed from the store. The state before the slot decides this, and no
-later operation can add a member to a deleted circle.
+**A circle left empty is deleted** at that slot, whether its last member left it,
+was removed from the store, or was recovered with new keys (§13.3). The state
+before the slot decides this, and no later operation can add a member to a
+deleted circle.
 
 #### 15.9 Deleting a circle
 
@@ -14370,7 +14376,7 @@ Write-ups explain each model and state its assumptions:
 | Store creation makes the circles its creating write asked for in slot 1: the slot introduces the store's first key and each circle's first key and carries the creator's copy of every one, so each circle's first reader has its copy from the slot that makes it | `creation_carries_own_copies` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §10.3, §12.1 |
 | A rotation among another admin's admission and a member's own replacement follows the rules and keeps the order; one that kept the routes it first read would leave the admitted member out, and is not legal | `races_follow`, `races_keep_order`, `stale_rotation_illegal` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1 |
 | *Body.* An admin outside a circle who recovers a member can send only the keys it holds, so the member can reach a slot of the circle before the copy it needs, in a history that follows every rule; a key scan that ended before the copy stops below the recovery too, and a scan that reaches past the copy opens that slot | `copy_precedes_need_fails`, `early_scan_stops_below_replacement` | `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1 |
-| *Body.* Only a member that holds a key, with a copy of it sealed to its current sealing key, can seal a copy of it, and a copy is legal only from such an author or for a key its author is about to introduce. A holder that reads the audience sends the copy on its next pass; a key with no copy at a stop gets none later, so with no holder and the reader holding no copy, the stop never ends: Ben's phone names Carol as the holder of the Gifts key, and with Carol removed first it names none and never clears | `reader_holder_sends`, `holders_from_holders`, `no_holder_never_clears`, `recovery_holders`, `orphan_has_no_holder`, `orphan_never_clears` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1, §19.1 |
+| *Body.* Only a member that holds a key, with a copy of it sealed to its current sealing key, can seal a copy of it, and a copy is legal only from such an author or for a key its author is about to introduce. A holder that reads the audience sends the copy on its next pass; a key with no copy at a stop gets none later, so with no holder and the reader holding no copy, the stop never ends: Ben's phone names Carol as the holder of the Gifts key, and with Carol removed after the recovery, before her pass sends his copy, it names none and never clears | `reader_holder_sends`, `holders_from_holders`, `no_holder_never_clears`, `recovery_holders`, `orphan_has_no_holder`, `orphan_never_clears` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1, §19.1 |
 | *Body.* Removing a member from a circle introduces the circle's replacement key in the same entry, with its copies below it to the readers who remain: the removed member no longer reads the circle, the key is the first-attempt choice of a remaining writer holding it, and no copy of it is routed to the removed member | `leave_selects_new_key` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §15.8 |
 | *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
@@ -14441,7 +14447,8 @@ Write-ups explain each model and state its assumptions:
 | A circle's name is its creation's, then each valid rename's in slot order; once it is deleted, a rename of it, an addition to it or a removal from it is refused because its target is gone | `name_is_latest_rename`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.5 |
 | A live circle always has a member: a circle is deleted at the slot that takes its last member out, whether the member left it or was removed from the store, as the circle's members before that slot decide; no slot records another slot's deletion | `live_has_member`, `leaving_deletes`, `member_removal_deletes`, `deleted_at_slot` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8 |
 | A deletion is permanent: the deleted circle keeps no members and its deletion slot at every later prefix, and making a circle under its id is refused | `deleted_stays`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8, §15.9 |
-| An admission or a recovery makes its member's circle with the member alone in it, refuses a circle id already used, live or deleted, changes nothing when repeated once the circle holds the member under that name, and leaves a recovered member's older circles as they were | `admission_makes_circle`, `used_circle_refuses_admission`, `admission_repeat_unchanged`, `recovery_keeps_old_circles` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §13.2, §13.3, §15.5 |
+| An admission or a recovery makes its member's circle with the member alone in it, refuses a circle id already used, live or deleted, and changes nothing when repeated once the circle holds the member under that name | `admission_makes_circle`, `used_circle_refuses_admission`, `admission_repeat_unchanged` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §13.2, §15.5 |
+| A recovery takes its member out of every live circle they alone are in, which deletes it at the recovery's slot, and keeps them in every circle someone else is in; after it, the member no longer reads such a circle, and still reads the shared ones and the new circle with the new pair | `recovery_deletes_lone_circles`, `recovery_keeps_shared_circles`, `recovery_leaves_lone_circle` | `proofs/sequence/CovenSequence/CircleLifecycle.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §13.3, §15.8 |
 
 ### G.5 Snapshots, the floor and reloads (§16)
 

@@ -119,7 +119,14 @@ def Slot.needs : Slot Aud Mem → List (Key Aud)
 def Roster.seat (r : Roster Aud Mem) (a : Aud) (m : Mem) (value : Option Nat) : Roster Aud Mem :=
   { r with current := fun a' m' => if a' = a ∧ m' = m then value else r.current a' m' }
 
-/-- An entry's effect on the roster. -/
+/-- Whether `m` alone reads circle `a`: no other id reads it. -/
+def Roster.alone (store : Aud) (r : Roster Aud Mem) (a : Aud) (m : Mem) : Bool :=
+  decide (a ≠ store) && r.people.all fun x => decide (x = m) || (r.current a x).isNone
+
+/-- An entry's effect on the roster. A recovery reads every audience its
+member read with the new sealing key, except each circle the member alone
+read: the recovery replaced the only pair that opened that circle's keys, so
+it takes the member out (§13.3). -/
 def Roster.apply (store : Aud) (r : Roster Aud Mem) (author : Mem) : Change Aud Mem → Roster Aud Mem
   | .create _ _ c circles =>
     { current := fun a m =>
@@ -135,7 +142,9 @@ def Roster.apply (store : Aud) (r : Roster Aud Mem) (author : Mem) : Change Aud 
       current := fun a x => if x = m then (r.current a x).map (fun _ => c) else r.current a x }
   | .recover m c key _ =>
     ({ r with
-      current := fun a x => if x = m then (r.current a x).map (fun _ => c) else r.current a x }
+      current := fun a x =>
+        if x = m then (if r.alone store a m then none else (r.current a x).map (fun _ => c))
+        else r.current a x }
         : Roster Aud Mem).seat key.audience m (some c)
   | .createCircle key _ => r.seat key.audience author (r.current store author)
   | .addToCircle a m => r.seat a m (r.current store m)
@@ -390,6 +399,20 @@ structure RosterOk (store : Aud) (r : Roster Aud Mem) : Prop where
   people : ∀ a m c, r.current a m = some c → m ∈ r.people
   sealing : ∀ a m c, r.current a m = some c → r.current store m = some c
 
+/-- A recovery's member reads an audience after it only with the new sealing
+key, and only where it read the audience before. -/
+theorem recovered_current {store a : Aud} {r : Roster Aud Mem} {m x : Mem} {c v : Nat}
+    (hv : (if x = m then (if r.alone store a m then none else (r.current a x).map (fun _ => c))
+      else r.current a x) = some v) :
+    (if x = m then (r.current a x).map (fun _ => c) else r.current a x) = some v := by
+  split at hv
+  · rename_i same
+    split at hv
+    · cases hv
+    · simpa [same] using hv
+  · rename_i different
+    simpa [different] using hv
+
 theorem seat_current (r : Roster Aud Mem) (a a' : Aud) (m m' : Mem) (v : Option Nat) :
     (r.seat a m v).current a' m' = if a' = a ∧ m' = m then v else r.current a' m' := rfl
 
@@ -440,12 +463,14 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
     simp only [allowed, circleFree, Bool.and_eq_true, decide_eq_true_eq, ne_eq] at yes
     obtain ⟨⟨_, known⟩, ⟨⟨notStore, _⟩, _⟩⟩ := yes
     obtain ⟨w₀, hw₀⟩ := Option.isSome_iff_exists.mp known
+    have kept : Roster.alone store r store m = false := by simp [Roster.alone]
     constructor
     · intro a x v hv
       simp only [Roster.apply, seat_current] at hv ⊢
       split at hv
       · rename_i same; rw [same.2]; exact ok.people _ _ _ hw₀
-      · split at hv
+      · have hv := recovered_current hv
+        split at hv
         · rename_i same
           obtain ⟨w, hw, _⟩ := Option.map_eq_some_iff.mp hv
           exact ok.people a x w hw
@@ -459,13 +484,14 @@ theorem apply_ok (store : Aud) {r : Roster Aud Mem} (ok : RosterOk store r) (h :
         cases hv
         obtain ⟨_, hx⟩ := same
         subst hx
-        simp [hw₀]
-      · split at hv
+        simp [hw₀, kept]
+      · have back := recovered_current hv
+        split at back
         · rename_i same
           subst same
-          obtain ⟨w, hw, eq⟩ := Option.map_eq_some_iff.mp hv
-          simp [ok.sealing a x w hw, eq]
-        · rename_i different; simp [different, ok.sealing a x v hv]
+          obtain ⟨w, hw, eq⟩ := Option.map_eq_some_iff.mp back
+          simp [ok.sealing a x w hw, eq, kept]
+        · rename_i different; simp [different, ok.sealing a x v back]
   | replaceKeys m c =>
     constructor
     · intro a x v hv
@@ -732,7 +758,8 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
           obtain ⟨_, hx⟩ := same
           subst hx
           exact List.mem_append_left _ (by simp [required])
-        · split at hv
+        · have hv := recovered_current hv
+          split at hv
           · obtain ⟨w, hw, -⟩ := Option.map_eq_some_iff.mp hv
             have hx := ok.people _ x w hw
             rw [← ha, empty x hx] at hw
@@ -747,7 +774,7 @@ theorem step_complete {store a : Aud} {h : History Aud Mem} {r : Roster Aud Mem}
             simp only [required]
             exact List.mem_append_left _
               (List.mem_map.mpr ⟨i, List.mem_filter.mpr ⟨hi, by simp [ha, reads, holds]⟩, rfl⟩))
-            i old ha x v hv
+            i old ha x v (recovered_current hv)
     | createCircle key hash =>
       simp only [allowed, Bool.and_eq_true, decide_eq_true_eq, ne_eq, List.all_eq_true,
         Option.isSome_iff_exists, Option.isNone_iff_eq_none] at allow

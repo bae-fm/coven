@@ -975,9 +975,11 @@ request (D8).
   been used. Recover-member: the member is active, its current binding equals
   `expected`, and both new keys have never been used; it rebinds the member
   like replace-member-keys, and, when `access` is present, sets it as
-  set-access does. A recovery keeps the member's role, circles and existing
-  device records; its earlier devices are gone for good from this slot
-  (§14.1).
+  set-access does. A recovery keeps the member's role, existing device records
+  and every circle someone else is in. It takes the member out of each live
+  circle the member alone is in, which deletes that circle at this slot
+  ([coven.md §13.3](coven.md#133-losing-everything)). The member's earlier
+  devices are gone for good from this slot (§14.1).
 - `device` has never been registered. `access` is of the kind Set up storage's
   `access` has, so an admission needs Set up storage to have applied.
 - The circle's id has never been used: no circle, live or deleted, has it. The

@@ -464,3 +464,38 @@ fn an_admission_records_its_members_facts_and_a_recovery_replaces_them() {
         Some(Joined { person: None, circle: admission_circle(9).circle })
     );
 }
+
+/// A recovery replaces its member's keys, so no device holds the key of a
+/// circle they alone are in: the recovery takes them out of it, which deletes
+/// it at the recovery's slot. A circle someone else is in keeps them, since
+/// that member sends them its keys (§12.1, §13.3).
+#[test]
+fn a_recovery_deletes_the_circles_its_member_alone_is_in() {
+    let shared = CircleId(uuid::Uuid::from_u128(13));
+    let mut state = with_a_plain_member(&household());
+    for change in [
+        create_circle(gifts(), "Gifts"),
+        create_circle(shared, "Shared"),
+        StoreChange::AddCircleMember { circle: shared, member: id(1) },
+    ] {
+        state = apply(&state, 3, change).unwrap().unwrap().state;
+    }
+    let own = admission_circle(3).circle;
+    let recovery = StoreChange::RecoverMember {
+        member: id(3),
+        expected: keys(3),
+        keys: keys(9),
+        access: None,
+        device: DeviceId(9),
+        device_name: "new phone".into(),
+        circle: admission_circle(9),
+    };
+    let recovered = apply(&state, 1, recovery).unwrap().unwrap().state;
+    for lone in [own, gifts()] {
+        assert_eq!(recovered.circle_deletions.get(&lone), Some(&slot(4)), "{lone:?}");
+        assert!(recovered.circles[&lone].members.is_empty());
+    }
+    assert_eq!(recovered.circle_deletions.get(&shared), None);
+    assert_eq!(recovered.circles[&shared].members, [id(3), id(1)].into());
+    assert_eq!(recovered.circles[&admission_circle(9).circle].members, [id(3)].into());
+}

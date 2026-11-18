@@ -70,6 +70,7 @@ import SequenceApply
 #print axioms CovenSequence.CopyOrder.holders_from_holders
 #print axioms CovenSequence.CopyOrder.no_holder_never_clears
 #print axioms CovenSequence.CopyOrderExamples.recovery_holders
+#print axioms CovenSequence.CopyOrderExamples.recovery_leaves_lone_circle
 #print axioms CovenSequence.CopyOrderExamples.orphan_has_no_holder
 #print axioms CovenSequence.CopyOrderExamples.orphan_never_clears
 #print axioms CovenSequence.CopyOrder.leave_selects_new_key
@@ -247,7 +248,8 @@ import SequenceApply
 #print axioms CovenSequence.CircleLifecycle.admission_makes_circle
 #print axioms CovenSequence.CircleLifecycle.used_circle_refuses_admission
 #print axioms CovenSequence.CircleLifecycle.admission_repeat_unchanged
-#print axioms CovenSequence.CircleLifecycle.recovery_keeps_old_circles
+#print axioms CovenSequence.CircleLifecycle.recovery_deletes_lone_circles
+#print axioms CovenSequence.CircleLifecycle.recovery_keeps_shared_circles
 #print axioms CovenSequence.WriteVersion.step_version
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts

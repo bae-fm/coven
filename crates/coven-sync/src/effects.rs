@@ -292,6 +292,7 @@ pub(crate) fn checked_change(
                 *device,
                 StoreDevice { member: *id, name: device_name.clone(), state: DeviceState::Active },
             );
+            circle_effects::leave_lone(&mut next, id, slot);
             circle_effects::create(
                 &mut next,
                 circle.circle,
