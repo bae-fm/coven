@@ -17,6 +17,9 @@ whole ownership *.rs,*.sql,Cargo.toml,Cargo.lock,owner-construction-check.toml s
 check deny Cargo.toml,Cargo.lock,deny.toml cargo deny check advisories bans licenses
 check clippy *.rs,Cargo.toml,Cargo.lock,clippy.toml,rust-toolchain.toml,.cargo/** scripts/cargo.sh clippy {crates} --all-targets --all-features -- -D warnings
 check build-without-test-code *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/cargo.sh check {crates}
+# The flags of scripts/check.sh's doc step: -Dwarnings also denies a public
+# doc's link to a private item (rustdoc::private_intra_doc_links).
+check rustdoc *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/cargo.sh doc {crates} --no-deps --all-features --config build.rustdocflags=["-Drustdoc::broken_intra_doc_links","-Dwarnings"]
 
 # Spec
 whole spec-readability spec/*.md,scripts/check-spec.py python3 scripts/check-spec.py
