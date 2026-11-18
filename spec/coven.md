@@ -12954,7 +12954,7 @@ keeps them apart from the app's own Block Store entries:
 |---|---|---|
 | Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the invite code of a join under way, the record of a restore under way, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
-| Device-only, for the whole device: belongs to no store | the app's device secrets and their list | the app deletes it, or deletes every device secret (api.md [E11](api.md#e11-keys-and-secrets)) |
+| Device-only, for the whole device: belongs to no store | the app's device secrets and their list | the app deletes every device secret (api.md [E11](api.md#e11-keys-and-secrets)) |
 
 On Apple devices the device-only entries can be read only while the device is
 unlocked (`WhenUnlockedThisDeviceOnly`). Opening reads the device id among them,

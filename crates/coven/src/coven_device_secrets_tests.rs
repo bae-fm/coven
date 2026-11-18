@@ -19,11 +19,10 @@ async fn a_device_secret_is_one_per_device_whatever_its_stores() {
     let elsewhere = tempfile::tempdir().unwrap();
     let other = app.another_device(elsewhere.path().to_owned());
     assert_eq!(other.device_secret("speaker").unwrap(), None);
-    app.delete_device_secret("another speaker").unwrap();
-    assert_eq!(app.device_secret("another speaker").unwrap(), None);
     app.fail_next_keychain_operation();
     assert!(app.delete_device_secrets().is_err());
     app.delete_device_secrets().unwrap();
     assert_eq!(app.device_secret("speaker").unwrap(), None);
+    assert_eq!(app.device_secret("another speaker").unwrap(), None);
     assert!(app.store_keychain(second.id()).device_id().unwrap().is_some());
 }

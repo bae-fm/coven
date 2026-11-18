@@ -142,12 +142,6 @@ impl Keychain {
         app_secrets::change(self, SecretsOwner::Device, name, Some(value))
     }
 
-    /// Delete this device's secret `name` before its listed name; an absent
-    /// secret succeeds, and retrying after a failure is safe (E11).
-    pub fn delete_device_secret(&self, name: &str) -> Result<(), KeyError> {
-        app_secrets::change(self, SecretsOwner::Device, name, None)
-    }
-
     /// Delete every listed device secret, then the list, without decoding a
     /// value: an app's reset of this device (E11). Absent entries succeed,
     /// so retrying after a failure finishes.

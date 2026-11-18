@@ -40,10 +40,7 @@ fn a_device_secret_outlives_every_store_and_stays_on_this_device() {
     );
     keychain.set_device_secret("speaker", "replaced").unwrap();
     assert_eq!(keychain.device_secret("speaker").unwrap().as_deref(), Some("replaced"));
-    keychain.delete_device_secret("speaker").unwrap();
-    keychain.delete_device_secret("speaker").unwrap();
-    assert_eq!(keychain.device_secret("speaker").unwrap(), None);
-    assert_eq!(device_names(&keychain), BTreeSet::from([String::new()]));
+    assert_eq!(device_names(&keychain), BTreeSet::from([String::new(), "speaker".to_owned()]));
 }
 
 /// Deleting every device secret finds each one through the list, leaves each
@@ -117,11 +114,7 @@ fn a_damaged_device_secret_list_refuses_changes_without_losing_secrets() {
     let keychain = Keychain::in_memory("damaged-device-names").unwrap();
     keychain.set_device_secret("speaker", "pairing keys").unwrap();
     keychain.write(EntryScope::DeviceOnly, DEVICE_SECRET_NAMES_ENTRY, b"unknown version").unwrap();
-    for result in [
-        keychain.set_device_secret("new", "value"),
-        keychain.delete_device_secret("speaker"),
-        keychain.delete_device_secrets(),
-    ] {
+    for result in [keychain.set_device_secret("new", "value"), keychain.delete_device_secrets()] {
         assert!(matches!(result, Err(KeyError::Material(MaterialError::Encoding))));
     }
     assert_eq!(keychain.device_secret("speaker").unwrap().as_deref(), Some("pairing keys"));

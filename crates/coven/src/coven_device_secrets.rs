@@ -23,12 +23,6 @@ impl Coven {
         self.keychain.set_device_secret(name, value)
     }
 
-    /// Delete this device's secret `name` before its listed name; an absent
-    /// secret succeeds, and retrying after a failure is safe (E11).
-    pub fn delete_device_secret(&self, name: &str) -> Result<(), KeyError> {
-        self.keychain.delete_device_secret(name)
-    }
-
     /// Delete every device secret, then their list, without the app naming
     /// them or coven decoding a value, as an app's reset of this device does
     /// (E11). Store entries and the person's entries stay. Absent entries

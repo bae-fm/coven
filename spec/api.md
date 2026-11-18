@@ -10197,9 +10197,6 @@ impl Coven {
     /// leave an extra name, and retrying is safe.
     pub fn set_device_secret(&self, name: &str, value: &str) -> Result<(), KeyError>;
 
-    /// Deletes the device secret before its listed name; succeeds if absent.
-    pub fn delete_device_secret(&self, name: &str) -> Result<(), KeyError>;
-
     /// Deletes every listed device secret, then the list, as an app's reset of
     /// the device does; every store's entries and the person's stay. Absent
     /// entries succeed, so retrying after a failure finishes.
