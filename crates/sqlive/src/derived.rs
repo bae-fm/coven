@@ -279,10 +279,12 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
         let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };
         // VALUES names its columns column1, column2, …
         return Some(
-            crate::sql::values_names(rows.first().map_or(0, |row| row.len()))
-                .into_iter()
-                .map(|name| Output { name: Some(name), passed: None })
-                .collect(),
+            crate::sql::values_names(
+                rows.first().expect("a parsed VALUES has at least one row").len(),
+            )
+            .into_iter()
+            .map(|name| Output { name: Some(name), passed: None })
+            .collect(),
         );
     };
     let mut found = Vec::new();

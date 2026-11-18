@@ -324,7 +324,9 @@ impl Walk<'_> {
 fn result_names(select: &Select<'_>) -> Option<Vec<String>> {
     let OneSelect::Select { columns, .. } = &select.body.select else {
         let OneSelect::Values(rows) = &select.body.select else { return None };
-        return Some(crate::sql::values_names(rows.first().map_or(0, |row| row.len())));
+        return Some(crate::sql::values_names(
+            rows.first().expect("a parsed VALUES has at least one row").len(),
+        ));
     };
     columns
         .iter()
