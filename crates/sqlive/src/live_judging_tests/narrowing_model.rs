@@ -45,6 +45,8 @@ mod using;
 mod view;
 #[path = "narrowing_model/whole.rs"]
 mod whole;
+#[path = "narrowing_model/window.rs"]
+mod window;
 
 use syntax::*;
 
@@ -533,6 +535,12 @@ async fn whole_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn aggregate_matches_lean() {
     differential("aggregate", aggregate::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn window_matches_lean() {
+    differential("window", window::statement).await;
 }
 
 #[tokio::test]

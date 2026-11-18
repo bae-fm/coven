@@ -89,6 +89,12 @@ inductive OutCol where
   values are integers, so the differential writes the joined text read back
   as one, which keeps the order. -/
   | concat (e : Expr) (orderBy : List (Expr × Bool))
+  /-- `row_number() OVER (PARTITION BY ... ORDER BY ...)`, each ORDER BY term
+  descending when `true`, in a core that doesn't aggregate: a binding's place
+  among the bindings of its partition, in the order the window's ORDER BY
+  sorts them and, among those that sort the same, in the order SQLite reads
+  them in. -/
+  | rowNumber (partition : List Expr) (orderBy : List (Expr × Bool))
   deriving Repr, Inhabited
 
 /-- The expressions a result column holds. -/
@@ -96,6 +102,7 @@ def OutCol.exprs : OutCol → List Expr
   | .expr e | .max e => [e]
   | .count => []
   | .concat e orderBy => e :: orderBy.map (·.1)
+  | .rowNumber partition orderBy => partition ++ orderBy.map (·.1)
 
 /-- One SELECT core: the statement's, an arm of a compound, or a subquery's. -/
 structure Core where
@@ -112,8 +119,15 @@ structure Core where
 /-- Whether a core makes one row of many: it groups or calls an aggregate. -/
 def Core.aggregated (c : Core) : Bool :=
   !c.groupBy.isEmpty || c.output.any fun
-    | .expr _ => false
-    | _ => true
+    | .count | .max _ | .concat .. => true
+    | .expr _ | .rowNumber .. => false
+
+/-- Whether a core calls a window function, whose value in a row depends on
+the core's other rows. -/
+def Core.windowed (c : Core) : Bool :=
+  c.output.any fun
+    | .rowNumber .. => true
+    | _ => false
 
 /-- How a compound combines the rows so far with an arm's. -/
 inductive Combine where

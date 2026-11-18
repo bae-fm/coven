@@ -244,3 +244,43 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         assert_eq!(found, pairs(&[]), "{sql}");
     }
 }
+
+/// A window function numbers or reads the rows of a partition in the order
+/// SQLite reads them among those its ORDER BY sorts the same, so a core that
+/// calls one reads every column of each table it reads, unless the window's
+/// ORDER BY sorts by the rowid of each of its tables and the core doesn't
+/// aggregate.
+#[test]
+fn a_window_that_doesnt_tell_its_rows_apart_reads_every_column() {
+    let connection = connection();
+    let a = [("a", "id"), ("a", "k"), ("a", "v")];
+    let b = [("b", "id"), ("b", "k"), ("b", "w")];
+    let both: Vec<_> = a.iter().chain(&b).copied().collect();
+    for (sql, expected) in [
+        ("SELECT a.v, row_number() OVER () FROM a", &a[..]),
+        ("SELECT a.v, row_number() OVER (PARTITION BY a.k ORDER BY a.v) FROM a", &a[..]),
+        ("SELECT a.v FROM a ORDER BY row_number() OVER (ORDER BY a.k)", &a[..]),
+        ("SELECT a.v, rank() OVER w FROM a WINDOW w AS (ORDER BY a.v)", &a[..]),
+        ("SELECT a.k, count(*), row_number() OVER (ORDER BY a.k) FROM a GROUP BY a.k", &a[..]),
+        ("SELECT sum(count(*)) OVER (ORDER BY a.id) FROM a", &a[..]),
+        ("SELECT a.v, row_number() OVER (ORDER BY a.id) FROM a JOIN b ON b.k = a.k", &both[..]),
+        ("SELECT a.v, row_number() OVER (ORDER BY s.v) FROM (SELECT a.v FROM a) AS s", &a[..]),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+    for sql in [
+        "SELECT a.v, row_number() OVER (ORDER BY a.id) FROM a",
+        "SELECT a.v, row_number() OVER (PARTITION BY a.k ORDER BY a.v, a.id DESC) FROM a",
+        "SELECT a.v, row_number() OVER w FROM a WINDOW w AS (ORDER BY rowid)",
+        "SELECT a.v, row_number() OVER (w ORDER BY a.id) FROM a WINDOW w AS (PARTITION BY a.k)",
+        "SELECT row_number() OVER (ORDER BY a.id, b.id) FROM a JOIN b ON b.k = a.k",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[]), "{sql}");
+    }
+}

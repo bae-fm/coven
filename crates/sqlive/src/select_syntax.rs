@@ -293,6 +293,16 @@ impl<'a> PartWalk<'a, '_> {
     }
 }
 
+/// The OVER clause of the window function `expr` calls, when it calls one.
+pub(crate) fn window_call<'a>(expr: &'a Expr<'a>) -> Option<&'a Over<'a>> {
+    let (Expr::FunctionCall { filter_over, .. } | Expr::FunctionCallStar { filter_over, .. }) =
+        expr
+    else {
+        return None;
+    };
+    filter_over.as_ref()?.over_clause
+}
+
 fn over(tail: &Option<FunctionTail<'_>>) -> bool {
     tail.as_ref().is_some_and(|tail| tail.over_clause.is_some())
 }

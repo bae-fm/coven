@@ -593,6 +593,7 @@ proofs() {
             connection::live_judging::tests::narrowing_model::using_matches_lean \
             connection::live_judging::tests::narrowing_model::whole_matches_lean \
             connection::live_judging::tests::narrowing_model::aggregate_matches_lean \
+            connection::live_judging::tests::narrowing_model::window_matches_lean \
             connection::live_judging::tests::narrowing_model::mixed_shapes_match_lean
     fi
 }

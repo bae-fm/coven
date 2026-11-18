@@ -1,7 +1,8 @@
 import SqliveNarrowing.Reader
 
 /-! Rule 4: a condition on a derived item's rows (a FROM subquery, a CTE or
-a view) passes into each of its arms that neither groups nor aggregates, when
+a view) passes into each of its arms that neither groups, aggregates nor
+calls a window function, when
 its query has no LIMIT and no OFFSET: an output column that is a bare column of the arm's
 own item holds that item's value, so a term or an edge on the column holds of
 the item's row (`derived.rs`, `push_down`). The target is then an inner
@@ -18,7 +19,7 @@ def arms (s : Statement) (i : Nat) : Option (List (List (Option (Nat × Nat)))) 
   | .derived q _ =>
     let query := s.query q
     if query.limit.isSome || query.offset.isSome then some []
-    else some <| (query.arms.filter fun k => !(s.core k).aggregated).map fun k =>
+    else some <| (query.arms.filter fun k => !(s.core k).aggregated && !(s.core k).windowed).map fun k =>
       (s.core k).output.map fun
         | .expr (.col j c) => if (s.item j).core = k then some (j, c) else none
         | _ => none
@@ -122,8 +123,8 @@ theorem push_down_sound {s : Statement} {q : Nat} {db : Db} {f : Nat} {b : Bind}
   | true => exact Or.inl rfl
   | false =>
     right
-    obtain ⟨b', hb', rfl⟩ := mem_rows_plain hagg hr
+    obtain ⟨b', hb', j, rfl⟩ := mem_rows_plain hagg hr
     refine ⟨b', hb', fun c j c' hc => ?_⟩
-    simp [Row.cell, List.getElem?_map, hc, Expr.eval]
+    simp [Row.cell, List.getElem?_map, hc, Expr.eval, OutCol.plain]
 
 end SqliveNarrowing.PushDown

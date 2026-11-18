@@ -122,8 +122,11 @@ promise of whichever rule reads it.
   a different value in each order. The model's values are integers, which
   compare equal only when they are the same, so the model counts a `max`
   as following the order unless its argument is a column whose equal values
-  are the same. `orderFree_rows_perm` proves that a SELECT with
-  none of these, whose `group_concat` calls each sort by the rowid of each of its
+  are the same. A SELECT that calls a window function picks rows too:
+  `rowNumber_follows_order` proves that `row_number()` whose window has no
+  ORDER BY numbers two rows in the order SQLite reads them.
+  `orderFree_rows_perm` proves that a SELECT with none of these, whose
+  `group_concat` calls and windows each sort by the rowid of each of its
   tables, gives the same rows in some order from every order of its rows.
   `picked_column_reruns` proves that a change to any column of a table that a
   query of the first kind, or a SELECT whose rows follow the order SQLite reads
@@ -165,8 +168,8 @@ disagree on whether the write reruns the query, when a write that either lets
 pass changed SQLite's rows, or when the model's rows differ from SQLite's.
 Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model
 among rows that sort the same, and an aggregate's column outside every GROUP BY
-term, or a `group_concat` with no ORDER BY that sorts by each table's rowid,
-may take other rows' values. The test compares the rows there only through
+term, or a `group_concat` or a window with no ORDER BY that sorts by each
+table's rowid, may take other rows' values. The test compares the rows there only through
 the reruns. The model's values are integers, so the differential reads
 `group_concat` as `CAST(group_concat(e, '') AS INTEGER)`, the joined digits read
 back as one integer, which the model computes the same way.

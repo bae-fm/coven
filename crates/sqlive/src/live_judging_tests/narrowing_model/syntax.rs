@@ -113,6 +113,9 @@ pub(super) enum Out {
     /// descending when `true`: the values joined in order, read back as an
     /// integer, which the model's values are.
     Concat(Expr, Vec<(Expr, bool)>, Option<String>),
+    /// `row_number() OVER (PARTITION BY ... ORDER BY ...)`, each ORDER BY
+    /// term descending when `true`.
+    RowNumber(Vec<Expr>, Vec<(Expr, bool)>, Option<String>),
 }
 
 pub(super) fn col(alias: &str, column: &'static str) -> Expr {
@@ -321,18 +324,26 @@ impl Core {
                 Out::Concat(e, order, _) => {
                     e.ambiguous() || order.iter().any(|(sorted, _)| sorted.ambiguous())
                 }
+                Out::RowNumber(partition, order, _) => {
+                    partition.iter().any(Expr::ambiguous)
+                        || order.iter().any(|(sorted, _)| sorted.ambiguous())
+                }
             })
             || self.from.iter().any(|item| item.on.iter().any(Cond::ambiguous))
             || self.follows_order()
     }
 
-    /// Whether the core aggregates and SQLite picks which row of a group a
-    /// column outside its GROUP BY comes from, the order `group_concat`
-    /// joins its values in, or which of the values that compare equal max
-    /// keeps: the model reads its rows in another order.
+    /// Whether SQLite picks which row of a group a column outside its GROUP
+    /// BY comes from, the order `group_concat` joins its values in, which of
+    /// the values that compare equal max keeps, or the order a window
+    /// numbers rows that its ORDER BY doesn't tell apart: the model reads
+    /// its rows in another order.
     fn follows_order(&self) -> bool {
         let aggregates = !self.group.is_empty()
-            || self.select.iter().any(|column| !matches!(column, Out::Expr(..)));
+            || self
+                .select
+                .iter()
+                .any(|column| !matches!(column, Out::Expr(..) | Out::RowNumber(..)));
         let rowids = |order: &[(Expr, bool)]| {
             self.from.iter().all(|item| {
                 matches!(item.source, Source::Table(_))
@@ -341,20 +352,22 @@ impl Core {
                     })
             })
         };
-        aggregates
-            && self.select.iter().any(|column| match column {
-                Out::Expr(e, _) => {
-                    !matches!(e, Expr::Lit(_)) && !self.group.iter().any(|g| g.sql() == e.sql())
-                }
-                Out::Concat(_, order, _) => !rowids(order),
-                // The untyped `b` and the NOCASE `n` can hold values that
-                // compare equal and differ (`super::TABLE_SQL`).
-                Out::Max(e, _) => !matches!(e, Expr::Col(alias, "id" | "a" | "c")
-                if self.from.iter().any(|item| {
-                    item.alias == *alias && matches!(item.source, Source::Table(_))
-                })),
-                Out::Count(_) => false,
-            })
+        self.select.iter().any(|column| match column {
+            Out::Expr(e, _) => {
+                aggregates
+                    && !matches!(e, Expr::Lit(_))
+                    && !self.group.iter().any(|g| g.sql() == e.sql())
+            }
+            Out::RowNumber(_, order, _) => aggregates || !rowids(order),
+            Out::Concat(_, order, _) => !rowids(order),
+            // The untyped `b` and the NOCASE `n` can hold values that
+            // compare equal and differ (`super::TABLE_SQL`).
+            Out::Max(e, _) => !matches!(e, Expr::Col(alias, "id" | "a" | "c")
+            if self.from.iter().any(|item| {
+                item.alias == *alias && matches!(item.source, Source::Table(_))
+            })),
+            Out::Count(_) => false,
+        })
     }
 }
 
@@ -495,18 +508,17 @@ impl Out {
             Self::Count(alias) => ("count(*)".to_owned(), alias),
             Self::Max(e, alias) => (format!("max({})", e.sql()), alias),
             Self::Concat(e, order, alias) => {
-                let terms: Vec<String> = order
-                    .iter()
-                    .map(|(sorted, descending)| {
-                        format!("{}{}", sorted.sql(), if *descending { " DESC" } else { "" })
-                    })
-                    .collect();
-                let order = if terms.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ORDER BY {}", terms.join(", "))
-                };
+                let order = order_sql(order).map_or_else(String::new, |order| format!(" {order}"));
                 (format!("CAST(group_concat({}, ''{order}) AS INTEGER)", e.sql()), alias)
+            }
+            Self::RowNumber(partition, order, alias) => {
+                let mut window = Vec::new();
+                if !partition.is_empty() {
+                    let terms: Vec<String> = partition.iter().map(Expr::sql).collect();
+                    window.push(format!("PARTITION BY {}", terms.join(", ")));
+                }
+                window.extend(order_sql(order));
+                (format!("row_number() OVER ({})", window.join(" ")), alias)
             }
         };
         match alias {
@@ -522,12 +534,35 @@ impl Out {
             Self::Max(e, alias) => json!({"max": e.json(), "as": alias}),
             Self::Concat(e, order, alias) => json!({
                 "concat": e.json(),
-                "order": order
-                    .iter()
-                    .map(|(sorted, descending)| json!({"expr": sorted.json(), "desc": descending}))
-                    .collect::<Vec<_>>(),
+                "order": order_json(order),
+                "as": alias,
+            }),
+            Self::RowNumber(partition, order, alias) => json!({
+                "row_number": {
+                    "partition": partition.iter().map(Expr::json).collect::<Vec<_>>(),
+                    "order": order_json(order),
+                },
                 "as": alias,
             }),
         }
     }
+}
+
+/// A call's or a window's `ORDER BY`, each term descending when `true`, or
+/// `None` for no terms.
+fn order_sql(order: &[(Expr, bool)]) -> Option<String> {
+    let terms: Vec<String> = order
+        .iter()
+        .map(|(sorted, descending)| {
+            format!("{}{}", sorted.sql(), if *descending { " DESC" } else { "" })
+        })
+        .collect();
+    (!terms.is_empty()).then(|| format!("ORDER BY {}", terms.join(", ")))
+}
+
+fn order_json(order: &[(Expr, bool)]) -> Vec<Json> {
+    order
+        .iter()
+        .map(|(sorted, descending)| json!({"expr": sorted.json(), "desc": descending}))
+        .collect()
 }

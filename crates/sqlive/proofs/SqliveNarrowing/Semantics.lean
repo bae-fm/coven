@@ -153,6 +153,35 @@ def OutCol.aggregate (subs : Bind → Subs) (g : List Bind) : OutCol → Value
   | .count => some (Int.ofNat g.length)
   | .max e => maxValue (g.map fun b => e.eval b (subs b))
   | .concat e orderBy => concatValue ((sortBindings subs orderBy g).map fun b => e.eval b (subs b))
+  | .rowNumber .. => none
+
+/-- The values of `exprs` in the binding `b`. -/
+def windowKey (subs : Bind → Subs) (exprs : List Expr) (b : Bind) : List Value :=
+  exprs.map fun e => e.eval b (subs b)
+
+/-- Whether `b'` sits in `b`'s partition of the window `PARTITION BY
+partition ORDER BY orderBy`, and how its ORDER BY values compare with `b`'s. -/
+def windowPeer (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Bool))
+    (b b' : Bind) (o : Ordering) : Bool :=
+  windowKey subs partition b' == windowKey subs partition b &&
+    keyCompare (orderBy.map (·.2)) (windowKey subs (orderBy.map (·.1)) b')
+      (windowKey subs (orderBy.map (·.1)) b) == o
+
+/-- `row_number()` of the binding `b` at position `j` of the bindings `kept`
+of a core that doesn't aggregate: one more than the bindings of its
+partition that sort before it, and than those that sort the same and come
+before it in the order SQLite reads them in. -/
+def windowRowNumber (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Bool))
+    (kept : List Bind) (b : Bind) (j : Nat) : Value :=
+  some (Int.ofNat (1 + kept.countP (windowPeer subs partition orderBy b · .lt) +
+    (kept.take j).countP (windowPeer subs partition orderBy b · .eq)))
+
+/-- The value of a result column of a core that doesn't aggregate, in the
+binding `b` at position `j` of the bindings `kept`. -/
+def OutCol.plain (subs : Bind → Subs) (kept : List Bind) (b : Bind) (j : Nat) : OutCol → Value
+  | .expr e => e.eval b (subs b)
+  | .rowNumber partition orderBy => windowRowNumber subs partition orderBy kept b j
+  | _ => none
 
 /-- A core's rows from the bindings it keeps. -/
 def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
@@ -161,9 +190,7 @@ def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
       else groupsOf (fun b => c.groupBy.map (Expr.eval b (subs b))) kept
     groups.map fun g => c.output.map (OutCol.aggregate subs g)
   else
-    kept.map fun b => c.output.map fun
-      | .expr e => e.eval b (subs b)
-      | _ => none
+    kept.zipIdx.map fun (b, j) => c.output.map (OutCol.plain subs kept b j)
 
 /-- The bindings core `k` keeps under the binding `outer` around it, with
 `eval` giving a query's rows under a binding. A core in no other, as a

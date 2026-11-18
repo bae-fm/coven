@@ -83,8 +83,8 @@ theorem mem_rows_single {c : Core} {e : Expr} (ho : c.output = [.expr e])
       · exact mem_groupsOf hg hb
     · left; rfl
   · simp only [List.mem_map, List.map_cons, List.map_nil] at hr
-    obtain ⟨b, hb, rfl⟩ := hr
-    exact Or.inr ⟨b, hb, rfl⟩
+    obtain ⟨⟨b, j⟩, hb, rfl⟩ := hr
+    exact Or.inr ⟨b, List.fst_mem_of_mem_zipIdx hb, rfl⟩
 
 theorem combineAll_single (ops : List Combine) (rows : List Row) :
     combineAll ops [rows] = rows := by
@@ -133,15 +133,13 @@ theorem mem_combineAll {ops : List Combine} {ls : List (List Row)} {r : Row}
     · exact ⟨p.2, by simp [(List.of_mem_zip hp).2], hr⟩
 
 /-- A row of a core that doesn't aggregate holds its result columns' values
-in a binding it keeps. -/
+in a binding it keeps, at some position of the bindings. -/
 theorem mem_rows_plain {c : Core} (hc : c.aggregated = false) {subs : Bind → Subs}
     {kept : List Bind} {r : Row} (hr : r ∈ c.rows subs kept) :
-    ∃ b ∈ kept, r = c.output.map fun
-      | .expr e => e.eval b (subs b)
-      | _ => none := by
+    ∃ b ∈ kept, ∃ j, r = c.output.map (OutCol.plain subs kept b j) := by
   unfold Core.rows at hr
   simp only [hc, Bool.false_eq_true, ↓reduceIte, List.mem_map] at hr
-  obtain ⟨b, hb, rfl⟩ := hr
-  exact ⟨b, hb, rfl⟩
+  obtain ⟨⟨b, j⟩, hb, rfl⟩ := hr
+  exact ⟨b, List.fst_mem_of_mem_zipIdx hb, j, rfl⟩
 
 end SqliveNarrowing

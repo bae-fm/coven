@@ -145,9 +145,9 @@ theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat
       · exact mem_groupsOf hg hb
     · left; rfl
   · simp only [List.mem_map] at hr
-    obtain ⟨b', hb', rfl⟩ := hr
+    obtain ⟨⟨b', j⟩, hb', rfl⟩ := hr
     right
-    exact ⟨b', hb', by simp [List.getElem?_map, ho]⟩
+    exact ⟨b', List.fst_mem_of_mem_zipIdx hb', by simp [List.getElem?_map, ho, OutCol.plain]⟩
 
 /-- The theorem: a row value compared with a subquery's row, true of a
 binding, makes each pair's member column hold a value the pair's partner

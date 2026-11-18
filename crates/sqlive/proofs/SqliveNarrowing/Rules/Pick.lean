@@ -19,9 +19,12 @@ reads them in decides (`bare_picks_any`), and `group_concat` joins its values in
 reads them (`concat_follows_order`), unless the call's own ORDER BY sorts by
 the rowid of each of the core's tables, and `max` keeps the value it reads
 first among values that compare equal (`max_keeps_first`), unless its
-argument is a column whose equal values are the same. Such a core depends on every column
-of each table it reads (`Statement.followsOrder`); any other core gives the
-same rows in every order (`orderFree_rows_perm`). -/
+argument is a column whose equal values are the same. A window numbers the
+bindings its ORDER BY doesn't tell apart in that order too
+(`rowNumber_follows_order`), unless the ORDER BY sorts by the rowid of each
+of the core's tables. Such a core depends on every column of each table it
+reads (`Statement.followsOrder`); any other core gives the same rows in every
+order (`orderFree_rows_perm`). -/
 namespace SqliveNarrowing.Pick
 open Limit
 
@@ -117,6 +120,14 @@ theorem keyCompare_eq {ds : List Bool} {as bs : List Value} (ha : as.length = ds
     rename_i a as b bs
     rw [keyCompare_cons, Ordering.then_eq_eq] at h
     rw [dcmp_eq.mp h.1, ih ha hb h.2]
+
+theorem keyCompare_self (ds : List Bool) (as : List Value) : keyCompare ds as as = .eq := by
+  induction ds generalizing as with
+  | nil => cases as <;> rfl
+  | cons d ds ih =>
+    cases as with
+    | nil => rfl
+    | cons a as => rw [keyCompare_cons, dcmp_eq.mpr rfl, ih]; rfl
 
 /-- Two keys that each sort at or before the other are equal. -/
 theorem keyLe_antisymm {ds : List Bool} {as bs : List Value} (ha : as.length = ds.length)
@@ -294,12 +305,25 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
   unfold Statement.fullyOrders at hfull
   rw [harms] at hfull
   simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true'] at hfull
-  rcases hfull with ⟨hagg, hgroup⟩ | ⟨hagg, hsorts⟩
+  rcases hfull with ⟨hagg, hgroup⟩ | ⟨⟨hagg, hwin⟩, hsorts⟩
   · intro a ha b hb _
     exact (one_row hagg hgroup ha).trans (one_row hagg hgroup hb).symm
   intro a ha b hb hkey
-  obtain ⟨ba, hba, rfl⟩ := mem_rows_plain hagg ha
-  obtain ⟨bb, hbb, rfl⟩ := mem_rows_plain hagg hb
+  obtain ⟨ba, hba, ja, rfl⟩ := mem_rows_plain hagg ha
+  obtain ⟨bb, hbb, jb, rfl⟩ := mem_rows_plain hagg hb
+  -- With no window, a row's values don't depend on its position.
+  have hplain : ∀ (b : Bind) (j j' : Nat), (s.core k).output.map
+      (OutCol.plain eval (coreBindings s db eval outer k) b j) =
+      (s.core k).output.map (OutCol.plain eval (coreBindings s db eval outer k) b j') := by
+    intro b j j'
+    apply List.map_congr_left
+    intro o ho
+    cases o with
+    | rowNumber =>
+      unfold Core.windowed at hwin
+      rw [List.any_eq_false] at hwin
+      exact absurd rfl (hwin _ ho)
+    | _ => rfl
   have hsame : ba = bb := by
     apply sortsByRowids_separates hdb hsorts hba hbb (sa := eval ba) (sb := eval bb)
     intro e he
@@ -309,9 +333,9 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
     · rename_i e' hout
       cases hp
       have hcell := (List.map_inj_left.mp hkey) (p, d) hpd
-      simpa [Row.cell, List.getElem?_map, hout] using hcell
+      simpa [Row.cell, List.getElem?_map, hout, OutCol.plain] using hcell
     · cases hp
-  rw [hsame]
+  rw [hsame, hplain bb ja jb]
 
 /-- Rule 7's theorem for a query that tells its rows apart: a one-arm query
 that aggregates with no GROUP BY, or whose ORDER BY sorts by the rowid of each
@@ -449,6 +473,67 @@ theorem groupsOf_perm {key : Bind → List Value} {bs bs' : List Bind} (hperm : 
   exact ⟨fun ⟨b, hb, hv⟩ => ⟨b, hperm.mem_iff.mp hb, hv⟩,
     fun ⟨b, hb, hv⟩ => ⟨b, hperm.mem_iff.mpr hb, hv⟩⟩
 
+/-- A window whose ORDER BY doesn't tell the bindings apart numbers them in
+the order SQLite reads them in: of two bindings whose values of `e` are 1
+and 2, the one read first is numbered 1, so the rows pair each value with
+another number read one way than the other. -/
+theorem rowNumber_follows_order {c : Core} (hagg : c.aggregated = false) {p q : Nat} {e : Expr}
+    (hp : c.output[p]? = some (.rowNumber [] [])) (hq : c.output[q]? = some (.expr e))
+    {subs : Bind → Subs} {b₁ b₂ : Bind} (h₁ : e.eval b₁ (subs b₁) = some 1)
+    (h₂ : e.eval b₂ (subs b₂) = some 2) :
+    (c.rows subs [b₁, b₂]).map (fun r => (r[q]?, r[p]?)) =
+      [(some (some 1), some (some 1)), (some (some 2), some (some 2))] ∧
+    (c.rows subs [b₂, b₁]).map (fun r => (r[q]?, r[p]?)) =
+      [(some (some 2), some (some 1)), (some (some 1), some (some 2))] := by
+  simp [Core.rows, hagg, List.getElem?_map, hp, hq, OutCol.plain, windowRowNumber, windowPeer,
+    windowKey, keyCompare, h₁, h₂]
+
+section Occurrences
+
+open Classical
+
+variable {α : Type}
+
+/-- Each element of `l` with how many elements equal to it come before it. -/
+noncomputable def occurrences (l : List α) : List (α × Nat) :=
+  l.zipIdx.map fun (b, j) => (b, (l.take j).countP fun b' => decide (b' = b))
+
+theorem occurrences_cons (x : α) (l : List α) :
+    occurrences (x :: l) =
+      (x, 0) :: (occurrences l).map fun (y, n) => (y, n + if x = y then 1 else 0) := by
+  unfold occurrences
+  rw [List.zipIdx_cons, List.zipIdx_succ]
+  simp [List.map_map, List.countP_cons]
+
+/-- Two lists of the same elements, in any order, give the same elements
+with their occurrence counts, in some order. -/
+theorem occurrences_perm {l₁ l₂ : List α} (h : l₁.Perm l₂) :
+    (occurrences l₁).Perm (occurrences l₂) := by
+  induction h with
+  | nil => exact List.Perm.refl _
+  | cons x _ ih =>
+    rw [occurrences_cons, occurrences_cons]
+    exact (ih.map _).cons _
+  | swap x y l =>
+    rw [occurrences_cons, occurrences_cons, occurrences_cons, occurrences_cons]
+    simp only [List.map_cons, List.map_map]
+    by_cases hxy : x = y
+    · subst hxy; exact List.Perm.refl _
+    · have hyx : ¬y = x := fun h => hxy h.symm
+      have hcomm : ((fun (p : α × Nat) => (p.1, p.2 + if y = p.1 then 1 else 0)) ∘
+            fun (p : α × Nat) => (p.1, p.2 + if x = p.1 then 1 else 0)) =
+          ((fun (p : α × Nat) => (p.1, p.2 + if x = p.1 then 1 else 0)) ∘
+            fun (p : α × Nat) => (p.1, p.2 + if y = p.1 then 1 else 0)) := by
+        funext ⟨z, n⟩
+        simp only [Function.comp_apply, Prod.mk.injEq, true_and]
+        omega
+      simp only [hxy, hyx, ↓reduceIte, Nat.add_zero]
+      rw [hcomm]
+      exact List.Perm.swap _ _ _
+  | trans _ _ ih₁ ih₂ => exact ih₁.trans ih₂
+
+end Occurrences
+
 /-- A core whose rows don't follow the order SQLite reads its bindings in
 gives, from any order of the bindings it keeps, the rows it gives from the
 order the model reads them in, in some order, on a database that keeps each
@@ -463,9 +548,57 @@ theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
   show (c.rows eval kept').Perm (c.rows eval kept)
   cases hagg : c.aggregated with
   | false =>
-    unfold Core.rows
-    simp only [hagg, Bool.false_eq_true, ↓reduceIte]
-    exact hperm.map _
+    -- Each window sorts by the rowid of each of the core's tables.
+    have hsorts : ∀ partition orderBy, OutCol.rowNumber partition orderBy ∈ c.output →
+        s.sortsByRowids k (orderBy.map (·.1)) = true := by
+      intro partition orderBy ho
+      have hagg' : (s.core k).aggregated = false := hagg
+      unfold Statement.followsOrder at hfree
+      rw [List.any_eq_false] at hfree
+      simpa [hagg'] using hfree _ ho
+    -- So a binding the core keeps ties in a window only with itself.
+    have htie : ∀ partition orderBy, OutCol.rowNumber partition orderBy ∈ c.output →
+        ∀ b ∈ kept, ∀ b' ∈ kept, windowPeer eval partition orderBy b b' .eq = true ↔ b' = b := by
+      intro partition orderBy ho b hb b' hb'
+      constructor
+      · intro h
+        simp only [windowPeer, Bool.and_eq_true, beq_iff_eq] at h
+        have hkey := keyCompare_eq (by simp [windowKey]) (by simp [windowKey]) h.2
+        exact sortsByRowids_separates hdb (hsorts _ _ ho) hb' hb (sa := eval b') (sb := eval b)
+          (fun e he => (List.map_inj_left.mp hkey) e he)
+      · rintro rfl
+        simp [windowPeer, keyCompare_self]
+    -- A row is its binding's values, each window's number counting the
+    -- bindings that sort before it in the window and the copies of the
+    -- binding read before it.
+    let G : Bind × Nat → Row := fun (b, n) => c.output.map fun
+      | .expr e => e.eval b (eval b)
+      | .rowNumber partition orderBy =>
+        some (Int.ofNat (1 + kept.countP (windowPeer eval partition orderBy b · .lt) + n))
+      | _ => none
+    have hrows : ∀ L : List Bind, L.Perm kept → c.rows eval L = (occurrences L).map G := by
+      intro L hL
+      unfold Core.rows occurrences
+      simp only [hagg, Bool.false_eq_true, ↓reduceIte, List.map_map]
+      apply List.map_congr_left
+      intro ⟨b, j⟩ hbj
+      have hb : b ∈ kept := hL.mem_iff.mp (List.fst_mem_of_mem_zipIdx hbj)
+      simp only [Function.comp_apply, G]
+      apply List.map_congr_left
+      intro o ho
+      cases o with
+      | expr e => rfl
+      | rowNumber partition orderBy =>
+        simp only [OutCol.plain, windowRowNumber, hL.countP_eq]
+        congr 3
+        apply List.countP_congr
+        intro b' hb'
+        have hb'' : b' ∈ kept := hL.mem_iff.mp (List.mem_of_mem_take hb')
+        simp [htie partition orderBy ho b hb b' hb'']
+      | _ => rfl
+    show (c.rows eval kept').Perm (c.rows eval kept)
+    rw [hrows kept' hperm, hrows kept (List.Perm.refl _)]
+    exact (occurrences_perm hperm).map G
   | true =>
   have hfree' : ∀ o ∈ c.output, (∀ e, o = .expr e → e.bare c.groupBy = false) ∧
       (∀ e orderBy, o = .concat e orderBy → s.sortsByRowids k (orderBy.map (·.1)) = true) := by
@@ -541,6 +674,7 @@ theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
             have hb' := (perm_sortBy g').mem_iff.mp hb
             exact hsep a ha' b hb' (keyLe_antisymm (hlen a) (hlen b) h1 h2)
       simp only [OutCol.aggregate, hsort]
+    | rowNumber => rfl
   unfold Core.rows
   simp only [hagg, ↓reduceIte]
   split

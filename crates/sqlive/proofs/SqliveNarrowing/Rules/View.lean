@@ -219,6 +219,7 @@ theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
       simp only [OutCol.aggregate, hsort, List.map_map]
       congr 1
       exact List.map_congr_left fun b _ => hout _ ho e (by simp [OutCol.exprs]) b
+    | rowNumber => rfl
   unfold Core.rows
   split
   · split
@@ -226,13 +227,25 @@ theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
     · rw [groupsOf_map (fun x => List.map_congr_left fun e he => hgroup e he x) L]
       simp only [List.map_map]
       exact List.map_congr_left fun g _ => hg g
-  · simp only [List.map_map]
+  · rw [List.zipIdx_map, List.map_map]
     apply List.map_congr_left
-    intro b _
+    intro ⟨b, j⟩ _
+    simp only [Function.comp_def, Prod.map, id]
     apply List.map_congr_left
     intro o ho
     cases o with
     | expr e => exact hout _ ho e (by simp [OutCol.exprs]) b
+    | rowNumber partition orderBy =>
+      have hkey : ∀ exprs : List Expr, (∀ e ∈ exprs, e ∈ partition ++ orderBy.map (·.1)) →
+          ∀ x, windowKey subs exprs (R x) = windowKey subs exprs x := fun exprs hin x =>
+        List.map_congr_left fun e he => hout _ ho e (by simpa [OutCol.exprs] using hin e he) x
+      have hpeer : ∀ x y o, windowPeer subs partition orderBy (R x) (R y) o =
+          windowPeer subs partition orderBy x y o := by
+        intro x y o
+        simp only [windowPeer, hkey partition (fun e he => List.mem_append_left _ he),
+          hkey (orderBy.map (·.1)) (fun e he => List.mem_append_right _ he)]
+      simp only [OutCol.plain, windowRowNumber, ← List.map_take, List.countP_map,
+        Function.comp_def, hpeer]
     | _ => rfl
 
 /-- What `closed` says of each arm `k` of queries `qs`. -/

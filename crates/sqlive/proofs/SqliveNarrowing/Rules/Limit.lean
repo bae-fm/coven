@@ -4,7 +4,8 @@ import SqliveNarrowing.Reader
 tables, each a result column, with a LIMIT and no OFFSET, depends only on that
 table's rows up to its last row when a run returns as many rows as its LIMIT
 (`scope_order.rs`). The table isn't a LEFT JOIN's right side, and the SELECT
-neither groups nor aggregates. -/
+neither groups, aggregates nor calls a window function, whose value in a row
+the rows after the last can change. -/
 namespace SqliveNarrowing.Limit
 
 structure SortedLimit where
@@ -25,7 +26,7 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let n ← query.limit
   if query.orderBy.isEmpty ∨ !query.orderNamed ∨ n = 0 ∨ query.offset.isSome then none
   let c := s.core k
-  if c.aggregated then none
+  if c.aggregated || c.windowed then none
   let terms ← query.orderBy.mapM fun (p, desc) => do
     let .expr (.col i col) ← c.output[p]? | none
     let position ← c.output.findIdx? fun

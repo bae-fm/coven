@@ -19,9 +19,13 @@
 //! it. The model states the rule as `Statement.picks` and proves it in
 //! `crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean`.
 //!
-//! A core that aggregates picks rows too, so every column of each table it
-//! reads counts as read when its rows follow the order SQLite reads its rows
-//! in. A result column, the HAVING or an ORDER BY term that names a column
+//! A core that aggregates or calls a window function picks rows too, so every
+//! column of each table it reads counts as read when its rows follow the
+//! order SQLite reads its rows in. A window function numbers or reads the
+//! rows of a partition in that order among those its ORDER BY sorts the
+//! same, unless that ORDER BY sorts by the rowid of each of the core's
+//! tables in a core that doesn't aggregate. A result column, the HAVING or
+//! an ORDER BY term that names a column
 //! outside every aggregate call and GROUP BY term takes the column's value
 //! from one row of its group, which that order decides. min and max keep the
 //! value they read first among values that compare equal, unless their
@@ -39,13 +43,13 @@ use crate::read_set::ColumnSet;
 use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{
-    aggregate_call, order_term, parts, parts_outside, window_parts, AggregateCall, Functions,
-    OrderTerm, Part,
+    aggregate_call, order_term, parts, parts_outside, window_call, window_parts, AggregateCall,
+    Functions, OrderTerm, Part,
 };
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, QualifiedName,
-    ResultColumn, Select, SelectTable, SortedColumn,
+    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, Over,
+    QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -542,8 +546,12 @@ impl Walk<'_> {
         Ok(true)
     }
 
-    /// Whether the rows of a core that aggregates follow the order SQLite
-    /// reads its rows in. A result column, the HAVING or a term of the
+    /// Whether the rows of a core follow the order SQLite reads its rows in.
+    /// A window function numbers or reads the rows of a partition in that
+    /// order among those its ORDER BY sorts the same, unless the ORDER BY
+    /// sorts by the rowid of each of the core's FROM items, each a table, in
+    /// a core that doesn't aggregate. In a core that aggregates, a result
+    /// column, the HAVING or a term of the
     /// ORDER BY `order_by` takes its value from one row of each group, which
     /// that order decides, when it names a column, or holds a subquery that
     /// can, outside every aggregate call and GROUP BY term, and so does a
@@ -558,7 +566,7 @@ impl Walk<'_> {
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
     ) -> rusqlite::Result<bool> {
-        let OneSelect::Select { columns, from, group_by, having, .. } = core else {
+        let OneSelect::Select { columns, from, group_by, having, window_clause, .. } = core else {
             return Ok(false);
         };
         let mut evaluated = Vec::new();
@@ -592,15 +600,42 @@ impl Walk<'_> {
         let inside = |expr: &Expr<'_>| {
             grouped.contains(&crate::sql::unparenthesized(expr))
                 || aggregate_call(expr, self.functions).is_some()
+                || window_call(expr).is_some()
         };
         let mut outside = Vec::new();
         let mut stopped = Vec::new();
+        let mut aggregated = group_by.is_some();
         for expr in evaluated {
             parts_outside(expr, &inside, &mut outside, &mut stopped);
+            // An aggregate inside a window function's arguments makes the
+            // core aggregate too.
+            let mut found = Vec::new();
+            parts(expr, &mut found);
+            aggregated |= found.iter().any(|part| part.aggregates(self.functions));
         }
+        let windows: Vec<&Over<'_>> = stopped.iter().filter_map(|expr| window_call(expr)).collect();
         let calls: Vec<AggregateCall<'_>> =
             stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.functions)).collect();
-        if group_by.is_none() && calls.is_empty() {
+        let items = self.table_items(from.as_ref())?;
+        // A window numbers or reads the rows of each partition in the order
+        // its ORDER BY sorts them, and among those that sort the same in the
+        // order SQLite reads them; in a core that aggregates, it reads the
+        // groups in the order SQLite makes them.
+        let definitions = window_clause.unwrap_or_default();
+        for over in windows {
+            let order = window_order(over, definitions);
+            let (false, Some(order), Some(items)) = (aggregated, order, &items) else {
+                return Ok(true);
+            };
+            let mut sorted = Vec::new();
+            for term in order {
+                sorted.push(self.item_column(items, &term.expr)?);
+            }
+            if !self.sorts_by_rowids(items, &sorted)? {
+                return Ok(true);
+            }
+        }
+        if !aggregated {
             return Ok(false);
         }
         let bare = outside
@@ -609,7 +644,6 @@ impl Walk<'_> {
         if star || bare {
             return Ok(true);
         }
-        let items = self.table_items(from.as_ref())?;
         for call in calls {
             match (call.name.as_str(), call.arguments, &items) {
                 // count gives the same value in every order.
@@ -751,6 +785,32 @@ impl Walk<'_> {
             .map(|column| column.name.to_ascii_lowercase())
             .collect())
     }
+}
+
+/// The ORDER BY terms of the window `over`, among the windows `definitions`
+/// its core's WINDOW clause names: its own, or else its base window's, or
+/// none. `None` when a name names no window, which SQLite refuses.
+fn window_order<'a>(
+    over: &'a Over<'a>,
+    definitions: &'a [WindowDef<'a>],
+) -> Option<&'a [SortedColumn<'a>]> {
+    let named = |name: &Name<'_>| {
+        definitions.iter().find(|definition| definition.name == *name).map(|found| &found.window)
+    };
+    let mut window = match over {
+        Over::Window(window) => *window,
+        Over::Name(name) => named(name)?,
+    };
+    // Each base is another of the definitions, so a chain longer than them
+    // repeats one.
+    for _ in 0..=definitions.len() {
+        if let Some(order) = window.order_by {
+            return Some(order);
+        }
+        let Some(base) = &window.base else { return Some(&[]) };
+        window = named(base)?;
+    }
+    None
 }
 
 /// The names, lowercase, SQLite gives the result columns of `select`'s first

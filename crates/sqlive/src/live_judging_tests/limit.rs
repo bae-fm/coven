@@ -299,6 +299,33 @@ async fn min_and_max_over_values_that_compare_equal_and_differ_rerun_on_any_colu
     db.close();
 }
 
+/// `row_number()` with no ORDER BY numbers the rows in the order SQLite
+/// reads them: here through the covering index on `u.a`, which the statement
+/// never names, so a write to `u.a` changes the numbers, and a write to any
+/// column of `u` reruns the query. Ordered by the rowid, the numbers depend
+/// only on the columns the statement names.
+#[tokio::test]
+async fn a_window_that_doesnt_tell_its_rows_apart_reruns_on_any_column() {
+    let db = TestDatabase::open(PICKED);
+    follows(
+        &db,
+        "SELECT x.id || ':' || row_number() OVER () FROM u AS x",
+        vec![],
+        &[("UPDATE u SET a = 0 WHERE id = 5", true), ("UPDATE u SET n = 1 WHERE id = 2", true)],
+    )
+    .await;
+    db.close();
+    let db = TestDatabase::open(PICKED);
+    follows(
+        &db,
+        "SELECT x.id || ':' || row_number() OVER (ORDER BY x.id) FROM u AS x",
+        vec![],
+        &[("UPDATE u SET a = 0 WHERE id = 5", false), ("DELETE FROM u WHERE id = 0", true)],
+    )
+    .await;
+    db.close();
+}
+
 /// An aggregate's own ORDER BY that sorts by the rowid fixes the order it
 /// joins its values in, and count, and max of an INTEGER column, give the
 /// same value in every order, so a write to a column the statement doesn't

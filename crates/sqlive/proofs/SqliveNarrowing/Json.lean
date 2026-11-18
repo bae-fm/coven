@@ -179,6 +179,9 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
   let mut groupBy := []
   for e in list j "group" do
     groupBy := groupBy ++ [← readExpr schema e k ctes]
+  let core : Core := { parent, items, conds, output, groupBy }
+  if core.aggregated && core.windowed then
+    lift (throw "the model numbers a window's rows only in a core that doesn't aggregate")
   modify fun b => { b with
     cores := b.cores.modify k fun c => { c with conds, output, groupBy }
     outNames := b.outNames.modify k fun _ => names }
@@ -266,6 +269,16 @@ partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : List (String 
       let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
       orderBy := orderBy ++ [(← readExpr schema sorted k ctes, desc)]
     pure (.concat e orderBy, alias)
+  else if let some window := field j "row_number" then
+    let mut partition := []
+    for e in list window "partition" do
+      partition := partition ++ [← readExpr schema e k ctes]
+    let mut orderBy := []
+    for term in list window "order" do
+      let some sorted := field term "expr" | lift (throw "an ORDER BY term sorts by nothing")
+      let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
+      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, desc)]
+    pure (.rowNumber partition orderBy, alias)
   else if (field j "count").isSome then
     pure (.count, alias)
   else lift (throw "unknown result column")

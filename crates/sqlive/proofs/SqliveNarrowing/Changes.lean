@@ -56,13 +56,15 @@ def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=
 
 /-- Whether query `q`'s ORDER BY tells every two of its rows apart. The query
 is one SELECT, and either it aggregates with no GROUP BY, so it returns one
-row, or it neither groups nor aggregates and its ORDER BY sorts by the rowid
-of each of its items as result columns (`Pick.fullyOrders_separates`). -/
+row, or it neither groups, aggregates nor calls a window function and its
+ORDER BY sorts by the rowid of each of its items as result columns
+(`Pick.fullyOrders_separates`). -/
 def Statement.fullyOrders (s : Statement) (q : Nat) : Bool :=
   match (s.query q).arms with
   | [k] =>
     let c := s.core k
-    (c.aggregated && c.groupBy.isEmpty) || (!c.aggregated && s.sortsByRowids k (s.orderExprs q k))
+    (c.aggregated && c.groupBy.isEmpty) ||
+      (!c.aggregated && !c.windowed && s.sortsByRowids k (s.orderExprs q k))
   | _ => false
 
 /-- Whether `e` can take a different value in each binding of a group of a
@@ -88,15 +90,19 @@ aggregates, and a result column takes its value from one binding of a group,
 which that order decides, as a column outside every GROUP BY term
 (`Expr.bare`) does, or joins its values in that order, with no ORDER BY of its
 own that tells the bindings apart, or keeps the greatest value it reads first
-among values that compare equal and can differ. That order follows the plan
-SQLite picks (`Pick.bare_picks_any`, `Pick.concat_follows_order`,
-`Pick.max_keeps_first`). -/
+among values that compare equal and can differ; or it numbers its bindings
+in a window whose ORDER BY doesn't tell them apart, or numbers its groups.
+That order follows the plan SQLite picks (`Pick.bare_picks_any`,
+`Pick.concat_follows_order`, `Pick.max_keeps_first`,
+`Pick.rowNumber_follows_order`). An aggregate's call implies that the core
+aggregates. -/
 def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
   let c := s.core k
-  c.aggregated && c.output.any fun
-    | .expr e => e.bare c.groupBy
+  c.output.any fun
+    | .expr e => c.aggregated && e.bare c.groupBy
     | .concat _ orderBy => !s.sortsByRowids k (orderBy.map (·.1))
     | .max e => !s.comparesExactly k e
+    | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (orderBy.map (·.1))
     | .count => false
 
 /-- The subqueries whose first row a clause of the statement takes. -/
