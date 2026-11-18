@@ -109,14 +109,9 @@ pub(crate) fn leave_all(next: &mut StoreState, member: &MemberId, slot: Slot) {
 /// member leaves each such circle at `slot`, which deletes it (§13.3).
 pub(crate) fn leave_lone(next: &mut StoreState, member: &MemberId, slot: Slot) {
     let lone: Vec<CircleId> = next
-        .circles
-        .iter()
-        .filter(|(circle, record)| {
-            !next.circle_deletions.contains_key(circle)
-                && record.members.len() == 1
-                && record.members.contains(member)
-        })
-        .map(|(circle, _)| *circle)
+        .readable_circles(member)
+        .into_iter()
+        .filter(|circle| next.circles[circle].members.len() == 1)
         .collect();
     for circle in lone {
         leave(next, circle, member, slot);

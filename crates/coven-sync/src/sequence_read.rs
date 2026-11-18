@@ -394,11 +394,24 @@ impl SequenceSync {
                 },
             );
             input.release().await?;
-            let Ok(received) = received else {
-                return Ok(None);
+            let received = match received {
+                Ok(received) => received,
+                Err(error) => {
+                    tracing::warn!(
+                        slot = next.get(),
+                        "the look for a slot taking this member out of a stuck circle stops \
+                         at a slot it can't open: {error}"
+                    );
+                    return Ok(None);
+                }
             };
             history.consume(received, me);
-            if history.acquire(&mut ring, member).is_err() {
+            if let Err(error) = history.acquire(&mut ring, member) {
+                tracing::warn!(
+                    slot = next.get(),
+                    "the look for a slot taking this member out of a stuck circle stops at \
+                     a key copy it can't open: {error}"
+                );
                 return Ok(None);
             }
             if !crate::effects::belongs(&history.state, &stuck, &me) {
