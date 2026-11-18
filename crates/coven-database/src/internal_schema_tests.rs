@@ -89,6 +89,7 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_circles".into()),
                 ("view".into(), "coven_devices".into()),
                 ("view".into(), "coven_downloading".into()),
+                ("view".into(), "coven_file_reads".into()),
                 ("view".into(), "coven_invites".into()),
                 ("view".into(), "coven_members".into()),
                 ("view".into(), "coven_network".into()),
@@ -96,6 +97,7 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_sending".into()),
                 ("view".into(), "coven_sync_state".into()),
                 ("view".into(), "coven_upload_pause".into()),
+                ("view".into(), "coven_upload_phases".into()),
                 ("view".into(), "coven_uploads".into()),
                 ("view".into(), "coven_user_files".into()),
             ]
