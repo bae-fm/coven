@@ -1,0 +1,5 @@
+name = "sqliveNarrowing"
+defaultTargets = ["SqliveNarrowing"]
+
+[[lean_lib]]
+name = "SqliveNarrowing"

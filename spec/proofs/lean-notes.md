@@ -1,8 +1,10 @@
 # Lean model boundaries
 
 The current proof packages are [sequence](sequence.md), [merge](merge.md),
-[queue](queue.md), [storage](storage.md) and [io](io.md). Each package's root
-imports its retained modules; its `Axioms.lean` names results for the audit.
+[queue](queue.md), [storage](storage.md), [io](io.md) and [sqlive](sqlive.md).
+The sqlive package lives in the crate it models, under `crates/sqlive/proofs`;
+the others live here. Each package's root imports its retained modules; its
+`Axioms.lean` names results for the audit.
 `scripts/check.sh` builds them and permits only Lean's `propext`,
 `Classical.choice` and `Quot.sound`. It rejects `sorry`, `admit` and custom
 axioms in the proof libraries. Each theorem a write-up or Appendix G cites
@@ -21,6 +23,10 @@ dependence, owner permissions and value accounting.
 It accepts sequence admission, creator identity and unique-claim ranks as
 inputs. A timestamp choosing a cell is distinct from the slot order choosing
 an owner or unique claimant.
+
+The sqlive package proves each rule by which a live query narrows its
+dependence on a table, against a port of sqlive's planner. The package doesn't
+yet prove that the planner composes the rules soundly.
 
 The queue package preserves original queued records while deriving received
 interpretations and schema losses. Its read and coverage sets are expanded

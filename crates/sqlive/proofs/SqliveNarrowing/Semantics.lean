@@ -1,0 +1,152 @@
+import SqliveNarrowing.Syntax
+
+/-! What a statement returns from a database.
+
+A table's rows sit in rowid slots, so a write is two databases that differ in
+some slots, and a row's place in a scan is its slot. A core joins its items
+left to right, keeps the bindings its conditions hold for, and outputs a row
+for each, or one for each group. A FROM item's rows are read under the
+binding around its core; a subquery's under the current binding. Evaluation
+takes fuel, and every theorem holds for every fuel. -/
+namespace SqliveNarrowing
+
+/-- Each table's rows, by rowid slot. -/
+abbrev Db := Nat → List (Option Row)
+
+/-- Table `t`'s rows, in slot order. -/
+def Db.rows (db : Db) (t : Nat) : List Row := (db t).filterMap id
+
+/-- Each item's row in one evaluation: `none` for a LEFT JOIN's missing row,
+or an item not bound. -/
+abbrev Bind := Nat → Option Row
+
+def Bind.set (b : Bind) (i : Nat) (r : Option Row) : Bind :=
+  fun j => if j = i then r else b j
+
+/-- The binding with no item bound. -/
+def Bind.empty : Bind := fun _ => none
+
+/-- The rows each subquery returns under a binding. -/
+abbrev Subs := Nat → List Row
+
+def Expr.eval (b : Bind) (sub : Subs) : Expr → Value
+  | .col i c => cellOf (b i) c
+  | .lit v => v
+  | .add l r =>
+    match l.eval b sub, r.eval b sub with
+    | some x, some y => some (x + y)
+    | _, _ => none
+  | .sub q => ((sub q).head?.bind List.head?).join
+
+def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
+  | .cmp op l r => op.apply (l.eval b sub) (r.eval b sub)
+  | .null e n => some ((e.eval b sub).isNone != n)
+  | .inList e vs => memberTruth (e.eval b sub) (vs.map (Expr.eval b sub))
+  | .inQuery e q n =>
+    let t := memberTruth (e.eval b sub) ((sub q).map (Row.cell · 0))
+    if n then tnot t else t
+  | .exists q n => some ((sub q).isEmpty == n)
+  | .and l r => tand (l.eval b sub) (r.eval b sub)
+  | .or l r => tor (l.eval b sub) (r.eval b sub)
+  | .not c => tnot (c.eval b sub)
+
+def combine : Combine → List Row → List Row → List Row
+  | .unionAll, a, b => a ++ b
+  | .union, a, b => (a ++ b).eraseDups
+  | .except, a, b => (a.filter fun r => !b.contains r).eraseDups
+  | .intersect, a, b => (a.filter fun r => b.contains r).eraseDups
+
+/-- The arms' rows combined left to right. -/
+def combineAll (ops : List Combine) : List (List Row) → List Row
+  | [] => []
+  | first :: rest => (ops.zip rest).foldl (fun acc (op, rows) => combine op acc rows) first
+
+/-- A query's ORDER BY and LIMIT over its rows. -/
+def Query.post (q : Query) (rows : List Row) : List Row :=
+  let directions := q.orderBy.map (·.2)
+  let key (r : Row) := q.orderBy.map fun (p, _) => r.cell p
+  let sorted := if q.orderBy.isEmpty then rows else sortBy (fun a b => keyLe directions (key a) (key b)) rows
+  match q.limit with
+  | some n => sorted.take n
+  | none => sorted
+
+/-- The ON conditions of the LEFT JOIN adding item `i`. -/
+def Core.onOf (c : Core) (i : Nat) : List Cond :=
+  c.conds.filterMap fun (cd, p) => if p == .leftOn i then some cd else none
+
+/-- The conditions of the WHERE and of inner joins' ONs. -/
+def Core.innerConds (c : Core) : List Cond :=
+  c.conds.filterMap fun (cd, p) => if p == .inner then some cd else none
+
+/-- Join `items` onto each binding, left to right: an item's rows that its
+LEFT JOIN's ON holds for, or `none` when no row does. -/
+def joinItems (s : Statement) (c : Core) (rowsOf : Nat → List Row)
+    (subs : Bind → Subs) : List Nat → List Bind → List Bind
+  | [], bs => bs
+  | i :: is, bs =>
+    joinItems s c rowsOf subs is <| bs.flatMap fun b =>
+      let joined := (rowsOf i).filterMap fun r =>
+        let b' := b.set i (some r)
+        if (c.onOf i).all (fun cd => isTrue (cd.eval b' (subs b'))) then some b' else none
+      if (s.item i).left && joined.isEmpty then [b.set i none] else joined
+
+/-- The groups of `bs` by `key`, in order of each key's first binding. -/
+def groupsOf (key : Bind → List Value) (bs : List Bind) : List (List Bind) :=
+  ((bs.map key).eraseDups).map fun k => bs.filter fun b => key b == k
+
+/-- The largest non-NULL value, or NULL. -/
+def maxValue (vs : List Value) : Value :=
+  vs.foldl (fun acc v => match acc, v with
+    | some x, some y => some (max x y)
+    | none, v => v
+    | acc, none => acc) none
+
+/-- A core's rows from the bindings it keeps. -/
+def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
+  if c.aggregated then
+    let groups := if c.groupBy.isEmpty then [kept]
+      else groupsOf (fun b => c.groupBy.map (Expr.eval b (subs b))) kept
+    groups.map fun g => c.output.map fun
+      | .expr e => match g.getLast? with
+        | some b => e.eval b (subs b)
+        | none => none
+      | .count => some (Int.ofNat g.length)
+      | .max e => maxValue (g.map fun b => e.eval b (subs b))
+  else
+    kept.map fun b => c.output.map fun
+      | .expr e => e.eval b (subs b)
+      | _ => none
+
+/-- The bindings core `k` keeps under the binding `outer` around it, with
+`eval` giving a query's rows under a binding. A core in no other, as a
+statement's own, a view's or a FROM subquery's of such a core, sees no row
+around it. -/
+def coreBindings (s : Statement) (db : Db) (eval : Bind → Nat → List Row)
+    (outer : Bind) (k : Nat) : List Bind :=
+  let c := s.core k
+  let b := if c.parent.isNone then Bind.empty else outer
+  let rowsOf (i : Nat) : List Row :=
+    match (s.item i).kind with
+    | .table t => db.rows t
+    | .derived q _ => eval b q
+  let subs (b' : Bind) : Subs := eval b'
+  (joinItems s c rowsOf subs c.items [b]).filter fun b' =>
+    c.innerConds.all fun cd => isTrue (cd.eval b' (subs b'))
+
+/-- Query `q`'s rows under the binding `b`, with `eval` for its subqueries. -/
+def queryRows (s : Statement) (db : Db) (eval : Bind → Nat → List Row)
+    (b : Bind) (q : Nat) : List Row :=
+  let query := s.query q
+  query.post <| combineAll query.ops <| query.arms.map fun k =>
+    (s.core k).rows eval (coreBindings s db eval b k)
+
+/-- Query `q`'s rows under `b`, with `fuel` for its nesting. -/
+def evalQuery (s : Statement) (db : Db) : Nat → Bind → Nat → List Row
+  | 0, _, _ => []
+  | fuel + 1, b, q => queryRows s db (evalQuery s db fuel) b q
+
+/-- What the statement returns, with fuel for each level of its nesting. -/
+def Statement.result (s : Statement) (db : Db) : List Row :=
+  evalQuery s db (s.queries.length + 1) Bind.empty s.root
+
+end SqliveNarrowing

@@ -2768,7 +2768,7 @@ away; the same key shows once (in two audiences, the store's row wins).
   So every device that applied the same writes sees the same rows, whatever order
   the writes arrived in and whatever order the rules ran in. The merge model
   proves this for the merged state and every removal rule, including rows hidden
-  by a circle-deletion slot (Appendix G.3). The
+  by a circle-deletion slot (Appendix G.4). The
   [merge write-up](proofs/merge.md) explains the model.
 
 ### 9. The rules SQL brings with it
@@ -5440,7 +5440,7 @@ rather than reuse them.
   request records the ending, then the kept sign-in, the saved code and the
   installation go. Nothing is left that would fail every later call, and
   nothing in a join that can't read its storage waits for an answer that can't
-  come (Appendix G.4). It
+  come (Appendix G.5). It
   applies once the join's account is proven, so a refusal that could mean
   Dan's own sign-in is never read as an end: on Dropbox and OneDrive the
   account check passed; on iCloud the acceptance succeeded once (the saved
@@ -7620,7 +7620,7 @@ and writing its own.
 
 **Every device still agrees.** A device that forgot an announcement accepts and
 refuses exactly what one holding it does, whatever the reasons it keeps one
-(Appendix G.5). Each
+(Appendix G.6). Each
 audience's greatest coverage stays, so a new announcement meets the same
 check. A raise or reset naming a forgotten announcement is refused either
 way: another announcement of the audience covers more. A device rebuilds its
@@ -10765,7 +10765,7 @@ read, never a refusal.
   identity, and a change to any of that code, or to a dependency, compiles it
   again. A compilation with `CONST_RANDOM_SEED` set, which would draw the same
   identity every time, fails. A number builds share, such as the package version, would leave a
-  device stuck on a refusal the fix never rechecks (Appendix G.7).
+  device stuck on a refusal the fix never rechecks (Appendix G.8).
 - A refused slot stops the device under §5.4's rule. No later floor, reset or
   admin entry can get past the refusal.
 - A failed database transaction keeps the old state and applied slot. A
@@ -12184,8 +12184,10 @@ changes.
 ### 22. What's proved and what isn't
 
 Some of this design's rules are checked by machine. The Lean models under
-[proofs/](proofs/) state the rules as small programs and prove properties of
-them: that a claim lands exactly once, that the floor check is needed and enough,
+[proofs/](proofs/), and the one under
+[crates/sqlive/proofs/](../crates/sqlive/proofs/) beside the code it models,
+state the rules as small programs and prove properties of them: that a claim
+lands exactly once, that the floor check is needed and enough,
 that every device converges, that a removed member's later writes never count.
 Appendix G lists every such claim with its theorems, their file, and the section
 of this document it supports.
@@ -12211,6 +12213,8 @@ What the models cover:
   approved, and nothing at the path carries the member's keys before that; and
   cancelling the new device before its restore records itself binds nothing
   (§13.2, §13.4). The sealing and opening are taken as given.
+- **Narrowing a live query** to the rows its statements can depend on (§4):
+  each rule's step, against a port of sqlive's planner.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:
@@ -12225,7 +12229,7 @@ What they don't cover:
   a write into a circle its member isn't in or that was deleted (§15.6,
   §15.9), though the membership it checks is modelled. Nor do they cover
   the checks that refuse a schema at open (§9.1, §9.2, §9.4, §15.1, §15.2),
-  though one refusal's reason is proved (Appendix G.3); nor `UuidText`, the
+  though one refusal's reason is proved (Appendix G.4); nor `UuidText`, the
   canonical spelling of an audience (§15.1), how a CHECK is judged on a merged
   row (§9.3), or which tables a trigger may write. Nor do
   they cover how a migration write is found from the tables before and after
@@ -12252,7 +12256,7 @@ What they don't cover:
 - **What the app is told.** Which entry a `WritesRefused` record names (§14.1),
   and what each pending record and status says (§19.1, Appendix H), are tested
   against the Rust. The models give the states they depend on, such as the sync
-  state (Appendix G.7) and the refusal itself (§14.1).
+  state (Appendix G.8) and the refusal itself (§14.1).
 - **The providers.** Whether a real service really is create-once is checked
   live: certification races writers against each service (§20.7), and every
   setup re-checks the server (§20.8). A live sample measures listing lag; it
@@ -14271,14 +14275,16 @@ tests of the check scripts are `test` lines of `.checks`, which CI runs.
 
 Every machine-checked claim this document relies on, in the order of the sections
 it supports. Each row names the claim in plain words, its theorems, and the file
-under [proofs/](proofs/) that proves them. A theorem proves what it states about
+under [proofs/](proofs/), or under [crates/sqlive/proofs/](../crates/sqlive/proofs/)
+for live queries, that proves them. A theorem proves what it states about
 its model, under that model's assumptions; it does not prove the Rust code
 (§22). Rows marked *body* are also linked where the rule they explain appears.
 
 Write-ups explain each model and state its assumptions:
 [sequence](proofs/sequence.md), [merge](proofs/merge.md),
-[queue](proofs/queue.md) (conversion of old writes and the reload gate) and
-[IO and observable work](proofs/io.md).
+[queue](proofs/queue.md) (conversion of old writes and the reload gate),
+[IO and observable work](proofs/io.md) and
+[live query narrowing](proofs/sqlive.md).
 
 ### G.1 Promises (§2)
 
@@ -14290,7 +14296,21 @@ Write-ups explain each model and state its assumptions:
 | An audience with no reader to supply coverage has no deletion deadline | `uncovered_has_no_deadline` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sequence.md` | §2.9 |
 
-### G.2 The sequence and the pass (§5–§7)
+### G.2 Live queries (§4)
+
+| Claim | Theorems | File | Section |
+|---|---|---|---|
+| A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
+| An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
+| A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
+| Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
+| A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row | `push_down_sound`, `renamed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
+| A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
+| A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
+| A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
+| Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
+
+### G.3 The sequence and the pass (§5–§7)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14339,7 +14359,7 @@ Write-ups explain each model and state its assumptions:
 | A wall clock past the last millisecond 48 bits hold fails the stamp, and so does a latest timestamp at that millisecond with its counter at the maximum; short of those, a stamp exists | `clock_past_range_fails`, `exhausted_fails`, `representable_stamp_exists` | `proofs/storage/CovenStorage/Clocks.lean` | §7.2 |
 | A write applies once its causes and keys are there, whatever its timestamp says about the receiver's clock; a write still waiting for them isn't seen | `no_clock_hold`, `waiting_is_not_seen` | `proofs/storage/CovenStorage/Clocks.lean` | §7.2 |
 
-### G.3 Merging and SQL rules (§8, §9)
+### G.4 Merging and SQL rules (§8, §9)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14377,7 +14397,7 @@ Write-ups explain each model and state its assumptions:
 | A shared reference's parent is the row its values key where the write's earlier steps leave that key, a move's two steps included, whether the row's own update or an ancestor's move made them: every author view consistent with the steps holds it there, at that incarnation, or nowhere after a delete, so the parent the receiver records is the one the author's capture names. A row of the key the write changed at no step of its own leaves that parent standing unless it is the row the last step names, the setter's parent, or, where the reference would name none, a row the reference could name: a removed row a move carries beside the shown one leaves it placed. Where no step touched the key and the action changes the reference, or such a row could have moved the key where the reference looks, two such views capture different parents, and the receiver refuses | `Place.place_settles`, `Place.place_sound`, `Place.resolve_sound`, `Place.recorded_sound`, `Place.aside_placed`, `Place.untouched_views_differ`, `Place.unstepped_views_differ`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | A net change's reference names the row its values key where the whole write's steps leave that key, at the incarnation the write's own record of that row leaves it at: every author view consistent with the steps and the rows changed at no step captures that parent for the net change, resolved as an action's is. It is not the parent an action's step names: a parent deleted and added again in the write keeps its incarnation in its net change, and a deferred reference's parent can be added after the action | `Place.net_sound`, `Place.readded_net_differs`, `Place.deferred_net_differs`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 
-### G.4 People (§10–§15)
+### G.5 People (§10–§15)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14482,7 +14502,7 @@ Write-ups explain each model and state its assumptions:
 | An admission or a recovery makes its member's circle with the member alone in it, refuses a circle id already used, live or deleted, and changes nothing when repeated once the circle holds the member under that name | `admission_makes_circle`, `used_circle_refuses_admission`, `admission_repeat_unchanged` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §13.2, §15.5 |
 | A recovery takes its member out of every live circle they alone are in, which deletes it at the recovery's slot, and keeps them in every circle someone else is in; after it, the member no longer reads such a circle, and still reads the shared ones and the new circle with the new pair | `recovery_deletes_lone_circles`, `recovery_keeps_shared_circles`, `recovery_leaves_lone_circle` | `proofs/sequence/CovenSequence/CircleLifecycle.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §13.3, §15.8 |
 
-### G.5 Snapshots, the floor and reloads (§16)
+### G.6 Snapshots, the floor and reloads (§16)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14555,7 +14575,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Each applied slot keeps those entries without looking at every one: tracking the latest stamped entry from the one kept before and the latest stamped one in the slots passed since, telling a device's last landed write by a kept later one, and forgetting only entries at or below the new slot that are neither, keeps what the row above assumes, through writes landing and a device looking at every entry again | `tracks_reset`, `passed_tracks`, `tracks_land`, `not_last_iff`, `pass_retains`, `retains_later`, `land_retains` | `proofs/merge/CovenMerge/ForgetEntries.lean` | §16.7 |
 | Grace is measured by the deleting device's wall clock against the provider's time for the announcement plus that time's resolution: with a clock no faster than real time it never ends early, and a fast clock can end it at once | `age_never_early`, `fast_clock_ages_at_once` | `proofs/storage/CovenStorage/Clocks.lean` | §16.6, §20.5 |
 
-### G.6 Files (§17)
+### G.7 Files (§17)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14602,7 +14622,7 @@ Write-ups explain each model and state its assumptions:
 | A read reaches a user's original only while the record keeps the file on this device and its bytes are there; a stored file reads the cache or storage, and an open racing the upload's switch goes where the record now points | `original_only_here`, `stored_reads_no_original` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.7 |
 | A complete listing of the folder of a device gone for good makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.10 |
 
-### G.7 Schema changes and resets (§18, §19)
+### G.8 Schema changes and resets (§18, §19)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
@@ -14662,7 +14682,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A registration that replaces nothing is no cut-off of any device under any key generation, and leaves every other device's batches counting; the fresh id's registration is valid and binds the id to its member when no applied history names it and the member's current keys authorize it, and a member no longer in the store refuses it | `rejoin_cuts_nothing`, `rejoin_registers`, `rejoin_refused_for_removed_member` | `proofs/sequence/CovenSequence/Rejoin.lean` | §19.3 |
 | *Body.* Of two copies of one device id from their parting, the one that finds the other landed no slot since and has every write it numbered since unsent; the other is never stopped once the first is | `detector_landed_nothing`, `keeper_never_detects` | `proofs/sequence/CovenSequence/Rejoin.lean` | §19.3 |
 
-### G.8 Storage (§20, Appendix E)
+### G.9 Storage (§20, Appendix E)
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|

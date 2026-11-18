@@ -22,3 +22,4 @@ spec/proofs/merge/.lake    1G
 spec/proofs/queue/.lake    1G
 spec/proofs/sequence/.lake 1G
 spec/proofs/storage/.lake  1G
+crates/sqlive/proofs/.lake 1G
