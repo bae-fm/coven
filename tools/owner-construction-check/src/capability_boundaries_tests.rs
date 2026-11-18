@@ -488,3 +488,171 @@ fn an_unlisted_function_in_an_authoritys_file_cannot_spawn() {
     )
     .is_empty());
 }
+
+/// A file system capability that gates calls: code anywhere may name a file
+/// type, and only its home opens one.
+const CALLS: &str = r#"
+    rules = ["capability-boundaries"]
+    [[capabilities]]
+    name = "file system"
+    homes = ["crates/app-files/src/"]
+    [[capabilities.gates]]
+    kind = "standard library file system"
+    calls = ["std::fs"]
+    [[capabilities.gates]]
+    kind = "temporary files"
+    calls = ["tempfile"]
+"#;
+
+/// The line and gate kind of each finding the `CALLS` policy makes in these
+/// files, each of which depends on `tempfile`.
+fn call_findings(files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
+    let policy = Policy::fixture(CALLS);
+    let files = files
+        .iter()
+        .map(|(path, source)| {
+            let mut file = RustFile::fixture(path, source);
+            file.extern_crates.insert("tempfile".into(), "tempfile".into());
+            file
+        })
+        .collect::<Vec<_>>();
+    find_capability_boundary_violations(&checked(&files, &policy), &policy)
+        .iter()
+        .map(|finding| (finding.path.clone(), finding.line, kind(finding).to_string()))
+        .collect()
+}
+
+fn calls_in(source: &str) -> Vec<(usize, String)> {
+    call_findings(&[("crates/app/src/leak.rs", source)])
+        .into_iter()
+        .map(|(_, line, kind)| (line, kind))
+        .collect()
+}
+
+#[test]
+fn a_call_gate_finds_the_call_through_its_import_and_not_the_import() {
+    assert_eq!(
+        calls_in(
+            r#"
+            use std::fs;
+            fn load(path: &Path) -> Vec<u8> {
+                fs::read(path).unwrap()
+            }
+            "#
+        ),
+        [(4, "standard library file system".to_string())]
+    );
+}
+
+#[test]
+fn a_call_gate_ignores_types_and_imports() {
+    assert_eq!(
+        calls_in(
+            r#"
+            use std::fs::File;
+            struct Held { file: std::fs::File }
+            fn len(file: &std::fs::File) -> std::fs::Metadata { todo!() }
+            fn keep(file: File) -> Option<File> { Some(file) }
+            "#
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_call_gate_finds_a_type_s_function_through_its_import() {
+    assert_eq!(
+        calls_in(
+            r#"
+            use tempfile::TempDir;
+            fn stage() -> TempDir {
+                TempDir::new().unwrap()
+            }
+            "#
+        ),
+        [(4, "temporary files".to_string())]
+    );
+}
+
+#[test]
+fn a_call_gate_finds_a_call_inside_a_macro_call() {
+    assert_eq!(
+        calls_in(
+            r#"
+            fn label(path: &Path) -> String {
+                format!("{:?}", std::fs::read_to_string(path))
+            }
+            fn tagged(path: &Path) {
+                tracing::info!(key => std::fs::metadata(path), x: std::fs::File);
+            }
+            "#
+        ),
+        [
+            (3, "standard library file system".to_string()),
+            (6, "standard library file system".to_string())
+        ]
+    );
+}
+
+#[test]
+fn a_call_gate_finds_a_function_used_as_a_value_and_one_a_module_re_exports() {
+    let found = call_findings(&[
+        ("crates/app/src/lib.rs", "mod files; mod leak;"),
+        ("crates/app/src/files.rs", "pub(crate) use std::fs::read as load;"),
+        (
+            "crates/app/src/leak.rs",
+            r#"
+            fn all(paths: &[PathBuf]) -> Vec<Vec<u8>> {
+                paths.iter().map(std::fs::read).map(Result::unwrap).collect()
+            }
+            fn one(path: &Path) { let _ = crate::files::load(path); }
+            "#,
+        ),
+    ]);
+    assert_eq!(
+        found,
+        [
+            ("crates/app/src/leak.rs".to_string(), 3, "standard library file system".to_string()),
+            ("crates/app/src/leak.rs".to_string(), 5, "standard library file system".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_call_gate_ignores_workspace_items_and_local_bindings_with_a_gated_name() {
+    assert_eq!(
+        calls_in(
+            r#"
+            mod fs { pub fn read(path: &Path) {} }
+            fn load(path: &Path) { fs::read(path); }
+            fn bound(tempfile: Staged) { drop(tempfile); }
+            "#
+        ),
+        []
+    );
+}
+
+/// A path whose first segment resolves to nothing, such as a crate the
+/// manifest doesn't list, matches as written.
+#[test]
+fn a_call_gate_matches_an_unresolved_path_as_written() {
+    let found = find_capability_boundary_violations(
+        &[RustFile::fixture("crates/app/src/leak.rs", "fn stage() { tempfile::tempdir(); }")],
+        &Policy::fixture(CALLS),
+    );
+    assert_eq!(
+        found.iter().map(|finding| (finding.line, kind(finding))).collect::<Vec<_>>(),
+        [(1, "temporary files")]
+    );
+}
+
+#[test]
+fn a_call_gate_allows_calls_in_the_capability_s_homes() {
+    assert_eq!(
+        call_findings(&[(
+            "crates/app-files/src/staging.rs",
+            "fn stage() { let _ = tempfile::TempDir::new(); let _ = std::fs::read(\"a\"); }",
+        )]),
+        []
+    );
+}

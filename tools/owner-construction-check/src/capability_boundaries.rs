@@ -4,7 +4,10 @@
 //! capability through the owner that holds it.
 //!
 //! The check is syntactic: naming the crate or the path is the violation, so a
-//! new direct use fails before compilation and review. It reads inside macro
+//! new direct use fails before compilation and review. A gate's `calls` match
+//! only a function that code calls or passes as a value, by the path it
+//! resolves to through its file's imports (`NameResolver`), so code may name
+//! a capability's types and import its modules. The check reads inside macro
 //! calls too, so `format!("{}", Uuid::new_v4())` is a direct use. It reads no
 //! test code (`test_code.rs`): fixtures may assemble raw material.
 
@@ -16,6 +19,7 @@ use syn::visit::{self, Visit};
 
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
+use crate::name_resolution::{qualified_path, NameResolver};
 use crate::policy::{describe_homes, Capability, Gate, Policy};
 use crate::syntax::{flatten_use_tree, type_name, RustFile};
 
@@ -23,6 +27,7 @@ pub(crate) fn find_capability_boundary_violations(
     files: &[RustFile],
     policy: &Policy,
 ) -> Vec<Finding> {
+    let resolver = NameResolver::collect(files);
     let mut violations = BTreeSet::new();
     for file in files {
         let gated = policy
@@ -38,6 +43,7 @@ pub(crate) fn find_capability_boundary_violations(
             gated: &gated,
             violations: &mut violations,
             policy,
+            resolver: &resolver,
             current_type: "<free>".into(),
             rooted: false,
         };
@@ -51,6 +57,7 @@ struct CapabilityBoundaryVisitor<'a, 'p> {
     gated: &'a [(&'p Capability, &'p Gate)],
     violations: &'a mut BTreeSet<Finding>,
     policy: &'p Policy,
+    resolver: &'a NameResolver,
     current_type: String,
     rooted: bool,
 }
@@ -112,6 +119,58 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
             }
         }
     }
+
+    /// A function that code calls or passes as a value, by its path as
+    /// written (`""` first for a leading `::`), against the gates' `calls`.
+    fn check_call(&mut self, segments: &[String], span: Span) {
+        let resolved = self.resolver.resolve(self.path, span, segments);
+        let path = match &resolved {
+            Ok(path) => path.as_slice(),
+            Err(_) => {
+                let written = segments.strip_prefix(&[String::new()]).unwrap_or(segments);
+                // A single name that resolves to nothing is a local binding.
+                if written.len() < 2 {
+                    return;
+                }
+                written
+            }
+        };
+        if !self.rooted {
+            for gate in &self.policy.background_starts {
+                if holds_any(path, &gate.call_patterns) {
+                    self.record_background_start(gate, span);
+                }
+            }
+        }
+        for &(capability, gate) in self.gated {
+            if holds_any(path, &gate.call_patterns) {
+                self.record(capability, gate, span);
+            }
+        }
+    }
+}
+
+/// Whether `segments` holds one of `patterns` as adjacent segments.
+fn holds_any(segments: &[String], patterns: &[Vec<String>]) -> bool {
+    patterns.iter().any(|pattern| {
+        segments
+            .windows(pattern.len())
+            .any(|window| window.iter().zip(pattern.iter()).all(|(a, b)| a == b))
+    })
+}
+
+/// An expression path's segments as written, a qualified one's from its
+/// type: `<File>::open` and `<File as Opener>::open` are `File::open`.
+fn expression_path(node: &syn::ExprPath) -> Option<Vec<String>> {
+    let Some(qself) = &node.qself else { return Some(qualified_path(&node.path)) };
+    let syn::Type::Path(ty) = qself.ty.as_ref() else { return None };
+    let rest = node.path.segments.iter().skip(qself.position);
+    Some(
+        qualified_path(&ty.path)
+            .into_iter()
+            .chain(rest.map(|segment| segment.ident.to_string()))
+            .collect(),
+    )
 }
 
 fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
@@ -142,12 +201,7 @@ fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
     }
     let first_is_gated_crate = (is_import || segments.len() >= 2)
         && segments.first().is_some_and(|first| gate.crates.iter().any(|name| first == name));
-    let contains_pattern = gate.path_patterns.iter().any(|pattern| {
-        segments
-            .windows(pattern.len())
-            .any(|window| window.iter().zip(pattern.iter()).all(|(a, b)| a == b))
-    });
-    first_is_gated_crate || contains_pattern
+    first_is_gated_crate || holds_any(segments, &gate.path_patterns)
 }
 
 impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
@@ -213,6 +267,13 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         }
     }
 
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(segments) = expression_path(node) {
+            self.check_call(&segments, node.span());
+        }
+        visit::visit_expr_path(self, node);
+    }
+
     fn visit_path(&mut self, node: &'ast syn::Path) {
         let segments =
             node.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>();
@@ -232,6 +293,12 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
                         self.check_method(&path.segments[0], path.span);
                     } else {
                         self.check_segments(&path.segments, false, path.span);
+                        if !path.type_position {
+                            let leading = path.leading_colon.then(String::new);
+                            let segments =
+                                leading.into_iter().chain(path.segments).collect::<Vec<_>>();
+                            self.check_call(&segments, path.span);
+                        }
                     }
                 }
             }

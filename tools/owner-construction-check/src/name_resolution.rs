@@ -16,6 +16,9 @@ use crate::syntax::{path_names, RustFile};
 pub(crate) type ItemPath = Vec<String>;
 type Position = (usize, usize);
 
+/// What a name resolves to in a scope and namespace.
+type Lookup = Result<ItemPath, ResolutionError>;
+
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 enum Namespace {
     Type,
@@ -69,10 +72,9 @@ pub(crate) struct NameResolver {
     /// Each crate's `#[macro_use] extern crate` names, whose exported
     /// definitions are in scope everywhere in it.
     macro_use_crates: BTreeMap<String, Vec<String>>,
-    /// For each scope, by its index, the type path the resolver resolved each
-    /// name to there, or `None` when it resolved the name to none
-    /// (`type_in_scope`).
-    type_lookups: Vec<RefCell<BTreeMap<String, Option<ItemPath>>>>,
+    /// For each scope, by its index, what the resolver resolved each name to
+    /// there in each namespace (`name_in_scope`).
+    lookups: Vec<RefCell<BTreeMap<(String, Namespace), Lookup>>>,
 }
 
 /// A `macro_rules!` definition and where it is.
@@ -95,7 +97,7 @@ pub(crate) enum MacroLookup {
     Unresolved(ResolutionError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ResolutionError {
     Missing,
     WrongNamespace,
@@ -135,7 +137,7 @@ impl NameResolver {
             macro_paths: BTreeMap::new(),
             macro_use_modules: BTreeMap::new(),
             macro_use_crates: BTreeMap::new(),
-            type_lookups: Vec::new(),
+            lookups: Vec::new(),
         };
         let prelude = resolver.module(&["<prelude>".into()]);
         resolver.prelude = prelude;
@@ -164,7 +166,7 @@ impl NameResolver {
                     .visit_file(&file.syntax);
             }
         }
-        resolver.type_lookups =
+        resolver.lookups =
             std::iter::repeat_with(RefCell::default).take(resolver.scopes.len()).collect();
         resolver
     }
@@ -191,28 +193,34 @@ impl NameResolver {
             scope = self.scopes[current].parent;
         }
         self.scope_names(self.prelude, &mut names, &mut visited);
-        names
-            .iter()
-            .filter(|name| name.as_str() != "_")
-            .any(|name| self.type_in_scope(start, name).as_ref() == Some(path))
+        names.iter().filter(|name| name.as_str() != "_").any(|name| {
+            self.name_in_scope(start, name, Namespace::Type).as_ref().ok() == Some(path)
+        })
     }
 
-    /// The type path the resolver resolves a name to in a scope. The resolver
-    /// looks up each name once per scope. In a block that neither binds the
-    /// name nor imports a glob, it resolves the name as the scope around the
-    /// block does, so the blocks of one module share that module's lookup.
-    fn type_in_scope(&self, scope: usize, name: &str) -> Option<ItemPath> {
-        if let Some(found) = self.type_lookups[scope].borrow().get(name) {
+    /// What the resolver resolves a name to in a scope and namespace. The
+    /// resolver looks up each name once per scope and namespace. In a block
+    /// that neither binds the name nor imports a glob, it resolves the name
+    /// as the scope around the block does, so the blocks of one module share
+    /// that module's lookup.
+    fn name_in_scope(
+        &self,
+        scope: usize,
+        name: &str,
+        namespace: Namespace,
+    ) -> Result<ItemPath, ResolutionError> {
+        let key = (name.to_string(), namespace);
+        if let Some(found) = self.lookups[scope].borrow().get(&key) {
             return found.clone();
         }
         let current = &self.scopes[scope];
         let found = match current.parent {
             Some(parent) if !current.names.contains_key(name) && current.globs.is_empty() => {
-                self.type_in_scope(parent, name)
+                self.name_in_scope(parent, name, namespace)
             }
-            _ => self.lookup(scope, name, true, Namespace::Type, &mut BTreeSet::new()).ok(),
+            _ => self.lookup(scope, name, true, namespace, &mut BTreeSet::new()),
         };
-        self.type_lookups[scope].borrow_mut().insert(name.to_string(), found.clone());
+        self.lookups[scope].borrow_mut().insert(key, found.clone());
         found
     }
 
@@ -421,13 +429,23 @@ impl NameResolver {
             })
     }
 
+    /// The value a path names where `span` is. A path that starts with a
+    /// name resolves that name once per scope (`name_in_scope`).
     pub(crate) fn resolve(
         &self,
         file: &str,
         span: Span,
         path: &[String],
     ) -> Result<ItemPath, ResolutionError> {
-        self.resolve_in(self.scope_at(file, span), path, Namespace::Value, &mut BTreeSet::new())
+        let scope = self.scope_at(file, span);
+        match path.split_first() {
+            Some((first, rest)) if !matches!(first.as_str(), "" | "crate" | "self" | "super") => {
+                let namespace = if rest.is_empty() { Namespace::Value } else { Namespace::Type };
+                let base = self.name_in_scope(scope, first, namespace)?;
+                self.descend(base, rest, Namespace::Value, &mut BTreeSet::new())
+            }
+            _ => self.resolve_in(scope, path, Namespace::Value, &mut BTreeSet::new()),
+        }
     }
 
     pub(crate) fn resolve_type(

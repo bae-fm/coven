@@ -53,12 +53,28 @@ fn gate_paths_are_rust_paths() {
 }
 
 #[test]
+fn gate_calls_are_rust_paths() {
+    let policy = Policy::fixture(
+        r#"
+        [[capabilities]]
+        name = "file system"
+        [[capabilities.gates]]
+        kind = "standard library file system"
+        calls = ["std::fs", "tempfile"]
+        "#,
+    );
+    let gate = &policy.capabilities[0].gates[0];
+    assert_eq!(gate.call_patterns, [vec!["std", "fs"], vec!["tempfile"]]);
+}
+
+#[test]
 fn malformed_rows_and_unknown_keys_are_refused() {
     for text in [
         "[composition_roots]\n\"a.rs\" = [\"Type::method::extra\"]",
         "[composition_roots]\n\"a.rs\" = [\"Type::\"]",
         "[capability_factories.\"a.rs\"]\n\"method\" = \"Product\"",
         "[[background_starts]]\nkind = \"spawn\"\npaths = [\"tokio::\"]",
+        "[[background_starts]]\nkind = \"spawn\"\ncalls = [\"tokio::\"]",
         "rules = [\"no-such-rule\"]",
         "capability_type = [\"Clock\"]",
         "[database]\ncapability = \"SQLite\"\nhomes = []",

@@ -467,8 +467,8 @@ pub(crate) struct Capability {
 }
 
 /// One way of using a capability directly: naming any of `crates`, writing a
-/// path containing any of `paths` as adjacent segments, or calling a method
-/// named in `methods`.
+/// path containing any of `paths` as adjacent segments, calling a function
+/// whose path holds any of `calls`, or calling a method named in `methods`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Gate {
@@ -478,6 +478,13 @@ pub(crate) struct Gate {
     /// Written as Rust paths, `std::fs`.
     #[serde(default, rename = "paths", deserialize_with = "rust_paths")]
     pub(crate) path_patterns: Vec<Vec<String>>,
+    /// Written as Rust paths, `std::fs`. A function code calls or passes as
+    /// a value matches when the path it resolves to through its file's
+    /// imports and scopes holds one as adjacent segments; an import or a
+    /// type never does. A path that resolves to nothing matches as written,
+    /// unless it is a single name, which is a local binding.
+    #[serde(default, rename = "calls", deserialize_with = "rust_paths")]
+    pub(crate) call_patterns: Vec<Vec<String>>,
     /// Method names whose receiver-call form (`x.name(...)`) is gated; `syn`
     /// does not surface a method call as a path.
     #[serde(default, rename = "methods")]
