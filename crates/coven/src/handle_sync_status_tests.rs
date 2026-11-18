@@ -48,25 +48,11 @@ async fn phases(device: &Device) -> Vec<UploadPhase> {
     let mut given: Vec<(FileId, String, Option<String>)> = files
         .iter()
         .map(|file| {
-            let (phase, wait) = match &file.phase {
-                UploadPhase::Uploading => ("uploading", None),
-                UploadPhase::Stored => ("stored", None),
-                UploadPhase::Failed(_) => ("failed", None),
-                UploadPhase::Waiting(wait) => (
-                    "waiting",
-                    Some(match wait {
-                        UploadWait::NotSyncing => "not_syncing",
-                        UploadWait::CoolingDown { .. } => "cooling_down",
-                        UploadWait::Sync => "sync",
-                        UploadWait::Paused => "paused",
-                        UploadWait::Metered => "metered",
-                        UploadWait::KeysChanging => "keys_changing",
-                        UploadWait::Retrying { .. } => "retrying",
-                        UploadWait::Queued => "queued",
-                    }),
-                ),
+            let wait = match &file.phase {
+                UploadPhase::Waiting(wait) => Some(wait.kind().to_owned()),
+                UploadPhase::Uploading | UploadPhase::Stored | UploadPhase::Failed(_) => None,
             };
-            (file.file, phase.to_owned(), wait.map(str::to_owned))
+            (file.file, file.phase.kind().to_owned(), wait)
         })
         .collect();
     given.sort();

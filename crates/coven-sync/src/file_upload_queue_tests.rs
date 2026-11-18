@@ -35,36 +35,23 @@ fn viewed(
 
 /// A phase's kind and its wait's, in the names the view gives them.
 fn names(phase: &UploadPhase) -> (&'static str, Option<&'static str>) {
-    match phase {
-        UploadPhase::Uploading => ("uploading", None),
-        UploadPhase::Stored => ("stored", None),
-        UploadPhase::Failed(_) => ("failed", None),
-        UploadPhase::Waiting(wait) => (
-            "waiting",
-            Some(match wait {
-                UploadWait::NotSyncing => "not_syncing",
-                UploadWait::CoolingDown { .. } => "cooling_down",
-                UploadWait::Sync => "sync",
-                UploadWait::Paused => "paused",
-                UploadWait::Metered => "metered",
-                UploadWait::KeysChanging => "keys_changing",
-                UploadWait::Retrying { .. } => "retrying",
-                UploadWait::Queued => "queued",
-            }),
-        ),
-    }
+    let wait = match phase {
+        UploadPhase::Waiting(wait) => Some(wait.kind()),
+        UploadPhase::Uploading | UploadPhase::Stored | UploadPhase::Failed(_) => None,
+    };
+    (phase.kind(), wait)
 }
 
 impl Fixture {
-    /// Each queued file's phase in the view's names, as `uploads()` gives
-    /// it; the view shows the same, every file there once.
-    async fn phases(&self) -> BTreeMap<FileId, (&'static str, Option<&'static str>)> {
+    /// Each queued file's phase as `uploads()` gives it; the view shows the
+    /// same, every file there once, in the phases' and waits' own names.
+    async fn phases(&self) -> BTreeMap<FileId, UploadPhase> {
         let given: BTreeMap<_, _> = self
             .queue()
             .await
             .files
-            .iter()
-            .map(|upload| (upload.file, names(&upload.phase)))
+            .into_iter()
+            .map(|upload| (upload.file, upload.phase))
             .collect();
         let shown: BTreeMap<_, _> = self
             .database
@@ -76,7 +63,10 @@ impl Fixture {
             .collect();
         let named: BTreeMap<_, _> = given
             .iter()
-            .map(|(file, (phase, wait))| (*file, ((*phase).to_owned(), wait.map(str::to_owned))))
+            .map(|(file, phase)| {
+                let (phase, wait) = names(phase);
+                (*file, (phase.to_owned(), wait.map(str::to_owned)))
+            })
             .collect();
         assert_eq!(shown, named);
         given
@@ -98,18 +88,20 @@ async fn the_view_shows_each_phase_that_uploads_gives_and_follows_it() {
     let photo = f.attach("files", "photo", vec![7; 64]).await.id();
     let cover = f.attach("covers", "cover", vec![8; 64]).await.id();
     let mut shown = Followed::new(f.database.subscribe(viewed));
-    let wait = |row: &Viewed| row.wait.clone();
-    shown.wait_for(|rows| rows.get(&photo).and_then(wait).as_deref() == Some("paused")).await;
+    let waits = |rows: &BTreeMap<FileId, Viewed>, file: FileId, wait: UploadWait| {
+        rows.get(&file).and_then(|row| row.wait.as_deref()) == Some(wait.kind())
+    };
+    shown.wait_for(|rows| waits(rows, photo, UploadWait::Paused)).await;
     assert_eq!(
         f.phases().await,
         BTreeMap::from([
-            (photo, ("waiting", Some("paused"))),
-            (cover, ("waiting", Some("queued")))
+            (photo, UploadPhase::Waiting(UploadWait::Paused)),
+            (cover, UploadPhase::Waiting(UploadWait::Queued))
         ])
     );
     f.set_uploads_paused(false).await;
     f.set_unmetered_only(true).await;
-    shown.wait_for(|rows| rows.get(&photo).and_then(wait).as_deref() == Some("queued")).await;
+    shown.wait_for(|rows| waits(rows, photo, UploadWait::Queued)).await;
     // The network alone changes the photo's phase, as the store's watch
     // tells the database.
     let network = |metered| coven_foundation::network_watch::NetworkState {
@@ -118,30 +110,33 @@ async fn the_view_shows_each_phase_that_uploads_gives_and_follows_it() {
         joined: 1,
     };
     f.database.record_network(network(true));
-    shown.wait_for(|rows| rows.get(&photo).and_then(wait).as_deref() == Some("metered")).await;
+    shown.wait_for(|rows| waits(rows, photo, UploadWait::Metered)).await;
     assert_eq!(
         f.phases().await,
         BTreeMap::from([
-            (photo, ("waiting", Some("metered"))),
-            (cover, ("waiting", Some("queued")))
+            (photo, UploadPhase::Waiting(UploadWait::Metered)),
+            (cover, UploadPhase::Waiting(UploadWait::Queued))
         ])
     );
     f.database.record_network(network(false));
-    shown.wait_for(|rows| rows.get(&photo).and_then(wait).as_deref() == Some("queued")).await;
+    shown.wait_for(|rows| waits(rows, photo, UploadWait::Queued)).await;
     f.storage
         .set_faults(Faults { fail_next: 2, failure: StorageFailure::Network, ..Faults::none() })
         .await;
     f.files.inner.drain_uploads().await.unwrap();
+    // A retry's kind is the same whatever its time.
     let retrying = shown
-        .wait_for(|rows| rows.values().all(|row| row.wait.as_deref() == Some("retrying")))
+        .wait_for(|rows| {
+            [photo, cover]
+                .into_iter()
+                .all(|file| waits(rows, file, UploadWait::Retrying { at: SystemTime::UNIX_EPOCH }))
+        })
         .await;
-    assert_eq!(
-        f.phases().await,
-        BTreeMap::from([
-            (photo, ("waiting", Some("retrying"))),
-            (cover, ("waiting", Some("retrying")))
-        ])
-    );
+    let phases = f.phases().await;
+    assert_eq!(phases.len(), 2);
+    assert!(phases
+        .values()
+        .all(|phase| matches!(phase, UploadPhase::Waiting(UploadWait::Retrying { .. }))));
     let retry_at: BTreeMap<FileId, Option<i64>> = f
         .database
         .read(|sql| {
@@ -170,10 +165,17 @@ async fn the_view_shows_each_phase_that_uploads_gives_and_follows_it() {
     let files = f.files.clone();
     let drain = tokio::spawn(async move { files.inner.drain_uploads_retrying().await });
     starting.await.unwrap();
-    shown.wait_for(|rows| rows.get(&cover).is_some_and(|row| row.phase == "uploading")).await;
+    shown
+        .wait_for(|rows| {
+            rows.get(&cover).is_some_and(|row| row.phase == UploadPhase::Uploading.kind())
+        })
+        .await;
     assert_eq!(
         f.phases().await,
-        BTreeMap::from([(photo, ("waiting", Some("paused"))), (cover, ("uploading", None))])
+        BTreeMap::from([
+            (photo, UploadPhase::Waiting(UploadWait::Paused)),
+            (cover, UploadPhase::Uploading)
+        ])
     );
     release.send(()).unwrap();
     drain.await.unwrap().unwrap();
@@ -192,9 +194,10 @@ async fn a_failed_upload_names_the_record_that_says_why() {
     std::fs::remove_file(f.root.path().join("song")).unwrap();
     f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
-    assert_eq!(f.phases().await, BTreeMap::from([(song, ("failed", None))]));
-    let UploadPhase::Failed(record) = f.queue().await.files.remove(0).phase else {
-        panic!("the song's upload failed");
+    let mut phases = f.phases().await;
+    let (Some(UploadPhase::Failed(record)), true) = (phases.remove(&song), phases.is_empty())
+    else {
+        panic!("the song's upload failed, and nothing else is queued");
     };
     let (pending, recorded) = f
         .database
