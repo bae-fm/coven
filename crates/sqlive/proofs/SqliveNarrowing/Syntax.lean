@@ -61,7 +61,8 @@ structure Item where
   /-- Each column's affinity, or `none` where a condition on it can't narrow. -/
   columns : List (Option Affinity)
   /-- Whether sqlive can read its rows alone, in a lookup: a table, a view,
-  and a FROM subquery or CTE outside any expression subquery. -/
+  and a FROM subquery or CTE outside any expression subquery or whose query
+  names nothing outside it (`View.readable`). -/
   readable : Bool
   deriving Repr, Inhabited
 
