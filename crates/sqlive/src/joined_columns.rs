@@ -216,7 +216,7 @@ impl Walk<'_> {
     /// The table `item` reads directly, and its columns, lowercase.
     fn table(&self, item: &SelectTable<'_>) -> rusqlite::Result<Option<(String, Vec<String>)>> {
         let SelectTable::Table(name, ..) = item else { return Ok(None) };
-        let Some(table) = self.object(name, "table")? else { return Ok(None) };
+        let Some(table) = self.object(name, &["table"])? else { return Ok(None) };
         let columns = self.columns(&table)?;
         Ok(Some((table, columns)))
     }
@@ -237,8 +237,7 @@ impl Walk<'_> {
     fn has_column(&self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<Option<bool>> {
         let names = match item {
             SelectTable::Table(name, ..) => {
-                let Some(object) = self.object(name, "table")?.or(self.object(name, "view")?)
-                else {
+                let Some(object) = self.object(name, &["table", "view"])? else {
                     return Ok(None);
                 };
                 self.columns(&object)?
@@ -255,7 +254,7 @@ impl Walk<'_> {
     fn item(&mut self, item: &SelectTable<'_>) -> rusqlite::Result<()> {
         match item {
             SelectTable::Table(name, ..) => {
-                let Some(view) = self.object(name, "view")? else { return Ok(()) };
+                let Some(view) = self.object(name, &["view"])? else { return Ok(()) };
                 if !self.views.insert(view.to_ascii_lowercase()) {
                     return Ok(());
                 }
@@ -295,10 +294,10 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// The stored name of the main schema's object of type `kind`, `table`
-    /// or `view`, that `name` names. A name of another schema reads no table
+    /// The stored name of the main schema's object that `name` names, when
+    /// its type is one of `kinds`, `table` or `view`. A name of another schema reads no table
     /// of the app's, and a CTE's name none of the schema's objects.
-    fn object(&self, name: &QualifiedName<'_>, kind: &str) -> rusqlite::Result<Option<String>> {
+    fn object(&self, name: &QualifiedName<'_>, kinds: &[&str]) -> rusqlite::Result<Option<String>> {
         if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
             return Ok(None);
         }
@@ -306,7 +305,7 @@ impl Walk<'_> {
             return Ok(None);
         }
         Ok(main_object(self.connection, &name.name)?
-            .filter(|(_, found)| found == kind)
+            .filter(|(_, found)| kinds.contains(&found.as_str()))
             .map(|(stored, _)| stored))
     }
 
