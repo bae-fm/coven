@@ -35,7 +35,7 @@ use syn::visit::{self, Visit};
 use crate::crate_code::CrateCode;
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
-use crate::name_resolution::{qualified_path, NameResolver};
+use crate::name_resolution::{qualified_path, NameResolver, ResolutionError};
 use crate::policy::{describe_homes, Capability, Gate, Policy, FILE_NAME};
 use crate::syntax::{flatten_use_tree, type_name, RustFile};
 
@@ -380,17 +380,32 @@ impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
 
     /// A function that code calls or passes as a value, by its path as
     /// written (`""` first for a leading `::`), against the gates' `calls`.
+    /// A path that resolves to nothing matches as written, unless it is a
+    /// single name: that is a local binding, which the resolver doesn't
+    /// know, so it may also share a type's or module's name. A path that
+    /// resolves ambiguously or through an import cycle is a finding when a
+    /// gate here matches calls, since the gate can't tell what it names.
     fn check_call(&mut self, segments: &[String], span: Span) {
         let resolved = self.resolver.resolve(self.path, span, segments);
         let path = match &resolved {
             Ok(path) => path.as_slice(),
-            Err(_) => {
+            Err(ResolutionError::Missing | ResolutionError::WrongNamespace) => {
                 let written = segments.strip_prefix(&[String::new()]).unwrap_or(segments);
-                // A single name that resolves to nothing is a local binding.
                 if written.len() < 2 {
                     return;
                 }
                 written
+            }
+            Err(error) => {
+                if self.gates_calls() {
+                    self.violations.insert(Finding::new(
+                        self.path,
+                        span.start().line,
+                        format!("cannot resolve call {}: {error}", segments.join("::")),
+                        "use an unambiguous module path or import, so a gate's calls can tell what the call names",
+                    ));
+                }
+                return;
             }
         };
         if !self.rooted {
@@ -405,6 +420,14 @@ impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
                 self.record(capability, gate, span);
             }
         }
+    }
+
+    /// Whether a gate checked here matches calls.
+    fn gates_calls(&self) -> bool {
+        let starts = self.background_starts.iter().filter(|_| !self.rooted);
+        starts
+            .chain(self.gated.iter().map(|&(_, gate)| gate))
+            .any(|gate| !gate.call_patterns.is_empty())
     }
 }
 

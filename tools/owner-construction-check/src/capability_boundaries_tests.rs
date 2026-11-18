@@ -870,3 +870,24 @@ fn test_code_starts_background_work_anywhere() {
     let production = "fn t() { tokio::spawn(async {}); }";
     assert_eq!(listed_findings(&policy, &[("crates/app/src/leak.rs", production)]).len(), 1);
 }
+
+/// A call the resolver finds two definitions for, or only through imports
+/// that name each other, may use the capability: it is a finding wherever a
+/// gate matches calls, and only there.
+#[test]
+fn a_call_that_resolves_ambiguously_is_a_finding_where_a_gate_matches_calls() {
+    let source = r#"
+        mod a { pub fn read() {} }
+        mod b { pub fn read() {} }
+        use a::*;
+        use b::*;
+        fn load() { read(); }
+    "#;
+    let found =
+        rule(&[RustFile::fixture("crates/app/src/leak.rs", source)], &Policy::fixture(CALLS));
+    assert_eq!(
+        found.iter().map(|finding| (finding.line, finding.message.as_str())).collect::<Vec<_>>(),
+        [(6, "cannot resolve call read: ambiguous paths: app::leak::a::read, app::leak::b::read")]
+    );
+    assert!(violations("crates/app/src/leak.rs", source).is_empty());
+}
