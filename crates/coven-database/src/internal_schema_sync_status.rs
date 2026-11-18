@@ -213,6 +213,23 @@ pub(crate) fn decode(
     })
 }
 
+/// Save `$location` on `$db`, a store's open write or a test's connection
+/// outside any store, with `$finished` in milliseconds and whether `$opening`.
+/// Both expand this one body, so a test records a location as a store does.
+macro_rules! save_location_row {
+    ($db:expr, $location:expr, $finished:expr, $opening:expr) => {{
+        let (storage, stored) = columns($location);
+        let provider = stored.map(|stored| stored.provider.as_str());
+        let recorded = stored.map(|stored| stored.location.as_str());
+        let finished: Option<i64> = $finished;
+        $db.execute(
+            SAVE_LOCATION,
+            sqlive::rusqlite::params![storage, provider, finished, $opening, recorded],
+        )?;
+        Ok::<(), DbError>(())
+    }};
+}
+
 /// Write whether a location is recorded and its credentials held, with the
 /// location and its labels, and, when `finished` names one, that sync
 /// finished then. Opening also writes that no pass moves and that no halt
@@ -223,15 +240,8 @@ pub(crate) fn save_location(
     finished: Option<SystemTime>,
     opening: bool,
 ) -> Result<(), DbError> {
-    let (storage, stored) = columns(location);
-    let provider = stored.map(|stored| stored.provider.as_str());
-    let recorded = stored.map(|stored| stored.location.as_str());
     let finished = finished.map(millis).transpose()?;
-    db.execute(
-        SAVE_LOCATION,
-        sqlive::rusqlite::params![storage, provider, finished, opening, recorded],
-    )?;
-    Ok(())
+    save_location_row!(db, location, finished, opening)
 }
 
 /// Write what the running pass moved last, when that changes it.
@@ -265,14 +275,7 @@ pub fn save_location_outside_store(
     connection: &sqlive::rusqlite::Connection,
     location: &RecordedLocation<StoredLocation>,
 ) -> Result<(), DbError> {
-    let (storage, stored) = columns(location);
-    let provider = stored.map(|stored| stored.provider.as_str());
-    let recorded = stored.map(|stored| stored.location.as_str());
-    connection.execute(
-        SAVE_LOCATION,
-        sqlive::rusqlite::params![storage, provider, None::<i64>, false, recorded],
-    )?;
-    Ok(())
+    save_location_row!(connection, location, None, false)
 }
 
 /// Write `last_pass` as how the last pass ended on `connection`, a test's
