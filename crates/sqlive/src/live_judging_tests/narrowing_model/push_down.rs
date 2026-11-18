@@ -4,8 +4,8 @@
 //! it; and a derived item joined to tables, or read inside a subquery.
 
 use super::{
-    cmp, col, eq, item, lit, out, pick, select, table, Cond, Core, Expr, Item, Join, Out, Query,
-    Source, TABLES,
+    cmp, col, eq, item, lit, out, pick, select, table, Cond, Core, Expr, Join, Out, Query, Source,
+    TABLES,
 };
 use crate::random_scopes::Rng;
 
@@ -13,19 +13,15 @@ use crate::random_scopes::Rng;
 /// can name them.
 pub(super) const DERIVED: [&str; 4] = ["id", "a", "b", "c"];
 
-fn plain(rng: &mut Rng, alias: &str, table: &'static str) -> Core {
+fn plain(rng: &mut Rng, alias: &str, name: &'static str) -> Core {
     let conditions =
         if rng.chance(50) { vec![super::term::condition(rng, alias, 1)] } else { Vec::new() };
     Core {
-        from: vec![table_of(alias, table)],
+        from: vec![table(alias, name)],
         conditions,
         select: DERIVED.iter().map(|column| out(col(alias, column))).collect(),
         group: Vec::new(),
     }
-}
-
-fn table_of(alias: &str, name: &'static str) -> Item {
-    table(alias, name)
 }
 
 /// A query a derived item reads, with columns `DERIVED`.
@@ -49,7 +45,7 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
             ..Query::default()
         },
         4 => select(Core {
-            from: vec![table_of("x", first)],
+            from: vec![table("x", first)],
             conditions: Vec::new(),
             select: vec![
                 Out::Expr(col("x", "a"), Some("id".to_owned())),
@@ -68,7 +64,7 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
         }
         _ => select(Core {
             from: vec![
-                table_of("x", first),
+                table("x", first),
                 item(
                     "y",
                     Source::Table(second),

@@ -4,14 +4,14 @@
 //! affinity.
 
 use super::{
-    col, eq, item, lit, out, pick, select, table, Cond, Core, Expr, Item, Join, Out, Query, Source,
+    col, eq, item, lit, out, pick, select, table, Cond, Core, Expr, Join, Out, Query, Source,
     COLUMNS, TABLES,
 };
 use crate::random_scopes::Rng;
 
-/// A subquery over `table` returning one column, sometimes correlated with
-/// the item `outer`.
-fn subquery(rng: &mut Rng, table: &'static str, outer: &str) -> Query {
+/// A subquery over the table `name` returning one column, sometimes
+/// correlated with the item `outer`.
+fn subquery(rng: &mut Rng, name: &'static str, outer: &str) -> Query {
     let returned = match rng.below(8) {
         0 => out(Expr::Add(Box::new(col("q", "a")), Box::new(lit(1)))),
         1 => Out::Max(col("q", "a"), None),
@@ -25,14 +25,14 @@ fn subquery(rng: &mut Rng, table: &'static str, outer: &str) -> Query {
         conditions.push(eq(col("q", "c"), col(outer, "c")));
     }
     let core = Core {
-        from: vec![table_item("q", table)],
+        from: vec![table("q", name)],
         conditions,
         select: vec![returned],
         group: Vec::new(),
     };
     if rng.chance(15) {
         let other = Core {
-            from: vec![table_item("p", pick(rng, &TABLES))],
+            from: vec![table("p", pick(rng, &TABLES))],
             conditions: Vec::new(),
             select: vec![out(col("p", "a"))],
             group: Vec::new(),
@@ -46,15 +46,11 @@ fn subquery(rng: &mut Rng, table: &'static str, outer: &str) -> Query {
     query
 }
 
-fn table_item(alias: &str, name: &'static str) -> Item {
-    table(alias, name)
-}
-
 /// A comparison of a column of `member` with a subquery's value.
 pub(super) fn comparison(rng: &mut Rng, member: &str) -> Cond {
     let column = col(member, pick(rng, &COLUMNS));
-    let table = pick(rng, &TABLES);
-    let query = Box::new(subquery(rng, table, member));
+    let name = pick(rng, &TABLES);
+    let query = Box::new(subquery(rng, name, member));
     match rng.below(5) {
         0 => eq(column, Expr::Sub(query)),
         1 => eq(Expr::Sub(query), column),
