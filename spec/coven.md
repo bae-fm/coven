@@ -12559,6 +12559,8 @@ device consistent with the database.
   access limited to its own objects and the views. SQL functions such as
   `coven_applying()` and `coven_key()` keep their names.
 - Coven's tables are local only; they never sync.
+- Every table coven creates is `STRICT`, so a stored value always has its
+  column's type.
 - A store, key, member, circle, file, stored object or device id has one form
   in every column of coven's tables and views that holds it: the form its type
   binds and reads in SQL ([api.md E4](api.md#e4-reading)). Member, circle and

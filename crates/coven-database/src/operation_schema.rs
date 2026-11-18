@@ -13,7 +13,7 @@ macro_rules! coven_operations_tables {
                 last_step INTEGER NOT NULL,
                 data BLOB NOT NULL,
                 started_by TEXT NOT NULL
-            );
+            ) STRICT;
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         "
         );

@@ -47,6 +47,27 @@ async fn migrations_change_present_values_without_a_second_copy() {
     db.close().await.unwrap();
 }
 
+/// Every table coven creates is STRICT, so a stored value always has its
+/// column's type.
+#[tokio::test]
+async fn every_table_is_strict() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_writer(|sql, _| {
+        let lax = sql
+            .query(
+                "SELECT name FROM pragma_table_list
+                 WHERE schema='main' AND type='table' AND name NOT GLOB 'sqlite_*' AND strict=0
+                 ORDER BY name",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(lax, Vec::<String>::new());
+    });
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn only_the_spec_tables_are_created() {
     let store = TestStore::new();
