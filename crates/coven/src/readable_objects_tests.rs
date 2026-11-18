@@ -18,6 +18,20 @@ fn outside_store() -> coven_database::test_utils::Connection {
     connection
 }
 
+/// A connection outside any store whose storage is connected, so that the
+/// sync state follows its last pass and pending records.
+fn connected_store() -> coven_database::test_utils::Connection {
+    let connection = outside_store();
+    let location = crate::StorageConfig::S3 {
+        bucket: "library".into(),
+        region: "us-east-1".into(),
+        endpoint: None,
+        profile: None,
+    };
+    super::record_connected_storage(&connection, location).unwrap();
+    connection
+}
+
 /// An invite whose id and member are built from `n`, at `stage`.
 fn invite(n: u8, stage: crate::RecordedInviteStage) -> crate::RecordedInvite {
     crate::RecordedInvite {
@@ -184,4 +198,62 @@ fn a_recorded_pending_record_fires_an_app_trigger_outside_a_store() {
         .map(|(operation, kind)| (operation.0, "operation".to_owned(), kind.to_owned(), 0))
         .collect();
     assert_eq!(heard, expected);
+}
+
+/// The state `coven_sync_state` shows outside a store, and the kinds of the
+/// pending records beside it.
+fn shown(connection: &coven_database::test_utils::Connection) -> (String, Vec<String>) {
+    let state =
+        connection.query_row("SELECT state FROM coven_sync_state", [], |r| r.get(0)).unwrap();
+    let kinds = connection
+        .prepare("SELECT reason_kind FROM coven_pending ORDER BY position")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    (state, kinds)
+}
+
+/// A last pass and a pending record that a test saves outside a store give
+/// the sync state coven computes from them: a failed operation, a removed
+/// device and replaced member keys.
+#[test]
+fn a_recorded_last_pass_and_pending_record_give_each_pending_state() {
+    // An operation whose last attempt failed.
+    let connection = connected_store();
+    let operation =
+        super::record_invite(&connection, invite(1, crate::RecordedInviteStage::Granting)).unwrap();
+    let record = crate::PendingRecord::new(
+        crate::PendingSubject::Operation { id: operation, kind: crate::OperationKind::Invite },
+        crate::PendingReason::NoStorage,
+    );
+    super::record_pending(&connection, &record).unwrap();
+    let pass = crate::LastPass::failed(crate::SyncFailure::Operation(Box::new(record)));
+    super::record_last_pass(&connection, &pass).unwrap();
+    assert_eq!(shown(&connection), ("failed".to_owned(), vec!["no_storage".to_owned()]));
+
+    // A device the store no longer holds.
+    let connection = connected_store();
+    let removed = crate::PendingRecord::new(
+        crate::PendingSubject::Connection,
+        crate::PendingReason::Removed(crate::Removal::Device),
+    );
+    super::record_pending(&connection, &removed).unwrap();
+    let pass = crate::LastPass::failed(crate::SyncFailure::Removed(crate::Removal::Device));
+    super::record_last_pass(&connection, &pass).unwrap();
+    assert_eq!(shown(&connection), ("removed".to_owned(), vec!["removed".to_owned()]));
+
+    // A member whose keys another installation replaced.
+    let connection = connected_store();
+    let member = crate::MemberId(uuid::Uuid::from_bytes([5; 16]));
+    let replaced = crate::PendingRecord::new(
+        crate::PendingSubject::Slot(crate::Slot::new(3).unwrap()),
+        crate::PendingReason::MemberKeysReplaced { member },
+    );
+    super::record_pending(&connection, &replaced).unwrap();
+    assert_eq!(
+        shown(&connection),
+        ("needs_reset".to_owned(), vec!["member_keys_replaced".to_owned()])
+    );
 }

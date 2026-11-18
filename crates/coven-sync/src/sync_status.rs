@@ -750,6 +750,21 @@ fn stored(
     })
 }
 
+/// Write that `location` is recorded on `connection`, a test's connection
+/// outside any store, with this device holding its credentials, as
+/// `record_opened` writes it.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn record_connected_outside_store(
+    connection: &coven_database::test_utils::Connection,
+    location: coven_storage::StorageConfig,
+) -> Result<(), SyncError> {
+    coven_database::test_utils::save_location_outside_store(
+        connection,
+        &stored(RecordedLocation::Connected(location))?,
+    )?;
+    Ok(())
+}
+
 #[path = "sync_status_facts.rs"]
 mod facts;
 pub(crate) use facts::{held_all, last_pass, Facts, Progress, Upload};

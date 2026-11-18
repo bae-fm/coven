@@ -3822,6 +3822,17 @@ let moved = handle
   - `record_pending` saves a `PendingRecord` as coven saves one, and
     coven's triggers show it in `coven_pending`, as an app's triggers on
     that table see it.
+  - `record_connected_storage` records a `StorageConfig` as the store's
+    storage with this device holding its credentials, as opening a
+    connected store does. Until a test calls it, `coven_sync_state` shows
+    `not_synced`, whatever else the test records.
+  - `record_last_pass` saves a `LastPass` as how the last pass ended, as the
+    loop saves it, so `coven_sync_state` computes its state from it beside
+    the pending records the test saves. With the storage connected, a
+    `LastPass::failed` of an operation's record and the same record saved
+    with `record_pending` give `failed`; one of `Removal::Device` and its
+    `Removed` record give `removed`; and a record whose reason is
+    `MemberKeysReplaced`, with no last pass, gives `needs_reset`.
 
   Ben's test of his invite screen records Dan's invite waiting with his
   request, and a pending record that holds Carol's invite because no
@@ -4359,6 +4370,15 @@ pub fn finish_operation(connection: &rusqlite::Connection, id: OperationId, outc
 /// Saves `record` as coven saves a pending record (E4).
 #[cfg(feature = "test-utils")]
 pub fn record_pending(connection: &rusqlite::Connection, record: &PendingRecord) -> Result<(), CovenError>;
+
+/// Records `location` as the store's storage, its credentials held on this
+/// device, as opening a connected store does (E4).
+#[cfg(feature = "test-utils")]
+pub fn record_connected_storage(connection: &rusqlite::Connection, location: StorageConfig) -> Result<(), CovenError>;
+
+/// Saves `pass` as how the last pass ended, as the sync loop saves it (E4).
+#[cfg(feature = "test-utils")]
+pub fn record_last_pass(connection: &rusqlite::Connection, pass: &LastPass) -> Result<(), CovenError>;
 
 /// An invite a test records: its id, the member it fixes, and its stage.
 #[cfg(feature = "test-utils")]

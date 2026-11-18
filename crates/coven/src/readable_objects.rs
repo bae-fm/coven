@@ -85,6 +85,30 @@ pub fn record_pending(
     Ok(coven_database::test_utils::save_outside_store(connection, record)?)
 }
 
+/// Record on `connection`, where `make_readable_objects` made coven's
+/// objects, that `location` is the store's storage and this device holds
+/// its credentials, as opening a connected store records it. Until a test
+/// does, `coven_sync_state` shows not synced, as for a store with no
+/// storage (§19.1).
+pub fn record_connected_storage(
+    connection: &coven_database::test_utils::Connection,
+    location: coven_storage::StorageConfig,
+) -> Result<(), crate::CovenError> {
+    Ok(coven_sync::record_connected_outside_store(connection, location)?)
+}
+
+/// Save `pass` on `connection`, where `make_readable_objects` made coven's
+/// objects, as how the last pass ended, as a store's loop writes it when a
+/// pass ends, so that `coven_sync_status.last_pass` holds it and
+/// `coven_sync_state` computes its state from it beside the pending records
+/// the test saves with `record_pending` (§19.1).
+pub fn record_last_pass(
+    connection: &coven_database::test_utils::Connection,
+    pass: &coven_sync::LastPass,
+) -> Result<(), crate::CovenError> {
+    Ok(pass.record_outside_store(connection)?)
+}
+
 #[cfg(test)]
 #[path = "readable_objects_tests.rs"]
 mod tests;

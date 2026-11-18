@@ -31,6 +31,21 @@ use std::time::SystemTime;
 /// The sync status table, which the app's triggers may follow.
 pub(crate) const SYNC_STATUS: &str = "coven_sync_status";
 
+/// Records the location, for `save_location` and its outside-store form.
+const SAVE_LOCATION: &str = "UPDATE coven_sync_status SET storage=?1,provider=?2,location=?5,
+             moved=CASE WHEN ?4 THEN NULL ELSE moved END,
+             halted=CASE WHEN ?4 THEN 0 ELSE halted END,
+             last_synced=CASE WHEN ?3 IS NULL THEN last_synced
+                 ELSE max(coalesce(last_synced,?3),?3) END
+         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2 OR location IS NOT ?5
+             OR (?4 AND (moved IS NOT NULL OR halted=1))
+             OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))";
+
+/// Records how the last pass ended, for `save_last_pass` and its
+/// outside-store form.
+const SAVE_LAST_PASS: &str = "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
+         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)";
+
 /// The table and its one row, as every store holds them from its creation.
 pub(super) const TABLE: &str = "CREATE TABLE coven_sync_status (
         singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
@@ -213,14 +228,7 @@ pub(crate) fn save_location(
     let recorded = stored.map(|stored| stored.location.as_str());
     let finished = finished.map(millis).transpose()?;
     db.execute(
-        "UPDATE coven_sync_status SET storage=?1,provider=?2,location=?5,
-             moved=CASE WHEN ?4 THEN NULL ELSE moved END,
-             halted=CASE WHEN ?4 THEN 0 ELSE halted END,
-             last_synced=CASE WHEN ?3 IS NULL THEN last_synced
-                 ELSE max(coalesce(last_synced,?3),?3) END
-         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2 OR location IS NOT ?5
-             OR (?4 AND (moved IS NOT NULL OR halted=1))
-             OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))",
+        SAVE_LOCATION,
         sqlive::rusqlite::params![storage, provider, finished, opening, recorded],
     )?;
     Ok(())
@@ -246,11 +254,35 @@ pub(crate) fn save_start(db: &StoreSql) -> Result<(), DbError> {
 /// that moved a slot shows its failure, never syncing. Once a halt holds,
 /// it writes nothing: the halt's failure stands.
 pub(crate) fn save_last_pass(db: &StoreSql, last_pass: &[u8]) -> Result<(), DbError> {
-    db.execute(
-        "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
-         WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)",
-        [last_pass],
+    db.execute(SAVE_LAST_PASS, [last_pass])?;
+    Ok(())
+}
+
+/// Write `location` as the recorded location on `connection`, a test's
+/// connection outside any store, as `save_location` does.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn save_location_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    location: &RecordedLocation<StoredLocation>,
+) -> Result<(), DbError> {
+    let (storage, stored) = columns(location);
+    let provider = stored.map(|stored| stored.provider.as_str());
+    let recorded = stored.map(|stored| stored.location.as_str());
+    connection.execute(
+        SAVE_LOCATION,
+        sqlive::rusqlite::params![storage, provider, None::<i64>, false, recorded],
     )?;
+    Ok(())
+}
+
+/// Write `last_pass` as how the last pass ended on `connection`, a test's
+/// connection outside any store, as `save_last_pass` does.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn save_last_pass_outside_store(
+    connection: &sqlive::rusqlite::Connection,
+    last_pass: &[u8],
+) -> Result<(), DbError> {
+    connection.execute(SAVE_LAST_PASS, [last_pass])?;
     Ok(())
 }
 

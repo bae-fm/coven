@@ -118,6 +118,16 @@ impl LastPass {
         database.record_pass_end(self.encoded()?, finished).await
     }
 
+    /// Write this as how the last pass ended on `connection`, a test's
+    /// connection outside any store, as `record_end` writes it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn record_outside_store(
+        &self,
+        connection: &coven_database::test_utils::Connection,
+    ) -> Result<(), DbError> {
+        coven_database::test_utils::save_last_pass_outside_store(connection, &self.encoded()?)
+    }
+
     /// Follow `coven_sync_status.last_pass` with a live query, as an app's
     /// SQL does: `None` until a pass ends on this device.
     #[cfg(any(test, feature = "test-utils"))]
