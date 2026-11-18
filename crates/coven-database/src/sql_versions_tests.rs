@@ -358,6 +358,7 @@ async fn a_new_sqlite_version_rebuilds_every_expression_index() {
     assert_eq!(
         reindexed(&database),
         [
+            "REINDEX main.\"_coven_pending_files\"",
             "REINDEX main.\"_coven_write_identity\"",
             "REINDEX main.\"words_score_text\"",
             "REINDEX main.\"words_shown\"",
