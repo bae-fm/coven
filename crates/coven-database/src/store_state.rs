@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// [`Audience::Store`], and each circle has its own. A raise is absent until a
 /// kept raise selects it, as in §18.3; before one, the audience is at its base
 /// ([`StoreState::reached`]). These are independent of the local app
-/// migration version returned by [`crate::Database::schema_version`].
+/// migration version returned by [`crate::StoreDatabase::schema_version`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreState {
     /// Absent before the first entry creates the store.

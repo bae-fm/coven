@@ -681,8 +681,8 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Give back the free pages of an incrementally vacuumed database past
-    /// [`KEPT_FREE_BYTES`]; any other auto-vacuum mode is the app's choice
-    /// and keeps its meaning.
+    /// the 4 MiB sqlive leaves for later writes to reuse; any other
+    /// auto-vacuum mode is the app's choice and keeps its meaning.
     pub fn give_back_free_pages(&self) -> Result<(), PolicyError<P>> {
         let pragma = |name: &str| -> Result<u64, PolicyError<P>> {
             let value: i64 = self.query_row(&format!("PRAGMA main.{name}"), [], |r| r.get(0))?;

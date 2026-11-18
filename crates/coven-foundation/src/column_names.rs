@@ -3,9 +3,9 @@
 //! writes and reads that name, and the app reads it from the column or
 //! parses it from a JSON array of the column's values (api.md E4).
 
-/// The SQL value conversions [`column_names!`] implements. The macro names
-/// them through this crate, so a crate that calls it needs no rusqlite
-/// dependency of its own.
+/// The SQL value conversions [`column_names!`](crate::column_names!)
+/// implements. The macro names them through this crate, so a crate that
+/// calls it needs no rusqlite dependency of its own.
 #[doc(hidden)]
 pub mod sql {
     pub use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};

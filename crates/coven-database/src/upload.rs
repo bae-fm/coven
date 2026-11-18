@@ -33,8 +33,9 @@ pub struct WaitingUpload<'a> {
 }
 
 /// A captured queue prefix whose writes all have their first-attempt keys
-/// fixed, in queue order. Only [`crate::Database::prepare_uploads`] makes
-/// one, and [`crate::Database::read_uploads`] reads its writes' plaintext.
+/// fixed, in queue order. Only [`crate::StoreDatabase::prepare_uploads`]
+/// makes one, and [`crate::StoreDatabase::read_uploads`] reads its
+/// writes' plaintext.
 pub struct PreparedUploads {
     writes: Vec<PreparedUpload>,
 }
