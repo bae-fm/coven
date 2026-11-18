@@ -17,6 +17,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Pick.bare_picks_any
 #print axioms SqliveNarrowing.Pick.concat_follows_order
 #print axioms SqliveNarrowing.Pick.max_keeps_first
+#print axioms SqliveNarrowing.Pick.distinct_keeps_first
 #print axioms SqliveNarrowing.Pick.rowNumber_follows_order
 #print axioms SqliveNarrowing.Pick.orderFree_rows_perm
 #print axioms SqliveNarrowing.Pick.picked_column_reruns

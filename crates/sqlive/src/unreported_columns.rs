@@ -27,9 +27,11 @@
 //! tables in a core that doesn't aggregate. A result column, the HAVING or
 //! an ORDER BY term that names a column
 //! outside every aggregate call and GROUP BY term takes the column's value
-//! from one row of its group, which that order decides. min and max keep the
-//! value they read first among values that compare equal, unless their
-//! argument is a column whose equal values are the same, and any other
+//! from one row of its group, which that order decides. A GROUP BY term, and
+//! min and max, keep the value they read first among values that compare
+//! equal, so a result column, the HAVING or an ORDER BY term that shows the
+//! term follows that order, and so does a call of min or max, unless the term
+//! or the argument is a column whose equal values are the same, and any other
 //! aggregate but count reads its values in that order, as `group_concat`
 //! joins them, unless the call's own ORDER BY sorts by the rowid of each of
 //! the core's tables. The model states the rule as `Statement.followsOrder`.
@@ -555,9 +557,11 @@ impl Walk<'_> {
     /// ORDER BY `order_by` takes its value from one row of each group, which
     /// that order decides, when it names a column, or holds a subquery that
     /// can, outside every aggregate call and GROUP BY term, and so does a
-    /// `*`. min and max keep the value they read first among values that
-    /// compare equal, unless their argument is a column whose equal values
-    /// are the same (`compares_exactly`). Any other aggregate but count reads
+    /// `*`. A GROUP BY term, and min and max, keep the value they read first
+    /// among values that compare equal, so a result column, the HAVING or an
+    /// ORDER BY term that shows the term follows that order, and so does a
+    /// call of min or max, unless the term or the argument is a column whose
+    /// equal values are the same (`compares_exactly`). Any other aggregate but count reads
     /// its values in that order too, as `group_concat` joins them and a sum
     /// of reals adds them, unless its own ORDER BY sorts by the rowid of each
     /// of the core's FROM items, each a table.
@@ -613,6 +617,13 @@ impl Walk<'_> {
             parts(expr, &mut found);
             aggregated |= found.iter().any(|part| part.aggregates(self.functions));
         }
+        // The GROUP BY terms a result column, the HAVING or the ORDER BY
+        // shows.
+        let shown: Vec<&Expr<'_>> = stopped
+            .iter()
+            .copied()
+            .filter(|expr| grouped.contains(&crate::sql::unparenthesized(expr)))
+            .collect();
         let windows: Vec<&Over<'_>> = stopped.iter().filter_map(|expr| window_call(expr)).collect();
         let calls: Vec<AggregateCall<'_>> =
             stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.functions)).collect();
@@ -643,6 +654,14 @@ impl Walk<'_> {
             .any(|part| matches!(part, Part::Name(_) | Part::Select(_) | Part::Subquery(_)));
         if star || bare {
             return Ok(true);
+        }
+        // A GROUP BY term keeps the value it reads first among values that
+        // compare equal.
+        for term in shown {
+            let Some(items) = &items else { return Ok(true) };
+            if !self.compares_exactly(items, term)? {
+                return Ok(true);
+            }
         }
         for call in calls {
             match (call.name.as_str(), call.arguments, &items) {

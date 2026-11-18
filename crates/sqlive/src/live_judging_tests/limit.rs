@@ -299,6 +299,35 @@ async fn min_and_max_over_values_that_compare_equal_and_differ_rerun_on_any_colu
     db.close();
 }
 
+/// Among values that compare equal, a GROUP BY term keeps the one SQLite
+/// reads first, so a write to `v.a` changes the value a result column that
+/// shows the term holds, and a write to any column of `v` reruns the query. A
+/// GROUP BY term the result doesn't show, or an INTEGER one, depends only on
+/// the columns the statement names.
+#[tokio::test]
+async fn a_grouped_value_that_compares_equal_to_another_and_differs_reruns_on_any_column() {
+    for sql in ["SELECT x.b FROM v AS x GROUP BY x.b", "SELECT x.t FROM v AS x GROUP BY x.t"] {
+        let db = TestDatabase::open(EQUAL);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE v SET a = 3 WHERE id = 2", true), ("UPDATE v SET x = 1 WHERE id = 1", true)],
+        )
+        .await;
+        db.close();
+    }
+    for (sql, write) in [
+        ("SELECT count(*) FROM v AS x GROUP BY x.t", "UPDATE v SET t = 'abd' WHERE id = 2"),
+        ("SELECT x.a FROM v AS x GROUP BY x.a", "DELETE FROM v WHERE id = 2"),
+    ] {
+        let db = TestDatabase::open(EQUAL);
+        follows(&db, sql, vec![], &[("UPDATE v SET x = 1 WHERE id = 1", false), (write, true)])
+            .await;
+        db.close();
+    }
+}
+
 /// `row_number()` with no ORDER BY numbers the rows in the order SQLite
 /// reads them: here through the covering index on `u.a`, which the statement
 /// never names, so a write to `u.a` changes the numbers, and a write to any

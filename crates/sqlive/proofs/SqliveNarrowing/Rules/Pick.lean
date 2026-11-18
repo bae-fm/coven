@@ -19,7 +19,10 @@ reads them in decides (`bare_picks_any`), and `group_concat` joins its values in
 reads them (`concat_follows_order`), unless the call's own ORDER BY sorts by
 the rowid of each of the core's tables, and `max` keeps the value it reads
 first among values that compare equal (`max_keeps_first`), unless its
-argument is a column whose equal values are the same. A window numbers the
+argument is a column whose equal values are the same, and a GROUP BY term
+keeps the value it reads first among values that compare equal
+(`distinct_keeps_first`), so a result column that shows one follows that
+order, unless the term is such a column. A window numbers the
 bindings its ORDER BY doesn't tell apart in that order too
 (`rowNumber_follows_order`), unless the ORDER BY sorts by the rowid of each
 of the core's tables. Such a core depends on every column of each table it
@@ -415,6 +418,24 @@ theorem max_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α} (h
     (hba : cmp b a = .eq) : keepMax cmp [a, b] = some a ∧ keepMax cmp [b, a] = some b := by
   simp [keepMax, hab, hba]
 
+/-- SQLite's GROUP BY over values that `cmp` orders: one value of each set of
+values that compare equal, the one it reads first, in the order it reads
+them. -/
+def keepDistinct {α : Type} (cmp : α → α → Ordering) (vs : List α) : List α :=
+  vs.foldl (fun kept v => if kept.any (cmp · v == .eq) then kept else kept ++ [v]) []
+
+/-- Among values that compare equal, a GROUP BY term keeps the one it reads
+first: two values that compare equal and differ, as `'Abc'` and `'ABC'` under
+NOCASE or `1` and `1.0`, give the group a different value read one way than
+the other. The model's values are integers, which compare equal only when
+they are the same, so a core that shows a GROUP BY term that can hold values
+that compare equal and differ follows the order SQLite reads its bindings in
+(`Statement.followsOrder`). -/
+theorem distinct_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α}
+    (hab : cmp a b = .eq) (hba : cmp b a = .eq) :
+    keepDistinct cmp [a, b] = [a] ∧ keepDistinct cmp [b, a] = [b] := by
+  simp [keepDistinct, hab, hba]
+
 /-- An expression that names no column or subquery outside its core's GROUP
 BY terms takes the same value in two bindings that agree on those terms. -/
 theorem Expr.eval_of_not_bare {groupBy : List Expr} {b b' : Bind} {sub sub' : Subs}
@@ -608,7 +629,7 @@ theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
     simp only [hagg', Bool.true_and, List.any_eq_false] at hfree
     have := hfree o ho
     constructor
-    · rintro e rfl; simpa using this
+    · rintro e rfl; simp at this; exact this.1
     · rintro e orderBy rfl; simpa using this
   -- Two permuted groups of the kept bindings, whose bindings agree on the
   -- GROUP BY terms, give the same row.

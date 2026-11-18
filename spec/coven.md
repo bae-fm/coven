@@ -800,7 +800,7 @@ app has an index on `albums(artist_id, year)`, so SQLite reads each artist's
 albums by year, and a write that changes only one album's `year` can change
 the title the list shows. `group_concat(b.title, ', ')` joins the titles in
 that same order. So a SELECT that groups its rows or calls an aggregate depends
-on every column of each table it reads, as a query with a LIMIT does, in three
+on every column of each table it reads, as a query with a LIMIT does, in four
 cases:
 
 - A result column, the HAVING or an ORDER BY term names a column, or holds a
@@ -817,6 +817,11 @@ cases:
   `min` and `max` keep the value SQLite reads first: an untyped column can
   hold both `1` and `1.0`, a NOCASE column both `'Abc'` and `'ABC'`, and an
   expression can give either.
+- A result column, the HAVING or an ORDER BY term shows a GROUP BY term other
+  than a column that the third case allows. Among values of the term that
+  compare equal and still differ, a group keeps the value SQLite reads first,
+  so `SELECT b.genre, count(*) FROM albums AS b GROUP BY b.genre`, where
+  `genre` is a NOCASE column, can show `'Rock'` or `'rock'`.
 
 A column is a GROUP BY term when the GROUP BY names it as the SELECT writes
 it, or names its result column by position or alias. SQLite tells an aggregate
@@ -824,9 +829,10 @@ from a scalar function by the function's name and the number of arguments the
 call passes: `max(b.year)` calls the aggregate, and `max(b.year, b.month)` calls
 SQLite's scalar max, which takes the larger value of each row, so its columns
 sit in no aggregate. `count` gives the same value in every order, and so do
-`min` and `max` of a column that the last case allows, so `SELECT b.artist_id,
-count(*), max(b.year) FROM albums AS b GROUP BY b.artist_id`, where `year` is
-an INTEGER column, depends only on the columns it names. `group_concat(b.title,
+`min` and `max` of a column that the third case allows, so `SELECT
+b.artist_id, count(*), max(b.year) FROM albums AS b GROUP BY b.artist_id`,
+where `artist_id` and `year` are INTEGER columns, depends only on the columns
+it names. `group_concat(b.title,
 ', ' ORDER BY b.id)`, where `id` is the table's INTEGER PRIMARY KEY, depends only on the columns it
 names. Ordered by `b.year` alone, it depends on every column of `albums`, since
 two albums of the same year can come in either order. The SELECT's conditions
@@ -14900,7 +14906,7 @@ Write-ups explain each model and state its assumptions:
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
-| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` keeps the first of the values that compare equal that it reads; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
+| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

@@ -2,10 +2,11 @@
 //! term takes its value from one row of its group, and `group_concat` joins
 //! its values in the order SQLite reads its rows, unless its own ORDER BY
 //! sorts by the rowid of each table, so such a core depends on every column
-//! of its tables, and so does max of a value that can compare equal to
-//! another and differ. SQLite reads `u` and `w` through their indexes on `a`
-//! and `c`, which the statements don't always name. A grouped column, count
-//! and max of an INTEGER column don't follow that order.
+//! of its tables, and so do max of a value that can compare equal to another
+//! and differ and a result column that shows a GROUP BY term that can hold
+//! such values. SQLite reads `u` and `w` through their indexes on `a` and
+//! `c`, which the statements don't always name. Count, and max and a GROUP
+//! BY term of an INTEGER column, don't follow that order.
 
 use super::{
     col, eq, item, out, pick, select, table, Core, Expr, Item, Join, Out, Query, Source, COLUMNS,
@@ -37,7 +38,11 @@ fn core(rng: &mut Rng) -> Core {
     if rng.chance(50) {
         conditions.push(super::term::condition(rng, "x", 1));
     }
-    let group = if rng.chance(50) { vec![col("x", pick(rng, &["a", "c"]))] } else { Vec::new() };
+    let group = match rng.below(4) {
+        0 | 1 => Vec::new(),
+        2 => vec![col("x", pick(rng, &COLUMNS))],
+        _ => vec![Expr::Add(Box::new(col("x", "a")), Box::new(col("x", "c")))],
+    };
     // Each result column has a name, which a statement around the core
     // reads it by.
     let mut names = (0..).map(|position| Some(format!("v{position}")));

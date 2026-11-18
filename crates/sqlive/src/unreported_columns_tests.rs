@@ -178,7 +178,8 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
 /// A core that aggregates reads every column of each table it reads when its
 /// rows follow the order SQLite reads its rows in: a result column, the
 /// HAVING or the ORDER BY names a column or holds a subquery outside every
-/// aggregate call and GROUP BY term, it returns a `*`, it calls min or max of
+/// aggregate call and GROUP BY term, it returns a `*`, a result column, the
+/// HAVING or the ORDER BY shows a GROUP BY term, or it calls min or max, of
 /// anything but a column whose equal values are the same, or it calls an
 /// aggregate other than count, min and max with no ORDER BY of its own that
 /// sorts by the rowid of each of its tables.
@@ -219,6 +220,12 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         ("SELECT max(c.x COLLATE NOCASE) FROM c", &c[..]),
         ("SELECT max(a.v + 1) FROM a", &a[..]),
         ("SELECT max(s.v) FROM (SELECT a.v FROM a) AS s", &a[..]),
+        ("SELECT c.t, count(*) FROM c GROUP BY c.t", &c[..]),
+        ("SELECT t FROM c GROUP BY 1", &c[..]),
+        ("SELECT upper(c.u) FROM c GROUP BY c.u", &c[..]),
+        ("SELECT count(*) FROM c GROUP BY c.t HAVING c.t > 'a'", &c[..]),
+        ("SELECT count(*) FROM c GROUP BY c.u ORDER BY c.u", &c[..]),
+        ("SELECT c.x || '' FROM c GROUP BY c.x || ''", &c[..]),
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");
@@ -237,6 +244,8 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         "SELECT json_group_array(a.v ORDER BY a.id, b.id) FROM a JOIN b ON b.k = a.k",
         "SELECT a.v FROM a",
         "SELECT max(c.x), min(c.r), max(c.id), min(rowid) FROM c",
+        "SELECT count(*) FROM c GROUP BY c.t",
+        "SELECT c.x, c.r + 1, c.id, count(*) FROM c GROUP BY c.x, c.r, c.id",
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");

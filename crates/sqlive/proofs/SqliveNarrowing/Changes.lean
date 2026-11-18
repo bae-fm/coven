@@ -76,6 +76,13 @@ def Expr.bare (groupBy : List Expr) (e : Expr) : Bool :=
     | .lit _ => false
     | .add l r | .greatest l r => l.bare groupBy || r.bare groupBy
 
+/-- The GROUP BY terms among `groupBy` whose values `e` shows: `e` itself
+when it is one, or those its operands show. -/
+def Expr.groupTerms (groupBy : List Expr) (e : Expr) : List Expr :=
+  if groupBy.contains e then [e] else match e with
+    | .add l r | .greatest l r => l.groupTerms groupBy ++ r.groupTerms groupBy
+    | .col .. | .lit _ | .sub _ => []
+
 /-- Whether two values of `e` in bindings of core `k` that compare equal are
 the same value: `e` is a column of one of the core's tables that sqlive gives
 an affinity other than BLOB, so it compares by BINARY and holds no integer
@@ -90,16 +97,18 @@ aggregates, and a result column takes its value from one binding of a group,
 which that order decides, as a column outside every GROUP BY term
 (`Expr.bare`) does, or joins its values in that order, with no ORDER BY of its
 own that tells the bindings apart, or keeps the greatest value it reads first
-among values that compare equal and can differ; or it numbers its bindings
-in a window whose ORDER BY doesn't tell them apart, or numbers its groups.
-That order follows the plan SQLite picks (`Pick.bare_picks_any`,
-`Pick.concat_follows_order`, `Pick.max_keeps_first`,
-`Pick.rowNumber_follows_order`). An aggregate's call implies that the core
-aggregates. -/
+among values that compare equal and can differ, or shows a GROUP BY term that
+can hold such values, of which the group keeps the one it reads first; or it
+numbers its bindings in a window whose ORDER BY doesn't tell them apart, or
+numbers its groups. That order follows the plan SQLite picks
+(`Pick.bare_picks_any`, `Pick.concat_follows_order`, `Pick.max_keeps_first`,
+`Pick.distinct_keeps_first`, `Pick.rowNumber_follows_order`). An aggregate's
+call implies that the core aggregates. -/
 def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
   let c := s.core k
   c.output.any fun
-    | .expr e => c.aggregated && e.bare c.groupBy
+    | .expr e => c.aggregated &&
+        (e.bare c.groupBy || (e.groupTerms c.groupBy).any (!s.comparesExactly k ·))
     | .concat _ orderBy => !s.sortsByRowids k (orderBy.map (·.1))
     | .max e => !s.comparesExactly k e
     | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (orderBy.map (·.1))
