@@ -5,8 +5,24 @@ use super::{SequenceSync, Session, SlotReading, SlotReads};
 use crate::{slot_object, PendingRecord, Refusal, SequenceStatus, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{LoadStep, PassMove, SlotContent};
-use coven_foundation::progress::ProgressReport;
-use coven_merge::{Slot, SlotRange};
+use coven_foundation::{id_source::CircleId, progress::ProgressReport};
+use coven_merge::{Audience, Slot, SlotRange};
+
+/// A stuck circle whose parts the reader consumes unopened, from its stop
+/// through the slot that takes this member out of the circle: the scan for
+/// the key met that slot before any copy of the key, so the member never
+/// reads those parts, and they go at that slot anyway (§12.1, §15.6, §15.9).
+struct Skip {
+    circle: CircleId,
+    through: Slot,
+}
+
+impl Skip {
+    /// Whether the reader consumes `audience`'s part of slot `slot` unopened.
+    fn covers(&self, audience: &Audience, slot: Slot) -> bool {
+        *audience == Audience::Circle(self.circle) && slot <= self.through
+    }
+}
 
 /// The slot after `slot`. Slot numbers are `u64`s, so none follows the last
 /// one: there the sequence is exhausted (E5).
@@ -83,6 +99,7 @@ impl SequenceSync {
                 self.reload_floor(session, floor, ring, member, progress.as_deref_mut()).await?;
             }
         }
+        let mut skips: Vec<Skip> = Vec::new();
         loop {
             let first = next_slot(session.through)?;
             let mut next = first;
@@ -141,7 +158,7 @@ impl SequenceSync {
                                 &virtual_history.state,
                                 audience,
                                 &member.member(),
-                            )
+                            ) && !skips.iter().any(|skip| skip.covers(audience, next))
                         },
                     );
                     timing.opening += self.clock.elapsed() - opening;
@@ -293,9 +310,12 @@ impl SequenceSync {
                 // have one above: reading in order never gets there, so scan
                 // ahead for it. The key's introduction applied below the
                 // slot, so its commitment checks the copy (§5.4, §12.1).
+                // The scan also looks for a slot that takes this member out of
+                // the circle; met before any copy, the reader skips the
+                // circle's parts up to it (§12.1, §15.6).
                 if let SyncError::KeyUnavailable { key, .. } = error {
                     if let Some((circle, hash)) = session.history.circle_commitment(key) {
-                        if let Some(found) = self
+                        let found = self
                             .scan_for_stuck_key(
                                 session,
                                 member,
@@ -304,8 +324,16 @@ impl SequenceSync {
                                 key,
                                 &hash,
                             )
+                            .await?;
+                        let copy_at = found.as_ref().map(|(at, _)| *at);
+                        if let Some(through) = self
+                            .taken_out(session, ring, member, slot, circle, copy_at, &skips)
                             .await?
                         {
+                            skips.push(Skip { circle, through });
+                            continue;
+                        }
+                        if let Some((_, found)) = found {
                             found.insert(ring)?;
                             self.keys.persist(ring)?;
                             continue;
@@ -324,6 +352,61 @@ impl SequenceSync {
             self.state.set(SequenceStatus::Synced { through: session.through });
             return Ok(());
         }
+    }
+
+    /// The slot, from the stop `stop` on and below `before`, that takes this
+    /// member out of `circle`, which the stop's part needs a key of: the
+    /// slots read in order from the applied history, with `circle`'s parts
+    /// and those `skips` covers consumed unopened, until this member no
+    /// longer reads the circle.
+    /// Nothing is applied. A slot that can't be read or opened, or the
+    /// sequence's end, ends the look with no such slot, and the reader stays
+    /// stopped.
+    async fn taken_out(
+        &self,
+        session: &Session,
+        ring: &StoreKeyring,
+        member: &MemberIdentity,
+        stop: Slot,
+        circle: CircleId,
+        before: Option<Slot>,
+        skips: &[Skip],
+    ) -> Result<Option<Slot>, SyncError> {
+        let me = member.member();
+        let stuck = Audience::Circle(circle);
+        let mut history = session.history.clone();
+        let mut ring = ring.clone();
+        let mut next = stop;
+        let mut reads = SlotReads::new(self, SlotRange::new(next, u64::MAX));
+        while before.is_none_or(|before| next < before) {
+            let Some(input) = reads.next().await? else {
+                return Ok(None);
+            };
+            let received = slot_object::open(
+                input.local_bytes().await?,
+                &self.path(next),
+                &ring,
+                &history,
+                |audience| {
+                    *audience != stuck
+                        && !skips.iter().any(|skip| skip.covers(audience, next))
+                        && crate::effects::belongs(&history.state, audience, &me)
+                },
+            );
+            input.release().await?;
+            let Ok(received) = received else {
+                return Ok(None);
+            };
+            history.consume(received, me);
+            if history.acquire(&mut ring, member).is_err() {
+                return Ok(None);
+            }
+            if !crate::effects::belongs(&history.state, &stuck, &me) {
+                return Ok(Some(next));
+            }
+            next = next_slot(next.get())?;
+        }
+        Ok(None)
     }
 }
 

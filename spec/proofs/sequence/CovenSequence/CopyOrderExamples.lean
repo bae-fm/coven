@@ -160,6 +160,37 @@ theorem recovery_leaves_lone_circle :
       (rosterAt household recovery 9).current benNewCircleKey.audience ben = some 21 := by
   decide +kernel
 
+/-- **A stop in a shared circle waits for its copy.** Ben's new phone, stopped
+at Carol's write at slot 14, scans on and meets Carol's copy at slot 18: the
+recovery kept Ben in Gifts, which Carol is in too, so nothing takes him out. -/
+theorem shared_circle_scan_finds_copy :
+    scan household recovery ben 21 giftsKey 14 18 = .copy 18 := by decide +kernel
+
+/-- Ben writes to his own circle at slot 3, then loses every device, and Ana
+recovers him at slot 4 with a new circle. -/
+def lone : Nat → CopyOrder.Slot Nat Nat
+  | 1 => .entry ana storeKey (.create storeKey 100 10 [])
+  | 2 => .entry ana storeKey (.admit ben false 20 benCircleKey 300)
+  | 3 => .writes storeKey [benCircleKey]
+  | 4 => .entry ana storeKey (.recover ben 21 benNewCircleKey 302)
+  | _ => .writes storeKey []
+
+theorem lone_follows : Follows household lone 4 := by
+  refine ⟨⟨ana, storeKey, 100, 10, [], rfl, rfl⟩, ?_⟩
+  have all : ∀ k, k < 5 → 2 ≤ k → legal household (keysAt household lone (k - 1))
+      (rosterAt household lone (k - 1)) (lone k) = true := by decide +kernel
+  exact fun k two below => all k (by omega) two
+
+/-- **A stop in a lone circle ends at the recovery.** Ben's new phone reads
+with pair 21 and stops at his write at slot 3, whose circle key only his lost
+pair opened. Nobody holds the key, so no copy comes; the scan meets the
+recovery at slot 4, which takes Ben out of that circle, and the phone skips
+the circle's part at slot 3 unopened (§13.3, §15.6). -/
+theorem lone_circle_scan_skips :
+    holders household (keysAt household lone 4) (rosterAt household lone 4) benCircleKey ben =
+      [] ∧
+    scan household lone ben 21 benCircleKey 3 4 = .out 4 := by decide +kernel
+
 /-- Ana recovers Ben, then removes Carol, Gifts' only other member, before
 Carol's pass sends Ben the Gifts key. Ben still reads Gifts: Carol was in it
 when the recovery applied, so the recovery kept him there. -/

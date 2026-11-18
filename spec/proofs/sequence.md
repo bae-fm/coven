@@ -434,6 +434,17 @@ before it, a slot below carries a copy to the member's current sealing key.
   the member keeps reading every other audience, with the new pair. Ben,
   recovered at slot 9, no longer reads his own old circle, and still reads
   Gifts, which Carol is in too, and his new circle.
+- `scan_out`, `recovery_takes_out`: the scan (`scan`) also looks for a slot
+  that takes the reader's member out of the key's audience (`takesOut`: the
+  member reads it just before the slot and not after). At each slot it looks
+  for the copy first. When it meets such a slot before any copy, no slot from
+  the stop through that slot carries the copy, and the reader skips the
+  audience's parts below it unopened (coven.md §12.1, §15.6). A recovery takes
+  its member out of every circle they alone read, so a reader stopped in such
+  a circle can meet the recovery. `lone_circle_scan_skips` is Ben's new phone,
+  stopped at his own write to the circle only he read, with no holder,
+  skipping it at the recovery; `shared_circle_scan_finds_copy` is the Gifts
+  recovery, which kept Ben in Gifts, finding Carol's copy instead.
 
 `Follows` allows more than Rust does, as it asks nothing of fresh sealing keys
 or a write's authority, so `store_copy_precedes_need` and

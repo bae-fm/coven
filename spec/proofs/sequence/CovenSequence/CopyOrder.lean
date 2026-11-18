@@ -1054,6 +1054,119 @@ theorem owed_complete {store a : Aud} {r : Roster Aud Mem} (ok : RosterOk store 
   rw [publish_copies] at hi
   exact needed_complete h through r.current r.people a i hi ha m c (ok.people a m c reads) reads
 
+/-! ## A stuck reader skips a circle a later slot takes it out of
+
+A reader stuck at a slot for a circle's key scans the slots after the stop for
+a copy of the key sealed to its pair. When nobody holds the key, no copy comes
+(`no_holder_never_clears`). The scan also looks for a slot that takes the
+reader's member out of the circle: a removal from the circle or from the
+store, a deletion of the circle, or a recovery of a member who alone read it,
+whose keys no device holds any more (§13.3). Finding such a slot before any
+copy, the reader consumes the circle's parts unopened up to that slot, as it
+does a part of an audience its member isn't in (§15.6). Those rows go at that
+slot anyway (§15.9). -/
+
+/-- Whether slot `t` takes `m` out of audience `a`: `m` reads `a` just before
+the slot and not after it. -/
+def takesOut (store : Aud) (seq : Nat → Slot Aud Mem) (m : Mem) (a : Aud) (t : Nat) : Bool :=
+  ((rosterAt store seq (t - 1)).current a m).isSome &&
+    ((rosterAt store seq t).current a m).isNone
+
+/-- What a stuck reader's scan meets first. -/
+inductive Scanned where
+  /-- A slot that carries the key's copy to the reader's pair, which ends the
+  stop (§12.1). -/
+  | copy (t : Nat)
+  /-- A slot that takes the reader's member out of the key's audience, below
+  which the reader skips the audience's parts. -/
+  | out (t : Nat)
+  /-- Neither, through the slots scanned: the reader stays stopped. -/
+  | waits
+  deriving DecidableEq
+
+/-- The scan of member `m` with pair `c` for `key`, from slot `t` on, through
+`fuel` slots: at each slot, a copy first, then a slot taking `m` out of the
+key's audience. -/
+def scanFrom (store : Aud) (seq : Nat → Slot Aud Mem) (m : Mem) (c : Nat) (key : Key Aud) :
+    Nat → Nat → Scanned
+  | _, 0 => .waits
+  | t, fuel + 1 =>
+    if (⟨key, m, c⟩ : Route Aud Mem) ∈ carriedAt store seq t then .copy t
+    else if takesOut store seq m key.audience t then .out t
+    else scanFrom store seq m c key (t + 1) fuel
+
+/-- The scan of a reader stopped at slot `s`, through slot `n`. -/
+def scan (store : Aud) (seq : Nat → Slot Aud Mem) (m : Mem) (c : Nat) (key : Key Aud)
+    (s n : Nat) : Scanned :=
+  scanFrom store seq m c key (s + 1) (n - s)
+
+theorem scanFrom_out {store : Aud} {seq : Nat → Slot Aud Mem} {m : Mem} {c : Nat}
+    {key : Key Aud} :
+    ∀ (fuel t u : Nat), scanFrom store seq m c key t fuel = .out u →
+      t ≤ u ∧ u < t + fuel ∧ takesOut store seq m key.audience u = true ∧
+        ∀ v, t ≤ v → v ≤ u → (⟨key, m, c⟩ : Route Aud Mem) ∉ carriedAt store seq v
+  | 0, t, u, h => by simp [scanFrom] at h
+  | fuel + 1, t, u, h => by
+    simp only [scanFrom] at h
+    split at h
+    · cases h
+    · rename_i none
+      split at h
+      · rename_i out
+        cases h
+        refine ⟨Nat.le_refl _, by omega, out, fun v lo hi => ?_⟩
+        have : v = t := by omega
+        subst this
+        exact none
+      · rename_i stays
+        obtain ⟨lo, hi, out, clear⟩ := scanFrom_out fuel (t + 1) u h
+        refine ⟨by omega, by omega, out, fun v lo' hi' => ?_⟩
+        by_cases here : v = t
+        · subst here; exact none
+        · exact clear v (by omega) hi'
+
+/-- **A scan skips only below a slot that takes the reader out.** When the
+scan of a reader stopped at `s` meets `out t`, slot `t` is above the stop and
+through `n`, the reader's member reads the key's audience just before it and
+not after it, and no slot from the stop's next through `t` carries the key's
+copy to the reader's pair: the reader has no copy to open the parts it skips
+with. -/
+theorem scan_out {store : Aud} {seq : Nat → Slot Aud Mem} {m : Mem} {c : Nat} {key : Key Aud}
+    {s n t : Nat} (h : scan store seq m c key s n = .out t) :
+    s < t ∧ t ≤ n ∧ takesOut store seq m key.audience t = true ∧
+      ∀ v, s < v → v ≤ t → (⟨key, m, c⟩ : Route Aud Mem) ∉ carriedAt store seq v := by
+  obtain ⟨lo, hi, out, clear⟩ := scanFrom_out (n - s) (s + 1) t h
+  exact ⟨by omega, by omega, out, fun v lo' hi' => clear v (by omega) hi'⟩
+
+/-- **A recovery takes its member out of a circle they alone read** (§13.3).
+In a followed history, a recovery of `m` at slot `t` takes `m` out of every
+circle `a` that `m` alone read just before it: the scan of a stopped reader of
+`m` can meet it. -/
+theorem recovery_takes_out {store : Aud} {seq : Nat → Slot Aud Mem} {n t : Nat}
+    (hf : Follows store seq n) (two : 2 ≤ t) (below : t ≤ n) {author : Mem} {outer : Key Aud}
+    {m : Mem} {c : Nat} {key : Key Aud} {hash : Nat}
+    (hs : seq t = .entry author outer (.recover m c key hash)) {a : Aud}
+    (reads : ((rosterAt store seq (t - 1)).current a m).isSome = true)
+    (lone : (rosterAt store seq (t - 1)).alone store a m = true) :
+    takesOut store seq m a t = true := by
+  have yes := hf.2 t two below
+  rw [hs] at yes
+  have allow := (legal_entry yes).1
+  simp only [allowed, circleFree, Bool.and_eq_true, List.all_eq_true,
+    Option.isNone_iff_eq_none] at allow
+  obtain ⟨_, ⟨_, empty⟩⟩ := allow
+  have other : a ≠ key.audience := by
+    intro same
+    obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp reads
+    have hm := (roster_ok (n := t - 1) ⟨hf.1, fun k h1 h2 => hf.2 k h1 (by omega)⟩).people a m v hv
+    rw [same, empty m hm] at hv
+    cases hv
+  have after : rosterAt store seq t = (rosterAt store seq (t - 1)).after store (seq t) := by
+    obtain ⟨u, rfl⟩ : ∃ u, t = u + 1 := ⟨t - 1, by omega⟩
+    rfl
+  simp only [takesOut, reads, Bool.true_and, after, hs, Roster.after, Roster.apply,
+    seat_current, other, false_and, ite_false, ite_true, lone, Option.isNone_none]
+
 /-! ## Leaving a circle replaces its key (§15.8)
 
 The entry that removes `m` from a circle introduces the circle's replacement

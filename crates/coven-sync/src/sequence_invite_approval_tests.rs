@@ -904,3 +904,49 @@ async fn an_approval_missing_a_key_it_must_copy_waits_for_it() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Carol loses every device and her restore code, and Ana recovers her on a
+/// new phone. Carol's old circle has her alone in it, under a sealing key no
+/// device holds any more, so the recovery takes her out of it, which deletes
+/// it. Her new phone stops at her pin, below the recovery, for a key no
+/// member can send; its scan meets the recovery before any copy, so it
+/// consumes the old circle's parts unopened and syncs past them (§12.1,
+/// §13.3, §15.6, §15.8).
+#[tokio::test]
+async fn a_recovered_member_syncs_past_their_old_circle() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let carol = group.device(3).await;
+    group.create(&ana).await;
+    let admission = admission(&carol, MemberRole::Member, group.access("carol"), "Carol's phone");
+    ana.sync.administer_admission(admission).await.unwrap();
+    carol.sync.pass().await.unwrap();
+    let member = carol.identity.member();
+    let state = carol.sync.database.store_state().await.unwrap();
+    let old = state.members[&member].joined.as_ref().unwrap().circle;
+    pin(&carol.sync.database, "00000000-0000-4000-8000-000000000001", old, "kept in her circle")
+        .await;
+    carol.sync.pass().await.unwrap();
+    carol.sync.database.close().await.unwrap();
+    ana.sync.pass().await.unwrap();
+
+    let invite = key_replacement_invite(&ana, member).await;
+    let mut phone = join(&group, invite.shown_code(), "Carol's new phone").await;
+    ana.sync.pass().await.unwrap();
+    let checked = requests(&ana).await;
+    ana.sync.approve_join_request(&checked[0]).await.unwrap();
+    assert_eq!(
+        phone.device.sync.join_outcome(&mut phone.request).await.unwrap(),
+        JoinOutcome::Admitted
+    );
+    phone.device.sync.pass().await.unwrap();
+    let state = phone.device.sync.database.store_state().await.unwrap();
+    let new = phone.request.circle().circle.circle;
+    assert!(state.circle_deletions.contains_key(&old), "the recovery deletes her old circle");
+    assert!(!state.reads_circle(old, &member));
+    assert_eq!(state.circles[&new].members, [member].into());
+    assert!(pins(&phone.device.sync.database).await.is_empty());
+    for device in [&ana, &phone.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}

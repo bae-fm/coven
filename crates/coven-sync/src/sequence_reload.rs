@@ -237,7 +237,7 @@ impl SequenceSync {
         if let Some((_, circle, key)) = waiting {
             if let Some(hash) = session.history.commitment(&Audience::Circle(circle), key) {
                 let start = floor.header.first;
-                if let Some(found) =
+                if let Some((_, found)) =
                     self.scan_for_stuck_key(session, member, start, circle, key, &hash).await?
                 {
                     found.insert(ring)?;

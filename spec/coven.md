@@ -1772,8 +1772,11 @@ new phone stops at slot 41, Carol's Gifts write, because it holds no Gifts key
 yet; Carol's copy of the key for him will land at slot 45. Reading in order, the
 phone never reaches 45. So a device stopped for want of a circle key scans the
 slots after its stop for a copy of that key sealed to its member, and a copy it
-finds there ends the wait: it applies 41 and reads on (§12.1). A later slot
-still never lets it skip 41.
+finds there ends the wait: it applies 41 and reads on (§12.1). The device never
+skips 41 itself. When no copy comes, the scan also looks for a later slot that
+takes Ben out of Gifts; meeting one before any copy, the device applies 41 with
+its Gifts part consumed unopened, as it would were Ben outside Gifts (§12.1,
+§15.6).
 
 A slot the device can't apply at all stops it the same way: its bytes are
 damaged, written in a newer format than its app reads, or a write at a newer
@@ -4270,6 +4273,22 @@ finds a copy of every key the stop needs
   failed read fails the pass, as any failed read does (§6.1).
 - **Only a circle key.** A store key's copy is always below the slot that needs
   it (below), so a stop for a store key has nothing to scan for.
+- **A later slot that takes the member out.** Ben loses every device, and Ana
+  recovers him at slot 50. His new phone stops at slot 30, his own write to his
+  old private circle, whose key only his lost pair opened. Nobody holds that
+  key, so no copy will come, but the recovery at 50 takes Ben out of the circle
+  (§13.3). So the scan also looks for a slot that takes this member out of the
+  stuck circle: a removal from the circle or from the store, the circle's
+  deletion, or a recovery that takes the member out. Meeting one before any
+  copy of the key, the phone reads on from its stop with that circle's parts
+  consumed unopened, as for a circle its member isn't in (§15.6), up to that
+  slot. Those rows would be taken out there anyway (§15.9). At each slot the
+  scan looks for the copy first, so a copy that lands at or below such a slot
+  still ends the wait the usual way. To find such a slot, the phone reads the
+  slots after its stop in order without applying them, opening the admin
+  entries with the store key it holds, and stops looking at a slot it can't
+  read or open, and at the end of the sequence
+  ([`scan_out`, `recovery_takes_out`](proofs/sequence/CovenSequence/CopyOrder.lean)).
 - **When retention deletes the stop.** Ben's phone stops at Carol's write at
   slot 41 and goes quiet. A floor written later can pass 41, and retention then
   deletes it. A floor never takes a stopped device past a slot it can't apply
@@ -5864,7 +5883,11 @@ admission, which replaces his keys and registers his new device:
 Approving sends his new keys only the keys the approving admin holds. If that
 admin is outside Gifts, his Gifts keys come from a Gifts member's next pass. A
 new device of his that reaches a Gifts slot before then stops there, and scans
-ahead until the copy lands; he needs no second invite or restore (§12.1).
+ahead until the copy lands; he needs no second invite or restore (§12.1). His
+old private circle's parts all sit below the recovery, since writes under his
+old keys after it are refused. His new device stops at the first of them,
+and its scan meets the recovery, which takes him out of that circle, before
+any copy: the device consumes those parts unopened and reads on (§12.1).
 
 A removed member can't be brought back by replacing keys. Inviting that person
 again gives them a fresh id, under the ordinary rules for adding a member.
@@ -6490,7 +6513,11 @@ Applying such a slot:
 - parts for audiences this member isn't in are consumed without being opened.
   Not being a recipient is not a missing key;
 - a missing key for a part the device should read stops the device at that slot
-  (§5.4).
+  (§5.4), unless the scan for the key meets a later slot that takes its member
+  out of the part's circle before any copy. The device then consumes that
+  circle's parts unopened up to that slot, as parts of an audience its member
+  isn't in, since it could never open them and they are taken out there
+  anyway (§12.1, §15.9).
 
 A write into a circle the member isn't in, or into a circle absent from the
 membership this device has applied, fails on the writing device with
@@ -14379,6 +14406,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Only a member that holds a key, with a copy of it sealed to its current sealing key, can seal a copy of it, and a copy is legal only from such an author or for a key its author is about to introduce. A holder that reads the audience sends the copy on its next pass; a key with no copy at a stop gets none later, so with no holder and the reader holding no copy, the stop never ends: Ben's phone names Carol as the holder of the Gifts key, and with Carol removed after the recovery, before her pass sends his copy, it names none and never clears | `reader_holder_sends`, `holders_from_holders`, `no_holder_never_clears`, `recovery_holders`, `orphan_has_no_holder`, `orphan_never_clears` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §12.1, §19.1 |
 | *Body.* Removing a member from a circle introduces the circle's replacement key in the same entry, with its copies below it to the readers who remain: the removed member no longer reads the circle, the key is the first-attempt choice of a remaining writer holding it, and no copy of it is routed to the removed member | `leave_selects_new_key` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §12.1, §15.8 |
 | *Body.* Every key a slot needs is introduced by that slot, so a copy of it found above the slot is checked against an applied commitment. Publishing the copies an audience still needs, as a member's pass does, gives each current reader a copy of every key introduced for it; then a stopped reader that scans through them finds a copy of every key its stop needs | `need_introduced`, `stuck_scan_finds_copy`, `owed_complete` | `proofs/sequence/CovenSequence/CopyOrder.lean` | §5.4, §12.1 |
+| *Body.* A stopped reader's scan looks at each slot for the key's copy first, then for a slot that takes its member out of the key's audience; meeting such a slot first, no slot from the stop through it carries the copy, and the reader skips that audience's parts below it. A recovery takes its member out of every circle they alone read, so Ben's new phone, stopped at his own write to his old circle with no holder, skips it at the recovery, while a stop in Gifts, which Carol is in, still finds Carol's copy | `scan_out`, `recovery_takes_out`, `lone_circle_scan_skips`, `shared_circle_scan_finds_copy` | `proofs/sequence/CovenSequence/CopyOrder.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §5.4, §12.1, §13.3, §15.6 |
 | Key preparation, of an audience key or of a member's own new pair, records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.3, §12.4 |
 | A replacement applies only while the pair it expects is current; once one applies, its member never has the replaced pair again, so a competing replacement, and every retry of it, is refused at every later slot | `replaced_never_current`, `competing_replacement_refused` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §10.4, §11.2, §12.3 |
 | Replacing one's own keys, every write under the old pair lands before the replacement's slot and every write under the new pair after it; once the replacement lands, writes resume only with the new pair kept, installed and its restore code refreshed, and a write meanwhile is refused | `writes_straddle_replacement`, `pause_lifts_after_install` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |

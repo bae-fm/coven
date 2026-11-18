@@ -338,7 +338,7 @@ impl SequenceSync {
     /// Scan the slots from `start` for a copy of `circle`'s key `key`, sealed
     /// to this member's pair, which a stuck slot waits on: from the slot
     /// after the stop, or from the floor's first kept slot once retention has
-    /// deleted it.
+    /// deleted it. A copy found comes with the slot that carries it.
     /// Reading in order never reaches a copy in a later slot, so this scan is
     /// what ends the wait. `hash` is the key's applied commitment: the copy's
     /// key is checked against it, so the key it gives is accepted at once
@@ -357,7 +357,7 @@ impl SequenceSync {
         circle: CircleId,
         key: KeyId,
         hash: &[u8; 32],
-    ) -> Result<Option<RoutedKey>, SyncError> {
+    ) -> Result<Option<(Slot, RoutedKey)>, SyncError> {
         let started = self.clock.elapsed();
         let from = match session.stuck_scan {
             Some(scan) if scan.start == start && scan.key == key => scan.next,
@@ -403,9 +403,10 @@ impl SequenceSync {
                 // The end of the sequence.
                 Ok(None) => break None,
                 Ok(Some(opened)) => {
+                    let at = next;
                     next = next_slot(next.get())?;
-                    if opened.is_some() {
-                        break opened;
+                    if let Some(opened) = opened {
+                        break Some((at, opened));
                     }
                 }
                 Err(error @ SyncError::Damaged(_)) => {
