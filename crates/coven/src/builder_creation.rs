@@ -38,7 +38,7 @@ impl CovenBuilder {
             name: name.to_owned(),
             device_name: device_name.to_owned(),
             person: person.to_owned(),
-            circle_name,
+            circle: circle_name,
             circles: circles.iter().map(|circle| (*circle).to_owned()).collect(),
         };
         let bugs = self.directories.bugs().clone();
@@ -56,19 +56,25 @@ pub(super) struct Asked<C> {
     pub(super) device_name: String,
     /// The creator's name, which her devices' joining write reads (§13.2).
     pub(super) person: String,
-    /// Names the creator's private circle from her member id.
-    pub(super) circle_name: C,
+    /// The creator's private circle: the app's function that names it from
+    /// her member id, then the name it gave.
+    pub(super) circle: C,
     pub(super) circles: Vec<String>,
 }
 
-/// [`Asked`] with the creator's member id made and her private circle named.
+impl<C: FnOnce(MemberId) -> String> Asked<C> {
+    /// The request with the creator's private circle named from `member`.
+    fn named(self, member: MemberId) -> Asked<String> {
+        let Self { name, device_name, person, circle, circles } = self;
+        Asked { name, device_name, person, circle: circle(member), circles }
+    }
+}
+
+/// The app's request with its private circle named, and the creator's
+/// member id it was named from.
 struct Founding {
-    name: String,
-    device_name: String,
+    asked: Asked<String>,
     member: MemberId,
-    person: String,
-    circle: String,
-    circles: Vec<String>,
 }
 
 /// The app's first write, which runs once slot 1 is applied and before the
@@ -88,15 +94,14 @@ pub(super) async fn create(
     creating: impl Creating,
     publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
-    let Asked { name, device_name, person, circle_name, circles } = asked;
     let id = StoreId(builder.ids.new_id());
     let member = MemberId(builder.ids.new_id());
-    let circle = circle_name(member);
+    let asked = asked.named(member);
     // A name the format refuses is refused before anything is made.
-    for name in [&person, &circle].into_iter().chain(&circles) {
+    for name in [&asked.person, &asked.circle].into_iter().chain(&asked.circles) {
         coven_format::value::name(name).map_err(SyncError::from)?;
     }
-    let founding = Founding { name, device_name, member, person, circle, circles };
+    let founding = Founding { asked, member };
     let pending = Arc::new(builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?);
     let bugs = builder.directories.bugs().clone();
     match prepare(builder, pending.clone(), founding, creating, publish).await {
@@ -129,7 +134,7 @@ async fn prepare(
     creating: impl Creating,
     publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
-    let Founding { name, device_name, member, person, circle, circles } = founding;
+    let Founding { asked: Asked { name, device_name, person, circle, circles }, member } = founding;
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
     let waits = match coven_sync::RetryWaits::open(database.clone(), builder.clock.clone()).await {

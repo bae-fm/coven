@@ -23,7 +23,7 @@ fn household() -> super::Asked<fn(MemberId) -> String> {
         name: "Household".into(),
         device_name: "Test device".into(),
         person: "Ana".into(),
-        circle_name: |_| "Private".into(),
+        circle: |_| "Private".into(),
         circles: vec![],
     }
 }
