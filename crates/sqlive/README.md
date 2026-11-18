@@ -55,7 +55,7 @@ fn main() {
     let directory = std::env::temp_dir().join(format!("sqlive-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let bugs: BugSinkRef = Arc::new(IgnoreBugs);
-    let handle = Handle::<HandleFailure>::recording_all(bugs.clone());
+    let handle = Handle::<HandleFailure>::new(bugs.clone(), Vec::new());
 
     // Open the database at a path, creating its tables with the first connection.
     let (database, ()) = Database::open_with(
