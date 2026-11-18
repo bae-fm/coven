@@ -59,7 +59,7 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
             let mut query = select(plain(rng, "x", first));
             query.order = vec![(0, false)];
             query.order_named = true;
-            query.limit = Some(3);
+            query.limit = super::limit(3);
             query
         }
         _ => select(Core {

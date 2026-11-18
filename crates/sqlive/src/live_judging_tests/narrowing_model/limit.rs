@@ -5,7 +5,7 @@
 //! that doesn't sort by the rowid of each table, as one over a join, makes
 //! every column of the tables count as read.
 
-use super::{col, eq, item, out, pick, table, Core, Join, Query, Source, TABLES};
+use super::{col, eq, item, out, pick, table, Core, Join, Limit, Query, Source, TABLES};
 use crate::random_scopes::Rng;
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -46,8 +46,10 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         arms: vec![Core { from, conditions, select: select_, group: Vec::new() }],
         order,
         order_named: rng.chance(85),
-        limit: Some(1 + rng.below(4) as u32),
-        offset: rng.chance(20).then(|| rng.below(3) as u32),
+        limit: Some(Limit {
+            count: 1 + rng.below(4) as u32,
+            offset: rng.chance(20).then(|| rng.below(3) as u32),
+        }),
         ..Query::default()
     }
 }

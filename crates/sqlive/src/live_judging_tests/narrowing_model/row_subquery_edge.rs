@@ -43,7 +43,7 @@ fn subquery(rng: &mut Rng, name: &'static str, outer: &str, width: usize) -> Que
     }
     let mut query = select(core);
     if rng.chance(20) {
-        query.limit = Some(1);
+        query.limit = super::limit(1);
     }
     query
 }

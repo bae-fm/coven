@@ -68,9 +68,19 @@ pub(super) struct Query {
     pub(super) order: Vec<(usize, bool)>,
     /// Whether the ORDER BY names each term's column instead of its position.
     pub(super) order_named: bool,
-    pub(super) limit: Option<u32>,
-    /// The OFFSET, written only after a LIMIT.
+    pub(super) limit: Option<Limit>,
+}
+
+/// A LIMIT, with the OFFSET SQL writes only after one.
+#[derive(Clone, Copy)]
+pub(super) struct Limit {
+    pub(super) count: u32,
     pub(super) offset: Option<u32>,
+}
+
+/// A LIMIT of `count` rows with no OFFSET.
+pub(super) fn limit(count: u32) -> Option<Limit> {
+    Some(Limit { count, offset: None })
 }
 
 #[derive(Clone, Default)]
@@ -219,9 +229,9 @@ impl Query {
                 .collect();
             sql.push_str(&format!(" ORDER BY {}", terms.join(", ")));
         }
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
-            if let Some(offset) = self.offset {
+        if let Some(Limit { count, offset }) = self.limit {
+            sql.push_str(&format!(" LIMIT {count}"));
+            if let Some(offset) = offset {
                 sql.push_str(&format!(" OFFSET {offset}"));
             }
         }
@@ -245,8 +255,8 @@ impl Query {
             "ops": self.ops.iter().map(|op| op.to_ascii_lowercase()).collect::<Vec<_>>(),
             "order": order,
             "order_named": self.order_named,
-            "limit": self.limit,
-            "offset": self.limit.and(self.offset),
+            "limit": self.limit.map(|limit| limit.count),
+            "offset": self.limit.and_then(|limit| limit.offset),
         })
     }
 
