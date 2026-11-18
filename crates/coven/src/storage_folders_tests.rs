@@ -899,7 +899,8 @@ async fn refreshing_during_account_lookup_commits_the_replacement_tokens() {
 
 /// Ben renames Household's folder to Family in Dropbox while Ana's laptop is
 /// closed. Her laptop reads the folder's name each time it connects, so the
-/// next launch shows Family (§20.2).
+/// next launch shows Family (§20.2), and her app's live query of the
+/// location hears the new name as the connection records it (E4).
 #[tokio::test]
 async fn each_connection_reads_the_folders_name_again() {
     for location in [dropbox("123"), drive("household")] {
@@ -911,11 +912,23 @@ async fn each_connection_reads_the_folders_name_again() {
         f.handle.close().await.unwrap();
         f.storage.rename_folder("Family").await;
         let handle = f.reopen().await;
+        let mut shown: LiveQuery<Option<StorageConfig>, CovenError> = handle.subscribe(|sql| {
+            Ok(sql.query_row("SELECT location FROM coven_sync_status", [], |r| r.get(0))?)
+        });
         let before = recorded(location.clone(), "ana@example.com", "Household");
-        assert_eq!(handle.storage_config().await.unwrap(), Some(before));
+        assert_eq!(handle.storage_config().await.unwrap(), Some(before.clone()));
+        let first = shown.next_inline().await.expect("the live query answers").unwrap();
+        assert_eq!(first, Some(before.clone()));
         handle.unlock_store_key().await.unwrap();
         let after = recorded(location, "ana@example.com", "Family");
         assert_eq!(handle.storage_config().await.unwrap(), Some(after.clone()));
+        // Connecting writes other columns of the row too, which may run the
+        // query again before the new label.
+        let mut renamed = shown.next_inline().await.expect("the live query answers").unwrap();
+        while renamed == Some(before.clone()) {
+            renamed = shown.next_inline().await.expect("the live query answers").unwrap();
+        }
+        assert_eq!(renamed, Some(after.clone()));
         handle.close().await.unwrap();
         let directory = f.app.store_dir(&f.handle.store_id());
         assert_eq!(Coven::storage_config(&directory).await.unwrap(), Some(after));

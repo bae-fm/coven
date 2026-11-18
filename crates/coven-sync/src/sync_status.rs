@@ -22,7 +22,7 @@
 
 use crate::{
     DeviceIdEvidence, KeyHolder, LastPass, LocalFailure, PendingReason, PendingRecord,
-    Prerequisite, StatusFailure,
+    Prerequisite, StatusFailure, SyncError,
 };
 use coven_database::{
     DbError, RecordedLocation, Removal, RetrySync, SqlReadContext, SyncFacts, SyncStateFunction,
@@ -721,27 +721,46 @@ fn named_provider(name: &str) -> Result<CloudProvider, DbError> {
 }
 
 /// Write, as the store opens, whether a storage location is recorded here
-/// and its credentials held, and that no pass moves; `finished`, for a store
-/// joining or restoring read to its end, is when (E5). A failure fails the
-/// store's handle with its cause.
+/// and its credentials held, with the location and its labels, and that no
+/// pass moves; `finished`, for a store joining or restoring read to its end,
+/// is when (E5). A failure fails the store's handle with its cause.
 pub async fn record_opened(
     database: &coven_database::StoreDatabase,
-    location: RecordedLocation<CloudProvider>,
+    location: RecordedLocation<coven_storage::StorageConfig>,
     finished: Option<SystemTime>,
-) -> Result<(), DbError> {
-    database.record_opened(location.map(|provider| provider.name().to_owned()), finished).await
+) -> Result<(), SyncError> {
+    Ok(database.record_opened(stored(location)?, finished).await?)
 }
 
 /// Write whether a storage location is recorded here and its credentials
-/// held, as setup, a change of credentials or releasing a connection finds
+/// held, with the location and its labels, as setup, a change of
+/// credentials, a connection's new label or releasing a connection finds
 /// it; `finished`, for setup, is when it read the store to its end. A
 /// failure fails the store's handle with its cause.
 pub async fn record_location(
     database: &coven_database::StoreDatabase,
-    location: RecordedLocation<CloudProvider>,
+    location: RecordedLocation<coven_storage::StorageConfig>,
     finished: Option<SystemTime>,
-) -> Result<(), DbError> {
-    database.record_location(location.map(|provider| provider.name().to_owned()), finished).await
+) -> Result<(), SyncError> {
+    Ok(database.record_location(stored(location)?, finished).await?)
+}
+
+/// `location` as `coven_sync_status` keeps it: its provider's name and the
+/// location's settings text.
+fn stored(
+    location: RecordedLocation<coven_storage::StorageConfig>,
+) -> Result<RecordedLocation<coven_database::StoredLocation>, SyncError> {
+    let store = |location: coven_storage::StorageConfig| {
+        Ok::<_, SyncError>(coven_database::StoredLocation {
+            provider: location.provider().name().to_owned(),
+            location: location.recorded_text()?,
+        })
+    };
+    Ok(match location {
+        RecordedLocation::None => RecordedLocation::None,
+        RecordedLocation::SignedOut(location) => RecordedLocation::SignedOut(store(location)?),
+        RecordedLocation::Connected(location) => RecordedLocation::Connected(store(location)?),
+    })
 }
 
 #[path = "sync_status_facts.rs"]

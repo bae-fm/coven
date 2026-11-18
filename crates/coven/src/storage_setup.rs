@@ -547,7 +547,9 @@ impl StorageConnections {
             .location()
             .ok_or(DbError::Invariant { what: "a finishing setup is past its point of no return" })?
             .clone();
-        let provider = location.provider();
+        // The location the setup commits below, which the row records once
+        // it has.
+        let committed = location.clone();
         let FinishingConnections { storage, setup } = candidate;
         let access = member_access(&credentials, &setup).await?;
         // The old provider remains installed until every fallible step
@@ -602,7 +604,7 @@ impl StorageConnections {
         // return the connection it published. A row that can't be written
         // has failed the handle, which every later call reports; what it
         // would have recorded goes to the log.
-        let recorded = coven_database::RecordedLocation::Connected(provider);
+        let recorded = coven_database::RecordedLocation::Connected(committed);
         if let Err(written) = self.record_location(recorded, Some(self.clock.now())).await {
             tracing::warn!("storage set up after setup can't be recorded: {written}");
         }

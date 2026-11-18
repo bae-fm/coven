@@ -1,6 +1,6 @@
 use crate::test_utils::notes_tables;
 use crate::tests::{database_error, TestStore};
-use crate::{DbError, Migration, PassMove, RecordedLocation, SyncStatusRow};
+use crate::{DbError, Migration, PassMove, RecordedLocation, StoredLocation, SyncStatusRow};
 use std::time::{Duration, SystemTime};
 
 /// The app's notes, and a local table its trigger keeps: each change coven
@@ -19,8 +19,13 @@ fn at(millis: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
 }
 
-fn connected() -> RecordedLocation<String> {
-    RecordedLocation::Connected("S3".into())
+/// A location on `provider`, as sync stores it.
+fn stored(provider: &str) -> StoredLocation {
+    StoredLocation { provider: provider.into(), location: format!("{{\"{provider}\":{{}}}}") }
+}
+
+fn connected() -> RecordedLocation<StoredLocation> {
+    RecordedLocation::Connected(stored("S3"))
 }
 
 /// A new store has its row from its creation on, saying no storage is set
@@ -41,11 +46,41 @@ async fn a_new_store_reads_no_storage_set_up() {
             last_synced: None,
         }
     );
-    db.record_opened(RecordedLocation::SignedOut("Dropbox".into()), None).await.unwrap();
+    db.record_opened(RecordedLocation::SignedOut(stored("Dropbox")), None).await.unwrap();
     assert_eq!(
         rows.next_inline().await.unwrap().unwrap().location,
         RecordedLocation::SignedOut("Dropbox".into())
     );
+    db.close().await.unwrap();
+}
+
+/// The location as the row holds it.
+fn location(db: &crate::sqlite::StoreSql) -> Result<Option<String>, DbError> {
+    Ok(db.query_row("SELECT location FROM coven_sync_status", [], |r| r.get(0))?)
+}
+
+/// Ben renames Household's folder to Family. Ana's laptop records the new
+/// label as it connects, and her app's live query of the location hears it,
+/// though the provider and the credentials stay as they were (§20.2, E4).
+#[tokio::test]
+async fn a_new_label_rewrites_the_location() {
+    let store = TestStore::new();
+    let db =
+        store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
+    let labelled = |folder: &str| {
+        RecordedLocation::Connected(StoredLocation {
+            provider: "Dropbox".into(),
+            location: format!("{{\"Dropbox\":{{\"folder\":\"{folder}\"}}}}"),
+        })
+    };
+    let mut locations = db.follow(location);
+    assert_eq!(locations.next_inline().await.unwrap().unwrap(), None);
+    db.record_opened(labelled("Household"), None).await.unwrap();
+    let household = locations.next_inline().await.unwrap().unwrap();
+    assert_eq!(household.as_deref(), Some("{\"Dropbox\":{\"folder\":\"Household\"}}"));
+    db.record_location(labelled("Family"), None).await.unwrap();
+    let family = locations.next_inline().await.unwrap().unwrap();
+    assert_eq!(family.as_deref(), Some("{\"Dropbox\":{\"folder\":\"Family\"}}"));
     db.close().await.unwrap();
 }
 
@@ -71,7 +106,7 @@ async fn the_last_synced_time_never_goes_backward() {
     assert_eq!(
         db.read_committed(row).await.unwrap(),
         SyncStatusRow {
-            location: connected(),
+            location: RecordedLocation::Connected("S3".into()),
             last_pass: Some(offline),
             moved: None,
             last_synced: Some(at(9_000)),

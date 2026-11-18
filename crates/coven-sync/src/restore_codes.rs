@@ -83,7 +83,9 @@ impl RestoreCodes {
     }
 
     /// Record `location`, the recorded location as a connection made from it
-    /// just labelled it (§20.2). Writes only when its labels changed.
+    /// just labelled it (§20.2), and write it to the sync status row, which
+    /// an app's live query reads it from (api.md E4). Writes only when its
+    /// labels changed.
     pub async fn record_labels(&self, location: &StorageConfig) -> Result<(), SyncError> {
         let owner = self.inner.lock().await;
         let owner = owner.as_ref().ok_or(coven_database::DbError::StoreClosed)?;
@@ -91,6 +93,7 @@ impl RestoreCodes {
             coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
         if recorded != *location {
             coven_storage::record_config(&owner.directory, location)?;
+            crate::record_location(&owner.database, owner.credentials.location()?, None).await?;
         }
         Ok(())
     }
@@ -436,20 +439,19 @@ pub fn read_connection(
     connection_at(location, keychain)
 }
 
-/// Whether a storage location is recorded on this installation and custody
-/// holds credentials for it, as the sync state reads it (§19.1): as a store
-/// opens, and as its closed status is read (api.md E1).
+/// The storage location recorded on this installation, with its labels, and
+/// whether custody holds credentials for it, as the sync state reads it
+/// (§19.1): as a store opens, and as its closed status is read (api.md E1).
 pub fn read_location(
     directory: &StoreDir,
     keychain: &StoreKeychain,
-) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
+) -> Result<coven_database::RecordedLocation<StorageConfig>, SyncError> {
     let Some(location) = coven_storage::recorded_config(directory)? else {
         return Ok(coven_database::RecordedLocation::None);
     };
-    let provider = location.provider();
-    Ok(match connection_at(location, keychain)? {
-        Some(_) => coven_database::RecordedLocation::Connected(provider),
-        None => coven_database::RecordedLocation::SignedOut(provider),
+    Ok(match connection_at(location.clone(), keychain)? {
+        Some(_) => coven_database::RecordedLocation::Connected(location),
+        None => coven_database::RecordedLocation::SignedOut(location),
     })
 }
 

@@ -6,7 +6,9 @@
 //! up until the first open writes over it, so a read always finds one. Each
 //! fact is written in the step that changes it: opening writes whether a
 //! location is recorded and this device holds its credentials (`storage`,
-//! with the location's `provider`) and that no pass moves; setup, joining
+//! with the location's `provider` and the `location` itself, with its
+//! labels) and that no pass moves; a connection that records a new label of
+//! the location writes it again; setup, joining
 //! and restoring write storage set up and their finish as the last synced
 //! time; each start of sync adds one to `starts`, so even a start that ends
 //! the way the last one did writes the row; a store-wide worker's panic
@@ -34,15 +36,17 @@ pub(super) const TABLE: &str = "CREATE TABLE coven_sync_status (
         singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
         storage TEXT NOT NULL CHECK(storage IN ('none','signed_out','connected')),
         provider TEXT,
+        location TEXT,
         last_pass BLOB,
         moved TEXT CHECK(moved IN ('read','claimed')),
         last_synced INTEGER CHECK(last_synced>=0),
         starts INTEGER NOT NULL CHECK(starts>=0),
         halted INTEGER NOT NULL CHECK(halted IN (0,1)),
-        CHECK((storage='none')=(provider IS NULL))
+        CHECK((storage='none')=(provider IS NULL)),
+        CHECK((storage='none')=(location IS NULL))
     ) STRICT;
-    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moved,last_synced,starts,halted)
-        VALUES(1,'none',NULL,NULL,NULL,NULL,0,0);";
+    INSERT INTO coven_sync_status(singleton,storage,provider,location,last_pass,moved,last_synced,starts,halted)
+        VALUES(1,'none',NULL,NULL,NULL,NULL,NULL,0,0);";
 
 /// Whether a storage location is recorded on this device, and whether this
 /// device holds credentials for it (§19.1), with the location's provider.
@@ -100,6 +104,17 @@ impl PassMove {
     }
 }
 
+/// A recorded location as `coven_sync_status` keeps it: its provider's
+/// name, which the sync state reads, and the location with its labels, as
+/// the text the app reads as `StorageConfig` (api.md E4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredLocation {
+    /// The provider's name, as sync gives it.
+    pub provider: String,
+    /// The location with its labels, as the settings file's text.
+    pub location: String,
+}
+
 /// `coven_sync_status`'s row as it is read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncStatusRow {
@@ -125,12 +140,12 @@ fn millis(time: SystemTime) -> Result<i64, DbError> {
     )
 }
 
-/// The `storage` and `provider` columns of `location`.
-fn columns(location: &RecordedLocation<String>) -> (&'static str, Option<&str>) {
+/// The `storage` column of `location`, with what it stores of the location.
+fn columns(location: &RecordedLocation<StoredLocation>) -> (&'static str, Option<&StoredLocation>) {
     match location {
         RecordedLocation::None => ("none", None),
-        RecordedLocation::SignedOut(provider) => ("signed_out", Some(provider)),
-        RecordedLocation::Connected(provider) => ("connected", Some(provider)),
+        RecordedLocation::SignedOut(stored) => ("signed_out", Some(stored)),
+        RecordedLocation::Connected(stored) => ("connected", Some(stored)),
     }
 }
 
@@ -170,28 +185,30 @@ pub(crate) fn decode(
     })
 }
 
-/// Write whether a location is recorded and its credentials held, and, when
-/// `finished` names one, that sync finished then. Opening also writes that
-/// no pass moves and that no halt holds. A row that already says this is
-/// left alone.
+/// Write whether a location is recorded and its credentials held, with the
+/// location and its labels, and, when `finished` names one, that sync
+/// finished then. Opening also writes that no pass moves and that no halt
+/// holds. A row that already says this is left alone.
 pub(crate) fn save_location(
     db: &StoreSql,
-    location: &RecordedLocation<String>,
+    location: &RecordedLocation<StoredLocation>,
     finished: Option<SystemTime>,
     opening: bool,
 ) -> Result<(), DbError> {
-    let (storage, provider) = columns(location);
+    let (storage, stored) = columns(location);
+    let provider = stored.map(|stored| stored.provider.as_str());
+    let recorded = stored.map(|stored| stored.location.as_str());
     let finished = finished.map(millis).transpose()?;
     db.execute(
-        "UPDATE coven_sync_status SET storage=?1,provider=?2,
+        "UPDATE coven_sync_status SET storage=?1,provider=?2,location=?5,
              moved=CASE WHEN ?4 THEN NULL ELSE moved END,
              halted=CASE WHEN ?4 THEN 0 ELSE halted END,
              last_synced=CASE WHEN ?3 IS NULL THEN last_synced
                  ELSE max(coalesce(last_synced,?3),?3) END
-         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2
+         WHERE singleton=1 AND (storage IS NOT ?1 OR provider IS NOT ?2 OR location IS NOT ?5
              OR (?4 AND (moved IS NOT NULL OR halted=1))
              OR (?3 IS NOT NULL AND (last_synced IS NULL OR last_synced<?3)))",
-        sqlive::rusqlite::params![storage, provider, finished, opening],
+        sqlive::rusqlite::params![storage, provider, finished, opening, recorded],
     )?;
     Ok(())
 }

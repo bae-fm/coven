@@ -63,10 +63,10 @@ pub(crate) type SetupProgress = tokio::sync::watch::Sender<Option<Progress<Stora
 pub(crate) async fn record_opened(
     database: &coven_database::StoreDatabase,
     clock: &ClockRef,
-    location: coven_database::RecordedLocation<CloudProvider>,
+    location: coven_database::RecordedLocation<StorageConfig>,
     finished: Option<std::time::SystemTime>,
 ) -> Result<(), SyncError> {
-    coven_sync::record_opened(database, location, finished).await.map_err(SyncError::from)?;
+    coven_sync::record_opened(database, location, finished).await?;
     coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)?;
     // No screen shows a pairing a closed handle or a crash left.
     coven_sync::pairings_opened(database).await.map_err(SyncError::from)
@@ -272,13 +272,11 @@ impl StorageConnections {
     /// failed the store's handle with its cause, which the caller returns.
     pub(crate) async fn record_location(
         &self,
-        location: coven_database::RecordedLocation<CloudProvider>,
+        location: coven_database::RecordedLocation<StorageConfig>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), SyncError> {
         self.configured.store(location.is_connected(), Ordering::SeqCst);
-        coven_sync::record_location(&self.database, location, finished)
-            .await
-            .map_err(SyncError::from)
+        coven_sync::record_location(&self.database, location, finished).await
     }
 
     /// Record the location as custody holds it now, as `record_location`

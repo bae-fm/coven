@@ -58,11 +58,11 @@ impl DeviceCredentials {
         self.keychains.connection()
     }
 
-    /// Whether a location is recorded, and this device's credentials for it
-    /// held, as the sync state reads it (§19.1).
+    /// The recorded location, with its labels, and whether this device's
+    /// credentials for it are held, as the sync state reads it (§19.1).
     pub fn location(
         &self,
-    ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
+    ) -> Result<coven_database::RecordedLocation<coven_storage::StorageConfig>, SyncError> {
         self.keychains.location()
     }
 

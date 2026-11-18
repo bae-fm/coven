@@ -224,6 +224,9 @@ pub enum Audience {
   without keeping a second copy. Neither returns
   credentials or contacts storage. Before setup they return
   `None`; once set up, the location stays, and unreadable settings remain an error.
+  An app's live query reads the same location from
+  `coven_sync_status.location` (E4), which changes as a connection records a
+  new folder label, so a screen shows a renamed folder without reading again.
 - `Coven::closed_sync_status` reads a closed store's sync state, its last synced
   time and its unsent work without opening it, so an app can list each store
   with how it last stood, "Synced 2 hours ago" or "Unsent changes", before the
@@ -3871,6 +3874,7 @@ let moved = handle
 | | `file` | the file's id; a file a failed move lists stays in it, and `move_to_cloud` refuses it with `FileInMove`, naming the move, until the app cancels the move |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state from `coven_sync_state` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`, read as `CloudProvider`; NULL with none |
+| | `location` | the recorded location with its account and folder labels, the `StorageConfig` that `storage_config` returns, read as `StorageConfig`; coven writes it in each step that records the location, and in the connection's step that records a new folder label (E5); NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moved` | what a running pass moved last: `read` for a slot it hadn't read, `claimed` for a slot it claimed; NULL while it has moved nothing, and opening writes NULL |
 | | `halted` | 1 once the upload worker's panic has halted sync until the store reopens (E15): no pass writes the row from then on, so the failure the halt wrote stands; opening writes 0 |
@@ -3926,6 +3930,8 @@ let moved = handle
 impl types::FromSql for PendingRecord;
 /// Reads `coven_sync_status.last_pass`.
 impl types::FromSql for LastPass;
+/// Reads `coven_sync_status.location`.
+impl types::FromSql for StorageConfig;
 /// Reads `coven_operations.kind`.
 impl types::FromSql for OperationKind;
 /// Reads `coven_operations.outcome` once it is not NULL.
@@ -4890,9 +4896,11 @@ loop {
   - The last synced time is kept across every state and every reopen, and
     never goes backward.
 - The row holds what the loop knows. Opening writes whether storage is set
-  up there, and that no pass has moved anything, before the handle exists, and
-  keeps the last pass and the last synced time. Setup, joining and restoring
-  write storage set up and their finish as the last synced time. The loop
+  up there, with the recorded location, and that no pass has moved anything,
+  before the handle exists, and keeps the last pass and the last synced time.
+  Setup, joining and restoring write storage set up, with the location, and
+  their finish as the last synced time. A connection that records a new
+  folder label writes the location again. The loop
   writes what the pass moved as it reads a slot it hadn't or claims one, each
   time that changes, and how the pass ended as it ends, before its retries
   hear the answer. The loop, or the attempt to
@@ -5000,7 +5008,8 @@ the OneDrive item's `name` and `webUrl`
 ([§20.2](coven.md#202-the-providers-and-signing-in)). Setup reads it in its
 `Connecting` step and commits it with the location, replacing any the app
 passed. Opening reads it when the store connects, before the first pass, and
-records it when it changed, so `storage_config` shows a rename from the next
+records it when it changed, with `coven_sync_status.location` (E4) in the
+same step, so `storage_config` and a live query show a rename from the next
 connection on. A restore reads it as it connects; a join reads it once it has
 accepted the share, and both commit it with the location. A missing field, an
 empty name or an address other than https fails the connection with
@@ -5341,6 +5350,9 @@ impl StorageConfig {
 
     /// Decode only a provider location; unknown fields and credential payloads fail.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
+    /// The location as `coven_sync_status.location` holds it: the encoded
+    /// text, which `FromSql` reads back (E4).
+    pub fn recorded_text(&self) -> Result<String, StorageError>;
 }
 
 /// Limits for concurrent transfers (E1, E5).

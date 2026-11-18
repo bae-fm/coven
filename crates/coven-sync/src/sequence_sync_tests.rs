@@ -292,7 +292,7 @@ impl Group {
         // As coven's opening does with storage set up, before any loop runs.
         crate::record_opened(
             &database,
-            coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+            coven_database::RecordedLocation::Connected(coven_storage::Storage::config(&storage)),
             None,
         )
         .await

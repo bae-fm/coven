@@ -10545,9 +10545,10 @@ which state each fact names, and
 The facts the loop knows are the one row of `coven_sync_status`, which the app's
 live queries and local triggers follow like any table ([api.md
 E5](api.md#e5-storage-and-sync)). Opening writes whether storage is set up
-there, before the handle exists, so the state is ready the moment the store
-opens and no app shows a placeholder. The loop writes the rest in the step that
-changes it: that the pass moved a slot, as it first does, and how the pass
+there, with the location and its labels (§20.2), before the handle exists, so
+the state is ready the moment the store opens and no app shows a placeholder.
+The loop writes the rest in the step that changes it: that the pass moved a
+slot, as it first does, and how the pass
 ended, as it ends. Each start of sync counts in the row too. Dan's app keeps a
 record of his failed start until a later one gets under way; when his next start
 holds for the same refused key, nothing else in the row changes, and without the
@@ -11203,6 +11204,13 @@ its provider cause. Each device keeps the label beside its recorded location,
 never in a synced table or a code: it is what one member's account sees, and on
 Dropbox a member who renames a shared folder renames it for themselves alone.
 The Dropbox App folder isn't picked, and has none.
+
+An app shows the location through a live query, as it shows the sync state:
+the one row of `coven_sync_status` (§19.1) holds the location this device
+recorded, with its labels. Coven writes the row in each step that records the location or a
+new label, so Ana's laptop shows Family as soon as its connection records the
+name. An app that read the location once would show Household until it
+happened to read it again.
 
 Token expiry never consults the device clock. Ben sets his laptop's clock back a
 year; his token still works until Dropbox rejects it, and one refresh lets the

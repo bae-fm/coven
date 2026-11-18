@@ -40,6 +40,21 @@ impl StorageConfig {
         location.validate()?;
         Ok(location)
     }
+
+    /// The location as `coven_sync_status.location` holds it: the settings
+    /// file's JSON text, which `FromSql` reads back (api.md E4).
+    pub fn recorded_text(&self) -> Result<String, StorageError> {
+        String::from_utf8(self.encode()?.as_bytes().to_vec())
+            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))
+    }
+}
+
+/// Reads `coven_sync_status.location`, the text `recorded_text` wrote.
+impl rusqlite::types::FromSql for StorageConfig {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Self::decode(value.as_str()?.as_bytes())
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
 }
 
 #[cfg(test)]

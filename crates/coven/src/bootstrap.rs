@@ -344,7 +344,6 @@ async fn bootstrap_device(
         Ok(Some(Loaded {
             code,
             location,
-            provider,
             credentials,
             sign_in,
             ring,
@@ -367,7 +366,7 @@ async fn bootstrap_device(
                 Ok(name) => crate::storage::record_opened(
                     &database,
                     &clock,
-                    coven_database::RecordedLocation::Connected(provider),
+                    coven_database::RecordedLocation::Connected(location.clone()),
                     Some(clock.now()),
                 )
                 .await
@@ -582,8 +581,6 @@ struct Loaded {
     /// The location as loading's connection labelled it, which the commit
     /// records (§20.2).
     location: StorageConfig,
-    /// The provider of the location loaded from.
-    provider: CloudProvider,
     credentials: StorageCredentials,
     sign_in: SignInCustody,
     ring: StoreKeyring,
@@ -903,7 +900,6 @@ async fn prepare_and_load(
         Ok(Some((code, location, credentials, ring))) => Ok(Some(Loaded {
             code,
             location,
-            provider,
             credentials,
             sign_in,
             ring,

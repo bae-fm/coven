@@ -202,7 +202,8 @@ impl Coven {
                 if keys.device_id()? != Some(directory.settings()?.device_id) {
                     return Err(CovenError::DeviceKeyMissing { store });
                 }
-                coven_sync::read_location(&directory, &keys).map_err(CovenError::from)
+                let location = coven_sync::read_location(&directory, &keys)?;
+                Ok::<_, CovenError>(location.map(|location| location.provider()))
             })
             .await??
         };

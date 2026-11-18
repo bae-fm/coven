@@ -300,7 +300,7 @@ async fn a_panicking_upload_worker_halts_sync() {
     let f = Fixture::new(Provenance::AppProvided).await;
     crate::record_opened(
         &f.database,
-        coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+        coven_database::RecordedLocation::Connected(coven_storage::Storage::config(&*f.storage)),
         None,
     )
     .await
@@ -799,7 +799,7 @@ async fn the_sync_state_view_runs_again_as_a_transfer_starts_and_ends() {
     f.files.stop_background_for_counts().await;
     crate::record_opened(
         &f.database,
-        coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+        coven_database::RecordedLocation::Connected(coven_storage::Storage::config(&*f.storage)),
         None,
     )
     .await

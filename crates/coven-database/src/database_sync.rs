@@ -323,11 +323,12 @@ impl StoreDatabase {
     /// here and its credentials held, and that no pass moves, keeping how the
     /// last pass ended and when sync last finished; `finished`, for a store
     /// joining or restoring read to its end, is when (api.md E5). The
-    /// provider is as sync names it. A failure fails this handle with its
-    /// cause, as losing a pending record does.
+    /// provider is as sync names it, and the location as its settings text.
+    /// A failure fails this handle with its cause, as losing a pending record
+    /// does.
     pub async fn record_opened(
         &self,
-        location: crate::RecordedLocation<String>,
+        location: crate::RecordedLocation<crate::StoredLocation>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
         self.save_sync_status(move |db, _| {
@@ -337,12 +338,13 @@ impl StoreDatabase {
     }
 
     /// Record whether a storage location is recorded here and its
-    /// credentials held, as setup, a change of credentials or releasing a
+    /// credentials held, with the location and its labels, as setup, a
+    /// change of credentials, a connection's new label or releasing a
     /// connection finds it; `finished`, for setup, is when it read the store
     /// to its end. A failure fails this handle, as `record_opened`'s does.
     pub async fn record_location(
         &self,
-        location: crate::RecordedLocation<String>,
+        location: crate::RecordedLocation<crate::StoredLocation>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
         self.save_sync_status(move |db, _| {
