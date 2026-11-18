@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use syn::visit::{self, Visit};
 
+use crate::capability_boundaries::declared_items;
 use crate::capability_construction::construction_only_types;
 use crate::counters::increment_sites;
 use crate::crate_code::CrateCode;
@@ -41,6 +42,7 @@ pub(crate) fn stale_rows(
     stale.extend(unknown_members(workspace, policy));
     stale.extend(unknown_libraries(workspace, policy));
     stale.extend(missing_homes(&code.written, policy));
+    stale.extend(invalid_capability_rows(code, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
     stale.extend(invalid_capability_factories(crate_files, identity, policy));
     stale.extend(invalid_handles(crate_files, identity, policy));
@@ -125,6 +127,69 @@ fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
             format!("capabilities: {} has home {home}, which holds no source", capability.name)
         })
         .collect()
+}
+
+/// A capability's gate kinds are its own, once each. Each frozen and allowed
+/// row names a file holding source, production or test, and one of the
+/// capability's gate kinds, with a count of at least one and what the code
+/// does there or why the matches use no capability; an allowed row's item is
+/// a function, method, static or const of that file. A key is listed once.
+fn invalid_capability_rows(code: &CrateCode, policy: &Policy) -> Vec<String> {
+    let crate_files = code.expanded.iter().chain(&code.tests).cloned().collect::<Vec<_>>();
+    let items = declared_items(&crate_files);
+    let sources = code
+        .written
+        .iter()
+        .chain(&code.tests)
+        .map(|file| file.relative_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut stale = Vec::new();
+    for capability in &policy.capabilities {
+        let name = &capability.name;
+        let mut kinds = BTreeSet::new();
+        for gate in &capability.gates {
+            if !kinds.insert(gate.kind.as_str()) {
+                stale.push(format!("capabilities: {name} has gate kind {} twice", gate.kind));
+            }
+        }
+        let frozen = capability.frozen.iter().map(|row| {
+            let named = format!("{} ({})", row.path, row.gate);
+            ("frozen", &row.path, None, &row.gate, row.count, &row.finding, named)
+        });
+        let allowed = capability.allowed.iter().map(|row| {
+            let named = format!("{}: {} ({})", row.path, row.item, row.gate);
+            ("allowed", &row.path, Some(&row.item), &row.gate, row.count, &row.reason, named)
+        });
+        let mut seen = BTreeSet::new();
+        for (list, path, item, gate, count, note, named) in frozen.chain(allowed) {
+            let row = format!("capabilities.{list}: {name}");
+            if !sources.contains(path.as_str()) {
+                stale.push(format!("{row}: {path} holds no source"));
+                continue;
+            }
+            if !kinds.contains(gate.as_str()) {
+                stale.push(format!("{row}: {path} names gate {gate}, which the capability lacks"));
+            }
+            if let Some(item) =
+                item.filter(|item| !items.contains(&(path.clone(), item.to_string())))
+            {
+                stale.push(format!(
+                    "{row}: {path}: {item} names no function, method, static or const there"
+                ));
+            }
+            if count == 0 {
+                stale.push(format!("{row}: {named} has a count of 0, not at least 1"));
+            }
+            if note.trim().is_empty() {
+                let note = if list == "frozen" { "finding" } else { "reason" };
+                stale.push(format!("{row}: {named} states no {note}"));
+            }
+            if !seen.insert((list, path, item, gate)) {
+                stale.push(format!("{row}: {named} is listed twice"));
+            }
+        }
+    }
+    stale
 }
 
 /// Every free function and method of the crates' production code, keyed by

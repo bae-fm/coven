@@ -656,3 +656,137 @@ fn a_call_gate_allows_calls_in_the_capability_s_homes() {
         []
     );
 }
+
+/// The `CALLS` policy with these rows in its capability, before its gates.
+fn listed_policy(rows: &str) -> Policy {
+    let (capability, gates) = CALLS.split_once("[[capabilities.gates]]").expect("a gate");
+    Policy::fixture(&format!("{capability}{rows}\n[[capabilities.gates]]{gates}"))
+}
+
+/// The findings `policy` makes in these files, each of which depends on
+/// `tempfile`, as their path, line and message.
+fn listed_findings(policy: &Policy, files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
+    let files = files
+        .iter()
+        .map(|(path, source)| {
+            let mut file = RustFile::fixture(path, source);
+            file.extern_crates.insert("tempfile".into(), "tempfile".into());
+            file
+        })
+        .collect::<Vec<_>>();
+    find_capability_boundary_violations(&checked(&files, policy), policy)
+        .into_iter()
+        .map(|finding| (finding.path, finding.line, finding.message))
+        .collect()
+}
+
+const STAGING: (&str, &str) = (
+    "crates/app/src/staging.rs",
+    r#"
+    struct Staged;
+    impl Staged {
+        fn stage(&self) {
+            let _ = tempfile::tempdir();
+            let _ = tempfile::tempdir();
+        }
+        fn length(&self) -> u64 { std::fs::metadata("a").unwrap().len() }
+    }
+    fn copy() { std::fs::copy("a", "b").unwrap(); }
+    "#,
+);
+
+#[test]
+fn a_frozen_row_covers_exactly_its_count_of_a_file_s_uses_of_a_gate() {
+    let policy = listed_policy(
+        r#"frozen = [
+            { path = "crates/app/src/staging.rs", gate = "temporary files", count = 2, finding = "stages copies" },
+            { path = "crates/app/src/staging.rs", gate = "standard library file system", count = 2, finding = "reads and copies" },
+        ]"#,
+    );
+    assert_eq!(listed_findings(&policy, &[STAGING]), []);
+}
+
+#[test]
+fn a_frozen_row_over_the_code_says_to_lower_or_remove_it() {
+    let policy = listed_policy(
+        r#"frozen = [
+            { path = "crates/app/src/staging.rs", gate = "temporary files", count = 3, finding = "stages copies" },
+            { path = "crates/app/src/staging.rs", gate = "standard library file system", count = 2, finding = "reads and copies" },
+            { path = "crates/app/src/gone.rs", gate = "temporary files", count = 1, finding = "stages copies" },
+        ]"#,
+    );
+    let found = listed_findings(&policy, &[STAGING, ("crates/app/src/gone.rs", "fn kept() {}")]);
+    assert_eq!(
+        found.iter().map(|(_, _, message)| message.as_str()).collect::<Vec<_>>(),
+        [
+            "capabilities.frozen: file system: crates/app/src/gone.rs (temporary files) lists 1 findings but the code has none: remove the row",
+            "capabilities.frozen: file system: crates/app/src/staging.rs (temporary files) lists 3 findings but the code has 2: lower the count to 2",
+        ]
+    );
+    assert!(found.iter().all(|(path, line, _)| path == crate::policy::FILE_NAME && *line == 1));
+}
+
+#[test]
+fn a_frozen_row_under_the_code_prints_every_use_and_the_count() {
+    let policy = listed_policy(
+        r#"frozen = [
+            { path = "crates/app/src/staging.rs", gate = "temporary files", count = 1, finding = "stages copies" },
+            { path = "crates/app/src/staging.rs", gate = "standard library file system", count = 2, finding = "reads and copies" },
+        ]"#,
+    );
+    let message = "temporary files (file system) is used directly only in crates/app-files/src/";
+    assert_eq!(
+        listed_findings(&policy, &[STAGING]),
+        [
+            (
+                STAGING.0.to_string(),
+                5,
+                "crates/app/src/staging.rs (temporary files) has 2 findings, and its frozen row lists 1"
+                    .to_string()
+            ),
+            (STAGING.0.to_string(), 5, message.to_string()),
+            (STAGING.0.to_string(), 6, message.to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_allowed_row_covers_its_item_s_uses_and_the_rest_need_a_frozen_row() {
+    let policy = listed_policy(
+        r#"allowed = [
+            { path = "crates/app/src/staging.rs", item = "Staged::length", gate = "standard library file system", count = 1, reason = "the length of a file the caller opened" },
+        ]
+        frozen = [
+            { path = "crates/app/src/staging.rs", gate = "temporary files", count = 2, finding = "stages copies" },
+        ]"#,
+    );
+    assert_eq!(
+        listed_findings(&policy, &[STAGING]),
+        [(
+            STAGING.0.to_string(),
+            10,
+            "standard library file system (file system) is used directly only in crates/app-files/src/".to_string()
+        )]
+    );
+}
+
+#[test]
+fn an_allowed_row_names_its_item_and_count_exactly() {
+    let policy = listed_policy(
+        r#"allowed = [
+            { path = "crates/app/src/staging.rs", item = "Staged::length", gate = "standard library file system", count = 2, reason = "the length of an open file" },
+            { path = "crates/app/src/staging.rs", item = "Staged::stage", gate = "standard library file system", count = 1, reason = "none here" },
+        ]
+        frozen = [
+            { path = "crates/app/src/staging.rs", gate = "temporary files", count = 2, finding = "stages copies" },
+            { path = "crates/app/src/staging.rs", gate = "standard library file system", count = 1, finding = "copies" },
+        ]"#,
+    );
+    assert_eq!(
+        listed_findings(&policy, &[STAGING]).into_iter().map(|(_, _, message)| message).collect::<Vec<_>>(),
+        [
+            "capabilities.allowed: file system: crates/app/src/staging.rs: Staged::length (standard library file system) lists 2 findings but the code has 1: lower the count to 1",
+            "capabilities.allowed: file system: crates/app/src/staging.rs: Staged::stage (standard library file system) lists 1 findings but the code has none: remove the row",
+        ]
+    );
+}

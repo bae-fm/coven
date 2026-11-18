@@ -464,6 +464,38 @@ pub(crate) struct Capability {
     pub(crate) homes: Vec<String>,
     #[serde(default)]
     pub(crate) gates: Vec<Gate>,
+    /// The direct uses outside the homes that the workspace has today, by
+    /// file and gate kind; they only shrink (`capability_boundaries.rs`).
+    #[serde(default)]
+    pub(crate) frozen: Vec<FrozenUses>,
+    /// Matches of a gate that use no capability, such as a `metadata` method
+    /// of a value that is no path, by the item that holds them.
+    #[serde(default)]
+    pub(crate) allowed: Vec<AllowedUses>,
+}
+
+/// `count` direct uses of a capability through the gate of kind `gate` in
+/// `path`, and what the code does there.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrozenUses {
+    pub(crate) path: String,
+    pub(crate) gate: String,
+    pub(crate) count: usize,
+    pub(crate) finding: String,
+}
+
+/// `count` matches of the gate of kind `gate` in `item` of `path` that use
+/// no capability, and why. `item` is the innermost function, method
+/// (`Type::method`), static or const that holds them.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AllowedUses {
+    pub(crate) path: String,
+    pub(crate) item: String,
+    pub(crate) gate: String,
+    pub(crate) count: usize,
+    pub(crate) reason: String,
 }
 
 /// One way of using a capability directly: naming any of `crates`, writing a

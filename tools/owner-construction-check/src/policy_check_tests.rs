@@ -716,3 +716,111 @@ fn a_kept_state_row_names_a_type_or_a_function_and_a_counter_row_a_sql_column() 
         ]
     );
 }
+
+fn capability_rows(rows: &str) -> String {
+    format!(
+        r#"
+        [[capabilities]]
+        name = "file system"
+        homes = ["crates/app/src/files/"]
+        {rows}
+        [[capabilities.gates]]
+        kind = "temporary files"
+        calls = ["tempfile"]
+        [[capabilities.gates]]
+        kind = "path queries"
+        methods = ["metadata"]
+        "#
+    )
+}
+
+fn capability_files() -> Vec<RustFile> {
+    vec![
+        RustFile::fixture("crates/app/src/files/stage.rs", ""),
+        RustFile::fixture(
+            "crates/app/src/reads.rs",
+            "struct Info; impl Info { fn size(&self) {} const LIMIT: u8 = 0; } fn free() {} static SHARED: u8 = 0; const MAX: u8 = 0;",
+        ),
+        RustFile::fixture("crates/app/src/reads_tests.rs", "fn helper() {}"),
+    ]
+}
+
+#[test]
+fn capability_rows_naming_what_exists_are_current() {
+    let rows = capability_rows(
+        r#"frozen = [
+            { path = "crates/app/src/reads.rs", gate = "temporary files", count = 1, finding = "stages" },
+            { path = "crates/app/src/reads_tests.rs", gate = "temporary files", count = 1, finding = "stages" },
+        ]
+        allowed = [
+            { path = "crates/app/src/reads.rs", item = "Info::size", gate = "path queries", count = 1, reason = "an info's metadata" },
+            { path = "crates/app/src/reads.rs", item = "free", gate = "path queries", count = 1, reason = "x" },
+            { path = "crates/app/src/reads.rs", item = "SHARED", gate = "path queries", count = 1, reason = "x" },
+            { path = "crates/app/src/reads.rs", item = "MAX", gate = "path queries", count = 1, reason = "x" },
+            { path = "crates/app/src/reads.rs", item = "Info::LIMIT", gate = "path queries", count = 1, reason = "x" },
+            { path = "crates/app/src/reads_tests.rs", item = "helper", gate = "path queries", count = 1, reason = "x" },
+        ]"#,
+    );
+    assert_eq!(stale(capability_files(), &rows), Vec::<String>::new());
+}
+
+#[test]
+fn a_capability_row_names_a_source_its_gate_and_an_item_there() {
+    let rows = capability_rows(
+        r#"frozen = [
+            { path = "crates/app/src/moved.rs", gate = "temporary files", count = 1, finding = "x" },
+            { path = "crates/app/src/reads.rs", gate = "sockets", count = 1, finding = "x" },
+        ]
+        allowed = [
+            { path = "crates/app/src/reads.rs", item = "Info::gone", gate = "path queries", count = 1, reason = "x" },
+            { path = "crates/app/src/reads.rs", item = "Gone", gate = "path queries", count = 1, reason = "x" },
+        ]"#,
+    );
+    assert_eq!(
+        stale(capability_files(), &rows),
+        [
+            "capabilities.frozen: file system: crates/app/src/moved.rs holds no source",
+            "capabilities.frozen: file system: crates/app/src/reads.rs names gate sockets, which the capability lacks",
+            "capabilities.allowed: file system: crates/app/src/reads.rs: Info::gone names no function, method, static or const there",
+            "capabilities.allowed: file system: crates/app/src/reads.rs: Gone names no function, method, static or const there",
+        ]
+    );
+}
+
+#[test]
+fn a_capability_row_has_a_count_a_note_and_a_key_of_its_own() {
+    let rows = capability_rows(
+        r#"frozen = [
+            { path = "crates/app/src/reads.rs", gate = "temporary files", count = 0, finding = "" },
+            { path = "crates/app/src/reads.rs", gate = "temporary files", count = 1, finding = "x" },
+        ]
+        allowed = [
+            { path = "crates/app/src/reads.rs", item = "free", gate = "path queries", count = 1, reason = " " },
+            { path = "crates/app/src/reads.rs", item = "free", gate = "path queries", count = 2, reason = "x" },
+        ]"#,
+    );
+    assert_eq!(
+        stale(capability_files(), &rows),
+        [
+            "capabilities.frozen: file system: crates/app/src/reads.rs (temporary files) has a count of 0, not at least 1",
+            "capabilities.frozen: file system: crates/app/src/reads.rs (temporary files) states no finding",
+            "capabilities.frozen: file system: crates/app/src/reads.rs (temporary files) is listed twice",
+            "capabilities.allowed: file system: crates/app/src/reads.rs: free (path queries) states no reason",
+            "capabilities.allowed: file system: crates/app/src/reads.rs: free (path queries) is listed twice",
+        ]
+    );
+}
+
+#[test]
+fn a_capability_names_each_gate_kind_once() {
+    let rows = capability_rows(
+        r#"
+        [[capabilities.gates]]
+        kind = "temporary files"
+        crates = ["tempfile"]"#,
+    );
+    assert_eq!(
+        stale(capability_files(), &rows),
+        ["capabilities: file system has gate kind temporary files twice"]
+    );
+}
