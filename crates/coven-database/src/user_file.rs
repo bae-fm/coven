@@ -248,10 +248,7 @@ pub(crate) fn read(
 ) -> Result<Option<UserFile>, DbError> {
     db.query(
         "SELECT u.path,u.size,u.modified_at FROM _coven_user_files AS u
-         WHERE u.file=?1
-         AND (NOT EXISTS(SELECT 1 FROM _coven_undoable_files AS k WHERE k.file=u.file)
-           OR EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=u.file
-             AND coalesce(coven_file_device(f.coordinates)=_coven_device(),1)))",
+         WHERE u.file=?1 AND EXISTS(SELECT 1 FROM coven_user_files AS v WHERE v.file=u.file)",
         [file],
         |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
     )?
