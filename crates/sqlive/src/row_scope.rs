@@ -181,7 +181,6 @@ impl RowScope {
 /// whose tables' rows those scopes cover. A table read otherwise, as
 /// through a view read whole, depends on every row. Empty when the
 /// statement's shape keeps every table whole.
-#[derive(Default)]
 pub struct Scopes {
     pub(crate) tables: BTreeMap<String, RowScope>,
     pub(crate) inlined: BTreeSet<String>,
@@ -189,6 +188,19 @@ pub struct Scopes {
     /// those its USING and NATURAL joins compare, or every column when the
     /// planner couldn't tell which.
     pub(crate) joined: std::sync::Arc<crate::joined_columns::JoinedColumns>,
+}
+
+impl Default for Scopes {
+    /// Every table whole, with no column beyond those SQLite reports.
+    fn default() -> Self {
+        Self {
+            tables: BTreeMap::new(),
+            inlined: BTreeSet::new(),
+            joined: std::sync::Arc::new(crate::joined_columns::JoinedColumns::Known(
+                crate::read_set::ColumnSet::new(),
+            )),
+        }
+    }
 }
 
 /// The values of some of a changed row's columns, as a write recorded them:

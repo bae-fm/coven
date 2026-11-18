@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::{declared_columns, main_object, read_view};
+use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES};
 use crate::select_syntax::{parts, window_parts, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
@@ -24,15 +24,9 @@ use sqlite3_parser::ast::{
 pub(crate) enum JoinedColumns {
     Known(ColumnSet),
     /// The parser couldn't read the statement or a view it reads: every
-    /// column of every table in the main schema, so every write to a table
-    /// reruns the statement.
+    /// column of every table in the main schema (`MAIN_TABLES`), so every
+    /// write reruns the statement.
     Unknown(ColumnSet),
-}
-
-impl Default for JoinedColumns {
-    fn default() -> Self {
-        Self::Known(ColumnSet::new())
-    }
 }
 
 impl JoinedColumns {
@@ -50,9 +44,7 @@ impl JoinedColumns {
             "the planner can't tell which columns a statement's joins compare, so every \
              column of every table counts as read"
         );
-        let mut tables = connection.prepare_cached(
-            "SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite~_%' ESCAPE '~'",
-        )?;
+        let mut tables = connection.prepare_cached(MAIN_TABLES)?;
         let tables = tables
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;

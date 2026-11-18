@@ -32,12 +32,9 @@ pub(crate) struct TableShapes {
 
 impl TableShapes {
     fn read<P: Policy>(database: &HostSql<P>) -> Result<Self, PolicyError<P>> {
-        let tables = database.query(
-            "SELECT name,type FROM pragma_table_list
-             WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?;
+        let tables = database.query(crate::schema_objects::MAIN_TABLES, [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
         // SQLite's built-in virtual modules name shadow tables with the owning
         // table's name and a suffix. Longest prefix disambiguates underscores.
         let mut virtuals: Vec<String> = tables

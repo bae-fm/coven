@@ -8,6 +8,12 @@ use sqlite3_parser::{
     Bump, FallibleIterator,
 };
 
+/// Every table of the main schema but SQLite's own, with its type: an
+/// ordinary table, a virtual table, or the shadow table that holds a virtual
+/// table's rows. A write can change each of them.
+pub(crate) const MAIN_TABLES: &str = "SELECT name,type FROM pragma_table_list
+     WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'";
+
 /// The stored name and type, `table` or `view`, of the main schema's table
 /// or view `name` names. Anything else, as a virtual table, is `None`.
 pub(crate) fn main_object(
