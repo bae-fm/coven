@@ -110,17 +110,52 @@ def maxValue (vs : List Value) : Value :=
     | none, v => v
     | acc, none => acc) none
 
+/-- SQLite's CAST of text to INTEGER: the longest prefix that reads as an
+integer, or 0 when none does, held between the least and the greatest 64-bit
+integers. -/
+def castInteger (text : String) : Int :=
+  let (negative, rest) := match text.toList with
+    | '-' :: rest => (true, rest)
+    | '+' :: rest => (false, rest)
+    | rest => (false, rest)
+  let digits := rest.takeWhile Char.isDigit
+  let n : Int := digits.foldl (fun acc d => acc * 10 + (d.toNat - '0'.toNat)) 0
+  max (-2 ^ 63) (min (2 ^ 63 - 1) (if negative then -n else n))
+
+/-- `CAST(group_concat(v, '') AS INTEGER)` over the values `vs` in order: the
+decimal text of each value that isn't NULL, joined and read as an integer;
+NULL when every value is NULL. -/
+def concatValue (vs : List Value) : Value :=
+  match vs.filterMap id with
+  | [] => none
+  | xs => some (castInteger (String.join (xs.map toString)))
+
+/-- A group's bindings in the order a call's ORDER BY sorts them, each term
+descending when `true`, keeping the order SQLite reads them in among
+bindings that sort the same; in that order alone with no ORDER BY. -/
+def sortBindings (subs : Bind → Subs) (orderBy : List (Expr × Bool)) (g : List Bind) :
+    List Bind :=
+  let key (b : Bind) := orderBy.map fun (e, _) => e.eval b (subs b)
+  if orderBy.isEmpty then g else sortBy (fun a b => keyLe (orderBy.map (·.2)) (key a) (key b)) g
+
+/-- The value of a result column of a core that aggregates, over the group
+`g` of its bindings. A plain expression takes its value from one binding of
+the group, which the order SQLite reads them in decides; the model takes the
+last. -/
+def OutCol.aggregate (subs : Bind → Subs) (g : List Bind) : OutCol → Value
+  | .expr e => match g.getLast? with
+    | some b => e.eval b (subs b)
+    | none => none
+  | .count => some (Int.ofNat g.length)
+  | .max e => maxValue (g.map fun b => e.eval b (subs b))
+  | .concat e orderBy => concatValue ((sortBindings subs orderBy g).map fun b => e.eval b (subs b))
+
 /-- A core's rows from the bindings it keeps. -/
 def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
   if c.aggregated then
     let groups := if c.groupBy.isEmpty then [kept]
       else groupsOf (fun b => c.groupBy.map (Expr.eval b (subs b))) kept
-    groups.map fun g => c.output.map fun
-      | .expr e => match g.getLast? with
-        | some b => e.eval b (subs b)
-        | none => none
-      | .count => some (Int.ofNat g.length)
-      | .max e => maxValue (g.map fun b => e.eval b (subs b))
+    groups.map fun g => c.output.map (OutCol.aggregate subs g)
   else
     kept.map fun b => c.output.map fun
       | .expr e => e.eval b (subs b)

@@ -15,7 +15,7 @@ inductive Expr where
   | add (left right : Expr)
   /-- A scalar subquery: the first column of its first row, or NULL. -/
   | sub (query : Nat)
-  deriving Repr, Inhabited, BEq
+  deriving Repr, Inhabited, DecidableEq
 
 /-- A condition, in SQL's three-valued logic. -/
 inductive Cond where
@@ -80,7 +80,19 @@ inductive OutCol where
   | count
   /-- `max(e)`. -/
   | max (e : Expr)
+  /-- `CAST(group_concat(e, '' ORDER BY ...) AS INTEGER)`: the values of `e`
+  joined in the order SQLite reads the group's rows in, or in the order its
+  own ORDER BY sorts them, each term descending when `true`. The model's
+  values are integers, so the differential writes the joined text read back
+  as one, which keeps the order. -/
+  | concat (e : Expr) (orderBy : List (Expr × Bool))
   deriving Repr, Inhabited
+
+/-- The expressions a result column holds. -/
+def OutCol.exprs : OutCol → List Expr
+  | .expr e | .max e => [e]
+  | .count => []
+  | .concat e orderBy => e :: orderBy.map (·.1)
 
 /-- One SELECT core: the statement's, an arm of a compound, or a subquery's. -/
 structure Core where
@@ -210,16 +222,12 @@ def Cond.firstRows : Cond → List Nat
 /-- The queries a core's clauses hold, in the order sqlive reads them: the
 result columns', then the conditions', then GROUP BY's. -/
 def Core.subqueries (c : Core) : List Nat :=
-  let outs := c.output.flatMap fun
-    | .expr e | .max e => e.queries
-    | .count => []
+  let outs := c.output.flatMap fun o => o.exprs.flatMap Expr.queries
   (outs ++ c.conds.flatMap (·.1.queries) ++ c.groupBy.flatMap Expr.queries).eraseDups
 
 /-- The subqueries whose first row a core's clauses take. -/
 def Core.firstRows (c : Core) : List Nat :=
-  let outs := c.output.flatMap fun
-    | .expr e | .max e => e.queries
-    | .count => []
+  let outs := c.output.flatMap fun o => o.exprs.flatMap Expr.queries
   outs ++ c.conds.flatMap (·.1.firstRows) ++ c.groupBy.flatMap Expr.queries
 
 end SqliveNarrowing

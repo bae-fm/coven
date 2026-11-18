@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use sqlite3_parser::ast::{
     As, Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Name, Operator, Over,
-    ResultColumn, Select, Window,
+    ResultColumn, Select, SortedColumn, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -169,71 +169,125 @@ pub(crate) fn order_term<'a>(columns: &'a [ResultColumn<'a>], expr: &'a Expr<'a>
 
 /// The parts of `expr`, in every operand, argument, filter and window.
 pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
-    match expr {
-        Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..) => {
-            into.push(Part::Name(expr))
+    PartWalk { inside: &|_| false, parts: into, stopped: &mut Vec::new() }.expr(expr);
+}
+
+/// The parts of `expr` outside the expressions `inside` picks, which go to
+/// `stopped` whole, without their parts.
+pub(crate) fn parts_outside<'a>(
+    expr: &'a Expr<'a>,
+    inside: &dyn Fn(&'a Expr<'a>) -> bool,
+    into: &mut Vec<Part<'a>>,
+    stopped: &mut Vec<&'a Expr<'a>>,
+) {
+    PartWalk { inside, parts: into, stopped }.expr(expr);
+}
+
+/// The parts of a window's partitions, order and frame.
+pub(crate) fn window_parts<'a>(window: &'a Window<'a>, into: &mut Vec<Part<'a>>) {
+    PartWalk { inside: &|_| false, parts: into, stopped: &mut Vec::new() }.window(window);
+}
+
+/// A walk of an expression's parts that stops at the expressions `inside`
+/// picks.
+struct PartWalk<'a, 'w> {
+    inside: &'w dyn Fn(&'a Expr<'a>) -> bool,
+    parts: &'w mut Vec<Part<'a>>,
+    stopped: &'w mut Vec<&'a Expr<'a>>,
+}
+
+impl<'a> PartWalk<'a, '_> {
+    fn expr(&mut self, expr: &'a Expr<'a>) {
+        if (self.inside)(expr) {
+            self.stopped.push(expr);
+            return;
         }
-        Expr::Exists(select) => into.push(Part::Select(select)),
-        Expr::Subquery(select) => into.push(Part::Subquery(select)),
-        Expr::InSelect { lhs, rhs, .. } => {
-            parts(lhs, into);
-            into.push(Part::Select(rhs));
-        }
-        Expr::InTable { lhs, args, .. } => {
-            parts(lhs, into);
-            into.push(Part::Table);
-            every(args.iter().flat_map(|args| args.iter()), into);
-        }
-        Expr::Between { lhs, start, end, .. } => every([*lhs, *start, *end], into),
-        Expr::Binary(left, _, right) => every([*left, *right], into),
-        Expr::Case { base, when_then_pairs, else_expr } => {
-            every(base.iter().copied(), into);
-            for (when, then) in when_then_pairs.iter() {
-                every([when, then], into);
+        match expr {
+            Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..) => {
+                self.parts.push(Part::Name(expr))
             }
-            every(else_expr.iter().copied(), into);
-        }
-        Expr::Collate(expr, _) => {
-            into.push(Part::Collation);
-            parts(expr, into);
-        }
-        Expr::Cast { expr, .. }
-        | Expr::IsNull(expr)
-        | Expr::NotNull(expr)
-        | Expr::Unary(_, expr) => parts(expr, into),
-        Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
-            into.push(Part::Function(name.0, over(filter_over)));
-            every(args.iter().flat_map(|args| args.iter()), into);
-            match order_by {
-                Some(FunctionCallOrder::SortList(terms)) => {
-                    every(terms.iter().map(|term| &term.expr), into)
+            Expr::Exists(select) => self.parts.push(Part::Select(select)),
+            Expr::Subquery(select) => self.parts.push(Part::Subquery(select)),
+            Expr::InSelect { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.parts.push(Part::Select(rhs));
+            }
+            Expr::InTable { lhs, args, .. } => {
+                self.expr(lhs);
+                self.parts.push(Part::Table);
+                self.every(args.iter().flat_map(|args| args.iter()));
+            }
+            Expr::Between { lhs, start, end, .. } => self.every([*lhs, *start, *end]),
+            Expr::Binary(left, _, right) => self.every([*left, *right]),
+            Expr::Case { base, when_then_pairs, else_expr } => {
+                self.every(base.iter().copied());
+                for (when, then) in when_then_pairs.iter() {
+                    self.every([when, then]);
                 }
-                None => {}
+                self.every(else_expr.iter().copied());
             }
-            if let Some(tail) = filter_over {
-                tail_parts(tail, into);
+            Expr::Collate(expr, _) => {
+                self.parts.push(Part::Collation);
+                self.expr(expr);
+            }
+            Expr::Cast { expr, .. }
+            | Expr::IsNull(expr)
+            | Expr::NotNull(expr)
+            | Expr::Unary(_, expr) => self.expr(expr),
+            Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
+                self.parts.push(Part::Function(name.0, over(filter_over)));
+                self.every(args.iter().flat_map(|args| args.iter()));
+                self.every(call_order(order_by).iter().map(|term| &term.expr));
+                if let Some(tail) = filter_over {
+                    self.tail(tail);
+                }
+            }
+            Expr::FunctionCallStar { name, filter_over } => {
+                self.parts.push(Part::Function(name.0, over(filter_over)));
+                if let Some(tail) = filter_over {
+                    self.tail(tail);
+                }
+            }
+            Expr::InList { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.every(rhs.iter().flat_map(|exprs| exprs.iter()));
+            }
+            Expr::Like { lhs, rhs, escape, .. } => {
+                self.every([*lhs, *rhs]);
+                self.every(escape.iter().copied());
+            }
+            Expr::Parenthesized(exprs) => self.every(exprs.iter()),
+            Expr::Raise(_, expr) => self.every(expr.iter().copied()),
+            Expr::Literal(
+                Literal::CurrentDate | Literal::CurrentTime | Literal::CurrentTimestamp,
+            ) => self.parts.push(Part::Clock),
+            Expr::Literal(_) | Expr::Variable(_) => {}
+        }
+    }
+
+    fn every(&mut self, exprs: impl IntoIterator<Item = &'a Expr<'a>>) {
+        for expr in exprs {
+            self.expr(expr);
+        }
+    }
+
+    fn tail(&mut self, tail: &'a FunctionTail<'a>) {
+        self.every(tail.filter_clause.iter().copied());
+        if let Some(Over::Window(window)) = tail.over_clause {
+            self.window(window);
+        }
+    }
+
+    fn window(&mut self, window: &'a Window<'a>) {
+        self.every(window.partition_by.iter().flat_map(|exprs| exprs.iter()));
+        self.every(window.order_by.iter().flat_map(|terms| terms.iter()).map(|term| &term.expr));
+        if let Some(frame) = &window.frame_clause {
+            for bound in [Some(&frame.start), frame.end.as_ref()].into_iter().flatten() {
+                if let FrameBound::Following(expr) | FrameBound::Preceding(expr) = bound {
+                    self.expr(expr);
+                }
             }
         }
-        Expr::FunctionCallStar { name, filter_over } => {
-            into.push(Part::Function(name.0, over(filter_over)));
-            if let Some(tail) = filter_over {
-                tail_parts(tail, into);
-            }
-        }
-        Expr::InList { lhs, rhs, .. } => {
-            parts(lhs, into);
-            every(rhs.iter().flat_map(|exprs| exprs.iter()), into);
-        }
-        Expr::Like { lhs, rhs, escape, .. } => {
-            every([*lhs, *rhs], into);
-            every(escape.iter().copied(), into);
-        }
-        Expr::Parenthesized(exprs) => every(exprs.iter(), into),
-        Expr::Raise(_, expr) => every(expr.iter().copied(), into),
-        Expr::Literal(Literal::CurrentDate | Literal::CurrentTime | Literal::CurrentTimestamp) => {
-            into.push(Part::Clock)
-        }
-        Expr::Literal(_) | Expr::Variable(_) => {}
     }
 }
 
@@ -241,30 +295,38 @@ fn over(tail: &Option<FunctionTail<'_>>) -> bool {
     tail.as_ref().is_some_and(|tail| tail.over_clause.is_some())
 }
 
-fn every<'a>(exprs: impl IntoIterator<Item = &'a Expr<'a>>, into: &mut Vec<Part<'a>>) {
-    for expr in exprs {
-        parts(expr, into);
+/// The terms of a call's own ORDER BY.
+fn call_order<'a>(order_by: &Option<FunctionCallOrder<'a>>) -> &'a [SortedColumn<'a>] {
+    match order_by {
+        Some(FunctionCallOrder::SortList(terms)) => terms,
+        None => &[],
     }
 }
 
-fn tail_parts<'a>(tail: &'a FunctionTail<'a>, into: &mut Vec<Part<'a>>) {
-    every(tail.filter_clause.iter().copied(), into);
-    if let Some(Over::Window(window)) = tail.over_clause {
-        window_parts(window, into);
-    }
+/// A call of one of the connection's aggregate functions as an aggregate,
+/// outside any window: its name, lowercase, and the terms of its own ORDER
+/// BY.
+pub(crate) struct AggregateCall<'a> {
+    pub(crate) name: String,
+    pub(crate) order: &'a [SortedColumn<'a>],
 }
 
-/// The parts of a window's partitions, order and frame.
-pub(crate) fn window_parts<'a>(window: &'a Window<'a>, into: &mut Vec<Part<'a>>) {
-    every(window.partition_by.iter().flat_map(|exprs| exprs.iter()), into);
-    every(window.order_by.iter().flat_map(|terms| terms.iter()).map(|term| &term.expr), into);
-    if let Some(frame) = &window.frame_clause {
-        for bound in [Some(&frame.start), frame.end.as_ref()].into_iter().flatten() {
-            if let FrameBound::Following(expr) | FrameBound::Preceding(expr) = bound {
-                parts(expr, into);
-            }
+/// The aggregate call `expr` is, when it calls one of `aggregates`, the
+/// connection's aggregate and window functions, lowercase, outside any window,
+/// as `Part::aggregates` reads a call.
+pub(crate) fn aggregate_call<'a>(
+    expr: &'a Expr<'a>,
+    aggregates: &BTreeSet<String>,
+) -> Option<AggregateCall<'a>> {
+    let (name, order, tail) = match expr {
+        Expr::FunctionCall { name, order_by, filter_over, .. } => {
+            (name.0, call_order(order_by), filter_over)
         }
-    }
+        Expr::FunctionCallStar { name, filter_over } => (name.0, &[][..], filter_over),
+        _ => return None,
+    };
+    let name = name.to_ascii_lowercase();
+    (!over(tail) && aggregates.contains(&name)).then_some(AggregateCall { name, order })
 }
 
 /// A parsed node written back as SQL.

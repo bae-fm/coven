@@ -132,7 +132,7 @@ theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat
   split at hr
   · simp only [List.mem_map] at hr
     obtain ⟨g, hg, rfl⟩ := hr
-    simp only [List.getElem?_map, ho, Option.map_some]
+    simp only [List.getElem?_map, ho, Option.map_some, OutCol.aggregate]
     split
     · rename_i b' hlast
       right

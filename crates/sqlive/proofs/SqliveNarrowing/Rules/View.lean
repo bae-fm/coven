@@ -37,9 +37,8 @@ def inside (s : Statement) (qs : List Nat) (i : Nat) : Bool := (armsOf s qs).con
 /-- The queries a core's clauses hold: its result columns', conditions' and
 GROUP BY's. -/
 def clauseQueries (c : Core) : List Nat :=
-  c.output.flatMap (fun
-    | .expr e | .max e => e.queries
-    | .count => []) ++ c.conds.flatMap (·.1.queries) ++ c.groupBy.flatMap Expr.queries
+  c.output.flatMap (·.exprs.flatMap Expr.queries) ++ c.conds.flatMap (·.1.queries) ++
+    c.groupBy.flatMap Expr.queries
 
 /-- Whether queries `qs` name nothing outside them: each arm's subqueries
 and derived items' queries are among them, and each column an arm names is
@@ -180,46 +179,46 @@ theorem groupsOf_map {key : Bind → List Value} {R : Bind → Bind} (hkey : ∀
   exact key2 bs
 
 /-- The result columns' and GROUP BY's expressions of a core. -/
-def outExprs (c : Core) : List Expr :=
-  c.output.flatMap (fun
-    | .expr e | .max e => [e]
-    | .count => []) ++ c.groupBy
+def outExprs (c : Core) : List Expr := c.output.flatMap OutCol.exprs ++ c.groupBy
 
 theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
     (hinv : ∀ e ∈ outExprs c, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x))
     (L : List Bind) : c.rows subs (L.map R) = c.rows subs L := by
-  have hout : ∀ e, OutCol.expr e ∈ c.output → ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
-    fun e he => hinv e (by simp only [outExprs, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨_, he, by simp⟩)
-  have hmax : ∀ e, OutCol.max e ∈ c.output → ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
-    fun e he => hinv e (by simp only [outExprs, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨_, he, by simp⟩)
+  have hout : ∀ o ∈ c.output, ∀ e ∈ o.exprs, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
+    fun o ho e he => hinv e (by
+      simp only [outExprs, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨o, ho, he⟩)
   have hgroup : ∀ e ∈ c.groupBy, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
     fun e he => hinv e (by simp [outExprs, he])
-  have hg : ∀ g : List Bind, (c.output.map fun
-      | .expr e => match (g.map R).getLast? with
-        | some b => e.eval b (subs b)
-        | none => none
-      | .count => some (Int.ofNat (g.map R).length)
-      | .max e => maxValue ((g.map R).map fun b => e.eval b (subs b))) =
-      (c.output.map fun
-      | .expr e => match g.getLast? with
-        | some b => e.eval b (subs b)
-        | none => none
-      | .count => some (Int.ofNat g.length)
-      | .max e => maxValue (g.map fun b => e.eval b (subs b))) := by
+  have hg : ∀ g : List Bind, c.output.map (OutCol.aggregate subs (g.map R)) =
+      c.output.map (OutCol.aggregate subs g) := by
     intro g
     apply List.map_congr_left
     intro o ho
     cases o with
     | expr e =>
-      simp only [List.getLast?_map]
+      simp only [OutCol.aggregate, List.getLast?_map]
       cases g.getLast? with
       | none => rfl
-      | some b => exact hout e ho b
-    | count => simp
+      | some b => exact hout _ ho e (by simp [OutCol.exprs]) b
+    | count => simp [OutCol.aggregate]
     | max e =>
-      simp only [List.map_map]
+      simp only [OutCol.aggregate, List.map_map]
       congr 1
-      exact List.map_congr_left fun b _ => hmax e ho b
+      exact List.map_congr_left fun b _ => hout _ ho e (by simp [OutCol.exprs]) b
+    | concat e orderBy =>
+      have hkey : ∀ x, (orderBy.map fun (e, _) => e.eval (R x) (subs (R x))) =
+          orderBy.map fun (e, _) => e.eval x (subs x) := fun x =>
+        List.map_congr_left fun (e', d) hed =>
+          hout _ ho e' (by simp only [OutCol.exprs, List.mem_cons, List.mem_map]
+                           exact Or.inr ⟨(e', d), hed, rfl⟩) x
+      have hsort : sortBindings subs orderBy (g.map R) = (sortBindings subs orderBy g).map R := by
+        unfold sortBindings
+        split
+        · rfl
+        · exact sortBy_map fun a b => by simp only [hkey a, hkey b]
+      simp only [OutCol.aggregate, hsort, List.map_map]
+      congr 1
+      exact List.map_congr_left fun b _ => hout _ ho e (by simp [OutCol.exprs]) b
   unfold Core.rows
   split
   · split
@@ -233,7 +232,7 @@ theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
     apply List.map_congr_left
     intro o ho
     cases o with
-    | expr e => exact hout e ho b
+    | expr e => exact hout _ ho e (by simp [OutCol.exprs]) b
     | _ => rfl
 
 /-- What `closed` says of each arm `k` of queries `qs`. -/
@@ -341,28 +340,15 @@ theorem closed_eval {s : Statement} {qs : List Nat} (h : closed s qs = true) (db
         simp only [outExprs, List.mem_append, List.mem_flatMap] at he
         simp only [Core.refs, List.mem_append, List.mem_flatMap]
         rcases he with ⟨o, ho, he⟩ | he
-        · cases o with
-          | expr e' =>
-            simp at he; subst he
-            exact Or.inl (Or.inr ⟨_, ho, by simpa [OutCol.refs] using hp⟩)
-          | max e' =>
-            simp at he; subst he
-            exact Or.inl (Or.inr ⟨_, ho, by simpa [OutCol.refs] using hp⟩)
-          | count => simp at he
+        · exact Or.inl (Or.inr ⟨o, ho, by
+            simp only [OutCol.refs, List.mem_flatMap]; exact ⟨e, he, hp⟩⟩)
         · exact Or.inr ⟨e, he, hp⟩
       · intro q' hq'
         apply hqueries
         simp only [outExprs, List.mem_append, List.mem_flatMap] at he
         simp only [clauseQueries, List.mem_append, List.mem_flatMap]
         rcases he with ⟨o, ho, he⟩ | he
-        · cases o with
-          | expr e' =>
-            simp at he; subst he
-            exact Or.inl (Or.inl ⟨_, ho, hq'⟩)
-          | max e' =>
-            simp at he; subst he
-            exact Or.inl (Or.inl ⟨_, ho, hq'⟩)
-          | count => simp at he
+        · exact Or.inl (Or.inl ⟨o, ho, e, he, hq'⟩)
         · exact Or.inr ⟨e, he, hq'⟩
     show c.rows E (coreBindings s db E b k) = c.rows E (coreBindings s db E (R b) k)
     rw [← hrows (coreBindings s db E b k), hbind, hrows]

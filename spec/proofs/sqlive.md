@@ -110,9 +110,17 @@ promise of whichever rule reads it.
   whose ORDER BY sorts by the rowid of each of its tables, keeps the same rows
   in every order, on a database whose tables hold each row's rowid in its
   first column, never NULL and different in each row.
+  A SELECT that aggregates picks rows too. `bare_picks_any` proves that for
+  any row of a group, some order of the group's rows gives that row's value to
+  a result column outside every GROUP BY term, and `concat_follows_order`
+  proves that `group_concat` with no ORDER BY of its own joins two values in
+  the order SQLite reads them. `orderFree_rows_perm` proves that a SELECT with
+  neither, whose `group_concat` calls each sort by the rowid of each of its
+  tables, gives the same rows in some order from every order of its rows.
   `picked_column_reruns` proves that a change to any column of a table that a
-  query of the first kind reads runs the query again, when the row before or
-  after passes the table's scope.
+  query of the first kind, or a SELECT whose rows follow the order SQLite reads
+  them in, reads runs the query again, when the row before or after passes the
+  table's scope.
 - **The whole read.** `whole_sound` proves that with no scope, every change of
   a column the statement reads runs the query again.
 
@@ -148,10 +156,15 @@ and makes random writes. After each write it fails when sqlive and the model
 disagree on whether the write reruns the query, when a write that either lets
 pass changed SQLite's rows, or when the model's rows differ from SQLite's.
 Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model
-among rows that sort the same, so the test compares the rows there only
-through the reruns.
+among rows that sort the same, and an aggregate's column outside every GROUP BY
+term, or a `group_concat` with no ORDER BY that sorts by each table's rowid,
+may take other rows' values. The test compares the rows there only through
+the reruns. The model's values are integers, so the differential reads
+`group_concat` as `CAST(group_concat(e, '') AS INTEGER)`, the joined digits read
+back as one integer, which the model computes the same way.
 
 SQLite's authorizer reports no read of the columns a USING or NATURAL join
 compares, nor of the columns that decide which rows a query whose rows SQLite
-picks keeps, so sqlive adds those columns to a statement's reads (§4), and the
+picks keeps, or which row an aggregate takes a value from, so sqlive adds those
+columns to a statement's reads (§4), and the
 model's reads and sqlive's agree.

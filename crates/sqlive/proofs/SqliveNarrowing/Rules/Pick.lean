@@ -11,7 +11,15 @@ conditions still narrow which rows it depends on. A query whose ORDER BY sorts
 by the rowid of each of its tables, or that aggregates with no GROUP BY,
 returns the same rows in every order SQLite reads them in
 (`fullyOrders_sound`), so it depends only on the columns its clauses name
-(`unreported_columns.rs`). -/
+(`unreported_columns.rs`).
+
+A core that aggregates picks rows too: a result column outside every GROUP BY
+term takes its value from one binding of its group, which the order SQLite
+reads them in decides (`bare_picks_any`), and `group_concat` joins its values in the order SQLite
+reads them (`concat_follows_order`), unless the call's own ORDER BY sorts by
+the rowid of each of the core's tables. Such a core depends on every column
+of each table it reads (`Statement.followsOrder`); any other core gives the
+same rows in every order (`orderFree_rows_perm`). -/
 namespace SqliveNarrowing.Pick
 open Limit
 
@@ -202,15 +210,75 @@ theorem mem_joinItems {s : Statement} {c : Core} {rowsOf : Nat → List Row}
 bindings. -/
 theorem one_row {c : Core} (hagg : c.aggregated = true) (hgroup : c.groupBy.isEmpty = true)
     {subs : Bind → Subs} {kept : List Bind} {r : Row} (hr : r ∈ c.rows subs kept) :
-    r = c.output.map fun
-      | .expr e => match kept.getLast? with
-        | some b => e.eval b (subs b)
-        | none => none
-      | .count => some (Int.ofNat kept.length)
-      | .max e => maxValue (kept.map fun b => e.eval b (subs b)) := by
+    r = c.output.map (OutCol.aggregate subs kept) := by
   unfold Core.rows at hr
   simp only [hagg, hgroup, ↓reduceIte, List.map_cons, List.map_nil, List.mem_singleton] at hr
   exact hr
+
+/-- Two bindings that core `k` keeps, each of whose items is a table, that
+agree on each item's rowid, on a database that keeps each row's rowid in its
+first column, are the same binding. -/
+theorem bindings_eq_of_rowids {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
+    (htables : ∀ i ∈ (s.core k).items, (s.table? i).isSome = true)
+    {eval : Bind → Nat → List Row} {outer ba bb : Bind}
+    (hba : ba ∈ coreBindings s db eval outer k) (hbb : bb ∈ coreBindings s db eval outer k)
+    (hrowid : ∀ i ∈ (s.core k).items, cellOf (ba i) 0 = cellOf (bb i) 0) : ba = bb := by
+  simp only [coreBindings, List.mem_filter] at hba hbb
+  obtain ⟨a0, ha0, haout, hain⟩ := mem_joinItems _ _ _ hba.1
+  obtain ⟨b0, hb0, hbout, hbin⟩ := mem_joinItems _ _ _ hbb.1
+  simp only [List.mem_singleton] at ha0 hb0
+  subst ha0 hb0
+  funext j
+  by_cases hj : j ∈ (s.core k).items
+  · obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp (htables j hj)
+    have hkind : (s.item j).kind = .table t := by
+      unfold Statement.table? at ht
+      split at ht
+      · rename_i t' hk; cases ht; exact hk
+      · cases ht
+    have hcell := hrowid j hj
+    have hrows : ∀ (bnd : Bind) (r : Row), bnd j = some r →
+        (bnd j = none ∨ ∃ r' ∈ (match (s.item j).kind with
+          | .table t => db.rows t
+          | .derived q _ => eval (if (s.core k).parent.isNone then Bind.empty else outer) q),
+          bnd j = some r') → r ∈ db.rows t := by
+      intro bnd r hr hin
+      rw [hkind] at hin
+      rcases hin with h | ⟨r', hr', h⟩
+      · rw [hr] at h; cases h
+      · rw [hr] at h; cases h; exact hr'
+    cases hja : ba j with
+    | none =>
+      cases hjb : bb j with
+      | none => rfl
+      | some rb =>
+        have hrb := hrows bb rb hjb (hbin j hj)
+        rw [hja, hjb] at hcell
+        exact absurd hcell.symm (hdb t rb hrb).1
+    | some ra =>
+      have hra := hrows ba ra hja (hain j hj)
+      cases hjb : bb j with
+      | none =>
+        rw [hja, hjb] at hcell
+        exact absurd hcell (hdb t ra hra).1
+      | some rb =>
+        have hrb := hrows bb rb hjb (hbin j hj)
+        rw [hja, hjb] at hcell
+        rw [(hdb t ra hra).2 rb hrb hcell]
+  · rw [haout j hj, hbout j hj]
+
+/-- Two bindings that core `k` keeps, on which expressions that sort by the
+rowid of each of its items take the same values, are the same binding. -/
+theorem sortsByRowids_separates {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
+    {sorted : List Expr} (hsorts : s.sortsByRowids k sorted = true)
+    {eval : Bind → Nat → List Row} {outer ba bb : Bind}
+    (hba : ba ∈ coreBindings s db eval outer k) (hbb : bb ∈ coreBindings s db eval outer k)
+    {sa sb : Subs} (hkey : ∀ e ∈ sorted, e.eval ba sa = e.eval bb sb) : ba = bb := by
+  unfold Statement.sortsByRowids at hsorts
+  simp only [List.all_eq_true, Bool.and_eq_true, List.contains_iff_mem] at hsorts
+  apply bindings_eq_of_rowids hdb (fun i hi => (hsorts i hi).1) hba hbb
+  intro i hi
+  simpa [Expr.eval] using hkey (.col i 0) (hsorts i hi).2
 
 /-- Two rows of a query that returns one row, or whose ORDER BY sorts by the
 rowid of each of its tables on a database that keeps each row's rowid in its
@@ -223,68 +291,24 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
       orderKey (s.query q) a = orderKey (s.query q) b → a = b := by
   unfold Statement.fullyOrders at hfull
   rw [harms] at hfull
-  simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true', List.all_eq_true] at hfull
-  rcases hfull with ⟨hagg, hgroup⟩ | ⟨hagg, hitems⟩
+  simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true'] at hfull
+  rcases hfull with ⟨hagg, hgroup⟩ | ⟨hagg, hsorts⟩
   · intro a ha b hb _
     exact (one_row hagg hgroup ha).trans (one_row hagg hgroup hb).symm
   intro a ha b hb hkey
   obtain ⟨ba, hba, rfl⟩ := mem_rows_plain hagg ha
   obtain ⟨bb, hbb, rfl⟩ := mem_rows_plain hagg hb
-  simp only [coreBindings, List.mem_filter] at hba hbb
-  obtain ⟨a0, ha0, haout, hain⟩ := mem_joinItems _ _ _ hba.1
-  obtain ⟨b0, hb0, hbout, hbin⟩ := mem_joinItems _ _ _ hbb.1
-  simp only [List.mem_singleton] at ha0 hb0
-  subst ha0 hb0
   have hsame : ba = bb := by
-    funext j
-    by_cases hj : j ∈ (s.core k).items
-    · obtain ⟨htable, horder⟩ := hitems j hj
-      obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp htable
-      have hkind : (s.item j).kind = .table t := by
-        unfold Statement.table? at ht
-        split at ht
-        · rename_i t' hk; cases ht; exact hk
-        · cases ht
-      obtain ⟨⟨p, d⟩, hpd, hout⟩ := List.any_eq_true.mp horder
-      have hp : (s.core k).output[p]? = some (.expr (.col j 0)) := by
-        split at hout
-        · rename_i j' hp'
-          simp only [beq_iff_eq] at hout
-          subst hout
-          exact hp'
-        · cases hout
+    apply sortsByRowids_separates hdb hsorts hba hbb (sa := eval ba) (sb := eval bb)
+    intro e he
+    simp only [Statement.orderExprs, List.mem_filterMap] at he
+    obtain ⟨⟨p, d⟩, hpd, hp⟩ := he
+    split at hp
+    · rename_i e' hout
+      cases hp
       have hcell := (List.map_inj_left.mp hkey) (p, d) hpd
-      simp only [Row.cell, List.getElem?_map, hp, Option.map_some, Option.join_some,
-        Expr.eval] at hcell
-      have hrows : ∀ (bnd : Bind) (r : Row), bnd j = some r →
-          (bnd j = none ∨ ∃ r' ∈ (match (s.item j).kind with
-            | .table t => db.rows t
-            | .derived q _ => eval (if (s.core k).parent.isNone then Bind.empty else outer) q),
-            bnd j = some r') → r ∈ db.rows t := by
-        intro bnd r hr hin
-        rw [hkind] at hin
-        rcases hin with h | ⟨r', hr', h⟩
-        · rw [hr] at h; cases h
-        · rw [hr] at h; cases h; exact hr'
-      cases hja : ba j with
-      | none =>
-        cases hjb : bb j with
-        | none => rfl
-        | some rb =>
-          have hrb := hrows bb rb hjb (hbin j hj)
-          rw [hja, hjb] at hcell
-          exact absurd hcell.symm (hdb t rb hrb).1
-      | some ra =>
-        have hra := hrows ba ra hja (hain j hj)
-        cases hjb : bb j with
-        | none =>
-          rw [hja, hjb] at hcell
-          exact absurd hcell (hdb t ra hra).1
-        | some rb =>
-          have hrb := hrows bb rb hjb (hbin j hj)
-          rw [hja, hjb] at hcell
-          rw [(hdb t ra hra).2 rb hrb hcell]
-    · rw [haout j hj, hbout j hj]
+      simpa [Row.cell, List.getElem?_map, hout] using hcell
+    · cases hp
   rw [hsame]
 
 /-- Rule 7's theorem for a query that tells its rows apart: a one-arm query
@@ -300,7 +324,221 @@ theorem fullyOrders_sound {s : Statement} {db : Db} (hdb : db.Keyed) {q k : Nat}
       (s.query q).post ((s.core k).rows eval (coreBindings s db eval outer k)) :=
   post_perm hperm (fullyOrders_separates hdb hfull harms)
 
-/-! Every column of a table a picked query reads counts as read. -/
+/-! A core that aggregates takes a plain result column's value from one
+binding of each group, which the order SQLite reads them in decides, and joins `group_concat`'s values in the
+order SQLite reads them, unless the call's own ORDER BY tells the bindings
+apart. That order follows the plan SQLite picks, so such a core depends on
+every column of each table it reads (`Statement.followsOrder`). A core whose
+rows don't follow that order gives the same rows from every order of its
+bindings (`orderFree_rows_perm`). -/
+
+/-- For any binding a core that aggregates keeps, some order of its bindings
+gives a row that holds a plain result column's value in that binding. A
+column outside every GROUP BY term (`Expr.bare`) can hold a different value
+in each binding of a group, so the order SQLite reads them in decides which
+the row shows. -/
+theorem bare_picks_any {c : Core} (hagg : c.aggregated = true) {subs : Bind → Subs}
+    {kept : List Bind} {b : Bind} (hb : b ∈ kept) {p : Nat} {e : Expr}
+    (hp : c.output[p]? = some (.expr e)) :
+    ∃ kept', kept'.Perm kept ∧ ∃ r ∈ c.rows subs kept', r[p]? = some (e.eval b (subs b)) := by
+  obtain ⟨l₁, l₂, rfl⟩ := List.append_of_mem hb
+  refine ⟨l₁ ++ l₂ ++ [b], (List.perm_append_singleton b _).trans List.perm_middle.symm, ?_⟩
+  let key := fun b' => c.groupBy.map (Expr.eval b' (subs b'))
+  have hcell : ∀ g : List Bind, g.getLast? = some b →
+      (c.output.map (OutCol.aggregate subs g))[p]? = some (e.eval b (subs b)) := by
+    intro g hlast
+    simp [List.getElem?_map, hp, OutCol.aggregate, hlast]
+  unfold Core.rows
+  simp only [hagg, ↓reduceIte]
+  split
+  · exact ⟨_, List.mem_singleton_self _, hcell _ List.getLast?_concat⟩
+  · refine ⟨_, List.mem_map.mpr ⟨(l₁ ++ l₂ ++ [b]).filter fun b' => key b' == key b, ?_, rfl⟩,
+      hcell _ (by simp [List.filter_append])⟩
+    simp only [groupsOf, List.mem_map]
+    exact ⟨key b, List.mem_eraseDups.mpr (List.mem_map.mpr ⟨b, by simp, rfl⟩), rfl⟩
+
+/-- A `group_concat` with no ORDER BY of its own joins its values in the
+order SQLite reads the group's bindings in: two bindings whose values are 1
+and 2 show 12 read one way and 21 the other. -/
+theorem concat_follows_order {c : Core} (hagg : c.aggregated = true) (hgroup : c.groupBy = [])
+    {p : Nat} {e : Expr} (hp : c.output[p]? = some (.concat e [])) {subs : Bind → Subs}
+    {b₁ b₂ : Bind} (h₁ : e.eval b₁ (subs b₁) = some 1) (h₂ : e.eval b₂ (subs b₂) = some 2) :
+    (c.rows subs [b₁, b₂]).map (·[p]?) = [some (some 12)] ∧
+    (c.rows subs [b₂, b₁]).map (·[p]?) = [some (some 21)] := by
+  have h12 : concatValue [some 1, some 2] = some 12 := by decide
+  have h21 : concatValue [some 2, some 1] = some 21 := by decide
+  simp [Core.rows, hagg, hgroup, List.getElem?_map, hp, OutCol.aggregate, sortBindings, h₁, h₂,
+    h12, h21]
+
+/-- An expression that names no column or subquery outside its core's GROUP
+BY terms takes the same value in two bindings that agree on those terms. -/
+theorem Expr.eval_of_not_bare {groupBy : List Expr} {b b' : Bind} {sub sub' : Subs}
+    (hkey : groupBy.map (Expr.eval b sub) = groupBy.map (Expr.eval b' sub')) (e : Expr)
+    (h : e.bare groupBy = false) : e.eval b sub = e.eval b' sub' := by
+  by_cases hg : e ∈ groupBy
+  · exact List.map_inj_left.mp hkey e hg
+  have hc : groupBy.contains e = false := by simpa using hg
+  induction e with
+  | col i c => simp [Expr.bare] at h; exact absurd h hg
+  | sub q => simp [Expr.bare] at h; exact absurd h hg
+  | lit _ => rfl
+  | add l r ihl ihr =>
+    simp only [Expr.bare, hc, Bool.not_false, Bool.true_and, Bool.or_eq_false_iff] at h
+    have hl : l.eval b sub = l.eval b' sub' := by
+      by_cases hgl : l ∈ groupBy
+      · exact List.map_inj_left.mp hkey l hgl
+      · exact ihl h.1 hgl (by simpa using hgl)
+    have hr : r.eval b sub = r.eval b' sub' := by
+      by_cases hgr : r ∈ groupBy
+      · exact List.map_inj_left.mp hkey r hgr
+      · exact ihr h.2 hgr (by simpa using hgr)
+    simp only [Expr.eval, hl, hr]
+
+/-- The largest value of a list is the same in every order. -/
+theorem maxValue_perm {vs vs' : List Value} (h : vs'.Perm vs) : maxValue vs' = maxValue vs := by
+  unfold maxValue
+  apply h.foldl_eq'
+  intro x _ y _ z
+  cases x <;> cases y <;> cases z <;> simp only [Option.some.injEq] <;> omega
+
+theorem nodup_eraseDups {α : Type} [BEq α] [LawfulBEq α] : ∀ (l : List α), l.eraseDups.Nodup
+  | [] => List.nodup_nil
+  | a :: as => by
+    rw [List.eraseDups_cons]
+    have := nodup_eraseDups (as.filter fun b => !b == a)
+    refine List.nodup_cons.mpr ⟨fun hm => ?_, this⟩
+    have := (List.mem_filter.mp (List.mem_eraseDups.mp hm)).2
+    simp at this
+termination_by l => l.length
+decreasing_by exact Nat.lt_succ_of_le (List.length_filter_le _ _)
+
+/-- The groups of a permutation of bindings, each made into a row by a map
+that gives the same row for groups that are permutations of each other, are
+a permutation of the groups' rows. -/
+theorem groupsOf_perm {key : Bind → List Value} {bs bs' : List Bind} (hperm : bs'.Perm bs)
+    {row : List Bind → Row}
+    (hrow : ∀ v, row (bs'.filter fun b => key b == v) = row (bs.filter fun b => key b == v)) :
+    ((groupsOf key bs').map row).Perm ((groupsOf key bs).map row) := by
+  unfold groupsOf
+  simp only [List.map_map, Function.comp_def, hrow]
+  apply List.Perm.map
+  apply (List.perm_ext_iff_of_nodup (nodup_eraseDups _) (nodup_eraseDups _)).mpr
+  intro v
+  simp only [List.mem_eraseDups, List.mem_map]
+  exact ⟨fun ⟨b, hb, hv⟩ => ⟨b, hperm.mem_iff.mp hb, hv⟩,
+    fun ⟨b, hb, hv⟩ => ⟨b, hperm.mem_iff.mpr hb, hv⟩⟩
+
+/-- A core whose rows don't follow the order SQLite reads its bindings in
+gives, from any order of the bindings it keeps, the rows it gives from the
+order the model reads them in, in some order, on a database that keeps each
+row's rowid in its first column. -/
+theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
+    (hfree : s.followsOrder k = false) {eval : Bind → Nat → List Row} {outer : Bind}
+    {kept' : List Bind} (hperm : kept'.Perm (coreBindings s db eval outer k)) :
+    ((s.core k).rows eval kept').Perm ((s.core k).rows eval (coreBindings s db eval outer k)) := by
+  let c := s.core k
+  let kept := coreBindings s db eval outer k
+  let key := fun b => c.groupBy.map (Expr.eval b (eval b))
+  show (c.rows eval kept').Perm (c.rows eval kept)
+  cases hagg : c.aggregated with
+  | false =>
+    unfold Core.rows
+    simp only [hagg, Bool.false_eq_true, ↓reduceIte]
+    exact hperm.map _
+  | true =>
+  have hfree' : ∀ o ∈ c.output, (∀ e, o = .expr e → e.bare c.groupBy = false) ∧
+      (∀ e orderBy, o = .concat e orderBy → s.sortsByRowids k (orderBy.map (·.1)) = true) := by
+    intro o ho
+    have hagg' : (s.core k).aggregated = true := hagg
+    unfold Statement.followsOrder at hfree
+    simp only [hagg', Bool.true_and, List.any_eq_false] at hfree
+    have := hfree o ho
+    constructor
+    · rintro e rfl; simpa using this
+    · rintro e orderBy rfl; simpa using this
+  -- Two permuted groups of the kept bindings, whose bindings agree on the
+  -- GROUP BY terms, give the same row.
+  have hgroup : ∀ g g' : List Bind, g'.Perm g → (∀ b ∈ g, b ∈ kept) →
+      (∀ b ∈ g, ∀ b' ∈ g, key b = key b') →
+      c.output.map (OutCol.aggregate eval g') = c.output.map (OutCol.aggregate eval g) := by
+    intro g g' hg hin hsame
+    apply List.map_congr_left
+    intro o ho
+    obtain ⟨hbare, hsorts⟩ := hfree' o ho
+    cases o with
+    | expr e =>
+      simp only [OutCol.aggregate]
+      cases hl' : g'.getLast? with
+      | none =>
+        have : g' = [] := List.getLast?_eq_none_iff.mp hl'
+        subst this
+        rw [List.nil_perm.mp hg]; rfl
+      | some x' =>
+        cases hl : g.getLast? with
+        | none =>
+          have : g = [] := List.getLast?_eq_none_iff.mp hl
+          subst this
+          rw [List.perm_nil.mp hg] at hl'; cases hl'
+        | some x =>
+          have hx' : x' ∈ g := hg.mem_iff.mp (List.mem_of_getLast? hl')
+          have hx : x ∈ g := List.mem_of_getLast? hl
+          exact Expr.eval_of_not_bare (hsame x' hx' x hx) e (hbare e rfl)
+    | count => simp [OutCol.aggregate, hg.length_eq]
+    | max e => simp only [OutCol.aggregate]; exact maxValue_perm (hg.map _)
+    | concat e orderBy =>
+      have hsep : ∀ a ∈ g', ∀ b ∈ g', (orderBy.map fun (e, _) => e.eval a (eval a)) =
+          (orderBy.map fun (e, _) => e.eval b (eval b)) → a = b := by
+        intro a ha b hb hkey
+        apply sortsByRowids_separates hdb (hsorts e orderBy rfl) (hin a (hg.mem_iff.mp ha))
+          (hin b (hg.mem_iff.mp hb)) (sa := eval a) (sb := eval b)
+        intro e' he'
+        obtain ⟨⟨e'', d⟩, hed, rfl⟩ := List.mem_map.mp he'
+        exact (List.map_inj_left.mp hkey) (e'', d) hed
+      have hsort : sortBindings eval orderBy g' = sortBindings eval orderBy g := by
+        unfold sortBindings
+        split
+        · rename_i hempty
+          have hnil : orderBy = [] := List.isEmpty_iff.mp hempty
+          apply eq_of_perm_of_sorted (le := fun _ _ => true) hg
+          · exact List.pairwise_of_forall (by simp)
+          · exact List.pairwise_of_forall (by simp)
+          · intro a ha b hb _ _
+            exact hsep a ha b hb (by simp [hnil])
+        · let ds := orderBy.map (·.2)
+          let okey := fun (b : Bind) => orderBy.map fun (e, _) => e.eval b (eval b)
+          have hlen : ∀ b, (okey b).length = ds.length := by intro b; simp [okey, ds]
+          let le := fun a b => keyLe ds (okey a) (okey b)
+          have total : ∀ a b, le a b || le b a := fun a b => keyLe_total _ _ _
+          have trans : ∀ a b c, le a b → le b c → le a c := fun a b c h1 h2 =>
+            keyLe_trans (hlen a) (hlen b) (hlen c) h1 h2
+          apply eq_of_perm_of_sorted (le := le)
+          · exact ((perm_sortBy g').trans hg).trans (perm_sortBy g).symm
+          · exact pairwise_sortBy total trans g'
+          · exact pairwise_sortBy total trans g
+          · intro a ha b hb h1 h2
+            have ha' := (perm_sortBy g').mem_iff.mp ha
+            have hb' := (perm_sortBy g').mem_iff.mp hb
+            exact hsep a ha' b hb' (keyLe_antisymm (hlen a) (hlen b) h1 h2)
+      simp only [OutCol.aggregate, hsort]
+  unfold Core.rows
+  simp only [hagg, ↓reduceIte]
+  split
+  · rename_i hempty
+    have hnil : c.groupBy = [] := List.isEmpty_iff.mp hempty
+    simp only [List.map_cons, List.map_nil]
+    rw [hgroup kept kept' hperm (fun b hb => hb) (fun b _ b' _ => by simp [key, hnil])]
+  · apply groupsOf_perm hperm
+    intro v
+    apply hgroup _ _ (hperm.filter _)
+    · intro b hb; exact (List.mem_filter.mp hb).1
+    · intro b hb b' hb'
+      have h1 := (List.mem_filter.mp hb).2
+      have h2 := (List.mem_filter.mp hb').2
+      simp only [beq_iff_eq] at h1 h2
+      exact h1.trans h2.symm
+
+/-! Every column of a table that a picked query, or a core whose rows follow
+the order SQLite reads them in, reads counts as read. -/
 
 theorem find?_pairs {f : Nat → List Nat} {l : List Nat} {t : Nat} (ht : t ∈ l) :
     (l.map fun t => (t, f t)).find? (·.1 == t) = some (t, f t) := by
@@ -315,8 +553,9 @@ theorem find?_pairs {f : Nat → List Nat} {l : List Nat} {t : Nat} (ht : t ∈ 
         · exact h
       simp [hu, ih ht']
 
-/-- Rule 7's theorem for a query whose rows SQLite picks: a change to any
-column of a table that such a query reads reruns the statement, when the row
+/-- Rule 7's theorem for a query whose rows SQLite picks, or a core whose rows
+follow the order SQLite reads its bindings in: a change to any column of a
+table that such a query or core reads reruns the statement, when the row
 before or after passes the table's scope. -/
 theorem picked_column_reruns {s : Statement} {scopeOf : Nat → Option RScope}
     {changes : List Change} {db' : Db} {ch : Change} (hch : ch ∈ changes)

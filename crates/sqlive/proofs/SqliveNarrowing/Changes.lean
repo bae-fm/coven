@@ -5,7 +5,8 @@ import SqliveNarrowing.Plan
 deletes a row, or changes a column the statement reads, and the row before
 or after passes the table's scope. The columns a statement reads are those
 its clauses name, and every column of a table it reads in a query whose rows
-SQLite picks (`unreported_columns.rs`). A join's lookups read the database the
+SQLite picks or a core whose rows follow the order SQLite reads its rows in
+(`unreported_columns.rs`). A join's lookups read the database the
 write leaves, as sqlive judges a write in the write's own transaction before
 it commits. -/
 namespace SqliveNarrowing
@@ -33,31 +34,58 @@ def lookupRows (s : Statement) (db : Db) (i : Nat) : List Row :=
   | .derived q _ => evalQuery s db (s.queries.length + 1) Bind.empty q
 
 /-- The columns a result column names. -/
-def OutCol.refs : OutCol → List (Nat × Nat)
-  | .expr e | .max e => e.refs
-  | .count => []
+def OutCol.refs (o : OutCol) : List (Nat × Nat) := o.exprs.flatMap Expr.refs
 
 /-- The columns a core's clauses name. -/
 def Core.refs (c : Core) : List (Nat × Nat) :=
   c.conds.flatMap (·.1.refs) ++ c.output.flatMap OutCol.refs ++ c.groupBy.flatMap Expr.refs
 
+/-- Whether the expressions `sorted` sort the bindings of core `k` by the
+rowid of each of its items, each a table, its first column (`Json.readDb`):
+two bindings of such a core differ in some item's row, and so in its rowid
+(`Pick.bindings_eq_of_rowids`). -/
+def Statement.sortsByRowids (s : Statement) (k : Nat) (sorted : List Expr) : Bool :=
+  (s.core k).items.all fun i => (s.table? i).isSome && sorted.contains (.col i 0)
+
+/-- The result columns' expressions that query `q`'s ORDER BY sorts by. -/
+def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=
+  (s.query q).orderBy.filterMap fun (p, _) =>
+    match (s.core k).output[p]? with
+    | some (.expr e) => some e
+    | _ => none
+
 /-- Whether query `q`'s ORDER BY tells every two of its rows apart. The query
 is one SELECT, and either it aggregates with no GROUP BY, so it returns one
-row, or it neither groups nor aggregates, each of its FROM items is a table,
-and the ORDER BY sorts by each one's rowid, its first column (`Json.readDb`),
-as a result column. Two rows of such a query come from bindings that differ in
-some item's row, and so in its rowid (`Pick.fullyOrders_separates`). -/
+row, or it neither groups nor aggregates and its ORDER BY sorts by the rowid
+of each of its items as result columns (`Pick.fullyOrders_separates`). -/
 def Statement.fullyOrders (s : Statement) (q : Nat) : Bool :=
   match (s.query q).arms with
   | [k] =>
     let c := s.core k
-    (c.aggregated && c.groupBy.isEmpty) ||
-    (!c.aggregated && c.items.all fun i => (s.table? i).isSome &&
-      (s.query q).orderBy.any fun (p, _) =>
-        match c.output[p]? with
-        | some (.expr (.col j 0)) => j == i
-        | _ => false)
+    (c.aggregated && c.groupBy.isEmpty) || (!c.aggregated && s.sortsByRowids k (s.orderExprs q k))
   | _ => false
+
+/-- Whether `e` can take a different value in each binding of a group of a
+core that aggregates by `groupBy`: it names a column, or holds a subquery,
+outside every GROUP BY term. -/
+def Expr.bare (groupBy : List Expr) (e : Expr) : Bool :=
+  !groupBy.contains e && match e with
+    | .col .. | .sub _ => true
+    | .lit _ => false
+    | .add l r => l.bare groupBy || r.bare groupBy
+
+/-- Whether core `k`'s rows follow the order SQLite reads its bindings in: it
+aggregates, and a result column takes its value from one binding of a group,
+which that order decides, as a column outside every GROUP BY term
+(`Expr.bare`) does, or joins its values in that order, with no ORDER BY of its
+own that tells the bindings apart. That order follows the plan SQLite picks
+(`Pick.bare_picks_any`, `Pick.concat_follows_order`). -/
+def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
+  let c := s.core k
+  c.aggregated && c.output.any fun
+    | .expr e => e.bare c.groupBy
+    | .concat _ orderBy => !s.sortsByRowids k (orderBy.map (·.1))
+    | .count | .max _ => false
 
 /-- The subqueries whose first row a clause of the statement takes. -/
 def Statement.firstRowQueries (s : Statement) : List Nat := s.cores.flatMap Core.firstRows
@@ -71,6 +99,16 @@ def Statement.picks (s : Statement) (q : Nat) : Bool :=
   let query := s.query q
   (query.limit.isSome || query.offset.isSome || s.firstRowQueries.contains q) && !s.fullyOrders q
 
+/-- The items core `k` reads, with `read` giving the items a query reads:
+its own, and those of the queries of its derived items and subqueries. -/
+def Statement.coreItemsWith (s : Statement) (read : Nat → List Nat) (k : Nat) : List Nat :=
+  let c := s.core k
+  let derived := c.items.flatMap fun i =>
+    match (s.item i).kind with
+    | .derived q _ => read q
+    | .table _ => []
+  c.items ++ derived ++ c.subqueries.flatMap read
+
 /-- The items query `q` reads: those of its arms' cores, and of the queries
 those cores read, FROM items' and subqueries' alike. -/
 def Statement.queryItems (s : Statement) (q : Nat) : List Nat :=
@@ -78,25 +116,23 @@ def Statement.queryItems (s : Statement) (q : Nat) : List Nat :=
 where
   go : Nat → Nat → List Nat
     | 0, _ => []
-    | f + 1, q => (s.query q).arms.flatMap fun k =>
-      let c := s.core k
-      let derived := c.items.flatMap fun i =>
-        match (s.item i).kind with
-        | .derived q' _ => go f q'
-        | .table _ => []
-      c.items ++ derived ++ c.subqueries.flatMap (go f)
+    | f + 1, q => (s.query q).arms.flatMap (s.coreItemsWith (go f))
 
-/-- The tables that a query whose rows SQLite picks reads. -/
+/-- The tables that a query whose rows SQLite picks, or a core whose rows
+follow the order SQLite reads its bindings in, reads. -/
 def Statement.pickedTables (s : Statement) : List Nat :=
-  ((List.range s.queries.length).filter s.picks).flatMap fun q =>
-    (s.queryItems q).filterMap s.table?
+  let picked := ((List.range s.queries.length).filter s.picks).flatMap s.queryItems
+  let followed := ((List.range s.cores.length).filter s.followsOrder).flatMap
+    (s.coreItemsWith s.queryItems)
+  (picked ++ followed).filterMap s.table?
 
 /-- How many columns table `t` has, as the items that read it list them. -/
 def Statement.width (s : Statement) (t : Nat) : Nat :=
   ((s.itemNumbers.find? (s.table? · = some t)).map fun i => (s.item i).columns.length).getD 0
 
 /-- Each table the statement reads, with the columns of it any of its
-clauses names, and every column of a table a query whose rows SQLite picks
+clauses names, and every column of a table that a query whose rows SQLite
+picks, or a core whose rows follow the order SQLite reads its bindings in,
 reads: what its rows can depend on. -/
 def Statement.reads (s : Statement) : List (Nat × List Nat) :=
   let refs := s.cores.flatMap Core.refs

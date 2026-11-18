@@ -19,6 +19,16 @@
 //! it. The model states the rule as `Statement.picks` and proves it in
 //! `crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean`.
 //!
+//! A core that aggregates picks rows too, so every column of each table it
+//! reads counts as read when its rows follow the order SQLite reads its rows
+//! in. A result column, the HAVING or an ORDER BY term that names a column
+//! outside every aggregate call and GROUP BY term takes the column's value
+//! from one row of its group, which that order decides, and an aggregate
+//! other than count, min and max reads its values in that order, as
+//! `group_concat` joins them, unless the call's own ORDER BY sorts by the
+//! rowid of each of the core's tables. The model states the rule as
+//! `Statement.followsOrder`.
+//!
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
 
@@ -26,12 +36,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::read_set::ColumnSet;
 use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
-use crate::select_syntax::{order_term, parts, window_parts, OrderTerm, Part};
+use crate::select_syntax::{
+    aggregate_call, order_term, parts, parts_outside, window_parts, AggregateCall, OrderTerm, Part,
+};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
     As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, QualifiedName,
-    ResultColumn, Select, SelectTable,
+    ResultColumn, Select, SelectTable, SortedColumn,
 };
+
+/// The aggregates whose value doesn't depend on the order of the values they
+/// read.
+const ORDER_FREE_AGGREGATES: [&str; 3] = ["count", "min", "max"];
 
 /// The columns a statement's rows depend on beyond those the authorizer
 /// reports, as (table, column) pairs, lowercase.
@@ -163,10 +179,16 @@ impl Walk<'_> {
             self.defined[place] = reads;
         }
         let mut reads = Reads::default();
+        // A compound's ORDER BY sorts by its result columns; a single
+        // SELECT's can name its core's columns too.
+        let order_by = match select.body.compounds {
+            None => select.order_by.unwrap_or_default(),
+            Some(_) => &[],
+        };
         let arms = std::iter::once(&select.body.select)
             .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
         for arm in arms {
-            reads.extend(self.core(arm)?);
+            reads.extend(self.core(arm, order_by)?);
         }
         for term in select.order_by.iter().flat_map(|terms| terms.iter()) {
             reads.extend(self.expr(&term.expr)?);
@@ -184,7 +206,13 @@ impl Walk<'_> {
         Ok(reads)
     }
 
-    fn core(&mut self, core: &OneSelect<'_>) -> rusqlite::Result<Reads> {
+    /// Read one core, sorted by `order_by` when it is the query's only one,
+    /// and note it when its rows follow the order SQLite reads its rows in.
+    fn core(
+        &mut self,
+        core: &OneSelect<'_>,
+        order_by: &[SortedColumn<'_>],
+    ) -> rusqlite::Result<Reads> {
         let mut reads = Reads::default();
         match core {
             OneSelect::Values(rows) => {
@@ -220,6 +248,9 @@ impl Walk<'_> {
                     window_parts(&definition.window, &mut found);
                 }
                 reads.extend(self.selects(&found)?);
+                if self.follows_order(core, order_by)? {
+                    self.picked.push(reads.clone());
+                }
             }
         }
         Ok(reads)
@@ -453,43 +484,145 @@ impl Walk<'_> {
         {
             return Ok(false);
         }
-        // Each FROM item: the name the statement qualifies its columns by,
-        // and its table.
+        let Some(items) = self.table_items(from.as_ref())? else { return Ok(false) };
+        let mut sorted = Vec::new();
+        for term in order_by {
+            sorted.push(match order_term(columns, &term.expr) {
+                OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr) => {
+                    self.item_column(&items, expr)?
+                }
+                OrderTerm::Unknown => None,
+            });
+        }
+        self.sorts_by_rowids(&items, &sorted)
+    }
+
+    /// Each FROM item of `from`, by the name the statement qualifies its
+    /// columns by, with its table, when each is a table of the main schema.
+    fn table_items<'a>(
+        &self,
+        from: Option<&'a FromClause<'a>>,
+    ) -> rusqlite::Result<Option<Vec<(&'a str, String)>>> {
         let mut items = Vec::new();
-        let listed = from.iter().flat_map(|from| {
+        let listed = from.into_iter().flat_map(|from| {
             from.select.into_iter().chain(from.joins.iter().flatten().map(|join| &join.table))
         });
         for item in listed {
-            let SelectTable::Table(name, alias, _) = item else { return Ok(false) };
+            let SelectTable::Table(name, alias, _) = item else { return Ok(None) };
             // A CTE's name names no table (`main`).
-            let Some(table) = self.object(name, &["table"])? else { return Ok(false) };
+            let Some(table) = self.object(name, &["table"])? else { return Ok(None) };
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0,
                 None => name.name.0,
             };
             items.push((qualifier, table));
         }
+        Ok(Some(items))
+    }
+
+    /// Whether a sort by `sorted`, the FROM item and column each term
+    /// names among `items` (`item_column`), sorts by the rowid of each of
+    /// `items`, and so tells every two of their rows apart.
+    fn sorts_by_rowids(
+        &self,
+        items: &[(&str, String)],
+        sorted: &[Option<(usize, String)>],
+    ) -> rusqlite::Result<bool> {
         for (position, (_, table)) in items.iter().enumerate() {
-            let mut sorted = false;
-            for term in order_by {
-                let sorted_by = match order_term(columns, &term.expr) {
-                    OrderTerm::Position(expr)
-                    | OrderTerm::Alias(_, expr)
-                    | OrderTerm::Expr(expr) => self.item_column(&items, expr)?,
-                    OrderTerm::Unknown => None,
-                };
-                if let Some((item, column)) = sorted_by {
-                    if item == position && self.is_rowid(table, &column)? {
-                        sorted = true;
-                        break;
-                    }
+            let mut found = false;
+            for (item, column) in sorted.iter().flatten() {
+                if *item == position && self.is_rowid(table, column)? {
+                    found = true;
+                    break;
                 }
             }
-            if !sorted {
+            if !found {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// Whether the rows of a core that aggregates follow the order SQLite
+    /// reads its rows in. A result column, the HAVING or a term of the
+    /// ORDER BY `order_by` takes its value from one row of each group, which
+    /// that order decides, when it names a column, or holds a subquery that
+    /// can, outside every aggregate call and GROUP BY term, and so does a
+    /// `*`. An aggregate other than count, min and max reads its values in
+    /// that order too, as `group_concat` joins them and a sum of reals adds
+    /// them, unless its own ORDER BY sorts by the rowid of each of the core's
+    /// FROM items, each a table.
+    fn follows_order(
+        &self,
+        core: &OneSelect<'_>,
+        order_by: &[SortedColumn<'_>],
+    ) -> rusqlite::Result<bool> {
+        let OneSelect::Select { columns, from, group_by, having, .. } = core else {
+            return Ok(false);
+        };
+        let mut evaluated = Vec::new();
+        let mut star = false;
+        for column in columns.iter() {
+            match column {
+                ResultColumn::Expr(expr, _) => evaluated.push(expr),
+                ResultColumn::Star | ResultColumn::TableStar(_) => star = true,
+            }
+        }
+        evaluated.extend(having.iter().copied());
+        for term in order_by {
+            // A term that names a result column sorts by its expression,
+            // which the result columns hold.
+            if let OrderTerm::Expr(expr) = order_term(columns, &term.expr) {
+                evaluated.push(expr);
+            }
+        }
+        // The expressions each GROUP BY term groups by: a result column's,
+        // by its position or alias, or its own.
+        let grouped: Vec<&Expr<'_>> = group_by
+            .iter()
+            .flat_map(|terms| terms.iter())
+            .filter_map(|term| match order_term(columns, term) {
+                OrderTerm::Position(expr) | OrderTerm::Alias(_, expr) | OrderTerm::Expr(expr) => {
+                    Some(crate::sql::unparenthesized(expr))
+                }
+                OrderTerm::Unknown => None,
+            })
+            .collect();
+        let inside = |expr: &Expr<'_>| {
+            grouped.contains(&crate::sql::unparenthesized(expr))
+                || aggregate_call(expr, self.aggregates).is_some()
+        };
+        let mut outside = Vec::new();
+        let mut stopped = Vec::new();
+        for expr in evaluated {
+            parts_outside(expr, &inside, &mut outside, &mut stopped);
+        }
+        let calls: Vec<AggregateCall<'_>> =
+            stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.aggregates)).collect();
+        if group_by.is_none() && calls.is_empty() {
+            return Ok(false);
+        }
+        let bare = outside
+            .iter()
+            .any(|part| matches!(part, Part::Name(_) | Part::Select(_) | Part::Subquery(_)));
+        if star || bare {
+            return Ok(true);
+        }
+        let items = self.table_items(from.as_ref())?;
+        for call in calls {
+            if ORDER_FREE_AGGREGATES.contains(&call.name.as_str()) {
+                continue;
+            }
+            let Some(items) = &items else { return Ok(true) };
+            let mut sorted = Vec::new();
+            for term in call.order {
+                sorted.push(self.item_column(items, &term.expr)?);
+            }
+            if !self.sorts_by_rowids(items, &sorted)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The FROM item, by its place in `items`, and the column, lowercase,

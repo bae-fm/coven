@@ -258,6 +258,14 @@ partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : List (String 
     pure (.expr e, alias.orElse fun _ => passed)
   else if let some e := field j "max" then
     pure (.max (← readExpr schema e k ctes), alias)
+  else if let some e := field j "concat" then
+    let e ← readExpr schema e k ctes
+    let mut orderBy := []
+    for term in list j "order" do
+      let some sorted := field term "expr" | lift (throw "an ORDER BY term sorts by nothing")
+      let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
+      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, desc)]
+    pure (.concat e orderBy, alias)
   else if (field j "count").isSome then
     pure (.count, alias)
   else lift (throw "unknown result column")

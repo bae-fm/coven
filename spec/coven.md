@@ -698,8 +698,9 @@ leaves out the columns a USING or NATURAL join compares, so coven adds them
 itself, for each table such a join compares in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
 query that joins `tracks` to `releases` with `USING (release_id)`. SQLite also
-leaves out the columns that decide which rows a LIMIT keeps, and coven adds
-them too, as the LIMIT's rules below say. When coven
+leaves out the columns that decide which rows a LIMIT keeps, and which row an
+aggregate takes a value from, and coven adds them too, as the rules on LIMIT
+and aggregates below say. When coven
 can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.
@@ -789,6 +790,40 @@ an ORDER BY over either still leaves the query depending on every column. A
 SELECT that calls an aggregate with no GROUP BY returns one row, which every
 order keeps, so a subquery such as `(SELECT count(*) FROM tracks AS t WHERE
 t.release_id = r.id)` depends only on the columns it names too.
+
+An aggregate can depend on the order SQLite reads rows in, with no LIMIT. Ben's
+artist list shows each artist's album count and the title of one album:
+`SELECT b.artist_id, b.title, count(*) FROM albums AS b GROUP BY b.artist_id`.
+`b.title` is no GROUP BY term and sits in no aggregate, so SQLite takes it from
+one of the artist's albums, which the order its plan reads them in decides. The
+app has an index on `albums(artist_id, year)`, so SQLite reads each artist's
+albums by year, and a write that changes only one album's `year` can change
+the title the list shows. `group_concat(b.title, ', ')` joins the titles in
+that same order. So a SELECT that groups its rows or calls an aggregate depends
+on every column of each table it reads, as a query with a LIMIT does, in two
+cases:
+
+- A result column, the HAVING or an ORDER BY term names a column, or holds a
+  subquery, outside every aggregate and every GROUP BY term, or the SELECT
+  returns a `*`.
+- The SELECT calls an aggregate other than `count`, `min` and `max`, and the
+  call has no ORDER BY of its own that sorts by the rowid of each of the
+  SELECT's tables. `group_concat` and `json_group_array` join their values in
+  the order SQLite reads them, and `sum`, `total` and `avg` add reals in that
+  order, which can change the last digits of the result.
+
+A column is a GROUP BY term when the GROUP BY names it as the SELECT writes
+it, or names its result column by position or alias. `count`, `min` and `max`
+give the same value in every order, so `SELECT b.artist_id, count(*),
+max(b.year) FROM albums AS b GROUP BY b.artist_id` depends only on the columns
+it names. Among values that compare equal and still differ, as `'Abc'` and
+`'ABC'` under NOCASE, `min` and `max` keep the value SQLite reads first, and
+coven doesn't count that order. `group_concat(b.title, ', ' ORDER BY b.id)`,
+where `id` is the table's INTEGER PRIMARY KEY, depends only on the columns it
+names. Ordered by `b.year` alone, it depends on every column of `albums`, since
+two albums of the same year can come in either order. The SELECT's conditions
+still narrow its rows: a write to an album of an artist the list doesn't show
+doesn't rerun it.
 
 A condition narrows only where coven compares values as SQLite does. One on a
 column whose collation isn't BINARY, or on a generated column, doesn't, and nor
@@ -14848,7 +14883,7 @@ Write-ups explain each model and state its assumptions:
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
-| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; a change to any column of a table a query whose rows SQLite picks reads reruns it | `post_picks_any`, `fullyOrders_sound`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
+| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, and `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

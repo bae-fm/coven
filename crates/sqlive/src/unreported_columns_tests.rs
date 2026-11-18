@@ -171,3 +171,55 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
         assert_eq!(found, pairs(&[(table, "id"), (table, "x")]), "{sql}");
     }
 }
+
+/// A core that aggregates reads every column of each table it reads when its
+/// rows follow the order SQLite reads its rows in: a result column, the
+/// HAVING or the ORDER BY names a column or holds a subquery outside every
+/// aggregate call and GROUP BY term, it returns a `*`, or it calls an
+/// aggregate other than count, min and max with no ORDER BY of its own that
+/// sorts by the rowid of each of its tables.
+#[test]
+fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
+    let connection = connection();
+    let a = [("a", "id"), ("a", "k"), ("a", "v")];
+    let b = [("b", "id"), ("b", "k"), ("b", "w")];
+    let both: Vec<_> = a.iter().chain(&b).copied().collect();
+    for (sql, expected) in [
+        ("SELECT a.v, count(*) FROM a", &a[..]),
+        ("SELECT a.k, a.v FROM a GROUP BY a.k", &a[..]),
+        ("SELECT count(*) FROM a GROUP BY a.k HAVING a.v > 1", &a[..]),
+        ("SELECT count(*) FROM a GROUP BY a.k ORDER BY a.v", &a[..]),
+        ("SELECT *, count(*) FROM a", &a[..]),
+        ("SELECT group_concat(a.v) FROM a", &a[..]),
+        ("SELECT coalesce(group_concat(a.v, ', '), '') FROM a GROUP BY a.k", &a[..]),
+        ("SELECT sum(a.v) FROM a GROUP BY a.k", &a[..]),
+        ("SELECT json_group_array(a.v ORDER BY a.k) FROM a", &a[..]),
+        ("SELECT group_concat(a.v ORDER BY a.id) FROM a JOIN b ON b.k = a.k", &both[..]),
+        // The core reads b in its subquery, whose value could name a row of a.
+        ("SELECT max(a.v), (SELECT b.w FROM b ORDER BY b.id LIMIT 1) FROM a", &both[..]),
+        ("SELECT x.n FROM (SELECT a.k, count(*) AS n, a.v FROM a GROUP BY a.k) AS x", &a[..]),
+        ("SELECT b.w FROM b WHERE b.k IN (SELECT a.v FROM a GROUP BY a.k)", &a[..]),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+    for sql in [
+        "SELECT a.k, count(*) FROM a GROUP BY a.k",
+        "SELECT a.k + 1, max(a.v) FROM a GROUP BY a.k",
+        "SELECT a.k AS g, min(a.v) FROM a GROUP BY g",
+        "SELECT a.k, count(*) FROM a GROUP BY 1",
+        "SELECT count(*), max(a.v), 7 FROM a",
+        "SELECT count(*) AS n FROM a GROUP BY a.k ORDER BY n",
+        "SELECT group_concat(a.v ORDER BY a.id) FROM a",
+        "SELECT group_concat(a.v ORDER BY a.k, rowid DESC) FROM a",
+        "SELECT json_group_array(a.v ORDER BY a.id, b.id) FROM a JOIN b ON b.k = a.k",
+        "SELECT a.v FROM a",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[]), "{sql}");
+    }
+}

@@ -14,6 +14,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.atOrBefore_passes
 #print axioms SqliveNarrowing.Pick.post_picks_any
 #print axioms SqliveNarrowing.Pick.fullyOrders_sound
+#print axioms SqliveNarrowing.Pick.bare_picks_any
+#print axioms SqliveNarrowing.Pick.concat_follows_order
+#print axioms SqliveNarrowing.Pick.orderFree_rows_perm
 #print axioms SqliveNarrowing.Pick.picked_column_reruns
 #print axioms SqliveNarrowing.Whole.whole_sound
 #print axioms SqliveNarrowing.readCondition_sound

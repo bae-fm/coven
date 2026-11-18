@@ -2,7 +2,8 @@
 //! as its LIMIT depends only on the rows that sort at or before its last
 //! row, as a list window read as one live query does (§4). A LIMIT whose
 //! ORDER BY doesn't tell its rows apart depends on every column of its
-//! tables.
+//! tables, and so does an aggregate whose rows follow the order SQLite reads
+//! its rows in.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -235,4 +236,45 @@ async fn a_limit_ordered_by_the_rowid_depends_only_on_the_named_columns() {
     )
     .await;
     db.close();
+}
+
+/// A core that aggregates takes a column outside every aggregate call and
+/// GROUP BY term from one row of its group, and `group_concat` joins its
+/// values, in the order SQLite reads the rows: here through the index on
+/// `u.a`, which the statement never names, so a write to `u.a` changes the
+/// result, and a write to any column of `u` reruns the query.
+#[tokio::test]
+async fn an_aggregate_that_follows_the_order_sqlite_reads_reruns_on_any_column() {
+    for sql in ["SELECT x.id, count(*) FROM u AS x", "SELECT group_concat(x.id, '') FROM u AS x"] {
+        let db = TestDatabase::open(PICKED);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE u SET a = 0 WHERE id = 5", true), ("UPDATE u SET n = 1 WHERE id = 2", true)],
+        )
+        .await;
+        db.close();
+    }
+}
+
+/// An aggregate's own ORDER BY that sorts by the rowid fixes the order it
+/// joins its values in, and count and max give the same value in every
+/// order, so a write to a column the statement doesn't name reruns nothing.
+#[tokio::test]
+async fn an_aggregate_in_a_fixed_order_depends_only_on_the_named_columns() {
+    for sql in [
+        "SELECT group_concat(x.id, '' ORDER BY x.id) FROM u AS x",
+        "SELECT count(*), max(x.id) FROM u AS x",
+    ] {
+        let db = TestDatabase::open(PICKED);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE u SET a = 0 WHERE id = 5", false), ("DELETE FROM u WHERE id = 0", true)],
+        )
+        .await;
+        db.close();
+    }
 }

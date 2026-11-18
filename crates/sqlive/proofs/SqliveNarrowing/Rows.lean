@@ -23,6 +23,23 @@ theorem mem_sortBy {α : Type} {le : α → α → Bool} {x : α} {l : List α} 
   | nil => simp [sortBy]
   | cons y ys ih => simp [sortBy, mem_insertSorted, ih]
 
+/-- Sorting the images of a list under a map that keeps how two elements
+sort sorts the list, then maps it. -/
+theorem sortBy_map {α β : Type} {le : β → β → Bool} {le' : α → α → Bool} {R : α → β}
+    (h : ∀ a b, le (R a) (R b) = le' a b) {l : List α} :
+    sortBy le (l.map R) = (sortBy le' l).map R := by
+  have hins : ∀ (x : α) (l : List α),
+      insertSorted le (R x) (l.map R) = (insertSorted le' x l).map R := by
+    intro x l
+    induction l with
+    | nil => rfl
+    | cons y ys ih =>
+      simp only [List.map_cons, insertSorted, h]
+      split <;> simp [ih]
+  induction l with
+  | nil => rfl
+  | cons x xs ih => simp only [List.map_cons, sortBy, ih, hins]
+
 theorem mem_post {q : Query} {rows : List Row} {r : Row} (h : r ∈ q.post rows) : r ∈ rows := by
   unfold Query.post at h
   simp only at h
@@ -53,6 +70,7 @@ theorem mem_rows_single {c : Core} {e : Expr} (ho : c.output = [.expr e])
   split at hr
   · simp only [List.mem_map, List.map_cons, List.map_nil] at hr
     obtain ⟨g, hg, rfl⟩ := hr
+    simp only [OutCol.aggregate]
     split
     · rename_i b hlast
       right
