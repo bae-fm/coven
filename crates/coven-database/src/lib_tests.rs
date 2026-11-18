@@ -501,10 +501,16 @@ pub(crate) fn contents(
         tables
             .into_iter()
             .map(|table| {
+                // The database files' sizes follow each open and checkpoint,
+                // not a write (§17.8); the other parts follow writes.
+                let rows = match table.as_str() {
+                    "coven_library_bytes" => " WHERE part NOT IN ('database','inputs')",
+                    _ => "",
+                };
                 let values = db
                     .query(
                         &format!(
-                            "SELECT * FROM main.{} ORDER BY 1",
+                            "SELECT * FROM main.{}{rows} ORDER BY 1",
                             sqlive::sql::identifier(&table)
                         ),
                         [],
