@@ -1,5 +1,9 @@
 name = "sqliveNarrowing"
-defaultTargets = ["SqliveNarrowing"]
+defaultTargets = ["SqliveNarrowing", "narrowingRunner"]
 
 [[lean_lib]]
 name = "SqliveNarrowing"
+
+[[lean_exe]]
+name = "narrowingRunner"
+root = "NarrowingRunner"

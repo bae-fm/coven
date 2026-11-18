@@ -99,3 +99,12 @@ conversions an affinity makes: sqlive's checks that refuse them are modelled as
 refusals. The model also leaves out bound parameters, table functions, the views sqlive
 reads whole as a join's partner, the terms that compare a NULL test's truth or
 a column `IS` a parameter, and the step limit on a lookup.
+
+## The runner
+
+`narrowingRunner` reads one case as JSON on stdin: the schema (each table's
+columns and their affinities, and each view's query), the statement as a tree
+that names its sources by alias, the database before and after the write, and
+the write's row changes. The runner writes whether the write reruns the statement,
+whether the model reads the statement whole, each table's scope, and the
+statement's rows before and after.
