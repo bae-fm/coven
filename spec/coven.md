@@ -473,15 +473,16 @@ mode so readers can keep their snapshots while a write commits. If SQLite keeps
 another mode, opening fails with `WalUnavailable`.
 
 Some of that bookkeeping decides what the app shows: the files its rows
-reference and where each is, which files are still waiting to upload and why,
-which files each move to the cloud holds, which files this device keeps
+reference, where each is and where a read here takes its bytes from, which
+files are still waiting to upload, why, and what each upload is doing, which
+files each move to the cloud holds, which files this device keeps
 pinned, how many bytes each namespace's cache holds, what can't proceed, how
 sync is going, how the app's admin operations ended, who the members are, and
 which circles this member is in.
-So the app's SQL can read it through fourteen views, `coven_uploads`,
-`coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
-`coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
-`coven_user_files`,
+So the app's SQL can read it through sixteen views, `coven_uploads`,
+`coven_upload_phases`, `coven_sending`, `coven_downloading`,
+`coven_upload_pause`, `coven_network`, `coven_cache_bytes`, `coven_sync_state`,
+`coven_invites`, `coven_operations`, `coven_file_reads`, `coven_user_files`,
 `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
 and ten tables,
 `coven_files`, `coven_pins`, `coven_pin_requests`, `coven_moves`,
