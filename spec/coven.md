@@ -2981,8 +2981,8 @@ by a delete and an insert (§9.2), which the delete rule covers.
 
 Each synced table declares one of two kinds of primary key:
 
-- **independent:** each new row gets a random UUID, so rows made on different
-  devices never collide (notes);
+- **independent:** the app makes a new UUID for each new row, so rows made on
+  different devices never collide (notes);
 - **shared:** the app derives the key from what makes the row unique, so the same
   thing made on two devices is one row (the tag "urgent").
 
@@ -7727,7 +7727,7 @@ members. Coven writes the records; app SQL reads them through `coven_files`
 
 | Column | Holds |
 |---|---|
-| `id` | the file's id, canonical UUID text; coven picks it when the file is staged |
+| `id` | the file's id, canonical UUID text; coven takes it from the app's id source when the file is staged |
 | `audience` | the store or one circle |
 | `size` | its size in bytes |
 | `hash` | its content hash, the SHA-256 of its bytes; NULL until the file is stored |
@@ -7844,10 +7844,10 @@ Ana's delete is published, then become a deletion candidate.
 #### 17.3 Staging a file
 
 A file comes into the store as a step of a write (§4,
-[api.md E3](api.md#e3-writing)). The step gives the file a new id, and the
-write's SQL puts that id in the rows that reference it. The app never makes a
-file id. A staged file no row references fails the write with
-`FileUnreferenced`.
+[api.md E3](api.md#e3-writing)). The step gives the file a new id from the
+app's id source (api.md E1), and the write's SQL puts that id in the rows that
+reference it. The app never makes a file id. A staged file no row references
+fails the write with `FileUnreferenced`.
 
 There are three ways in. A user's original, read whole once beforehand (below),
 is staged by a step of the write itself: nothing is read under the writer. So
@@ -7978,9 +7978,9 @@ no path on this operating system fail `path_from_bytes` with
 `PathBytesError`: on Windows, bytes that aren't WTF-8, such as Latin-1 bytes
 recorded on Linux. Unix takes any bytes.
 
-**The staging write** for the cloud picks the file's random id, a random object
-id and a random key, records this device as its uploader, and fixes its storage
-path, `<store>/files/<device>/<object>`.
+**The staging write** for the cloud gives the file a new object id from the
+app's id source and a random key, records this device as its uploader, and
+fixes its storage path, `<store>/files/<device>/<object>`.
 
 - The same transaction makes the file's record in the audience of the rows
   that reference it, on this device only, and queues the upload, even with no
@@ -8407,7 +8407,8 @@ writes like any other. Every device checks a downloaded file against it.
 Uploading stores the file, encrypted with the file key chosen by the staging
 write, at its already chosen path.
 
-- The provider sees only a random name, never a hash of the content.
+- The provider sees only the object id as the file's name, never a hash of
+  the content.
 - Each staged file is a copy of its own. Identical bytes staged twice are
   stored twice, and deleting one never touches the other. A file several rows
   reference is stored once, and so are the files over its bytes in other
@@ -10791,8 +10792,9 @@ its id:
 Outside the sequence, an occupied path that never changes (a file, a snapshot, a
 floor body, a key delivery) counts as this device's only if its complete bytes
 equal the recorded attempt. A failed read for the comparison stays pending, and
-metadata alone never proves the bytes equal. A file's path holds a random id, so
-no other copy can have written it, and a mismatch there stops the attempt. A
+metadata alone never proves the bytes equal. A file's path holds a new object id
+from the id source, which never repeats, so no other copy can have written it,
+and a mismatch there stops the attempt. A
 snapshot's and a floor body's path holds the device's id and a number of its own,
 so a copy that parted from this one can have written the same path: Ana's
 restored phone numbered a snapshot 5 and uploaded its body, and Ben's phone, the
@@ -12751,7 +12753,7 @@ A member's keys are two key pairs, kept together:
 | Sealing a pairing's handover | anonymous sealed box to the request's sealing key: X25519 with XChaCha20-Poly1305, with its own label |
 | Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
-| A file | a random key of its own; its storage name is a random object id (§17.5) |
+| A file | a random key of its own; its storage name is a new object id from the app's id source (§17.5) |
 
 ### D.3 What authentication binds
 

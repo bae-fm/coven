@@ -35,8 +35,8 @@ impl FileLocation {
         ObjectPath::file(store, self.uploader, self.object)
     }
 
-    /// A new location for bytes this device uploads: a random object id and
-    /// a new key (§17.3).
+    /// A new location for bytes this device uploads: a new object id from
+    /// `ids` and a new random key (§17.3).
     pub(crate) fn new(device: DeviceId, ids: &dyn IdSource) -> Result<Self, DbError> {
         Self::from_reference(&FileReference {
             device,

@@ -114,8 +114,10 @@ impl std::fmt::Display for InviteId {
     }
 }
 
-/// A file record's random identity, independent of its content and of where
-/// its bytes are stored (§17.2).
+/// A file record's identity, independent of its content and of where its
+/// bytes are stored (§17.2). coven takes it from the id source when the app
+/// stages the file, or when a write moves a row that names a file to another
+/// audience and gives it a new file there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FileId(
@@ -129,8 +131,9 @@ impl std::fmt::Display for FileId {
     }
 }
 
-/// A stored object's random id, the last part of its path
-/// `<store>/files/<uploader>/<object>` (§17.5).
+/// A stored object's id, the last part of its path
+/// `<store>/files/<uploader>/<object>` (§17.5). coven takes it from the id
+/// source when a write queues the upload of bytes this device holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObjectId(

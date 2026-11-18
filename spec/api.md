@@ -1219,7 +1219,7 @@ impl ObjectPath {
         number: NonZeroU64,
     ) -> Self;
 
-    /// A stored object: encrypted file bytes named by a random id (§17.5).
+    /// A stored object: encrypted file bytes named by their object id (§17.5).
     pub fn file(store: StoreId, device: DeviceId, object: ObjectId) -> Self;
 
     /// An encrypted join request under its invite id (§13.2).
@@ -2523,8 +2523,9 @@ impl CovenBuilder {
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
-    /// The source of new ids: store, circle, member, key, invite and file ids,
-    /// and this install's device id (Appendix F.2). Defaults to `UuidIds`.
+    /// The source of new ids: store, circle, member, key, invite, file and
+    /// stored object ids, and this install's device id (Appendix F.2).
+    /// Defaults to `UuidIds`.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
     /// Replace the platform's network with one the test drives (E5).
@@ -8539,11 +8540,11 @@ pub enum ProviderSignOut {
 /// A one-time invite's UUID, also naming its join-request object (§13.2).
 pub struct InviteId(pub Uuid);
 
-/// A file's random id, as `coven_files` and the app's file reference
-/// columns hold it (§17.2). ToSql/FromSql bind/read canonical text.
+/// A file's id from the app's id source, as `coven_files` and the app's file
+/// reference columns hold it (§17.2). ToSql/FromSql bind/read canonical text.
 pub struct FileId(pub Uuid);
 
-/// A stored object's random id, the last part of its path
+/// A stored object's id from the app's id source, the last part of its path
 /// `<store>/files/<uploader>/<object>` (§17.5): never a file's id, since
 /// files over the same bytes share one object. ToSql/FromSql bind/read its
 /// 16 bytes.

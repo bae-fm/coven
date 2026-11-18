@@ -5,13 +5,13 @@ use coven_crypto::{FileKey, SecretText};
 use coven_foundation::id_source::{DeviceId, ObjectId};
 use zeroize::Zeroizing;
 
-/// A file's fixed uploader, random storage name and decryption key.
+/// A file's fixed uploader, storage name and decryption key.
 /// This identity carries neither upload status nor a device-local path.
 #[derive(Debug)]
 pub struct FileReference {
     /// Device responsible for uploading the object.
     pub device: DeviceId,
-    /// The stored object's random id, its name in storage (§17.5).
+    /// The stored object's id from the id source, its name in storage (§17.5).
     pub object: ObjectId,
     /// Key carried only inside encrypted rows and writes.
     pub key: FileKey,

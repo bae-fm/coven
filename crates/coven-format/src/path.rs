@@ -65,7 +65,7 @@ impl ObjectPath {
     ) -> Self {
         Self(format!("{store}/snapshots/{}/{}/{number}", audience, device.0))
     }
-    /// A stored object: encrypted file bytes named by a random id (§17.5).
+    /// A stored object: encrypted file bytes named by their object id (§17.5).
     pub fn file(store: StoreId, device: DeviceId, object: ObjectId) -> Self {
         Self(format!("{store}/files/{}/{object}", device.0))
     }

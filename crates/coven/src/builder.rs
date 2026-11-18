@@ -163,8 +163,9 @@ impl CovenBuilder {
         self.clock = clock;
         self
     }
-    /// The source of new ids: store, circle, member, key, invite and file ids,
-    /// and this install's device id (Appendix F.2). Defaults to `UuidIds`.
+    /// The source of new ids: store, circle, member, key, invite, file and
+    /// stored object ids, and this install's device id (Appendix F.2).
+    /// Defaults to `UuidIds`.
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;
         self

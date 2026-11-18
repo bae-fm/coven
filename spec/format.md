@@ -2132,7 +2132,7 @@ provider can't move one object into another's place.
 | `<store>/floor` | The floor pointer: the first retained slot and the newest body's writer, number and digest, signed; conditional replacement, in one request |
 | `<store>/floors/<device>/<n>` | One floor body: signed, encrypted snapshot references, the first retained slot and the key copies; created once, deleted by its writer once the pointer names another |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
-| `<store>/files/<device>/<object>` | An uploaded file, by its random object id |
+| `<store>/files/<device>/<object>` | An uploaded file, by its object id from the app's id source |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite or pairing, a pairing's handover in the request's place, or the marker of its end |
 | `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |
 | `<store>/.coven-uploads/<device>/<session>` | One upload temporary or provider session of the device whose connection staged it; never a published object (§20.6) |
