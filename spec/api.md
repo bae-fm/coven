@@ -7998,9 +7998,9 @@ impl CovenHandle {
     /// coven forgets it (§14.3).
     /// The entry is journaled before the key is taken, and runs only while
     /// the connection holds the key: a device killed in between ends the
-    /// entry without claiming, and keeps the old key and record. The call
-    /// fails only when it changed nothing: one that fails taking the key
-    /// ends the entry it journaled. Once the key is taken, a claim storage
+    /// entry without claiming, and keeps the old key and record. A failure
+    /// before the key is taken changes nothing: a call that fails taking the
+    /// key ends the entry it journaled. Once the key is taken, a claim storage
     /// fails or leaves uncertain returns `Ok`: the entry stays journaled
     /// with the failure in its pending record, and passes retry it. Any
     /// other failure still fails the call with the key taken: the caught-up
