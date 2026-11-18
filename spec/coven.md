@@ -695,7 +695,7 @@ A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
 commit that changes none of those columns doesn't run the query again. SQLite
 leaves out the columns a USING or NATURAL join compares, so coven adds them
-itself, for each table such a join compares in the statement or in one of the
+itself, for each table such a join reads in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
 query that joins `tracks` to `releases` with `USING (release_id)`. When coven
 can't parse the statement, or a view it reads, coven counts every column of
