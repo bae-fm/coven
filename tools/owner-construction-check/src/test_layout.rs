@@ -34,7 +34,7 @@ pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<Finding> {
         }
         if let Some(subject) = name.strip_suffix("_tests.rs") {
             let sibling = format!("{directory}/{subject}.rs");
-            if !file.is_integration_test_source() && !paths.contains(sibling.as_str()) {
+            if !file.is_in_test_directory() && !paths.contains(sibling.as_str()) {
                 violations.push(violation(path, 1, Convention::OrphanTestFile));
             }
         }

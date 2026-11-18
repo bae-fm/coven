@@ -32,12 +32,12 @@ pub(crate) struct SqlFile {
 }
 
 impl SqlFile {
-    /// A file under its member's own `tests/` directory, as an integration
-    /// test's Rust file is (`RustFile::is_integration_test_source`).
+    /// A file under its member's own `tests/` or `examples/` directory, as
+    /// a Rust file there is (`RustFile::is_in_test_directory`).
     pub(crate) fn is_test_source(&self) -> bool {
         self.relative_path
             .strip_prefix(self.package_root.as_str())
-            .is_some_and(|path| path.starts_with("tests/"))
+            .is_some_and(|path| path.starts_with("tests/") || path.starts_with("examples/"))
     }
 }
 

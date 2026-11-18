@@ -790,6 +790,7 @@ fn trait_fakes_are_allowed_only_in_roots_and_test_code() {
         "crates/app/src/runtime_tests.rs",
         "crates/app/tests/runtime.rs",
         "crates/app/tests/support/fixture.rs",
+        "crates/app/examples/bench.rs",
     ] {
         assert!(check(path, source).is_empty(), "{path}");
     }

@@ -7,6 +7,8 @@ fn test_sources_are_exactly_sibling_test_files_and_integration_tests() {
         "crates/app-sync/src/sync/loop_tests.rs",
         "crates/app-sync/tests/two_devices.rs",
         "crates/app-sync/tests/support/fixture.rs",
+        "crates/app-sync/examples/bench.rs",
+        "crates/app-sync/examples/multi/part.rs",
         "tools/owner-construction-check/src/main_tests.rs",
     ] {
         assert!(RustFile::fixture(test_source, "").is_test_source(), "{test_source}");
@@ -19,6 +21,7 @@ fn test_sources_are_exactly_sibling_test_files_and_integration_tests() {
         "crates/app-sync/src/pull_tests/case.rs",
         "crates/app-sync/src/sync/tests/case.rs",
         "crates/app-sync/src/pull_test.rs",
+        "crates/app-sync/src/examples/case.rs",
     ] {
         assert!(!RustFile::fixture(production, "").is_test_source(), "{production}");
     }

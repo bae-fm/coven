@@ -49,6 +49,7 @@ fn members_anywhere_give_their_files_a_package() {
     fixture.write("app-core/src/checks.rs", "");
     fixture.write("app-core/src/db/tests/bench.rs", "");
     fixture.write("app-core/tests/flow.rs", "");
+    fixture.write("app-core/examples/bench.rs", "");
     fixture.write("app-util/Cargo.toml", "[package]\nname = \"app-util\"\n");
     fixture.write("app-util/build.rs", "fn main() {}");
     fixture.write("app-core/src/db/schema.sql", "CREATE TABLE notes (id TEXT);");
@@ -71,6 +72,7 @@ fn members_anywhere_give_their_files_a_package() {
     assert_eq!(
         files,
         [
+            ("app-core/examples/bench.rs", "app-core/", "app-core", true),
             ("app-core/src/checks.rs", "app-core/", "app-core", true),
             ("app-core/src/db/tests/bench.rs", "app-core/", "app-core", false),
             ("app-core/src/lib.rs", "app-core/", "app-core", false),

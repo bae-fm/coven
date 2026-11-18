@@ -14155,7 +14155,8 @@ the same on any platform.
    own source names none of it. Test code answers to none of these rules but
    one of F.2's, that a domain's tests live with it, a file's
    `<name>_tests.rs` beside the file; and to F.5's. Test code is the
-   `<name>_tests.rs` files, each crate's `tests/` directory, files only test
+   `<name>_tests.rs` files, each crate's `tests/` and `examples/` directories
+   (Cargo builds examples with the dev-dependencies, as it builds tests), files only test
    modules declare, and every item that compiles only into tests: under
    `cfg(test)`, or under a Cargo feature only tests turn on, such as the
    fakes' `test-utils` (F.5). So is an attribute a `cfg_attr` adds only

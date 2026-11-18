@@ -58,16 +58,17 @@ impl RustFile {
 
     /// The test layout of Appendix F.5: a source's tests live beside it in
     /// `<name>_tests.rs`, and integration tests in a member's `tests/`
-    /// directory.
+    /// directory. A member's `examples/` count as tests too: Cargo builds
+    /// them with the dev-dependencies, as it builds tests.
     pub(crate) fn is_test_source_by_name(&self) -> bool {
-        self.is_integration_test_source() || self.relative_path.ends_with("_tests.rs")
+        self.is_in_test_directory() || self.relative_path.ends_with("_tests.rs")
     }
 
-    /// A file under its member's own `tests/` directory.
-    pub(crate) fn is_integration_test_source(&self) -> bool {
+    /// A file under its member's own `tests/` or `examples/` directory.
+    pub(crate) fn is_in_test_directory(&self) -> bool {
         self.relative_path
             .strip_prefix(self.package_root.as_str())
-            .is_some_and(|path| path.starts_with("tests/"))
+            .is_some_and(|path| path.starts_with("tests/") || path.starts_with("examples/"))
     }
 }
 
