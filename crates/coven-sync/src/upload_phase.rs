@@ -30,8 +30,22 @@ impl Facts {
     /// model's `Upload.phase`), with what holds every transfer as these facts
     /// say it: `upload_phase`.
     pub(crate) fn upload_phase(&self, holds: &TransferHolds, upload: &Upload) -> UploadPhase {
-        upload_phase(self.held_all(), holds, upload)
+        match upload_phase(self.held_all(), holds, upload, |record| record) {
+            Phase::Uploading => UploadPhase::Uploading,
+            Phase::Stored => UploadPhase::Stored,
+            Phase::Waiting(wait) => UploadPhase::Waiting(wait),
+            Phase::Failed(record) => UploadPhase::Failed(record.clone()),
+        }
     }
+}
+
+/// An upload's phase, as `UploadPhase` names it, with a failed phase
+/// carrying the upload's record as its reader keeps it.
+enum Phase<R> {
+    Uploading,
+    Stored,
+    Waiting(UploadWait),
+    Failed(R),
 }
 
 /// What one upload in the queue is doing, a trailing one's included (the
@@ -41,18 +55,23 @@ impl Facts {
 /// (`holds`: the pause, the network, a self-replacement's write pause),
 /// then its backoff, then its turn. The network comes before the backoff,
 /// since an upload whose backoff ends still can't go out on a metered
-/// network.
-fn upload_phase(held_all: Option<SyncWait>, holds: &TransferHolds, upload: &Upload) -> UploadPhase {
+/// network. `record_of` gives the pending record of what the upload keeps as `R`.
+fn upload_phase<'a, R>(
+    held_all: Option<SyncWait>,
+    holds: &TransferHolds,
+    upload: &'a Upload<R>,
+    record_of: impl Fn(&R) -> &PendingRecord,
+) -> Phase<&'a R> {
     match upload.progress {
-        Progress::Moving => UploadPhase::Uploading,
-        Progress::Stored => UploadPhase::Stored,
+        Progress::Moving => Phase::Uploading,
+        Progress::Stored => Phase::Stored,
         Progress::Queued => {
             if let Some(record) =
-                upload.record.as_ref().filter(|record| record.reason.names_a_state())
+                upload.record.as_ref().filter(|record| record_of(record).reason.names_a_state())
             {
-                return UploadPhase::Failed(record.clone());
+                return Phase::Failed(record);
             }
-            UploadPhase::Waiting(if let Some(held) = held_all.and_then(SyncWait::held_transfers) {
+            Phase::Waiting(if let Some(held) = held_all.and_then(SyncWait::held_transfers) {
                 held
             } else if holds.paused && !upload.bound {
                 UploadWait::Paused
@@ -82,7 +101,6 @@ fn upload_phase_row(facts: UploadPhaseFacts<PendingRecord>) -> Result<UploadPhas
     let record = facts.own.or_else(|| {
         facts.moving.filter(|(_, record)| crate::files::names_original(&record.reason, original))
     });
-    let (position, record) = record.unzip();
     let upload = Upload {
         progress: if facts.sending {
             Progress::Moving
@@ -95,20 +113,13 @@ fn upload_phase_row(facts: UploadPhaseFacts<PendingRecord>) -> Result<UploadPhas
         retry_at: facts.retry_at,
         record,
     };
-    let phase = upload_phase(
-        crate::sync_status::held_all(facts.sync, last.as_ref()),
-        &facts.holds,
-        &upload,
-    );
-    Ok(match phase {
-        UploadPhase::Uploading => UploadPhaseRow::Uploading,
-        UploadPhase::Stored => UploadPhaseRow::Stored,
-        UploadPhase::Waiting(wait) => UploadPhaseRow::Waiting(wait.kind()),
-        // A failed phase names the upload's record, which came with its
-        // position.
-        UploadPhase::Failed(_) => UploadPhaseRow::Failed(position.ok_or(DbError::Invariant {
-            what: "a failed upload's record has its position in coven_pending",
-        })?),
+    let held_all = crate::sync_status::held_all(facts.sync, last.as_ref());
+    // The record keeps its position in `coven_pending`, which a failure names.
+    Ok(match upload_phase(held_all, &facts.holds, &upload, |(_, record)| record) {
+        Phase::Uploading => UploadPhaseRow::Uploading,
+        Phase::Stored => UploadPhaseRow::Stored,
+        Phase::Waiting(wait) => UploadPhaseRow::Waiting(wait.kind()),
+        Phase::Failed((position, _)) => UploadPhaseRow::Failed(*position),
     })
 }
 

@@ -21,9 +21,10 @@ pub(crate) enum Progress {
     Queued,
 }
 
-/// One upload in this device's queue.
+/// One upload in this device's queue, with its record as `R`: the record
+/// alone, or with what else its reader keeps beside it.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Upload {
+pub(crate) struct Upload<R = PendingRecord> {
     pub(crate) progress: Progress,
     /// A bound reference's, which holds the writes behind it and which the
     /// pause doesn't hold (§17.4). The state reads bound uploads only.
@@ -31,7 +32,7 @@ pub(crate) struct Upload {
     /// Its last attempt failed, and it retries then (§6.7).
     pub(crate) retry_at: Option<SystemTime>,
     /// Its own pending record, if it has one.
-    pub(crate) record: Option<PendingRecord>,
+    pub(crate) record: Option<R>,
 }
 
 /// The facts `Facts::state` computes the state from, the same as the
