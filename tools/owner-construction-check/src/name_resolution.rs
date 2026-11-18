@@ -587,20 +587,13 @@ impl NameResolver {
             return Err(ResolutionError::Missing);
         };
         let module = &self.scopes[scope].module;
+        if let Some((base, rest)) = self.module_prefix(module, path)? {
+            return self.descend(base, rest, namespace, visiting);
+        }
         let (base, rest) = match first.as_str() {
             "" => {
                 let (root, rest) = rest.split_first().ok_or(ResolutionError::Missing)?;
                 (self.external(module, root).ok_or(ResolutionError::Missing)?, rest)
-            }
-            "crate" => (vec![module[0].clone()], rest),
-            "self" => (module.clone(), rest),
-            "super" => {
-                let count = path.iter().take_while(|part| part.as_str() == "super").count();
-                let mut parent = module;
-                for _ in 0..count {
-                    parent = self.module_parents.get(parent).ok_or(ResolutionError::Missing)?;
-                }
-                (parent.clone(), &path[count..])
             }
             _ => (
                 self.lookup(
@@ -615,6 +608,31 @@ impl NameResolver {
             ),
         };
         self.descend(base, rest, namespace, visiting)
+    }
+
+    /// The module a path starting with `crate`, `self` or `super` names
+    /// from code in `module`, and the rest of the path; none for a path
+    /// that starts otherwise. A `super` past the crate's root names no
+    /// module.
+    fn module_prefix<'p>(
+        &self,
+        module: &[String],
+        path: &'p [String],
+    ) -> Result<Option<(ItemPath, &'p [String])>, ResolutionError> {
+        let Some((first, rest)) = path.split_first() else { return Ok(None) };
+        match first.as_str() {
+            "crate" => Ok(Some((vec![module[0].clone()], rest))),
+            "self" => Ok(Some((module.to_vec(), rest))),
+            "super" => {
+                let count = path.iter().take_while(|part| part.as_str() == "super").count();
+                let mut parent = module;
+                for _ in 0..count {
+                    parent = self.module_parents.get(parent).ok_or(ResolutionError::Missing)?;
+                }
+                Ok(Some((parent.to_vec(), &path[count..])))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn descend(

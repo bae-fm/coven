@@ -56,21 +56,13 @@ impl Collector<'_> {
             syn::Visibility::Inherited => return module.clone(),
             syn::Visibility::Restricted(restricted) => path_names(&restricted.path),
         };
-        let (base, rest) = match restricted.split_first() {
-            Some((first, rest)) if first == "crate" => (vec![module[0].clone()], rest),
-            Some((first, rest)) if first == "self" => (module.clone(), rest),
-            Some((first, _)) if first == "super" => {
-                let count = restricted.iter().take_while(|part| *part == "super").count();
-                let mut parent = module;
-                for _ in 0..count {
-                    match self.resolver.module_parents.get(parent) {
-                        Some(next) => parent = next,
-                        None => break,
-                    }
-                }
-                (parent.clone(), &restricted[count..])
-            }
-            _ => (vec![module[0].clone()], restricted.as_slice()),
+        let (base, rest) = match self.resolver.module_prefix(module, &restricted) {
+            Ok(Some(prefixed)) => prefixed,
+            // A path of the 2015 edition, from the crate's root.
+            Ok(None) => (vec![module[0].clone()], restricted.as_slice()),
+            // `pub(super)` at a crate's root, which rustc refuses: the item
+            // stays private.
+            Err(_) => return module.clone(),
         };
         base.into_iter().chain(rest.iter().cloned()).collect()
     }
