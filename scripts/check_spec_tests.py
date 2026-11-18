@@ -83,10 +83,14 @@ WRITEUP = """\
 """
 
 
-def run(coven=COVEN, format_md=FORMAT, claim=CLAIM, axioms=AXIOMS, writeup=WRITEUP):
+def run(coven=COVEN, format_md=FORMAT, claim=CLAIM, axioms=AXIOMS, writeup=WRITEUP,
+        crate_files=()):
     with tempfile.TemporaryDirectory() as tmp:
         spec = Path(tmp) / "spec"
         (spec / "proofs" / "model" / "Model").mkdir(parents=True)
+        for path, text in crate_files:
+            (Path(tmp) / path).parent.mkdir(parents=True, exist_ok=True)
+            (Path(tmp) / path).write_text(text, encoding="utf-8")
         # The spec is UTF-8 on every platform, whatever the locale's encoding.
         for path, text in [
             (spec / "proofs" / "model" / "Model" / "Claim.lean", claim),
@@ -143,6 +147,26 @@ class CheckSpec(unittest.TestCase):
         status, out = run(claim=CLAIM.replace("namespace Claim\n", "").replace("end Claim\n", ""))
         self.assertEqual(status, 1)
         self.assertIn("cites `Model.listed_only`", out)
+
+    def test_a_crates_proof_package_is_checked_as_one_under_spec(self):
+        crate = [
+            ("crates/engine/proofs/Engine/Rule.lean",
+             "namespace Engine\ntheorem rule_sound : True := trivial\nend Engine\n"),
+            ("crates/engine/proofs/Engine/Axioms.lean",
+             "import Engine\n\n#print axioms Engine.rule_sound\n"),
+        ]
+        row = "| A crate's rule | `rule_sound` | `../crates/engine/proofs/Engine/Rule.lean` | §1 |\n"
+        self.assertEqual(run(COVEN + row, crate_files=crate), (0, ""))
+        status, out = run(COVEN + row.replace("rule_sound", "missing_rule"), crate_files=crate)
+        self.assertEqual(status, 1)
+        self.assertIn("cites `missing_rule`, which ../crates/engine/proofs/Engine/Rule.lean "
+                      "declares no theorem of that name", out)
+        unaudited = [(path, text.replace("#print axioms Engine.rule_sound\n", ""))
+                     for path, text in crate]
+        status, out = run(COVEN + row, crate_files=unaudited)
+        self.assertEqual(status, 1)
+        self.assertIn("cites `Engine.rule_sound`, which ../crates/engine/proofs/Engine/Axioms.lean "
+                      "has no `#print axioms` line for", out)
 
     def test_long_prose_lines_fail_but_tables_code_and_links_do_not(self):
         long_prose = "word " * 21

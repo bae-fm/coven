@@ -10,8 +10,9 @@ a machine can see:
   E.6 alone), format.md section (D5.6) and api.md section (E13) names a
   heading that exists, and every link to a heading or a file resolves, using
   GitHub's heading anchors;
-- every link into proofs/ before coven.md's Appendix G names theorems listed
-  in a row of Appendix G marked *Body.*, so body citations are deliberate;
+- every link into a proof package before coven.md's Appendix G names theorems
+  listed in a row of Appendix G marked *Body.*, so body citations are
+  deliberate;
 - every theorem a row of Appendix G cites is declared in a Lean file that row
   names, and every theorem Appendix G or a proof write-up (proofs/<package>.md)
   cites has its own `#print axioms` line in its package's Axioms.lean, so the
@@ -20,10 +21,15 @@ a machine can see:
   that hold only links are exempt);
 - no paragraph or list is broken by two blank lines in a row.
 
+A proof package is a directory under spec/proofs/, or a crate's proofs/
+directory (../crates/<crate>/proofs/ from spec/), which models that crate; a
+crate's package is named for the crate.
+
 Exit status 0 when every file passes, 1 with one line per finding otherwise.
 """
 
 from pathlib import Path
+import os
 import re
 import sys
 
@@ -38,6 +44,8 @@ INLINE_CODE = re.compile(r"`[^`\n]*`")
 # A link's text may wrap onto the next line; its target may not.
 LINK = re.compile(r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\(([^()\s]+)\)")
 SECTION_REF = re.compile(r"§(\d+(?:\.\d+)?)")
+# A path from spec/ into a proof package.
+PROOF_PATH = r"(?:\.\./crates/[\w-]+/)?proofs/[\w./-]+"
 APPENDIX_REF = re.compile(r"\bAppendix ([A-Z])(?:\.(\d+))?")
 DOTTED_REF = re.compile(r"(?<![\w.])([A-H])\.(\d+)\b")
 FORMAT_REF = re.compile(r"(?<![\w.§])D(\d+)(?:\.(\d+))?\b")
@@ -188,7 +196,7 @@ def body_citations(coven):
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if not line.lstrip().startswith("|") or len(cells) < 3 or not cells[0].startswith("*Body.*"):
             continue
-        files = set(re.findall(r"proofs/[\w./-]+", cells[2]))
+        files = set(re.findall(PROOF_PATH, cells[2]))
         for theorem in re.findall(r"`([^`]+)`", cells[1]):
             listed.setdefault(theorem, set()).update(files)
     return start, listed
@@ -203,7 +211,7 @@ def check_body_citations(coven, findings):
     code = coven.code[: start - 1]
     for match in LINK.finditer(body):
         target = match.group(2)
-        if not target.startswith("proofs/"):
+        if not re.match(PROOF_PATH, target):
             continue
         line = coven.line_of(match.start(), body)
         if code[line - 1]:
@@ -300,24 +308,39 @@ class ProofPackage:
 
 
 def proof_packages(spec):
+    """Each proof package with an Axioms.lean, by name: spec/proofs/<name>/ and crates/<name>/proofs/."""
     packages = {}
     proofs = spec / "proofs"
-    for directory in sorted(proofs.iterdir()) if proofs.is_dir() else []:
+    found = [(directory.name, directory)
+             for directory in (sorted(proofs.iterdir()) if proofs.is_dir() else [])]
+    found += [(directory.parent.name, directory)
+              for directory in sorted((spec.parent / "crates").glob("*/proofs"))]
+    for name, directory in found:
         axioms = sorted(directory.glob("*/Axioms.lean")) if directory.is_dir() else []
         if axioms:
-            packages[directory.name] = ProofPackage(directory, axioms[0])
+            packages[name] = ProofPackage(directory, axioms[0])
     return packages
+
+
+def package_of(packages, path):
+    """The package holding `path`, if any."""
+    return next((package for package in packages.values()
+                 if path.is_relative_to(package.directory.resolve())), None)
 
 
 def check_audits(coven, writeups, packages, findings):
     """Each theorem Appendix G or a write-up cites is declared where cited and audited by name."""
-    proofs = (coven.path.parent / "proofs").resolve()
+    spec = coven.path.parent.resolve()
+
+    def shown(path):
+        """A path as the spec's links name it, from spec/."""
+        return Path(os.path.relpath(path, spec)).as_posix()
 
     def unaudited(document, line, package, names):
         for name in names:
             if name not in package.audited:
                 findings.append((document, line, f"cites `{name}`, which "
-                                 f"{package.axioms.relative_to(proofs.parent).as_posix()} has no "
+                                 f"{shown(package.axioms)} has no "
                                  "`#print axioms` line for"))
 
     start = next((n for n, title in coven.headings if title.startswith("Appendix G.")), None)
@@ -330,10 +353,10 @@ def check_audits(coven, writeups, packages, findings):
         if not line.lstrip().startswith("|") or len(cells) < 3:
             continue
         files = {(coven.path.parent / path).resolve()
-                 for path in re.findall(r"proofs/[\w./-]+\.lean", cells[2])}
+                 for path in re.findall(PROOF_PATH, cells[2]) if path.endswith(".lean")}
         if not files:
             continue
-        package = packages.get(next(iter(files)).relative_to(proofs).parts[0])
+        package = package_of(packages, next(iter(files)))
         if package is None:
             findings.append((coven, number + 1, "cites a proof package with no Axioms.lean"))
             continue
@@ -341,8 +364,7 @@ def check_audits(coven, writeups, packages, findings):
             names = package.theorems(cited, files)
             if not names:
                 findings.append((coven, number + 1, f"cites `{cited}`, which "
-                                 + ", ".join(sorted(path.relative_to(proofs.parent).as_posix()
-                                                    for path in files))
+                                 + ", ".join(sorted(shown(path) for path in files))
                                  + " declares no theorem of that name"))
             unaudited(coven, number + 1, package, names)
     for name, document in writeups.items():
