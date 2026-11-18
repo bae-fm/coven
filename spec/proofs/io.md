@@ -411,7 +411,7 @@ pause on or off, and a record of each kind.
 ## Work notifications
 
 [Wakes.lean](io/CovenIO/Wakes.lean) models queued work and the events that wake
-its worker. `database_changes::tests::io_differential_wakes` compares the
+its worker. `database::changes::tests::io_differential_wakes` compares the
 Rust notification decisions with `ioRunner`. The model concerns which work
 becomes runnable, not a proof of an operating system scheduler.
 

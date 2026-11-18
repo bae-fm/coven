@@ -530,7 +530,7 @@ proofs() {
         runner=$(runner io ioRunner)
         step "Rust / Lean write-queue wakes"
         COVEN_IO_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            database_changes::tests::io_differential_wakes
+            database::changes::tests::io_differential_wakes
     fi
 
     if proof_selected storage || crate_selected coven-sync; then
