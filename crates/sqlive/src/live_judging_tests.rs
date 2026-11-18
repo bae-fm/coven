@@ -3,6 +3,8 @@
 //! Each module covers one part of the scope judging, with live queries and
 //! writes over plain tables.
 
+#[path = "live_judging_tests/burst.rs"]
+mod burst;
 #[path = "live_judging_tests/derived.rs"]
 mod derived;
 #[path = "live_judging_tests/limit.rs"]
