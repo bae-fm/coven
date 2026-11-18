@@ -179,3 +179,25 @@ async fn the_watch_keeps_the_most_files_open_at_once() {
     drop(lease);
     assert_eq!((watch.leased(), watch.most_leased()), (0, 3));
 }
+
+/// The watch's empty wait resolves at once on a budget with nothing leased,
+/// waits while a lease or a file opened in one is left, and resolves once
+/// the last of them is gone.
+#[tokio::test]
+async fn the_empty_wait_resolves_once_every_lease_and_file_is_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("file");
+    std::fs::write(&path, b"a").unwrap();
+    let budget = budget(2);
+    let watch = budget.watch();
+    within(watch.empty()).await.unwrap();
+    let lease = budget.lease(2).await.unwrap();
+    let file = lease.place().await.open(&path).unwrap();
+    let mut empty = pin!(watch.empty());
+    assert!(poll_once(&mut empty).await.is_none());
+    drop(lease);
+    assert!(poll_once(&mut empty).await.is_none(), "the open file keeps its lease");
+    drop(file);
+    within(empty).await.unwrap();
+    assert_eq!((watch.leased(), watch.holding()), (0, 0));
+}

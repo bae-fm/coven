@@ -5439,6 +5439,11 @@ impl FileBudgetWatch {
         &self,
         count: usize,
     ) -> impl std::future::Future<Output = ()> + Send + 'static;
+    /// Resolves once the budget is empty: every lease has given its places
+    /// back, so no place holds an open file or stream either. A budget empty
+    /// at the call resolves at once. A test waits on it until the work that
+    /// held the places has ended, such as a response that streamed a file.
+    pub fn empty(&self) -> impl std::future::Future<Output = ()> + Send + 'static;
 }
 
 #[cfg(feature = "test-utils")]
