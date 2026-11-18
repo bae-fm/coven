@@ -3,31 +3,81 @@
 //! statement's reads add them for each table the join reads directly, in any
 //! SELECT of the statement and in any of the app's views it reads. A view's
 //! or a subquery's columns the join compares are named in its own SELECT,
-//! where the authorizer reports the columns of its tables itself.
+//! where the authorizer reports the columns of its tables itself. When the
+//! parser can't read the statement or a view it reads, the columns are
+//! unknown, and every column of every table counts as read.
 
 use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
+use crate::schema_objects::{declared_columns, main_object, read_view};
 use crate::select_syntax::{parts, window_parts, Part};
 use rusqlite::Connection;
-use sqlite3_parser::{
-    ast::{
-        Cmd, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
-        ResultColumn, Select, SelectTable, Stmt,
-    },
-    lexer::sql::Parser,
-    Bump, FallibleIterator,
+use sqlite3_parser::ast::{
+    Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
+    ResultColumn, Select, SelectTable,
 };
 
-/// The columns USING and NATURAL joins compare in `select`, as (table,
+/// The columns a statement's USING and NATURAL joins compare, as (table,
 /// column) pairs, lowercase.
+#[derive(Clone)]
+pub(crate) enum JoinedColumns {
+    Known(ColumnSet),
+    /// The parser couldn't read the statement or a view it reads: every
+    /// column of every table in the main schema, so every write to a table
+    /// reruns the statement.
+    Unknown(ColumnSet),
+}
+
+impl Default for JoinedColumns {
+    fn default() -> Self {
+        Self::Known(ColumnSet::new())
+    }
+}
+
+impl JoinedColumns {
+    /// The columns to count as read.
+    pub(crate) fn columns(&self) -> &ColumnSet {
+        match self {
+            Self::Known(columns) | Self::Unknown(columns) => columns,
+        }
+    }
+
+    /// Unknown columns, for the reason `why`, which goes to the log.
+    pub(crate) fn unknown(connection: &Connection, why: String) -> rusqlite::Result<Self> {
+        tracing::warn!(
+            %why,
+            "the planner can't tell which columns a statement's joins compare, so every \
+             column of every table counts as read"
+        );
+        let mut tables = connection.prepare_cached(
+            "SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite~_%' ESCAPE '~'",
+        )?;
+        let tables = tables
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut every = ColumnSet::new();
+        for table in tables {
+            for column in declared_columns(connection, &table)? {
+                every.insert((table.to_ascii_lowercase(), column.name.to_ascii_lowercase()));
+            }
+        }
+        Ok(Self::Unknown(every))
+    }
+}
+
+/// The columns USING and NATURAL joins compare in `select`.
 pub(crate) fn joined_columns(
     connection: &Connection,
     select: &Select<'_>,
-) -> rusqlite::Result<ColumnSet> {
-    let mut walk = Walk { connection, views: BTreeSet::new(), found: ColumnSet::new() };
+) -> rusqlite::Result<JoinedColumns> {
+    let mut walk =
+        Walk { connection, views: BTreeSet::new(), found: ColumnSet::new(), unread: None };
     walk.select(select)?;
-    Ok(walk.found)
+    match walk.unread {
+        Some(why) => JoinedColumns::unknown(connection, why),
+        None => Ok(JoinedColumns::Known(walk.found)),
+    }
 }
 
 struct Walk<'c> {
@@ -35,6 +85,8 @@ struct Walk<'c> {
     /// The views read so far, lowercase, so a view read twice is read once.
     views: BTreeSet<String>,
     found: ColumnSet,
+    /// Why the parser couldn't read a view the statement reads.
+    unread: Option<String>,
 }
 
 impl Walk<'_> {
@@ -153,15 +205,9 @@ impl Walk<'_> {
                 if !self.views.insert(view.to_ascii_lowercase()) {
                     return Ok(());
                 }
-                let sql: String = self.connection.query_row(
-                    "SELECT sql FROM main.sqlite_schema WHERE type='view' AND name=?1",
-                    [&view],
-                    |row| row.get(0),
-                )?;
-                let bump = Bump::new();
-                let mut parser = Parser::new(&bump, sql.as_bytes());
-                if let Ok(Some(Cmd::Stmt(Stmt::CreateView { select, .. }))) = parser.next() {
-                    self.select(select)?;
+                let connection = self.connection;
+                if let Err(why) = read_view(connection, &view, |_, select| self.select(select))? {
+                    self.unread.get_or_insert(why);
                 }
                 Ok(())
             }
@@ -191,31 +237,27 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// The stored name of the main schema's object of type `kind` that
-    /// `name` names. A name of another schema reads no table of the app's.
+    /// The stored name of the main schema's object of type `kind`, `table`
+    /// or `view`, that `name` names. A name of another schema reads no table
+    /// of the app's.
     fn object(&self, name: &QualifiedName<'_>, kind: &str) -> rusqlite::Result<Option<String>> {
         if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
             return Ok(None);
         }
-        let mut objects = self
-            .connection
-            .prepare_cached("SELECT name FROM pragma_table_list WHERE schema='main' AND type=?1")?;
-        let found = objects
-            .query_map([kind], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .find(|object| name.name == object.as_str());
-        Ok(found)
+        Ok(main_object(self.connection, &name.name)?
+            .filter(|(_, found)| found == kind)
+            .map(|(stored, _)| stored))
     }
 
     /// A table's columns, lowercase.
     fn columns(&self, table: &str) -> rusqlite::Result<Vec<String>> {
-        let mut columns =
-            self.connection.prepare_cached("SELECT name FROM pragma_table_xinfo(?1,'main')")?;
-        let names = columns
-            .query_map([table], |row| row.get::<_, String>(0))?
-            .map(|name| name.map(|name| name.to_ascii_lowercase()))
-            .collect();
-        names
+        Ok(declared_columns(self.connection, table)?
+            .into_iter()
+            .map(|column| column.name.to_ascii_lowercase())
+            .collect())
     }
 }
+
+#[cfg(test)]
+#[path = "joined_columns_tests.rs"]
+mod tests;

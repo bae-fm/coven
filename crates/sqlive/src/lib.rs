@@ -44,6 +44,7 @@ pub mod random_scopes;
 mod read_capture;
 mod read_set;
 mod row_scope;
+mod schema_objects;
 mod scope_lookup;
 mod scope_order;
 mod scope_plan;

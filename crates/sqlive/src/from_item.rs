@@ -3,6 +3,7 @@
 //! view read as cores of its own (§4).
 
 use crate::derived::{read_derived_item, Ctes, Derived};
+use crate::schema_objects::{declared_columns, main_object, DeclaredColumn};
 use crate::scope_plan::{Planner, Source};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{parts, text, Part};
@@ -117,7 +118,7 @@ pub(crate) fn read_item<'a>(
             if !in_main(name) {
                 return Ok(None);
             }
-            let Some((stored, kind)) = object(connection, &name.name)? else {
+            let Some((stored, kind)) = main_object(connection, &name.name)? else {
                 return Ok(None);
             };
             let ordinary = kind == "table";
@@ -208,32 +209,11 @@ fn in_main(name: &QualifiedName<'_>) -> bool {
     name.db_name.as_ref().is_none_or(|name| *name == "main")
 }
 
-/// The stored name and type of the table or view `name` names. Anything
-/// else, as a virtual table, keeps what it reads whole.
-fn object(connection: &Connection, name: &Name<'_>) -> rusqlite::Result<Option<(String, String)>> {
-    let mut objects = connection.prepare_cached(
-        "SELECT name,type FROM pragma_table_list WHERE schema='main' AND type IN ('table','view')",
-    )?;
-    let found = objects
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .find(|(table, _)| *name == table.as_str());
-    Ok(found)
-}
-
 /// A table's or a view's columns, in order. A view's comparisons happen
 /// inside SQLite, so sqlive gives none of them an affinity to narrow by.
 fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Result<Columns> {
-    let mut metadata =
-        connection.prepare_cached("SELECT name,type,hidden FROM pragma_table_xinfo(?1,'main')")?;
-    let declared = metadata
-        .query_map([table], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut columns = Vec::new();
-    for (column, declared, hidden) in declared {
+    for DeclaredColumn { name: column, declared, hidden } in declared_columns(connection, table)? {
         let affinity = if ordinary && !hidden {
             let (_, collation, _, _, _) =
                 connection.column_metadata(Some("main"), table, column.as_str())?;

@@ -20,12 +20,12 @@
 //! (`derived.rs`).
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
-use crate::joined_columns::joined_columns;
+use crate::joined_columns::{joined_columns, JoinedColumns};
 use crate::read_capture::WholeViews;
-use crate::read_set::ColumnSet;
 use crate::row_scope::Scopes;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::row_term;
@@ -50,8 +50,9 @@ pub(crate) struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
     sources: Option<Sources>,
     /// The columns its USING and NATURAL joins compare, which SQLite's
-    /// authorizer doesn't report (`joined_columns.rs`).
-    joined: ColumnSet,
+    /// authorizer doesn't report, or unknown when the parser can't read the
+    /// statement (`joined_columns.rs`).
+    joined: Arc<JoinedColumns>,
 }
 
 impl ScopePlan {
@@ -62,23 +63,30 @@ impl ScopePlan {
         statement: &Statement<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        let unread = Self { sources: None, joined: ColumnSet::new() };
+        let unread = |why: &str| -> rusqlite::Result<Self> {
+            Ok(Self {
+                sources: None,
+                joined: Arc::new(JoinedColumns::unknown(connection, why.to_owned())?),
+            })
+        };
         let Some(sql) = number_parameters(sql, statement)? else {
-            return Ok(unread);
+            return unread("the parser can't number the statement's parameters");
         };
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
         // SQLite and the parser can accept different language versions. A
         // SQL form this parser cannot represent depends on whole tables.
-        let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
-            return Ok(unread);
+        let select = match parser.next() {
+            Ok(Some(Cmd::Stmt(Stmt::Select(select)))) => select,
+            Ok(_) => return unread("the statement isn't one SELECT the parser reads"),
+            Err(error) => return unread(&format!("the parser can't read the statement: {error}")),
         };
         if !matches!(parser.next(), Ok(None)) {
-            return Ok(unread);
+            return unread("the statement isn't one SELECT the parser reads");
         }
         Ok(Self {
             sources: Sources::read(connection, select, whole)?,
-            joined: joined_columns(connection, select)?,
+            joined: Arc::new(joined_columns(connection, select)?),
         })
     }
 
@@ -97,7 +105,7 @@ impl ScopePlan {
             Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             None => Scopes::default(),
         };
-        scopes.joined = self.joined.clone();
+        scopes.joined = Arc::clone(&self.joined);
         scopes
     }
 }

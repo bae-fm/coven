@@ -697,8 +697,10 @@ commit that changes none of those columns doesn't run the query again. SQLite
 leaves out the columns a USING or NATURAL join compares, so coven adds them
 itself, for each table such a join reads in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
-query that joins `tracks` to `releases` with `USING (release_id)`. A one-shot
-read records none of this: nothing runs it again.
+query that joins `tracks` to `releases` with `USING (release_id)`. When coven
+can't parse the statement, or a view it reads, coven counts every column of
+every table as read, so every write runs the query again. A one-shot read records none of this:
+nothing runs it again.
 
 Within a table, a statement that reads one table depends only on the rows its
 WHERE allows: a column compared with a constant or a bound value by `=`, `<`,

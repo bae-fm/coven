@@ -9,15 +9,12 @@
 
 use crate::from_item::{Column, Columns, FromItem};
 use crate::read_capture::WholeViews;
+use crate::schema_objects::read_view;
 use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::{
-    ast::{As, Cmd, CommonTableExpr, Name, OneSelect, ResultColumn, Select, Stmt, With},
-    lexer::sql::Parser,
-    Bump, FallibleIterator,
-};
+use sqlite3_parser::ast::{As, CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
 
 /// The CTEs a FROM item can name where it is read, and those whose SQL is
 /// being read now, which naming again would recurse.
@@ -121,31 +118,24 @@ pub(crate) fn read_derived_item<'a>(
                 .map(|(columns, derived)| (from, columns, derived))
         }
         Named::View(stored) => {
-            let sql: String = connection.query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type='view' AND name=?1",
-                [stored],
-                |row| row.get(0),
-            )?;
-            let bump = Bump::new();
-            let mut parser = Parser::new(&bump, sql.as_bytes());
-            let Ok(Some(Cmd::Stmt(Stmt::CreateView { columns, select, .. }))) = parser.next()
-            else {
+            let read = read_view(connection, stored, |columns, select| {
+                let names = columns.map(|columns| {
+                    columns
+                        .iter()
+                        .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
+                        .collect()
+                });
+                // A view names only the schema's tables and views.
+                read_derived(connection, planner, select, names, None, &Ctes::default())
+            })?;
+            // A view the parser can't read is read whole.
+            let Ok(read) = read else {
                 return Ok(None);
             };
-            let names = columns.map(|columns| {
-                columns
-                    .iter()
-                    .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
-                    .collect()
-            });
-            // A view names only the schema's tables and views.
-            read_derived(connection, planner, select, names, None, &Ctes::default())?.map(
-                |(columns, derived)| {
-                    let from =
-                        Some(format!("main.{} AS {qualifier}", crate::sql::identifier(stored)));
-                    (from, columns, derived)
-                },
-            )
+            read.map(|(columns, derived)| {
+                let from = Some(format!("main.{} AS {qualifier}", crate::sql::identifier(stored)));
+                (from, columns, derived)
+            })
         }
     };
     Ok(found.map(|(from, columns, derived)| {
