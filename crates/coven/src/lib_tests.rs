@@ -109,18 +109,19 @@ pub(crate) async fn connection_wait(
 }
 
 /// Wait for the operation a write journaled to end, as an app waiting in
-/// place does, and return its outcome.
-pub(crate) async fn outcome(
+/// place does, and return its outcome, read in the outcome type of its kind.
+pub(crate) async fn outcome<O: types::FromSql + Clone + PartialEq + Send + 'static>(
     handle: &CovenHandle,
     journaled: Option<OperationId>,
-) -> OperationOutcome {
+) -> O {
     handle.operation_outcome(journaled.expect("the write journaled an operation")).await.unwrap()
 }
 
-/// Wait for the operation a write journaled to land, and return its slot.
+/// Wait for the admin change a write journaled to land, and return its
+/// slot.
 pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>) -> Slot {
     match outcome(handle, journaled).await {
-        OperationOutcome::Landed(slot) => slot,
+        ChangeOutcome::Landed(slot) => slot,
         outcome => panic!("the operation ended {outcome:?}"),
     }
 }

@@ -3,8 +3,8 @@
 #![cfg(feature = "test-utils")]
 
 use coven::{
-    restore_from_saved_code, BootstrapError, CloudProvider, Coven, CovenBuilder, CovenHandle,
-    FixedClock, IdSourceRef, MemoryStorage, OperationOutcome, SavedRestoreCode, SavedRestoreEntry,
+    restore_from_saved_code, BootstrapError, ChangeOutcome, CloudProvider, Coven, CovenBuilder,
+    CovenHandle, FixedClock, IdSourceRef, MemoryStorage, SavedRestoreCode, SavedRestoreEntry,
     SecretText, SequentialIds, Storage, StorageSetup, StorageSetupError, SyncError,
 };
 use std::sync::Arc;
@@ -141,8 +141,8 @@ async fn a_rename_rewrites_only_this_phones_entry() {
     phone.handle.start_sync().await.unwrap();
     let rename = phone.handle.rename_store("Family").await.unwrap().unwrap();
     assert!(matches!(
-        phone.handle.operation_outcome(rename).await.unwrap(),
-        OperationOutcome::Landed(_)
+        phone.handle.operation_outcome::<ChangeOutcome>(rename).await.unwrap(),
+        ChangeOutcome::Landed(_)
     ));
     assert_eq!(readable(phone.app.saved_restore_codes().await.unwrap())[0].name, "Family");
     assert_eq!(readable(tablet.saved_restore_codes().await.unwrap())[0].name, "Household");

@@ -66,8 +66,8 @@ impl SequenceSync {
     ) -> Result<Child, SyncError> {
         let request = Request::Change(change);
         match self.validate_request(session, member, &request)? {
-            Err(reason) => return Ok(Child::Decided(OperationOutcome::Rejected(reason))),
-            Ok(false) => return Ok(Child::Decided(OperationOutcome::Satisfied)),
+            Err(reason) => return Ok(Child::Decided(EntryOutcome::Rejected(reason))),
+            Ok(false) => return Ok(Child::Decided(EntryOutcome::Satisfied)),
             Ok(true) => (),
         }
         let work = SequenceOperation {
@@ -142,7 +142,7 @@ pub(crate) enum Child {
     Journaled(OperationId),
     /// Nothing journaled: the caught-up history refuses the entry, or has it
     /// already.
-    Decided(OperationOutcome),
+    Decided(EntryOutcome),
 }
 
 #[cfg(test)]

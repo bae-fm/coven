@@ -1,6 +1,7 @@
 //! Why the applied state refuses an administrative operation (§10), and
 //! how an operation an app's write journaled ended, as `coven_operations`
-//! lists it until a write acknowledges it (§11.4).
+//! lists it until a write acknowledges it (§11.4): each kind it lists has
+//! an outcome type that holds only the outcomes coven gives that kind.
 
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 
@@ -41,12 +42,14 @@ pub enum OperationRejection {
     AdmissionTooLarge,
 }
 
-/// How an operation an app's write journaled ended (§11.4):
+/// How an admin change an app's write journaled ended, for the kinds
+/// `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`,
+/// `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember` (§11.4):
 /// `coven_operations.outcome` holds it from the transaction that ends the
 /// operation's journal row until a write acknowledges it, so an outcome
 /// nobody awaited is still there to read.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum OperationOutcome {
+pub enum ChangeOutcome {
     /// Its entry landed at this slot, which this device has applied.
     Landed(#[serde(with = "slot_json")] coven_merge::Slot),
     /// The applied state already had what it asked for, so it claimed no
@@ -60,16 +63,47 @@ pub enum OperationOutcome {
     /// same change, and for a copy of this installation, the other copy may
     /// still land it (§14.1, §19.3).
     Stopped(DeviceStop),
-    /// The app cancelled it before its point of no return, and what it had
-    /// written was undone (§11.6).
-    Cancelled,
-    /// It was undone before its point of no return, or refused after it
-    /// before anything it claimed landed (§11.6).
-    Undone(UndoCause),
-    /// An invite's operation ended because the provider refused to share the
-    /// store for a reason only a person can fix (§13.2). The invite is gone
-    /// from `coven_invites`; the outcome stays until a write acknowledges
-    /// it, for the app to say what went wrong and what to fix.
+}
+
+/// How an admin change an app's write journaled ended, for the kinds
+/// `CreateCircle` and `ReplaceMemberKeys`, as `coven_operations.outcome`
+/// holds it (§11.4). Each names something no applied state holds yet, a
+/// new circle or a member's new pair, so it is never satisfied: a state
+/// that already holds it refuses it (§12.3, §15.5).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FreshChangeOutcome {
+    /// Its entry landed at this slot, which this device has applied.
+    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
+    /// The applied state refused it once this device had caught up; its
+    /// preparation was undone (§11.2, §11.3).
+    Rejected(OperationRejection),
+    /// This device stopped for good before the operation ended, so it never
+    /// will here (§14.1, §19.3).
+    Stopped(DeviceStop),
+}
+
+/// How an operation of the kind `Invite` ended, as `coven_operations.outcome`
+/// holds it (§11.4, §13.2): the binding an approval journals, which ends as
+/// an admin change does, or the invite itself, which `coven_operations`
+/// lists only when a sharing refusal ends it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InviteOutcome {
+    /// The binding's entry landed at this slot, which this device has
+    /// applied.
+    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
+    /// The applied state already admitted the request, so the binding
+    /// claimed no slot (§11.2).
+    Satisfied,
+    /// The applied state refused the binding once this device had caught
+    /// up (§11.1).
+    Rejected(OperationRejection),
+    /// This device stopped for good before the binding ended, so it never
+    /// will here (§14.1).
+    Stopped(DeviceStop),
+    /// The invite ended because the provider refused to share the store for
+    /// a reason only a person can fix (§13.2). The invite is gone from
+    /// `coven_invites`; the outcome stays until a write acknowledges it,
+    /// for the app to say what went wrong and what to fix.
     SharingRefused {
         /// The address the invite was to share with.
         account: String,
@@ -77,6 +111,122 @@ pub enum OperationOutcome {
         refusal: coven_foundation::sharing::SharingRefusal,
     },
 }
+
+/// How a storage setup ended, the kind `StorageSetup`, as
+/// `coven_operations.outcome` holds it (§11.4, §11.6).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StorageSetupOutcome {
+    /// Its entry landed at this slot: slot 1 for a creation, the
+    /// `Set access` slot for a reconnect.
+    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
+    /// A reconnect had nothing to claim: the applied state already held
+    /// what it asked for (§11.2).
+    Satisfied,
+    /// The caught-up state refused the entry it claimed, and setup was
+    /// undone (§11.2, §11.6).
+    Rejected(OperationRejection),
+    /// This device stopped for good before setup ended, so it never will
+    /// here (§14.1).
+    Stopped(DeviceStop),
+    /// The app cancelled it before its point of no return, and what it had
+    /// written was undone (§11.6).
+    Cancelled,
+    /// It was undone before its point of no return, or refused after it
+    /// before anything it claimed landed (§11.6).
+    Undone(UndoCause),
+}
+
+/// An outcome as a write keeps it in `coven_operations.outcome`, in the
+/// outcome type of the kind the operation is listed under. The column
+/// holds the inner outcome, so each type reads its own kinds' rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListedOutcome {
+    /// An outcome of a kind `ChangeOutcome` lists.
+    Change(ChangeOutcome),
+    /// An outcome of a kind `FreshChangeOutcome` lists.
+    FreshChange(FreshChangeOutcome),
+    /// An outcome of the kind `Invite`.
+    Invite(InviteOutcome),
+    /// An outcome of the kind `StorageSetup`.
+    StorageSetup(StorageSetupOutcome),
+}
+
+impl ListedOutcome {
+    /// The outcome as `_coven_app_operations.outcome` keeps it.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Change(outcome) => encode(outcome),
+            Self::FreshChange(outcome) => encode(outcome),
+            Self::Invite(outcome) => encode(outcome),
+            Self::StorageSetup(outcome) => encode(outcome),
+        }
+    }
+}
+
+impl From<ChangeOutcome> for ListedOutcome {
+    fn from(outcome: ChangeOutcome) -> Self {
+        Self::Change(outcome)
+    }
+}
+
+impl From<FreshChangeOutcome> for ListedOutcome {
+    fn from(outcome: FreshChangeOutcome) -> Self {
+        Self::FreshChange(outcome)
+    }
+}
+
+impl From<InviteOutcome> for ListedOutcome {
+    fn from(outcome: InviteOutcome) -> Self {
+        Self::Invite(outcome)
+    }
+}
+
+impl From<StorageSetupOutcome> for ListedOutcome {
+    fn from(outcome: StorageSetupOutcome) -> Self {
+        Self::StorageSetup(outcome)
+    }
+}
+
+/// How a listed operation of any kind ends once this installation stops for
+/// good (`operation::end`): landed at the slot its claim took, or stopped.
+/// Every kind's outcome type has both, encoded as here.
+#[derive(serde::Serialize)]
+pub(crate) enum StopOutcome {
+    /// Its claim landed at this slot.
+    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
+    /// Nothing of it landed.
+    Stopped(DeviceStop),
+}
+
+impl StopOutcome {
+    /// The outcome as `_coven_app_operations.outcome` keeps it.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        encode(self)
+    }
+}
+
+/// `outcome` as `_coven_app_operations.outcome` keeps it.
+pub(crate) fn encode(outcome: &impl serde::Serialize) -> Vec<u8> {
+    serde_json::to_vec(outcome).expect("an outcome is plain data, which always encodes")
+}
+
+/// Reads `coven_operations.outcome`, once it is not NULL, as `$outcome`: an
+/// outcome `$outcome` doesn't hold, which coven never gives its kinds, fails
+/// to read.
+macro_rules! read_outcome {
+    ($($outcome:ty),*) => {$(
+        impl sqlive::rusqlite::types::FromSql for $outcome {
+            fn column_result(
+                value: sqlive::rusqlite::types::ValueRef<'_>,
+            ) -> sqlive::rusqlite::types::FromSqlResult<Self> {
+                serde_json::from_slice(value.as_blob()?).map_err(|error| {
+                    sqlive::rusqlite::types::FromSqlError::Other(Box::new(error))
+                })
+            }
+        }
+    )*};
+}
+read_outcome!(ChangeOutcome, FreshChangeOutcome, InviteOutcome, StorageSetupOutcome);
 
 /// Why an operation was undone (§11.6).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -115,23 +265,6 @@ pub enum DeviceStop {
     Copied,
     /// Its member's keys were replaced with a pair it doesn't hold.
     MemberKeysReplaced,
-}
-
-impl OperationOutcome {
-    /// The outcome as `_coven_app_operations.outcome` keeps it.
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("an outcome is plain data, which always encodes")
-    }
-}
-
-/// Reads `coven_operations.outcome`, once it is not NULL.
-impl sqlive::rusqlite::types::FromSql for OperationOutcome {
-    fn column_result(
-        value: sqlive::rusqlite::types::ValueRef<'_>,
-    ) -> sqlive::rusqlite::types::FromSqlResult<Self> {
-        serde_json::from_slice(value.as_blob()?)
-            .map_err(|error| sqlive::rusqlite::types::FromSqlError::Other(Box::new(error)))
-    }
 }
 
 /// A slot as the JSON coven keeps it in: its number. For
@@ -187,3 +320,7 @@ pub mod slot_json {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "operation_outcome_tests.rs"]
+mod tests;

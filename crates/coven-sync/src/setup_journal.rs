@@ -5,8 +5,8 @@
 
 use crate::{OperationKind, SyncError};
 use coven_database::{
-    operation_kind::STORAGE_SETUP, DbError, NewOperation, OperationId, OperationOutcome,
-    OperationRecord, StoreDatabase,
+    operation_kind::STORAGE_SETUP, DbError, NewOperation, OperationId, OperationRecord,
+    StorageSetupOutcome, StoreDatabase,
 };
 use coven_storage::StorageConfig;
 use serde::{Deserialize, Serialize};
@@ -127,8 +127,8 @@ impl SetupJournal {
     pub async fn end(
         &self,
         database: &StoreDatabase,
-        outcome: OperationOutcome,
+        outcome: StorageSetupOutcome,
     ) -> Result<(), SyncError> {
-        Ok(database.finish_operation_with_outcome(self.id, outcome).await?)
+        Ok(database.finish_operation_with_outcome(self.id, Some(outcome.into())).await?)
     }
 }

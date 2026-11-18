@@ -264,7 +264,7 @@ impl SequenceSync {
             match self
                 .start_request(session, ring, &identity, Request::Change(change), MEMBER_KEYS)
                 .await
-                .and_then(crate::operation_outcome::into_slot)
+                .and_then(crate::operation_outcome::EntryOutcome::into_slot)
             {
                 Ok(_) => continue,
                 Err(SyncError::Rejected(reason)) => {
@@ -300,10 +300,11 @@ impl SequenceSync {
         let outcome = self
             .journal_and_pass(move |sql| steps.replace_member_keys_for(sql, member, keys))
             .await?;
-        let Some(outcome) = outcome else {
-            return Ok(());
-        };
-        crate::operation_outcome::into_slot(outcome).map(drop)
+        match outcome {
+            None | Some(crate::FreshChangeOutcome::Landed(_)) => Ok(()),
+            Some(crate::FreshChangeOutcome::Rejected(reason)) => Err(SyncError::Rejected(reason)),
+            Some(stopped) => panic!("the pass ended the replacement {stopped:?}"),
+        }
     }
 }
 

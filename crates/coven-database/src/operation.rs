@@ -133,14 +133,14 @@ macro_rules! finish {
 }
 
 /// Set the outcome of the listed operation `$id` on `$db` to `$outcome`,
-/// then end it with `$finish`, which returns how many journal rows it
-/// deleted. An operation that had ended already fails with
-/// `OperationChanged`. `finish_with_outcome` and `finish_outside_store` both
-/// expand this one body.
+/// encoded as `_coven_app_operations.outcome` keeps it, then end it with
+/// `$finish`, which returns how many journal rows it deleted. An operation
+/// that had ended already fails with `OperationChanged`. `finish_with_encoded`
+/// and `finish_outside_store` both expand this one body.
 macro_rules! finish_with_outcome {
     ($db:expr, $id:expr, $outcome:expr, $finish:expr) => {{
-        let (db, id, outcome): (_, OperationId, &crate::OperationOutcome) = ($db, $id, $outcome);
-        db.execute(SET_OUTCOME, (id.0, outcome.encode()))?;
+        let (db, id, outcome): (_, OperationId, Vec<u8>) = ($db, $id, $outcome);
+        db.execute(SET_OUTCOME, (id.0, outcome))?;
         if $finish != 1 {
             return Err(DbError::OperationChanged(id));
         }
@@ -172,9 +172,9 @@ pub(crate) fn list_outcome(
     db: &StoreSql,
     id: OperationId,
     kind: &str,
-    outcome: &crate::OperationOutcome,
+    outcome: &crate::InviteOutcome,
 ) -> Result<(), DbError> {
-    db.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?;
+    db.execute(LIST_OUTCOME, (id.0, kind, crate::operation_outcome::encode(outcome)))?;
     Ok(())
 }
 
@@ -218,7 +218,7 @@ pub fn finish_outside_store(
     };
     match listing {
         OutcomeListing::Listed(outcome) => {
-            finish_with_outcome!(connection, id, outcome, finished()?)
+            finish_with_outcome!(connection, id, outcome.encode(), finished()?)
         }
         OutcomeListing::Unlisted { kind, outcome } => {
             connection.execute(LIST_OUTCOME, (id.0, kind, outcome.encode()))?;
@@ -236,13 +236,13 @@ pub fn finish_outside_store(
 #[cfg(any(test, feature = "test-utils"))]
 pub enum OutcomeListing<'a> {
     /// The app's write journaled it, so `coven_operations` lists it already.
-    Listed(&'a crate::OperationOutcome),
+    Listed(&'a crate::ListedOutcome),
     /// Sync journaled it, and its outcome lists it under `kind`.
     Unlisted {
         /// The kind `coven_operations` lists it under.
         kind: &'a str,
         /// How it ended.
-        outcome: &'a crate::OperationOutcome,
+        outcome: &'a crate::ListedOutcome,
     },
 }
 
@@ -362,17 +362,28 @@ pub(crate) fn set_step(db: &StoreSql, id: OperationId, step: u32) -> Result<(), 
     Ok(())
 }
 
-/// End the running operation `id` with `outcome`, which `coven_operations`
-/// lists for an operation the app's write journaled. An outcome is final:
-/// an operation that no longer runs fails with `OperationChanged` and keeps
-/// the outcome it ended with (§11.4). The outcome is written first, as the
+/// End the running operation `id` with `outcome`, in the outcome type of its
+/// kind, which `coven_operations` lists for an operation the app's write
+/// journaled; `None` for a kind it never lists. An outcome is final: an
+/// operation that no longer runs fails with `OperationChanged` and keeps the
+/// outcome it ended with (§11.4). The outcome is written first, as the
 /// journal row's end requires; the caller's transaction undoes it when the
 /// operation had already ended.
 pub(crate) fn finish_with_outcome(
     db: &StoreSql,
     id: OperationId,
-    outcome: &crate::OperationOutcome,
+    outcome: Option<&crate::ListedOutcome>,
 ) -> Result<(), DbError> {
+    match outcome {
+        Some(outcome) => finish_with_encoded(db, id, outcome.encode()),
+        None if finish(db, id)? == 1 => Ok(()),
+        None => Err(DbError::OperationChanged(id)),
+    }
+}
+
+/// `finish_with_outcome` with the outcome encoded already, as `end` writes
+/// an outcome of any listed kind.
+fn finish_with_encoded(db: &StoreSql, id: OperationId, outcome: Vec<u8>) -> Result<(), DbError> {
     finish_with_outcome!(db, id, outcome, finish(db, id)?)
 }
 
@@ -451,11 +462,11 @@ fn end(
     let landed = crate::claim::landed_operation(db)?;
     for id in running {
         let outcome = match landed {
-            Some((entry, slot)) if entry == id => crate::OperationOutcome::Landed(slot),
-            _ => crate::OperationOutcome::Stopped(stop),
+            Some((entry, slot)) if entry == id => crate::StopOutcome::Landed(slot),
+            _ => crate::StopOutcome::Stopped(stop),
         };
         crate::claim::drop_operation(db, id)?;
-        finish_with_outcome(db, id, &outcome)?;
+        finish_with_encoded(db, id, outcome.encode())?;
     }
     for id in invites {
         crate::claim::drop_operation(db, id)?;

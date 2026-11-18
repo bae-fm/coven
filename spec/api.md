@@ -3827,8 +3827,9 @@ let moved = handle
   - `record_change` journals a `StoreChange`, the change of an admin
     entry, as the app's write does, and `coven_operations` lists it running
     under its kind.
-    `finish_operation` ends it with an outcome, which `coven_operations`
-    then shows.
+    `finish_operation` ends it with an outcome in the outcome type of its
+    kind (E6), which `coven_operations` then shows. An outcome of another
+    type fails, as coven never writes one.
   - `record_pending` saves a `PendingRecord` as coven saves one, and
     coven's triggers show it in `coven_pending`, as an app's triggers on
     that table see it.
@@ -3942,8 +3943,8 @@ let moved = handle
 | | `invite_id` | the invite's id, as canonical UUID text and read as `InviteId`, the id `Invite::id` carries |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
-| | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |
-| | `outcome_kind` | NULL while it runs; then the kind of `OperationOutcome` it ended with, in snake case: `landed`, `satisfied`, `rejected`, `stopped`, `cancelled`, `undone` or `sharing_refused` |
+| | `outcome` | NULL while it runs; then how it ended, read in the outcome type of its kind (E6): `ChangeOutcome` for `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`, `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember`; `FreshChangeOutcome` for `CreateCircle` and `ReplaceMemberKeys`; `InviteOutcome` for `Invite`; `StorageSetupOutcome` for `StorageSetup`. A type fails to read an outcome its kinds never end with |
+| | `outcome_kind` | NULL while it runs; then the variant of the outcome it ended with, in snake case: `landed`, `satisfied`, `rejected`, `stopped`, `cancelled`, `undone` or `sharing_refused` |
 | | `account` | for an invite that ended with a sharing refusal, the address it was to share with; NULL for every other outcome |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member`, read as `MemberRole` |
@@ -3971,8 +3972,12 @@ impl types::FromSql for LastPass;
 impl types::FromSql for StorageConfig;
 /// Reads `coven_operations.kind`.
 impl types::FromSql for OperationKind;
-/// Reads `coven_operations.outcome` once it is not NULL.
-impl types::FromSql for OperationOutcome;
+/// Read `coven_operations.outcome` once it is not NULL, each for the kinds
+/// it lists (E6).
+impl types::FromSql for ChangeOutcome;
+impl types::FromSql for FreshChangeOutcome;
+impl types::FromSql for InviteOutcome;
+impl types::FromSql for StorageSetupOutcome;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
 /// Reads `coven_uploads.move`, `coven_pending.move` and
@@ -4373,9 +4378,11 @@ pub fn record_change(connection: &rusqlite::Connection, change: StoreChange) -> 
 #[cfg(feature = "test-utils")]
 pub use coven_format::admin::StoreChange;
 
-/// Ends the operation `id` the app's write journaled with `outcome` (E4).
+/// Ends the operation `id` the app's write journaled with `outcome`, which
+/// must be in the outcome type of its kind, as coven's own outcomes are
+/// (E4, E6).
 #[cfg(feature = "test-utils")]
-pub fn finish_operation(connection: &rusqlite::Connection, id: OperationId, outcome: &OperationOutcome) -> Result<(), CovenError>;
+pub fn finish_operation(connection: &rusqlite::Connection, id: OperationId, outcome: impl Into<ListedOutcome>) -> Result<(), CovenError>;
 
 /// Saves `record` as coven saves a pending record (E4).
 #[cfg(feature = "test-utils")]
@@ -6755,7 +6762,12 @@ loop {
   that write's commit, and each storage setup, from its journal on (E5): its
   outcome is NULL while it runs, then `Landed`, `Satisfied` or `Rejected`, or
   for a setup `Cancelled` or `Undone`, written in the transaction that ends
-  its journal row, so no outcome is lost to a dropped call or a restart. Applying a slot
+  its journal row, so no outcome is lost to a dropped call or a restart.
+  Each kind has an outcome type that holds only the ways coven ends that
+  kind, so an app reading a row has no case to handle that can't happen:
+  only a setup is cancelled or undone, only an invite ends with a sharing
+  refusal, and a change naming a new circle or a new pair is never
+  satisfied, since no applied state holds it already. Applying a slot
   that stops this device for good, its removal, its replacement by a reset or
   a replacement of its member's keys it doesn't hold, ends every one still
   running, in that transaction, as `Stopped` with that stop
@@ -6846,9 +6858,11 @@ pub enum OperationKind {
 /// Operation calls retain the same typed causes as sync calls (§11).
 pub type OperationError = SyncError;
 
-/// How an operation an app's write journaled ended, as
+/// How an admin change an app's write journaled ended, for the kinds
+/// `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`,
+/// `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember`, as
 /// `coven_operations.outcome` holds it until a write acknowledges it (§11.4).
-pub enum OperationOutcome {
+pub enum ChangeOutcome {
     /// Its entry landed at this slot, which this device has applied.
     Landed(Slot),
     /// The applied state already had what it asked for, so it claimed no slot.
@@ -6860,23 +6874,66 @@ pub enum OperationOutcome {
     /// and for a copy of this installation, the other copy may land it
     /// (§14.1, §19.3).
     Stopped(DeviceStop),
-    /// The app cancelled it before its point of no return, and what it had
-    /// written was undone (§11.6). Only storage setup ends this way.
-    Cancelled,
-    /// It was undone before its point of no return, or refused after it
-    /// before anything it claimed landed (§11.6). Only storage setup ends
-    /// this way.
-    Undone(UndoCause),
-    /// An invite's operation ended because the provider refused to share the
-    /// store for a reason only a person can fix (§13.2). The invite is gone
-    /// from `coven_invites`; the outcome stays until a write acknowledges it,
-    /// for the app to say what went wrong and what to fix.
+}
+
+/// How an admin change an app's write journaled ended, for the kinds
+/// `CreateCircle` and `ReplaceMemberKeys`. Each names a new circle or a
+/// member's new pair, which no applied state holds yet, so it is never
+/// satisfied: a state that holds it already refuses it.
+pub enum FreshChangeOutcome {
+    Landed(Slot),
+    Rejected(OperationRejection),
+    Stopped(DeviceStop),
+}
+
+/// How an operation of the kind `Invite` ended: the binding an approval
+/// journals, which ends as a `ChangeOutcome` does, or the invite itself,
+/// which `coven_operations` lists only once a sharing refusal ends it.
+pub enum InviteOutcome {
+    Landed(Slot),
+    /// The applied state already admitted the request.
+    Satisfied,
+    Rejected(OperationRejection),
+    Stopped(DeviceStop),
+    /// The invite ended because the provider refused to share the store for
+    /// a reason only a person can fix (§13.2). The invite is gone from
+    /// `coven_invites`; the outcome stays until a write acknowledges it, for
+    /// the app to say what went wrong and what to fix.
     SharingRefused {
         /// The address the invite was to share with.
         account: String,
         /// What was refused.
         refusal: SharingRefusal,
     },
+}
+
+/// How a storage setup ended, the kind `StorageSetup` (§11.6, E5).
+pub enum StorageSetupOutcome {
+    /// Its entry landed at this slot: slot 1 for a creation, the `Set access`
+    /// slot for a reconnect.
+    Landed(Slot),
+    /// A reconnect had nothing to claim: the applied state already held what
+    /// it asked for.
+    Satisfied,
+    /// The caught-up state refused the entry it claimed, and setup was
+    /// undone (§11.6).
+    Rejected(OperationRejection),
+    Stopped(DeviceStop),
+    /// The app cancelled it before its point of no return, and what it had
+    /// written was undone (§11.6).
+    Cancelled,
+    /// It was undone before its point of no return, or refused after it
+    /// before anything it claimed landed (§11.6).
+    Undone(UndoCause),
+}
+
+/// An outcome in the type of its operation's kind, as a test's
+/// `finish_operation` writes it (E4).
+pub enum ListedOutcome {
+    Change(ChangeOutcome),
+    FreshChange(FreshChangeOutcome),
+    Invite(InviteOutcome),
+    StorageSetup(StorageSetupOutcome),
 }
 
 /// Why sharing a store was refused for good (§13.2).
@@ -6940,11 +6997,12 @@ impl CovenHandle {
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Waits for an operation an app's write journaled to end and returns its
-    /// outcome, as `coven_operations` lists it; the outcome stays listed until
-    /// a write acknowledges it. It waits for storage too: a pass runs the
-    /// operation once storage is connected. One not listed fails with
-    /// `OperationUnknown`.
-    pub async fn operation_outcome(&self, operation: OperationId) -> Result<OperationOutcome, SyncError>;
+    /// outcome, as `coven_operations` lists it, read as `O`, the outcome type
+    /// of its kind; the outcome stays listed until a write acknowledges it.
+    /// It waits for storage too: a pass runs the operation once storage is
+    /// connected. One not listed fails with `OperationUnknown`, and one whose
+    /// outcome `O` doesn't hold fails to read.
+    pub async fn operation_outcome<O: types::FromSql + Clone + PartialEq>(&self, operation: OperationId) -> Result<O, SyncError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
     /// writes, as an operation (§19.2). It cannot bypass §5.4's stuck-device rule.
@@ -8377,7 +8435,7 @@ pub enum ProviderSignOut {
   listed invite and cancels the invite to end it, or the pass retries it. A
   grant the provider refuses with `StorageFailure::SharingRefused` ends the
   invite at once, as a failed request check does: its operation ends with
-  `OperationOutcome::SharingRefused` naming the address and the
+  `InviteOutcome::SharingRefused` naming the address and the
   `SharingRefusal`, which stays in `coven_operations` until the app
   acknowledges it with `CovenWrite::acknowledge_operation`
   ([§13.2](coven.md#132-adding-a-person-invites)).
@@ -9129,7 +9187,7 @@ pub enum InviteStage {
     /// and then it shows its code. A refusal, or a grant that fails for a
     /// reason a retry can fix, is its pending record; cancelling ends it. A
     /// grant refused for a reason only a person can fix ends the invite
-    /// (`OperationOutcome::SharingRefused`).
+    /// (`InviteOutcome::SharingRefused`).
     Granting,
     /// The code to show as a QR code, again whenever the admin asks, and the
     /// checked request once one has arrived, waiting for the app's decision.

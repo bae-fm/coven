@@ -490,7 +490,7 @@ async fn a_recovery_invites_cleanup_takes_back_only_its_new_grant() {
 
 /// The invite operation's outcome, as `coven_operations` lists it: none while
 /// no such row is listed.
-async fn listed_outcome(device: &Device) -> Vec<(i64, OperationKind, OperationOutcome)> {
+async fn listed_outcome(device: &Device) -> Vec<(i64, OperationKind, InviteOutcome)> {
     device
         .database()
         .read(|sql| {
@@ -551,7 +551,7 @@ async fn a_refusal_only_a_person_can_fix_ends_the_invite_and_keeps_its_reason() 
                 .collect::<Vec<_>>(),
             [(
                 OperationKind::Invite,
-                OperationOutcome::SharingRefused { account: CAROL.into(), refusal }
+                InviteOutcome::SharingRefused { account: CAROL.into(), refusal }
             )],
             "{refusal:?}"
         );

@@ -4033,6 +4033,12 @@ snapshot body is deleted (§16.3).
   lists each such operation from that write's commit: running, then landed at
   its slot, satisfied with no slot, rejected with its `OperationRejection`, or
   stopped, naming how this device stopped for good first (§14.1).
+  Each kind has an outcome type with only the ways coven ends that kind
+  ([api.md E6](api.md#e6-operations-and-recovery)), so the app handles no
+  outcome that can't happen: only a storage setup is cancelled or undone
+  (§11.6), only an invite ends with a sharing refusal (§13.2), and making a
+  circle or replacing another member's pair is never satisfied, since no
+  applied state holds the new circle or pair already.
   The outcome is written in the same transaction that ends the journal row, so
   a rejection met in a pass long after the call, or after reopening, is still
   there. It stays listed until a write acknowledges it, a step too: Ana's app

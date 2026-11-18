@@ -345,20 +345,21 @@ impl CovenHandle {
         self.storage.holds_store().await
     }
     /// Waits for an operation the app's writes journaled to end and returns
-    /// its outcome, as `coven_operations` lists it (§11.4, E6); the outcome
-    /// stays listed until a write acknowledges it. It waits for storage
-    /// too: a pass runs the operation once storage is connected. An
-    /// operation not listed fails with `OperationUnknown`.
-    pub async fn operation_outcome(
+    /// its outcome, as `coven_operations` lists it, read as `O`, the outcome
+    /// type of its kind (§11.4, E6); the outcome stays listed until a write
+    /// acknowledges it. It waits for storage too: a pass runs the operation
+    /// once storage is connected. An operation not listed fails with
+    /// `OperationUnknown`, and one whose outcome `O` doesn't hold fails to read.
+    pub async fn operation_outcome<O: types::FromSql + Clone + PartialEq + Send + 'static>(
         &self,
         operation: OperationId,
-    ) -> Result<OperationOutcome, SyncError> {
+    ) -> Result<O, SyncError> {
         let mut listed: LiveQuery<_, SyncError> = self.database.subscribe(move |sql| {
             Ok(sql
                 .query(
                     "SELECT outcome FROM coven_operations WHERE operation=?1",
                     [operation.0],
-                    |row| row.get::<_, Option<OperationOutcome>>(0),
+                    |row| row.get::<_, Option<O>>(0),
                 )?
                 .pop())
         });

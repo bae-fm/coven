@@ -34,20 +34,21 @@ impl crate::StoreDatabase {
     }
 
     /// Advance an invitation and its account intention atomically, ending
-    /// the operation it started for the step it leaves, `child`, with its
-    /// outcome, in the same transaction (§13.2).
+    /// the operation it started for the step it leaves, `child`, in the same
+    /// transaction (§13.2). `coven_operations` lists no such operation, so
+    /// its outcome is nobody's to read.
     pub async fn advance_operation_with_access<P: PendingValue>(
         &self,
         update: crate::OperationUpdate,
         changes: Vec<ProviderAccessChange>,
-        child: Option<(OperationId, crate::OperationOutcome)>,
+        child: Option<OperationId>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|db, _| {
                 db.transaction(|db| {
                     crate::operation::advance(db, &update)?;
-                    if let Some((child, outcome)) = &child {
-                        crate::operation::finish_with_outcome(db, *child, outcome)?;
+                    if let Some(child) = child {
+                        crate::operation::finish_with_outcome(db, child, None)?;
                     }
                     adopt::<P>(db, &changes)
                 })

@@ -3,10 +3,11 @@
 
 use super::sequence_copies::ApprovedAdmission;
 use super::{SequenceSync, Session};
+use crate::operation_outcome::EntryOutcome;
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::sequence_sync::OperationState;
 use crate::{
-    Invite, InviteAccess, InviteLifetime, JoinRequest, OperationKind, OperationOutcome,
+    Invite, InviteAccess, InviteLifetime, InviteOutcome, JoinRequest, OperationKind,
     OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
     SyncError,
 };
@@ -400,7 +401,11 @@ impl SequenceSync {
             .journal_and_pass(move |sql| steps.approve_join_request(sql, &request).map(Some))
             .await?
             .expect("an approval always journals its binding");
-        crate::operation_outcome::into_slot(outcome).map(drop)
+        match outcome {
+            crate::InviteOutcome::Landed(_) | crate::InviteOutcome::Satisfied => Ok(()),
+            crate::InviteOutcome::Rejected(reason) => Err(SyncError::Rejected(reason)),
+            other => panic!("the pass ended the binding {other:?}"),
+        }
     }
 
     /// Decline the request as the app's write step does, then run the pass
@@ -506,7 +511,7 @@ impl SequenceSync {
                             self.start_invite_share(session, member, &record, &work, account);
                         match started.await? {
                             Child::Journaled(_) => continue,
-                            Child::Decided(OperationOutcome::Rejected(reason)) => {
+                            Child::Decided(EntryOutcome::Rejected(reason)) => {
                                 return Ok(InviteProgress::Waiting(
                                     self.error_reason(&SyncError::Rejected(reason)),
                                 ))
@@ -518,37 +523,16 @@ impl SequenceSync {
                 }
                 InviteState::Sharing { share } => {
                     let share = *share;
-                    let outcome = self.run_administration(session, ring, member, share).await?;
-                    match outcome {
-                        OperationOutcome::Landed(_) | OperationOutcome::Satisfied => {
-                            let shared = Some((share, outcome));
+                    match self.run_administration(session, ring, member, share).await? {
+                        EntryOutcome::Landed(_) | EntryOutcome::Satisfied => {
+                            let shared = Some(share);
                             self.grant(session, ring, member, &record, work, shared, step).await?;
                         }
                         // The invite checks again, and waits on the refusal.
-                        OperationOutcome::Rejected(_) => {
+                        EntryOutcome::Rejected(_) => {
                             work.state = InviteState::Requested;
                             let update = work.update(&record)?;
-                            self.database
-                                .finish_operation_advancing(share, outcome, update)
-                                .await?;
-                        }
-                        OperationOutcome::Stopped(_) => {
-                            return Err(coven_database::DbError::Invariant {
-                                what: "a stop for good ends the invite with its claims",
-                            }
-                            .into())
-                        }
-                        OperationOutcome::Cancelled | OperationOutcome::Undone(_) => {
-                            return Err(coven_database::DbError::Invariant {
-                                what: "only storage setup is cancelled or undone",
-                            }
-                            .into())
-                        }
-                        OperationOutcome::SharingRefused { .. } => {
-                            return Err(coven_database::DbError::Invariant {
-                                what: "only an invite ends with a sharing refusal",
-                            }
-                            .into())
+                            self.database.finish_operation_advancing(share, None, update).await?;
                         }
                     }
                 }
@@ -661,8 +645,9 @@ impl SequenceSync {
                     // binding's outcome, which `coven_operations` lists for the
                     // app that approved it; the invite ends as a decline does.
                     work.state = InviteState::Settled { share: None, end: None, refusal: None };
+                    let listed = OperationKind::Invite.listed_outcome(outcome)?;
                     self.database
-                        .finish_operation_advancing(binding, outcome, work.update(&record)?)
+                        .finish_operation_advancing(binding, listed, work.update(&record)?)
                         .await?;
                 }
                 InviteState::Settled { share, end, refusal } => {
@@ -684,7 +669,7 @@ impl SequenceSync {
                     };
                     if let Some(end) = end {
                         let outcome = self.run_administration(session, ring, member, end).await?;
-                        if let OperationOutcome::Rejected(reason) = &outcome {
+                        if let EntryOutcome::Rejected(reason) = &outcome {
                             tracing::warn!(?id, ?reason, "an invite share's end was refused");
                         }
                     }
@@ -706,7 +691,7 @@ impl SequenceSync {
                                 work.account().ok_or(coven_database::DbError::DamagedDatabase)?;
                             Some((
                                 crate::OperationKind::Invite.listed(),
-                                OperationOutcome::SharingRefused {
+                                InviteOutcome::SharingRefused {
                                     account: account.to_owned(),
                                     refusal,
                                 },
@@ -725,10 +710,10 @@ impl SequenceSync {
 
     /// Move the checked invite to granting its access, in one transaction
     /// with adopting its account's grant and ending the record of its share,
-    /// `shared`, with that record's outcome; then ask for the grant, unless
-    /// another open invite's grant already shared the account with an
-    /// invitation (§14.2). A grant that fails is the invite's pending record,
-    /// and `step` follows the step this takes, which that failure belongs to.
+    /// `shared`; then ask for the grant, unless another open invite's grant
+    /// already shared the account with an invitation (§14.2). A grant that
+    /// fails is the invite's pending record, and `step` follows the step this
+    /// takes, which that failure belongs to.
     #[expect(
         clippy::too_many_arguments,
         reason = "a step of the invite's advance takes the pass's session, keys and member"
@@ -740,7 +725,7 @@ impl SequenceSync {
         member: &MemberIdentity,
         record: &OperationRecord,
         mut work: InviteWork,
-        shared: Option<(OperationId, OperationOutcome)>,
+        shared: Option<OperationId>,
         step: &mut Option<u32>,
     ) -> Result<(), SyncError> {
         work.state = InviteState::Grant;

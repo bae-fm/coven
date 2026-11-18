@@ -60,7 +60,7 @@ async fn a_steps_refusal_comes_back_as_its_own_error() {
 async fn listed(
     handle: &CovenHandle,
     operation: OperationId,
-) -> Option<(OperationKind, Option<OperationOutcome>)> {
+) -> Option<(OperationKind, Option<ChangeOutcome>)> {
     handle
         .read(move |sql| {
             Ok::<_, CovenError>(
@@ -115,7 +115,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
     assert_eq!(ana.circles().list().await.unwrap()[0].name, "Presents");
     assert_eq!(
         listed(ana, rename).await,
-        Some((OperationKind::RenameCircle, Some(OperationOutcome::Landed(slot))))
+        Some((OperationKind::RenameCircle, Some(ChangeOutcome::Landed(slot))))
     );
     ana.write(move |sql| {
         sql.acknowledge_operation(rename)?;
@@ -181,8 +181,8 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     let ana = network.reopen(&device).open(device.store, |_| ()).await.unwrap();
     ana.start_sync().await.unwrap();
     let rejected =
-        OperationOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Circle(gifts)));
-    assert_eq!(crate::tests::outcome(&ana, rename).await, rejected);
+        ChangeOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Circle(gifts)));
+    assert_eq!(crate::tests::outcome::<ChangeOutcome>(&ana, rename).await, rejected);
     ana.close().await.unwrap();
     let ana = network.reopen(&device).open(device.store, |_| ()).await.unwrap();
     let rename = rename.unwrap();
@@ -219,7 +219,8 @@ async fn a_new_circle_takes_rows_once_its_slot_applies() {
         "{early:?}"
     );
     ana.start_sync().await.unwrap();
-    crate::tests::landed(ana, Some(created)).await;
+    let made: FreshChangeOutcome = crate::tests::outcome(ana, Some(created)).await;
+    assert!(matches!(made, FreshChangeOutcome::Landed(_)), "{made:?}");
     ana.write(note(gifts.to_string())).await.unwrap();
     assert!(ana.circles().list().await.unwrap().iter().any(|circle| circle.id == gifts));
     // A name that isn't one journals nothing.

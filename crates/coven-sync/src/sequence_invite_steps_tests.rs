@@ -365,28 +365,22 @@ impl Case {
             .database()
             .read(move |sql| {
                 Ok::<_, DbError>(sql.query(
-                    "SELECT outcome FROM coven_operations WHERE operation=?1",
+                    "SELECT outcome_kind FROM coven_operations WHERE operation=?1",
                     [id.0],
-                    |row| row.get::<_, Option<OperationOutcome>>(0),
+                    |row| row.get::<_, Option<String>>(0),
                 )?)
             })
             .await
             .unwrap();
-        match listed.first() {
+        match listed.first().map(Option::as_deref) {
             None => Value::Null,
             Some(None) => json!("running"),
-            Some(Some(OperationOutcome::Landed(_) | OperationOutcome::Satisfied)) => {
-                json!("landed")
-            }
-            Some(Some(OperationOutcome::Rejected(_))) => json!("rejected"),
-            Some(Some(OperationOutcome::Stopped(_))) => json!("stopped"),
-            Some(Some(OperationOutcome::Cancelled | OperationOutcome::Undone(_))) => {
-                unreachable!("only storage setup is cancelled or undone")
-            }
-            // The differential drives storage that always answers.
-            Some(Some(OperationOutcome::SharingRefused { .. })) => {
-                unreachable!("the differential's storage never refuses to share")
-            }
+            Some(Some("landed" | "satisfied")) => json!("landed"),
+            Some(Some("rejected")) => json!("rejected"),
+            Some(Some("stopped")) => json!("stopped"),
+            // A rename and a binding end no other way, and the
+            // differential drives storage that always answers.
+            Some(Some(other)) => unreachable!("a rename or a binding never ends {other}"),
         }
     }
 

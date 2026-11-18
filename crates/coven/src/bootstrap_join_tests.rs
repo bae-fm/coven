@@ -438,12 +438,7 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
                 Ok::<_, CovenError>(sql.query_row(
                     "SELECT kind,outcome FROM coven_operations WHERE operation=?1",
                     [binding.0],
-                    |r| {
-                        Ok((
-                            r.get::<_, OperationKind>(0)?,
-                            r.get::<_, Option<OperationOutcome>>(1)?,
-                        ))
-                    },
+                    |r| Ok((r.get::<_, OperationKind>(0)?, r.get::<_, Option<InviteOutcome>>(1)?)),
                 )?)
             })
             .await
@@ -461,7 +456,8 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
         assert!(matches!(again, Err(SyncError::InvitationChanged)), "{again:?}");
         assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
         owner.handle.start_sync().await.unwrap();
-        crate::tests::landed(&owner.handle, Some(binding)).await;
+        let bound: InviteOutcome = crate::tests::outcome(&owner.handle, Some(binding)).await;
+        assert!(matches!(bound, InviteOutcome::Landed(_)), "{bound:?}");
         _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, approve).await;

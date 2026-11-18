@@ -72,31 +72,22 @@ impl Phone {
     }
 
     /// The setups `coven_operations` lists, with their outcomes.
-    async fn setups(&self) -> Vec<(OperationId, Option<OperationOutcome>)> {
+    async fn setups(&self) -> Vec<(OperationId, Option<StorageSetupOutcome>)> {
         self.handle
             .read(|sql| {
                 Ok::<_, CovenError>(sql.query(
-                    "SELECT operation,kind,outcome FROM coven_operations ORDER BY operation",
+                    "SELECT operation,outcome FROM coven_operations \
+                     WHERE kind='StorageSetup' ORDER BY operation",
                     [],
-                    |row| {
-                        Ok((
-                            OperationId(row.get(0)?),
-                            row.get::<_, OperationKind>(1)?,
-                            row.get::<_, Option<OperationOutcome>>(2)?,
-                        ))
-                    },
+                    |row| Ok((OperationId(row.get(0)?), row.get(1)?)),
                 )?)
             })
             .await
             .unwrap()
-            .into_iter()
-            .filter(|(_, kind, _)| *kind == OperationKind::StorageSetup)
-            .map(|(operation, _, outcome)| (operation, outcome))
-            .collect()
     }
 
     /// The one setup listed, once it has ended.
-    async fn ended(&self) -> OperationOutcome {
+    async fn ended(&self) -> StorageSetupOutcome {
         let setups = self.setups().await;
         assert_eq!(setups.len(), 1, "one setup is listed: {setups:?}");
         let ending = self.handle.operation_outcome(setups[0].0);
@@ -150,7 +141,11 @@ async fn a_setup_cut_before_its_point_of_no_return_is_undone_as_the_store_opens(
         phone.setup().await.unwrap_err();
         phone.reopen().await;
 
-        assert_eq!(phone.ended().await, OperationOutcome::Undone(UndoCause::Interrupted), "{at:?}");
+        assert_eq!(
+            phone.ended().await,
+            StorageSetupOutcome::Undone(UndoCause::Interrupted),
+            "{at:?}"
+        );
         assert!(!phone.candidate_kept(), "{at:?}");
         assert_eq!(phone.handle.storage_config().await.unwrap(), None, "{at:?}");
         assert!(!phone.created().await, "{at:?}");
@@ -181,7 +176,7 @@ async fn a_setup_cut_past_its_point_of_no_return_finishes_once_sync_starts() {
             assert_eq!(setups[0].1, None, "{at:?}: still running");
         }
         phone.handle.start_sync().await.unwrap();
-        assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)), "{at:?}");
+        assert_eq!(phone.ended().await, StorageSetupOutcome::Landed(slot(1)), "{at:?}");
         assert!(phone.created().await, "{at:?}");
         assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
         // Setup deletes its own credentials after its row ends, before the
@@ -228,7 +223,7 @@ async fn cancelling_before_the_point_of_no_return_undoes_setup() {
     resume.send(()).unwrap();
 
     assert!(matches!(setup.await.unwrap(), Err(StorageSetupError::Cancelled)));
-    assert_eq!(phone.ended().await, OperationOutcome::Cancelled);
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Cancelled);
     assert!(!phone.created().await);
     assert!(!phone.candidate_kept());
     assert_eq!(phone.handle.storage_config().await.unwrap(), None);
@@ -251,7 +246,7 @@ async fn cancelling_before_setup_journals_itself_undoes_it() {
     resume.send(()).unwrap();
 
     assert!(matches!(setup.await.unwrap(), Err(StorageSetupError::Cancelled)));
-    assert_eq!(phone.ended().await, OperationOutcome::Cancelled);
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Cancelled);
     assert!(!phone.created().await);
     assert!(!phone.candidate_kept());
     assert_eq!(phone.handle.storage_config().await.unwrap(), None);
@@ -298,7 +293,7 @@ async fn a_second_setup_call_is_refused_while_one_runs() {
     resume.send(()).unwrap();
 
     setup.await.unwrap().unwrap();
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Landed(slot(1)));
     phone.handle.close().await.unwrap();
 }
 
@@ -316,7 +311,7 @@ async fn cancelling_past_the_point_of_no_return_lets_setup_finish() {
     resume.send(()).unwrap();
 
     setup.await.unwrap().unwrap();
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Landed(slot(1)));
     assert!(phone.created().await);
     phone.handle.close().await.unwrap();
 }
@@ -333,7 +328,7 @@ async fn a_dropped_setup_keeps_going() {
     assert!(setup.await.unwrap_err().is_cancelled());
     resume.send(()).unwrap();
 
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(slot(1)));
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Landed(slot(1)));
     assert!(phone.created().await);
     assert_eq!(phone.handle.storage_config().await.unwrap(), Some(phone.storage.config()));
     phone.handle.close().await.unwrap();
@@ -362,7 +357,7 @@ async fn a_reconnect_cut_past_its_point_of_no_return_finishes_once_sync_starts()
     phone.reopen().await;
     phone.handle.start_sync().await.unwrap();
 
-    assert_eq!(phone.ended().await, OperationOutcome::Satisfied);
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Satisfied);
     assert!(phone
         .app
         .store_keychain(phone.directory.id())
@@ -450,7 +445,7 @@ async fn a_setup_whose_slot_1_reply_is_lost_settles_that_claim() {
     if result.is_err() {
         phone.handle.start_sync().await.unwrap();
     }
-    assert_eq!(phone.ended().await, OperationOutcome::Landed(coven_merge::slot(1)));
+    assert_eq!(phone.ended().await, StorageSetupOutcome::Landed(coven_merge::slot(1)));
     assert!(phone.created().await);
     let members = phone.handle.members().await.unwrap();
     assert_eq!(members.len(), 1, "{members:?}");
@@ -476,7 +471,7 @@ async fn a_setup_whose_claim_is_refused_undoes_what_it_made() {
     let custody = phone.app.store_keychain(phone.directory.id());
     assert!(custody.storage_credentials().unwrap().is_none());
     assert!(!phone.candidate_kept());
-    assert!(matches!(phone.ended().await, OperationOutcome::Undone(_)));
+    assert!(matches!(phone.ended().await, StorageSetupOutcome::Undone(_)));
     assert!(stored_slots(&phone).await.is_empty());
     phone.handle.close().await.unwrap();
 }

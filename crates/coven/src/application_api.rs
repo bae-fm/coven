@@ -135,15 +135,16 @@ pub use coven_sync::{
     Joiner, PairingInfo, UnreadableSavedCode,
 };
 pub use coven_sync::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
+pub use coven_sync::{ChangeOutcome, FreshChangeOutcome, InviteOutcome, StorageSetupOutcome};
 pub use coven_sync::{
     Circle, CircleMemberInfo, CutOffRefusal, DamagedObject, DeviceIdEvidence, DeviceInfo,
     DeviceState, DeviceStop, EntryTarget, FileMissingReason, FileSourceFailure, Invite,
     InviteAccess, InviteLifetime, InviteStage, JoinRequest, LastPass, LocalFailure, MemberInfo,
-    OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
-    PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
-    Removal, RequiredUpdate, ResetReason, Retry, RetryAnswer, RetryEffect, RetryOutcome,
-    StatusFailure, SyncActivity, SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState,
-    SyncStatus, SyncWait, UndoCause, WriteCutoff,
+    OperationError, OperationId, OperationKind, OperationRejection, PassFailure, PendingReason,
+    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal, Removal,
+    RequiredUpdate, ResetReason, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
+    SyncActivity, SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus,
+    SyncWait, UndoCause, WriteCutoff,
 };
 pub use coven_sync::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,

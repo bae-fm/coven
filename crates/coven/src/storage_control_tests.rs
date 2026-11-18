@@ -428,7 +428,7 @@ async fn a_retried_operation_still_waits_out_a_provider_cooldown() {
     f.advance(Duration::from_secs(201));
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
-    let finished: Option<OperationOutcome> = f
+    let finished: Option<FreshChangeOutcome> = f
         .handle
         .read(move |sql| {
             Ok::<_, CovenError>(sql.query_row(

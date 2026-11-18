@@ -43,7 +43,9 @@ async fn an_app_operation_ends_with_its_outcome_and_stays_listed_until_acknowled
     // Its journal row can't end without its outcome.
     assert!(db.finish_operation(id).await.is_err());
     assert!(db.operation(id).await.unwrap().is_some());
-    db.finish_operation_with_outcome(id, crate::OperationOutcome::Satisfied).await.unwrap();
+    db.finish_operation_with_outcome(id, Some(crate::ChangeOutcome::Satisfied.into()))
+        .await
+        .unwrap();
     assert!(db.operation(id).await.unwrap().is_none());
     assert_eq!(
         listed(&db).await,
@@ -76,11 +78,13 @@ async fn an_ended_operation_keeps_the_outcome_it_ended_with() {
         })
         .await
         .unwrap();
-    db.finish_operation_with_outcome(id, crate::OperationOutcome::Satisfied).await.unwrap();
+    db.finish_operation_with_outcome(id, Some(crate::ChangeOutcome::Satisfied.into()))
+        .await
+        .unwrap();
     let again = db
         .finish_operation_with_outcome(
             id,
-            crate::OperationOutcome::Rejected(crate::OperationRejection::NoAdminLeft),
+            Some(crate::ChangeOutcome::Rejected(crate::OperationRejection::NoAdminLeft).into()),
         )
         .await;
     assert!(matches!(again, Err(DbError::OperationChanged(found)) if found == id), "{again:?}");

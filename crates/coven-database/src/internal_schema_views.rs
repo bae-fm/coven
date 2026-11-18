@@ -240,10 +240,10 @@ pub(super) const SCHEMA: &str = concat!(
     // The operations the app's writes journaled, in the order they were
     // journaled, each until the app acknowledges its outcome: `kind` as
     // coven-sync names it, and `outcome` NULL while it runs, then how it
-    // ended as coven-sync encodes it (`OperationOutcome`). `outcome_kind`
-    // names the outcome's variant in snake case, as `OperationOutcome` names
-    // it, and is NULL while the operation runs; `account` is the address a
-    // sharing refusal names, NULL for every other outcome.
+    // ended, encoded in the outcome type of its kind (`ListedOutcome`).
+    // `outcome_kind` names the outcome's variant in snake case, as that type
+    // names it, and is NULL while the operation runs; `account` is the
+    // address a sharing refusal names, NULL for every other outcome.
     "CREATE VIEW coven_operations(operation,kind,outcome,outcome_kind,account) AS
         SELECT a.operation,a.kind,a.outcome,
             _coven_variant_kind(CAST(a.outcome AS TEXT)),

@@ -234,8 +234,10 @@ mod operation;
 pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate};
 pub mod operation_kind;
 mod operation_outcome;
+pub(crate) use operation_outcome::StopOutcome;
 pub use operation_outcome::{
-    slot_json, DeviceStop, EntryTarget, OperationOutcome, OperationRejection, Removal, UndoCause,
+    slot_json, ChangeOutcome, DeviceStop, EntryTarget, FreshChangeOutcome, InviteOutcome,
+    ListedOutcome, OperationRejection, Removal, StorageSetupOutcome, UndoCause,
 };
 
 mod commit_task;

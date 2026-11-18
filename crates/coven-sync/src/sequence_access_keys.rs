@@ -4,7 +4,8 @@
 
 use super::sequence_operations::Request;
 use super::SequenceSync;
-use crate::{OperationOutcome, SyncError};
+use crate::operation_outcome::EntryOutcome;
+use crate::SyncError;
 use coven_crypto::MemberIdentity;
 use coven_database::ClaimWork;
 use coven_format::{admin::StoreChange, MemberAccess};
@@ -77,8 +78,7 @@ impl SequenceSync {
             // without claiming. One an earlier call journaled stays, and a
             // pass ends it so while custody holds another key.
             if let Some(id) = entry.filter(|_| earlier.is_none()) {
-                let ended =
-                    self.database.finish_operation_with_outcome(id, OperationOutcome::Satisfied);
+                let ended = self.database.finish_operation_with_outcome(id, None);
                 if let Err(cleanup) = ended.await {
                     return Err(SyncError::cleanup(error, cleanup.into()));
                 }
@@ -103,7 +103,7 @@ impl SequenceSync {
             }
             self.run_administration(&mut session, &mut ring, &member, id)
                 .await
-                .and_then(crate::operation_outcome::into_slot)
+                .and_then(EntryOutcome::into_slot)
         };
         match claimed.await {
             Ok(_) => Ok(replaced),

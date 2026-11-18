@@ -8,7 +8,7 @@
 
 use super::*;
 use coven_crypto::custody::StoreKeychain;
-use coven_database::{OperationOutcome, OperationRejection, UndoCause};
+use coven_database::{OperationRejection, StorageSetupOutcome, UndoCause};
 use coven_storage::CheckEnd;
 use coven_sync::SetupJournal;
 
@@ -167,7 +167,7 @@ pub(crate) async fn settle_opened(
     })
     .await??;
     if let Some(journal) = running {
-        journal.end(database, OperationOutcome::Undone(UndoCause::Interrupted)).await?;
+        journal.end(database, StorageSetupOutcome::Undone(UndoCause::Interrupted)).await?;
     }
     Ok(false)
 }
@@ -328,8 +328,8 @@ impl StorageConnections {
         error: StorageSetupError,
     ) -> StorageSetupError {
         let outcome = match &error {
-            StorageSetupError::Cancelled => OperationOutcome::Cancelled,
-            error => OperationOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
+            StorageSetupError::Cancelled => StorageSetupOutcome::Cancelled,
+            error => StorageSetupOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
         };
         let undone = async {
             self.keychain.delete_setup_credentials()?;
@@ -578,8 +578,8 @@ impl StorageConnections {
         .await;
         let (slot, restore_code) = prepared?;
         let outcome = match slot {
-            Some(slot) => OperationOutcome::Landed(slot),
-            None => OperationOutcome::Satisfied,
+            Some(slot) => StorageSetupOutcome::Landed(slot),
+            None => StorageSetupOutcome::Satisfied,
         };
         journal.end(&self.database, outcome).await?;
         *lock_unpoisoned(&self.setup) = SetupRun::Idle;
@@ -662,9 +662,9 @@ impl StorageConnections {
     /// (§11.2, §11.6).
     async fn refuse_setup(&self, journal: &SetupJournal, error: SyncError) -> SyncError {
         let outcome = match &error {
-            SyncError::Rejected(reason) => OperationOutcome::Rejected(reason.clone()),
-            SyncError::StoreOwner => OperationOutcome::Rejected(OperationRejection::StoreOwner),
-            error => OperationOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
+            SyncError::Rejected(reason) => StorageSetupOutcome::Rejected(reason.clone()),
+            SyncError::StoreOwner => StorageSetupOutcome::Rejected(OperationRejection::StoreOwner),
+            error => StorageSetupOutcome::Undone(UndoCause::Failed { error: error.to_string() }),
         };
         let undone = async {
             self.keychain.delete_setup_credentials()?;

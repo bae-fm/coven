@@ -315,7 +315,7 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
     ana.sync.pass().await.unwrap();
     assert_eq!(
         outcome(&ana, binding).await,
-        Some(OperationOutcome::Rejected(OperationRejection::NotAllowed))
+        Some(InviteOutcome::Rejected(OperationRejection::NotAllowed))
     );
     assert!(listed(&ana).await.is_empty());
     assert!(ana
@@ -416,17 +416,14 @@ async fn approve(device: &Device, request: &JoinRequest) -> coven_database::Oper
 }
 
 /// The operation's outcome, as `coven_operations` lists it.
-async fn outcome(
-    device: &Device,
-    operation: coven_database::OperationId,
-) -> Option<OperationOutcome> {
+async fn outcome(device: &Device, operation: coven_database::OperationId) -> Option<InviteOutcome> {
     device
         .database()
         .read(move |sql| {
             Ok::<_, DbError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [operation.0],
-                |row| row.get::<_, Option<OperationOutcome>>(0),
+                |row| row.get::<_, Option<InviteOutcome>>(0),
             )?)
         })
         .await
@@ -533,7 +530,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         };
         assert_eq!(
             outcome(&ana, binding).await,
-            Some(OperationOutcome::Rejected(OperationRejection::MemberKeysChanged(target)))
+            Some(InviteOutcome::Rejected(OperationRejection::MemberKeysChanged(target)))
         );
         if failed_cleanup {
             let pending =
@@ -899,7 +896,7 @@ async fn an_approval_missing_a_key_it_must_copy_waits_for_it() {
     ana.sync.keys.persist(&full).unwrap();
     ana.sync.retry_pending_operation(invite_operation).await.unwrap();
     assert!(enrolled().await);
-    assert!(matches!(outcome(&ana, binding).await, Some(OperationOutcome::Landed(_))));
+    assert!(matches!(outcome(&ana, binding).await, Some(InviteOutcome::Landed(_))));
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }

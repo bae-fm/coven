@@ -117,10 +117,7 @@ impl SequenceSync {
         target: KeyPreparation,
     ) -> Result<(), SyncError> {
         let id = self.start_request_row(Request::Key(target), "key").await?;
-        crate::operation_outcome::into_slot(
-            self.run_administration(session, ring, member, id).await?,
-        )
-        .map(drop)
+        self.run_administration(session, ring, member, id).await?.into_slot().map(drop)
     }
 
     pub(crate) async fn prepare_audience_key(

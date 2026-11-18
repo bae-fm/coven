@@ -219,7 +219,7 @@ async fn a_raise_started_before_its_circle_is_deleted_claims_nothing() {
     let mut ring = ana.sync.ring(&mut session, &member).await.unwrap();
     let outcome =
         ana.sync.run_administration(&mut session, &mut ring, &member, raise.id).await.unwrap();
-    assert_eq!(outcome, crate::OperationOutcome::Satisfied);
+    assert_eq!(outcome, crate::operation_outcome::EntryOutcome::Satisfied);
     drop(session);
     let operations = ana.database().operations().await.unwrap();
     assert!(operations.is_empty(), "{operations:?}");

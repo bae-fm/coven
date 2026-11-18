@@ -565,7 +565,8 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let removed = admit_member(&f, &handle, member(29).keys()).await;
     let (circle, created) = handle.circles().create("Shared").await.unwrap();
     f.sync(&handle).await;
-    crate::tests::landed(&handle, Some(created)).await;
+    let made: FreshChangeOutcome = crate::tests::outcome(&handle, Some(created)).await;
+    assert!(matches!(made, FreshChangeOutcome::Landed(_)), "{made:?}");
     let added = handle.circles().add_member(circle, &removed).await.unwrap();
     f.sync(&handle).await;
     crate::tests::landed(&handle, added).await;

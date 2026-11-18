@@ -74,7 +74,8 @@ pub use codes::{
 };
 pub use coven_database::WriteCutoff;
 pub use coven_database::{
-    DeviceStop, EntryTarget, OperationOutcome, OperationRejection, Removal, UndoCause,
+    ChangeOutcome, DeviceStop, EntryTarget, FreshChangeOutcome, InviteOutcome, OperationRejection,
+    Removal, StorageSetupOutcome, UndoCause,
 };
 pub use coven_format::codes::InviteAdmits;
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};

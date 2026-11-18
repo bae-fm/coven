@@ -113,7 +113,7 @@ fn recorded_operations_list_their_outcomes() {
     .unwrap();
     let rename = || crate::StoreChange::RenameStore { name: "Household".into() };
     let renamed = super::record_change(&connection, rename()).unwrap();
-    super::finish_operation(&connection, renamed, &crate::OperationOutcome::Satisfied).unwrap();
+    super::finish_operation(&connection, renamed, crate::ChangeOutcome::Satisfied).unwrap();
     let running = super::record_change(&connection, rename()).unwrap();
 
     let listed: Vec<(i64, String, Option<String>, Option<String>)> = connection
@@ -141,6 +141,27 @@ fn recorded_operations_list_their_outcomes() {
     let invites: i64 =
         connection.query_row("SELECT count(*) FROM coven_invites", [], |r| r.get(0)).unwrap();
     assert_eq!(invites, 0);
+}
+
+/// A test ends an operation only as coven could: an outcome outside the
+/// outcome type of the operation's kind fails, and the operation runs on.
+#[test]
+fn a_recorded_operation_refuses_an_outcome_its_kind_never_ends_with() {
+    let connection = outside_store();
+    let rename = crate::StoreChange::RenameStore { name: "Household".into() };
+    let renamed = super::record_change(&connection, rename).unwrap();
+    let cancelled =
+        super::finish_operation(&connection, renamed, crate::StorageSetupOutcome::Cancelled);
+    assert!(
+        matches!(cancelled, Err(crate::CovenError::Database(crate::DbError::Invariant { .. }))),
+        "{cancelled:?}"
+    );
+    let outcome: Option<Vec<u8>> = connection
+        .query_row("SELECT outcome FROM coven_operations WHERE operation=?1", [renamed.0], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome, None);
 }
 
 /// A pending record a test records outside a store reaches `coven_pending`

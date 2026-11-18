@@ -182,8 +182,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // reads on finds no such member.
     let added = handle.circles().add_member(circle.id, &outsider).await.unwrap();
     assert!(matches!(
-        crate::tests::outcome(&handle, added).await,
-        OperationOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id))) if id == outsider
+        crate::tests::outcome::<ChangeOutcome>(&handle, added).await,
+        ChangeOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id))) if id == outsider
     ));
     let invite = crate::tests::invite(
         &handle,

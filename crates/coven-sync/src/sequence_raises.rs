@@ -89,7 +89,7 @@ impl SequenceSync {
                     operation_kind::COVEN,
                 )
                 .await
-                .and_then(crate::operation_outcome::into_slot)
+                .and_then(crate::operation_outcome::EntryOutcome::into_slot)
                 .map(drop);
             self.own_work(result, |request| {
                 matches!(request, Request::Snapshot(raise) if raise.audience == capture.audience)

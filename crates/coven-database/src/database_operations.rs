@@ -282,18 +282,21 @@ impl StoreDatabase {
         .await
     }
 
-    /// Retire a finished operation with its outcome, as sync encodes it,
-    /// which `coven_operations` lists for an operation the app's write
-    /// journaled, in the same transaction: an outcome nobody awaits is
-    /// never lost (§11.4).
+    /// Retire a finished operation with its outcome, in the outcome type of
+    /// its kind, which `coven_operations` lists for an operation the app's
+    /// write journaled, in the same transaction: an outcome nobody awaits is
+    /// never lost (§11.4). `None` for a kind `coven_operations` never lists.
+    /// An operation that has ended already fails with `OperationChanged`.
     pub async fn finish_operation_with_outcome(
         &self,
         id: OperationId,
-        outcome: crate::OperationOutcome,
+        outcome: Option<crate::ListedOutcome>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
-                writer.transaction(|db| crate::operation::finish_with_outcome(db, id, &outcome))
+                writer.transaction(|db| {
+                    crate::operation::finish_with_outcome(db, id, outcome.as_ref())
+                })
             })
         })
         .await
@@ -310,7 +313,7 @@ impl StoreDatabase {
         id: OperationId,
         children: Vec<OperationId>,
         removal: crate::ObjectRemoval,
-        outcome: Option<(String, crate::OperationOutcome)>,
+        outcome: Option<(String, crate::InviteOutcome)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
@@ -333,23 +336,23 @@ impl StoreDatabase {
         .await
     }
 
-    /// End an operation another started, with its outcome, in the
-    /// transaction that advances its parent past it: the parent's step and
-    /// the child's end commit together, so no restart finds one without the
-    /// other. An outcome `coven_operations` lists is written as
+    /// End an operation another started in the transaction that advances
+    /// its parent past it: the parent's step and the child's end commit
+    /// together, so no restart finds one without the other. The child's
+    /// `outcome`, for one `coven_operations` lists, is written as
     /// `finish_operation_with_outcome` writes it. A parent that has moved on
     /// since, or a child already ended, fails with `OperationChanged`.
     pub async fn finish_operation_advancing(
         &self,
         child: OperationId,
-        outcome: crate::OperationOutcome,
+        outcome: Option<crate::ListedOutcome>,
         parent: OperationUpdate,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
                 writer.transaction(|db| {
                     crate::operation::advance(db, &parent)?;
-                    crate::operation::finish_with_outcome(db, child, &outcome)
+                    crate::operation::finish_with_outcome(db, child, outcome.as_ref())
                 })
             })
         })

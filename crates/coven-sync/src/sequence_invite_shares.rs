@@ -64,7 +64,7 @@ impl SequenceSync {
             {
                 Child::Journaled(end) => Some(end),
                 Child::Decided(outcome) => {
-                    if let OperationOutcome::Rejected(reason) = &outcome {
+                    if let EntryOutcome::Rejected(reason) = &outcome {
                         tracing::warn!(invite = ?work.id, ?reason, "an invite share's end was refused");
                     }
                     None

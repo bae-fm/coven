@@ -823,10 +823,10 @@ mod mutual_removal {
         ben.handle.start_sync().await.unwrap();
         network.clock.set(network.clock.now() + std::time::Duration::from_secs(1));
         let _ = ben.handle.retry_now().await.unwrap().await;
-        let ended = outcome(&ben.handle, against_ana).await;
+        let ended: ChangeOutcome = outcome(&ben.handle, against_ana).await;
         assert_eq!(
             ended,
-            OperationOutcome::Stopped(coven_database::DeviceStop::Removed(
+            ChangeOutcome::Stopped(coven_database::DeviceStop::Removed(
                 coven_database::Removal::Member
             ))
         );

@@ -342,17 +342,14 @@ async fn journal(device: &Device, change: StoreChange) -> coven_database::Operat
 }
 
 /// The operation's outcome, as `coven_operations` lists it.
-async fn outcome(
-    device: &Device,
-    operation: coven_database::OperationId,
-) -> Option<OperationOutcome> {
+async fn outcome(device: &Device, operation: coven_database::OperationId) -> Option<ChangeOutcome> {
     device
         .database()
         .read(move |sql| {
             Ok::<_, DbError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [operation.0],
-                |row| row.get::<_, Option<OperationOutcome>>(0),
+                |row| row.get::<_, Option<ChangeOutcome>>(0),
             )?)
         })
         .await
@@ -360,8 +357,8 @@ async fn outcome(
 }
 
 /// The outcome of an operation a stop for good ended: nothing refused it.
-fn stopped(stop: DeviceStop) -> Option<OperationOutcome> {
-    Some(OperationOutcome::Stopped(stop))
+fn stopped(stop: DeviceStop) -> Option<ChangeOutcome> {
+    Some(ChangeOutcome::Stopped(stop))
 }
 
 /// Ana and Ben, an admin, each with a device; Ben's has applied his
@@ -405,7 +402,7 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
     let slot = claim.attempts.last().unwrap().slot_number().unwrap();
     ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed(Removal::Device))));
-    assert_eq!(outcome(&ben, removal).await, Some(OperationOutcome::Landed(slot)));
+    assert_eq!(outcome(&ben, removal).await, Some(ChangeOutcome::Landed(slot)));
     assert_eq!(outcome(&ben, rename).await, stopped(DeviceStop::Removed(Removal::Device)));
     assert!(ben.database().operations().await.unwrap().is_empty());
     assert!(ben.database().current_claim().await.unwrap().is_none());
@@ -479,7 +476,7 @@ async fn replacing_ones_own_keys_ends_no_operation() {
     ben.sync.replace_member_keys().await.unwrap();
     assert_eq!(outcome(&ben, rename).await, None);
     ben.sync.pass().await.unwrap();
-    assert!(matches!(outcome(&ben, rename).await, Some(OperationOutcome::Landed(_))));
+    assert!(matches!(outcome(&ben, rename).await, Some(ChangeOutcome::Landed(_))));
     close(&[&ana, &ben]).await;
 }
 

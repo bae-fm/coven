@@ -1,10 +1,11 @@
 //! One journal owns validation, prerequisite artifacts, claims and undo.
 
+use crate::operation_outcome::EntryOutcome;
 use crate::sequence_sync::OperationState;
 use crate::{
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
     sequence_sync::{next_slot, SequenceSync, Session},
-    OperationOutcome, OperationRejection, SyncError,
+    OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
@@ -209,7 +210,7 @@ impl SequenceSync {
             owner
                 .run_administration(&mut session, &mut ring, &member, id)
                 .await
-                .and_then(crate::operation_outcome::into_slot)
+                .and_then(EntryOutcome::into_slot)
                 .map(drop)
         };
         coven_foundation::task::spawn_completing(
@@ -301,7 +302,7 @@ impl SequenceSync {
                         .await
                 }
             };
-            match ran.and_then(crate::operation_outcome::into_slot) {
+            match ran.and_then(EntryOutcome::into_slot) {
                 // Another creation claimed slot 1 first (§10).
                 Err(SyncError::Rejected(_)) if creation => {
                     Err(coven_storage::StorageFailure::StoreExists.into())
@@ -337,9 +338,9 @@ impl SequenceSync {
         member: &MemberIdentity,
         request: Request,
         started_by: &str,
-    ) -> Result<OperationOutcome, SyncError> {
+    ) -> Result<EntryOutcome, SyncError> {
         if !self.validate_request(session, member, &request)?? {
-            return Ok(OperationOutcome::Satisfied);
+            return Ok(EntryOutcome::Satisfied);
         }
         let id = self.start_request_row(request, started_by).await?;
         self.run_administration(session, ring, member, id).await
@@ -494,7 +495,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         id: OperationId,
-    ) -> Result<OperationOutcome, SyncError> {
+    ) -> Result<EntryOutcome, SyncError> {
         let record = self.database.operation(id).await?.ok_or(SyncError::NotPending(id))?;
         if parent_owned(&record) {
             // The parent records the failure and owns its retry scope (§11.4).
@@ -529,7 +530,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         id: OperationId,
-    ) -> Result<OperationOutcome, SyncError> {
+    ) -> Result<EntryOutcome, SyncError> {
         loop {
             let record = self
                 .database
@@ -537,6 +538,7 @@ impl SequenceSync {
                 .await?
                 .ok_or(coven_database::DbError::OperationChanged(id))?;
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
+            let kind = work.kind();
             let SequenceOperation { request, progress } = work;
             let mut step = match progress {
                 OperationProgress::Undo { step, reason } => {
@@ -544,20 +546,20 @@ impl SequenceSync {
                     if let Err(cleanup) = self.undo_step(&step).await {
                         return Err(SyncError::cleanup(reason.into(), cleanup));
                     }
-                    return self.finish(&record, OperationOutcome::Rejected(reason)).await;
+                    return self.finish(&record, kind, EntryOutcome::Rejected(reason)).await;
                 }
                 OperationProgress::Running(step) => step,
             };
             match &step {
                 OperationStep::Applied(slot) => {
-                    return self.finish(&record, OperationOutcome::Landed(*slot)).await
+                    return self.finish(&record, kind, EntryOutcome::Landed(*slot)).await
                 }
                 OperationStep::Satisfied => {
-                    return self.finish(&record, OperationOutcome::Satisfied).await
+                    return self.finish(&record, kind, EntryOutcome::Satisfied).await
                 }
                 OperationStep::SnapshotApplied { artifact, slot } => {
                     self.remove_artifact(&artifact.capture.name).await?;
-                    return self.finish(&record, OperationOutcome::Landed(*slot)).await;
+                    return self.finish(&record, kind, EntryOutcome::Landed(*slot)).await;
                 }
                 _ => (),
             }
@@ -788,17 +790,20 @@ impl SequenceSync {
     }
 
     /// End the operation's journal row with its outcome, which the app's
-    /// record of it keeps in the same transaction (§11.4). An operation an
-    /// invite started stays journaled at its last step: the invite names it,
-    /// and ends it in the transaction that moves the invite on or ends the
-    /// invite, so a restart never finds one without the other (§13.2).
+    /// record of it keeps in the same transaction, in the outcome type of
+    /// its kind (§11.4). An operation an invite started stays journaled at
+    /// its last step: the invite names it, and ends it in the transaction
+    /// that moves the invite on or ends the invite, so a restart never finds
+    /// one without the other (§13.2).
     async fn finish(
         &self,
         record: &OperationRecord,
-        outcome: OperationOutcome,
-    ) -> Result<OperationOutcome, SyncError> {
+        kind: crate::OperationKind,
+        outcome: EntryOutcome,
+    ) -> Result<EntryOutcome, SyncError> {
         if !parent_owned(record) {
-            self.database.finish_operation_with_outcome(record.id, outcome.clone()).await?;
+            let listed = kind.listed_outcome(outcome.clone())?;
+            self.database.finish_operation_with_outcome(record.id, listed).await?;
         }
         Ok(outcome)
     }
@@ -817,13 +822,14 @@ pub fn change_operation(change: StoreChange) -> Result<(NewOperation, String), S
 impl SequenceSync {
     /// Run one of the app's journal steps in a write of its own, then a
     /// pass, and return the operation's outcome as `coven_operations` lists
-    /// it; `None` when the step journaled nothing.
-    pub(crate) async fn journal_and_pass(
+    /// it, read as `O`, the outcome type of its kind; `None` when the step
+    /// journaled nothing.
+    pub(crate) async fn journal_and_pass<O: coven_database::types::FromSql + Send + 'static>(
         &self,
         step: impl FnOnce(&coven_database::SqlContext<'_, '_>) -> Result<Option<OperationId>, SyncError>
             + Send
             + 'static,
-    ) -> Result<Option<OperationOutcome>, SyncError> {
+    ) -> Result<Option<O>, SyncError> {
         let journaled = self.database.write_as(move |sql| step(&sql)).await?;
         let Some(id) = journaled else {
             return Ok(None);
@@ -835,7 +841,7 @@ impl SequenceSync {
                 Ok::<_, coven_database::DbError>(sql.query_row(
                     "SELECT outcome FROM coven_operations WHERE operation=?1",
                     [id.0],
-                    |row| row.get::<_, OperationOutcome>(0),
+                    |row| row.get::<_, O>(0),
                 )?)
             })
             .await?;
@@ -858,7 +864,11 @@ impl SequenceSync {
             })
             .await?
             .expect("making a circle always journals");
-        crate::operation_outcome::into_slot(outcome)?;
+        match outcome {
+            crate::FreshChangeOutcome::Landed(_) => {}
+            crate::FreshChangeOutcome::Rejected(reason) => return Err(SyncError::Rejected(reason)),
+            stopped => panic!("the pass ended making the circle {stopped:?}"),
+        }
         Ok(receiver.await.expect("the step sent the circle"))
     }
 }

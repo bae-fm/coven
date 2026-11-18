@@ -40,7 +40,10 @@ pub fn refuse_invite(
     refusal: coven_foundation::sharing::SharingRefusal,
 ) -> Result<(), crate::CovenError> {
     let outcome =
-        coven_database::OperationOutcome::SharingRefused { account: account.to_owned(), refusal };
+        coven_database::ListedOutcome::Invite(coven_database::InviteOutcome::SharingRefused {
+            account: account.to_owned(),
+            refusal,
+        });
     let kind = coven_sync::OperationKind::Invite.listed();
     Ok(coven_database::test_utils::finish_outside_store(
         connection,
@@ -62,16 +65,29 @@ pub fn record_change(
 
 /// End the operation `id`, which the app's write journaled, on `connection`
 /// as a store ends it with `outcome`: `coven_operations` lists the outcome
-/// until the app acknowledges it (§11.4).
+/// until the app acknowledges it (§11.4). An outcome not in the outcome type
+/// of the operation's kind fails with `Invariant`, as coven never writes one.
 pub fn finish_operation(
     connection: &coven_database::test_utils::Connection,
     id: coven_database::OperationId,
-    outcome: &coven_database::OperationOutcome,
+    outcome: impl Into<coven_database::ListedOutcome>,
 ) -> Result<(), crate::CovenError> {
+    let outcome = outcome.into();
+    let kind: Option<coven_sync::OperationKind> = connection
+        .query_row("SELECT (SELECT kind FROM coven_operations WHERE operation=?1)", [id.0], |row| {
+            row.get(0)
+        })
+        .map_err(coven_database::DbError::from)?;
+    if kind.is_some_and(|kind| !kind.lists(&outcome)) {
+        return Err(coven_database::DbError::Invariant {
+            what: "an operation ends in the outcome type of its kind",
+        }
+        .into());
+    }
     Ok(coven_database::test_utils::finish_outside_store(
         connection,
         id,
-        coven_database::test_utils::OutcomeListing::Listed(outcome),
+        coven_database::test_utils::OutcomeListing::Listed(&outcome),
     )?)
 }
 
