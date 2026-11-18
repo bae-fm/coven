@@ -1,6 +1,8 @@
 //! One journal owns validation, prerequisite artifacts, claims and undo.
 
 use crate::operation_outcome::EntryOutcome;
+#[cfg(test)]
+use crate::operation_outcome::SettledByPass;
 use crate::sequence_sync::OperationState;
 use crate::{
     sequence_sync::snapshot_capture::{Capture, SnapshotArtifact, SnapshotRequest},
@@ -856,7 +858,7 @@ impl SequenceSync {
     ) -> Result<coven_foundation::id_source::CircleId, SyncError> {
         let steps = self.operation_steps();
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let outcome = self
+        let outcome: crate::FreshChangeOutcome = self
             .journal_and_pass(move |sql| {
                 let (circle, operation) = steps.create_circle(sql, name)?;
                 sender.send(circle).expect("the caller waits");
@@ -864,11 +866,7 @@ impl SequenceSync {
             })
             .await?
             .expect("making a circle always journals");
-        match outcome {
-            crate::FreshChangeOutcome::Landed(_) => {}
-            crate::FreshChangeOutcome::Rejected(reason) => return Err(SyncError::Rejected(reason)),
-            stopped => panic!("the pass ended making the circle {stopped:?}"),
-        }
+        outcome.settled()?;
         Ok(receiver.await.expect("the step sent the circle"))
     }
 }

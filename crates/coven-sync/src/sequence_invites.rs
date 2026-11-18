@@ -395,17 +395,14 @@ impl SequenceSync {
         &self,
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
+        use crate::operation_outcome::SettledByPass as _;
         let request = request.clone();
         let steps = self.operation_steps();
-        let outcome = self
+        let outcome: crate::InviteOutcome = self
             .journal_and_pass(move |sql| steps.approve_join_request(sql, &request).map(Some))
             .await?
             .expect("an approval always journals its binding");
-        match outcome {
-            crate::InviteOutcome::Landed(_) | crate::InviteOutcome::Satisfied => Ok(()),
-            crate::InviteOutcome::Rejected(reason) => Err(SyncError::Rejected(reason)),
-            other => panic!("the pass ended the binding {other:?}"),
-        }
+        outcome.settled()
     }
 
     /// Decline the request as the app's write step does, then run the pass

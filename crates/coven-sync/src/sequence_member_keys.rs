@@ -4,6 +4,8 @@
 //! pair for another member, which is only the entry and its copies.
 
 use super::{sequence_operations::Request, SequenceSync, Session};
+#[cfg(test)]
+use crate::operation_outcome::SettledByPass;
 use crate::sequence_sync::OperationState;
 use crate::{
     OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, Prerequisite,
@@ -297,14 +299,10 @@ impl SequenceSync {
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError> {
         let steps = self.operation_steps();
-        let outcome = self
+        let outcome: Option<crate::FreshChangeOutcome> = self
             .journal_and_pass(move |sql| steps.replace_member_keys_for(sql, member, keys))
             .await?;
-        match outcome {
-            None | Some(crate::FreshChangeOutcome::Landed(_)) => Ok(()),
-            Some(crate::FreshChangeOutcome::Rejected(reason)) => Err(SyncError::Rejected(reason)),
-            Some(stopped) => panic!("the pass ended the replacement {stopped:?}"),
-        }
+        outcome.map_or(Ok(()), SettledByPass::settled)
     }
 }
 

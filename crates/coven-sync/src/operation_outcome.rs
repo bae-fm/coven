@@ -66,6 +66,38 @@ impl TryFrom<EntryOutcome> for FreshChangeOutcome {
     }
 }
 
+/// How a call that journals an operation and runs the pass that settles it
+/// reads the operation's listed outcome: it ended in the pass, so it landed
+/// or was rejected.
+#[cfg(test)]
+pub(crate) trait SettledByPass: std::fmt::Debug + Sized {
+    /// Whether the operation took effect, or the rejection as the error.
+    /// An outcome the pass can't give, a device that stopped, panics.
+    fn settled(self) -> Result<(), SyncError>;
+}
+
+#[cfg(test)]
+impl SettledByPass for FreshChangeOutcome {
+    fn settled(self) -> Result<(), SyncError> {
+        match self {
+            Self::Landed(_) => Ok(()),
+            Self::Rejected(reason) => Err(SyncError::Rejected(reason)),
+            other => panic!("the pass ended the operation {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SettledByPass for InviteOutcome {
+    fn settled(self) -> Result<(), SyncError> {
+        match self {
+            Self::Landed(_) | Self::Satisfied => Ok(()),
+            Self::Rejected(reason) => Err(SyncError::Rejected(reason)),
+            other => panic!("the pass ended the operation {other:?}"),
+        }
+    }
+}
+
 /// The outcome types `coven_operations` lists outcomes in, one for each
 /// group of kinds that end the same ways.
 #[derive(PartialEq)]
