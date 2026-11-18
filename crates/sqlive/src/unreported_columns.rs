@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES};
+use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
 use crate::select_syntax::{parts, window_parts, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
@@ -633,9 +633,6 @@ impl Walk<'_> {
             .collect())
     }
 }
-
-/// The names SQLite gives a rowid table's rowid where no column has them.
-const ROWID_NAMES: [&str; 3] = ["rowid", "oid", "_rowid_"];
 
 /// The names, lowercase, SQLite gives the result columns of `select`'s first
 /// arm, when each is an alias or a column's name; `None` when one is an

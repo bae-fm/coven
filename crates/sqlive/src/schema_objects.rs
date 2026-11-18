@@ -14,6 +14,9 @@ use sqlite3_parser::{
 pub(crate) const MAIN_TABLES: &str = "SELECT name,type FROM pragma_table_list
      WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'";
 
+/// The names SQLite gives a rowid table's rowid where no column has them.
+pub(crate) const ROWID_NAMES: [&str; 3] = ["rowid", "oid", "_rowid_"];
+
 /// The stored name and type, `table` or `view`, of the main schema's table
 /// or view `name` names. Anything else, as a virtual table, is `None`.
 pub(crate) fn main_object(

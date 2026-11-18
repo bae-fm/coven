@@ -433,7 +433,7 @@ impl Planner<'_> {
                     // before looking further out.
                     if items.clone().any(|(_, item)| !item.columns.complete())
                         || self.cores[current].aliases.iter().any(|alias| name == Name(alias))
-                        || ["rowid", "oid", "_rowid_"].iter().any(|rowid| name == *rowid)
+                        || crate::schema_objects::ROWID_NAMES.iter().any(|rowid| name == *rowid)
                     {
                         return None;
                     }
