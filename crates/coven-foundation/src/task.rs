@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 #[path = "task_in_flight.rs"]
 mod in_flight;
 
-pub use ::caught::{
+pub use ::panic_as_error::{
     catching_operation, caught, caught_sync, panic_message, report, Bug, BugKind, BugSink,
     BugSinkRef, CarriesBug, SourceLocation,
 };
@@ -87,7 +87,7 @@ impl TaskFailed {
     /// join uncaught gives a bug that can't say where it began.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
         if error.is_panic() {
-            Self::Panicked(caught::bug_of_unlocated(operation, error.into_panic()))
+            Self::Panicked(panic_as_error::bug_of_unlocated(operation, error.into_panic()))
         } else {
             Self::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::Unknown })
         }

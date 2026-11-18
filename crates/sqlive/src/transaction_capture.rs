@@ -8,7 +8,7 @@ use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::RowChange;
 use crate::UnrecordedTables;
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 

@@ -2,7 +2,7 @@
 //! statements its reads run, and the points a write transaction passes; and
 //! the costs a measurement prints for the performance suite.
 
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// The work a connection counts: its commits, its reads of the schema

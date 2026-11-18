@@ -6,8 +6,8 @@
 use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
 use crate::{affected, Answers, EngineFailure, Error, Lookups, ReadSet, RowChange, RowScope};
-use caught::locks::lock_unpoisoned;
-use caught::{Bug, BugSinkRef};
+use panic_as_error::locks::lock_unpoisoned;
+use panic_as_error::{Bug, BugSinkRef};
 use std::{
     any::Any,
     cell::RefCell,
@@ -695,7 +695,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
 
     /// Hand `bug`, which no call returns, to the handle's bug sink (E15).
     pub fn report(&self, bug: &Bug) {
-        caught::report(self.bugs.as_ref(), bug);
+        panic_as_error::report(self.bugs.as_ref(), bug);
     }
 
     /// This handle, as `CALL` names it.

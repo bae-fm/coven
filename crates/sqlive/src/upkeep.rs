@@ -148,7 +148,7 @@ impl<U: Upkeep> Serving<U> {
     /// upkeep, the thread fails the handle with it and hands it to the
     /// handle's bug sink (E15).
     fn serve(self) {
-        let served = caught::caught_sync(U::THREAD, || loop {
+        let served = panic_as_error::caught_sync(U::THREAD, || loop {
             std::thread::park();
             if self.shared.closing.load(Ordering::Acquire) {
                 return;

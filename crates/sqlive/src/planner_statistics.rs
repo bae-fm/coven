@@ -16,7 +16,7 @@
 use crate::authorization::{Policy, PolicyError};
 use crate::connection::HostSql;
 use crate::upkeep::{Upkeep, UpkeepThread, Wake};
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -68,7 +68,7 @@ impl<P: Policy> UpkeepThread<PlannerStatistics<P>> {
 
     /// Stop, after any check or run in progress, and close the connection.
     pub(crate) fn stop(self) -> Result<(), PolicyError<P>> {
-        caught::locks::into_unpoisoned(self.join().connection).close()
+        panic_as_error::locks::into_unpoisoned(self.join().connection).close()
     }
 }
 

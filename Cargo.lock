@@ -742,14 +742,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "caught"
-version = "0.1.0"
-dependencies = [
- "futures-lite",
- "tracing",
-]
-
-[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1034,7 +1026,6 @@ name = "coven-foundation"
 version = "0.1.0"
 dependencies = [
  "block2",
- "caught",
  "futures-lite",
  "icu_casemap",
  "icu_normalizer",
@@ -1042,6 +1033,7 @@ dependencies = [
  "jni 0.22.4",
  "libc",
  "ndk-context",
+ "panic-as-error",
  "rusqlite",
  "rustix",
  "serde",
@@ -2392,6 +2384,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "panic-as-error"
+version = "0.1.0"
+dependencies = [
+ "futures-lite",
+ "tracing",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3142,8 +3142,8 @@ dependencies = [
 name = "sqlive"
 version = "0.1.0"
 dependencies = [
- "caught",
  "futures-lite",
+ "panic-as-error",
  "rusqlite",
  "sqlite3-parser",
  "tempfile",

@@ -3,7 +3,7 @@
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::connection::HostSql;
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::sync::{Condvar, Mutex};
 
 pub(super) struct ReadPool<P: Policy> {
@@ -36,7 +36,7 @@ impl<P: Policy> ReadPool<P> {
     pub(super) fn close(self) -> Vec<PolicyError<P>> {
         let mut failures = Vec::new();
         for reader in self.readers {
-            if let Err(error) = caught::locks::into_unpoisoned(reader).close() {
+            if let Err(error) = panic_as_error::locks::into_unpoisoned(reader).close() {
                 failures.push(error);
             }
         }
@@ -53,7 +53,7 @@ impl<P: Policy> ReadPool<P> {
             if let Some(waiting) = lock_unpoisoned(&self.waiting).take() {
                 waiting.send(()).unwrap();
             }
-            idle = caught::locks::wait_unpoisoned(&self.reader_ready, idle);
+            idle = panic_as_error::locks::wait_unpoisoned(&self.reader_ready, idle);
         }
     }
 }

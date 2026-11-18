@@ -8,8 +8,8 @@ use super::HostSql;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::RowChange;
-use caught::locks::lock_unpoisoned;
-use caught::{caught_sync, Bug};
+use panic_as_error::locks::lock_unpoisoned;
+use panic_as_error::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -74,7 +74,7 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
         let fault = self.database.hook_panics.clone();
         self.database.connection.preupdate_hook(Some(
             move |action, schema: &str, table: &str, case: &PreUpdateCase| {
-                let observed = caught::caught_sync("observe a row operation", || {
+                let observed = panic_as_error::caught_sync("observe a row operation", || {
                     #[cfg(any(test, feature = "test-utils"))]
                     assert!(
                         !fault.swap(false, std::sync::atomic::Ordering::SeqCst),
@@ -108,7 +108,7 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
         let failed = self.hook_failure.clone();
         self.database.connection.update_hook(Some(
             move |action, schema: &str, table: &str, rowid| {
-                let observed = caught::caught_sync("observe a changed row", || {
+                let observed = panic_as_error::caught_sync("observe a changed row", || {
                     hook(action, schema, table, rowid)
                 });
                 keep_failure::<P>(&failed, observed);

@@ -27,7 +27,7 @@ api_crate = "coven"
 # Appendix F.1: the crates in dependency order.
 crate_order = [
     "windows-reserved-names",
-    "caught",
+    "panic-as-error",
     "sqlive",
     "coven-foundation",
     "coven-crypto",

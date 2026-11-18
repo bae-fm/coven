@@ -30,7 +30,7 @@ use crate::authorization::{Policy, PolicyError};
 use crate::connection::HostSql;
 use crate::upkeep::{Upkeep, UpkeepThread};
 use crate::{CheckpointMode, WalCheckpoint};
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -108,7 +108,7 @@ impl<P: Policy> UpkeepThread<Checkpoints<P>> {
 
     /// Stop, after any checkpoint in progress, and close the connection.
     pub(crate) fn stop(self) -> Result<(), PolicyError<P>> {
-        caught::locks::into_unpoisoned(self.join().connection).close()
+        panic_as_error::locks::into_unpoisoned(self.join().connection).close()
     }
 }
 

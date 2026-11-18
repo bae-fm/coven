@@ -307,7 +307,7 @@ async fn a_failed_rollback_keeps_both_causes_and_fails_the_handle_until_reopen()
 #[test]
 fn a_profile_inside_another_leaves_the_outer_tracing() {
     let directory = tempfile::tempdir().unwrap();
-    let bugs: caught::BugSinkRef = Arc::new(crate::tests::HeardBugs::default());
+    let bugs: panic_as_error::BugSinkRef = Arc::new(crate::tests::HeardBugs::default());
     let (database, ()) = crate::Database::open_with(
         &directory.path().join("profiled.sqlite"),
         crate::Handle::recording_all(bugs),

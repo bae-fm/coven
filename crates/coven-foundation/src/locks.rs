@@ -16,7 +16,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-pub use caught::locks::{
+pub use panic_as_error::locks::{
     into_unpoisoned, lock_unpoisoned, read_unpoisoned, wait_unpoisoned, write_unpoisoned,
 };
 

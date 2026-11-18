@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use caught::locks::lock_unpoisoned;
-use caught::Bug;
+use panic_as_error::locks::lock_unpoisoned;
+use panic_as_error::Bug;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
@@ -251,7 +251,9 @@ impl<P: Policy> SqlAuthorization<P> {
             // what it was changing may be half-changed, so the handle fails
             // and this connection refuses every later statement, repeating
             // the bug its first refusal returned (E15).
-            match caught::caught_sync("authorize a statement", || state.judge(context, &*policy)) {
+            match panic_as_error::caught_sync("authorize a statement", || {
+                state.judge(context, &*policy)
+            }) {
                 Ok(authorization) => authorization,
                 Err(bug) => {
                     if let Some(handle) = handle.get() {
@@ -472,7 +474,7 @@ impl<P: Policy> HostFunctions<P> {
     {
         let state = Arc::clone(&self.state);
         move |context| {
-            let called = caught::caught_sync(name, || {
+            let called = panic_as_error::caught_sync(name, || {
                 #[cfg(any(test, feature = "test-utils"))]
                 assert!(
                     !std::mem::take(&mut lock_unpoisoned(&state).panic_next_function),

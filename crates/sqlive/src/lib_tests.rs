@@ -5,8 +5,8 @@ use crate::{
     Database, Handle, HandleFailure, HostSql, LiveQuery, NoPolicy, Options, PolicyError,
     ReconfigurableLiveQuery, WholeViews,
 };
-use caught::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
-use caught::{Bug, BugSink, BugSinkRef, CarriesBug};
+use panic_as_error::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
+use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;

@@ -3,7 +3,7 @@
 //! failed carries as it is, and `R` is the type the host's policy refuses
 //! with, which a refused statement carries as it is.
 
-use caught::Bug;
+use panic_as_error::Bug;
 use std::path::PathBuf;
 
 /// A failure of sqlive's own that ends its handle: every later call

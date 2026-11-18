@@ -63,7 +63,6 @@ pub use authorization::{
     FunctionCall, HostError, Owner, Policy, PolicyAction, PolicyError, Refresh, StatementReads,
     StatementScope, WriteSql,
 };
-pub use caught;
 pub use checkpointed_size::CheckpointedSize;
 pub use commit_scope::{committing, enter, CommitScope};
 #[cfg(any(test, feature = "profiles"))]
@@ -83,6 +82,7 @@ pub use live_query::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use live_query_runs::LiveQueryRuns;
 pub use no_policy::{HandleFailure, NoPolicy};
+pub use panic_as_error;
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
 pub use read_set::{affected, Answers, ColumnSet, ReadSet, RowChange, TableRead, ROWS_PER_TABLE};
 pub use row_scope::{RowImage, RowScope, Scopes};

@@ -12,7 +12,7 @@ use super::write_transaction::WriteTransaction;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::SqlValue;
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use std::sync::{Arc, Mutex};
 

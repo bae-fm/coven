@@ -12,7 +12,7 @@ use crate::connection_setup::Setup;
 use crate::planner_statistics::PlannerStatistics;
 use crate::upkeep::UpkeepThread;
 use crate::wal_checkpoints::WalCheckpointer;
-use caught::locks::{into_unpoisoned, lock_unpoisoned};
+use panic_as_error::locks::{into_unpoisoned, lock_unpoisoned};
 use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;

@@ -3,9 +3,9 @@
 use crate::handle::{CommitSubscription, Failed, Handle, Stop};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
-use caught::locks::lock_unpoisoned;
-use caught::{caught_sync, BugSinkRef, CarriesBug};
 use futures_lite::future::block_on;
+use panic_as_error::locks::lock_unpoisoned;
+use panic_as_error::{caught_sync, BugSinkRef, CarriesBug};
 use std::{
     future::{poll_fn, Future},
     pin::pin,

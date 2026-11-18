@@ -10,7 +10,7 @@ use super::HostSql;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::RowChange;
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 

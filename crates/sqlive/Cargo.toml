@@ -13,7 +13,7 @@ test-utils = []
 profiles = ["rusqlite/trace"]
 
 [dependencies]
-caught.workspace = true
+panic-as-error.workspace = true
 futures-lite = { workspace = true, features = ["std"] }
 rusqlite = { workspace = true, features = ["bundled", "session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation"] }
 sqlite3-parser.workspace = true

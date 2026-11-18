@@ -1,5 +1,5 @@
 [package]
-name = "caught"
+name = "panic-as-error"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

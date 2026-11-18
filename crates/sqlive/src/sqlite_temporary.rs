@@ -6,7 +6,7 @@
 //! everywhere but Android, where an app names one, such as its cache folder.
 
 use crate::authorization::HostError;
-use caught::locks::lock_unpoisoned;
+use panic_as_error::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
