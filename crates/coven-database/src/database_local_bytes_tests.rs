@@ -107,7 +107,9 @@ fn copy_bytes(sql: SqlReadContext<'_>) -> Result<i64, DbError> {
 
 /// A staged copy counts among the store's own files from the write that
 /// keeps it, at its size on disk, until the write that releases it, and a
-/// live query of the copies' bytes runs again for each (§17.8).
+/// live query of the copies' bytes runs again for each (§17.8). The upload
+/// completing keeps the copy until no reset can switch the file back
+/// (§17.11).
 #[tokio::test]
 async fn a_kept_copy_counts_until_it_is_released() {
     use crate::file_write::tests::{complete_uploads, owned_paths, stage};
@@ -121,6 +123,8 @@ async fn a_kept_copy_counts_until_it_is_released() {
     assert_eq!(on_disk, 3000);
     assert_eq!(crate::tests::next(&mut copies).await, 3000);
     complete_uploads(&db).await;
+    assert!(!owned_paths(&store).is_empty(), "a reset may switch the file back");
+    db.test_past_every_reset().await;
     assert_eq!(crate::tests::next(&mut copies).await, 0);
     db.close().await.unwrap();
 }
