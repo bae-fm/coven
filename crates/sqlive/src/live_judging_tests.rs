@@ -9,6 +9,8 @@ mod derived;
 mod limit;
 #[path = "live_judging_tests/lookup.rs"]
 mod lookup;
+#[path = "live_judging_tests/narrowing_model.rs"]
+mod narrowing_model;
 #[path = "live_judging_tests/plan.rs"]
 mod plan;
 #[path = "live_judging_tests/row.rs"]

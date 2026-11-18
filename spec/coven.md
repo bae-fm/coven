@@ -12214,7 +12214,8 @@ What the models cover:
   cancelling the new device before its restore records itself binds nothing
   (§13.2, §13.4). The sealing and opening are taken as given.
 - **Narrowing a live query** to the rows its statements can depend on (§4):
-  each rule's step, against a port of sqlive's planner.
+  each rule's step, against a port of sqlive's planner. A differential test
+  checks how the planner composes the rules against SQLite.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:

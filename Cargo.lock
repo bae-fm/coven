@@ -3145,6 +3145,7 @@ dependencies = [
  "futures-lite",
  "panic-as-error",
  "rusqlite",
+ "serde_json",
  "sqlite3-parser",
  "tempfile",
  "thiserror 2.0.21",

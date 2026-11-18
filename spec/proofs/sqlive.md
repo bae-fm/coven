@@ -5,7 +5,8 @@ how sqlive narrows a live query to the rows its statements can depend on (§4),
 and which writes therefore run the query again. The package states a statement
 as sqlive's planner reads it, ports the planner, and proves each rule's step:
 the rows a rule leaves out of a table's scope are rows the statement's result
-doesn't depend on.
+doesn't depend on. A differential test runs sqlive, the model and SQLite on
+random statements and writes and compares all three.
 
 ## The model
 
@@ -41,7 +42,8 @@ statements changed, as sqlive's pre-update hook records them. A change reruns
 the query when it inserts or deletes a row of a table the statement reads, or
 changes a column the statement reads, and the row before or after passes the
 table's scope. A join's lookups read the database the write leaves. The model
-takes the columns a statement reads to be the columns its clauses name.
+takes the columns a statement reads to be the columns its clauses name; the
+differential checks that sqlive reads the same ones from SQLite.
 
 ## Each rule's theorem
 
@@ -92,7 +94,8 @@ The theorems prove each rule's step. No theorem yet proves that the planner
 puts the steps together soundly: that the order in which it places items, the
 ON conditions it holds back, the terms it passes into derived items and the
 lookups of each join's partner give scopes outside of which a write leaves the
-result unchanged.
+result unchanged. The differential checks that composition against SQLite on
+every statement it generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
@@ -100,7 +103,7 @@ refusals. The model also leaves out bound parameters, table functions, the views
 reads whole as a join's partner, the terms that compare a NULL test's truth or
 a column `IS` a parameter, and the step limit on a lookup.
 
-## The runner
+## The runner and the differential
 
 `narrowingRunner` reads one case as JSON on stdin: the schema (each table's
 columns and their affinities, and each view's query), the statement as a tree
@@ -108,3 +111,18 @@ that names its sources by alias, the database before and after the write, and
 the write's row changes. The runner writes whether the write reruns the statement,
 whether the model reads the statement whole, each table's scope, and the
 statement's rows before and after.
+
+The differential in sqlive (`narrowing_model` among the live judging tests)
+has one test per rule, `<rule>_matches_lean`, and `mixed_shapes_match_lean`
+for statements that hold several rules. Each rule's generator writes
+statements of its rule's shape. For each statement the test opens a live query
+and makes random writes. After each write it fails when sqlive and the model
+disagree on whether the write reruns the query, when a write that either lets
+pass changed SQLite's rows, or when the model's rows differ from SQLite's.
+Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model
+among rows that sort the same, so the test compares the rows there only
+through the reruns.
+
+The differential found that a write changing only a column a USING or NATURAL
+join compares didn't rerun the query: SQLite's authorizer reports no read of
+that column. sqlive now adds those columns to the statement's reads (§4).
