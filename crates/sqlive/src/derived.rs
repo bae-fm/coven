@@ -12,7 +12,7 @@ use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
 use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
-use crate::select_syntax::{parts, text, Part};
+use crate::select_syntax::{parts, text};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
 
@@ -256,12 +256,7 @@ fn aggregates(planner: &Planner, select: &Select<'_>, body: &OneSelect<'_>) -> b
             parts(&term.expr, &mut found);
         }
     }
-    found.iter().any(|part| match part {
-        Part::Function(name, window) => {
-            *window || planner.aggregates.contains(&name.to_ascii_lowercase())
-        }
-        _ => false,
-    })
+    found.iter().any(|part| part.many_rows(planner.aggregates))
 }
 
 /// A column a core outputs: its name as SQLite gives it, when sqlive knows

@@ -27,9 +27,10 @@ use std::cmp::Ordering;
 use crate::row_scope::RowScope;
 use crate::scope_plan::{is_name, Planner};
 use crate::scope_term::{operand, Affinity, Operand};
+use crate::select_syntax::{order_term, OrderTerm};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
-use sqlite3_parser::ast::{As, Expr, Name, OneSelect, ResultColumn, Select, SortOrder};
+use sqlite3_parser::ast::{Expr, OneSelect, ResultColumn, Select, SortOrder};
 
 /// A statement's order and LIMIT, which a full run's last row bounds.
 pub(crate) struct SortedLimit {
@@ -107,11 +108,7 @@ pub(crate) fn sorted_limit(
             crate::select_syntax::parts(expr, &mut found);
         }
     }
-    let many_rows = found.iter().any(|part| {
-        matches!(part, crate::select_syntax::Part::Function(name, window)
-            if *window || planner.aggregates.contains(&name.to_ascii_lowercase()))
-    });
-    if many_rows {
+    if found.iter().any(|part| part.many_rows(planner.aggregates)) {
         return Ok(None);
     }
     let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {
@@ -155,46 +152,26 @@ fn result_column(
     columns: &[ResultColumn<'_>],
     expr: &Expr<'_>,
 ) -> Option<(usize, usize, String)> {
-    let bare = match expr {
-        Expr::Id(name) => Some(Name(name.0)),
-        Expr::Name(name) => Some(name.clone()),
-        Expr::Qualified(..) | Expr::DoublyQualified(..) => None,
-        _ => return None,
-    };
-    // sqlive doesn't know how many columns a `*` adds, so it can't tell the
-    // position of a column after one.
-    let listed: Vec<&Expr<'_>> = columns
-        .iter()
-        .map_while(|column| match column {
-            ResultColumn::Expr(expr, _) => Some(expr),
-            ResultColumn::Star | ResultColumn::TableStar(_) => None,
-        })
-        .collect();
-    let named: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| {
-            matches!((column, &bare), (ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias))), Some(bare))
-                if Name(alias.0) == *bare)
-        })
-        .map(|(position, _)| position)
-        .collect();
-    let (position, (item, column)) = match named[..] {
-        [] => {
-            let resolved = planner.resolve(core, expr)?;
-            let position = listed.iter().position(|listed| {
-                is_name(listed) && planner.resolve(core, listed).as_ref() == Some(&resolved)
-            })?;
-            (position, resolved)
-        }
-        [position] => {
-            let listed = listed.get(position)?;
-            if !is_name(listed) {
-                return None;
-            }
+    let (position, (item, column)) = match order_term(columns, expr) {
+        OrderTerm::Alias(position, listed) if is_name(listed) => {
             (position, planner.resolve(core, listed)?)
         }
-        _ => return None,
+        OrderTerm::Expr(expr) => {
+            let resolved = planner.resolve(core, expr)?;
+            // sqlive doesn't know how many columns a `*` adds, so it can't
+            // tell the position of a column after one.
+            let position = columns
+                .iter()
+                .map_while(|column| match column {
+                    ResultColumn::Expr(expr, _) => Some(expr),
+                    ResultColumn::Star | ResultColumn::TableStar(_) => None,
+                })
+                .position(|listed| {
+                    is_name(listed) && planner.resolve(core, listed).as_ref() == Some(&resolved)
+                })?;
+            (position, resolved)
+        }
+        OrderTerm::Alias(..) | OrderTerm::Position(_) | OrderTerm::Unknown => return None,
     };
     Some((position, item, column))
 }

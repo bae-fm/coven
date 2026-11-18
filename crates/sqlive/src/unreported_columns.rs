@@ -26,11 +26,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::read_set::ColumnSet;
 use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
-use crate::select_syntax::{parts, window_parts, Part};
+use crate::select_syntax::{order_term, parts, window_parts, OrderTerm, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Literal, Name, OneSelect,
-    QualifiedName, ResultColumn, Select, SelectTable,
+    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, QualifiedName,
+    ResultColumn, Select, SelectTable,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -442,16 +442,15 @@ impl Walk<'_> {
         for term in order_by {
             parts(&term.expr, &mut sorted);
         }
-        let windowed =
-            returned.iter().chain(&sorted).any(|part| matches!(part, Part::Function(_, true)));
-        let aggregate = |part: &Part<'_>| {
-            matches!(part, Part::Function(name, false)
-                if self.aggregates.contains(&name.to_ascii_lowercase()))
-        };
-        if !windowed && returned.iter().any(aggregate) {
+        let windowed = returned.iter().chain(&sorted).any(Part::windowed);
+        if !windowed && returned.iter().any(|part| part.aggregates(self.aggregates)) {
             return Ok(true);
         }
-        if windowed || distinctness.is_some() || having.is_some() || sorted.iter().any(aggregate) {
+        if windowed
+            || distinctness.is_some()
+            || having.is_some()
+            || sorted.iter().any(|part| part.aggregates(self.aggregates))
+        {
             return Ok(false);
         }
         // Each FROM item: the name the statement qualifies its columns by,
@@ -473,7 +472,13 @@ impl Walk<'_> {
         for (position, (_, table)) in items.iter().enumerate() {
             let mut sorted = false;
             for term in order_by {
-                if let Some((item, column)) = self.sorted_column(columns, &items, &term.expr)? {
+                let sorted_by = match order_term(columns, &term.expr) {
+                    OrderTerm::Position(expr)
+                    | OrderTerm::Alias(_, expr)
+                    | OrderTerm::Expr(expr) => self.item_column(&items, expr)?,
+                    OrderTerm::Unknown => None,
+                };
+                if let Some((item, column)) = sorted_by {
                     if item == position && self.is_rowid(table, &column)? {
                         sorted = true;
                         break;
@@ -485,56 +490,6 @@ impl Walk<'_> {
             }
         }
         Ok(true)
-    }
-
-    /// The FROM item, by its place in `items`, and the column, lowercase,
-    /// that the ORDER BY term `expr` sorts by, when it is a column: a result
-    /// column, by its position or by an alias, as SQLite reads a bare name
-    /// first, or a name that resolves to a column of one of `items`.
-    fn sorted_column(
-        &self,
-        columns: &[ResultColumn<'_>],
-        items: &[(&str, String)],
-        expr: &Expr<'_>,
-    ) -> rusqlite::Result<Option<(usize, String)>> {
-        let result_column = |position: usize| match columns.get(position) {
-            // sqlive doesn't know how many columns a `*` adds, so it can't
-            // tell the position of a column after one.
-            Some(ResultColumn::Expr(expr, _))
-                if columns[..position].iter().all(|column| {
-                    !matches!(column, ResultColumn::Star | ResultColumn::TableStar(_))
-                }) =>
-            {
-                Some(expr)
-            }
-            _ => None,
-        };
-        let expr = crate::sql::unparenthesized(expr);
-        let bare = match expr {
-            Expr::Literal(Literal::Numeric(number)) => {
-                let position = number.parse::<usize>().ok().filter(|position| *position > 0);
-                return match position.and_then(|position| result_column(position - 1)) {
-                    Some(column) => self.item_column(items, column),
-                    None => Ok(None),
-                };
-            }
-            Expr::Id(name) => Some(Name(name.0)),
-            Expr::Name(name) => Some(Name(name.0)),
-            _ => None,
-        };
-        if let Some(bare) = bare {
-            let aliased = columns.iter().position(|column| {
-                matches!(column, ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias)))
-                    if Name(alias.0) == bare)
-            });
-            if let Some(position) = aliased {
-                return match result_column(position) {
-                    Some(column) => self.item_column(items, column),
-                    None => Ok(None),
-                };
-            }
-        }
-        self.item_column(items, expr)
     }
 
     /// The FROM item, by its place in `items`, and the column, lowercase,

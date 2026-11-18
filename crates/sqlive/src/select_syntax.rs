@@ -2,8 +2,11 @@
 //! order, and the expressions inside it (§4).
 
 use rusqlite::{Connection, Statement};
+use std::collections::BTreeSet;
+
 use sqlite3_parser::ast::{
-    Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Operator, Over, Select, Window,
+    As, Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Name, Operator, Over,
+    ResultColumn, Select, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -79,6 +82,89 @@ pub(crate) enum Part<'a> {
     /// `CURRENT_DATE`, `CURRENT_TIME` or `CURRENT_TIMESTAMP`, which read
     /// the clock.
     Clock,
+}
+
+impl Part<'_> {
+    /// Whether it calls a function over a window.
+    pub(crate) fn windowed(&self) -> bool {
+        matches!(self, Part::Function(_, true))
+    }
+
+    /// Whether it calls one of `aggregates`, the connection's aggregate and
+    /// window functions, lowercase, as an aggregate outside any window.
+    pub(crate) fn aggregates(&self, aggregates: &BTreeSet<String>) -> bool {
+        matches!(self, Part::Function(name, false) if aggregates.contains(&name.to_ascii_lowercase()))
+    }
+
+    /// Whether it makes one row of many: it calls an aggregate, or a
+    /// function over a window.
+    pub(crate) fn many_rows(&self, aggregates: &BTreeSet<String>) -> bool {
+        self.windowed() || self.aggregates(aggregates)
+    }
+}
+
+/// What an ORDER BY term sorts by, as SQLite reads it against the result
+/// columns `columns`.
+pub(crate) enum OrderTerm<'a> {
+    /// The expression of the result column whose position the term gives
+    /// as its number.
+    Position(&'a Expr<'a>),
+    /// The result column at a position, from zero, whose alias the term, a
+    /// bare name, matches, which SQLite reads before any other column of
+    /// that name, and the column's expression.
+    Alias(usize, &'a Expr<'a>),
+    /// An expression of its own, which SQLite resolves among the FROM items.
+    Expr(&'a Expr<'a>),
+    /// A result column sqlive can't place: one after a `*`, whose position
+    /// sqlive doesn't know as it doesn't know how many columns a `*` adds, a
+    /// `*` itself, a number past the last column, or an alias several result
+    /// columns share.
+    Unknown,
+}
+
+/// What the ORDER BY term `expr` sorts by, among the result columns
+/// `columns`.
+pub(crate) fn order_term<'a>(columns: &'a [ResultColumn<'a>], expr: &'a Expr<'a>) -> OrderTerm<'a> {
+    let result_column = |position: usize| match columns.get(position) {
+        Some(ResultColumn::Expr(expr, _))
+            if columns[..position].iter().all(|column| {
+                !matches!(column, ResultColumn::Star | ResultColumn::TableStar(_))
+            }) =>
+        {
+            Some(expr)
+        }
+        _ => None,
+    };
+    let expr = crate::sql::unparenthesized(expr);
+    let bare = match expr {
+        Expr::Literal(Literal::Numeric(number)) => {
+            let position = number.parse::<usize>().ok().and_then(|number| number.checked_sub(1));
+            return match position.and_then(result_column) {
+                Some(column) => OrderTerm::Position(column),
+                None => OrderTerm::Unknown,
+            };
+        }
+        Expr::Id(name) => Name(name.0),
+        Expr::Name(name) => Name(name.0),
+        _ => return OrderTerm::Expr(expr),
+    };
+    let named: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            matches!(column, ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias)))
+                if Name(alias.0) == bare)
+        })
+        .map(|(position, _)| position)
+        .collect();
+    match named[..] {
+        [] => OrderTerm::Expr(expr),
+        [position] => match result_column(position) {
+            Some(column) => OrderTerm::Alias(position, column),
+            None => OrderTerm::Unknown,
+        },
+        _ => OrderTerm::Unknown,
+    }
 }
 
 /// The parts of `expr`, in every operand, argument, filter and window.
