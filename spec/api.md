@@ -55,7 +55,8 @@ impl types::FromSql for RowKey;
 /// bind/read its eight big-endian bytes, as `coven_devices` holds it (E4).
 pub struct DeviceId(pub u64);
 
-/// A member's random stable UUID, independent of their keys (§10).
+/// A member's UUID from the app's id source, which never changes and is
+/// independent of their keys (§10).
 /// ToSql/FromSql bind/read canonical text, as `coven_members` holds it (E4).
 pub struct MemberId(pub Uuid);
 

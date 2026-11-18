@@ -47,7 +47,9 @@ impl std::fmt::Display for KeyId {
     }
 }
 
-/// A member's random stable identity, independent of their keys (§10).
+/// A member's identity, independent of their keys, which never changes (§10).
+/// coven takes it from the id source when the first device creates the store
+/// or an admin makes the invite that admits the member.
 /// Device ownership, circle membership and slot authors name it; a key
 /// replacement keeps it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]

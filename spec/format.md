@@ -259,7 +259,7 @@ reads.
 | `Option<T>` | `0`, or `1 \| T` | |
 | `uuid` | 16 bytes | UUID byte order. Store, member, circle, invite, key, attempt and file ids. |
 | `DeviceId` | `u64` | |
-| `MemberId` | `uuid` | A random, stable member identity, independent of keys. |
+| `MemberId` | `uuid` | A member identity that coven takes from the app's id source, independent of keys. It never changes. |
 | `SigningKey` | 32 bytes | An Ed25519 public key; weak and invalid points are refused. |
 | `SealingKey` | 32 bytes | An X25519 public key. |
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes. Byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |

@@ -3636,9 +3636,12 @@ ask, so every device has to reach the same answer on its own. This section says
 who the actors are and what each may do; §11 says how a change is made, and §12
 how keys reach people.
 
-A *member* is a person. Each member has a random, permanent `MemberId` and two
+A *member* is a person. Each member has a `MemberId` that never changes, and two
 current key pairs: one to sign with and one that others seal keys to (Appendix D
 gives their exact form). Devices and circles refer to the member by that id.
+coven takes a new id from the app's id source (api.md E1) for the `MemberId`:
+for the first member when the first device creates the store, and for anyone
+else when an admin makes the invite that admits them (§13.2).
 
 A *device* is one installation of the app, belonging to one member, with its own
 id. The id is also kept in custody that a backup doesn't carry to another
@@ -12728,7 +12731,7 @@ A member's keys are two key pairs, kept together:
 
 | Part | Form |
 |---|---|
-| `MemberId` | an independent random UUID; never changes |
+| `MemberId` | a new UUID that coven takes from the app's id source when the first device creates the store or an admin makes the invite; never changes |
 | `SigningKey` | a 32-byte Ed25519 public key; invalid and weak points are refused |
 | `SealingKey` | a 32-byte X25519 public key, which opens keys sealed to the member |
 | `MemberKeys` | the public pair of both (format.md D2) |
