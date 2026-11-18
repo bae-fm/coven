@@ -775,12 +775,18 @@ fn read_condition<'a>(
     condition: &'a Expr<'a>,
     subqueries: &Subqueries<'a>,
 ) -> rusqlite::Result<Narrowing> {
-    if let Some((member, select)) = compared_subquery(condition) {
+    if let Some((values, select)) = compared_subquery(condition) {
         let cores = subqueries.iter().find(|(read, _)| std::ptr::eq(*read, select));
-        if let Some(edge) =
-            cores.and_then(|(_, cores)| planner.subquery_edge(core, member, select, cores))
-        {
-            return Ok(Narrowing { terms: Vec::new(), edges: vec![edge] });
+        if let Some((_, cores)) = cores {
+            let width = values.len();
+            let edges = values
+                .into_iter()
+                .enumerate()
+                .filter_map(|(position, value)| {
+                    planner.subquery_edge(core, value, (position, width), select, cores)
+                })
+                .collect();
+            return Ok(Narrowing { terms: Vec::new(), edges });
         }
     }
     let mut read = Vec::new();

@@ -154,6 +154,53 @@ async fn a_subquery_correlated_with_the_compared_columns_source_still_follows_it
     db.close();
 }
 
+/// A row value compared with a subquery's row narrows each of its columns
+/// as that column compared alone would: a state row of another hash, or of
+/// this hash at another revision, wakes nothing.
+#[tokio::test]
+async fn a_row_value_compared_with_a_subquery_narrows_by_each_column() {
+    let db = TestDatabase::open(
+        "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, hash TEXT, rev INTEGER);
+CREATE TABLE state(id INTEGER PRIMARY KEY, hash TEXT, rev INTEGER, value TEXT);
+INSERT INTO scan VALUES (1,'/a','h1',1),(2,'/b','h2',1);
+INSERT INTO state VALUES (1,'h1',1,'one'),(2,'h1',2,'old'),(3,'h2',1,'two')",
+    );
+    for sql in [
+        "SELECT value FROM state WHERE (hash, rev) = (SELECT hash, rev FROM scan WHERE path = '/a') ORDER BY id",
+        "SELECT value FROM state WHERE (SELECT hash, rev FROM scan WHERE path = '/a') = (hash, rev) ORDER BY id",
+        "SELECT value FROM state WHERE (hash, rev) IN (SELECT hash, rev FROM scan WHERE path = '/a') ORDER BY id",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE state SET value = 'deux' WHERE id = 3", false),
+            ("UPDATE state SET value = 'older' WHERE id = 2", false),
+            ("UPDATE state SET value = 'uno' WHERE id = 1", true),
+            ("UPDATE scan SET rev = 2 WHERE id = 1", true),
+            ("UPDATE state SET hash = 'h1', rev = 2 WHERE id = 3", true),
+        ])
+        .await;
+        write(&db, "UPDATE scan SET rev = 1 WHERE id = 1; UPDATE state SET hash = 'h2', rev = 1, value = 'two' WHERE id = 3; UPDATE state SET value = 'one' WHERE id = 1; UPDATE state SET value = 'old' WHERE id = 2");
+    }
+    db.close();
+    // A pair SQLite compares by NOCASE narrows nothing; the others still do.
+    let db = TestDatabase::open(
+        "CREATE TABLE x(id INTEGER PRIMARY KEY, k INTEGER, g TEXT, n TEXT COLLATE NOCASE);
+CREATE TABLE y(id INTEGER PRIMARY KEY, k INTEGER, g TEXT, n TEXT COLLATE NOCASE);
+INSERT INTO x VALUES (1,1,'a','a'),(2,2,'b','b'),(9,9,'z','z');
+INSERT INTO y VALUES (1,1,'a','a'),(2,2,'b','b')",
+    );
+    follows(
+        &db,
+        "SELECT x.g FROM x WHERE (x.n, x.k) = (SELECT y.n, y.k FROM y WHERE y.id = 1)",
+        vec![],
+        &[
+            ("UPDATE x SET g = g || '.' WHERE id = 9", false),
+            ("UPDATE x SET n = 'A' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// What isn't a row's own value, or can't be compared as SQLite does, keeps
 /// the compared column's table whole: a write to any row of it reruns.
 #[tokio::test]
@@ -174,6 +221,8 @@ INSERT INTO y VALUES (1,1,'a','a'),(2,2,'b','b')",
         "SELECT x.g FROM x WHERE x.n = (SELECT y.g FROM y WHERE y.id = 1)",
         "SELECT x.g FROM x WHERE x.k NOT IN (SELECT y.k FROM y WHERE y.id = 1)",
         "SELECT x.g FROM x WHERE x.k < (SELECT y.k FROM y WHERE y.id = 2)",
+        "SELECT x.g FROM x WHERE (x.k, x.g) <> (SELECT y.k, y.g FROM y WHERE y.id = 1)",
+        "SELECT x.g FROM x WHERE (x.k, x.g) NOT IN (SELECT y.k, y.g FROM y)",
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();

@@ -59,6 +59,16 @@ theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by simp [Cond.queries, h])),
       hs q (by simp [Cond.queries])]
   | «exists» q n => simp [Cond.eval, hs q (by simp [Cond.queries])]
+  | rowSub vs q isIn n =>
+    simp only [Cond.eval]
+    have hvs : vs.map (Expr.eval b sub) = vs.map (Expr.eval b' sub') := by
+      apply List.map_congr_left
+      intro v hv
+      exact v.eval_congr
+        (fun i c h => hb i c (by simp only [Cond.refs, List.mem_flatMap]; exact ⟨v, hv, h⟩))
+        (fun q h => hs q (by
+          simp only [Cond.queries, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨v, hv, h⟩))
+    rw [hvs, hs q (by simp [Cond.queries])]
   | and l r ihl ihr =>
     simp only [Cond.eval]
     rw [ihl (fun i c h => hb i c (by simp [Cond.refs, h]))

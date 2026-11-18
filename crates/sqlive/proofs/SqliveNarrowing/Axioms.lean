@@ -3,6 +3,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Term.term_sound
 #print axioms SqliveNarrowing.Edge.edge_sound
 #print axioms SqliveNarrowing.SubqueryEdge.subquery_edge_sound
+#print axioms SqliveNarrowing.RowSubqueryEdge.row_subquery_edge_sound
 #print axioms SqliveNarrowing.PushDown.renamed_sound
 #print axioms SqliveNarrowing.PushDown.push_down_sound
 #print axioms SqliveNarrowing.View.view_sound

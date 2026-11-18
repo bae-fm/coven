@@ -945,7 +945,10 @@ match. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
 `col IN (SELECT x.c ...)`, where the subquery is one SELECT, with no UNION or
 VALUES, whose single column is a bare column `x.c` of one of its own sources,
 and where both columns have the same affinity and compare by BINARY, as a
-join's do. A subquery returning an expression, as `max(x.c)` or `x.c + 1`, or a
+join's do. A row value narrows the same way, as `(a, b) = (SELECT x.c, x.d
+...)` or `(a, b) IN (SELECT x.c, x.d ...)`: each pair narrows as that pair
+alone would, since the comparison holds only where every pair is equal. A
+subquery returning an expression, as `max(x.c)` or `x.c + 1`, or a
 column of the query around it, returns no row's own value, so it narrows
 nothing, and neither do `NOT IN`, `<>` and `<` with a subquery. The files
 beside the covers narrow the same way: `coven_files.id = cover.file` takes its
@@ -14735,6 +14738,7 @@ Write-ups explain each model and state its assumptions:
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
+| Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
 | A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row | `push_down_sound`, `renamed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |

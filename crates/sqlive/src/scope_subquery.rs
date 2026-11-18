@@ -1,5 +1,5 @@
-//! A column compared with the value a subquery returns, read as an edge to
-//! the subquery's source (§4).
+//! A column, or each column of a row value, compared with the value a
+//! subquery returns, read as an edge to the subquery's source (§4).
 //!
 //! `col = (SELECT x.c …)`, `(SELECT x.c …) = col` and `col IN (SELECT x.c
 //! …)`, where the subquery is one SELECT whose single result column is a bare
@@ -14,36 +14,49 @@ use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
 
-/// The column the comparison `condition` tests and the subquery it compares
-/// with, when it has one of the forms above.
+/// The values a comparison with a subquery tests, each compared with the
+/// subquery's result column of its position, and the subquery, when
+/// `condition` has one of the forms above or is a row value compared with
+/// a subquery's row the same ways: `(a, b) = (SELECT x.c, x.d …)`, either
+/// way round, or `(a, b) IN (SELECT x.c, x.d …)`. A row value comparison
+/// holds only where each pair is equal, so each pair narrows as it would
+/// alone.
 pub(crate) fn compared_subquery<'a>(
     condition: &'a Expr<'a>,
-) -> Option<(&'a Expr<'a>, &'a Select<'a>)> {
+) -> Option<(Vec<&'a Expr<'a>>, &'a Select<'a>)> {
     match unparenthesized(condition) {
         Expr::Binary(left, Operator::Equals, right) => {
             match (unparenthesized(left), unparenthesized(right)) {
-                (member, Expr::Subquery(select)) | (Expr::Subquery(select), member)
-                    if is_name(member) =>
-                {
-                    Some((member, select))
+                (Expr::Subquery(_), Expr::Subquery(_)) => None,
+                (compared, Expr::Subquery(select)) | (Expr::Subquery(select), compared) => {
+                    Some((values(compared)?, select))
                 }
                 _ => None,
             }
         }
-        Expr::InSelect { lhs, not: false, rhs } if is_name(lhs) => Some((lhs, rhs)),
+        Expr::InSelect { lhs, not: false, rhs } => Some((values(lhs)?, rhs)),
         _ => None,
+    }
+}
+
+/// The values of a row value, or the one bare column compared alone.
+fn values<'a>(compared: &'a Expr<'a>) -> Option<Vec<&'a Expr<'a>>> {
+    match unparenthesized(compared) {
+        Expr::Parenthesized(values) => Some(values.iter().collect()),
+        compared => is_name(compared).then(|| vec![compared]),
     }
 }
 
 impl Planner<'_> {
     /// The edge from the column `member_expr` names, written in `core`, to
-    /// the source of the column `select` returns, when `cores` are the cores
-    /// `select` was read as. The column and the source's column compare by
-    /// BINARY with no conversion, as a join's do.
+    /// the source of the column `select` returns at `position` of `width`,
+    /// when `cores` are the cores `select` was read as. The column and the
+    /// source's column compare by BINARY with no conversion, as a join's do.
     pub(crate) fn subquery_edge(
         &self,
         core: usize,
         member_expr: &Expr<'_>,
+        (position, width): (usize, usize),
         select: &Select<'_>,
         cores: &[usize],
     ) -> Option<Edge> {
@@ -56,13 +69,17 @@ impl Planner<'_> {
         let OneSelect::Select { columns, .. } = &select.body.select else {
             return None;
         };
-        let mut result = columns.iter();
-        let (Some(ResultColumn::Expr(returned, _)), None) = (result.next(), result.next()) else {
-            return None;
-        };
-        if !is_name(returned) {
+        let returned: Vec<&Expr<'_>> = columns
+            .iter()
+            .map(|column| match column {
+                ResultColumn::Expr(returned, _) => Some(returned),
+                ResultColumn::Star | ResultColumn::TableStar(_) => None,
+            })
+            .collect::<Option<_>>()?;
+        if returned.len() != width || !is_name(returned[position]) || !is_name(member_expr) {
             return None;
         }
+        let returned = returned[position];
         let (partner, partner_column) = self.resolve(subquery, returned)?;
         let items = &self.items;
         // A source of the subquery's own, which sqlive can read alone.

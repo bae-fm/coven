@@ -293,6 +293,13 @@ partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : List (String
       for v in list j "list" do
         values := values ++ [← readExpr schema v k ctes]
       pure (.inList e values)
+  else if let some (.arr values) := field j "row" then
+    let mut read := []
+    for v in values.toList do
+      read := read ++ [← readExpr schema v k ctes]
+    let some q := field j "query" | lift (throw "a row value compares with no query")
+    let isIn := (field j "member").bind (·.getBool?.toOption) |>.getD false
+    pure (.rowSub read (← readSelect schema q (some k) ctes) isIn not)
   else if let some q := field j "exists" then
     pure (.exists (← readSelect schema q (some k) ctes) not)
   else if let some (.arr #[l, r]) := field j "and" then

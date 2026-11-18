@@ -76,6 +76,16 @@ def memberTruth (v : Value) (vs : List Value) : Truth :=
     else if vs.contains none then none
     else some false
 
+/-- `(a1, ..., an) = (b1, ..., bn)` in SQL: each pair equal, joined by AND. -/
+def rowEqTruth : List Value → List Value → Truth
+  | a :: as, b :: bs => tand (Op.apply .eq a b) (rowEqTruth as bs)
+  | _, _ => some true
+
+/-- `(a1, ..., an) IN rows` in SQL: true when some row equals it, NULL when
+none does but the equality of some row is NULL, false otherwise. -/
+def rowMemberTruth (vs : List Value) (rows : List (List Value)) : Truth :=
+  rows.foldr (fun r acc => tor (rowEqTruth vs r) acc) (some false)
+
 /-- How SQLite orders two values in ascending order: NULL first. -/
 def valueCompare : Value → Value → Ordering
   | none, none => .eq

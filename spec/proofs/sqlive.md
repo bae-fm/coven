@@ -73,6 +73,10 @@ promise of whichever rule reads it.
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's
   core keeps.
+- **A row value compared with a subquery's row.** `row_subquery_edge_sound`
+  proves the same of each pair of `(x.a, x.b) = (SELECT y.c, y.d ...)`, the
+  subquery on either side, and of `(x.a, x.b) IN (SELECT y.c, y.d ...)`, since
+  a row value comparison holds only where every pair is equal.
 - **A condition passed into a FROM subquery, CTE or view.** `push_down_sound`
   proves that a row of a derived item's query is a row of one of its arms, and
   that a row of an arm that doesn't aggregate holds, in each column that is a

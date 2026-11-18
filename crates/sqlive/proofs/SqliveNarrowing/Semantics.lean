@@ -46,6 +46,13 @@ def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
     let t := memberTruth (e.eval b sub) ((sub q).map (Row.cell · 0))
     if n then tnot t else t
   | .exists q n => some ((sub q).isEmpty == n)
+  | .rowSub vs q isIn n =>
+    let values := vs.map (Expr.eval b sub)
+    let t := if isIn then rowMemberTruth values (sub q)
+      else match (sub q).head? with
+        | some row => rowEqTruth values row
+        | none => none
+    if n then tnot t else t
   | .and l r => tand (l.eval b sub) (r.eval b sub)
   | .or l r => tor (l.eval b sub) (r.eval b sub)
   | .not c => tnot (c.eval b sub)

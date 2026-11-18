@@ -27,6 +27,8 @@ mod mixed;
 mod nested_derived;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
+#[path = "narrowing_model/row_subquery_edge.rs"]
+mod row_subquery_edge;
 #[path = "narrowing_model/subquery_edge.rs"]
 mod subquery_edge;
 #[path = "narrowing_model/term.rs"]
@@ -122,6 +124,15 @@ pub(super) enum Cond {
     InList(Expr, Vec<Expr>),
     InQuery(Expr, Box<Query>, bool),
     Exists(Box<Query>, bool),
+    /// A row value compared with a subquery's row: `=`, with the subquery
+    /// first when `first`, or IN when `member`; NOT around it when `not`.
+    RowSub {
+        values: Vec<Expr>,
+        query: Box<Query>,
+        member: bool,
+        first: bool,
+        not: bool,
+    },
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
@@ -383,6 +394,26 @@ impl Cond {
             Self::Exists(query, not) => {
                 format!("{}EXISTS ({})", if *not { "NOT " } else { "" }, query.sql())
             }
+            Self::RowSub { values, query, member, first, not } => {
+                let values: Vec<String> = values.iter().map(Expr::sql).collect();
+                let row = format!("({})", values.join(", "));
+                let query = format!("({})", query.sql());
+                match (member, not) {
+                    (true, not) => format!("{row} {}IN {query}", if *not { "NOT " } else { "" }),
+                    (false, not) => {
+                        let compared = if *first {
+                            format!("{query} = {row}")
+                        } else {
+                            format!("{row} = {query}")
+                        };
+                        if *not {
+                            format!("NOT ({compared})")
+                        } else {
+                            compared
+                        }
+                    }
+                }
+            }
             Self::And(left, right) => format!("({} AND {})", left.sql(), right.sql()),
             Self::Or(left, right) => format!("({} OR {})", left.sql(), right.sql()),
             Self::Not(c) => format!("NOT ({})", c.sql()),
@@ -402,6 +433,12 @@ impl Cond {
                 json!({"in": e.json(), "query": query.json(), "not": not})
             }
             Self::Exists(query, not) => json!({"exists": query.json(), "not": not}),
+            Self::RowSub { values, query, member, not, .. } => json!({
+                "row": values.iter().map(Expr::json).collect::<Vec<_>>(),
+                "query": query.json(),
+                "member": member,
+                "not": not,
+            }),
             Self::And(left, right) => json!({"and": [left.json(), right.json()]}),
             Self::Or(left, right) => json!({"or": [left.json(), right.json()]}),
             Self::Not(c) => json!({"negate": c.json()}),
@@ -415,6 +452,11 @@ impl Cond {
             Self::InList(e, values) => e.ambiguous() || values.iter().any(Expr::ambiguous),
             Self::InQuery(e, query, _) => e.ambiguous() || query.ambiguous(),
             Self::Exists(query, _) => query.ambiguous(),
+            // `=` compares with the subquery's first row, whichever SQLite
+            // reads first.
+            Self::RowSub { values, query, member, .. } => {
+                !member || values.iter().any(Expr::ambiguous) || query.ambiguous()
+            }
             Self::And(left, right) | Self::Or(left, right) => left.ambiguous() || right.ambiguous(),
             Self::Not(c) => c.ambiguous(),
         }
@@ -860,6 +902,12 @@ async fn edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn subquery_edge_matches_lean() {
     differential("subquery edge", subquery_edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn row_subquery_edge_matches_lean() {
+    differential("row subquery edge", row_subquery_edge::statement).await;
 }
 
 #[tokio::test]
