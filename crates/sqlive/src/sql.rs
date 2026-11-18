@@ -1,6 +1,6 @@
 //! SQLite tokens used to inspect CREATE statements without matching comments or strings.
 
-use sqlite3_parser::ast::Expr;
+use sqlite3_parser::ast::{As, Expr};
 
 pub use crate::token_scan::scan;
 
@@ -93,6 +93,18 @@ pub fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
         expr = item;
     }
     expr
+}
+
+/// The name, lowercase, SQLite gives a result column that `alias` names.
+pub fn alias_name(alias: &As<'_>) -> String {
+    let (As::As(alias) | As::Elided(alias)) = alias;
+    name(alias.0).to_ascii_lowercase()
+}
+
+/// The names SQLite gives the columns of a VALUES list whose first row has
+/// `width` expressions: column1, column2, and so on.
+pub fn values_names(width: usize) -> Vec<String> {
+    (1..=width).map(|position| format!("column{position}")).collect()
 }
 
 #[cfg(test)]

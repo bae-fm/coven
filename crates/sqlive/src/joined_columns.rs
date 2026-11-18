@@ -14,7 +14,7 @@ use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLE
 use crate::select_syntax::{parts, window_parts, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
+    Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
     ResultColumn, Select, SelectTable,
 };
 
@@ -325,17 +325,13 @@ impl Walk<'_> {
 fn result_names(select: &Select<'_>) -> Option<Vec<String>> {
     let OneSelect::Select { columns, .. } = &select.body.select else {
         let OneSelect::Values(rows) = &select.body.select else { return None };
-        return Some(
-            (1..=rows.first().map_or(0, |row| row.len()))
-                .map(|position| format!("column{position}"))
-                .collect(),
-        );
+        return Some(crate::sql::values_names(rows.first().map_or(0, |row| row.len())));
     };
     columns
         .iter()
         .map(|column| {
             let name = match column {
-                ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias))) => alias.0,
+                ResultColumn::Expr(_, Some(alias)) => return Some(crate::sql::alias_name(alias)),
                 ResultColumn::Expr(expr, None) => match crate::sql::unparenthesized(expr) {
                     Expr::Id(name) => name.0,
                     Expr::Name(name)

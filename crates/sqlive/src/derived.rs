@@ -14,7 +14,7 @@ use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::ast::{As, CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
+use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
 
 /// The CTEs a FROM item can name where it is read, and those whose SQL is
 /// being read now, which naming again would recurse.
@@ -279,8 +279,9 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
         let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };
         // VALUES names its columns column1, column2, …
         return Some(
-            (1..=rows.first().map_or(0, |row| row.len()))
-                .map(|position| Output { name: Some(format!("column{position}")), passed: None })
+            crate::sql::values_names(rows.first().map_or(0, |row| row.len()))
+                .into_iter()
+                .map(|name| Output { name: Some(name), passed: None })
                 .collect(),
         );
     };
@@ -293,9 +294,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     .flatten()
                     .filter(|(item, _)| planner.items[*item].core == core);
                 let name = match alias {
-                    Some(As::As(alias) | As::Elided(alias)) => {
-                        Some(crate::sql::name(alias.0).to_ascii_lowercase())
-                    }
+                    Some(alias) => Some(crate::sql::alias_name(alias)),
                     None => passed.as_ref().map(|(_, column)| column.clone()),
                 };
                 found.push(Output { name, passed });
