@@ -219,9 +219,14 @@ fn in_main(name: &QualifiedName<'_>) -> bool {
     name.db_name.as_ref().is_none_or(|name| *name == "main")
 }
 
-/// A table's or a view's columns, in order. A view's comparisons happen
-/// inside SQLite, so sqlive gives none of them an affinity to narrow by.
-fn columns(connection: &Connection, table: &str, ordinary: bool) -> rusqlite::Result<Columns> {
+/// A table's or a view's columns, in order, `ordinary` for a table. A view's
+/// comparisons happen inside SQLite, so sqlive gives none of them an affinity
+/// to narrow by.
+pub(crate) fn columns(
+    connection: &Connection,
+    table: &str,
+    ordinary: bool,
+) -> rusqlite::Result<Columns> {
     let mut columns = Vec::new();
     for DeclaredColumn { name: column, declared, hidden } in declared_columns(connection, table)? {
         let affinity = if ordinary && !hidden {

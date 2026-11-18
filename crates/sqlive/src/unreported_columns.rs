@@ -23,11 +23,12 @@
 //! reads counts as read when its rows follow the order SQLite reads its rows
 //! in. A result column, the HAVING or an ORDER BY term that names a column
 //! outside every aggregate call and GROUP BY term takes the column's value
-//! from one row of its group, which that order decides, and an aggregate
-//! other than count, min and max reads its values in that order, as
-//! `group_concat` joins them, unless the call's own ORDER BY sorts by the
-//! rowid of each of the core's tables. The model states the rule as
-//! `Statement.followsOrder`.
+//! from one row of its group, which that order decides. min and max keep the
+//! value they read first among values that compare equal, unless their
+//! argument is a column whose equal values are the same, and any other
+//! aggregate but count reads its values in that order, as `group_concat`
+//! joins them, unless the call's own ORDER BY sorts by the rowid of each of
+//! the core's tables. The model states the rule as `Statement.followsOrder`.
 //!
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
@@ -36,6 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::read_set::ColumnSet;
 use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
+use crate::scope_term::Affinity;
 use crate::select_syntax::{
     aggregate_call, order_term, parts, parts_outside, window_parts, AggregateCall, Functions,
     OrderTerm, Part,
@@ -45,10 +47,6 @@ use sqlite3_parser::ast::{
     As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, QualifiedName,
     ResultColumn, Select, SelectTable, SortedColumn,
 };
-
-/// The aggregates whose value doesn't depend on the order of the values they
-/// read.
-const ORDER_FREE_AGGREGATES: [&str; 3] = ["count", "min", "max"];
 
 /// The columns a statement's rows depend on beyond those the authorizer
 /// reports, as (table, column) pairs, lowercase.
@@ -549,10 +547,12 @@ impl Walk<'_> {
     /// ORDER BY `order_by` takes its value from one row of each group, which
     /// that order decides, when it names a column, or holds a subquery that
     /// can, outside every aggregate call and GROUP BY term, and so does a
-    /// `*`. An aggregate other than count, min and max reads its values in
-    /// that order too, as `group_concat` joins them and a sum of reals adds
-    /// them, unless its own ORDER BY sorts by the rowid of each of the core's
-    /// FROM items, each a table.
+    /// `*`. min and max keep the value they read first among values that
+    /// compare equal, unless their argument is a column whose equal values
+    /// are the same (`compares_exactly`). Any other aggregate but count reads
+    /// its values in that order too, as `group_concat` joins them and a sum
+    /// of reals adds them, unless its own ORDER BY sorts by the rowid of each
+    /// of the core's FROM items, each a table.
     fn follows_order(
         &self,
         core: &OneSelect<'_>,
@@ -611,8 +611,18 @@ impl Walk<'_> {
         }
         let items = self.table_items(from.as_ref())?;
         for call in calls {
-            if ORDER_FREE_AGGREGATES.contains(&call.name.as_str()) {
-                continue;
+            match (call.name.as_str(), call.arguments, &items) {
+                // count gives the same value in every order.
+                ("count", ..) => continue,
+                // min and max keep the value they read first among values
+                // that compare equal.
+                ("min" | "max", [argument], Some(items))
+                    if self.compares_exactly(items, argument)? =>
+                {
+                    continue
+                }
+                ("min" | "max", ..) => return Ok(true),
+                _ => {}
             }
             let Some(items) = &items else { return Ok(true) };
             let mut sorted = Vec::new();
@@ -624,6 +634,26 @@ impl Walk<'_> {
             }
         }
         Ok(false)
+    }
+
+    /// Whether two values that the column `expr` names among `items` holds
+    /// that compare equal are the same value: a rowid, or a stored column of
+    /// BINARY collation whose declared type gives it an affinity other than
+    /// BLOB, which stores an integer and a real that compare equal as one of
+    /// them. An untyped column can hold both `1` and `1.0`, and a NOCASE one
+    /// both `'Abc'` and `'ABC'`.
+    fn compares_exactly(
+        &self,
+        items: &[(&str, String)],
+        expr: &Expr<'_>,
+    ) -> rusqlite::Result<bool> {
+        let Some((item, column)) = self.item_column(items, expr)? else { return Ok(false) };
+        let table = &items[item].1;
+        if self.is_rowid(table, &column)? {
+            return Ok(true);
+        }
+        let columns = crate::from_item::columns(self.connection, table, true)?;
+        Ok(matches!(columns.affinity(&column), Some(Affinity::Numeric | Affinity::Text)))
     }
 
     /// The FROM item, by its place in `items`, and the column, lowercase,

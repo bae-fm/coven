@@ -116,8 +116,14 @@ promise of whichever rule reads it.
   any row of a group, some order of the group's rows gives that row's value to
   a result column outside every GROUP BY term, and `concat_follows_order`
   proves that `group_concat` with no ORDER BY of its own joins two values in
-  the order SQLite reads them. `orderFree_rows_perm` proves that a SELECT with
-  neither, whose `group_concat` calls each sort by the rowid of each of its
+  the order SQLite reads them. `max_keeps_first` proves, over any comparison,
+  that among two values that compare equal `max` keeps the one it reads
+  first, so values that compare equal and differ, as `1` and `1.0`, give `max`
+  a different value in each order. The model's values are integers, which
+  compare equal only when they are the same, so the model counts a `max`
+  as following the order unless its argument is a column whose equal values
+  are the same. `orderFree_rows_perm` proves that a SELECT with
+  none of these, whose `group_concat` calls each sort by the rowid of each of its
   tables, gives the same rows in some order from every order of its rows.
   `picked_column_reruns` proves that a change to any column of a table that a
   query of the first kind, or a SELECT whose rows follow the order SQLite reads

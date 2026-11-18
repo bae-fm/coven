@@ -327,8 +327,9 @@ impl Core {
     }
 
     /// Whether the core aggregates and SQLite picks which row of a group a
-    /// column outside its GROUP BY comes from, or the order `group_concat`
-    /// joins its values in: the model reads its rows in another order.
+    /// column outside its GROUP BY comes from, the order `group_concat`
+    /// joins its values in, or which of the values that compare equal max
+    /// keeps: the model reads its rows in another order.
     fn follows_order(&self) -> bool {
         let aggregates = !self.group.is_empty()
             || self.select.iter().any(|column| !matches!(column, Out::Expr(..)));
@@ -346,7 +347,13 @@ impl Core {
                     !matches!(e, Expr::Lit(_)) && !self.group.iter().any(|g| g.sql() == e.sql())
                 }
                 Out::Concat(_, order, _) => !rowids(order),
-                Out::Count(_) | Out::Max(..) => false,
+                // The untyped `b` and the NOCASE `n` can hold values that
+                // compare equal and differ (`super::TABLE_SQL`).
+                Out::Max(e, _) => !matches!(e, Expr::Col(alias, "id" | "a" | "c")
+                if self.from.iter().any(|item| {
+                    item.alias == *alias && matches!(item.source, Source::Table(_))
+                })),
+                Out::Count(_) => false,
             })
     }
 }

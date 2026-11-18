@@ -2,9 +2,10 @@
 //! term takes its value from one row of its group, and `group_concat` joins
 //! its values in the order SQLite reads its rows, unless its own ORDER BY
 //! sorts by the rowid of each table, so such a core depends on every column
-//! of its tables. SQLite reads `u` and `w` through their indexes on `a` and
-//! `c`, which the statements don't always name. A grouped column, count and
-//! max don't follow that order.
+//! of its tables, and so does max of a value that can compare equal to
+//! another and differ. SQLite reads `u` and `w` through their indexes on `a`
+//! and `c`, which the statements don't always name. A grouped column, count
+//! and max of an INTEGER column don't follow that order.
 
 use super::{
     col, eq, item, out, pick, select, table, Core, Expr, Item, Join, Out, Query, Source, COLUMNS,
@@ -48,13 +49,14 @@ fn core(rng: &mut Rng) -> Core {
     }
     for _ in 0..1 + rng.below(2) {
         let name = names.next().unwrap();
-        select_.push(match rng.below(7) {
+        select_.push(match rng.below(8) {
             0 | 1 => Out::Expr(col("x", pick(rng, &COLUMNS)), name),
             2 => Out::Count(name),
             3 => Out::Max(col("x", pick(rng, &COLUMNS)), name),
+            4 => Out::Max(Expr::Add(Box::new(col("x", "a")), Box::new(col("x", "c"))), name),
             // `max(a, b)` with two arguments is SQLite's scalar max, whose
             // columns sit in no aggregate.
-            4 => Out::Expr(
+            5 => Out::Expr(
                 Expr::Greatest(
                     Box::new(col("x", pick(rng, &COLUMNS))),
                     Box::new(col("x", pick(rng, &COLUMNS))),

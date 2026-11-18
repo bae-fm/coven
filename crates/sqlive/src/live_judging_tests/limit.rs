@@ -258,9 +258,51 @@ async fn an_aggregate_that_follows_the_order_sqlite_reads_reruns_on_any_column()
     }
 }
 
+/// Two rows whose values compare equal and differ: `1` and `1.0` in the
+/// untyped `b`, and `'abc'` and `'ABC'` in the NOCASE `t`. SQLite reads `v`
+/// through the covering index on `v(a, b, t)`, ordered by `a`, which the
+/// statements never name.
+const EQUAL: &str = "CREATE TABLE v(id INTEGER PRIMARY KEY, a INTEGER, b, t TEXT COLLATE NOCASE, \
+x INTEGER);
+CREATE INDEX v_abt ON v(a, b, t);
+INSERT INTO v VALUES (1, 2, 1, 'abc', 0), (2, 1, 1.0, 'ABC', 0)";
+
+/// Among values that compare equal, min and max keep the one SQLite reads
+/// first, so a write to `v.a` changes the value they keep, and a write to
+/// any column of `v` reruns the query. An INTEGER column's equal values are
+/// the same, so max of one depends only on the columns the statement names.
+#[tokio::test]
+async fn min_and_max_over_values_that_compare_equal_and_differ_rerun_on_any_column() {
+    for sql in [
+        "SELECT quote(max(x.b)) FROM v AS x",
+        "SELECT max(x.t) FROM v AS x",
+        "SELECT min(x.t) FROM v AS x",
+    ] {
+        let db = TestDatabase::open(EQUAL);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE v SET a = 3 WHERE id = 2", true), ("UPDATE v SET x = 1 WHERE id = 1", true)],
+        )
+        .await;
+        db.close();
+    }
+    let db = TestDatabase::open(EQUAL);
+    follows(
+        &db,
+        "SELECT max(x.id) FROM v AS x",
+        vec![],
+        &[("UPDATE v SET x = 1 WHERE id = 1", false), ("DELETE FROM v WHERE id = 2", true)],
+    )
+    .await;
+    db.close();
+}
+
 /// An aggregate's own ORDER BY that sorts by the rowid fixes the order it
-/// joins its values in, and count and max give the same value in every
-/// order, so a write to a column the statement doesn't name reruns nothing.
+/// joins its values in, and count, and max of an INTEGER column, give the
+/// same value in every order, so a write to a column the statement doesn't
+/// name reruns nothing.
 #[tokio::test]
 async fn an_aggregate_in_a_fixed_order_depends_only_on_the_named_columns() {
     for sql in [

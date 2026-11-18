@@ -178,7 +178,8 @@ fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
 /// A core that aggregates reads every column of each table it reads when its
 /// rows follow the order SQLite reads its rows in: a result column, the
 /// HAVING or the ORDER BY names a column or holds a subquery outside every
-/// aggregate call and GROUP BY term, it returns a `*`, or it calls an
+/// aggregate call and GROUP BY term, it returns a `*`, it calls min or max of
+/// anything but a column whose equal values are the same, or it calls an
 /// aggregate other than count, min and max with no ORDER BY of its own that
 /// sorts by the rowid of each of its tables.
 #[test]
@@ -187,6 +188,12 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
     let a = [("a", "id"), ("a", "k"), ("a", "v")];
     let b = [("b", "id"), ("b", "k"), ("b", "w")];
     let both: Vec<_> = a.iter().chain(&b).copied().collect();
+    connection
+        .execute_batch(
+            "CREATE TABLE c(id INTEGER PRIMARY KEY, u, t TEXT COLLATE NOCASE, x TEXT, r REAL)",
+        )
+        .unwrap();
+    let c = [("c", "id"), ("c", "r"), ("c", "t"), ("c", "u"), ("c", "x")];
     for (sql, expected) in [
         ("SELECT a.v, count(*) FROM a", &a[..]),
         ("SELECT a.k, a.v FROM a GROUP BY a.k", &a[..]),
@@ -204,6 +211,14 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         ("SELECT b.w FROM b WHERE b.k IN (SELECT a.v FROM a GROUP BY a.k)", &a[..]),
         // The scalar max's columns sit in no aggregate.
         ("SELECT a.k, count(*), max(a.k, a.v) FROM a GROUP BY a.k", &a[..]),
+        // Values that compare equal can differ: `1` and `1.0` in an untyped
+        // column, `'Abc'` and `'ABC'` under NOCASE, and any value of an
+        // expression.
+        ("SELECT max(c.u) FROM c", &c[..]),
+        ("SELECT min(c.t) FROM c GROUP BY c.x", &c[..]),
+        ("SELECT max(c.x COLLATE NOCASE) FROM c", &c[..]),
+        ("SELECT max(a.v + 1) FROM a", &a[..]),
+        ("SELECT max(s.v) FROM (SELECT a.v FROM a) AS s", &a[..]),
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");
@@ -221,6 +236,7 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         "SELECT group_concat(a.v ORDER BY a.k, rowid DESC) FROM a",
         "SELECT json_group_array(a.v ORDER BY a.id, b.id) FROM a JOIN b ON b.k = a.k",
         "SELECT a.v FROM a",
+        "SELECT max(c.x), min(c.r), max(c.id), min(rowid) FROM c",
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");

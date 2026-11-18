@@ -306,10 +306,11 @@ fn call_order<'a>(order_by: &Option<FunctionCallOrder<'a>>) -> &'a [SortedColumn
 }
 
 /// A call of one of the connection's aggregate functions as an aggregate,
-/// outside any window: its name, lowercase, and the terms of its own ORDER
-/// BY.
+/// outside any window: its name, lowercase, its arguments and the terms of
+/// its own ORDER BY.
 pub(crate) struct AggregateCall<'a> {
     pub(crate) name: String,
+    pub(crate) arguments: &'a [Expr<'a>],
     pub(crate) order: &'a [SortedColumn<'a>],
 }
 
@@ -322,13 +323,17 @@ pub(crate) fn aggregate_call<'a>(
 ) -> Option<AggregateCall<'a>> {
     let (name, arguments, order, tail) = match expr {
         Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
-            (name.0, args.as_ref().map_or(0, |args| args.len()), call_order(order_by), filter_over)
+            (name.0, args.unwrap_or_default(), call_order(order_by), filter_over)
         }
-        Expr::FunctionCallStar { name, filter_over } => (name.0, 0, &[][..], filter_over),
+        Expr::FunctionCallStar { name, filter_over } => (name.0, &[][..], &[][..], filter_over),
         _ => return None,
     };
     let name = name.to_ascii_lowercase();
-    (!over(tail) && functions.aggregate(&name, arguments)).then_some(AggregateCall { name, order })
+    (!over(tail) && functions.aggregate(&name, arguments.len())).then_some(AggregateCall {
+        name,
+        arguments,
+        order,
+    })
 }
 
 /// A parsed node written back as SQL.

@@ -17,7 +17,9 @@ A core that aggregates picks rows too: a result column outside every GROUP BY
 term takes its value from one binding of its group, which the order SQLite
 reads them in decides (`bare_picks_any`), and `group_concat` joins its values in the order SQLite
 reads them (`concat_follows_order`), unless the call's own ORDER BY sorts by
-the rowid of each of the core's tables. Such a core depends on every column
+the rowid of each of the core's tables, and `max` keeps the value it reads
+first among values that compare equal (`max_keeps_first`), unless its
+argument is a column whose equal values are the same. Such a core depends on every column
 of each table it reads (`Statement.followsOrder`); any other core gives the
 same rows in every order (`orderFree_rows_perm`). -/
 namespace SqliveNarrowing.Pick
@@ -369,6 +371,25 @@ theorem concat_follows_order {c : Core} (hagg : c.aggregated = true) (hgroup : c
   have h21 : concatValue [some 2, some 1] = some 21 := by decide
   simp [Core.rows, hagg, hgroup, List.getElem?_map, hp, OutCol.aggregate, sortBindings, h₁, h₂,
     h12, h21]
+
+/-- SQLite's `max` over values that `cmp` orders: the first value it reads
+among the greatest, as it replaces the value it keeps only by a greater one
+(`minmaxStep`). -/
+def keepMax {α : Type} (cmp : α → α → Ordering) (vs : List α) : Option α :=
+  vs.foldl (fun acc v => match acc with
+    | none => some v
+    | some best => if cmp best v = .lt then some v else some best) none
+
+/-- Among values that compare equal, `max` keeps the one it reads first: two
+values that compare equal and differ, as `'Abc'` and `'ABC'` under NOCASE or
+`1` and `1.0`, give `max` a different value read one way than the other. The
+model's values are integers, which compare equal only when they are the same
+(`maxValue_perm`), so a core whose `max` reads a value that can compare equal
+to another and differ follows the order SQLite reads its bindings in
+(`Statement.followsOrder`). -/
+theorem max_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α} (hab : cmp a b = .eq)
+    (hba : cmp b a = .eq) : keepMax cmp [a, b] = some a ∧ keepMax cmp [b, a] = some b := by
+  simp [keepMax, hab, hba]
 
 /-- An expression that names no column or subquery outside its core's GROUP
 BY terms takes the same value in two bindings that agree on those terms. -/

@@ -74,18 +74,30 @@ def Expr.bare (groupBy : List Expr) (e : Expr) : Bool :=
     | .lit _ => false
     | .add l r | .greatest l r => l.bare groupBy || r.bare groupBy
 
+/-- Whether two values of `e` in bindings of core `k` that compare equal are
+the same value: `e` is a column of one of the core's tables that sqlive gives
+an affinity other than BLOB, so it compares by BINARY and holds no integer
+and real that compare equal, as an untyped column can hold `1` and `1.0`. -/
+def Statement.comparesExactly (s : Statement) (k : Nat) : Expr → Bool
+  | .col i c => (s.core k).items.contains i && (s.table? i).isSome &&
+      (s.affinity i c).any (· != .blob)
+  | _ => false
+
 /-- Whether core `k`'s rows follow the order SQLite reads its bindings in: it
 aggregates, and a result column takes its value from one binding of a group,
 which that order decides, as a column outside every GROUP BY term
 (`Expr.bare`) does, or joins its values in that order, with no ORDER BY of its
-own that tells the bindings apart. That order follows the plan SQLite picks
-(`Pick.bare_picks_any`, `Pick.concat_follows_order`). -/
+own that tells the bindings apart, or keeps the greatest value it reads first
+among values that compare equal and can differ. That order follows the plan
+SQLite picks (`Pick.bare_picks_any`, `Pick.concat_follows_order`,
+`Pick.max_keeps_first`). -/
 def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
   let c := s.core k
   c.aggregated && c.output.any fun
     | .expr e => e.bare c.groupBy
     | .concat _ orderBy => !s.sortsByRowids k (orderBy.map (·.1))
-    | .count | .max _ => false
+    | .max e => !s.comparesExactly k e
+    | .count => false
 
 /-- The subqueries whose first row a clause of the statement takes. -/
 def Statement.firstRowQueries (s : Statement) : List Nat := s.cores.flatMap Core.firstRows
