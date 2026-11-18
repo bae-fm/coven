@@ -13,6 +13,9 @@ inductive Expr where
   | col (item column : Nat)
   | lit (value : Value)
   | add (left right : Expr)
+  /-- `max(left, right)`: SQLite's scalar max of two values, NULL when either
+  is, which reads one row as `+` does and is no aggregate. -/
+  | greatest (left right : Expr)
   /-- A scalar subquery: the first column of its first row, or NULL. -/
   | sub (query : Nat)
   deriving Repr, Inhabited, DecidableEq
@@ -169,7 +172,7 @@ def Statement.affinity (s : Statement) (i c : Nat) : Option Affinity :=
 def Expr.refs : Expr → List (Nat × Nat)
   | .col i c => [(i, c)]
   | .lit _ => []
-  | .add l r => l.refs ++ r.refs
+  | .add l r | .greatest l r => l.refs ++ r.refs
   | .sub _ => []
 
 /-- The items `e` names, in order, with repeats. -/
@@ -178,7 +181,7 @@ def Expr.items (e : Expr) : List Nat := e.refs.map (·.1)
 /-- The subqueries `e` holds. -/
 def Expr.queries : Expr → List Nat
   | .col .. | .lit _ => []
-  | .add l r => l.queries ++ r.queries
+  | .add l r | .greatest l r => l.queries ++ r.queries
   | .sub q => [q]
 
 def Cond.refs : Cond → List (Nat × Nat)

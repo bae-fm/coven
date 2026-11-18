@@ -5,9 +5,8 @@
 use crate::from_item::Columns;
 use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
 use crate::scope_term::Affinity;
-use crate::select_syntax::{parts, repeatable, Part};
+use crate::select_syntax::{parts, Part};
 use crate::sql::unparenthesized;
-use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Name};
 
 impl Planner<'_> {
@@ -22,18 +21,15 @@ impl Planner<'_> {
     /// would get another answer than the query did.
     pub(crate) fn edge(
         &self,
-        connection: &Connection,
         core: usize,
         member_expr: &Expr<'_>,
         other: &Expr<'_>,
         first: bool,
-    ) -> rusqlite::Result<Option<Edge>> {
-        let Some(edge) = self.edge_between(core, member_expr, other, first) else {
-            return Ok(None);
-        };
+    ) -> Option<Edge> {
+        let edge = self.edge_between(core, member_expr, other, first)?;
         let mut found = Vec::new();
         parts(other, &mut found);
-        Ok(repeatable(connection, &found)?.then_some(edge))
+        self.functions.repeatable(&found).then_some(edge)
     }
 
     fn edge_between(

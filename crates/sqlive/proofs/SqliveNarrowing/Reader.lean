@@ -21,7 +21,7 @@ theorem Expr.eval_congr (e : Expr) {b b' : Bind} {sub sub' : Subs}
   induction e with
   | col i c => exact hb i c (by simp [Expr.refs])
   | lit v => rfl
-  | add l r ihl ihr =>
+  | add l r ihl ihr | greatest l r ihl ihr =>
     simp only [Expr.eval]
     rw [ihl (fun i c h => hb i c (by simp [Expr.refs, h]))
         (fun q h => hs q (by simp [Expr.queries, h])),
@@ -110,7 +110,7 @@ theorem Expr.eval_null (e : Expr) {b : Bind} {sub : Subs} (hr : e.refs ≠ [])
   induction e with
   | col i c => exact hn i c (by simp [Expr.refs])
   | lit v => simp [Expr.refs] at hr
-  | add l r ihl ihr =>
+  | add l r ihl ihr | greatest l r ihl ihr =>
     simp only [Expr.queries, List.append_eq_nil_iff] at hq
     simp only [Expr.eval]
     by_cases hl : l.refs = []

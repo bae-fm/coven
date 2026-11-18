@@ -48,10 +48,19 @@ fn core(rng: &mut Rng) -> Core {
     }
     for _ in 0..1 + rng.below(2) {
         let name = names.next().unwrap();
-        select_.push(match rng.below(6) {
+        select_.push(match rng.below(7) {
             0 | 1 => Out::Expr(col("x", pick(rng, &COLUMNS)), name),
             2 => Out::Count(name),
             3 => Out::Max(col("x", pick(rng, &COLUMNS)), name),
+            // `max(a, b)` with two arguments is SQLite's scalar max, whose
+            // columns sit in no aggregate.
+            4 => Out::Expr(
+                Expr::Greatest(
+                    Box::new(col("x", pick(rng, &COLUMNS))),
+                    Box::new(col("x", pick(rng, &COLUMNS))),
+                ),
+                name,
+            ),
             _ => concat(rng, &from, name),
         });
     }

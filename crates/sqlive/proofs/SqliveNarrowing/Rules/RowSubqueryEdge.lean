@@ -57,7 +57,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q position : Nat} 
       | some pa =>
         simp only [hpa] at h
         cases member
-        case lit | add | sub => simp at h
+        case lit | add | greatest | sub => simp at h
         case col m c =>
           simp only at h
           split at h

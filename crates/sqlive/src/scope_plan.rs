@@ -30,7 +30,7 @@ use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
-use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
+use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use crate::unreported_columns::{unreported_columns, UnreportedColumns};
@@ -84,10 +84,10 @@ impl ScopePlan {
         if !matches!(parser.next(), Ok(None)) {
             return unread("the statement isn't one SELECT the parser reads");
         }
-        let aggregates = aggregates(connection)?;
+        let functions = Functions::read(connection)?;
         Ok(Self {
-            sources: Sources::read(connection, select, whole, &aggregates)?,
-            unreported: Arc::new(unreported_columns(connection, &aggregates, select)?),
+            sources: Sources::read(connection, select, whole, &functions)?,
+            unreported: Arc::new(unreported_columns(connection, &functions, select)?),
         })
     }
 
@@ -189,13 +189,13 @@ impl Sources {
         connection: &Connection,
         select: &Select<'_>,
         whole: &WholeViews,
-        aggregates: &BTreeSet<String>,
+        functions: &Functions,
     ) -> rusqlite::Result<Option<Self>> {
         let mut planner = Planner {
             items: Vec::new(),
             cores: Vec::new(),
             edges: Vec::new(),
-            aggregates,
+            functions,
             inlined: Vec::new(),
             whole,
         };
@@ -219,25 +219,14 @@ pub(crate) struct Planner<'a> {
     /// Each core after the core it sits in.
     pub(crate) cores: Vec<Core>,
     pub(crate) edges: Vec<Edge>,
-    /// The functions that can make one row of many, lowercase: aggregate
-    /// and window functions.
-    pub(crate) aggregates: &'a BTreeSet<String>,
+    /// The connection's functions, which tell an aggregate call from a
+    /// scalar one.
+    pub(crate) functions: &'a Functions,
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by.
     pub(crate) inlined: Vec<String>,
     /// The views and tables the live query reads whole.
     pub(crate) whole: &'a WholeViews,
-}
-
-/// The names of the connection's aggregate and window functions.
-pub(crate) fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
-    let mut functions = connection
-        .prepare_cached("SELECT DISTINCT name FROM pragma_function_list WHERE type IN ('a','w')")?;
-    let names = functions
-        .query_map([], |row| row.get::<_, String>(0))?
-        .map(|name| name.map(|name| name.to_ascii_lowercase()))
-        .collect();
-    names
 }
 
 impl Planner<'_> {
@@ -829,7 +818,7 @@ fn read_condition<'a>(
         // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
         let narrowed = match term(connection, &column, condition)? {
             Some(term) => Some(term),
-            None => row_term(connection, planner, core, item, condition, &read)?,
+            None => row_term(planner, core, item, condition, &read),
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
     } else if let Expr::Binary(left, Operator::Equals, right) = condition {
@@ -846,7 +835,7 @@ fn read_condition<'a>(
             };
         for (left, right) in pairs {
             for (member, other, first) in [(left, right, false), (right, left, true)] {
-                found.edges.extend(planner.edge(connection, core, member, other, first)?);
+                found.edges.extend(planner.edge(core, member, other, first));
             }
         }
     }

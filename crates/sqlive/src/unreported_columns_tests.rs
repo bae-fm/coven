@@ -27,8 +27,8 @@ fn unreported(connection: &rusqlite::Connection, sql: &str) -> UnreportedColumns
     let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
         panic!("the parser reads {sql}");
     };
-    let aggregates = crate::scope_plan::aggregates(connection).unwrap();
-    unreported_columns(connection, &aggregates, select).unwrap()
+    let functions = crate::select_syntax::Functions::read(connection).unwrap();
+    unreported_columns(connection, &functions, select).unwrap()
 }
 
 #[test]
@@ -117,6 +117,9 @@ fn a_query_sqlite_picks_rows_of_reads_every_column_of_its_tables() {
         ("SELECT a.v FROM a JOIN b ON b.k = a.k ORDER BY a.id LIMIT 1", &both[..]),
         ("SELECT a.k, max(a.v) FROM a GROUP BY a.k ORDER BY a.k LIMIT 1", &a[..]),
         ("SELECT DISTINCT a.v FROM a ORDER BY a.id LIMIT 1", &a[..]),
+        // With two arguments, max is SQLite's scalar max, so the SELECT
+        // returns a row of each row of `a`.
+        ("SELECT max(a.k, a.v) FROM a LIMIT 1", &a[..]),
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");
@@ -199,6 +202,8 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
         ("SELECT max(a.v), (SELECT b.w FROM b ORDER BY b.id LIMIT 1) FROM a", &both[..]),
         ("SELECT x.n FROM (SELECT a.k, count(*) AS n, a.v FROM a GROUP BY a.k) AS x", &a[..]),
         ("SELECT b.w FROM b WHERE b.k IN (SELECT a.v FROM a GROUP BY a.k)", &a[..]),
+        // The scalar max's columns sit in no aggregate.
+        ("SELECT a.k, count(*), max(a.k, a.v) FROM a GROUP BY a.k", &a[..]),
     ] {
         let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
             panic!("the columns are known: {sql}");

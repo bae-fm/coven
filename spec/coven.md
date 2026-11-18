@@ -813,7 +813,11 @@ cases:
   order, which can change the last digits of the result.
 
 A column is a GROUP BY term when the GROUP BY names it as the SELECT writes
-it, or names its result column by position or alias. `count`, `min` and `max`
+it, or names its result column by position or alias. SQLite tells an aggregate
+from a scalar function by the function's name and the number of arguments the
+call passes: `max(b.year)` calls the aggregate, and `max(b.year, b.month)` calls
+SQLite's scalar max, which takes the larger value of each row, so its columns
+sit in no aggregate. `count`, `min` and `max`
 give the same value in every order, so `SELECT b.artist_id, count(*),
 max(b.year) FROM albums AS b GROUP BY b.artist_id` depends only on the columns
 it names. Among values that compare equal and still differ, as `'Abc'` and

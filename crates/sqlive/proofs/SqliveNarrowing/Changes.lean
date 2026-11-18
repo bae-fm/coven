@@ -72,7 +72,7 @@ def Expr.bare (groupBy : List Expr) (e : Expr) : Bool :=
   !groupBy.contains e && match e with
     | .col .. | .sub _ => true
     | .lit _ => false
-    | .add l r => l.bare groupBy || r.bare groupBy
+    | .add l r | .greatest l r => l.bare groupBy || r.bare groupBy
 
 /-- Whether core `k`'s rows follow the order SQLite reads its bindings in: it
 aggregates, and a result column takes its value from one binding of a group,

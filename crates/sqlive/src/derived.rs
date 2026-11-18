@@ -256,7 +256,7 @@ fn aggregates(planner: &Planner, select: &Select<'_>, body: &OneSelect<'_>) -> b
             parts(&term.expr, &mut found);
         }
     }
-    found.iter().any(|part| part.many_rows(planner.aggregates))
+    found.iter().any(|part| part.many_rows(planner.functions))
 }
 
 /// A column a core outputs: its name as SQLite gives it, when sqlive knows

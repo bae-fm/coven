@@ -108,7 +108,7 @@ pub(crate) fn sorted_limit(
             crate::select_syntax::parts(expr, &mut found);
         }
     }
-    if found.iter().any(|part| part.many_rows(planner.aggregates)) {
+    if found.iter().any(|part| part.many_rows(planner.functions)) {
         return Ok(None);
     }
     let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {

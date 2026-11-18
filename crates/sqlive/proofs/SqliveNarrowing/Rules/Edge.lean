@@ -47,7 +47,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     ∀ r, e.value.eval r = other.eval (rowBind (some r)) noSubs := by
   unfold edge at h
   cases member
-  case lit | add | sub => simp at h
+  case lit | add | greatest | sub => simp at h
   case col m c =>
     simp only [bind, Option.bind] at h
     split at h

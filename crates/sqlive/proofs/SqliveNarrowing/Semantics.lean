@@ -36,6 +36,10 @@ def Expr.eval (b : Bind) (sub : Subs) : Expr → Value
     match l.eval b sub, r.eval b sub with
     | some x, some y => some (x + y)
     | _, _ => none
+  | .greatest l r =>
+    match l.eval b sub, r.eval b sub with
+    | some x, some y => some (max x y)
+    | _, _ => none
   | .sub q => ((sub q).head?.bind List.head?).join
 
 def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth

@@ -37,7 +37,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::read_set::ColumnSet;
 use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
 use crate::select_syntax::{
-    aggregate_call, order_term, parts, parts_outside, window_parts, AggregateCall, OrderTerm, Part,
+    aggregate_call, order_term, parts, parts_outside, window_parts, AggregateCall, Functions,
+    OrderTerm, Part,
 };
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
@@ -89,17 +90,16 @@ impl UnreportedColumns {
     }
 }
 
-/// The columns `select`'s rows depend on that the authorizer doesn't report;
-/// `aggregates` names the connection's aggregate and window functions,
-/// lowercase.
+/// The columns `select`'s rows depend on that the authorizer doesn't report,
+/// with the connection's `functions`.
 pub(crate) fn unreported_columns(
     connection: &Connection,
-    aggregates: &BTreeSet<String>,
+    functions: &Functions,
     select: &Select<'_>,
 ) -> rusqlite::Result<UnreportedColumns> {
     let mut walk = Walk {
         connection,
-        aggregates,
+        functions,
         views: BTreeMap::new(),
         ctes: Vec::new(),
         defined: Vec::new(),
@@ -142,8 +142,9 @@ impl Reads {
 
 struct Walk<'c> {
     connection: &'c Connection,
-    /// The connection's aggregate and window functions, lowercase.
-    aggregates: &'c BTreeSet<String>,
+    /// The connection's functions, which tell an aggregate call from a
+    /// scalar one.
+    functions: &'c Functions,
     /// What each view read so far reads, by its name, lowercase, so a view
     /// read twice is read once.
     views: BTreeMap<String, Reads>,
@@ -474,13 +475,13 @@ impl Walk<'_> {
             parts(&term.expr, &mut sorted);
         }
         let windowed = returned.iter().chain(&sorted).any(Part::windowed);
-        if !windowed && returned.iter().any(|part| part.aggregates(self.aggregates)) {
+        if !windowed && returned.iter().any(|part| part.aggregates(self.functions)) {
             return Ok(true);
         }
         if windowed
             || distinctness.is_some()
             || having.is_some()
-            || sorted.iter().any(|part| part.aggregates(self.aggregates))
+            || sorted.iter().any(|part| part.aggregates(self.functions))
         {
             return Ok(false);
         }
@@ -590,7 +591,7 @@ impl Walk<'_> {
             .collect();
         let inside = |expr: &Expr<'_>| {
             grouped.contains(&crate::sql::unparenthesized(expr))
-                || aggregate_call(expr, self.aggregates).is_some()
+                || aggregate_call(expr, self.functions).is_some()
         };
         let mut outside = Vec::new();
         let mut stopped = Vec::new();
@@ -598,7 +599,7 @@ impl Walk<'_> {
             parts_outside(expr, &inside, &mut outside, &mut stopped);
         }
         let calls: Vec<AggregateCall<'_>> =
-            stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.aggregates)).collect();
+            stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.functions)).collect();
         if group_by.is_none() && calls.is_empty() {
             return Ok(false);
         }

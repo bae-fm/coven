@@ -21,9 +21,8 @@ use std::sync::Arc;
 use crate::row_scope::RowImage;
 use crate::scope_plan::Planner;
 use crate::scope_term::{Affinity, ScopeTerm};
-use crate::select_syntax::{deterministic, is_clock_function, Part};
+use crate::select_syntax::{is_clock_function, Part};
 use crate::sql_value::SqlValue as Value;
-use rusqlite::Connection;
 use sqlite3_parser::ast::Expr;
 
 /// The condition of one conjunct and what it names, before a run's values.
@@ -41,56 +40,49 @@ pub(crate) struct RowTerm {
 /// The term `condition` gives the table item `item` of `core`, when it is a
 /// condition SQLite can judge row by row; `parts` are its parts.
 pub(crate) fn row_term(
-    connection: &Connection,
     planner: &Planner,
     core: usize,
     item: usize,
     condition: &Expr<'_>,
     parts: &[Part<'_>],
-) -> rusqlite::Result<Option<ScopeTerm>> {
+) -> Option<ScopeTerm> {
     let from = &planner.items[item];
-    if from.source.table.is_none() {
-        return Ok(None);
-    }
+    from.source.table.as_ref()?;
     let mut columns: Vec<(String, Affinity)> = Vec::new();
-    let mut functions: Vec<String> = Vec::new();
     for part in parts {
         match part {
             Part::Name(name) => {
                 // A name qualified by a database isn't one the judging
                 // statement could resolve.
                 if matches!(name, Expr::DoublyQualified(..)) {
-                    return Ok(None);
+                    return None;
                 }
-                let Some((_, column)) = planner.resolve(core, name) else {
-                    return Ok(None);
-                };
-                let Some(affinity) = from.columns.affinity(&column) else {
-                    return Ok(None);
-                };
+                let (_, column) = planner.resolve(core, name)?;
+                let affinity = from.columns.affinity(&column)?;
                 if !columns.iter().any(|(named, _)| *named == column) {
                     columns.push((column, affinity));
                 }
             }
-            Part::Function(name, window) => {
-                let name = name.to_ascii_lowercase();
-                if *window || planner.aggregates.contains(&name) || is_clock_function(&name) {
-                    return Ok(None);
+            Part::Function(name, arguments, window) => {
+                if *window
+                    || is_clock_function(&name.to_ascii_lowercase())
+                    || !planner.functions.deterministic(name, *arguments)
+                {
+                    return None;
                 }
-                functions.push(name);
             }
             Part::Collation => {}
-            Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Clock => return Ok(None),
+            Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Clock => return None,
         }
     }
-    if columns.is_empty() || !deterministic(connection, &functions)? {
-        return Ok(None);
+    if columns.is_empty() {
+        return None;
     }
-    Ok(Some(ScopeTerm::Row(Arc::new(RowTerm {
+    Some(ScopeTerm::Row(Arc::new(RowTerm {
         condition: condition.to_string(),
         qualifier: from.source.qualifier.clone(),
         columns,
-    }))))
+    })))
 }
 
 /// A run's condition: the term bound to the run's parameters.

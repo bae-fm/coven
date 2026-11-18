@@ -2,7 +2,7 @@
 //! order, and the expressions inside it (§4).
 
 use rusqlite::{Connection, Statement};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use sqlite3_parser::ast::{
     As, Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Name, Operator, Over,
@@ -77,8 +77,9 @@ pub(crate) enum Part<'a> {
     Table,
     /// A COLLATE, which gives a comparison holding it its collation.
     Collation,
-    /// A function called by name, and whether it runs over a window.
-    Function(&'a str, bool),
+    /// A function called by name, with how many arguments, and whether it
+    /// runs over a window.
+    Function(&'a str, usize, bool),
     /// `CURRENT_DATE`, `CURRENT_TIME` or `CURRENT_TIMESTAMP`, which read
     /// the clock.
     Clock,
@@ -87,19 +88,19 @@ pub(crate) enum Part<'a> {
 impl Part<'_> {
     /// Whether it calls a function over a window.
     pub(crate) fn windowed(&self) -> bool {
-        matches!(self, Part::Function(_, true))
+        matches!(self, Part::Function(_, _, true))
     }
 
-    /// Whether it calls one of `aggregates`, the connection's aggregate and
-    /// window functions, lowercase, as an aggregate outside any window.
-    pub(crate) fn aggregates(&self, aggregates: &BTreeSet<String>) -> bool {
-        matches!(self, Part::Function(name, false) if aggregates.contains(&name.to_ascii_lowercase()))
+    /// Whether it calls an aggregate of the connection's `functions`,
+    /// outside any window.
+    pub(crate) fn aggregates(&self, functions: &Functions) -> bool {
+        matches!(self, Part::Function(name, arguments, false) if functions.aggregate(name, *arguments))
     }
 
     /// Whether it makes one row of many: it calls an aggregate, or a
     /// function over a window.
-    pub(crate) fn many_rows(&self, aggregates: &BTreeSet<String>) -> bool {
-        self.windowed() || self.aggregates(aggregates)
+    pub(crate) fn many_rows(&self, functions: &Functions) -> bool {
+        self.windowed() || self.aggregates(functions)
     }
 }
 
@@ -235,7 +236,8 @@ impl<'a> PartWalk<'a, '_> {
             | Expr::NotNull(expr)
             | Expr::Unary(_, expr) => self.expr(expr),
             Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
-                self.parts.push(Part::Function(name.0, over(filter_over)));
+                let arguments = args.as_ref().map_or(0, |args| args.len());
+                self.parts.push(Part::Function(name.0, arguments, over(filter_over)));
                 self.every(args.iter().flat_map(|args| args.iter()));
                 self.every(call_order(order_by).iter().map(|term| &term.expr));
                 if let Some(tail) = filter_over {
@@ -243,7 +245,7 @@ impl<'a> PartWalk<'a, '_> {
                 }
             }
             Expr::FunctionCallStar { name, filter_over } => {
-                self.parts.push(Part::Function(name.0, over(filter_over)));
+                self.parts.push(Part::Function(name.0, 0, over(filter_over)));
                 if let Some(tail) = filter_over {
                     self.tail(tail);
                 }
@@ -311,22 +313,22 @@ pub(crate) struct AggregateCall<'a> {
     pub(crate) order: &'a [SortedColumn<'a>],
 }
 
-/// The aggregate call `expr` is, when it calls one of `aggregates`, the
-/// connection's aggregate and window functions, lowercase, outside any window,
-/// as `Part::aggregates` reads a call.
+/// The aggregate call `expr` is, when it calls an aggregate of the
+/// connection's `functions` outside any window, as `Part::aggregates` reads a
+/// call.
 pub(crate) fn aggregate_call<'a>(
     expr: &'a Expr<'a>,
-    aggregates: &BTreeSet<String>,
+    functions: &Functions,
 ) -> Option<AggregateCall<'a>> {
-    let (name, order, tail) = match expr {
-        Expr::FunctionCall { name, order_by, filter_over, .. } => {
-            (name.0, call_order(order_by), filter_over)
+    let (name, arguments, order, tail) = match expr {
+        Expr::FunctionCall { name, args, order_by, filter_over, .. } => {
+            (name.0, args.as_ref().map_or(0, |args| args.len()), call_order(order_by), filter_over)
         }
-        Expr::FunctionCallStar { name, filter_over } => (name.0, &[][..], filter_over),
+        Expr::FunctionCallStar { name, filter_over } => (name.0, 0, &[][..], filter_over),
         _ => return None,
     };
     let name = name.to_ascii_lowercase();
-    (!over(tail) && aggregates.contains(&name)).then_some(AggregateCall { name, order })
+    (!over(tail) && functions.aggregate(&name, arguments)).then_some(AggregateCall { name, order })
 }
 
 /// A parsed node written back as SQL.
@@ -354,41 +356,96 @@ pub(crate) fn is_clock_function(name: &str) -> bool {
     CLOCK_FUNCTIONS.contains(&name)
 }
 
-/// Whether every function of `names` is a scalar function the connection
-/// flags deterministic, at every arity it has.
-pub(crate) fn deterministic(connection: &Connection, names: &[String]) -> rusqlite::Result<bool> {
-    let mut flags = connection.prepare_cached(
-        "SELECT count(*), min(flags & ?2 = ?2 AND type = 's') \
-         FROM pragma_function_list WHERE name = ?1 COLLATE NOCASE",
-    )?;
-    for name in names {
-        let (found, all): (i64, Option<i64>) = flags
-            .query_row(rusqlite::params![name, DETERMINISTIC], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-        if found == 0 || all != Some(1) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+/// One of the definitions SQLite keeps for a function's name.
+struct Definition {
+    /// How many arguments it takes, as `pragma_function_list` reports it: a
+    /// count, -1 for any number, -3 for one or more, -4 for two or more.
+    arguments: i64,
+    /// An aggregate, which a window function is too outside a window.
+    aggregate: bool,
+    /// A scalar function the connection flags deterministic.
+    deterministic: bool,
 }
 
-/// Whether evaluating the expression `found` holds twice gives the same
-/// answer: it names no clock and every function in it is deterministic.
-pub(crate) fn repeatable(connection: &Connection, found: &[Part<'_>]) -> rusqlite::Result<bool> {
-    let mut functions = Vec::new();
-    for part in found {
-        match part {
-            Part::Clock => return Ok(false),
-            Part::Function(name, _) => {
-                let name = name.to_ascii_lowercase();
-                if is_clock_function(&name) {
-                    return Ok(false);
-                }
-                functions.push(name);
-            }
-            _ => {}
+impl Definition {
+    fn takes(&self, arguments: usize) -> bool {
+        let arguments = i64::try_from(arguments).unwrap_or(i64::MAX);
+        match self.arguments {
+            -1 => true,
+            least @ ..=-3 => arguments >= -2 - least,
+            count => count == arguments,
         }
     }
-    deterministic(connection, &functions)
+}
+
+/// The connection's functions, as SQLite reads a call: by its name and how
+/// many arguments it passes. A definition that takes exactly that many
+/// arguments wins over one that takes any number, so `max(a)` calls the
+/// aggregate and `max(a, b)` the scalar function.
+pub(crate) struct Functions(BTreeMap<String, Vec<Definition>>);
+
+impl Functions {
+    pub(crate) fn read(connection: &Connection) -> rusqlite::Result<Self> {
+        let mut listed = connection
+            .prepare_cached("SELECT name, narg, type, flags FROM pragma_function_list")?;
+        let mut functions: BTreeMap<String, Vec<Definition>> = BTreeMap::new();
+        let rows = listed.query_map([], |row| {
+            let kind: String = row.get(2)?;
+            let flags: i64 = row.get(3)?;
+            Ok((
+                row.get::<_, String>(0)?.to_ascii_lowercase(),
+                Definition {
+                    arguments: row.get(1)?,
+                    aggregate: kind != "s",
+                    deterministic: kind == "s" && flags & DETERMINISTIC != 0,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (name, definition) = row?;
+            functions.entry(name).or_default().push(definition);
+        }
+        Ok(Self(functions))
+    }
+
+    /// The definitions a call of `name` with `arguments` arguments can run:
+    /// those that take exactly that many, or else those that take a number
+    /// of arguments that includes it.
+    fn called(&self, name: &str, arguments: usize) -> Vec<&Definition> {
+        let Some(definitions) = self.0.get(&name.to_ascii_lowercase()) else { return Vec::new() };
+        let exact: Vec<&Definition> = definitions
+            .iter()
+            .filter(|definition| definition.arguments >= 0 && definition.takes(arguments))
+            .collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+        definitions.iter().filter(|definition| definition.takes(arguments)).collect()
+    }
+
+    /// Whether a call of `name` with `arguments` arguments, outside any
+    /// window, calls an aggregate.
+    pub(crate) fn aggregate(&self, name: &str, arguments: usize) -> bool {
+        self.called(name, arguments).iter().any(|definition| definition.aggregate)
+    }
+
+    /// Whether a call of `name` with `arguments` arguments calls a scalar
+    /// function the connection flags deterministic.
+    pub(crate) fn deterministic(&self, name: &str, arguments: usize) -> bool {
+        let called = self.called(name, arguments);
+        !called.is_empty() && called.iter().all(|definition| definition.deterministic)
+    }
+
+    /// Whether evaluating the expression `found` holds twice gives the same
+    /// answer: it names no clock and every function in it is deterministic.
+    pub(crate) fn repeatable(&self, found: &[Part<'_>]) -> bool {
+        found.iter().all(|part| match part {
+            Part::Clock => false,
+            Part::Function(name, arguments, _) => {
+                !is_clock_function(&name.to_ascii_lowercase())
+                    && self.deterministic(name, *arguments)
+            }
+            _ => true,
+        })
+    }
 }

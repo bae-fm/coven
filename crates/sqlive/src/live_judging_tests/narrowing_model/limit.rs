@@ -5,7 +5,7 @@
 //! that doesn't sort by the rowid of each table, as one over a join, makes
 //! every column of the tables count as read.
 
-use super::{col, eq, item, out, pick, table, Core, Join, Limit, Query, Source, TABLES};
+use super::{col, eq, item, out, pick, table, Core, Expr, Join, Limit, Query, Source, TABLES};
 use crate::random_scopes::Rng;
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -15,6 +15,17 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
     let mut conditions = Vec::new();
     if rng.chance(60) {
         conditions.push(super::term::condition(rng, "x", 1));
+    }
+    if rng.chance(15) {
+        // `max(a, c)` with two arguments is SQLite's scalar max, so the core
+        // makes a row of each row of `x`, and the LIMIT keeps the rows SQLite
+        // reads first.
+        let greatest = Expr::Greatest(Box::new(col("x", "a")), Box::new(col("x", "c")));
+        return Query {
+            arms: vec![Core { from, conditions, select: vec![out(greatest)], group: Vec::new() }],
+            limit: super::limit(1 + rng.below(3) as u32),
+            ..Query::default()
+        };
     }
     let sorted = if rng.chance(15) { "y" } else { "x" };
     match rng.below(3) {

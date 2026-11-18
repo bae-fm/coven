@@ -280,6 +280,9 @@ partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : List (String
   else if let some (.arr #[l, r]) := field j "add" then
     let l ← readExpr schema l k ctes
     pure (.add l (← readExpr schema r k ctes))
+  else if let some (.arr #[l, r]) := field j "greatest" then
+    let l ← readExpr schema l k ctes
+    pure (.greatest l (← readExpr schema r k ctes))
   else if let some q := field j "query" then
     pure (.sub (← readSelect schema q (some k) ctes))
   else lift (throw s!"unknown expression {j.compress}")
