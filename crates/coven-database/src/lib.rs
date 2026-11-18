@@ -183,7 +183,7 @@ pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuth
 pub use error::{sqlite_error_is_disk, CovenMigrationError, DbError, MigrationError, OpenError};
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadCompletion, UploadProgress, UploadQueueState};
-pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream};
+pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream, Located};
 pub use live_results::next_result;
 pub use lost::{
     ChangeSource, Lost, LostCell, LostValue, RemovalRule, Replacement, RowAuthorizationFailure,

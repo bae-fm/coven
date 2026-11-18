@@ -59,7 +59,10 @@ async fn a_malformed_record_is_damage_and_never_shows_its_key() {
     assert_eq!(location.uploader(), DeviceId(1));
     assert_eq!(location.object(), ObjectId(id));
     // Only a file this device uploads has a local source.
-    assert!(db.open_local_file(&uploaded, LeasePlace::for_test().await).await.unwrap().is_none());
+    assert!(matches!(
+        db.open_local_file(&uploaded, LeasePlace::for_test().await).await.unwrap(),
+        crate::Located::Elsewhere(record) if record == uploaded
+    ));
     assert!(!format!("{uploaded:?}").contains(&"ab".repeat(32)));
     let valid = format!("file 1 {id} {}", "ab".repeat(32));
     let mut malformed: Vec<_> = (0..valid.len()).map(|end| valid[..end].to_owned()).collect();
@@ -267,7 +270,7 @@ async fn open_local_around(
     db: &StoreDatabase,
     reference: FileRef,
     meanwhile: impl std::future::Future<Output = ()>,
-) -> Result<Option<LocalFileStream>, LocalFileError> {
+) -> Result<Located<LocalFileStream>, LocalFileError> {
     let (found, finding) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     db.test_gate_local_open(move || {
@@ -288,9 +291,9 @@ async fn open_local_around(
 /// A read finds where a file's bytes are here from one committed state and
 /// opens them after it. The upload completing between the two switches the
 /// file to its stored bytes, and coven's copy goes once no reset can switch
-/// it back (§17.11): the read finds the
-/// file's bytes here no more, and the file reads as its record now says,
-/// from storage, never as damage (§17.7, Appendix C.3).
+/// it back (§17.11): the read finds the file's bytes here no more, and
+/// returns the record it found then, which says the file is stored, so the
+/// file reads from storage, never as damage (§17.7, Appendix C.3).
 #[tokio::test]
 async fn a_copy_its_upload_deletes_as_a_read_opens_it_reads_from_storage() {
     let store = TestStore::new();
@@ -304,8 +307,11 @@ async fn a_copy_its_upload_deletes_as_a_read_opens_it_reads_from_storage() {
         assert!(crate::file_write::tests::owned_paths(&store).is_empty(), "the copy is gone");
     })
     .await;
-    assert!(opened.unwrap().is_none(), "the bytes are read from storage");
-    assert!(matches!(db.file_ref(file).await.unwrap().place(), FilePlace::Cloud { .. }));
+    let Located::Elsewhere(stored) = opened.unwrap() else {
+        panic!("the bytes are read from storage");
+    };
+    assert!(matches!(stored.place(), FilePlace::Cloud { .. }));
+    assert_eq!(db.file_ref(file).await.unwrap(), stored);
     db.close().await.unwrap();
 }
 
@@ -334,7 +340,10 @@ async fn an_original_deleted_after_its_upload_as_a_read_opens_it_reads_from_stor
         std::fs::remove_file(&path).unwrap();
     })
     .await;
-    assert!(opened.unwrap().is_none(), "the bytes are read from storage");
+    assert!(
+        matches!(opened.unwrap(), Located::Elsewhere(stored) if matches!(stored.place(), FilePlace::Cloud { .. })),
+        "the bytes are read from storage"
+    );
     db.close().await.unwrap();
 }
 
@@ -354,7 +363,7 @@ async fn a_copy_missing_while_its_record_names_it_is_damage() {
     assert!(
         matches!(&opened, Err(LocalFileError::Integrity { id }) if *id == file.to_string()),
         "{:?}",
-        opened.map(|stream| stream.is_some())
+        opened.map(|located| matches!(located, Located::Here(_)))
     );
     db.close().await.unwrap();
 }

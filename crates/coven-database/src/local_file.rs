@@ -206,23 +206,54 @@ impl LocalFileReader {
     }
 }
 
+/// What a read of a file here finds in one committed state: its bytes here
+/// while its record keeps it on this device only, or else that record, or
+/// no record (§17.7).
+#[derive(Debug)]
+pub enum Located<T> {
+    /// The record keeps the file on this device only: its bytes here.
+    Here(T),
+    /// The record as the read found it, which doesn't keep the file on this
+    /// device only: the file is stored, its bytes in the cache or storage,
+    /// or it is on another device only. A file whose upload this device
+    /// finished since a reference to it was taken is stored.
+    Elsewhere(crate::FileRef),
+    /// This device has no record of the file.
+    Gone,
+}
+
+impl<T> Located<T> {
+    /// The bytes here, or what the read found instead.
+    pub(crate) fn here<U>(self) -> Result<T, Located<U>> {
+        match self {
+            Self::Here(here) => Ok(here),
+            Self::Elsewhere(record) => Err(Located::Elsewhere(record)),
+            Self::Gone => Err(Located::Gone),
+        }
+    }
+}
+
 /// Where the bytes of `file` are while its record, as this read finds it,
-/// says it is on this device only: the user's original, or coven's copy.
-/// Any other file, including one this device has finished uploading since
-/// a reference to it was taken, and one whose record is gone, returns
-/// `None`: its bytes are read from the cache or storage, or it fails as its
-/// record says (§17.7). Reads only the database.
+/// keeps it on this device only: the user's original, or coven's copy.
+/// This device keeps them while a record puts the file here (§17.11,
+/// ResetBytes `reset_finds_bytes`), so such a record with none is a bug.
+/// Reads only the database.
 pub(crate) fn device_only_source(
     db: &StoreSql,
     device: DeviceId,
     file: coven_foundation::id_source::FileId,
-) -> Result<Option<LocalSource>, DbError> {
-    match crate::file_table::Record::read(db, file)? {
-        Some(record) if record.place == crate::file_location::Place::DeviceOnly(device) => {
-            file_source(db, file)
-        }
-        _ => Ok(None),
+) -> Result<Located<LocalSource>, DbError> {
+    let record = match super::read(db, file) {
+        Ok(record) => record,
+        Err(DbError::FileAbsent { .. }) => return Ok(Located::Gone),
+        Err(error) => return Err(error),
+    };
+    if record.place() != (crate::FilePlace::DeviceOnly { device }) {
+        return Ok(Located::Elsewhere(record));
     }
+    file_source(db, file)?
+        .map(Located::Here)
+        .ok_or(DbError::Invariant { what: "a file on this device only has its bytes here" })
 }
 
 /// Where a file's bytes are on this device: the user's original, as
@@ -232,8 +263,8 @@ pub(crate) enum LocalSource {
     Copy(StagedName),
 }
 
-/// The bytes this device keeps for `file`, while it is on this device only;
-/// `None` for any other file. Reads only the database.
+/// Where this device keeps the bytes of `file`, whose record keeps it on
+/// this device only: its original or coven's copy. Reads only the database.
 fn file_source(
     db: &StoreSql,
     file: coven_foundation::id_source::FileId,

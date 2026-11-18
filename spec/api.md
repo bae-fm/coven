@@ -7221,7 +7221,12 @@ while let Some(changes) = watch.next().await {
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§17](coven.md#17-files)). A file on another
   device only can't be read here: reads, downloads and pins fail with
-  `FileReadError::DeviceOnly`, and its status is `DeviceOnly`. A file a bound
+  `FileReadError::DeviceOnly`, and its status is `DeviceOnly`. A read of a
+  file on this device only never fails with `DeviceOnly`, since this device
+  keeps the file's bytes while its record keeps the file here
+  ([§17.11](coven.md#1711-what-a-device-keeps-about-files)). A pin of such a
+  file does fail with `DeviceOnly`, since a pin keeps only stored bytes
+  ([§17.8](coven.md#178-cache-and-pinning)). A file a bound
   reference names reaches other devices already stored, with the row naming
   it, so only its uploader sees it on one device only
   ([§17.4](coven.md#174-bound-and-trailing-references)).
@@ -7721,8 +7726,12 @@ pub enum FileReadError {
     /// Storage confirms nothing at the path the file's record names: the
     /// provider lost it (§17.6). Its pending reason is `FileUnavailable(Lost)`.
     Missing { id: String, device: DeviceId },
-    /// The file is only on another device, or on this one with no source to
-    /// read: nothing here can read it, and nothing waits for it (§17.2).
+    /// The file is only on one device, and nothing waits for it (§17.2). A
+    /// read, a download of `prepare_device_only` among them, returns it only
+    /// for a file on another device, since this device keeps the bytes of
+    /// each file whose record keeps it here (§17.7, §17.11). A pin returns it
+    /// for a file on any one device, this one included while the file
+    /// uploads, since a pin keeps only stored bytes (§17.8).
     DeviceOnly { file: FileId, device: DeviceId },
     /// A user-provided file is gone from its recorded path.
     UserFileMissing { id: String, path: PathBuf },

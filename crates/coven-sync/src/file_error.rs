@@ -26,9 +26,12 @@ pub enum FileReadError {
         /// The device that uploaded it.
         device: DeviceId,
     },
-    /// The file is only on one device, another one or this one with no
-    /// source to read: nothing here can read it, and nothing waits for it
-    /// (§17.2).
+    /// The file is only on one device, and nothing waits for it (§17.2). A
+    /// read, a device-only call's download among them, returns it only for
+    /// a file on another device: this device keeps the bytes of every file
+    /// whose record keeps it here (§17.7, §17.11). A pin returns it for a
+    /// file on any one device, this one included while it uploads, since
+    /// only stored bytes are kept (§17.8).
     #[error("file {file} is only on device {device:?}")]
     DeviceOnly {
         /// The file.

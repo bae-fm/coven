@@ -45,10 +45,11 @@ async fn original_row(
 
 async fn read_local(db: &crate::StoreDatabase, file: FileId) -> Result<Vec<u8>, LocalFileError> {
     let reference = db.file_ref(file).await.unwrap();
-    let stream = db
-        .open_local_file(&reference, LeasePlace::for_test().await)
-        .await?
-        .expect("its bytes are here");
+    let crate::Located::Here(stream) =
+        db.open_local_file(&reference, LeasePlace::for_test().await).await?
+    else {
+        panic!("its bytes are here");
+    };
     stream.read_at(0, reference.size()).await
 }
 
@@ -73,11 +74,11 @@ async fn a_stream_of_an_original_holds_its_place_until_its_last_read_ends() {
     let file = original_row(&db, prepared, Place::DeviceOnly).await;
     let reference = db.file_ref(file).await.unwrap();
     let (watch, lease) = one_place().await;
-    let stream = db
-        .open_local_file(&reference, lease.place().await)
-        .await
-        .unwrap()
-        .expect("its original is here");
+    let crate::Located::Here(stream) =
+        db.open_local_file(&reference, lease.place().await).await.unwrap()
+    else {
+        panic!("its original is here");
+    };
     assert_eq!(watch.holding(), 1);
     assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), b"local track");
     assert_eq!(watch.holding(), 1);
@@ -99,11 +100,11 @@ async fn a_stream_of_the_store_copy_holds_a_place() {
             .await;
     let reference = db.file_ref(file).await.unwrap();
     let (watch, lease) = one_place().await;
-    let stream = db
-        .open_local_file(&reference, lease.place().await)
-        .await
-        .unwrap()
-        .expect("its bytes are here");
+    let crate::Located::Here(stream) =
+        db.open_local_file(&reference, lease.place().await).await.unwrap()
+    else {
+        panic!("its bytes are here");
+    };
     assert_eq!(watch.holding(), 1);
     assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), b"local bytes");
     drop(stream);
@@ -134,12 +135,15 @@ async fn an_app_file_staged_on_this_device_only_keeps_coven_copy_and_uploads_not
         b.receive(record.into()).await.unwrap();
     }
     assert_eq!(b.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
-    // Only this device's own files are read from bytes here.
-    assert!(b
-        .open_local_file(&b.file_ref(file).await.unwrap(), LeasePlace::for_test().await)
-        .await
-        .unwrap()
-        .is_none());
+    // Only this device's own files are read from bytes here: the other
+    // device's open finds the record naming this one.
+    assert!(matches!(
+        b.open_local_file(&b.file_ref(file).await.unwrap(), LeasePlace::for_test().await)
+            .await
+            .unwrap(),
+        crate::Located::Elsewhere(record)
+            if record.place() == FilePlace::DeviceOnly { device }
+    ));
     a.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())

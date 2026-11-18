@@ -9,8 +9,8 @@ use crate::{
 };
 use coven_crypto::{ContentHash, ContentHasher, FileKey};
 use coven_database::{
-    CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferEnd,
-    TransferMeter,
+    CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, Located,
+    TransferEnd, TransferMeter,
 };
 use coven_database::{FileLocationKey, Writer};
 use coven_format::{
@@ -131,8 +131,11 @@ enum ChunkDestination<'a> {
 impl<M: FilesMode> Files<M> {
     /// Open the file as its record now stands: its bytes here while it is on
     /// this device only, uploading or not, or else its cached or stored
-    /// bytes. A file only on another device can't be read here (§17.7). The
-    /// stream holds one place of `lease` until it drops.
+    /// bytes. A file only on another device can't be read here (§17.7), and
+    /// only such a file fails with `DeviceOnly`: a file that leaves this
+    /// device only as it opens goes on as the record the open found says,
+    /// which never keeps it here. The stream holds one place of `lease`
+    /// until it drops.
     pub async fn open_file_stream(
         &self,
         file: &FileRef,
@@ -149,7 +152,7 @@ impl<M: FilesMode> Files<M> {
                 .await
                 .map_err(FileReadError::from);
             match local {
-                Ok(Some(stream)) => {
+                Ok(Located::Here(stream)) => {
                     return Ok(FileStream::new(
                         &file,
                         OpenFile::Local {
@@ -161,9 +164,10 @@ impl<M: FilesMode> Files<M> {
                     ))
                 }
                 // Its upload completed meanwhile, even as it opened, and its
-                // bytes are stored; or its record went, or says another
-                // device has it.
-                Ok(None) => file = self.inner.current(&file).await?,
+                // bytes are stored; or its record says another device has
+                // it.
+                Ok(Located::Elsewhere(record)) => file = record,
+                Ok(Located::Gone) => return Err(DbError::FileAbsent { file: file.id() }.into()),
                 Err(error) => {
                     return match &uploading {
                         Some(uploading) => {
@@ -175,7 +179,7 @@ impl<M: FilesMode> Files<M> {
             }
         }
         if let FilePlace::DeviceOnly { device } = file.place() {
-            return Err(self.inner.unreadable(&file, device).await);
+            return Err(FileReadError::DeviceOnly { file: file.id(), device });
         }
         let place = Some(lease.place().await);
         let opened = match UploadedFile::open(self.inner.clone(), file.clone(), true, place).await {

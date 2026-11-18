@@ -7924,7 +7924,11 @@ once nothing else names it and no reset can bring the record back (§17.11).
 When a switch puts the file on another device only, as making it device-only
 there does, coven forgets the original here too, at the same point (below).
 `coven_user_files` lists only the originals of files whose record exists here
-and doesn't put the file on another device only.
+and doesn't put the file on another device only. So a read here finds the bytes
+of every file whose record keeps it on this device only, and fails with
+`DeviceOnly` only for a file on another device only (§17.7). A pin still
+refuses a file on this device only with `DeviceOnly`, since a pin keeps only
+stored bytes (§17.8).
 
 **The hashes stay here too.** Each file on this device only keeps, with its
 original or coven's copy, the content hash and chunk hashes its staging read,
@@ -8457,7 +8461,8 @@ The app reads a file through a file reference, which it takes by the file's id,
 the id its row holds. A read uses the record as it stands when the file opens: a
 file that was uploading when the reference was taken reads from storage once
 stored. A file on this device only reads from its bytes here, uploading or not.
-A file on another device only fails with `DeviceOnly`. A file whose
+A file on another device only fails with `DeviceOnly`, and a read fails with
+`DeviceOnly` for no other file. A file whose
 record is gone reads its stored bytes while storage still holds them, and a file
 this device staged whose record is gone fails with `FileAbsent`.
 
@@ -8484,11 +8489,17 @@ keeps the place until it ends.
     it. Coven deletes bytes only once no record names them (Appendix C.3), so
     bytes missing or changed are judged by the record as it stands then. A
     record that no longer keeps the file on this device only means the file
-    moved on, and the read takes its bytes from the cache or storage, as the
-    record now says. A record that still names the bytes leaves the failure
-    standing: `UserFileMissing` or `UserFileChanged` for an original, and
-    `Integrity` for coven's copy. Without this, a read at that moment would
+    moved on, and the read goes on as that record says: it takes the bytes
+    from the cache or storage, or fails with `DeviceOnly` for a file on
+    another device only. A record that still names the bytes leaves the
+    failure standing: `UserFileMissing` or `UserFileChanged` for an original,
+    and `Integrity` for coven's copy. Without this, a read at that moment would
     report damage that isn't there.
+  - The read goes on from the record that opening found, and never reads the
+    record again. A moment later, a reset that undoes the upload's completion
+    can put the file back on this device only, and a read that looked again
+    would then fail with `DeviceOnly` naming this device, whose bytes are
+    still here (§17.11).
 - **A stored file not in the cache** is read by fetching only the chunks that
   cover the range, with ranged requests to the provider.
   - Its checked header is reused across opens while it stays cached. If it's
@@ -14715,7 +14726,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `NoStorage` | no storage is connected and none is coming: sync is stopped or none is set up; a read or status call waits while a connection is coming | §17.6, §17.7 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.7 |
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.6, §17.7, §17.9 |
-| `DeviceOnly` | a file is on one device only, with no upload: its status, and, on any other device, the error reads, downloads and pins return | §17.3, §17.6, §17.8 |
+| `DeviceOnly` | a file is on one device only: its status, except on the device that uploads it; the error a read returns on any other device; and the error a pin returns on every device, the one that has the file included | §17.3, §17.6, §17.7, §17.8 |
 | `Keep` (a pending subject) | a pin coven keeps for a file kept here; its failures retry under the shared backoff | §17.7, §17.8 |
 | `Original { path, failure }` | a move's original is missing, and the move waits for it, or changed, and the move failed | §17.3 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.7 |

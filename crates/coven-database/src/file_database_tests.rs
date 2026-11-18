@@ -302,11 +302,10 @@ async fn a_staged_file_and_its_upload_commit_or_roll_back_together() {
             .await
             .unwrap();
         let reference = database.file_ref(file).await.unwrap();
-        assert!(owner
-            .open_local(&reference, LeasePlace::for_test().await)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(matches!(
+            owner.open_local(&reference, LeasePlace::for_test().await).await.unwrap(),
+            crate::Located::Here(_)
+        ));
         let queued = owner.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].files, [file]);

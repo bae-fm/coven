@@ -400,11 +400,11 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     assert!(imported.is_some());
     assert_eq!(shared, imported);
     let reference = db.file_ref(copy).await.unwrap();
-    let local = db
-        .open_local_file(&reference, LeasePlace::for_test().await)
-        .await
-        .unwrap()
-        .expect("its original is here");
+    let crate::Located::Here(local) =
+        db.open_local_file(&reference, LeasePlace::for_test().await).await.unwrap()
+    else {
+        panic!("its original is here");
+    };
     assert_eq!(local.read_at(0, reference.size()).await.unwrap(), b"local track");
     db.close().await.unwrap();
 }

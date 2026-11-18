@@ -95,13 +95,13 @@ impl<M: Mode> FileDatabase<M> {
         self.database.file_ref(file).await
     }
     /// Open and check the local source of a file still on this device only,
-    /// while it uploads, in `place` of the app's budget. `None` means its
-    /// bytes come from the cache or storage.
+    /// uploading or not, in `place` of the app's budget; for any other file,
+    /// its record as the open found it, or that it has none.
     pub async fn open_local(
         &self,
         file: &FileRef,
         place: coven_foundation::files::LeasePlace,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+    ) -> Result<crate::Located<crate::LocalFileStream>, crate::LocalFileError> {
         self.database.open_local_file(file, place).await
     }
 

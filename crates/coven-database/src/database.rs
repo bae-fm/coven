@@ -287,26 +287,28 @@ impl<L> DatabaseAccess<L> {
         failures
     }
 
-    /// The bytes here of a file its record says is on this device only.
-    /// They are found in one committed state and opened after it, and a
-    /// write committing between the two, such as its upload's completion,
-    /// can release them, which coven deletes as that write returns (Appendix
-    /// C.3). Bytes are released only once no record names them, so bytes
-    /// missing or changed are judged by the record as it stands after the
-    /// open: one that no longer names bytes here means the file left this
-    /// device only meanwhile, and `None` sends the read to the cache or
-    /// storage; one that still names them leaves the failure standing.
+    /// The bytes here of a file its record says is on this device only,
+    /// opened, or the record that says otherwise. They are found in one
+    /// committed state and opened after it, and a write committing between
+    /// the two, such as its upload's completion, can release them, which
+    /// coven deletes as that write returns (Appendix C.3). Bytes are released
+    /// only once no record names them, so bytes missing or changed are
+    /// judged by the record as it stands after the open: one that no longer
+    /// names bytes here means the file left this device only meanwhile, and
+    /// the read goes on as that record says; one that still names them
+    /// leaves the failure standing.
     fn open_local_file(
         &self,
         reference: &crate::FileRef,
         place: coven_foundation::files::LeasePlace,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+    ) -> Result<crate::Located<crate::LocalFileStream>, crate::LocalFileError> {
         let file = reference.id();
         let source = || {
             self.with_committed(|db, _| crate::file_ref::device_only_source(db, self.device, file))
         };
-        let Some(found) = source()? else {
-            return Ok(None);
+        let found = match source()?.here() {
+            Ok(found) => found,
+            Err(elsewhere) => return Ok(elsewhere),
         };
         #[cfg(test)]
         if let Some(gate) = lock_unpoisoned(&self.local_open_gate).take() {
@@ -319,8 +321,11 @@ impl<L> DatabaseAccess<L> {
             found,
             place,
         ) {
-            Ok(stream) => Ok(Some(stream)),
-            Err(error) if error.judges_bytes() && source()?.is_none() => Ok(None),
+            Ok(stream) => Ok(crate::Located::Here(stream)),
+            Err(error) if error.judges_bytes() => match source()?.here() {
+                Ok(_) => Err(error),
+                Err(elsewhere) => Ok(elsewhere),
+            },
             Err(error) => Err(error),
         }
     }
@@ -498,13 +503,14 @@ impl<M: Mode> StoreDatabase<M> {
 
     /// Open the local source of a file still on this device only, in `place`
     /// of the app's budget, which the stream holds until its last read ends.
-    /// No storage operation occurs; `None` means the bytes come from the
-    /// cache or storage, and the place goes back.
+    /// No storage operation occurs. For a file whose record no longer keeps
+    /// it on this device only, or that has no record, it returns what the
+    /// open found instead, and the place goes back.
     pub async fn open_local_file(
         &self,
         reference: &crate::FileRef,
         place: coven_foundation::files::LeasePlace,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+    ) -> Result<crate::Located<crate::LocalFileStream>, crate::LocalFileError> {
         let reference = reference.clone();
         self.call(move |open| M::access(open).open_local_file(&reference, place)).await
     }

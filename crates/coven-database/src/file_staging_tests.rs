@@ -171,11 +171,11 @@ async fn each_stagings_copies_land_in_a_folder_of_its_own() {
     assert_eq!(folders.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2], "{folders:?}");
     for (file, bytes) in first.into_iter().chain(second).zip(["one", "two", "three", "four"]) {
         let reference = db.file_ref(file).await.unwrap();
-        let stream = db
-            .open_local_file(&reference, LeasePlace::for_test().await)
-            .await
-            .unwrap()
-            .expect("its bytes are here");
+        let crate::Located::Here(stream) =
+            db.open_local_file(&reference, LeasePlace::for_test().await).await.unwrap()
+        else {
+            panic!("its bytes are here");
+        };
         assert_eq!(stream.read_at(0, reference.size()).await.unwrap(), bytes.as_bytes());
     }
     db.close().await.unwrap();
