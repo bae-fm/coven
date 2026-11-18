@@ -22,6 +22,10 @@ type Position = (usize, usize);
 /// What a name resolves to in a scope and namespace.
 type Lookup = Result<ItemPath, ResolutionError>;
 
+/// The lookups under way, by scope, name, whether lexical, and namespace:
+/// one that comes back to itself has gone round a cycle of imports.
+type Visiting = BTreeSet<(usize, String, bool, Namespace)>;
+
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 enum Namespace {
     Type,
@@ -29,10 +33,36 @@ enum Namespace {
     Macro,
 }
 
+/// The module whose code, and its descendants' code, may name a binding:
+/// the module itself for a private one, its crate for a `pub(crate)` one,
+/// and the empty path, every module, for a `pub` one.
+type Visibility = ItemPath;
+
 #[derive(Clone)]
 enum Binding {
-    Definition(ItemPath, Namespace),
-    Import(ItemPath),
+    Definition(ItemPath, Namespace, Visibility),
+    Import(ItemPath, Visibility),
+}
+
+impl Binding {
+    fn visible_to(&self, viewer: Option<&[String]>) -> bool {
+        let visibility = match self {
+            Binding::Definition(_, _, visibility) | Binding::Import(_, visibility) => visibility,
+        };
+        visible(visibility, viewer)
+    }
+}
+
+/// A `use path::*`.
+struct Glob {
+    path: ItemPath,
+    visibility: Visibility,
+}
+
+/// Whether code in the module `viewer` may name what has `visibility`; any
+/// code may when there is no viewer.
+fn visible(visibility: &[String], viewer: Option<&[String]>) -> bool {
+    viewer.is_none_or(|viewer| viewer.starts_with(visibility))
 }
 
 struct Scope {
@@ -40,7 +70,7 @@ struct Scope {
     identity: ItemPath,
     parent: Option<usize>,
     names: BTreeMap<String, Vec<Binding>>,
-    globs: Vec<ItemPath>,
+    globs: Vec<Glob>,
     /// The `macro_rules!` this scope defines, by name: indexes into
     /// `NameResolver::macros`.
     macros: BTreeMap<String, Vec<usize>>,
@@ -185,10 +215,10 @@ impl NameResolver {
             self.scope_names(current, &mut names, &mut visited);
             if self.scopes[current].names.get("_").into_iter().flatten().any(
                 |binding| match binding {
-                    Binding::Import(import) => self
+                    Binding::Import(import, _) => self
                         .resolve_in(current, import, Namespace::Type, &mut BTreeSet::new())
                         .is_ok_and(|resolved| resolved == *path),
-                    Binding::Definition(_, _) => false,
+                    Binding::Definition(..) => false,
                 },
             ) {
                 return true;
@@ -221,10 +251,67 @@ impl NameResolver {
             Some(parent) if !current.names.contains_key(name) && current.globs.is_empty() => {
                 self.name_in_scope(parent, name, namespace)
             }
-            _ => self.lookup(scope, name, true, namespace, &mut BTreeSet::new()),
+            _ => self.named(scope, name, namespace),
         };
         self.lookups[scope].borrow_mut().insert(key, found.clone());
         found
+    }
+
+    /// What `name` names where code in `scope` uses it. A name nothing the
+    /// checker reads names, in a scope an outside crate's glob brings names
+    /// into, is one of the names that crate exports, since the code compiles:
+    /// the glob's of the nearest scope that has one, as a glob in a block
+    /// hides the names of the scopes around it.
+    fn named(&self, scope: usize, name: &str, namespace: Namespace) -> Lookup {
+        let found = self.lookup(scope, name, true, namespace, &mut BTreeSet::new(), None);
+        let Err(ResolutionError::Missing) = found else {
+            return found;
+        };
+        let mut current = Some(scope);
+        while let Some(scope) = current {
+            let mut outside = BTreeSet::new();
+            self.outside_globs(scope, None, &mut BTreeSet::new(), &mut outside);
+            if !outside.is_empty() {
+                let members = outside.into_iter().map(|mut glob| {
+                    glob.push(name.to_string());
+                    glob
+                });
+                return unique(members.collect());
+            }
+            current = self.scopes[scope].parent;
+        }
+        found
+    }
+
+    /// The outside crates' modules whose globs bring names into `scope`:
+    /// those of its own globs, and those of the workspace modules its globs
+    /// bring in, as far as `viewer`, the module of the first glob, may name
+    /// them.
+    fn outside_globs(
+        &self,
+        scope: usize,
+        viewer: Option<&[String]>,
+        visited: &mut BTreeSet<usize>,
+        outside: &mut BTreeSet<ItemPath>,
+    ) {
+        if !visited.insert(scope) {
+            return;
+        }
+        let current = &self.scopes[scope];
+        let glob_viewer = viewer.unwrap_or(&current.module);
+        for glob in current.globs.iter().filter(|glob| visible(&glob.visibility, viewer)) {
+            let target = self.resolve_in(scope, &glob.path, Namespace::Type, &mut BTreeSet::new());
+            let Ok(target) = target else { continue };
+            if self.enum_members.contains_key(&target) {
+                continue;
+            }
+            match self.modules.get(&target) {
+                Some(module) => self.outside_globs(*module, Some(glob_viewer), visited, outside),
+                None => {
+                    outside.insert(target);
+                }
+            }
+        }
     }
 
     fn scope_names(
@@ -240,7 +327,8 @@ impl NameResolver {
         for glob in &self.scopes[scope].globs {
             // Only indexed modules can contribute additional alias names.
             // Whether any collected name resolves is checked at the caller.
-            if let Ok(path) = self.resolve_in(scope, glob, Namespace::Type, &mut BTreeSet::new()) {
+            let target = self.resolve_in(scope, &glob.path, Namespace::Type, &mut BTreeSet::new());
+            if let Ok(path) = target {
                 if let Some(module) = self.modules.get(&path) {
                     self.scope_names(*module, names, visited);
                 }
@@ -248,6 +336,8 @@ impl NameResolver {
         }
     }
 
+    /// The scope of the module at `path`, which its parent names privately
+    /// until its declaration says otherwise (`local_module`).
     fn module(&mut self, path: &[String]) -> usize {
         if let Some(scope) = self.modules.get(path) {
             return *scope;
@@ -262,23 +352,36 @@ impl NameResolver {
             macros: BTreeMap::new(),
         });
         self.modules.insert(path.to_vec(), scope);
-        if path.len() > 1 {
-            let parent = self.module(&path[..path.len() - 1]);
-            self.module_parents.insert(path.to_vec(), path[..path.len() - 1].to_vec());
-            self.scopes[parent]
-                .names
-                .entry(path.last().expect("module name").clone())
-                .or_default()
-                .push(Binding::Definition(path.to_vec(), Namespace::Type));
+        if let Some((name, parent_path)) = path.split_last().filter(|_| path.len() > 1) {
+            let parent = self.module(parent_path);
+            self.module_parents.insert(path.to_vec(), parent_path.to_vec());
+            self.scopes[parent].names.entry(name.clone()).or_default().push(Binding::Definition(
+                path.to_vec(),
+                Namespace::Type,
+                parent_path.to_vec(),
+            ));
         }
         scope
     }
 
-    fn local_module(&mut self, parent: usize, name: &str) -> usize {
+    /// The scope of the module `name` that `parent` declares, which code
+    /// within `visibility` may name.
+    fn local_module(&mut self, parent: usize, name: &str, visibility: Visibility) -> usize {
         let mut path = self.scopes[parent].identity.clone();
         path.push(name.to_string());
         if self.scopes[parent].parent.is_none() {
-            return self.module(&path);
+            let scope = self.module(&path);
+            for binding in self.scopes[parent].names.get_mut(name).into_iter().flatten() {
+                match binding {
+                    Binding::Definition(declared, Namespace::Type, declared_visibility)
+                        if *declared == path =>
+                    {
+                        *declared_visibility = visibility.clone();
+                    }
+                    _ => {}
+                }
+            }
+            return scope;
         }
         let scope = self.scopes.len();
         self.scopes.push(Scope {
@@ -291,11 +394,11 @@ impl NameResolver {
         });
         self.modules.insert(path.clone(), scope);
         self.module_parents.insert(path.clone(), self.scopes[parent].module.clone());
-        self.scopes[parent]
-            .names
-            .entry(name.to_string())
-            .or_default()
-            .push(Binding::Definition(path, Namespace::Type));
+        self.scopes[parent].names.entry(name.to_string()).or_default().push(Binding::Definition(
+            path,
+            Namespace::Type,
+            visibility,
+        ));
         scope
     }
 
@@ -432,32 +535,45 @@ impl NameResolver {
             })
     }
 
-    /// The value a path names where `span` is. A path that starts with a
-    /// name resolves that name once per scope (`name_in_scope`).
+    /// The value a path names where `span` is.
     pub(crate) fn resolve(
         &self,
         file: &str,
         span: Span,
         path: &[String],
     ) -> Result<ItemPath, ResolutionError> {
-        let scope = self.scope_at(file, span);
-        match path.split_first() {
-            Some((first, rest)) if !matches!(first.as_str(), "" | "crate" | "self" | "super") => {
-                let namespace = if rest.is_empty() { Namespace::Value } else { Namespace::Type };
-                let base = self.name_in_scope(scope, first, namespace)?;
-                self.descend(base, rest, Namespace::Value, &mut BTreeSet::new())
-            }
-            _ => self.resolve_in(scope, path, Namespace::Value, &mut BTreeSet::new()),
-        }
+        self.resolve_where(file, span, path, Namespace::Value)
     }
 
+    /// The type a path names where `span` is.
     pub(crate) fn resolve_type(
         &self,
         file: &str,
         span: Span,
         path: &[String],
     ) -> Result<ItemPath, ResolutionError> {
-        self.resolve_in(self.scope_at(file, span), path, Namespace::Type, &mut BTreeSet::new())
+        self.resolve_where(file, span, path, Namespace::Type)
+    }
+
+    /// The item in `namespace` a path names where `span` is. A path that
+    /// starts with a name resolves that name once per scope
+    /// (`name_in_scope`).
+    fn resolve_where(
+        &self,
+        file: &str,
+        span: Span,
+        path: &[String],
+        namespace: Namespace,
+    ) -> Lookup {
+        let scope = self.scope_at(file, span);
+        match path.split_first() {
+            Some((first, rest)) if !matches!(first.as_str(), "" | "crate" | "self" | "super") => {
+                let first_namespace = if rest.is_empty() { namespace } else { Namespace::Type };
+                let base = self.name_in_scope(scope, first, first_namespace)?;
+                self.descend(base, rest, namespace, &mut BTreeSet::new())
+            }
+            _ => self.resolve_in(scope, path, namespace, &mut BTreeSet::new()),
+        }
     }
 
     fn resolve_in(
@@ -465,7 +581,7 @@ impl NameResolver {
         scope: usize,
         path: &[String],
         namespace: Namespace,
-        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        visiting: &mut Visiting,
     ) -> Result<ItemPath, ResolutionError> {
         let Some((first, rest)) = path.split_first() else {
             return Err(ResolutionError::Missing);
@@ -493,6 +609,7 @@ impl NameResolver {
                     true,
                     if rest.is_empty() { namespace } else { Namespace::Type },
                     visiting,
+                    None,
                 )?,
                 rest,
             ),
@@ -505,7 +622,7 @@ impl NameResolver {
         mut base: ItemPath,
         rest: &[String],
         namespace: Namespace,
-        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        visiting: &mut Visiting,
     ) -> Result<ItemPath, ResolutionError> {
         for (index, name) in rest.iter().enumerate() {
             if let Some(scope) = self.modules.get(&base) {
@@ -515,6 +632,7 @@ impl NameResolver {
                     false,
                     if index + 1 == rest.len() { namespace } else { Namespace::Type },
                     visiting,
+                    None,
                 )?;
             } else {
                 base.push(name.clone());
@@ -523,39 +641,35 @@ impl NameResolver {
         Ok(base)
     }
 
+    /// What `name` names in `scope` and `namespace`: through the scope's own
+    /// bindings, then its globs, and when `lexical`, in the scopes around it.
+    /// With a `viewer`, the lookup is a glob's in the module `viewer`, which
+    /// brings in only the bindings and globs that module may name.
     fn lookup(
         &self,
         scope: usize,
         name: &str,
         lexical: bool,
         namespace: Namespace,
-        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        visiting: &mut Visiting,
+        viewer: Option<&[String]>,
     ) -> Result<ItemPath, ResolutionError> {
         let key = (scope, name.to_string(), lexical, namespace);
         if !visiting.insert(key.clone()) {
-            let definitions = self.scopes[scope]
-                .names
-                .get(name)
-                .into_iter()
-                .flatten()
-                .filter_map(|binding| match binding {
-                    Binding::Definition(path, kind) if *kind == namespace => Some(path.clone()),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
+            let definitions = self.definitions_of(scope, name, namespace, viewer);
             return if !definitions.is_empty() {
                 unique(definitions)
             } else if lexical {
-                // An import never names itself: `use rusqlite;` names what
-                // the scope's other bindings, the scopes around it, the
-                // dependencies and the prelude call `rusqlite`, as rustc
-                // resolves it.
+                // A glob's own path never names through the glob, as
+                // `use lofty::prelude::*` looking up `lofty` would: the name
+                // is what the scopes around it, the dependencies and the
+                // prelude call it, as rustc resolves it.
                 self.enclosing(scope, name, namespace, visiting, ResolutionError::ImportCycle)
             } else {
                 Err(ResolutionError::ImportCycle)
             };
         }
-        let result = self.lookup_inner(scope, name, lexical, namespace, visiting);
+        let result = self.lookup_inner(scope, name, lexical, namespace, visiting, viewer);
         visiting.remove(&key);
         result
     }
@@ -566,53 +680,112 @@ impl NameResolver {
         name: &str,
         lexical: bool,
         namespace: Namespace,
-        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        visiting: &mut Visiting,
+        viewer: Option<&[String]>,
     ) -> Result<ItemPath, ResolutionError> {
-        let current = &self.scopes[scope];
-        if let Some(bindings) = current.names.get(name) {
-            let mut paths = BTreeSet::new();
-            for binding in bindings {
-                match binding {
-                    Binding::Definition(path, kind) if *kind == namespace => {
-                        paths.insert(path.clone());
-                    }
-                    Binding::Definition(_, _) => {}
-                    Binding::Import(path) => {
-                        match self.resolve_in(scope, path, namespace, visiting) {
-                            Ok(path) => {
-                                paths.insert(path);
-                            }
-                            Err(ResolutionError::WrongNamespace) => {}
-                            Err(error) => return Err(error),
+        let bindings = self.scopes[scope].names.get(name).into_iter().flatten();
+        let bindings = bindings.filter(|binding| binding.visible_to(viewer)).collect::<Vec<_>>();
+        let mut paths = BTreeSet::new();
+        for binding in &bindings {
+            match binding {
+                Binding::Definition(path, kind, _) if *kind == namespace => {
+                    paths.insert(path.clone());
+                }
+                Binding::Definition(..) => {}
+                Binding::Import(path, _) => {
+                    match self.import(scope, name, path, namespace, visiting) {
+                        Ok(path) => {
+                            paths.insert(path);
                         }
+                        Err(ResolutionError::WrongNamespace) => {}
+                        Err(error) => return Err(error),
                     }
                 }
             }
-            if !paths.is_empty() {
-                return unique(paths);
-            }
         }
-        let missing = if current.names.contains_key(name) {
-            ResolutionError::WrongNamespace
-        } else {
-            ResolutionError::Missing
+        if !paths.is_empty() {
+            return unique(paths);
+        }
+        match self.beyond_bindings(scope, name, lexical, namespace, visiting, viewer) {
+            Err(ResolutionError::Missing) if !bindings.is_empty() => {
+                Err(ResolutionError::WrongNamespace)
+            }
+            found => found,
+        }
+    }
+
+    /// The paths `scope` defines `name` as in `namespace`, those `viewer`
+    /// may name.
+    fn definitions_of(
+        &self,
+        scope: usize,
+        name: &str,
+        namespace: Namespace,
+        viewer: Option<&[String]>,
+    ) -> BTreeSet<ItemPath> {
+        let bindings = self.scopes[scope].names.get(name).into_iter().flatten();
+        bindings
+            .filter(|binding| binding.visible_to(viewer))
+            .filter_map(|binding| match binding {
+                Binding::Definition(path, kind, _) if *kind == namespace => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the import of `path` that `scope` binds as `name` names in
+    /// `namespace`. An import whose path starts with its own name, as
+    /// `use rusqlite;` or a `macro_rules!`'s re-export `use name;` does,
+    /// never names itself: it names what the scope's definitions, its globs
+    /// and the scopes around it call that name, and nothing in a namespace
+    /// where they call it nothing.
+    fn import(
+        &self,
+        scope: usize,
+        name: &str,
+        path: &[String],
+        namespace: Namespace,
+        visiting: &mut Visiting,
+    ) -> Result<ItemPath, ResolutionError> {
+        let Some(rest) = path.strip_prefix(&[name.to_string()]) else {
+            return self.resolve_in(scope, path, namespace, visiting);
         };
+        let first = if rest.is_empty() { namespace } else { Namespace::Type };
+        let definitions = self.definitions_of(scope, name, first, None);
+        let base = if definitions.is_empty() {
+            match self.beyond_bindings(scope, name, true, first, visiting, None) {
+                Err(ResolutionError::Missing) => Err(ResolutionError::WrongNamespace),
+                found => found,
+            }
+        } else {
+            unique(definitions)
+        }?;
+        self.descend(base, rest, namespace, visiting)
+    }
+
+    /// What `name` names in `scope` beyond the scope's own bindings: through
+    /// its globs, then, when `lexical`, in the scopes around it, the
+    /// dependencies and the prelude. With a `viewer`, only the globs that
+    /// module may name count, and each brings in only what it may name.
+    fn beyond_bindings(
+        &self,
+        scope: usize,
+        name: &str,
+        lexical: bool,
+        namespace: Namespace,
+        visiting: &mut Visiting,
+        viewer: Option<&[String]>,
+    ) -> Result<ItemPath, ResolutionError> {
+        let current = &self.scopes[scope];
+        let glob_viewer = viewer.unwrap_or(&current.module);
         let mut paths = BTreeSet::new();
-        for glob in &current.globs {
-            let target = match self.resolve_in(scope, glob, Namespace::Type, visiting) {
+        for glob in current.globs.iter().filter(|glob| visible(&glob.visibility, viewer)) {
+            let target = match self.resolve_in(scope, &glob.path, Namespace::Type, visiting) {
                 Ok(target) => target,
                 Err(ResolutionError::ImportCycle) => continue,
                 Err(error) => return Err(error),
             };
-            if let Some(members) = self.enum_members.get(&target) {
-                if members.contains(name) {
-                    let mut variant = target;
-                    variant.push(name.to_string());
-                    paths.insert(variant);
-                }
-                continue;
-            }
-            match self.descend(target, &[name.to_string()], namespace, visiting) {
+            match self.glob_member(target, name, namespace, visiting, glob_viewer) {
                 Ok(path) => {
                     paths.insert(path);
                 }
@@ -630,9 +803,36 @@ impl NameResolver {
             return unique(paths);
         }
         if !lexical {
-            return Err(missing);
+            return Err(ResolutionError::Missing);
         }
-        self.enclosing(scope, name, namespace, visiting, missing)
+        self.enclosing(scope, name, namespace, visiting, ResolutionError::Missing)
+    }
+
+    /// What a glob of `target` in the module `viewer` brings in as `name`:
+    /// an enum's variant, or a binding of a workspace module that `viewer`
+    /// may name. An outside crate's module brings in what that crate
+    /// exports, which the checker doesn't read: no name any other import or
+    /// definition has (`named`).
+    fn glob_member(
+        &self,
+        target: ItemPath,
+        name: &str,
+        namespace: Namespace,
+        visiting: &mut Visiting,
+        viewer: &[String],
+    ) -> Result<ItemPath, ResolutionError> {
+        if let Some(members) = self.enum_members.get(&target) {
+            if !members.contains(name) {
+                return Err(ResolutionError::Missing);
+            }
+            let mut variant = target;
+            variant.push(name.to_string());
+            return Ok(variant);
+        }
+        let Some(module) = self.modules.get(&target) else {
+            return Err(ResolutionError::Missing);
+        };
+        self.lookup(*module, name, false, namespace, visiting, Some(viewer))
     }
 
     /// What `name` names beyond `scope`'s own bindings: in the scopes
@@ -643,12 +843,12 @@ impl NameResolver {
         scope: usize,
         name: &str,
         namespace: Namespace,
-        visiting: &mut BTreeSet<(usize, String, bool, Namespace)>,
+        visiting: &mut Visiting,
         missing: ResolutionError,
     ) -> Result<ItemPath, ResolutionError> {
         let current = &self.scopes[scope];
         if let Some(parent) = current.parent {
-            return self.lookup(parent, name, true, namespace, visiting);
+            return self.lookup(parent, name, true, namespace, visiting, None);
         }
         if namespace == Namespace::Type {
             if let Some(path) = self.external(&current.module, name) {
@@ -656,7 +856,7 @@ impl NameResolver {
             }
         }
         if scope != self.prelude {
-            return match self.lookup(self.prelude, name, false, namespace, visiting) {
+            return match self.lookup(self.prelude, name, false, namespace, visiting, None) {
                 Err(ResolutionError::Missing | ResolutionError::WrongNamespace) => Err(missing),
                 result => result,
             };

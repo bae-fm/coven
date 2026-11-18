@@ -49,31 +49,31 @@ fn check(path: &str, source: &str) -> Vec<Finding> {
 }
 
 const CAPABILITIES: &str = r#"
-    use std::sync::Arc;
-    fn consume<T>(_: T) {}
-    struct Wrapper<T>(T);
-    struct Builder;
-    struct Runtime;
-    struct Factory;
-    struct StoreDir;
-    struct AtomicFile;
-    struct ClockRef;
-    struct IdSourceRef;
+    pub use std::sync::Arc;
+    pub fn consume<T>(_: T) {}
+    pub struct Wrapper<T>(T);
+    pub struct Builder;
+    pub struct Runtime;
+    pub struct Factory;
+    pub struct StoreDir;
+    pub struct AtomicFile;
+    pub struct ClockRef;
+    pub struct IdSourceRef;
     pub use fakes::*;
-    trait Clock {}
-    trait IdSource {}
-    struct SystemClock;
+    pub trait Clock {}
+    pub trait IdSource {}
+    pub struct SystemClock;
     impl Clock for SystemClock {}
-    struct UuidIds;
+    pub struct UuidIds;
     impl IdSource for UuidIds {}
     #[cfg(feature = "test-utils")]
     mod fakes {
         use super::*;
-        struct FixedClock(u64);
+        pub struct FixedClock(u64);
         impl Clock for FixedClock {}
-        struct SequentialIds { next: u64 }
+        pub struct SequentialIds { next: u64 }
         impl IdSource for SequentialIds {}
-        struct ClosureClock<F>(F);
+        pub struct ClosureClock<F>(F);
         impl<F: Fn() -> u64> Clock for ClosureClock<F> {}
     }
 "#;

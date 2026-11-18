@@ -891,3 +891,105 @@ fn a_call_that_resolves_ambiguously_is_a_finding_where_a_gate_matches_calls() {
     );
     assert!(violations("crates/app/src/leak.rs", source).is_empty());
 }
+
+/// The line and message of each finding the `CALLS` policy makes in a crate
+/// root holding `source`, whose crate depends on `lofty` and `tempfile`; a
+/// gate's finding by its kind.
+fn root_findings(source: &str) -> Vec<(usize, String)> {
+    let mut file = RustFile::fixture("crates/app/src/lib.rs", source);
+    for name in ["lofty", "tempfile"] {
+        file.extern_crates.insert(name.into(), name.into());
+    }
+    rule(&[file], &Policy::fixture(CALLS))
+        .iter()
+        .map(|finding| (finding.line, kind(finding).to_string()))
+        .collect()
+}
+
+/// A glob of an outside crate's module brings in the names that crate
+/// exports, which the checker doesn't read: none that the workspace's
+/// globs, the scopes around it or the dependencies name, and its own path
+/// names the crate. A name nothing else names is that crate's, the nearest
+/// such glob's.
+#[test]
+fn an_outside_crate_s_glob_names_only_what_nothing_else_names() {
+    let source = r#"
+        mod tags { pub fn read_tags() {} }
+        mod tests {
+            use super::tags::*;
+            use lofty::prelude::*;
+            use std::path::Path;
+            fn load(path: &Path) {
+                read_tags();
+                let _ = Path::new("a");
+                lofty::read_from_path(path);
+                std::fs::read(path);
+            }
+            fn stage() { use tempfile::*; let _ = tempdir(); read_tags(); }
+        }
+    "#;
+    assert_eq!(
+        root_findings(source),
+        [(11, "standard library file system".to_string()), (13, "temporary files".to_string())]
+    );
+}
+
+/// `use name;` imports what `name` names without the import, there: a
+/// module re-exports its `macro_rules!` so, which names no value, and a
+/// local of the same name stays a local.
+#[test]
+fn a_macro_s_re_export_names_no_value() {
+    let source = r#"
+        mod members {
+            use super::*;
+            macro_rules! self_is_admin { () => { "SELECT 1" } }
+            pub(crate) use self_is_admin;
+        }
+        pub(crate) use members::self_is_admin;
+        fn removable(self_is_admin: bool, is_self: bool) -> bool { self_is_admin && !is_self }
+    "#;
+    assert_eq!(root_findings(source), []);
+}
+
+/// `use Name;` in a module whose glob brings `Name` in names what the glob
+/// brings.
+#[test]
+fn an_import_of_a_name_a_glob_brings_names_the_glob_s_item() {
+    let source = r#"
+        mod fill { pub enum Fill { Shuffled } pub fn read() {} }
+        use fill::*;
+        mod bench {
+            use super::*;
+            use Fill;
+            use read;
+            fn run() { take(Fill::Shuffled); read(); std::fs::read("a"); }
+        }
+    "#;
+    assert_eq!(root_findings(source), [(8, "standard library file system".to_string())]);
+}
+
+/// A glob brings in only the names visible where it is: a module's private
+/// imports, its globs among them, stay its own, and so do its private items.
+#[test]
+fn a_glob_brings_only_the_names_visible_where_it_is() {
+    let source = r#"
+        mod queue { pub(super) fn admit() {} }
+        mod identification {
+            use super::queue::*;
+            fn settle() {}
+            pub(crate) mod tests { use super::*; pub(crate) fn seed() {} }
+        }
+        mod handle {
+            pub(crate) mod tests { pub(crate) fn admit() {} pub(crate) fn settle() {} }
+            mod import {
+                mod tests {
+                    use crate::handle::tests::*;
+                    use crate::identification::*;
+                    use crate::identification::tests::*;
+                    fn run() { admit(); settle(); seed(); }
+                }
+            }
+        }
+    "#;
+    assert_eq!(root_findings(source), []);
+}

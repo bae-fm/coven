@@ -43,7 +43,8 @@ fn capability_implementations() -> RustFile {
     RustFile::fixture(
         "crates/app-foundation/src/implementations.rs",
         r#"
-        trait Clock {} trait IdSource {} struct SystemClock; struct UuidIds; impl Clock for SystemClock {}
+        pub trait Clock {} pub trait IdSource {} pub struct SystemClock; pub struct UuidIds;
+        impl Clock for SystemClock {}
         impl IdSource for UuidIds {}
     "#,
     )

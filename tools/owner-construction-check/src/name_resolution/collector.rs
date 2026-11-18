@@ -8,8 +8,12 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use super::{position, Binding, ItemPath, MacroDefinition, NameResolver, Namespace, Region, Scope};
+use super::{
+    position, Binding, Glob, ItemPath, MacroDefinition, NameResolver, Namespace, Region, Scope,
+    Visibility,
+};
 use crate::macros::parse_macro_body;
+use crate::syntax::path_names;
 
 pub(super) struct Collector<'a> {
     pub(super) resolver: &'a mut NameResolver,
@@ -42,14 +46,48 @@ impl Collector<'_> {
         self.scope = parent;
     }
 
-    fn declare(&mut self, ident: &syn::Ident, namespace: Namespace) -> ItemPath {
+    /// Who may name what this scope declares with `visibility`: the module
+    /// the scope is in for a private one, as for an item in a function's
+    /// body, which no glob reaches.
+    fn visibility(&self, visibility: &syn::Visibility) -> Visibility {
+        let module = &self.resolver.scopes[self.scope].module;
+        let restricted = match visibility {
+            syn::Visibility::Public(_) => return Vec::new(),
+            syn::Visibility::Inherited => return module.clone(),
+            syn::Visibility::Restricted(restricted) => path_names(&restricted.path),
+        };
+        let (base, rest) = match restricted.split_first() {
+            Some((first, rest)) if first == "crate" => (vec![module[0].clone()], rest),
+            Some((first, rest)) if first == "self" => (module.clone(), rest),
+            Some((first, _)) if first == "super" => {
+                let count = restricted.iter().take_while(|part| *part == "super").count();
+                let mut parent = module;
+                for _ in 0..count {
+                    match self.resolver.module_parents.get(parent) {
+                        Some(next) => parent = next,
+                        None => break,
+                    }
+                }
+                (parent.clone(), &restricted[count..])
+            }
+            _ => (vec![module[0].clone()], restricted.as_slice()),
+        };
+        base.into_iter().chain(rest.iter().cloned()).collect()
+    }
+
+    fn declare(
+        &mut self,
+        ident: &syn::Ident,
+        namespace: Namespace,
+        visibility: Visibility,
+    ) -> ItemPath {
         let mut path = self.resolver.scopes[self.scope].identity.clone();
         path.push(ident.to_string());
         self.resolver.scopes[self.scope]
             .names
             .entry(ident.to_string())
             .or_default()
-            .push(Binding::Definition(path.clone(), namespace));
+            .push(Binding::Definition(path.clone(), namespace, visibility));
         self.resolver.definitions.insert(
             (self.file.to_string(), position(ident.span().start()), ident.to_string()),
             path.clone(),
@@ -57,19 +95,21 @@ impl Collector<'_> {
         path
     }
 
-    fn import(&mut self, tree: &syn::UseTree, prefix: &mut ItemPath) {
+    fn import(&mut self, tree: &syn::UseTree, prefix: &mut ItemPath, visibility: &Visibility) {
         match tree {
             syn::UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                self.import(&path.tree, prefix);
+                self.import(&path.tree, prefix, visibility);
                 prefix.pop();
             }
             syn::UseTree::Group(group) => {
                 for tree in &group.items {
-                    self.import(tree, prefix);
+                    self.import(tree, prefix, visibility);
                 }
             }
-            syn::UseTree::Glob(_) => self.resolver.scopes[self.scope].globs.push(prefix.clone()),
+            syn::UseTree::Glob(_) => self.resolver.scopes[self.scope]
+                .globs
+                .push(Glob { path: prefix.clone(), visibility: visibility.clone() }),
             syn::UseTree::Name(name) => {
                 let mut path = prefix.clone();
                 let local = if name.ident == "self" {
@@ -82,7 +122,7 @@ impl Collector<'_> {
                     .names
                     .entry(local)
                     .or_default()
-                    .push(Binding::Import(path));
+                    .push(Binding::Import(path, visibility.clone()));
             }
             syn::UseTree::Rename(rename) => {
                 let mut path = prefix.clone();
@@ -93,7 +133,7 @@ impl Collector<'_> {
                     .names
                     .entry(rename.rename.to_string())
                     .or_default()
-                    .push(Binding::Import(path));
+                    .push(Binding::Import(path, visibility.clone()));
             }
         }
     }
@@ -101,27 +141,28 @@ impl Collector<'_> {
 
 impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item(&mut self, node: &'ast syn::Item) {
-        let ident = match node {
-            syn::Item::Fn(item) => Some(&item.sig.ident),
-            syn::Item::Struct(item) => Some(&item.ident),
-            syn::Item::Enum(item) => Some(&item.ident),
-            syn::Item::Union(item) => Some(&item.ident),
-            syn::Item::Type(item) => Some(&item.ident),
-            syn::Item::Trait(item) => Some(&item.ident),
-            syn::Item::Const(item) => Some(&item.ident),
-            syn::Item::Static(item) => Some(&item.ident),
+        let named = match node {
+            syn::Item::Fn(item) => Some((&item.sig.ident, &item.vis)),
+            syn::Item::Struct(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Enum(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Union(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Type(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Trait(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Const(item) => Some((&item.ident, &item.vis)),
+            syn::Item::Static(item) => Some((&item.ident, &item.vis)),
             _ => None,
         };
-        if let Some(ident) = ident {
+        if let Some((ident, visibility)) = named {
             let namespace =
                 if matches!(node, syn::Item::Fn(_) | syn::Item::Const(_) | syn::Item::Static(_)) {
                     Namespace::Value
                 } else {
                     Namespace::Type
                 };
-            let path = self.declare(ident, namespace);
+            let visibility = self.visibility(visibility);
+            let path = self.declare(ident, namespace, visibility.clone());
             if matches!(node, syn::Item::Struct(_)) {
-                self.declare(ident, Namespace::Value);
+                self.declare(ident, Namespace::Value, visibility);
             }
             if matches!(
                 node,
@@ -147,7 +188,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         let mut prefix =
             if node.leading_colon.is_some() { vec![String::new()] } else { Vec::new() };
-        self.import(&node.tree, &mut prefix);
+        let visibility = self.visibility(&node.vis);
+        self.import(&node.tree, &mut prefix, &visibility);
     }
 
     fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
@@ -165,15 +207,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         } else {
             node.ident.to_string()
         };
-        self.resolver.scopes[self.scope]
-            .names
-            .entry(name)
-            .or_default()
-            .push(Binding::Definition(vec![target], Namespace::Type));
+        let visibility = self.visibility(&node.vis);
+        let binding = Binding::Definition(vec![target], Namespace::Type, visibility);
+        self.resolver.scopes[self.scope].names.entry(name).or_default().push(binding);
     }
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        let scope = self.resolver.local_module(self.scope, &node.ident.to_string());
+        let visibility = self.visibility(&node.vis);
+        let scope = self.resolver.local_module(self.scope, &node.ident.to_string(), visibility);
         if has_attribute(&node.attrs, "macro_use") {
             let parent = self.resolver.scopes[self.scope].identity.clone();
             let child = self.resolver.scopes[scope].identity.clone();
@@ -228,11 +269,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_type_param(&mut self, node: &'ast syn::TypeParam) {
-        self.declare(&node.ident, Namespace::Type);
+        let visibility = self.resolver.scopes[self.scope].module.clone();
+        self.declare(&node.ident, Namespace::Type, visibility);
     }
 
     fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
-        self.declare(&node.sig.ident, Namespace::Value);
+        let visibility = self.visibility(&node.vis);
+        self.declare(&node.sig.ident, Namespace::Value, visibility);
     }
 
     /// A `macro_rules!` is in textual scope where it is defined. One with
@@ -261,10 +304,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 .names
                 .entry(name.to_string())
                 .or_default()
-                .push(Binding::Definition(path.clone(), Namespace::Macro));
+                .push(Binding::Definition(path.clone(), Namespace::Macro, Vec::new()));
             Some(path)
         } else if self.resolver.scopes[self.scope].parent.is_none() {
-            Some(self.declare(name, Namespace::Macro))
+            // A `macro_rules!` is private to its module, which re-exports
+            // it with `use`.
+            let visibility = self.resolver.scopes[self.scope].module.clone();
+            Some(self.declare(name, Namespace::Macro, visibility))
         } else {
             None
         };
