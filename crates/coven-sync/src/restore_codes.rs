@@ -93,7 +93,9 @@ impl RestoreCodes {
             coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
         if recorded != *location {
             coven_storage::record_config(&owner.directory, location)?;
-            crate::record_location(&owner.database, owner.credentials.location()?, None).await?;
+            // The connection that labelled it used this device's credentials.
+            let connected = coven_database::RecordedLocation::Connected(location.clone());
+            crate::record_location(&owner.database, connected, None).await?;
         }
         Ok(())
     }
