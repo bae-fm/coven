@@ -98,11 +98,13 @@ impl AudienceDatabase {
             triggers: before.triggers(),
         };
         let database = result.database.as_mut().expect("open");
-        database.batch(&crate::internal_schema::initial_schema())?;
         let synced = MigrationCapture::new(live, call, tables)?.synced().clone();
         let before_run = synced_before(live)?;
         let (mut circles, mut staged) = (BTreeSet::new(), Vec::new());
+        // One transaction makes the whole copy, coven's tables included: on
+        // their own, each of their statements commits, and syncs, alone.
         database.transaction(|scratch| {
+            scratch.batch(&crate::internal_schema::initial_schema())?;
             scratch.batch("PRAGMA defer_foreign_keys=ON")?;
             // A virtual table's shadow tables come with it, and SQLite
             // refuses to create one by name. Their rows are the virtual
