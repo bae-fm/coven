@@ -1,32 +1,21 @@
 # sqlive
 
-sqlive gives SQLite live queries. A live query runs once and returns its rows,
-then runs again whenever a write commits a change to something the query read.
-It is a Rust library for programs that show a database's contents and must
-keep the display current as the database changes.
+sqlive runs live queries over a SQLite database. A live query returns its rows
+once, then returns them again each time a write commits a change to something
+the query read. A Rust program that shows a database's contents uses it to keep
+the display current.
 
-## What sqlive does
-
-- A `Database` opens a SQLite file in WAL mode with one writer connection and
-  several read-only connections beside it.
-- A write is one transaction. sqlive captures each row change the transaction
-  makes, and when it commits, sqlive judges the changes against every live
-  query.
-- A live query records what its statements read: the tables, the columns and
-  the rows. A commit that changes none of them does not run the query again.
-- A panic in a query or a write comes back as an error that names where the
-  panic began, instead of unwinding through the caller.
-- Options start upkeep threads that checkpoint the WAL and keep the query
-  planner's statistics.
-- A `Policy` that your program supplies judges each statement as SQLite
-  prepares it, so the program can refuse statements.
-
-SQLite comes bundled through `rusqlite`.
+A `Database` opens one SQLite file, bundled through `rusqlite`, in WAL mode
+with one writer connection and several read-only connections. A write is one
+transaction on the writer. sqlive captures each row change the transaction
+makes and, when it commits, judges the changes against every live query to find
+the queries whose results could differ now. Options can also start threads that
+checkpoint the WAL and keep the query planner's statistics.
 
 ## Example
 
-The program below opens a database, starts a live query that counts a table's
-rows, adds a row, and receives the new count.
+This program opens a database, starts a live query that counts the rows of a
+table, adds a row, and receives the new count.
 
 ```rust
 use panic_as_error::{Bug, BugSink, BugSinkRef, CarriesBug};
@@ -137,35 +126,37 @@ fn main() {
 }
 ```
 
+A panic inside a query or a write comes back as an `Error::Bug` that names where
+the panic began. The live query's error type says whether it carries a bug
+(`CarriesBug`), and a query whose error carries one ends.
+
 ## What a live query reruns on
 
-sqlive parses each statement's SQL into the conditions that narrow each table
-it reads, and a statement that reads one table depends only on the rows its
-`WHERE` allows. A column compared with a constant or a bound value by `=`, `<`,
-`<=`, `>`, `>=` or `IN`, and conditions like these joined by `AND` and `OR`,
-narrow the rows. So `SELECT title FROM tracks WHERE release_id = ?1` does not
-run again when a write changes another release's tracks. A statement with a
-`LIMIT` narrows further once a run returns as many rows as the limit.
+sqlive records the tables, the columns and the rows each statement of a live
+query reads. A commit that changes none of them does not run the query again.
 
-A one-shot read records none of this, because nothing runs it again.
+A statement that reads one table depends only on the rows its `WHERE` allows.
+A column compared with a constant or a bound value by `=`, `<`, `<=`, `>`, `>=`
+or `IN`, and conditions like these joined by `AND` and `OR`, narrow those rows.
+So `SELECT title FROM tracks WHERE release_id = ?1` does not run again when a
+write changes another release's tracks. A statement with a `LIMIT` narrows
+further once a run returns as many rows as the limit. A one-shot read records
+nothing, because nothing runs it again.
 
 ## Policy
 
-Every connection has a policy, which sqlive asks about each statement as SQLite
-prepares it. `NoPolicy` adds nothing to sqlive's own rules. sqlive refuses app
-SQL that controls transactions, runs a `PRAGMA`, attaches a database, loads an
-extension, or changes the schema outside a migration.
+The program that embeds sqlive, the host, implements `Policy` to judge each
+statement as SQLite prepares it, and passes one to every connection. `NoPolicy`
+adds nothing to sqlive's own rules, which refuse app SQL that controls
+transactions, runs a `PRAGMA`, attaches a database, loads an extension or
+changes the schema outside a migration.
 
-## Crates
+## Related crates
 
-sqlive uses two small crates that it publishes beside it:
+sqlive publishes two small crates beside it:
 
 - `panic-as-error` turns a panic into an error value that names where the panic
   began.
 - `windows-reserved-names` tells whether a file name is one that Windows opens
-  as a device, such as `NUL` or `COM1`. sqlive uses it on Windows to refuse a
+  as a device, such as `NUL` or `COM1`. On Windows, sqlive uses it to refuse a
   database path that holds such a name.
-
-## License
-
-Apache-2.0.
