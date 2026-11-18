@@ -60,6 +60,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         if target < current {
             return Err(invalid("reload target precedes committed applied slot"));
         }
+        call.set_reset_change(Some(crate::reset_bytes::Change::Slot(target)));
         crate::store_state_tables::replace(database, &state)?;
         crate::provider_access::adopt::<P>(database, &provider_access)?;
         if cutoffs.iter().any(|(slot, _)| slot.get() > target) {

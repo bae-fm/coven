@@ -604,9 +604,14 @@ async fn another_handles_removals_leave_a_range_being_written() {
         .expect("the work reaches the stalled file")
         .unwrap();
     assert!(!writing.is_finished(), "the range write is stalled");
-    // Completing the upload releases the queue's copy, which the writer
-    // removes with every other recorded removal.
-    let completed = tokio::time::timeout(HANG_GUARD, complete_uploads(&db)).await;
+    // Completing the upload releases the queue's copy once no reset can
+    // switch the file back (§17.11), and the writer removes it with every
+    // other recorded removal.
+    let completed = tokio::time::timeout(HANG_GUARD, async {
+        complete_uploads(&db).await;
+        db.test_past_every_reset().await;
+    })
+    .await;
     let left = path.exists();
     release_fifo_writer(path.clone()).await;
     completed.expect("completion waited for a stalled cache range write");

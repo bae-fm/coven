@@ -108,7 +108,12 @@ async fn stored_paths_are_found_by_retention() {
         sql.transaction(|sql| {
             sql.execute("UPDATE main.coven_files SET coordinates=?1,hash=zeroblob(32)", [text])?;
             let key = ("coven_files".into(), crate::file_table::key(file)?);
-            crate::file_protection::refresh(sql, call, schema, &key, &Default::default()).map(drop)
+            // As a slot applying another device's switch would (§17.11).
+            call.set_reset_change(Some(crate::reset_bytes::Change::Slot(1)));
+            let refreshed =
+                crate::file_protection::refresh(sql, call, schema, &key, &Default::default());
+            call.set_reset_change(None);
+            refreshed.map(drop)
         })
         .unwrap()
     });
@@ -282,7 +287,8 @@ async fn open_local_around(
 
 /// A read finds where a file's bytes are here from one committed state and
 /// opens them after it. The upload completing between the two switches the
-/// file to its stored bytes and deletes coven's copy: the read finds the
+/// file to its stored bytes, and coven's copy goes once no reset can switch
+/// it back (§17.11): the read finds the
 /// file's bytes here no more, and the file reads as its record now says,
 /// from storage, never as damage (§17.7, Appendix C.3).
 #[tokio::test]
@@ -294,6 +300,7 @@ async fn a_copy_its_upload_deletes_as_a_read_opens_it_reads_from_storage() {
     assert_eq!(uploading.place(), FilePlace::DeviceOnly { device: store.device() });
     let opened = open_local_around(&db, uploading, async {
         complete_uploads(&db).await;
+        db.test_past_every_reset().await;
         assert!(crate::file_write::tests::owned_paths(&store).is_empty(), "the copy is gone");
     })
     .await;

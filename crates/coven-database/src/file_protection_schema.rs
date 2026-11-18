@@ -61,5 +61,36 @@ macro_rules! coven_file_protection_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_queued_file_refs_write ON _coven_queued_file_refs(writer,number);
         ");
+        // Each file whose record a change took off this device's bytes,
+        // in the record's audience, while a reset may still undo the change
+        // (§17.11): this device's write that made it, by number, until the
+        // write leaves the queue, then the slot it applied at or before.
+        // The file's bytes here stay until the audience's reset bound
+        // reaches that slot; `past` marks a change it has reached, whose
+        // bytes the transaction's end settles.
+        $visit!(_coven_undoable_files, "
+            CREATE TABLE _coven_undoable_files (
+                file TEXT PRIMARY KEY NOT NULL,
+                audience TEXT NOT NULL,
+                number BLOB CHECK(number IS NULL OR length(number)=8),
+                slot BLOB CHECK(slot IS NULL OR length(slot)=8),
+                past INTEGER NOT NULL DEFAULT 0 CHECK(past IN (0,1)),
+                CHECK((number IS NULL)!=(slot IS NULL)),
+                CHECK(past=0 OR slot IS NOT NULL)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_undoable_files_audience ON _coven_undoable_files(audience,slot);
+            CREATE INDEX _coven_undoable_files_number ON _coven_undoable_files(number)
+                WHERE number IS NOT NULL;
+            CREATE INDEX _coven_undoable_files_past ON _coven_undoable_files(file) WHERE past=1;
+        ");
+        // The lowest coverage a later reset of each audience may name: the
+        // highest coverage announced for it and the slot of its last raise
+        // or reset (§16.3, §17.11). It only rises.
+        $visit!(_coven_reset_bounds, "
+            CREATE TABLE _coven_reset_bounds (
+                audience TEXT PRIMARY KEY NOT NULL,
+                slot BLOB NOT NULL CHECK(length(slot)=8)
+            ) STRICT, WITHOUT ROWID;
+        ");
     };
 }

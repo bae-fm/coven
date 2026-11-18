@@ -4,7 +4,8 @@
 macro_rules! coven_user_originals_tables {
     ($visit:ident) => {
         // The user's originals this device has, by file, while their
-        // records exist here: the path, as the operating system's bytes
+        // records exist here, or a reset may still bring one back
+        // (§17.11): the path, as the operating system's bytes
         // (`path_bytes`), size, modification time and content hash recorded
         // when each was staged, or placed as a copy (§17.3).
         $visit!(
@@ -23,8 +24,9 @@ macro_rules! coven_user_originals_tables {
         // The plaintext chunk hashes of each original recorded above, from
         // the same read as its content hash, while its file may still move
         // to the cloud: a move's upload checks the bytes it sends against
-        // them. They go when the file's record switches to stored bytes, or
-        // with the original's row (§17.3).
+        // them. They go once the file's record names stored bytes and no
+        // reset can switch it back (§17.11), or with the original's row
+        // (§17.3).
         $visit!(
             _coven_user_chunks,
             "

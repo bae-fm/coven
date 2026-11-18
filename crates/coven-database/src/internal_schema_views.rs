@@ -50,11 +50,16 @@ pub(super) const SCHEMA: &str = concat!(
     // operating system's bytes, which `coven_path_text` shows, and the size
     // and exact modification time recorded when each was staged, as whole
     // seconds since the Unix epoch rounded down and the nanoseconds past
-    // that second (§17.3).
+    // that second (§17.3). An original kept only for a reset that may
+    // bring its record back isn't listed: its file has no record here, or
+    // one on another device only (§17.11).
     "CREATE VIEW coven_user_files(file,path,size,modified_seconds,modified_nanos) AS
         SELECT u.file,u.path,u.size,_coven_unix_seconds(u.modified_at),
             _coven_unix_nanos(u.modified_at)
-        FROM _coven_user_files AS u;",
+        FROM _coven_user_files AS u
+        WHERE NOT EXISTS(SELECT 1 FROM _coven_undoable_files AS k WHERE k.file=u.file)
+            OR EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=u.file
+                AND coalesce(coven_file_device(f.coordinates)=_coven_device(),1));",
     // The sync state a status screen shows, in one row (§19.1): its kind,
     // when sync last finished, the pending record that names it, and the
     // whole state as sync encodes it. `_coven_sync_state` computes it from

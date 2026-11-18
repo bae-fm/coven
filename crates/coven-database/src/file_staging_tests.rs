@@ -196,6 +196,7 @@ async fn a_stagings_folder_goes_with_its_last_copy() {
         })
         .await
         .unwrap();
+        db.test_past_every_reset().await;
         assert_eq!(staging_folders(&store).iter().map(Vec::len).collect::<Vec<_>>(), left);
     }
     db.close().await.unwrap();

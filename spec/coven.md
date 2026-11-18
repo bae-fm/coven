@@ -7702,7 +7702,8 @@ memory.
   succeeds. After that, reads on the staging device use the cache or storage, as
   for a user-provided file, and a pinned copy comes from storage too. A file kept
   here (§17.8) is the exception: its cache copy is made from coven's copy, which
-  stays a separate copy until then.
+  stays a separate copy until then. The copy itself goes once no reset can
+  switch the file back to this device only (§17.11).
 
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
@@ -7825,9 +7826,10 @@ nowhere.
 - **The bytes go after the record.** Once the record's delete is published, its
   stored bytes become a deletion candidate when no other record names their
   location, under §17.10's rules.
-- **A file on one device only is forgotten with its record:** coven forgets its
-  record of a user's original, which it never touches, and its upload, which no
-  file waits for any more, is retired with coven's own copy (§17.9).
+- **A file on one device only is forgotten with its record:** its upload, which
+  no file waits for any more, is retired (§17.9), and coven forgets its record
+  of a user's original, which it never touches, and deletes its own copy, once
+  no reset can bring the record back (§17.11).
 
 Ana's laptop deletes the last row naming photo A, so her write deletes A's
 record. Ben's phone, offline and not yet seeing her write, points a new row at
@@ -7908,7 +7910,8 @@ each file in turn. Coven's own files (its store, its locks, its cache, its
 copies, and a pin's reading of coven's copy) take none.
 
 **This device keeps the bytes** of each of its files on this device only, by
-file id, while the file's record exists here: the original's recorded path,
+file id, while the file's record exists here, and while a reset may still bring
+it back (§17.11): the original's recorded path,
 size and modification time, or coven's copy. App SQL reads the originals through
 the view `coven_user_files` (§4): each file's `path` as the operating system's
 bytes (§17.1), its `size` in bytes and its modification time, exactly, in
@@ -7917,17 +7920,20 @@ path's own; on Windows they are its UTF-16 in WTF-8, which writes an unpaired
 surrogate as the three bytes UTF-8 would give its code point. A path that is
 valid Unicode is its UTF-8 bytes on both. Coven never changes an original.
 When the file's record goes, coven forgets the original and deletes its copy
-once nothing else names it. When a switch puts the file on another device
-only, as making it device-only there does, coven forgets the original here too
-(below).
+once nothing else names it and no reset can bring the record back (§17.11).
+When a switch puts the file on another device only, as making it device-only
+there does, coven forgets the original here too, at the same point (below).
+`coven_user_files` lists only the originals of files whose record exists here
+and doesn't put the file on another device only.
 
 **The hashes stay here too.** Each file on this device only keeps, with its
 original or coven's copy, the content hash and chunk hashes its staging read,
 for an upload to check against. They are this device's own: the record's
 `hash` stays NULL until the file is stored (§17.2), since that cell names
 stored bytes, which every device checks a download against. Once the file is
-stored nothing moves it again, so its original's chunk hashes go; its path,
-size, modification time and content hash stay recorded.
+stored nothing moves it again, so its original's chunk hashes go, as soon as no
+reset can switch it back (§17.11); its path, size, modification time and
+content hash stay recorded.
 
 **The exact modification time.** Ana's app later checks which imported tracks
 changed on disk, comparing each file's modification time with the one
@@ -8190,7 +8196,8 @@ laptop.
 - **Other devices drop what they kept.** When the switch arrives, a device's
   pin of the file ends and its cached bytes go (§17.8): a file on one device
   only is on that device alone. An original another device recorded for the
-  file, such as the one its import read, is forgotten there, never touched.
+  file, such as the one its import read, is forgotten there, never touched,
+  once no reset can undo the switch (§17.11).
 - **The stored bytes become a deletion candidate.** Once the switch is
   published no record names them, and §17.10's rules decide when they go.
 
@@ -8198,11 +8205,13 @@ laptop.
 seeing the other's write. The later write wins, as it does for any cell
 (§8.1): every device ends with the album on Ben's laptop, and Ana's switch
 stays as lost values of each record (§8.2). Ana's download lost. When Ben's write
-arrives on her laptop, coven forgets the copies it wrote for her, and deletes
-each one still as coven left it, with the folders it made once they are
-empty. A copy she changed meanwhile is hers, and stays. No reader saw wrong
-state in between: every device read the album from where its records said it
-was, and what goes is only space.
+arrives on her laptop, her copies stay until no reset can undo his write
+(§17.11), since a reset that undoes it puts the album back on her laptop. Then
+coven forgets the copies it wrote for her, and deletes each one still as coven
+left it, with the folders it made once they are empty. A copy she changed
+meanwhile is hers, and stays. No reader saw wrong state in between: every
+device read the album from where its records said it was, and what goes is
+only space.
 
 **A newer change wins.** The app can point the row at another file, clear its
 reference, or delete it before the upload completes. If nothing references the
@@ -9037,10 +9046,10 @@ hashes. It keeps no encrypted copy.
 - `_coven_user_files` keeps an original's path, size, modification time and
   content hash, by file id, while the file's record exists on this device and
   doesn't put the file on another device only (§17.3), and `_coven_user_chunks`
-  its chunk hashes until the file is stored. The transaction that deletes the
-  record, or applies that switch, forgets the original; the one switching it
-  to its stored bytes forgets the chunk hashes. A move queues its upload with
-  a copy of these facts. A queued upload owns
+  its chunk hashes until the file is stored. Both stay after the record changes
+  until no reset can undo the change (§17.11); then the device forgets the
+  original, or for a stored file only its chunk hashes. A move queues its
+  upload with a copy of these facts. A queued upload owns
   its own copy of the source facts, the original's or the name of coven's copy,
   and keeps them until it settles, so coven's copy stays while either names it.
 
@@ -9455,6 +9464,47 @@ too ([Appendix C.1](#c1-covens-tables-in-the-apps-database)). So are the copies
 coven writes into the person's folders to make files device-only, and the
 folders it makes for them (§17.3): each recorded before it exists, kept as an
 original once its switch commits, and forgotten with that original's record.
+
+**Bytes a reset may need.** Ana's phone keeps photo P on it only. Ben resets the
+store from his laptop, whose snapshot covers slot 8. Meanwhile Ana deletes the
+last row naming P: her write lands at slot 9, and Ben's reset entry at slot 12.
+The reset ignores her write, which didn't read the entry (§19.4), so on every
+device the row and P's record come back, with P on Ana's phone only. Had her
+phone forgotten P's bytes with its write, or once it applied slot 9, the record
+would name bytes nobody has.
+
+So a change that takes a file's record off this device's bytes keeps those
+bytes here until no reset can undo the change. The change can be this
+device's write or another device's, and it can delete the record, switch the
+file to the cloud, or switch it to another device only. Every announcement
+covers at least as much as each earlier one and as the audience's last raise or
+reset, and a reset entry names only such an announcement (§16.3). So a later
+reset of the audience never names less coverage than the highest announced, or
+than the slot of its last raise or reset, and a change at or below that slot is
+in every snapshot a later reset can name.
+
+- **Which slot.** Another device's change counts from the slot that applies it.
+  This device's write counts from the point it leaves the queue, at the slot
+  this device has applied by then. Until it leaves, a reset may ignore it
+  however much is announced.
+- **What goes.** Once an announcement of the record's audience covers that
+  slot, or a raise or reset of the audience lands at or after it, the device
+  forgets what the record no longer needs. With no record here, or one on
+  another device only, that is the original's record, its chunk hashes and
+  coven's copy; with the file stored, the chunk hashes and coven's copy. A
+  record that a reset brought back here needs them all, and keeps them.
+- **No wait for a record gone for good.** A record in a deleted circle never
+  comes back (§15.9). Neither does a record a reload left no trace of: the
+  reset ignored the write that staged it, and every later reset ignores that
+  write too.
+- **The wait costs space only.** The copies of deleted app files, and of app
+  files switched to the cloud, stay on the device until an announcement covers
+  the change. Deleting history asks for a snapshot once the oldest slot no
+  snapshot covers has passed grace (§16.2), so the wait has a deadline even in a
+  store that writes little.
+- **The app sees no kept bytes.** Reads and status follow the record (§17.6,
+  §17.7), and `coven_user_files` lists no original whose file has no record
+  here or is on another device only.
 
 Calls retain native errors while the process runs, except that file integrity
 failures return `FileReadError::Integrity { id }` without a native cause. Pending
@@ -10993,6 +11043,11 @@ laptop made writes 9 and 10 without reading the reset; 10 read 9.
 - Ana's own writes, made after capturing the snapshot but before reading her reset
   entry, are ignored by the same rule.
 
+**Files on one device only.** An ignored write can have deleted the record of a
+file on one device only, or switched that file to the cloud. The record comes
+back as the snapshot holds it, and the device it names still has the file's
+bytes: a device keeps them until no reset can undo such a write (§17.11).
+
 **Later resets and raises** take effect in slot order, and each reloads its
 audience. The entry before stays part of history; it is never dropped.
 
@@ -12469,9 +12524,9 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_migration_records` | this device's own migration write's row changes, whole, which its marker's slot applies, since the marker carries none (§18.4), until a loaded snapshot replaces them (§18.5) |
 | `_coven_slot_records` | the original signed admin, admission and key-copy slots, and each announcement slot this device accepted and still keeps, which store snapshots carry and history is rebuilt from when the store opens ([format.md D7.6](format.md#d76-original-slots-sections-7-to-9)). A refused announcement has none (§16.1), and a forgotten one's goes (§16.8) |
 | `_coven_absent_snapshots` | each snapshot whose body this device confirmed absent, by its deletion or by a read that found nothing, while an announcement it keeps names it: retention and file deletion skip it (§16.6, §17.10). The row goes with its last announcement (§16.8) |
-| `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
-| `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
-| `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
+| `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only, or a reset may still bring such a record back (§17.11); `coven_user_files` lists all but the hash of those whose record is here (§17.3) |
+| `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored and no reset can switch it back (§17.11); a move's upload checks against them (§17.3) |
+| `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash, and of each file a reset may still put back on this device only (§17.11); files over the same bytes share one copy (§17.3) |
 | `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
 | `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
@@ -12485,6 +12540,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_copy_sizes` | the size of each of coven's copies of app files that a row names, by the copy, once for a copy files share: the write that keeps a staged copy writes it, as it deletes the copy's cleanup record, and the write that records the copy for removal deletes it; triggers keep the sum in `coven_library_bytes`'s `copies` row (§17.8) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
+| `_coven_undoable_files` | each file whose record a change took off this device's bytes, while a reset may still undo the change, with the record's audience and the change: this device's write, by number, until it leaves the queue, then the slot it applied at or before (§17.11) |
+| `_coven_reset_bounds` | for each audience, the lowest coverage a later reset of it may name: the highest coverage announced for it, or the slot of its last raise or reset, whichever is later; it only rises (§16.3, §17.11) |
 | `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_device_id_in_use` | the one row a copy writes when it stops because another installation uses its device id: the slot that showed it, kept until a reset or deletion (§19.3) |
@@ -14461,6 +14518,8 @@ Write-ups explain each model and state its assumptions:
 | A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the app unpins the file, the file's record goes or the file leaves the cloud; the app's unpin ends it with the pin | `requested_by_switch`, `unkept_unrequested`, `unpin_ends_request`, `request_ends_made_unpinned_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
 | Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published; so is the app's write that carries the switch beside its own change, refused whole if that change removes a switched file's last reference | `make_local_whole`, `make_local_keeps_candidates`, `make_local_with_whole`, `make_local_with_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | Across crashes, no row names bytes that aren't durable on disk, every file on disk is named by a row or recorded for cleanup, and a deletion never takes bytes a row names | `rows_durable`, `bytes_findable`, `delete_spares_rows` | `proofs/storage/CovenStorage/LocalBytes.lean` | §17.11, C.3 |
+| Across resets, every record that puts a file on this device has its bytes here, and so does every change that took a record off them while a later reset may still undo it; the lowest coverage a later reset may name never falls | `reset_finds_bytes`, `kept_until_bound`, `bound_rises` | `proofs/storage/CovenStorage/ResetBytes.lean` | §17.11, §19.4 |
+| *Body.* Forgetting a file's bytes with the change that took its record off this device, once this device's write landed, or with another device's change, lets a reset bring back a record whose bytes are gone | `forget_on_change_strands`, `forget_on_landing_strands`, `forget_on_receipt_strands` | `proofs/storage/CovenStorage/ResetBytes.lean` | §17.11 |
 | *Body.* A row committed before its bytes are durable names missing bytes after a crash; a file created before its name is recorded is left where no deletion finds it | `early_commit_strands`, `unrecorded_file_lost` | `proofs/storage/CovenStorage/LocalBytes.lean` | C.3 |
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy, and none writes onto such a file or marks it as coven's own; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `person_files_unchanged`, `abandon_person_files_unchanged`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |

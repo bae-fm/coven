@@ -286,6 +286,7 @@ pub(crate) fn initial_schema() -> String {
 /// - each table coven's views read;
 /// - `_coven_user_chunks`, which `user_file::record_original!` writes when
 ///   it records a user's original;
+/// - `_coven_undoable_files`, which `coven_user_files` reads;
 /// - `_coven_write_pause`, which `operation::journal!` writes when it
 ///   journals an operation that pauses writes;
 /// - `_coven_moves` and `_coven_pin_requests`, which the pending records,
@@ -296,9 +297,10 @@ pub(crate) fn initial_schema() -> String {
 ///   `coven_library_bytes` count: SQLite makes a trigger only on a table
 ///   that exists.
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) const OUTSIDE_STORE_TABLES: [&str; 24] = [
+pub(crate) const OUTSIDE_STORE_TABLES: [&str; 25] = [
     "_coven_user_files",
     "_coven_user_chunks",
+    "_coven_undoable_files",
     "_coven_write_pause",
     "_coven_moves",
     "_coven_pin_requests",

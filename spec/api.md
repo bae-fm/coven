@@ -3834,7 +3834,7 @@ let moved = handle
 | | `hash` | its content hash, 32 bytes; NULL until it is stored |
 | | `coordinates` | where it is (format.md D12): stored at a location with its key, or on one device only; read the device with `coven_file_device` |
 | | `namespace` | its namespace, which fixes its kind |
-| `coven_user_files`: each user original this device records, while its file's record exists here ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
+| `coven_user_files`: each user original this device records, while its file's record exists here and doesn't put the file on another device only ([§17.3](coven.md#173-staging-a-file)) | `file` | the file's id, as in `coven_files` |
 | | `path` | the original's path as the operating system's bytes, which coven never changes: on Unix its own, on Windows its UTF-16 in WTF-8, as `path_bytes` gives them; show it with `coven_path_text`, and turn it back into a path with `path_from_bytes` |
 | | `size` | its size in bytes, recorded when it was staged |
 | | `modified_seconds` | its modification time when it was staged, exactly as coven records it and checks the original against, in two parts: whole seconds since the Unix epoch, rounded down, so negative before 1970 |

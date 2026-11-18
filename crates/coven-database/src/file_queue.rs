@@ -416,10 +416,10 @@ pub(crate) fn retirable(db: &StoreSql) -> Result<Vec<(i64, FileLocation)>, DbErr
     .collect()
 }
 
-/// Retire an upload whose move switched its files to the cloud (§17.3):
-/// their copies and their originals' chunk hashes, needed only while they
-/// were on this device only, go with it, except a copy a pin request keeps
-/// for a file kept here.
+/// Retire an upload whose move switched its files to the cloud (§17.3).
+/// Their copies and their originals' chunk hashes, needed only while they
+/// were on this device only, stay until no reset can switch them back
+/// (§17.11), and a pin request keeps a copy for a file kept here.
 pub(crate) fn switched(db: &StoreSql, id: i64) -> Result<(), DbError> {
     // A file kept here is pinned by the write that switched it: its request
     // keeps coven's copy until the cache copy is made from it (§17.8).
@@ -434,15 +434,6 @@ pub(crate) fn switched(db: &StoreSql, id: i64) -> Result<(), DbError> {
             crate::file_pins::request(db, file)?;
         }
     }
-    for path in db.query(
-        "DELETE FROM _coven_device_files
-         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1) RETURNING path",
-        [id],
-        |r| r.get::<_, String>(0),
-    )? {
-        release_copy(db, &path)?;
-    }
-    crate::user_file::uploaded(db, id)?;
     retire(db, id)
 }
 
@@ -674,11 +665,17 @@ pub(crate) fn share(db: &StoreSql, from: FileId, to: FileId) -> Result<(), DbErr
     Ok(())
 }
 
-/// `file`'s record is gone from this device: no upload switches it, and
-/// coven's copy of its bytes goes once nothing names it. An upload no other
-/// file shares is left for the upload worker to retire (§17.9).
+/// `file`'s record is gone from this device: no upload switches it. An
+/// upload no other file shares is left for the upload worker to retire
+/// (§17.9).
 pub(crate) fn forget(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     db.execute("DELETE FROM _coven_upload_files WHERE file=?1", [file])?;
+    Ok(())
+}
+
+/// No record needs coven's copy of `file`'s bytes any more, and no reset
+/// can bring one back (§17.11): the copy goes once nothing else names it.
+pub(crate) fn forget_copy(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     for copy in
         db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [file], |r| {
             r.get::<_, String>(0)

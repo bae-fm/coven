@@ -703,7 +703,8 @@ async fn a_download_that_panics_returns_the_bug_and_leaves_nothing() {
 }
 
 /// Ana and Carol make the same tracks device-only at once. Carol's write is
-/// the later one, so it wins on both devices. Ana's download lost: her copy
+/// the later one, so it wins on both devices. Ana's download lost: her copies
+/// stay while a reset may still undo Carol's write (§17.11). Then the copy
 /// she didn't touch goes, with the folder coven made for it once empty, and
 /// the one she edited meanwhile is hers and stays.
 #[tokio::test]
@@ -748,6 +749,11 @@ async fn two_devices_at_once_the_later_write_wins_and_the_losing_copy_goes() {
     network.sync(0).await;
     network.sync(1).await;
     network.sync(0).await;
+    assert_eq!(names(anas_music.path()), ["Album", "Edited"], "a reset may undo Carol's write");
+    // Ana's reset captures Carol's write, so no later reset can undo it.
+    ana.handle.reset_store().await.unwrap();
+    network.sync(0).await;
+    network.sync(1).await;
     let winner = carol.handle.device_id();
     for device in [ana, carol] {
         for file in [one, two, three] {

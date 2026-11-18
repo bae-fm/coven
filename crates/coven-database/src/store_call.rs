@@ -12,6 +12,9 @@ pub(crate) struct StoreCall<'a> {
     /// every other connection.
     device: Option<DeviceId>,
     constants: TransactionConstants,
+    /// The change the running transaction makes to the records it takes
+    /// off this device's bytes, which a reset may undo (§17.11).
+    reset_change: std::cell::Cell<Option<crate::reset_bytes::Change>>,
     #[cfg_attr(
         not(any(test, feature = "test-utils")),
         expect(dead_code, reason = "only tests read what coven's work records")
@@ -109,7 +112,24 @@ pub(crate) fn outside_store<R>(run: impl FnOnce(&StoreCall<'_>) -> R) -> R {
 
 impl<'a> StoreCall<'a> {
     pub(crate) fn new(device: Option<DeviceId>, tests: &'a TestRecords) -> Self {
-        Self { device, constants: TransactionConstants::default(), tests }
+        Self {
+            device,
+            constants: TransactionConstants::default(),
+            reset_change: std::cell::Cell::new(None),
+            tests,
+        }
+    }
+
+    /// The change the running transaction makes to the records it takes
+    /// off this device's bytes, if it changes any.
+    pub(crate) fn reset_change(&self) -> Option<crate::reset_bytes::Change> {
+        self.reset_change.get()
+    }
+
+    /// The running transaction is this device's write, or applies slots,
+    /// or has ended (`None`).
+    pub(crate) fn set_reset_change(&self, change: Option<crate::reset_bytes::Change>) {
+        self.reset_change.set(change);
     }
 
     pub(crate) fn constants(&self) -> &TransactionConstants {

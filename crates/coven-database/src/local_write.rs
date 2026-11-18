@@ -176,6 +176,13 @@ fn host_phase<R, E: crate::WriteFailure>(
         }
         error => error,
     })?;
+    // A record this write takes off this device's bytes can come back
+    // until no reset can undo the write (§17.11).
+    call.set_reset_change(
+        record
+            .as_ref()
+            .map(|record| crate::reset_bytes::Change::Write(record.header.position.number)),
+    );
     files.retain_rows(applied.affected, &applied.merged)?;
     if let Some(record) = &record {
         // The write completing a bound upload frees the write it

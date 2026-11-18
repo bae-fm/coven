@@ -200,15 +200,14 @@ pub(crate) fn share(
     Ok(())
 }
 
-/// The files the upload `upload` switches are stored: a stored file never
+/// `file` is stored, and no reset can switch it back: a stored file never
 /// moves again, so its original's chunk hashes go; the original stays
-/// recorded (§17.3).
-pub(crate) fn uploaded(db: &StoreSql, upload: i64) -> Result<(), DbError> {
-    db.execute(
-        "DELETE FROM _coven_user_chunks
-         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1)",
-        [upload],
-    )?;
+/// recorded (§17.3, §17.11).
+pub(crate) fn stored(
+    db: &StoreSql,
+    file: coven_foundation::id_source::FileId,
+) -> Result<(), DbError> {
+    db.execute("DELETE FROM _coven_user_chunks WHERE file=?1", [file])?;
     Ok(())
 }
 
@@ -235,7 +234,10 @@ pub(crate) fn hashes(
     Ok(Some(FileHashes::stored(content, chunks)?))
 }
 
-/// The user's original this device recorded for `file`, if it has one.
+/// The user's original this device recorded for `file`, if it has one and
+/// the file's record is here and doesn't put the file on another device
+/// only, as `coven_user_files` lists it: one kept only for a reset that may
+/// bring its record back isn't (§17.11).
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
@@ -244,9 +246,15 @@ pub(crate) fn read(
     db: &StoreSql,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<UserFile>, DbError> {
-    db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE file=?1", [file], |row| {
-        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?))
-    })?
+    db.query(
+        "SELECT u.path,u.size,u.modified_at FROM _coven_user_files AS u
+         WHERE u.file=?1
+         AND (NOT EXISTS(SELECT 1 FROM _coven_undoable_files AS k WHERE k.file=u.file)
+           OR EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=u.file
+             AND coalesce(coven_file_device(f.coordinates)=_coven_device(),1)))",
+        [file],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?)),
+    )?
     .into_iter()
     .next()
     .map(|(path, size, modified_at)| {

@@ -751,6 +751,21 @@ impl StoreDatabase {
         .await
     }
 
+    /// Take every change that took a record off this device's bytes as
+    /// past every reset that could undo it (§17.11), then run an empty
+    /// write, after which the bytes no record needs go.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_past_every_reset(&self) {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer, _| writer.transaction(crate::reset_bytes::past_every_reset))
+        })
+        .await
+        .expect("an open store settles its kept bytes");
+        self.write(|_| Ok::<_, DbError>(())).await.expect("an empty write commits");
+    }
+
     /// Fail the next `count` `applied_slot` reads with a disk error.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn fail_applied_slots(&self, count: usize) {

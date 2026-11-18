@@ -794,8 +794,14 @@ impl<'a> FileWrite<'a> {
         self.finish_completion()
     }
 
+    /// The state of the call this transaction runs in.
+    pub(crate) fn call(&self) -> &StoreCall<'_> {
+        self.call
+    }
+
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
         let db = self.database;
+        crate::reset_bytes::settle(db, self.call)?;
         for file in self.files.staged.borrow().iter() {
             if let StagedSource::Copy(name) = &file.source {
                 self.files.obsolete.borrow_mut().insert(name.clone());

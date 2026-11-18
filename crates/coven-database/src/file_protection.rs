@@ -343,11 +343,13 @@ fn refresh_record(
     let store = crate::merge_store::MergeStore::new(db, call, &visible);
     let deleted = crate::store_state_tables::deleted_circles(db)?;
     let mut kept = false;
+    let mut audience = None;
     db.for_each(
         "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1 AND key=?2",
         params![key.0, key.1],
         |r| {
             let row = crate::row_queries::read_identity(r)?;
+            audience.get_or_insert_with(|| row.audience.clone());
             let state = store.row_without_losses(&row)?.state;
             kept |= state.present()
                 && !matches!(&row.audience, coven_merge::Audience::Circle(circle) if deleted.contains_key(circle));
@@ -411,7 +413,7 @@ fn refresh_record(
         )?,
         _ => db.execute("DELETE FROM _coven_stored_files WHERE file=?1", [id])?,
     };
-    settle_record(db, id, cached, shown.as_ref(), kept)
+    settle_record(db, call, id, cached, shown.as_ref(), kept, audience.as_ref())
 }
 
 /// The namespace and object path of the stored bytes a file's record named as
@@ -429,15 +431,18 @@ pub(crate) fn cached(db: &StoreSql, file: FileId) -> Result<Option<(String, Stri
 
 /// What this device keeps for a file once its stored file is up to date
 /// with `shown`, the record the app's table shows, and `kept`, whether any
-/// audience still has the record: the cached bytes of stored bytes it
-/// named, `cached`, a request to keep it whole, its original, its upload
-/// and coven's copy. A file with none of these has nothing to settle.
+/// audience still has the record, in `audience`, none once no merge record
+/// of it is left: the cached bytes of stored bytes it named, `cached`, a
+/// request to keep it whole, its original, its upload and coven's copy. A
+/// file with none of these has nothing to settle.
 pub(crate) fn settle_record(
     db: &StoreSql,
+    call: &StoreCall<'_>,
     id: FileId,
     cached: Option<(String, String)>,
     shown: Option<&crate::file_table::Record>,
     kept: bool,
+    audience: Option<&coven_merge::Audience>,
 ) -> Result<(), DbError> {
     let leaving = !matches!(
         shown,
@@ -461,15 +466,13 @@ pub(crate) fn settle_record(
             crate::file_pins::end(db, id)?;
         }
     }
-    if let Some(crate::file_table::Record { place: Place::DeviceOnly(device), .. }) = shown {
-        elsewhere(db, id, *device)?;
-    }
+    // Its original, coven's copy and their hashes go once no reset can
+    // bring back a record that needs them (§17.11).
+    crate::reset_bytes::changed(db, call, id, shown, kept, audience)?;
     if !kept {
-        // The record's file is gone from this device: its original is
-        // forgotten, never touched, coven's copy goes once nothing names it,
-        // an upload no other file shares is left for the upload worker to
-        // retire (§17.9), and no move lists it (§17.3).
-        crate::user_file::forget(db, id)?;
+        // The record's file is gone from this device: no upload switches
+        // it, an upload no other file shares is left for the upload worker
+        // to retire (§17.9), and no move lists it (§17.3).
         crate::file_queue::forget(db, id)?;
         crate::file_moves::forget(db, id)?;
         crate::file_pins::end(db, id)?;
@@ -482,13 +485,11 @@ pub(crate) fn settle_record(
 /// the file device-only here and that switch lost to the other device's
 /// (§17.3). Such a copy is the losing download: it is recorded for removal,
 /// and goes once the writer is free if it is as coven left it (Appendix C.3).
-fn elsewhere(db: &StoreSql, file: FileId, device: DeviceId) -> Result<(), DbError> {
+pub(crate) fn elsewhere(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     let paths = db.query("SELECT path FROM _coven_user_files WHERE file=?1", [file], |r| {
         r.get::<_, Vec<u8>>(0)
     })?;
-    if paths.is_empty()
-        || db.query_row("SELECT _coven_device()", [], |r| r.get::<_, DeviceId>(0))? == device
-    {
+    if paths.is_empty() {
         return Ok(());
     }
     for path in paths {

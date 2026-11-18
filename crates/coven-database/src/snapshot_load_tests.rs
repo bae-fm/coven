@@ -751,6 +751,7 @@ async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&store), paths);
     complete_uploads(&db).await;
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());

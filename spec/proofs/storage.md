@@ -268,6 +268,27 @@ missing bytes after a crash, and a file created before its name is recorded is
 left where no deletion finds it. A flush that reaches the drive's storage is
 §3's assumption, and reads that race a deletion are §17.7's.
 
+[ResetBytes.lean](storage/CovenStorage/ResetBytes.lean) models the bytes a
+device keeps for its files on it only across resets (coven.md §17.11,
+§19.4): whether a record puts each file on this device, whether its bytes are
+here, and the latest change that took its record off this device, a write of
+its own still queued or a change applied at a slot. A reset names coverage no
+lower than the audience's *bound*, the highest coverage announced and the
+slot of the last raise or reset, which the sequence model's `audValid`
+requires of every announcement and entry, and it may bring back the record
+of any file whose change is queued or after its coverage. The device forgets
+a file's bytes only while no record puts the file here and the bound has
+reached its change. `reset_finds_bytes` shows that in every reachable state a
+record putting a file here has its bytes, `kept_until_bound` that so does
+every change the bound hasn't reached, and `bound_rises` that the bound never
+falls. The counterexamples `forget_on_change_strands`,
+`forget_on_landing_strands` and `forget_on_receipt_strands` forget the bytes
+with this device's change, once its write lands, and with another device's
+change: in each, a reset brings back a record whose bytes are gone. The model
+leaves out what the reset's snapshot holds besides the record: that a change
+at or below the bound is in every snapshot a later reset names is the
+sequence model's rule, not proved here.
+
 `change_keeps_candidates` and `settle_keeps_candidates` show that no write of
 this device makes stored bytes a deletion candidate: a deleted record's
 coordinates stay with its unpublished write, and `publish_releases` shows

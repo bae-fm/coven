@@ -242,6 +242,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
     assert_eq!(local_count(&db, "coven_files"), 0);
     assert_eq!(owned_paths(&store).len(), 2);
     complete_uploads(&db).await;
+    db.test_past_every_reset().await;
     assert!(owned_paths(&store).is_empty());
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     db.close().await.unwrap();
@@ -352,16 +353,18 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     .unwrap();
     assert!(!has_record(&db, file));
     assert_eq!(db.user_file(file).await.unwrap(), None);
+    assert_eq!(local_count(&db, "_coven_user_files"), 1, "a reset may bring it back");
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_user_files"), 0);
     assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
     db.close().await.unwrap();
 }
 
 /// Another device's write deleting the last row that names a user file,
-/// applied here, forgets the original in the same transaction and never
-/// touches the original itself (§17.1).
+/// applied here, forgets the original once no reset can undo it (§17.11),
+/// and never touches the original itself (§17.1).
 #[tokio::test]
-async fn an_applied_deletion_forgets_a_users_original_in_its_transaction() {
+async fn an_applied_deletion_forgets_a_users_original_once_no_reset_can_undo_it() {
     let ids = SequentialIds::new();
     let (a_store, b_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
     let a = open(&a_store, Provenance::UserProvided).await;
@@ -394,6 +397,7 @@ async fn an_applied_deletion_forgets_a_users_original_in_its_transaction() {
     }
     assert!(!has_record(&a, file));
     assert_eq!(a.user_file(file).await.unwrap(), None);
+    a.test_past_every_reset().await;
     assert_eq!(local_count(&a, "_coven_user_files"), 0);
     assert_eq!(local_count(&a, "_coven_user_chunks"), 0);
     assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
@@ -824,6 +828,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         .unwrap();
         if stored {
             complete_uploads(&db).await;
+            db.test_past_every_reset().await;
         }
         let before = photo_file(&db, row).await;
         db.write(move |sql| {
@@ -880,6 +885,7 @@ async fn a_downloaded_deletion_keeps_the_queued_copy_until_upload() {
     assert_eq!(local_count(&a, "_coven_file_uploads"), 1);
     assert_eq!(owned_paths(&a_store), paths);
     complete_uploads(&a).await;
+    a.test_past_every_reset().await;
     assert_eq!(local_count(&a, "_coven_device_files"), 0);
     assert!(owned_paths(&a_store).is_empty());
     a.close().await.unwrap();

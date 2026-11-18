@@ -27,8 +27,10 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
         // A directory at the file's name makes removal fail on every platform.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        // Upload completion releases the queue's copy.
+        // Upload completion releases the queue's copy once no reset can
+        // switch the file back (§17.11).
         complete(&db).await.unwrap();
+        db.test_past_every_reset().await;
         // Later writes still commit and return their results.
         assert_eq!(db.write(|_| Ok(7)).await.unwrap(), 7);
         assert_eq!(local_count(&db, "files"), 1);
@@ -72,6 +74,7 @@ async fn deleting_a_pending_record_can_fail_without_losing_the_retry() {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     complete(&db).await.unwrap();
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     assert!(owned_paths(&store).is_empty());
     db.inspect_writer(|sql, _| sql.batch("DROP TRIGGER _coven_fail_cleanup").unwrap());
@@ -172,6 +175,9 @@ fn crashing_file_writer() {
             ))
             .unwrap();
     } else {
+        // Completion keeps the copy until no reset can switch the file back,
+        // and that point releases it (§17.11).
+        runtime.block_on(complete(&db)).unwrap();
         db.inspect_writer(|sql, _| {
             if phase == "committed" {
                 sql.crash_after_next_commit();
@@ -179,7 +185,7 @@ fn crashing_file_writer() {
                 sql.crash_after("_coven_file_removals", "DELETE");
             }
         });
-        runtime.block_on(complete(&db)).unwrap();
+        runtime.block_on(db.test_past_every_reset());
     }
     panic!("file write did not reach its crash point");
 }
@@ -257,6 +263,7 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     let writes = crate::write::tests::records(&db).len();
     complete(&db).await.unwrap();
     assert_eq!(crate::write::tests::records(&db).len(), writes);
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     assert!(owned_paths(&store).is_empty());
@@ -372,8 +379,9 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     db.close().await.unwrap();
 }
 
-/// §21.2, Appendix C.3: upload completion releases the queue's copy, whose bytes go
-/// only after the writer is free. While that removal stalls on the disk an
+/// §21.2, Appendix C.3: once no reset can switch an uploaded file back
+/// (§17.11), the queue's copy is released, and its bytes go only after the
+/// writer is free. While that removal stalls on the disk an
 /// app write commits; once it finishes, the record goes too.
 #[tokio::test]
 async fn a_stalled_file_removal_holds_back_no_app_write() {
@@ -381,11 +389,12 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
+    complete(&db).await.unwrap();
     let (entered, stalled) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let gate = Mutex::new(Some((entered, released)));
     db.test_gate_file_removal(move || {
-        // Only the first removal, the completion's, stalls.
+        // Only the first removal, the release's, stalls.
         let first = gate.lock().unwrap().take();
         if let Some((entered, released)) = first {
             entered.send(()).unwrap();
@@ -395,7 +404,10 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
     .await;
     let completing = tokio::spawn({
         let db = db.clone();
-        async move { complete(&db).await }
+        async move {
+            db.test_past_every_reset().await;
+            Ok::<_, DbError>(())
+        }
     });
     tokio::task::spawn_blocking(move || stalled.recv_timeout(HANG_GUARD).unwrap()).await.unwrap();
     assert_eq!(local_count(&db, "_coven_device_files"), 0);

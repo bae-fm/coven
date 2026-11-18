@@ -54,7 +54,7 @@ pub(crate) fn protect(
             continue;
         }
         if record {
-            records(db, table)?;
+            records(db, table, files)?;
         } else {
             for column in columns {
                 references(db, table, column)?;
@@ -108,7 +108,7 @@ fn references(db: &StoreSql, table: &TableLayout, column: &str) -> Result<(), Db
 /// of coordinates; its stored file, from the record the app's table shows;
 /// and, for a record with any of its own here, what this device keeps for
 /// it, as one row at a time would settle it.
-fn records(db: &StoreSql, table: &TableLayout) -> Result<(), DbError> {
+fn records(db: &StoreSql, table: &TableLayout, files: &FileWrite<'_>) -> Result<(), DbError> {
     let Some(j) = table
         .columns
         .iter()
@@ -193,7 +193,16 @@ fn records(db: &StoreSql, table: &TableLayout) -> Result<(), DbError> {
                 |r| r.get::<_, bool>(0),
             )?;
             let shown = crate::file_table::Record::read(db, file)?;
-            crate::file_protection::settle_record(db, file, cached, shown.as_ref(), kept)
+            let audience = crate::reset_bytes::audience(db, file)?;
+            crate::file_protection::settle_record(
+                db,
+                files.call(),
+                file,
+                cached,
+                shown.as_ref(),
+                kept,
+                audience.as_ref(),
+            )
         },
     )?;
     db.execute("DELETE FROM temp._coven_install_records", [])?;

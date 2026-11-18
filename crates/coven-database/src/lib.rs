@@ -65,6 +65,7 @@ mod object_removals;
 mod pending;
 mod provider_access;
 mod raise_capture;
+mod reset_bytes;
 mod row_cache;
 pub use object_removals::ObjectRemoval;
 pub use provider_access::{

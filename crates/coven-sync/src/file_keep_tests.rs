@@ -87,6 +87,8 @@ async fn an_app_file_kept_here_is_pinned_from_coven_copy_without_storage() {
     f.files.inner.keep_pinned().await.unwrap();
     assert!(pinned(&f, file).await);
     assert_eq!(reads(&f, before), 0);
+    // The copy goes once no reset can switch the file back (§17.11).
+    f.database.test_past_every_reset().await;
     assert!(!copy.exists());
     let reference = f.database.file_ref(file).await.unwrap();
     assert_eq!(f.files.read_file(&reference, &FileLease::for_test().await).await.unwrap(), bytes);
@@ -310,6 +312,7 @@ async fn unpinning_a_kept_file_ends_its_request() {
     f.database.write(move |sql| sql.unpin(&[file])).await.unwrap();
     assert!(requested(&f).await.is_empty());
     assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
+    f.database.test_past_every_reset().await;
     assert!(!copy.exists());
     let before = f.storage.request_trace().len();
     f.files.inner.keep_pinned().await.unwrap();

@@ -42,8 +42,13 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 crate::sequence_apply::retain(db, "admin", &original)?
             }
             SlotContent::KeyCopy(original) => crate::sequence_apply::retain(db, "key", &original)?,
-            SlotContent::Announcement { original, accepted: Some(_) } => {
-                crate::sequence_apply::retain(db, "announcement", &original)?
+            SlotContent::Announcement { original, accepted: Some(announcement) } => {
+                crate::sequence_apply::retain(db, "announcement", &original)?;
+                crate::reset_bytes::bound(
+                    db,
+                    &announcement.snapshot.audience,
+                    announcement.covers,
+                )?;
             }
             // Refused, or at or below the store snapshot's coverage, where
             // the snapshot's originals or this device's own are the kept ones.

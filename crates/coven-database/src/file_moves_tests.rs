@@ -143,7 +143,10 @@ async fn a_move_resumes_after_reopening_and_switches_its_files_in_one_write() {
     assert!(files.iter().all(|file| cloud(&db, *file)));
     assert_eq!(records(&db).len(), writes + 1);
     assert_eq!(switched_in_last_write(&db), 2);
-    // Each switched file's copy goes with its upload.
+    // Each switched file's copy goes once no reset can switch it back
+    // (§17.11).
+    assert_eq!(local_count(&db, "_coven_device_files"), 2);
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     db.close().await.unwrap();
 }
@@ -412,6 +415,7 @@ async fn a_moved_original_uploads_with_what_its_staging_recorded() {
     assert_eq!(queued_chunks, imported_chunks);
     complete(&db, file).await;
     assert!(cloud(&db, file));
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_user_chunks"), 0);
     assert_eq!(local_count(&db, "_coven_user_files"), 1);
     db.close().await.unwrap();
@@ -434,7 +438,9 @@ async fn a_move_kept_here_asks_for_its_pins_in_the_switch() {
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].file, files[0]);
     assert!(asked[0].copy.is_some());
-    // The plain file's copy went with its upload; the kept one's stays.
+    // Once no reset can switch them back (§17.11), the plain file's copy
+    // goes; the kept one's stays for its pin.
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     let copies: i64 = db.inspect_writer(|sql, _| {
         sql.query_row(

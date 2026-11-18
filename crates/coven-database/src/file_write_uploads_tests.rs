@@ -147,6 +147,9 @@ async fn an_app_file_staged_on_this_device_only_keeps_coven_copy_and_uploads_not
     .await
     .unwrap();
     assert!(!has_record(&a, file));
+    // A reset may still bring the record back, and needs the copy (§17.11).
+    assert_eq!(local_count(&a, "_coven_device_files"), 1);
+    a.test_past_every_reset().await;
     assert_eq!(local_count(&a, "_coven_device_files"), 0);
     assert!(owned_paths(&a_store).is_empty());
     a.close().await.unwrap();
@@ -216,6 +219,7 @@ async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     .await
     .unwrap();
     assert!(!has_record(&db, file));
+    db.test_past_every_reset().await;
     assert_eq!(local_count(&db, "_coven_user_files"), 0);
     assert_eq!(local_count(&db, "_coven_user_chunks"), 0);
     assert_eq!(std::fs::read(original.path()).unwrap(), b"edited original!!");

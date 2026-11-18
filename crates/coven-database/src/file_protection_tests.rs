@@ -6,7 +6,10 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
          INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
          INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
          INSERT INTO _coven_unreferenced_files SELECT 'file_' || i FROM fixture;
-         INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;",
+         INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
+         INSERT INTO _coven_undoable_files SELECT 'file_' || i,audience,
+           CASE WHEN i%2=1 THEN n END,CASE WHEN i%2=0 THEN n END,i%4=0 FROM fixture;
+         INSERT INTO _coven_reset_bounds SELECT 'audience_' || i,n FROM fixture;",
     )
     .unwrap();
 }
@@ -37,6 +40,10 @@ pub(crate) fn scan_reason(
     Some("once per migration: rebuild every referencing row's file references"),
 ("file_protection.rs", "DELETE FROM _coven_unreferenced_files WHERE EXISTS( SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file) OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)", "_coven_unreferenced_files") =>
     Some("files other devices' writes left for this device's next write, which concurrent removals leave; normally none"),
+("reset_bytes.rs", "DELETE FROM _coven_undoable_files WHERE past=1 RETURNING file", "_coven_undoable_files") =>
+    Some("its partial index holds only the changes the reset bound reached, each of which the statement deletes"),
+("reset_bytes.rs", "DELETE FROM _coven_undoable_files RETURNING file", "_coven_undoable_files") =>
+    Some("a test takes every change as past every reset"),
         _ => None,
     }
 }

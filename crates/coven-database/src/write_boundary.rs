@@ -89,7 +89,8 @@ pub struct BoundaryCoverage {
     pub included: u64,
 }
 
-/// Keep a checked boundary, once, at its entry's slot.
+/// Keep a checked boundary, once, at its entry's slot. No later reset of
+/// its audience names coverage below it (§16.3).
 pub(crate) fn record(database: &StoreSql, boundary: &Boundary) -> Result<(), DbError> {
     let (kind, version) = match boundary {
         Boundary::SchemaChange(version) => ("schema", Some(version.number)),
@@ -97,6 +98,7 @@ pub(crate) fn record(database: &StoreSql, boundary: &Boundary) -> Result<(), DbE
     };
     let entry = boundary.entry();
     let snapshot = boundary.snapshot();
+    crate::reset_bytes::bound(database, &snapshot.audience, entry.get())?;
     database.execute(
         "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
          VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",

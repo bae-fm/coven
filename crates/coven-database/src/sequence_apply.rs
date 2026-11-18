@@ -160,6 +160,7 @@ fn apply_in<P: crate::PendingValue>(
         if applied.checked_add(1) != Some(incoming.slot.get()) || incoming.header.after > applied {
             return Err(DbError::SequenceGap { applied, received: incoming.slot });
         }
+        call.set_reset_change(Some(crate::reset_bytes::Change::Slot(incoming.slot.get())));
         // Circles that became readable below this device's breaking version
         // don't reload: the slot applies, and each waits for its rebuild.
         let mut rebuilding = Vec::new();
@@ -277,7 +278,8 @@ fn apply_in<P: crate::PendingValue>(
     }
 }
 
-/// `announcement` was accepted. An ordinary snapshot's coverage only moves
+/// `announcement` was accepted, so no later reset of its audience names
+/// less coverage (§16.3). An ordinary snapshot's coverage only moves
 /// forward and is always usable, so a new device replays for its audience
 /// only the slots after it, and those at or below it never count toward that
 /// audience's next snapshot again (§16.2): their records of the audience's
@@ -286,6 +288,8 @@ fn snapshot_announced(
     db: &StoreSql,
     announcement: &coven_format::sequence::SnapshotAnnouncement,
 ) -> Result<(), DbError> {
+    // No later reset of the audience names less coverage (§16.3).
+    crate::reset_bytes::bound(db, &announcement.snapshot.audience, announcement.covers)?;
     if announcement.purpose != coven_format::sequence::Purpose::Ordinary {
         return Ok(());
     }

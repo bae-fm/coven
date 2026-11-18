@@ -806,3 +806,167 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [None]);
     handle.close().await.unwrap();
 }
+
+/// Ana's phone deletes the last row naming a file it keeps on it only,
+/// while her reset of the store is capturing. The reset ignores that write,
+/// so the row and the file's record come back on her phone only, and so
+/// must the bytes the write took off it (§17.11, §19.4).
+#[tokio::test]
+async fn a_reset_that_ignores_a_delete_finds_the_device_only_bytes() {
+    use coven_storage::test_utils::MemoryStorage;
+    tokio::time::timeout(HANG_GUARD, async {
+        let root = tempfile::tempdir().unwrap();
+        let app = Coven::in_memory(root.path().into());
+        let memory =
+            Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
+        let directory = app.create_closed_store("Reset", Arc::new(UuidIds)).await.unwrap();
+        let handle = app
+            .builder()
+            .storage_connector(crate::tests::Connector::new(memory.clone()))
+            .synced_tables(files_table())
+            .namespaces(files_namespace())
+            .migrations(vec![Migration::addition(1, "files", FILES)])
+            .open(directory.id(), |_| ())
+            .await
+            .unwrap();
+        handle
+            .setup_s3_storage(
+                memory.config(),
+                "key".into(),
+                SecretText::new("secret".into()),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let file = handle
+            .test_staged_write(
+                |batch| {
+                    Ok::<_, CovenError>(batch.put_file(
+                        "files",
+                        b"kept here".to_vec(),
+                        crate::Place::DeviceOnly,
+                    ))
+                },
+                |sql, file: FileId| {
+                    sql.execute("INSERT INTO files(id,file) VALUES('0',?1)", [file])?;
+                    Ok(file)
+                },
+            )
+            .await
+            .unwrap();
+        passed(&handle).await;
+        let (started, starting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        memory
+            .hold_next_creation(coven_storage::ObjectPrefix::all(directory.id()), started, released)
+            .await;
+        let delete = async {
+            starting.await.unwrap();
+            handle
+                .write(|sql| {
+                    sql.execute("DELETE FROM files", [])?;
+                    Ok::<_, CovenError>(())
+                })
+                .await
+                .unwrap();
+            assert!(matches!(handle.file_ref(file).await, Err(DbError::FileAbsent { .. })));
+            release.send(()).unwrap();
+        };
+        let (reset, ()) = tokio::join!(handle.reset_store(), delete);
+        reset.unwrap();
+        passed(&handle).await;
+        let rows: Vec<String> = handle
+            .read(|sql| Ok::<_, CovenError>(sql.query("SELECT id FROM files", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(rows, ["0"]);
+        let back = handle.file_ref(file).await.unwrap();
+        let device = directory.settings().unwrap().device_id;
+        assert_eq!(back.place(), crate::FilePlace::DeviceOnly { device });
+        assert_eq!(
+            handle.read_file(&back, &crate::FileLease::for_test().await).await.unwrap(),
+            b"kept here"
+        );
+        handle.close().await.unwrap();
+    })
+    .await
+    .expect("the reset finishes in time");
+}
+
+/// The copies coven keeps in the store's `files` folder, each in the folder
+/// of the staging that wrote it (Appendix C.3).
+fn staged_copies(directory: &StoreDir) -> usize {
+    let files = directory.database_path().parent().unwrap().join("files");
+    std::fs::read_dir(files)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .map(|folder| std::fs::read_dir(folder).unwrap().count())
+        .sum()
+}
+
+/// A delete that landed can still be undone by a reset naming a snapshot
+/// from before it, so coven's copy stays; a reset whose snapshot holds the
+/// delete leaves no reset able to undo it, and the copy goes (§17.11).
+#[tokio::test]
+async fn a_deleted_device_only_copy_stays_until_no_reset_can_undo_the_delete() {
+    use coven_storage::test_utils::MemoryStorage;
+    tokio::time::timeout(HANG_GUARD, async {
+        let root = tempfile::tempdir().unwrap();
+        let app = Coven::in_memory(root.path().into());
+        let memory =
+            Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
+        let directory = app.create_closed_store("Reset", Arc::new(UuidIds)).await.unwrap();
+        let handle = app
+            .builder()
+            .storage_connector(crate::tests::Connector::new(memory.clone()))
+            .synced_tables(files_table())
+            .namespaces(files_namespace())
+            .migrations(vec![Migration::addition(1, "files", FILES)])
+            .open(directory.id(), |_| ())
+            .await
+            .unwrap();
+        handle
+            .setup_s3_storage(
+                memory.config(),
+                "key".into(),
+                SecretText::new("secret".into()),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        handle
+            .test_staged_write(
+                |batch| {
+                    Ok::<_, CovenError>(batch.put_file(
+                        "files",
+                        b"kept here".to_vec(),
+                        crate::Place::DeviceOnly,
+                    ))
+                },
+                |sql, file: FileId| {
+                    sql.execute("INSERT INTO files(id,file) VALUES('0',?1)", [file])?;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        passed(&handle).await;
+        handle
+            .write(|sql| {
+                sql.execute("DELETE FROM files", [])?;
+                Ok::<_, CovenError>(())
+            })
+            .await
+            .unwrap();
+        passed(&handle).await;
+        passed(&handle).await;
+        assert_eq!(staged_copies(&directory), 1, "a reset may still undo the delete");
+        handle.reset_store().await.unwrap();
+        passed(&handle).await;
+        assert_eq!(staged_copies(&directory), 0, "the reset's snapshot holds the delete");
+        handle.close().await.unwrap();
+    })
+    .await
+    .expect("the reset finishes in time");
+}

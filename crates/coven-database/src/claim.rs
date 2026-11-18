@@ -399,6 +399,7 @@ pub(crate) fn finish(db: &StoreSql) -> Result<(), DbError> {
             if unconsumed {
                 return Err(DbError::ClaimUnsettled);
             }
+            crate::reset_bytes::landed(db, claim.device, claim.number)?;
             crate::upload::forget_claimed(db, claim.device, claim.number)?;
             writes_landed = true;
         }

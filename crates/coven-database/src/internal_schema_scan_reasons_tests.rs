@@ -39,6 +39,7 @@ mod fixture {
             ("_coven_file_id", 1),
             ("_coven_file_of_key", 1),
             ("_coven_stored_device", 1),
+            ("coven_file_device", 1),
             ("_coven_stored_object", 1),
             ("_coven_stored_object_path", 1),
             ("_coven_sync_state", crate::sync_facts::FACTS),

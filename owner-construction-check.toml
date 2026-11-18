@@ -916,13 +916,16 @@ homes = [
     "crates/coven-database/src/file_protection_schema.rs",
     "crates/coven-database/src/internal_schema_pending.rs",
     "crates/coven-database/src/internal_schema_pins.rs",
+    "crates/coven-database/src/reset_bytes.rs",
     "crates/coven-database/src/snapshot_files.rs",
 ]
 tables = [
     "_coven_file_references",
     "_coven_queued_file_refs",
+    "_coven_reset_bounds",
     "_coven_row_file_refs",
     "_coven_stored_files",
+    "_coven_undoable_files",
     "_coven_unreferenced_files",
 ]
 

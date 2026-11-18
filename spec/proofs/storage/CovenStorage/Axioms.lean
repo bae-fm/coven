@@ -252,6 +252,13 @@ import CovenStorage
 #print axioms CovenStorage.LocalBytes.early_commit_strands
 #print axioms CovenStorage.LocalBytes.unrecorded_file_lost
 
+#print axioms CovenStorage.ResetBytes.reset_finds_bytes
+#print axioms CovenStorage.ResetBytes.kept_until_bound
+#print axioms CovenStorage.ResetBytes.bound_rises
+#print axioms CovenStorage.ResetBytes.forget_on_change_strands
+#print axioms CovenStorage.ResetBytes.forget_on_landing_strands
+#print axioms CovenStorage.ResetBytes.forget_on_receipt_strands
+
 #print axioms CovenStorage.ProviderAccess.inv_start
 #print axioms CovenStorage.ProviderAccess.idle_call
 #print axioms CovenStorage.ProviderAccess.inv_step
