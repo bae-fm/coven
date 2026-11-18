@@ -824,3 +824,23 @@ fn a_capability_names_each_gate_kind_once() {
         ["capabilities: file system has gate kind temporary files twice"]
     );
 }
+
+#[test]
+fn test_homes_hold_source_and_belong_to_a_capability_that_reads_tests() {
+    let rows = capability_rows(
+        r#"tests = true
+        test_homes = ["crates/app/src/reads_tests.rs", "crates/app/src/fixtures/", "crates/app/src/gone.rs"]"#,
+    );
+    assert_eq!(
+        stale(capability_files(), &rows),
+        [
+            "capabilities: file system has test home crates/app/src/fixtures/, which holds no source",
+            "capabilities: file system has test home crates/app/src/gone.rs, which holds no source",
+        ]
+    );
+    let rows = capability_rows(r#"test_homes = ["crates/app/src/reads_tests.rs"]"#);
+    assert_eq!(
+        stale(capability_files(), &rows),
+        ["capabilities: file system has test_homes but reads no test code"]
+    );
+}

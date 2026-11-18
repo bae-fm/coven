@@ -464,6 +464,16 @@ pub(crate) struct Capability {
     pub(crate) homes: Vec<String>,
     #[serde(default)]
     pub(crate) gates: Vec<Gate>,
+    /// Whether the rule reads the crates' test code for this capability too.
+    /// Test code in a home, in a file home's tests (`<name>_tests.rs` and the
+    /// `<name>_tests/` directory beside it) or in one of `test_homes` may use
+    /// the capability directly.
+    #[serde(default)]
+    pub(crate) tests: bool,
+    /// Source files, and directories (ending in `/`) of them, where test code
+    /// may use the capability directly besides the homes.
+    #[serde(default)]
+    pub(crate) test_homes: Vec<String>,
     /// The direct uses outside the homes that the workspace has today, by
     /// file and gate kind; they only shrink (`capability_boundaries.rs`).
     #[serde(default)]
@@ -472,6 +482,30 @@ pub(crate) struct Capability {
     /// of a value that is no path, by the item that holds them.
     #[serde(default)]
     pub(crate) allowed: Vec<AllowedUses>,
+}
+
+impl Capability {
+    /// Whether production code in `path` may use the capability directly.
+    pub(crate) fn holds(&self, path: &str) -> bool {
+        self.homes.iter().any(|home| path.starts_with(home.as_str()))
+    }
+
+    /// Whether test code in `path` may use the capability directly: a
+    /// home, a file home's tests, or a test home.
+    pub(crate) fn holds_tests(&self, path: &str) -> bool {
+        let tests_of_home =
+            self.homes.iter().filter_map(|home| home.strip_suffix(".rs")).any(|stem| {
+                path == format!("{stem}_tests.rs") || path.starts_with(&format!("{stem}_tests/"))
+            });
+        let test_home = self.test_homes.iter().any(|home| {
+            if home.ends_with('/') {
+                path.starts_with(home.as_str())
+            } else {
+                path == home
+            }
+        });
+        self.holds(path) || tests_of_home || test_home
+    }
 }
 
 /// `count` direct uses of a capability through the gate of kind `gate` in

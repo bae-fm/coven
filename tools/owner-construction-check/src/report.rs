@@ -92,7 +92,7 @@ fn check_paths(
         findings.extend(find_component_bundle_violations(files, &graph.identity));
     }
     if policy.selects(Rule::CapabilityBoundaries) {
-        findings.extend(find_capability_boundary_violations(files, policy));
+        findings.extend(find_capability_boundary_violations(code, policy));
     }
     if policy.selects(Rule::CapabilityConstruction) {
         findings.extend(find_capability_construction_violations(files, policy, graph));

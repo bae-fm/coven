@@ -1,7 +1,8 @@
 //! The code the rules of Appendix F.1 to F.3 read: the files of the members
 //! that are not tools, without their test code (`test_code.rs`), with the
 //! workspace's own macros expanded (`macro_expansion.rs`), and their SQL
-//! files. The database's domains read the crates' test code too, as written.
+//! files. The database's domains read the crates' test code too, as written,
+//! and so does a capability whose policy row says so.
 //! The conventions of F.5 read the files as written instead, tests and tools
 //! included.
 
@@ -24,6 +25,10 @@ pub(crate) struct CrateCode {
     pub(crate) sql: Vec<SqlFile>,
     /// The crates' test code as written (`test_code::test_code`).
     pub(crate) tests: Vec<RustFile>,
+    /// The crates' files whole, as written: production and test code
+    /// together, where a test module's names resolve through the imports of
+    /// the module around it.
+    pub(crate) whole: Vec<RustFile>,
     /// The SQL files in the crates' `tests/` directories.
     pub(crate) test_sql: Vec<SqlFile>,
 }
@@ -57,6 +62,7 @@ impl CrateCode {
             unexpanded: expanded.findings,
             sql,
             tests: test_code(files, features),
+            whole: files.to_vec(),
             test_sql,
         }
     }

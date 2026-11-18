@@ -129,7 +129,8 @@ fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
         .collect()
 }
 
-/// A capability's gate kinds are its own, once each. Each frozen and allowed
+/// A capability's test homes hold source, and only a capability that reads
+/// test code has them. Its gate kinds are its own, once each. Each frozen and allowed
 /// row names a file holding source, production or test, and one of the
 /// capability's gate kinds, with a count of at least one and what the code
 /// does there or why the matches use no capability; an allowed row's item is
@@ -146,6 +147,16 @@ fn invalid_capability_rows(code: &CrateCode, policy: &Policy) -> Vec<String> {
     let mut stale = Vec::new();
     for capability in &policy.capabilities {
         let name = &capability.name;
+        if !capability.tests && !capability.test_homes.is_empty() {
+            stale.push(format!("capabilities: {name} has test_homes but reads no test code"));
+        }
+        for home in &capability.test_homes {
+            if !sources.iter().any(|path| home_holds(home, path)) {
+                stale.push(format!(
+                    "capabilities: {name} has test home {home}, which holds no source"
+                ));
+            }
+        }
         let mut kinds = BTreeSet::new();
         for gate in &capability.gates {
             if !kinds.insert(gate.kind.as_str()) {

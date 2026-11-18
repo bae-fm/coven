@@ -1,5 +1,5 @@
 use super::*;
-use crate::crate_code::checked;
+use crate::crate_code::CrateCode;
 
 fn assert_findings(
     actual: &[Finding],
@@ -14,13 +14,18 @@ fn assert_findings(
     );
 }
 
+/// The rule's findings in these crate files, read as the checker reads them.
+fn rule(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
+    find_capability_boundary_violations(&CrateCode::fixture(files, &[], policy), policy)
+}
+
 fn violations(path: &str, source: &str) -> Vec<Finding> {
     files_violations(&[RustFile::fixture(path, source)])
 }
 
 fn files_violations(files: &[RustFile]) -> Vec<Finding> {
     let policy = Policy::gated_fixture();
-    find_capability_boundary_violations(&checked(files, &policy), &policy)
+    rule(files, &policy)
 }
 
 fn kind(finding: &Finding) -> &str {
@@ -183,16 +188,11 @@ fn a_lifetime_authority_starts_its_work() {
         }
     "#;
     let file = |path| [RustFile::fixture(path, source)];
-    assert!(find_capability_boundary_violations(
-        &file("crates/app-sync/src/sync_loop.rs"),
-        &authority
-    )
-    .is_empty());
-    let elsewhere =
-        find_capability_boundary_violations(&file("crates/app-sync/src/upload.rs"), &authority)
-            .into_iter()
-            .map(|violation| kind(&violation).to_string())
-            .collect::<BTreeSet<_>>();
+    assert!(rule(&file("crates/app-sync/src/sync_loop.rs"), &authority).is_empty());
+    let elsewhere = rule(&file("crates/app-sync/src/upload.rs"), &authority)
+        .into_iter()
+        .map(|violation| kind(&violation).to_string())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         elsewhere,
         BTreeSet::from(["runtime construction", "thread or future spawn"].map(str::to_string))
@@ -212,10 +212,7 @@ fn a_static_listed_as_a_root_may_start_its_work() {
         LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().build().unwrap()); \
         static OTHER: LazyLock<Runtime> = \
         LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().build().unwrap());";
-    let found = find_capability_boundary_violations(
-        &[RustFile::fixture("crates/app-sync/src/runtime.rs", source)],
-        &authority,
-    );
+    let found = rule(&[RustFile::fixture("crates/app-sync/src/runtime.rs", source)], &authority);
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(kind(&found[0]), "runtime construction");
 }
@@ -516,7 +513,7 @@ fn call_findings(files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
             file
         })
         .collect::<Vec<_>>();
-    find_capability_boundary_violations(&checked(&files, &policy), &policy)
+    rule(&files, &policy)
         .iter()
         .map(|finding| (finding.path.clone(), finding.line, kind(finding).to_string()))
         .collect()
@@ -636,7 +633,7 @@ fn a_call_gate_ignores_workspace_items_and_local_bindings_with_a_gated_name() {
 /// manifest doesn't list, matches as written.
 #[test]
 fn a_call_gate_matches_an_unresolved_path_as_written() {
-    let found = find_capability_boundary_violations(
+    let found = rule(
         &[RustFile::fixture("crates/app/src/leak.rs", "fn stage() { tempfile::tempdir(); }")],
         &Policy::fixture(CALLS),
     );
@@ -674,7 +671,7 @@ fn listed_findings(policy: &Policy, files: &[(&str, &str)]) -> Vec<(String, usiz
             file
         })
         .collect::<Vec<_>>();
-    find_capability_boundary_violations(&checked(&files, policy), policy)
+    rule(&files, policy)
         .into_iter()
         .map(|finding| (finding.path, finding.line, finding.message))
         .collect()
@@ -789,4 +786,87 @@ fn an_allowed_row_names_its_item_and_count_exactly() {
             "capabilities.allowed: file system: crates/app/src/staging.rs: Staged::stage (standard library file system) lists 1 findings but the code has none: remove the row",
         ]
     );
+}
+
+/// The `CALLS` policy's capability reading test code, with these test homes.
+fn tests_policy(test_homes: &str) -> Policy {
+    listed_policy(&format!("tests = true\ntest_homes = [{test_homes}]"))
+}
+
+#[test]
+fn a_capability_that_reads_tests_finds_test_code_outside_its_homes() {
+    let leak = (
+        "crates/app/src/leak.rs",
+        r#"
+        use std::fs;
+        fn production() {}
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            fn inline() { fs::read("a").unwrap(); }
+        }
+        #[cfg(test)]
+        #[path = "leak_tests.rs"]
+        mod more;
+        "#,
+    );
+    let tests = (
+        "crates/app/src/leak_tests.rs",
+        "use super::*;\nfn beside() { fs::write(\"a\", \"b\").unwrap(); }",
+    );
+    let found =
+        listed_findings(&tests_policy(""), &[("crates/app/src/lib.rs", "mod leak;"), leak, tests]);
+    let message =
+        "standard library file system (file system) is used directly only in crates/app-files/src/";
+    assert_eq!(
+        found,
+        [
+            ("crates/app/src/leak.rs".to_string(), 7, message.to_string()),
+            ("crates/app/src/leak_tests.rs".to_string(), 2, message.to_string()),
+        ]
+    );
+    let without_tests =
+        listed_findings(&listed_policy(""), &[("crates/app/src/lib.rs", "mod leak;"), leak, tests]);
+    assert_eq!(without_tests, []);
+}
+
+#[test]
+fn test_code_may_use_a_capability_in_its_homes_their_tests_and_its_test_homes() {
+    let policy = Policy::fixture(&CALLS.replace(
+        r#"homes = ["crates/app-files/src/"]"#,
+        r#"homes = ["crates/app-files/src/", "crates/app/src/staging.rs"]
+        tests = true
+        test_homes = ["crates/app/src/fixtures/", "crates/app/src/seeds.rs"]"#,
+    ));
+    let call = "#[cfg(test)] fn t() { let _ = tempfile::tempdir(); }";
+    let whole = "fn t() { let _ = tempfile::tempdir(); }";
+    let files = [
+        ("crates/app-files/src/stage_tests.rs", whole),
+        ("crates/app/src/staging.rs", call),
+        ("crates/app/src/staging_tests.rs", whole),
+        ("crates/app/src/staging_tests/more.rs", &format!("#![cfg(test)]\n{whole}")),
+        ("crates/app/src/fixtures/folders.rs", call),
+        ("crates/app/src/seeds.rs", call),
+        ("crates/app/src/other_tests.rs", whole),
+    ];
+    assert_eq!(
+        listed_findings(&policy, &files),
+        [(
+            "crates/app/src/other_tests.rs".to_string(),
+            1,
+            "temporary files (file system) is used directly only in crates/app-files/src/, crates/app/src/staging.rs".to_string()
+        )]
+    );
+}
+
+#[test]
+fn test_code_starts_background_work_anywhere() {
+    let (capability, gates) = CALLS.split_once("[[capabilities.gates]]").expect("a gate");
+    let policy = Policy::fixture(&format!(
+        "{capability}tests = true\n[[capabilities.gates]]{gates}\n[[background_starts]]\nkind = \"thread or future spawn\"\npaths = [\"tokio::spawn\"]"
+    ));
+    let test = "#[cfg(test)] fn t() { tokio::spawn(async {}); }";
+    assert_eq!(listed_findings(&policy, &[("crates/app/src/leak.rs", test)]), []);
+    let production = "fn t() { tokio::spawn(async {}); }";
+    assert_eq!(listed_findings(&policy, &[("crates/app/src/leak.rs", production)]).len(), 1);
 }

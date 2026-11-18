@@ -9,7 +9,11 @@
 //! resolves to through its file's imports (`NameResolver`), so code may name
 //! a capability's types and import its modules. The check reads inside macro
 //! calls too, so `format!("{}", Uuid::new_v4())` is a direct use. It reads no
-//! test code (`test_code.rs`): fixtures may assemble raw material.
+//! test code (`test_code.rs`), since fixtures may assemble raw material,
+//! except for a capability whose row sets `tests`: then test code outside its
+//! homes, their tests and its `test_homes` may not use it directly either.
+//! Test code needs no composition root, so background work starts are
+//! checked in production code only.
 //!
 //! A capability's `frozen` rows list the direct uses a workspace has today,
 //! by file and gate kind, and its `allowed` rows the matches that use no
@@ -28,40 +32,40 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+use crate::crate_code::CrateCode;
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::policy::{describe_homes, Capability, Gate, Policy, FILE_NAME};
 use crate::syntax::{flatten_use_tree, type_name, RustFile};
 
+/// The rule over the crates' production code with its macros expanded, and
+/// over their test code as written for the capabilities that read it.
 pub(crate) fn find_capability_boundary_violations(
-    files: &[RustFile],
+    code: &CrateCode,
     policy: &Policy,
 ) -> Vec<Finding> {
-    let resolver = NameResolver::collect(files);
     let mut violations = BTreeSet::new();
     let mut uses = BTreeSet::new();
-    for file in files {
-        let gated = policy
-            .capabilities
-            .iter()
-            .filter(|capability| {
-                !capability.homes.iter().any(|home| file.relative_path.starts_with(home))
-            })
-            .flat_map(|capability| capability.gates.iter().map(move |gate| (capability, gate)))
-            .collect::<Vec<_>>();
-        let mut visitor = CapabilityBoundaryVisitor {
-            path: &file.relative_path,
-            gated: &gated,
-            violations: &mut violations,
-            uses: &mut uses,
-            policy,
-            resolver: &resolver,
-            current_type: "<free>".into(),
-            item: None,
-            rooted: false,
-        };
-        visitor.visit_file(&file.syntax);
+    let production = NameResolver::collect(&code.expanded);
+    for file in &code.expanded {
+        let gated = gated(policy, |capability| !capability.holds(&file.relative_path));
+        let mut visitor = CapabilityBoundaryVisitor::new(file, &gated, policy, &production);
+        visitor.background_starts = &policy.background_starts;
+        visitor.read(file, &mut violations, &mut uses);
+    }
+    if policy.capabilities.iter().any(|capability| capability.tests) {
+        let tests = NameResolver::collect(&code.whole);
+        for file in &code.tests {
+            let gated = gated(policy, |capability| {
+                capability.tests && !capability.holds_tests(&file.relative_path)
+            });
+            CapabilityBoundaryVisitor::new(file, &gated, policy, &tests).read(
+                file,
+                &mut violations,
+                &mut uses,
+            );
+        }
     }
     for capability in &policy.capabilities {
         let held = uses.iter().filter(|direct| direct.capability == capability.name);
@@ -254,11 +258,23 @@ pub(crate) fn declared_items(files: &[RustFile]) -> BTreeSet<(String, String)> {
     items
 }
 
+/// The gates of the capabilities `outside` picks, with their capability.
+fn gated(policy: &Policy, outside: impl Fn(&Capability) -> bool) -> Vec<(&Capability, &Gate)> {
+    policy
+        .capabilities
+        .iter()
+        .filter(|capability| outside(capability))
+        .flat_map(|capability| capability.gates.iter().map(move |gate| (capability, gate)))
+        .collect()
+}
+
 struct CapabilityBoundaryVisitor<'a, 'p> {
     path: &'a str,
     gated: &'a [(&'p Capability, &'p Gate)],
-    violations: &'a mut BTreeSet<Finding>,
-    uses: &'a mut BTreeSet<DirectUse<'p>>,
+    /// The background work starts the visitor checks: none in test code.
+    background_starts: &'p [Gate],
+    violations: BTreeSet<Finding>,
+    uses: BTreeSet<DirectUse<'p>>,
     policy: &'p Policy,
     resolver: &'a NameResolver,
     /// The type of the `impl` block, or the trait, the visitor is in.
@@ -269,7 +285,39 @@ struct CapabilityBoundaryVisitor<'a, 'p> {
     rooted: bool,
 }
 
-impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
+impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
+    fn new(
+        file: &'a RustFile,
+        gated: &'a [(&'p Capability, &'p Gate)],
+        policy: &'p Policy,
+        resolver: &'a NameResolver,
+    ) -> Self {
+        Self {
+            path: &file.relative_path,
+            gated,
+            background_starts: &[],
+            violations: BTreeSet::new(),
+            uses: BTreeSet::new(),
+            policy,
+            resolver,
+            current_type: "<free>".into(),
+            item: None,
+            rooted: false,
+        }
+    }
+
+    /// Visits `file` and adds what it finds to `violations` and `uses`.
+    fn read(
+        mut self,
+        file: &RustFile,
+        violations: &mut BTreeSet<Finding>,
+        uses: &mut BTreeSet<DirectUse<'p>>,
+    ) {
+        self.visit_file(&file.syntax);
+        violations.append(&mut self.violations);
+        uses.append(&mut self.uses);
+    }
+
     fn record(&mut self, capability: &'p Capability, gate: &'p Gate, span: Span) {
         self.uses.insert(DirectUse {
             capability: &capability.name,
@@ -298,7 +346,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
 
     fn check_method(&mut self, name: &str, span: Span) {
         if !self.rooted {
-            for gate in &self.policy.background_starts {
+            for gate in self.background_starts {
                 if gate.method_patterns.iter().any(|method| method == name) {
                     self.record_background_start(gate, span);
                 }
@@ -317,7 +365,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
     /// item and must not match a gated crate of the same name.
     fn check_segments(&mut self, segments: &[String], is_import: bool, span: Span) {
         if !self.rooted {
-            for gate in &self.policy.background_starts {
+            for gate in self.background_starts {
                 if gate_matches(gate, segments, is_import) {
                     self.record_background_start(gate, span);
                 }
@@ -346,7 +394,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
             }
         };
         if !self.rooted {
-            for gate in &self.policy.background_starts {
+            for gate in self.background_starts {
                 if holds_any(path, &gate.call_patterns) {
                     self.record_background_start(gate, span);
                 }
