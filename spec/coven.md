@@ -9034,7 +9034,8 @@ coven hears it (§6.7), and the photos go up.
 
 **What an upload is doing.** The sync state names bound files only (§19.1), so
 each upload in the queue has a phase of its own, which an app shows where
-files are, in `coven_uploads` and `uploads()` ([api.md
+files are: `uploads()` gives it, and the view `coven_upload_phases` shows it
+for a live query, both from the same computation ([api.md
 E7](api.md#e7-moves-and-uploads)). It is *uploading* while an attempt sends it,
 *stored* once storage holds its bytes and it waits for the rest of its move
 (§17.3), *failed* when its pending record names a failure only the person

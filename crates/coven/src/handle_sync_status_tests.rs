@@ -41,9 +41,49 @@ async fn state(device: &Device, expected: impl Fn(&SyncState) -> bool) -> SyncSt
     device.handle.test_sync_status().wait_for(|status| expected(&status.state)).await
 }
 
-/// What each file in the upload queue is doing, oldest first.
+/// What each file in the upload queue is doing, oldest first. The app's
+/// SQL reads the same phases from `coven_upload_phases` (E4).
 async fn phases(device: &Device) -> Vec<UploadPhase> {
-    device.handle.uploads().await.unwrap().files.into_iter().map(|file| file.phase).collect()
+    let files = device.handle.uploads().await.unwrap().files;
+    let mut given: Vec<(FileId, String, Option<String>)> = files
+        .iter()
+        .map(|file| {
+            let (phase, wait) = match &file.phase {
+                UploadPhase::Uploading => ("uploading", None),
+                UploadPhase::Stored => ("stored", None),
+                UploadPhase::Failed(_) => ("failed", None),
+                UploadPhase::Waiting(wait) => (
+                    "waiting",
+                    Some(match wait {
+                        UploadWait::NotSyncing => "not_syncing",
+                        UploadWait::CoolingDown { .. } => "cooling_down",
+                        UploadWait::Sync => "sync",
+                        UploadWait::Paused => "paused",
+                        UploadWait::Metered => "metered",
+                        UploadWait::KeysChanging => "keys_changing",
+                        UploadWait::Retrying { .. } => "retrying",
+                        UploadWait::Queued => "queued",
+                    }),
+                ),
+            };
+            (file.file, phase.to_owned(), wait.map(str::to_owned))
+        })
+        .collect();
+    given.sort();
+    let mut shown: Vec<(FileId, String, Option<String>)> = device
+        .handle
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query(
+                "SELECT file,phase,wait FROM coven_upload_phases",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    shown.sort();
+    assert_eq!(shown, given);
+    files.into_iter().map(|file| file.phase).collect()
 }
 
 /// Wait until the upload queue is empty: every upload stored its file.
@@ -549,9 +589,9 @@ async fn the_view_names_the_pending_record_behind_its_state() {
 }
 
 /// A read-only handle can't tell whether the writer that last wrote the
-/// sync state's facts still runs, so a read of `coven_sync_state` there
-/// fails, as a read of `coven_sync_status` does, and gives no state (E4,
-/// E5).
+/// sync state's facts still runs, so a read of `coven_sync_state` or of
+/// `coven_upload_phases` there fails, as a read of `coven_sync_status` does,
+/// and gives no row (E4, E5).
 #[tokio::test]
 async fn a_read_only_handle_cant_read_the_sync_state() {
     let root = tempfile::tempdir().unwrap();
@@ -560,23 +600,24 @@ async fn a_read_only_handle_cant_read_the_sync_state() {
     let handle =
         builder().create_store("Recipes", "Test device", &[], |_, _| Ok(())).await.unwrap();
     let reader = builder().open_read_only(handle.store_id()).await.unwrap();
-    let error = reader
-        .read(|sql| {
-            Ok::<_, CovenError>(sql.query_row("SELECT state FROM coven_sync_state", [], |row| {
-                row.get::<_, String>(0)
-            })?)
-        })
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            CovenError::Database(DbError::StatementForbidden {
-                operation: "reading the writer's sync state through a read-only handle",
+    for statement in ["SELECT state FROM coven_sync_state", "SELECT phase FROM coven_upload_phases"]
+    {
+        let error = reader
+            .read(move |sql| {
+                Ok::<_, CovenError>(sql.query(statement, [], |row| row.get::<_, String>(0))?)
             })
-        ),
-        "{error:?}"
-    );
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                CovenError::Database(DbError::StatementForbidden {
+                    operation: "reading the writer's sync state through a read-only handle",
+                })
+            ),
+            "{statement}: {error:?}"
+        );
+    }
     reader.close().await.unwrap();
     handle.close().await.unwrap();
 }

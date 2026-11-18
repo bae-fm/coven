@@ -74,6 +74,19 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_downloading", "SELECT * FROM coven_downloading", "j") => Some(
             "the files being downloaded to keep whole, one per download in flight, from this process's memory",
         ),
+        (
+            "coven_upload_phases",
+            "SELECT * FROM coven_upload_phases",
+            "one" | "s" | "r" | "w" | "z" | "x" | "y",
+        ) => Some(
+            "the network's constant row, the status, retry, pause, setting and write pause tables, which hold at most one row each, and the subqueries that give one row and one row per queued file",
+        ),
+        ("coven_upload_phases", "SELECT * FROM coven_upload_phases", "l") => {
+            Some("the view lists every queued file, which its link to its upload enumerates")
+        }
+        ("coven_upload_phases", "SELECT * FROM coven_upload_phases", "j") => {
+            Some("the files being sent, one per upload in flight, from this process's memory")
+        }
         ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") => {
             Some("one constant row, and the pause table holds at most one row")
         }

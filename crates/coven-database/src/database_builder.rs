@@ -21,7 +21,7 @@ pub(crate) struct OpenInputs {
     pub(crate) namespaces: Vec<crate::Namespace>,
     pub(crate) sqlite: crate::SqliteSettings,
     pub(crate) functions: crate::SqlFunctions,
-    pub(crate) sync_state: Option<crate::SyncStateFunction>,
+    pub(crate) sync_functions: Option<crate::SyncFunctions>,
 }
 
 /// Choices needed to open the database part of a store.
@@ -37,7 +37,7 @@ pub struct DatabaseBuilder {
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
-    sync_state: Option<crate::SyncStateFunction>,
+    sync_functions: Option<crate::SyncFunctions>,
     progress: ProgressChannel<OpenStep>,
     #[cfg(test)]
     upkeep_threads: Option<usize>,
@@ -60,7 +60,7 @@ impl DatabaseBuilder {
             ids: None,
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
-            sync_state: None,
+            sync_functions: None,
             progress: ProgressChannel::new(),
             #[cfg(test)]
             upkeep_threads: None,
@@ -178,22 +178,24 @@ impl DatabaseBuilder {
         self
     }
 
-    /// Sync's computation of the sync state, which `coven_sync_state` calls
-    /// as `_coven_sync_state`, registered on every connection with the
-    /// functions coven's views call (§19.1). coven's own builder always
-    /// gives it; a store opened without it fails each read of the view.
-    pub fn sync_state(mut self, function: crate::SyncStateFunction) -> Self {
-        self.sync_state = Some(function);
+    /// Sync's computations of the sync state and of each upload's phase,
+    /// which `coven_sync_state` and `coven_upload_phases` call as
+    /// `_coven_sync_state` and `_coven_upload_phase`, registered on every
+    /// connection with the functions coven's views call (§17.9, §19.1).
+    /// coven's own builder always gives them; a store opened without them
+    /// fails each read of either view.
+    pub fn sync_functions(mut self, functions: crate::SyncFunctions) -> Self {
+        self.sync_functions = Some(functions);
         self
     }
 
-    /// The sync state function that `open` received, or none, which a
-    /// rebuild passes again when it opens its copy of the store.
-    pub(crate) fn sync_state_as_opened(
+    /// The sync functions that `open` received, or none, which a rebuild
+    /// passes again when it opens its copy of the store.
+    pub(crate) fn sync_functions_as_opened(
         mut self,
-        function: Option<crate::SyncStateFunction>,
+        functions: Option<crate::SyncFunctions>,
     ) -> Self {
-        self.sync_state = function;
+        self.sync_functions = functions;
         self
     }
 
@@ -255,7 +257,7 @@ impl DatabaseBuilder {
             namespaces: self.namespaces.clone(),
             sqlite: self.sqlite.clone(),
             functions: self.functions.clone(),
-            sync_state: self.sync_state.clone(),
+            sync_functions: self.sync_functions.clone(),
         };
         let path = self.directory.database_path();
         let whole = crate::internal_schema::whole_views();
@@ -272,7 +274,7 @@ impl DatabaseBuilder {
                 settings.device_id,
                 &transfers,
                 &network,
-                self.sync_state.as_ref(),
+                self.sync_functions.as_ref(),
             )
         };
         let recorded = crate::file_table::synced(&tables)
@@ -324,7 +326,7 @@ impl DatabaseBuilder {
                             &self.directory,
                             &self.sqlite,
                             &self.functions,
-                            self.sync_state.as_ref(),
+                            self.sync_functions.as_ref(),
                             &observer,
                             settings.device_id,
                             &tables,
@@ -481,7 +483,7 @@ impl DatabaseBuilder {
                 settings.device_id,
                 &transfers,
                 &network,
-                self.sync_state.as_ref(),
+                self.sync_functions.as_ref(),
             )
         };
         // A read-only open runs no step, so nothing reaches `progress`.

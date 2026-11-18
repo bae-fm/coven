@@ -485,7 +485,7 @@ fn builder(
     namespaces: &[Namespace],
 ) -> DatabaseBuilder {
     DatabaseBuilder::new(directory.clone())
-        .sync_state(crate::sync_state_function())
+        .sync_functions(crate::sync_functions())
         .id_source(ids.clone())
         .clock(clock.clone())
         .synced_tables(tables())
@@ -664,6 +664,8 @@ mod storage_states;
 mod upload_connections;
 #[path = "file_upload_pool_tests.rs"]
 mod upload_pool;
+#[path = "file_upload_queue_tests.rs"]
+mod upload_queue;
 #[path = "file_upload_retry_tests.rs"]
 mod upload_retry;
 #[path = "file_upload_tests.rs"]

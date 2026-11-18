@@ -112,18 +112,7 @@ impl Facts {
     /// write's alike: sync stopped, a provider's cooldown, or a slot that
     /// can't apply yet (the model's `Facts.heldAll`).
     pub(crate) fn held_all(&self) -> Option<SyncWait> {
-        match self.sync {
-            RetrySync::Stopped => Some(SyncWait::NotSyncing),
-            RetrySync::Started { cooling_until: Some(until) } => {
-                Some(SyncWait::CoolingDown { until })
-            }
-            RetrySync::Started { cooling_until: None } => match &self.last {
-                // A slot's failure that clears by itself retries instead, and a
-                // newer floor is the next pass's turn: neither is a wait.
-                Some(LastPass::Blocked { reason, .. }) => reason.slot_wait(),
-                _ => None,
-            },
-        }
+        held_all(self.sync, self.last.as_ref())
     }
 
     /// The key the first write in the send queue is recorded as waiting for,
@@ -273,10 +262,7 @@ impl Facts {
                 RecordedLocation::Connected(named_provider(&name)?)
             }
         };
-        let last = row
-            .last_pass
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(DbError::StateEncoding))
-            .transpose()?;
+        let last = last_pass(row.last_pass)?;
         let pass_retry = match last.as_ref() {
             Some(LastPass::Failed { failure: StatusFailure::Operation(record), .. }) => {
                 match record.subject {
@@ -323,6 +309,29 @@ impl Facts {
         };
         Ok((facts, row.last_synced))
     }
+}
+
+/// What holds every transfer while sync is `sync` and the last pass ended
+/// as `last`: sync stopped, a provider's cooldown, or a slot that can't
+/// apply yet (the model's `Facts.heldAll`). The sync state and each
+/// upload's phase read it alike.
+pub(crate) fn held_all(sync: RetrySync, last: Option<&LastPass>) -> Option<SyncWait> {
+    match sync {
+        RetrySync::Stopped => Some(SyncWait::NotSyncing),
+        RetrySync::Started { cooling_until: Some(until) } => Some(SyncWait::CoolingDown { until }),
+        RetrySync::Started { cooling_until: None } => match last {
+            // A slot's failure that clears by itself retries instead, and a
+            // newer floor is the next pass's turn: neither is a wait.
+            Some(LastPass::Blocked { reason, .. }) => reason.slot_wait(),
+            _ => None,
+        },
+    }
+}
+
+/// How the last pass ended, from the bytes `coven_sync_status.last_pass`
+/// holds; none until a pass ends here.
+pub(crate) fn last_pass(bytes: Option<Vec<u8>>) -> Result<Option<LastPass>, DbError> {
+    bytes.map(|bytes| serde_json::from_slice(&bytes).map_err(DbError::StateEncoding)).transpose()
 }
 
 #[cfg(test)]

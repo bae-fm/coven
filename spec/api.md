@@ -3693,7 +3693,7 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads fourteen views of coven's own tables
+- *Coven's state in SQL.* App SQL reads fifteen views of coven's own tables
   and ten tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
   `coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`, in
@@ -3756,16 +3756,23 @@ let moved = handle
   network changes. The function behind them, `_coven_network`, refuses a
   direct call in the same way. A read-only handle watches nothing: it shows
   `usable` NULL and nothing metered, with the setting as stored.
-- `coven_sync_state` is the one view whose row coven's own code computes: it
-  reads the facts coven computes the sync state from and passes them to
-  `_coven_sync_state`, which runs the computation that the Lean model of
+- `coven_sync_state` and `coven_upload_phases` are the two views whose rows
+  coven's own code computes. `coven_sync_state` reads the facts coven
+  computes the sync state from and passes them to `_coven_sync_state`, which
+  runs the computation that the Lean model of
   [§19.1](coven.md#191-what-the-app-sees) checks. A status screen reads the view
   beside its own rows in its live query, which runs again whenever one of
   those facts changes, a transfer starting or ending included, and gives the
   current state as its first value. `SyncStatus::read` reads the view's row
-  as a `SyncStatus`. A read of it on a read-only handle fails with
+  as a `SyncStatus`. `coven_upload_phases` passes each queued upload's facts
+  to `_coven_upload_phase`, which runs the computation of its phase that
+  `uploads()` runs and the Lean model of
+  [§17.9](coven.md#179-uploads) checks, so a screen that lists files reads
+  what each upload is doing beside its own rows, and its live query runs
+  again as the pause, the network, a send, a retry or a record changes it.
+  A read of either view on a read-only handle fails with
   `StatementForbidden`, as a read of `coven_sync_status` does (E5), and
-  gives no state.
+  gives no row.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -3777,7 +3784,7 @@ let moved = handle
   connection a test opened itself, outside any store, as every store makes
   it: the ten tables above, `coven_sync_status` and `coven_retry_effect`
   with their one row, `coven_library_bytes` with its rows at no bytes, and
-  the fourteen views. The function also makes the
+  the fifteen views. The function also makes the
   tables of coven's own that the views read or that the test writes below
   fill, all empty. The function registers coven's SQL functions there too,
   `coven_key`, `coven_file_device` and `coven_path_text` among them, with
@@ -3849,6 +3856,11 @@ let moved = handle
 | | `bytes_total` | the whole encrypted size its session sends; NULL with no session |
 | | `sending` | 1 while this process sends it; never stored, so 0 after reopening and on a read-only handle |
 | | `move` | the move its upload belongs to, read as `MoveId`, for `cancel_move`: the id `move_to_cloud` returned, or the move of the write that staged it ([§17.3](coven.md#173-staging-a-file)); files sharing one upload share it. NULL for a bound file's upload, whose move can't be cancelled ([§17.4](coven.md#174-bound-and-trailing-references)) |
+| `coven_upload_phases`: each file waiting in this device's upload queue with what its upload is doing, the phase `uploads()` gives it (E7); coven's own code computes it in the read and never stores it; not readable on a read-only handle | `file` | the file's id, as in `coven_uploads` |
+| | `phase` | the phase's kind, in snake case: `uploading`, `stored`, `waiting` or `failed` |
+| | `wait` | while it waits, what for, the first that holds, in snake case: `not_syncing`, `cooling_down`, `sync`, `paused`, `metered`, `keys_changing`, `retrying` or `queued` (E7); NULL otherwise |
+| | `at` | when the wait ends, in milliseconds since the Unix epoch: for `retrying` its retry, as `coven_uploads.retry_at` holds it, and for `cooling_down` the provider's cooldown, as `coven_retry_effect.cooling_until` holds it; NULL otherwise |
+| | `pending` | while it has failed, the pending record that says why, by its `coven_pending.position`: its own, or its move's when that names the original it uploads; NULL otherwise |
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
@@ -7091,7 +7103,8 @@ pub struct QueuedUpload {
     /// What the upload is doing, for a bound file and a trailing one alike:
     /// the sync state names bound files only (§19.1), so a trailing file's
     /// wait and failure show here. Whether it is sending is kept in memory
-    /// only: a reopened store shows every file waiting.
+    /// only: a reopened store shows every file waiting. App SQL reads the
+    /// same phase from `coven_upload_phases` (E4).
     pub phase: UploadPhase,
     /// Bytes the provider confirmed in the file's resumable session; `None`
     /// while it has none, as a file sent in one request never does.

@@ -22,7 +22,8 @@ pub struct UploadQueue {
 pub struct QueuedUpload {
     /// The file its upload switches to the cloud.
     pub file: FileId,
-    /// What the upload is doing (§17.9).
+    /// What the upload is doing (§17.9). App SQL reads the same phase from
+    /// `coven_upload_phases` (E4).
     pub phase: UploadPhase,
     /// Progress the provider confirmed and this device persisted in the
     /// file's resumable session; `None` while it has no session, as a file
@@ -82,6 +83,36 @@ pub enum UploadWait {
     Queued,
 }
 
+impl UploadPhase {
+    /// The phase's kind, in snake case, as `coven_upload_phases.phase`
+    /// holds it.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Uploading => "uploading",
+            Self::Stored => "stored",
+            Self::Waiting(_) => "waiting",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+impl UploadWait {
+    /// The wait's kind, in snake case, as `coven_upload_phases.wait` holds
+    /// it.
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            Self::NotSyncing => "not_syncing",
+            Self::CoolingDown { .. } => "cooling_down",
+            Self::Sync => "sync",
+            Self::Paused => "paused",
+            Self::Metered => "metered",
+            Self::KeysChanging => "keys_changing",
+            Self::Retrying { .. } => "retrying",
+            Self::Queued => "queued",
+        }
+    }
+}
+
 impl UploadQueue {
     /// The queue as one committed snapshot read it: each upload's phase from
     /// the facts the sync state reads, what holds trailing uploads, the
@@ -128,7 +159,8 @@ impl UploadQueue {
     }
 }
 
-/// Whether `reason` names the original at `path`.
-fn names_original(reason: &PendingReason, path: Option<&std::path::Path>) -> bool {
+/// Whether `reason` names the original at `path`: a move's record shows as
+/// the phase of the upload that uploads the original it names.
+pub(crate) fn names_original(reason: &PendingReason, path: Option<&std::path::Path>) -> bool {
     matches!(reason, PendingReason::Original { path: named, .. } if Some(named.as_path()) == path)
 }

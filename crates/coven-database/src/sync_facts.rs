@@ -4,11 +4,12 @@
 //! `coven_retry_effect` holds, the send queue, the bound uploads (the uploads
 //! a write waits for, each with its retry wait and record), and the pending
 //! records the state reads. The `coven_sync_state` view passes them to
-//! `_coven_sync_state` as its arguments (`sync_state_function.rs`), and coven
+//! `_coven_sync_state` as its arguments (`sync_functions.rs`), and coven
 //! reads them as a row where sync computes the state in Rust: a closed
 //! store's state, and each upload's phase (`QueueFacts`). Both decode them
 //! with `SyncFacts::decode`. Sync computes the state; this module reads
-//! what sync needs.
+//! what sync needs. The `coven_upload_phases` view passes each upload's own
+//! facts to `_coven_upload_phase` in the same way (`UploadPhaseFacts`).
 //!
 //! A trailing upload, a download and a pin coven keeps are not sync's: this
 //! module reads no upload of theirs and no record about them, and the state
@@ -339,6 +340,93 @@ pub struct UploadRecords<P> {
     /// The record about the move the upload belongs to, if it has one: it
     /// names an original, which may be this upload's or a sibling's.
     pub moving: Option<P>,
+}
+
+/// How many values `_coven_upload_phase` takes, in the order
+/// `UploadPhaseFacts::decode` reads them: whether sync runs and its
+/// cooldown, as `coven_retry_effect` holds them; how the last pass ended, as
+/// `coven_sync_status` holds it; the pause, the setting to move files only
+/// on unmetered networks, whether the network is metered and whether a
+/// self-replacement pauses writes; whether this process sends the upload,
+/// whether storage holds its bytes and whether it is bound; when its retry
+/// wait ends, as `_coven_retries` stores it; the position and value of its
+/// own pending record and of its move's; and the path of the original it
+/// uploads, as `_coven_file_uploads` stores it.
+pub(crate) const UPLOAD_PHASE_FACTS: i32 = 16;
+
+/// What one upload's phase is computed from (§17.9, api.md E4), as
+/// `coven_upload_phases` passes it to `_coven_upload_phase` for each upload
+/// in this device's queue, in one committed snapshot: what holds every
+/// transfer, what holds trailing uploads, and the upload's own facts.
+#[derive(Clone, Debug)]
+pub struct UploadPhaseFacts<P> {
+    /// Whether a started connection will plan, and the cooldown holding
+    /// every request.
+    pub sync: crate::RetrySync,
+    /// How the last pass ended, as sync encodes it; none until a pass ends
+    /// on this device.
+    pub last_pass: Option<Vec<u8>>,
+    /// What holds trailing uploads.
+    pub holds: TransferHolds,
+    /// This process is sending it now.
+    pub sending: bool,
+    /// Storage holds its bytes; it waits for the rest of its move.
+    pub stored: bool,
+    /// A bound reference's, which the pause, a metered network and a
+    /// self-replacement don't hold (§17.4).
+    pub bound: bool,
+    /// Its last attempt failed, and it retries then (§6.7).
+    pub retry_at: Option<SystemTime>,
+    /// The record about its stored bytes, with its position in
+    /// `coven_pending`, if it has one.
+    pub own: Option<(i64, P)>,
+    /// The record about its move, with its position, if it has one: it
+    /// names an original, which may be this upload's or a sibling's.
+    pub moving: Option<(i64, P)>,
+    /// The path of the user's original it uploads, if it uploads one.
+    pub original: Option<std::path::PathBuf>,
+}
+
+impl<P: crate::PendingValue> UploadPhaseFacts<P> {
+    /// The facts from the values `coven_upload_phases` passes, in the order
+    /// `UPLOAD_PHASE_FACTS` lists them. A value that doesn't decode is
+    /// `DamagedDatabase`, and a record that doesn't decode `StateEncoding`.
+    pub(crate) fn decode(values: &impl FactValues) -> Result<Self, DbError> {
+        let record = |first: usize| -> Result<Option<(i64, P)>, DbError> {
+            match (values.get::<Option<i64>>(first)?, values.get::<Option<Vec<u8>>>(first + 1)?) {
+                (Some(position), Some(value)) => Ok(Some((
+                    position,
+                    serde_json::from_slice(&value).map_err(DbError::StateEncoding)?,
+                ))),
+                (None, None) => Ok(None),
+                _ => Err(DbError::DamagedDatabase),
+            }
+        };
+        Ok(Self {
+            sync: crate::internal_schema::retry_effect::sync(values.get(0)?, values.get(1)?)?,
+            last_pass: values.get(2)?,
+            holds: TransferHolds {
+                paused: values.get(3)?,
+                unmetered_only: values.get(4)?,
+                metered: values.get(5)?,
+                keys_changing: values.get(6)?,
+            },
+            sending: values.get(7)?,
+            stored: values.get(8)?,
+            bound: values.get(9)?,
+            retry_at: values
+                .get::<Option<Vec<u8>>>(10)?
+                .as_deref()
+                .map(crate::user_file::decode_time)
+                .transpose()?,
+            own: record(11)?,
+            moving: record(13)?,
+            original: values
+                .get::<Option<Vec<u8>>>(15)?
+                .map(crate::user_file::decode_path)
+                .transpose()?,
+        })
+    }
 }
 
 /// Read the facts, what holds trailing uploads, and the queue with what is

@@ -14,7 +14,7 @@ pub fn make_readable_objects(
     coven_database::test_utils::make_readable_objects(
         connection,
         device,
-        &coven_sync::sync_state_function(),
+        &coven_sync::sync_functions(),
     )
 }
 

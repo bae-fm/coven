@@ -18,10 +18,11 @@
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`), and the sizes of the store's own
 /// files (`local_bytes_schema.rs`).
-pub(crate) const READABLE: [&str; 24] = [
+pub(crate) const READABLE: [&str; 25] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
+    "coven_upload_phases",
     "coven_upload_pause",
     "coven_network",
     "coven_sending",
@@ -66,7 +67,7 @@ pub(super) const SCHEMA: &str = concat!(
     // the facts the subquery reads (`sync_facts.rs`), in sync's own Rust
     // code, so that an app's screen reads the state in its own live query
     // and the Rust code stays the one definition the Lean model checks
-    // (`sync_state_function.rs`). OFFSET 0 keeps SQLite from merging the
+    // (`sync_functions.rs`). OFFSET 0 keeps SQLite from merging the
     // subquery into the outer SELECT, which would call the function once
     // for each column. The subquery reads the files being sent through
     // `coven_sending`, so a live query of this view runs again as a send
@@ -104,6 +105,51 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_unmetered_only AS w
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.object=u.object;",
+    // What each file in this device's upload queue is doing, as `uploads()`
+    // gives each one's phase (§17.9): `_coven_upload_phase` computes it from
+    // the facts it reads (`sync_facts.rs`), in sync's own Rust code, as
+    // `_coven_sync_state` computes the state. The inner subquery reads once
+    // what holds every transfer and what holds trailing uploads; each upload
+    // adds whether this process sends it, read through `coven_sending` so a
+    // live query of this view runs again as a send starts or ends, whether
+    // storage holds its bytes, whether it is bound, its retry wait, its own
+    // record and its move's, and its original. Files sharing one upload
+    // share its phase. `at` is when the wait ends, for a retry as
+    // `coven_uploads.retry_at` holds it and for a cooldown as
+    // `coven_retry_effect.cooling_until` does. OFFSET 0 keeps SQLite from
+    // merging either subquery into the SELECT around it, which would call
+    // the function once for each column. The view reads `coven_sync_status`
+    // and `coven_retry_effect`, so on a read-only handle the policy refuses
+    // each read of it with `StatementForbidden` (`WRITER_STATE`).
+    "CREATE VIEW coven_upload_phases(file,phase,wait,at,pending) AS
+        SELECT y.file,y.phase->>'$.phase',y.phase->>'$.wait',
+            CASE y.phase->>'$.wait' WHEN 'retrying' THEN y.retry_at
+                WHEN 'cooling_down' THEN y.cooling_until END,
+            y.phase->>'$.pending'
+        FROM (SELECT l.file AS file,_coven_unix_ms(t.not_before) AS retry_at,
+                x.cooling_until AS cooling_until,
+                _coven_upload_phase(x.syncing,x.cooling_until,x.last_pass,x.paused,
+                    x.unmetered_only,x.metered,x.keys_changing,
+                    u.id IN (SELECT c.position FROM coven_sending AS c),u.stored,
+                    u.holds IS NOT NULL,t.not_before,o.id,o.value,m.id,m.value,
+                    u.original) AS phase
+            FROM (SELECT r.syncing AS syncing,r.cooling_until AS cooling_until,
+                    s.last_pass AS last_pass,z.paused IS NOT NULL AS paused,
+                    n.unmetered_only AS unmetered_only,n.metered AS metered,
+                    w.paused IS NOT NULL AS keys_changing
+                FROM coven_sync_status AS s
+                JOIN coven_retry_effect AS r
+                JOIN coven_network AS n
+                LEFT JOIN _coven_upload_pause AS z
+                LEFT JOIN _coven_write_pause AS w ON w.paused=1
+                LIMIT 1 OFFSET 0) AS x
+            CROSS JOIN _coven_upload_files AS l
+            JOIN _coven_file_uploads AS u ON u.id=l.upload
+            LEFT JOIN _coven_retries AS t ON t.upload=u.id
+            LEFT JOIN _coven_pending AS o
+                ON o.work='upload' AND o.device=u.device AND o.object=u.object
+            LEFT JOIN _coven_pending AS m ON m.move=u.move
+            LIMIT -1 OFFSET 0) AS y;",
     // Whether the app paused uploads, as one row whether or not anything is
     // queued. The pause table's one row, if any, joins a constant one.
     "CREATE VIEW coven_upload_pause(paused) AS

@@ -60,7 +60,7 @@ impl AudienceDatabase {
         directory: &StoreDir,
         sqlite: &crate::SqliteSettings,
         functions: &crate::SqlFunctions,
-        sync_state: Option<&crate::SyncStateFunction>,
+        sync_functions: Option<&crate::SyncFunctions>,
         observer: &crate::store_failure::StoreHandle,
         device: coven_foundation::id_source::DeviceId,
         tables: &[SyncedTable],
@@ -73,7 +73,13 @@ impl AudienceDatabase {
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
-            crate::coven_functions::register_views(setup, device, &transfers, &network, sync_state)
+            crate::coven_functions::register_views(
+                setup,
+                device,
+                &transfers,
+                &network,
+                sync_functions,
+            )
         };
         let database = StoreSql::open(
             &directory.audience_database_path(),

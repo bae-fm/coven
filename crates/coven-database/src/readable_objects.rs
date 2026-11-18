@@ -12,8 +12,9 @@ use sqlive::rusqlite::Connection;
 /// coven's views. The function also makes the tables of coven's own that
 /// the views read or that the outside-store writes fill, all empty
 /// (`readable_schema`). The function registers coven's SQL functions, with
-/// `device` as this device's id and `sync_state` as the sync state's
-/// computation, which the coven crate passes from sync as its builder does. Nothing transfers files there and
+/// `device` as this device's id and `sync_functions` as the computations of
+/// the sync state and of each upload's phase, which the coven crate passes
+/// from sync as its builder does. Nothing transfers files there and
 /// nothing watches the network, as on a read-only handle. The test runs
 /// this function before the app's schema, so the app's triggers and views
 /// apply and run as in a store. coven writes no rows on that connection.
@@ -24,7 +25,7 @@ use sqlive::rusqlite::Connection;
 pub fn make_readable_objects(
     connection: &Connection,
     device: DeviceId,
-    sync_state: &crate::SyncStateFunction,
+    sync_functions: &crate::SyncFunctions,
 ) -> sqlive::rusqlite::Result<()> {
     let policy = crate::app_policy::CovenPolicy::new(&[]);
     sqlive::Setup::on_test_connection(connection, policy.clone(), |setup| {
@@ -39,7 +40,7 @@ pub fn make_readable_objects(
             device,
             &crate::transfers_in_flight::TransfersInFlight::new(observer.clone()),
             &crate::network_facts::NetworkFacts::new(observer),
-            Some(sync_state),
+            Some(sync_functions),
         )
     })?;
     connection.execute_batch(&crate::internal_schema::readable_schema())

@@ -16,19 +16,28 @@ const OBJECTS: &str = "SELECT type,name,sql FROM sqlite_schema
 /// This device's id outside a store.
 const DEVICE: DeviceId = DeviceId(7);
 
-/// A sync state computation that decodes the facts the view passes and
-/// shows every state as synced: sync's own computation is in coven-sync,
-/// which this crate can't reach.
-fn sync_state() -> crate::SyncStateFunction {
-    crate::SyncStateFunction::new::<crate::sync_facts::tests::Record>(|_facts| {
-        Ok(crate::SyncStateRow { state: "synced", pending: None, detail: serde_json::json!({}) })
-    })
+/// Computations that decode the facts the views pass and show every state
+/// as synced and every upload as queued: sync's own computations are in
+/// coven-sync, which this crate can't reach.
+fn sync_functions() -> crate::SyncFunctions {
+    crate::SyncFunctions::new::<crate::sync_facts::tests::Record>(
+        |_facts| {
+            Ok(crate::SyncStateRow {
+                state: "synced",
+                pending: None,
+                detail: serde_json::json!({}),
+            })
+        },
+        |_facts| {
+            Ok(crate::UploadPhaseRow { phase: "waiting", wait: Some("queued"), pending: None })
+        },
+    )
 }
 
 /// A connection outside any store, with coven's readable objects made on it.
 fn outside_store() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
-    make_readable_objects(&connection, DEVICE, &sync_state()).unwrap();
+    make_readable_objects(&connection, DEVICE, &sync_functions()).unwrap();
     connection
 }
 

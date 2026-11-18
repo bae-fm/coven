@@ -259,27 +259,27 @@ fn coven_key(ctx: &sqlive::rusqlite::functions::Context<'_>) -> sqlive::rusqlite
 
 /// The callback that registers, on a connection to the store's database, the
 /// functions coven's views call: the device id, the transfers in flight,
-/// the network state and the sync state.
+/// the network state, the sync state and each upload's phase.
 pub(crate) type Views<'a> =
     dyn Fn(&Setup<'_, crate::app_policy::CovenPolicy>) -> sqlive::rusqlite::Result<()> + 'a;
 
 /// Register what coven's views call: the device id, the transfers in flight,
-/// the network (§4), and sync's computation of the sync state, when the code
-/// that opens the store passes it (§19.1). A test of the database crate
-/// alone opens a store without it, and each read of `coven_sync_state` then
-/// fails.
+/// the network (§4), and sync's computations of the sync state and of each
+/// upload's phase, when the code that opens the store passes them (§17.9,
+/// §19.1). A test of the database crate alone opens a store without them,
+/// and each read of `coven_sync_state` or `coven_upload_phases` then fails.
 pub(crate) fn register_views(
     setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     device: DeviceId,
     transfers: &crate::transfers_in_flight::TransfersInFlight,
     network: &crate::network_facts::NetworkFacts,
-    sync_state: Option<&crate::SyncStateFunction>,
+    sync_functions: Option<&crate::SyncFunctions>,
 ) -> sqlive::rusqlite::Result<()> {
     register_device(setup, device)?;
     transfers.register(setup)?;
     network.register(setup)?;
-    match sync_state {
-        Some(sync_state) => sync_state.register(setup),
+    match sync_functions {
+        Some(sync_functions) => sync_functions.register(setup),
         None => Ok(()),
     }
 }

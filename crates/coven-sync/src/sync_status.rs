@@ -14,7 +14,7 @@
 //! computes it.
 //!
 //! The database registers `SyncStatus::row` as the SQL function
-//! `_coven_sync_state` (`sync_state_function`), which the `coven_sync_state`
+//! `_coven_sync_state` (`sync_functions`), which the `coven_sync_state`
 //! view calls over the facts it reads: an app's screen reads the state in
 //! its own live query, joined to its rows, and this code stays the one
 //! definition of the state that the Lean model checks. `sync_status` reads
@@ -25,8 +25,8 @@ use crate::{
     Prerequisite, StatusFailure, SyncError,
 };
 use coven_database::{
-    DbError, RecordedLocation, Removal, RetrySync, SqlReadContext, SyncFacts, SyncStateFunction,
-    SyncStateRow, UnsentWork,
+    DbError, RecordedLocation, Removal, RetrySync, SqlReadContext, SyncFacts, SyncStateRow,
+    UnsentWork,
 };
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
@@ -644,7 +644,7 @@ impl SyncStatus {
     /// The state as `coven_sync_state` shows it, from the facts its subquery
     /// reads: what `_coven_sync_state` returns. The view reads when sync last
     /// finished from the status row itself.
-    fn row(facts: SyncFacts<PendingRecord>) -> Result<SyncStateRow, DbError> {
+    pub(crate) fn row(facts: SyncFacts<PendingRecord>) -> Result<SyncStateRow, DbError> {
         let positions: Vec<(i64, crate::PendingSubject)> = facts
             .records
             .iter()
@@ -706,14 +706,6 @@ pub async fn sync_status(database: &coven_database::StoreDatabase) -> Result<Syn
     database.read(SyncStatus::read).await
 }
 
-/// `_coven_sync_state`, the function `coven_sync_state` calls, for the
-/// database to register on every connection: the state computed in this
-/// module's Rust code, so that it stays the one definition the Lean model
-/// checks while an app's screen reads it in SQL (§19.1).
-pub fn sync_state_function() -> SyncStateFunction {
-    SyncStateFunction::new(SyncStatus::row)
-}
-
 /// The provider that `coven_sync_status.provider` names, or
 /// `DamagedDatabase` when the name matches no provider.
 fn named_provider(name: &str) -> Result<CloudProvider, DbError> {
@@ -760,7 +752,7 @@ fn stored(
 
 #[path = "sync_status_facts.rs"]
 mod facts;
-pub(crate) use facts::{Facts, Progress, Upload};
+pub(crate) use facts::{held_all, last_pass, Facts, Progress, Upload};
 
 #[cfg(test)]
 #[path = "sync_status_tests.rs"]
