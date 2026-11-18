@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::row_scope::RowImage;
 use crate::scope_plan::Planner;
 use crate::scope_term::{Affinity, ScopeTerm};
-use crate::select_syntax::{is_clock_function, Part};
+use crate::select_syntax::Part;
 use crate::sql_value::SqlValue as Value;
 use sqlite3_parser::ast::Expr;
 
@@ -64,10 +64,7 @@ pub(crate) fn row_term(
                 }
             }
             Part::Function(name, arguments, window) => {
-                if *window
-                    || is_clock_function(&name.to_ascii_lowercase())
-                    || !planner.functions.deterministic(name, *arguments)
-                {
+                if *window || !planner.functions.repeats(name, *arguments) {
                     return None;
                 }
             }

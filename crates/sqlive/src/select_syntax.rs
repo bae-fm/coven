@@ -367,7 +367,7 @@ const DETERMINISTIC: i64 = 0x800;
 
 /// Whether `name` is one of SQLite's date and time functions, which may read
 /// the clock.
-pub(crate) fn is_clock_function(name: &str) -> bool {
+fn is_clock_function(name: &str) -> bool {
     CLOCK_FUNCTIONS.contains(&name)
 }
 
@@ -444,11 +444,15 @@ impl Functions {
         self.called(name, arguments).iter().any(|definition| definition.aggregate)
     }
 
-    /// Whether a call of `name` with `arguments` arguments calls a scalar
-    /// function the connection flags deterministic.
-    pub(crate) fn deterministic(&self, name: &str, arguments: usize) -> bool {
+    /// Whether a call of `name` with `arguments` arguments gives the same
+    /// answer each time it runs on the same values: it calls a scalar
+    /// function the connection flags deterministic, and none of the date and
+    /// time functions, which read the clock for `'now'`.
+    pub(crate) fn repeats(&self, name: &str, arguments: usize) -> bool {
         let called = self.called(name, arguments);
-        !called.is_empty() && called.iter().all(|definition| definition.deterministic)
+        !is_clock_function(&name.to_ascii_lowercase())
+            && !called.is_empty()
+            && called.iter().all(|definition| definition.deterministic)
     }
 
     /// Whether evaluating the expression `found` holds twice gives the same
@@ -456,10 +460,7 @@ impl Functions {
     pub(crate) fn repeatable(&self, found: &[Part<'_>]) -> bool {
         found.iter().all(|part| match part {
             Part::Clock => false,
-            Part::Function(name, arguments, _) => {
-                !is_clock_function(&name.to_ascii_lowercase())
-                    && self.deterministic(name, *arguments)
-            }
+            Part::Function(name, arguments, _) => self.repeats(name, *arguments),
             _ => true,
         })
     }
