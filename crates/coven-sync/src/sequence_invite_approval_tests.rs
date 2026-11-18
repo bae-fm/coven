@@ -923,7 +923,7 @@ async fn a_recovered_member_syncs_past_their_old_circle() {
     carol.sync.pass().await.unwrap();
     let member = carol.identity.member();
     let state = carol.sync.database.store_state().await.unwrap();
-    let old = state.members[&member].joined.as_ref().unwrap().circle;
+    let old = state.members[&member].joined.circle;
     pin(&carol.sync.database, "00000000-0000-4000-8000-000000000001", old, "kept in her circle")
         .await;
     carol.sync.pass().await.unwrap();
