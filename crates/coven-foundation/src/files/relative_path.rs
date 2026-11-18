@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use windows_names::windows_device;
+use windows_reserved_names::windows_device;
 
 /// A path below a folder, as the names the app gives, outermost first: an
 /// album's name, then a track's. Each name is one name on every platform,

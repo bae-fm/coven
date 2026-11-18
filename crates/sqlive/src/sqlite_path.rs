@@ -78,7 +78,7 @@ fn reads_alike(name: &std::ffi::OsStr) -> bool {
         return false;
     }
     let base = name.split('.').next().unwrap_or_default().trim_end_matches(' ');
-    !windows_names::windows_device(base)
+    !windows_reserved_names::windows_device(base)
 }
 
 #[cfg(test)]

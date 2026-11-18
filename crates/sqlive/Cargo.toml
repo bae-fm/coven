@@ -24,7 +24,7 @@ tracing.workspace = true
 # The device names a verbatim path to a database may not hold
 # (sqlite_path.rs).
 [target.'cfg(windows)'.dependencies]
-windows-names.workspace = true
+windows-reserved-names.workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["trace"] }
