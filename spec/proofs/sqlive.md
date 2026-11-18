@@ -44,7 +44,8 @@ statements changed, as sqlive's pre-update hook records them. A change reruns
 the query when it inserts or deletes a row of a table the statement reads, or
 changes a column the statement reads, and the row before or after passes the
 table's scope. A join's lookups read the database the write leaves. The model
-takes the columns a statement reads to be the columns its clauses name; the
+takes the columns a statement reads to be the columns its clauses name, and
+every column of each table that a query whose rows SQLite picks reads; the
 differential checks that sqlive reads the same ones from SQLite.
 
 ## Each rule's theorem
@@ -99,6 +100,19 @@ promise of whichever rule reads it.
   rows it returns. `atOrBefore_passes` proves that the bound's scope passes
   exactly the rows that sort at or before the last row, NULL first ascending
   and last descending.
+- **The rows SQLite picks.** A query that keeps some of its rows, by a LIMIT
+  or an OFFSET or as a subquery whose first row a comparison takes, keeps the
+  rows SQLite reads first, in the order of the plan it chooses.
+  `post_picks_any` proves that with no ORDER BY, some order of the rows puts
+  any of them among the rows the query keeps, so an index on a column no
+  clause names can decide which rows those are. `fullyOrders_sound` proves
+  that a query that aggregates with no GROUP BY, and so returns one row, or
+  whose ORDER BY sorts by the rowid of each of its tables, keeps the same rows
+  in every order, on a database whose tables hold each row's rowid in its
+  first column, never NULL and different in each row.
+  `picked_column_reruns` proves that a change to any column of a table that a
+  query of the first kind reads runs the query again, when the row before or
+  after passes the table's scope.
 - **The whole read.** `whole_sound` proves that with no scope, every change of
   a column the statement reads runs the query again.
 
@@ -138,5 +152,6 @@ among rows that sort the same, so the test compares the rows there only
 through the reruns.
 
 SQLite's authorizer reports no read of the columns a USING or NATURAL join
-compares, so sqlive adds those columns to a statement's reads (§4), and the
+compares, nor of the columns that decide which rows a query whose rows SQLite
+picks keeps, so sqlive adds those columns to a statement's reads (§4), and the
 model's reads and sqlive's agree.

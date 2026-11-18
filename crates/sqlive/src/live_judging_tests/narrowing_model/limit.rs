@@ -1,7 +1,9 @@
 //! Rule 6: a statement ordered by its result columns of one table, with a
 //! LIMIT, depends on that table's rows up to its last row; and the forms
 //! that keep the WHERE's scope: an order by position, by a LEFT JOIN's right
-//! side, or by another table's column too.
+//! side, or by another table's column too, and an OFFSET. Rule 7: an order
+//! that doesn't sort by the rowid of each table, as one over a join, makes
+//! every column of the tables count as read.
 
 use super::{col, eq, item, out, pick, table, Core, Join, Query, Source, TABLES};
 use crate::random_scopes::Rng;
@@ -45,6 +47,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         order,
         order_named: rng.chance(85),
         limit: Some(1 + rng.below(4) as u32),
+        offset: rng.chance(20).then(|| rng.below(3) as u32),
         ..Query::default()
     }
 }

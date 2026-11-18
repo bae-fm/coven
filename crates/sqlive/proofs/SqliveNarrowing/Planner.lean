@@ -5,14 +5,6 @@ core's conditions with the rules, orders the items so each takes values from
 items placed before it, and binds the scopes of a run. -/
 namespace SqliveNarrowing
 
-/-- The queries a core's clauses hold, in the order sqlive reads them: the
-result columns', then the conditions', then GROUP BY's. -/
-def Core.subqueries (c : Core) : List Nat :=
-  let outs := c.output.flatMap fun
-    | .expr e | .max e => e.queries
-    | .count => []
-  (outs ++ c.conds.flatMap (·.1.queries) ++ c.groupBy.flatMap Expr.queries).eraseDups
-
 /-- The cores in the order sqlive finishes reading them: a core after the
 cores of its derived items and of its subqueries. -/
 def Statement.readOrder (s : Statement) : List Nat :=

@@ -33,7 +33,6 @@ mod derived;
 mod error;
 mod from_item;
 mod handle;
-mod joined_columns;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;
@@ -63,6 +62,7 @@ mod test_records;
 mod token_scan;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod triggered_inserts;
+mod unreported_columns;
 mod upkeep;
 mod wal_checkpoints;
 

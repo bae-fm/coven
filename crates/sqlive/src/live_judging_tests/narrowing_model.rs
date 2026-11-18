@@ -69,6 +69,8 @@ pub(super) struct Query {
     /// Whether the ORDER BY names each term's column instead of its position.
     pub(super) order_named: bool,
     pub(super) limit: Option<u32>,
+    /// The OFFSET, written only after a LIMIT.
+    pub(super) offset: Option<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -219,6 +221,9 @@ impl Query {
         }
         if let Some(limit) = self.limit {
             sql.push_str(&format!(" LIMIT {limit}"));
+            if let Some(offset) = self.offset {
+                sql.push_str(&format!(" OFFSET {offset}"));
+            }
         }
         sql
     }
@@ -241,6 +246,7 @@ impl Query {
             "order": order,
             "order_named": self.order_named,
             "limit": self.limit,
+            "offset": self.limit.and(self.offset),
         })
     }
 

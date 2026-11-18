@@ -1,8 +1,8 @@
 import SqliveNarrowing.Reader
 
 /-! Rule 6: a statement that is one SELECT ordered by columns of one of its
-tables, each a result column, with a LIMIT, depends only on that table's rows
-up to its last row when a run returns as many rows as its LIMIT
+tables, each a result column, with a LIMIT and no OFFSET, depends only on that
+table's rows up to its last row when a run returns as many rows as its LIMIT
 (`scope_order.rs`). The table isn't a LEFT JOIN's right side, and the SELECT
 neither groups nor aggregates. -/
 namespace SqliveNarrowing.Limit
@@ -23,7 +23,7 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let query := s.query s.root
   let [k] := query.arms | none
   let n ← query.limit
-  if query.orderBy.isEmpty ∨ !query.orderNamed ∨ n = 0 then none
+  if query.orderBy.isEmpty ∨ !query.orderNamed ∨ n = 0 ∨ query.offset.isSome then none
   let c := s.core k
   if c.aggregated then none
   let terms ← query.orderBy.mapM fun (p, desc) => do
@@ -363,11 +363,12 @@ end Sorting
 /-- An ORDER BY's sort key of a row. -/
 def orderKey (q : Query) (r : Row) : List Value := q.orderBy.map fun (p, _) => r.cell p
 
-/-- Rule 6's theorem: a query with an ORDER BY and a LIMIT whose run on
-`rows` returned as many rows as its LIMIT, the last with ORDER BY values
+/-- Rule 6's theorem: a query with an ORDER BY, a LIMIT and no OFFSET whose
+run on `rows` returned as many rows as its LIMIT, the last with ORDER BY values
 `last`, returns the same rows from any `rows'` that hold the same rows
 sorting at or before `last`, in the same order. -/
-theorem limit_sound {q : Query} {n : Nat} (hlimit : q.limit = some n) (horder : q.orderBy ≠ [])
+theorem limit_sound {q : Query} {n : Nat} (hlimit : q.limit = some n) (hoffset : q.offset = none)
+    (horder : q.orderBy ≠ [])
     {rows rows' : List Row} {last : List Value}
     (hlen : (q.post rows).length = n)
     (hlast : ((q.post rows).getLast?.map (orderKey q)) = some last)
@@ -377,7 +378,8 @@ theorem limit_sound {q : Query} {n : Nat} (hlimit : q.limit = some n) (horder : 
   have hne : q.orderBy.isEmpty = false := by simpa using horder
   have hlen_key : ∀ r, (orderKey q r).length = (q.orderBy.map (·.2)).length := by
     intro r; simp [orderKey]
-  simp only [Query.post, hne, Bool.false_eq_true, ↓reduceIte, hlimit] at hlen hlast ⊢
+  simp only [Query.post, hne, Bool.false_eq_true, ↓reduceIte, hlimit, hoffset, Option.getD_none,
+    List.drop_zero] at hlen hlast ⊢
   obtain ⟨y, hy, hky⟩ := Option.map_eq_some_iff.mp hlast
   have hlast_len : last.length = (q.orderBy.map (·.2)).length := by rw [← hky]; exact hlen_key y
   apply take_sortBy (P := fun r => keyLe (q.orderBy.map (·.2)) (orderKey q r) last)

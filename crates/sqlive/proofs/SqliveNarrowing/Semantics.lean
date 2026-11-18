@@ -69,14 +69,15 @@ def combineAll (ops : List Combine) : List (List Row) → List Row
   | [] => []
   | first :: rest => (ops.zip rest).foldl (fun acc (op, rows) => combine op acc rows) first
 
-/-- A query's ORDER BY and LIMIT over its rows. -/
+/-- A query's ORDER BY, OFFSET and LIMIT over its rows. -/
 def Query.post (q : Query) (rows : List Row) : List Row :=
   let directions := q.orderBy.map (·.2)
   let key (r : Row) := q.orderBy.map fun (p, _) => r.cell p
   let sorted := if q.orderBy.isEmpty then rows else sortBy (fun a b => keyLe directions (key a) (key b)) rows
+  let kept := sorted.drop (q.offset.getD 0)
   match q.limit with
-  | some n => sorted.take n
-  | none => sorted
+  | some n => kept.take n
+  | none => kept
 
 /-- The ON conditions of the LEFT JOIN adding item `i`. -/
 def Core.onOf (c : Core) (i : Nat) : List Cond :=

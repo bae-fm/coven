@@ -2,7 +2,7 @@ import SqliveNarrowing.Reader
 
 /-! Rule 4: a condition on a derived item's rows (a FROM subquery, a CTE or
 a view) passes into each of its arms that neither groups nor aggregates, when
-its query has no LIMIT: an output column that is a bare column of the arm's
+its query has no LIMIT and no OFFSET: an output column that is a bare column of the arm's
 own item holds that item's value, so a term or an edge on the column holds of
 the item's row (`derived.rs`, `push_down`). The target is then an inner
 join's, as a WHERE condition in the arm would make it, except that a term a
@@ -11,13 +11,13 @@ namespace SqliveNarrowing.PushDown
 
 /-- For a derived item, each arm a condition on its rows passes into: the
 item and column each output column passes on unchanged. `none` for a table;
-no arm when the query has a LIMIT. -/
+no arm when the query has a LIMIT or an OFFSET. -/
 def arms (s : Statement) (i : Nat) : Option (List (List (Option (Nat × Nat)))) :=
   match (s.item i).kind with
   | .table _ => none
   | .derived q _ =>
     let query := s.query q
-    if query.limit.isSome then some []
+    if query.limit.isSome || query.offset.isSome then some []
     else some <| (query.arms.filter fun k => !(s.core k).aggregated).map fun k =>
       (s.core k).output.map fun
         | .expr (.col j c) => if (s.item j).core = k then some (j, c) else none

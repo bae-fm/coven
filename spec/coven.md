@@ -697,7 +697,9 @@ commit that changes none of those columns doesn't run the query again. SQLite
 leaves out the columns a USING or NATURAL join compares, so coven adds them
 itself, for each table such a join compares in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
-query that joins `tracks` to `releases` with `USING (release_id)`. When coven
+query that joins `tracks` to `releases` with `USING (release_id)`. SQLite also
+leaves out the columns that decide which rows a LIMIT keeps, and coven adds
+them too, as the LIMIT's rules below say. When coven
 can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.
@@ -755,6 +757,38 @@ result row's values depend on many table rows. A join
 that narrows another table by the sorted table's rows takes only the rows up to
 the bound. Any other ORDER BY, such as an expression, and any OFFSET leave the
 scope as the WHERE gives it.
+
+Which rows a LIMIT keeps can depend on columns the statement never names.
+SQLite keeps the first rows it reads, and it reads them in the order of the
+plan it chooses. Ana's photo app shows one photo of each album with `p.id IN
+(SELECT f.id FROM photos AS f WHERE f.album_id = a.id LIMIT 1)`, and the app
+has an index on `photos(album_id, taken_at)`. SQLite reads each album's photos
+through that index, in the order Ana took them, so a write that changes only
+one photo's `taken_at` can change the photo the album shows. So a query with a
+LIMIT or an OFFSET depends on every column of each table it reads: the tables
+of its FROM, of the views and CTEs it reads, and of the queries inside it. So
+does a subquery whose first row a comparison takes, as `x = (SELECT ...)` or
+`(a, b) = (SELECT ...)`, since SQLite reads it as if it had `LIMIT 1`. The
+query's rows still narrow as its conditions and the LIMIT's bound say: a write
+to a photo of an album the screen doesn't show doesn't rerun it.
+
+An ORDER BY that sorts by the rowid of each of the query's tables tells every
+two of its rows apart, so the order SQLite reads them in can't change which
+rows the LIMIT keeps. Such a query depends only on the columns its statements
+name. Ben's album list above, ordered by `title` alone, depends on every column
+of `albums`: two albums with the same title can come in either order, and an
+index SQLite reads them through decides which one ends the window. Ordered by
+`title, id`, where `id` is the table's INTEGER PRIMARY KEY, the window depends
+only on the columns it names. A table's rowid is its INTEGER PRIMARY KEY
+column, or `rowid` where no column has that name. Each ORDER BY term names it
+as a column, by its name, by its result column's alias or by its position. The
+query is one SELECT with no DISTINCT, GROUP BY or aggregate, and each of its
+FROM items is a table. A WITHOUT ROWID table has no rowid, and a PRIMARY KEY
+that isn't the rowid, as `id INT PRIMARY KEY`, can hold NULL in many rows, so
+an ORDER BY over either still leaves the query depending on every column. A
+SELECT that calls an aggregate with no GROUP BY returns one row, which every
+order keeps, so a subquery such as `(SELECT count(*) FROM tracks AS t WHERE
+t.release_id = r.id)` depends only on the columns it names too.
 
 A condition narrows only where coven compares values as SQLite does. One on a
 column whose collation isn't BINARY, or on a generated column, doesn't, and nor
@@ -14808,6 +14842,7 @@ Write-ups explain each model and state its assumptions:
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
+| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; a change to any column of a table a query whose rows SQLite picks reads reruns it | `post_picks_any`, `fullyOrders_sound`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

@@ -185,9 +185,10 @@ pub struct Scopes {
     pub(crate) tables: BTreeMap<String, RowScope>,
     pub(crate) inlined: BTreeSet<String>,
     /// Columns the statement reads that SQLite's authorizer doesn't report:
-    /// those its USING and NATURAL joins compare, or every column when the
-    /// planner couldn't tell which.
-    pub(crate) joined: std::sync::Arc<crate::joined_columns::JoinedColumns>,
+    /// those its USING and NATURAL joins compare and every column of a table
+    /// that a query whose rows SQLite picks reads, or every column when the
+    /// planner couldn't tell which (`unreported_columns.rs`).
+    pub(crate) unreported: std::sync::Arc<crate::unreported_columns::UnreportedColumns>,
 }
 
 impl Default for Scopes {
@@ -196,7 +197,7 @@ impl Default for Scopes {
         Self {
             tables: BTreeMap::new(),
             inlined: BTreeSet::new(),
-            joined: std::sync::Arc::new(crate::joined_columns::JoinedColumns::Known(
+            unreported: std::sync::Arc::new(crate::unreported_columns::UnreportedColumns::Known(
                 crate::read_set::ColumnSet::new(),
             )),
         }

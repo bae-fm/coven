@@ -116,6 +116,8 @@ structure Query where
   sqlive's LIMIT bound needs, rather than its position. -/
   orderNamed : Bool
   limit : Option Nat
+  /-- OFFSET: how many of the ordered rows the query skips first. -/
+  offset : Option Nat
   deriving Repr, Inhabited
 
 /-- A shape that makes sqlive read every table of the statement whole. A
@@ -190,5 +192,34 @@ def Cond.queries : Cond → List Nat
   | .rowEq ls rs => ls.flatMap Expr.queries ++ rs.flatMap Expr.queries
   | .and l r | .or l r => l.queries ++ r.queries
   | .not c => c.queries
+
+/-- The subqueries whose first row `c` takes: each scalar subquery in it, and
+the subquery a row value is compared with by `=`. An IN and an EXISTS take
+none, as they read every row. -/
+def Cond.firstRows : Cond → List Nat
+  | .cmp _ l r => l.queries ++ r.queries
+  | .null e _ => e.queries
+  | .inList e vs => e.queries ++ vs.flatMap Expr.queries
+  | .inQuery e _ _ => e.queries
+  | .exists .. => []
+  | .rowSub vs q isIn _ => vs.flatMap Expr.queries ++ if isIn then [] else [q]
+  | .rowEq ls rs => ls.flatMap Expr.queries ++ rs.flatMap Expr.queries
+  | .and l r | .or l r => l.firstRows ++ r.firstRows
+  | .not c => c.firstRows
+
+/-- The queries a core's clauses hold, in the order sqlive reads them: the
+result columns', then the conditions', then GROUP BY's. -/
+def Core.subqueries (c : Core) : List Nat :=
+  let outs := c.output.flatMap fun
+    | .expr e | .max e => e.queries
+    | .count => []
+  (outs ++ c.conds.flatMap (·.1.queries) ++ c.groupBy.flatMap Expr.queries).eraseDups
+
+/-- The subqueries whose first row a core's clauses take. -/
+def Core.firstRows (c : Core) : List Nat :=
+  let outs := c.output.flatMap fun
+    | .expr e | .max e => e.queries
+    | .count => []
+  outs ++ c.conds.flatMap (·.1.firstRows) ++ c.groupBy.flatMap Expr.queries
 
 end SqliveNarrowing

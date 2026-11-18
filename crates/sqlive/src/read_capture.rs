@@ -119,16 +119,17 @@ impl ReadCapture {
     }
 
     /// Record `frame`'s tables, each read through the scope `scopes` gives
-    /// it, or whole, with the columns the statement's joins compare that the
-    /// authorizer didn't report: SQLite reports no read at all of a table
-    /// that a subquery reads only through a USING join. A table read through a view or CTE that the
+    /// it, or whole, with the columns its rows depend on that the authorizer
+    /// didn't report (`unreported_columns.rs`): SQLite reports no read at all
+    /// of a table that a subquery reads only through a USING join. A table
+    /// read through a view or CTE that the
     /// statement didn't read as a source of its own, such as a view read
     /// whole, may give the statement any of its rows, so `finish` records it
     /// as read in every row.
     fn finish(&mut self, frame: ReadFrame, scopes: &Scopes) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (table, column) in
-            frame.columns.into_iter().chain(scopes.joined.columns().iter().cloned())
+            frame.columns.into_iter().chain(scopes.unreported.columns().iter().cloned())
         {
             tables.entry(table).or_default().insert(column);
         }

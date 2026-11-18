@@ -1,6 +1,8 @@
 //! A statement that orders by columns of one table and returns as many rows
 //! as its LIMIT depends only on the rows that sort at or before its last
-//! row, as a list window read as one live query does (§4).
+//! row, as a list window read as one live query does (§4). A LIMIT whose
+//! ORDER BY doesn't tell its rows apart depends on every column of its
+//! tables.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -178,5 +180,60 @@ async fn an_offset_an_unreturned_column_or_an_expression_narrows_nothing_more() 
         follows(&db, sql, vec![], &[("INSERT INTO notes VALUES (7,'z','')", true)]).await;
         db.commit("DELETE FROM notes WHERE id = 7");
     }
+    db.close();
+}
+
+/// The tables of the narrowing differential, and its rows at seed 226 of its
+/// mixed shapes.
+const PICKED: &str =
+    "CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE);
+CREATE TABLE w(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE);
+CREATE INDEX u_a ON u(a);
+CREATE INDEX w_c ON w(c);
+INSERT INTO u VALUES (0,3,0,5,3),(1,3,0,4,3),(2,3,3,1,2),(3,1,1,2,2),(4,1,0,2,0),(5,3,1,3,3);
+INSERT INTO w VALUES (0,1,NULL,5,2),(1,0,1,0,2),(2,3,1,5,0),(3,3,0,4,1),(4,2,NULL,0,2),(5,3,3,1,0)";
+
+/// A LIMIT whose ORDER BY doesn't tell its rows apart keeps the rows SQLite
+/// reads first, in the order of the plan it picks: here the index on `u.a`,
+/// which the statement never names, so a write to `u.a` changes the row the
+/// subquery keeps, and a write to any column of `u` reruns the query. The
+/// narrowing differential found the first statement, among its mixed shapes
+/// at seed 226. A scalar subquery keeps its first row the same way.
+#[tokio::test]
+async fn a_limit_that_doesnt_tell_its_rows_apart_reruns_on_any_column() {
+    let db = TestDatabase::open(PICKED);
+    follows(
+        &db,
+        "SELECT x.id, d.a, y.c FROM w AS x JOIN (SELECT x.id, x.a, x.b, x.c FROM w AS x) AS d \
+         ON d.b = x.b LEFT JOIN u AS y ON y.c = d.c \
+         WHERE x.id IN (SELECT q.id FROM u AS q LIMIT 1) AND y.id >= 1",
+        vec![],
+        &[("UPDATE u SET a = 1 WHERE id = 1", true), ("UPDATE u SET n = 1 WHERE id = 2", true)],
+    )
+    .await;
+    db.close();
+    let db = TestDatabase::open(PICKED);
+    follows(
+        &db,
+        "SELECT x.id FROM w AS x WHERE x.id = (SELECT q.id FROM u AS q)",
+        vec![],
+        &[("UPDATE u SET a = 0 WHERE id = 5", true)],
+    )
+    .await;
+    db.close();
+}
+
+/// An ORDER BY that sorts by the rowid tells the rows apart, so a write to a
+/// column the statement doesn't name reruns nothing.
+#[tokio::test]
+async fn a_limit_ordered_by_the_rowid_depends_only_on_the_named_columns() {
+    let db = TestDatabase::open(PICKED);
+    follows(
+        &db,
+        "SELECT x.id FROM w AS x WHERE x.id IN (SELECT q.id FROM u AS q ORDER BY q.id LIMIT 1)",
+        vec![],
+        &[("UPDATE u SET a = 0 WHERE id = 5", false), ("DELETE FROM u WHERE id = 0", true)],
+    )
+    .await;
     db.close();
 }

@@ -1,6 +1,6 @@
 import SqliveNarrowing.Semantics
 
-/-! Facts about where a query's rows come from: sorting and LIMIT keep only
+/-! Facts about where a query's rows come from: sorting, OFFSET and LIMIT keep only
 rows they were given, and a core's row is made from one binding it keeps. -/
 namespace SqliveNarrowing
 
@@ -34,8 +34,8 @@ theorem mem_post {q : Query} {rows : List Row} {r : Row} (h : r ∈ q.post rows)
     · exact h
     · exact mem_sortBy.mp h
   split at h
-  · exact hs h (List.mem_of_mem_take h)
-  · exact hs h h
+  · exact hs h (List.mem_of_mem_drop (List.mem_of_mem_take h))
+  · exact hs h (List.mem_of_mem_drop h)
 
 theorem mem_groupsOf {key : Bind → List Value} {bs g : List Bind} {b : Bind}
     (hg : g ∈ groupsOf key bs) (hb : b ∈ g) : b ∈ bs := by

@@ -24,7 +24,6 @@ use std::sync::Arc;
 
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
-use crate::joined_columns::{joined_columns, JoinedColumns};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
@@ -34,6 +33,7 @@ use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
+use crate::unreported_columns::{unreported_columns, UnreportedColumns};
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
     ast::{
@@ -49,10 +49,10 @@ use sqlite3_parser::{
 pub(crate) struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
     sources: Option<Sources>,
-    /// The columns its USING and NATURAL joins compare, which SQLite's
-    /// authorizer doesn't report, or unknown when the parser can't read the
-    /// statement (`joined_columns.rs`).
-    joined: Arc<JoinedColumns>,
+    /// The columns its rows depend on that SQLite's authorizer doesn't
+    /// report, or unknown when the parser can't read the statement
+    /// (`unreported_columns.rs`).
+    unreported: Arc<UnreportedColumns>,
 }
 
 impl ScopePlan {
@@ -66,7 +66,7 @@ impl ScopePlan {
         let unread = |why: &str| -> rusqlite::Result<Self> {
             Ok(Self {
                 sources: None,
-                joined: Arc::new(JoinedColumns::unknown(connection, why.to_owned())?),
+                unreported: Arc::new(UnreportedColumns::unknown(connection, why.to_owned())?),
             })
         };
         let Some(sql) = number_parameters(sql, statement)? else {
@@ -84,9 +84,10 @@ impl ScopePlan {
         if !matches!(parser.next(), Ok(None)) {
             return unread("the statement isn't one SELECT the parser reads");
         }
+        let aggregates = aggregates(connection)?;
         Ok(Self {
-            sources: Sources::read(connection, select, whole)?,
-            joined: Arc::new(joined_columns(connection, select)?),
+            sources: Sources::read(connection, select, whole, &aggregates)?,
+            unreported: Arc::new(unreported_columns(connection, &aggregates, select)?),
         })
     }
 
@@ -105,7 +106,7 @@ impl ScopePlan {
             Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             None => Scopes::default(),
         };
-        scopes.joined = Arc::clone(&self.joined);
+        scopes.unreported = Arc::clone(&self.unreported);
         scopes
     }
 }
@@ -188,12 +189,13 @@ impl Sources {
         connection: &Connection,
         select: &Select<'_>,
         whole: &WholeViews,
+        aggregates: &BTreeSet<String>,
     ) -> rusqlite::Result<Option<Self>> {
         let mut planner = Planner {
             items: Vec::new(),
             cores: Vec::new(),
             edges: Vec::new(),
-            aggregates: aggregates(connection)?,
+            aggregates,
             inlined: Vec::new(),
             whole,
         };
@@ -219,7 +221,7 @@ pub(crate) struct Planner<'a> {
     pub(crate) edges: Vec<Edge>,
     /// The functions that can make one row of many, lowercase: aggregate
     /// and window functions.
-    pub(crate) aggregates: BTreeSet<String>,
+    pub(crate) aggregates: &'a BTreeSet<String>,
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by.
     pub(crate) inlined: Vec<String>,
@@ -228,7 +230,7 @@ pub(crate) struct Planner<'a> {
 }
 
 /// The names of the connection's aggregate and window functions.
-fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
+pub(crate) fn aggregates(connection: &Connection) -> rusqlite::Result<BTreeSet<String>> {
     let mut functions = connection
         .prepare_cached("SELECT DISTINCT name FROM pragma_function_list WHERE type IN ('a','w')")?;
     let names = functions
@@ -571,7 +573,10 @@ pub(crate) fn read_select<'a>(
             planner.note_names(core, &found);
             Some(core)
         }
-        _ if found.iter().any(|part| matches!(part, Part::Select(_) | Part::Table)) => {
+        _ if found
+            .iter()
+            .any(|part| matches!(part, Part::Select(_) | Part::Subquery(_) | Part::Table)) =>
+        {
             return Ok(None)
         }
         _ => None,
@@ -605,7 +610,7 @@ fn read_nested<'a>(
     for part in found {
         match part {
             Part::Name(_) | Part::Collation | Part::Function(..) | Part::Clock => {}
-            Part::Select(select) => {
+            Part::Select(select) | Part::Subquery(select) => {
                 let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
                     return Ok(None);
                 };
@@ -800,7 +805,7 @@ fn read_condition<'a>(
             // `edge` refuse the comparisons it reaches, and a NULL test
             // looks through it.
             Part::Collation => continue,
-            Part::Select(_) | Part::Table => return Ok(Narrowing::default()),
+            Part::Select(_) | Part::Subquery(_) | Part::Table => return Ok(Narrowing::default()),
         };
         let Some((item, _)) = planner.resolve(core, name) else {
             // A name sqlive can't place keeps the condition from narrowing.

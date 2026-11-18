@@ -1,0 +1,173 @@
+use super::{unreported_columns, UnreportedColumns};
+use sqlite3_parser::{
+    ast::{Cmd, Stmt},
+    lexer::sql::Parser,
+    Bump, FallibleIterator,
+};
+
+fn connection() -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE a(id INTEGER PRIMARY KEY, K INTEGER, v INTEGER);
+             CREATE TABLE b(id INTEGER PRIMARY KEY, k INTEGER, w INTEGER);
+             CREATE VIEW ab AS SELECT a.v, b.w FROM a NATURAL JOIN b",
+        )
+        .unwrap();
+    connection
+}
+
+fn pairs(found: &[(&str, &str)]) -> super::ColumnSet {
+    found.iter().map(|(table, column)| ((*table).to_owned(), (*column).to_owned())).collect()
+}
+
+fn unreported(connection: &rusqlite::Connection, sql: &str) -> UnreportedColumns {
+    let bump = Bump::new();
+    let mut parser = Parser::new(&bump, sql.as_bytes());
+    let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
+        panic!("the parser reads {sql}");
+    };
+    let aggregates = crate::scope_plan::aggregates(connection).unwrap();
+    unreported_columns(connection, &aggregates, select).unwrap()
+}
+
+#[test]
+fn a_using_join_names_its_column_of_each_side_and_a_view_its_natural_join() {
+    let connection = connection();
+    let UnreportedColumns::Known(found) = unreported(
+        &connection,
+        "SELECT a.v FROM a JOIN b USING (k) WHERE a.v IN (SELECT v FROM ab)",
+    ) else {
+        panic!("the joins are known");
+    };
+    assert_eq!(
+        found,
+        pairs(&[("a", "id"), ("a", "k"), ("a", "v"), ("b", "id"), ("b", "k"), ("b", "w"),])
+    );
+}
+
+#[test]
+fn unknown_joins_count_every_column_of_every_table() {
+    let connection = connection();
+    let unknown = UnreportedColumns::unknown(&connection, "a test".to_owned()).unwrap();
+    assert!(matches!(unknown, UnreportedColumns::Unknown(_)));
+    assert_eq!(
+        unknown.columns(),
+        &pairs(&[("a", "id"), ("a", "k"), ("a", "v"), ("b", "id"), ("b", "k"), ("b", "w"),])
+    );
+}
+
+/// A USING column compares with the leftmost item before the join that has
+/// it: a table after that item compares nothing, and a CTE of a table's name
+/// is not that table.
+#[test]
+fn a_using_join_names_the_leftmost_column_before_it() {
+    let connection = connection();
+    for (sql, expected) in [
+        ("SELECT a.v FROM a CROSS JOIN b AS c JOIN b USING (k)", &[("a", "k"), ("b", "k")][..]),
+        (
+            "WITH a AS (SELECT 1 AS id) SELECT * FROM a CROSS JOIN b AS c JOIN b USING (k)",
+            &[("b", "k")][..],
+        ),
+        ("SELECT * FROM (SELECT 1 AS k) AS s CROSS JOIN a JOIN b USING (k)", &[("b", "k")][..]),
+        (
+            "SELECT * FROM (SELECT a.id FROM a) AS s CROSS JOIN a JOIN b USING (k)",
+            &[("a", "k"), ("b", "k")][..],
+        ),
+        (
+            "SELECT * FROM (SELECT k + 1 FROM a) AS s CROSS JOIN a JOIN b USING (k)",
+            &[("a", "k"), ("b", "k")][..],
+        ),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the joins are known");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+}
+
+/// A query whose rows SQLite picks reads every column of each table it reads:
+/// through a LIMIT, an OFFSET, a scalar subquery or a row value compared
+/// with a subquery, in its FROM, a view, a CTE, or a query inside it.
+#[test]
+fn a_query_sqlite_picks_rows_of_reads_every_column_of_its_tables() {
+    let connection = connection();
+    let a = [("a", "id"), ("a", "k"), ("a", "v")];
+    let b = [("b", "id"), ("b", "k"), ("b", "w")];
+    let both: Vec<_> = a.iter().chain(&b).copied().collect();
+    for (sql, expected) in [
+        ("SELECT a.v FROM a LIMIT 1", &a[..]),
+        ("SELECT a.v FROM a LIMIT 1 OFFSET 1", &a[..]),
+        ("SELECT a.v FROM a WHERE a.v = (SELECT b.w FROM b)", &b[..]),
+        ("SELECT a.v FROM a WHERE (a.k, a.v) = (SELECT b.k, b.w FROM b)", &b[..]),
+        ("SELECT a.v FROM a WHERE a.id IN (SELECT b.id FROM b LIMIT 1)", &b[..]),
+        ("SELECT (SELECT b.w FROM b WHERE b.k = a.k) FROM a", &b[..]),
+        (
+            "SELECT x.v FROM (SELECT a.v FROM a WHERE a.k IN (SELECT b.k FROM b)) AS x LIMIT 2",
+            &both[..],
+        ),
+        // The view's NATURAL join compares every column of both tables too.
+        ("SELECT v FROM ab LIMIT 1", &both[..]),
+        (
+            "WITH c AS (SELECT * FROM d), d AS (SELECT b.id FROM b) \
+             SELECT a.v FROM a WHERE a.id IN (SELECT c.id FROM c LIMIT 1)",
+            &b[..],
+        ),
+        ("SELECT a.v FROM a ORDER BY a.v LIMIT 1", &a[..]),
+        ("SELECT a.v FROM a JOIN b ON b.k = a.k ORDER BY a.id LIMIT 1", &both[..]),
+        ("SELECT a.k, max(a.v) FROM a GROUP BY a.k ORDER BY a.k LIMIT 1", &a[..]),
+        ("SELECT DISTINCT a.v FROM a ORDER BY a.id LIMIT 1", &a[..]),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+}
+
+/// An ORDER BY that sorts by the rowid of each table of its SELECT tells
+/// every two rows apart, so the rows a LIMIT keeps depend only on the columns
+/// the statement names: by the INTEGER PRIMARY KEY column, named or by its
+/// result column's position or alias, or by `rowid`. An aggregate with no
+/// GROUP BY returns one row, which every order keeps. A primary key that
+/// isn't the rowid can hold NULL in many rows, and a WITHOUT ROWID table has
+/// no rowid.
+#[test]
+fn an_order_by_each_tables_rowid_reads_only_the_named_columns() {
+    let connection = connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE p(id INT PRIMARY KEY, x INTEGER);
+             CREATE TABLE q(id INTEGER PRIMARY KEY DESC, x INTEGER);
+             CREATE TABLE r(id INTEGER PRIMARY KEY, x INTEGER) WITHOUT ROWID;
+             CREATE TABLE s(id INTEGER, x INTEGER, PRIMARY KEY (id DESC))",
+        )
+        .unwrap();
+    for sql in [
+        "SELECT a.v FROM a",
+        "SELECT a.v FROM a ORDER BY a.id LIMIT 1",
+        "SELECT a.v, a.id FROM a ORDER BY 2 DESC LIMIT 1",
+        "SELECT a.v, a.id AS key FROM a ORDER BY key LIMIT 1",
+        "SELECT a.v FROM a ORDER BY rowid LIMIT 1",
+        "SELECT a.v FROM a JOIN b ON b.k = a.k ORDER BY a.v, b.id, a.id LIMIT 1",
+        "SELECT a.v FROM a WHERE a.v = (SELECT b.w FROM b ORDER BY b.id DESC LIMIT 1)",
+        "SELECT a.v FROM a WHERE a.v = (SELECT max(b.w) FROM b WHERE b.k = a.k)",
+        "SELECT count(*) FROM a LIMIT 1",
+        "SELECT s.x FROM s ORDER BY s.id LIMIT 1",
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[]), "{sql}");
+    }
+    for (sql, table) in [
+        ("SELECT p.x FROM p ORDER BY p.id LIMIT 1", "p"),
+        ("SELECT q.x FROM q ORDER BY q.id LIMIT 1", "q"),
+        ("SELECT r.x FROM r ORDER BY r.id LIMIT 1", "r"),
+    ] {
+        let UnreportedColumns::Known(found) = unreported(&connection, sql) else {
+            panic!("the columns are known: {sql}");
+        };
+        assert_eq!(found, pairs(&[(table, "id"), (table, "x")]), "{sql}");
+    }
+}

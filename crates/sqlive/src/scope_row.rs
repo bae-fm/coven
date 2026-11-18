@@ -80,7 +80,7 @@ pub(crate) fn row_term(
                 functions.push(name);
             }
             Part::Collation => {}
-            Part::Select(_) | Part::Table | Part::Clock => return Ok(None),
+            Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Clock => return Ok(None),
         }
     }
     if columns.is_empty() || !deterministic(connection, &functions)? {

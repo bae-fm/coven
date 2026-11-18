@@ -65,8 +65,11 @@ pub(crate) enum Part<'a> {
     /// A name SQLite could resolve to a column: bare, qualified by a table,
     /// or by a schema and a table.
     Name(&'a Expr<'a>),
-    /// A SELECT, with sources of its own.
+    /// A SELECT, with sources of its own, that an EXISTS or an IN reads.
     Select(&'a Select<'a>),
+    /// A SELECT whose first row the expression takes: a scalar subquery, or
+    /// the subquery a row value is compared with.
+    Subquery(&'a Select<'a>),
     /// `x IN table`: a table read outside any FROM.
     Table,
     /// A COLLATE, which gives a comparison holding it its collation.
@@ -84,7 +87,8 @@ pub(crate) fn parts<'a>(expr: &'a Expr<'a>, into: &mut Vec<Part<'a>>) {
         Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..) => {
             into.push(Part::Name(expr))
         }
-        Expr::Exists(select) | Expr::Subquery(select) => into.push(Part::Select(select)),
+        Expr::Exists(select) => into.push(Part::Select(select)),
+        Expr::Subquery(select) => into.push(Part::Subquery(select)),
         Expr::InSelect { lhs, rhs, .. } => {
             parts(lhs, into);
             into.push(Part::Select(rhs));

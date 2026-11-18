@@ -135,8 +135,9 @@ partial def readSelect (schema : Schema) (j : Json) (parent : Option Nat)
     pure ((← o.getObjValAs? Nat "position"), (← o.getObjValAs? Bool "desc")))
   let orderNamed := (field j "order_named").bind (·.getBool?.toOption) |>.getD false
   let limit := (field j "limit").bind (·.getNat?.toOption)
+  let offset := (field j "offset").bind (·.getNat?.toOption)
   let b ← get
-  set { b with queries := b.queries.push { arms, ops, orderBy, orderNamed, limit } }
+  set { b with queries := b.queries.push { arms, ops, orderBy, orderNamed, limit, offset } }
   pure b.queries.size
 
 /-- Read one core's tree: its items, then its result columns, conditions and
