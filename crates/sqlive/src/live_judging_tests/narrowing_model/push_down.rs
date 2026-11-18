@@ -21,6 +21,7 @@ fn plain(rng: &mut Rng, alias: &str, name: &'static str) -> Core {
         conditions,
         select: DERIVED.iter().map(|column| out(col(alias, column))).collect(),
         group: Vec::new(),
+        distinct: false,
     }
 }
 
@@ -66,6 +67,7 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
                 Out::Max(col("x", "c"), Some("c".to_owned())),
             ],
             group: vec![col("x", "a")],
+            distinct: false,
         }),
         5 => {
             let mut query = select(plain(rng, "x", first));
@@ -92,6 +94,7 @@ pub(super) fn derived(rng: &mut Rng) -> Query {
                 out(col("y", "c")),
             ],
             group: Vec::new(),
+            distinct: false,
         }),
     }
 }
@@ -119,6 +122,7 @@ pub(super) fn around(rng: &mut Rng, source: Source, columns: &[&'static str]) ->
             conditions: vec![condition(rng, "d", columns)],
             select: shown,
             group: Vec::new(),
+            distinct: false,
         }),
         1 => {
             // The derived item and a table, joined either way.
@@ -145,6 +149,7 @@ pub(super) fn around(rng: &mut Rng, source: Source, columns: &[&'static str]) ->
                 conditions: where_,
                 select: select_,
                 group: Vec::new(),
+                distinct: false,
             })
         }
         2 => {
@@ -159,6 +164,7 @@ pub(super) fn around(rng: &mut Rng, source: Source, columns: &[&'static str]) ->
                 conditions: vec![super::term::condition(rng, "x", 1)],
                 select: select_,
                 group: Vec::new(),
+                distinct: false,
             })
         }
         _ => {
@@ -173,12 +179,14 @@ pub(super) fn around(rng: &mut Rng, source: Source, columns: &[&'static str]) ->
                 ],
                 select: vec![out(lit(1))],
                 group: Vec::new(),
+                distinct: false,
             });
             select(Core {
                 from: vec![table("x", table_)],
                 conditions: vec![Cond::Exists(Box::new(inner), rng.chance(30))],
                 select: super::term::columns("x"),
                 group: Vec::new(),
+                distinct: false,
             })
         }
     }

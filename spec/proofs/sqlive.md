@@ -18,7 +18,8 @@ equality of each column it names with the column of that name of the leftmost
 item before it that has one, as SQLite compares them. A subquery is a query
 number, so an expression names it without nesting. A call of `max` with two
 arguments is SQLite's scalar max, an expression of one row, which the aggregate
-`max` of one argument is not. A value is NULL or an integer, and
+`max` of one argument is not. A SELECT DISTINCT keeps the first of each set of
+its rows that are equal. A value is NULL or an integer, and
 the differential's tables hold only those, in columns SQLite compares without
 converting a value.
 
@@ -125,11 +126,12 @@ promise of whichever rule reads it.
   are the same. `distinct_keeps_first` proves the same of a GROUP BY term,
   which keeps one of each set of values that compare equal, the one it reads
   first, so the model counts a SELECT whose result column shows a GROUP BY
-  term as following the order unless the term is such a column. UNION,
-  INTERSECT and EXCEPT keep one of each set of rows that compare equal in the
-  same way, the first or the last they read as their plan decides, so the
-  model counts a compound as following the order unless each result column
-  of each of its SELECTs is such a column. A SELECT that calls a window function picks rows too:
+  term as following the order unless the term is such a column. DISTINCT,
+  UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal
+  in the same way: DISTINCT the first it reads, and a compound the first or
+  the last as its plan decides. So the model counts a SELECT DISTINCT, and a
+  compound, as following the order unless each result column of each of its
+  SELECTs is such a column. A SELECT that calls a window function picks rows too:
   `rowNumber_follows_order` proves that `row_number()` whose window has no
   ORDER BY numbers two rows in the order SQLite reads them.
   `orderFree_rows_perm` proves that a SELECT with none of these, whose

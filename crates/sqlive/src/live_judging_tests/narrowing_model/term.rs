@@ -56,6 +56,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions: conditions(rng, "x"),
             select: columns("x"),
             group: Vec::new(),
+            distinct: false,
         }),
         1 => {
             let mut where_ = conditions(rng, "x");
@@ -67,6 +68,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: where_,
                 select: select_,
                 group: Vec::new(),
+                distinct: false,
             })
         }
         2 => {
@@ -88,6 +90,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: where_,
                 select: select_,
                 group: Vec::new(),
+                distinct: false,
             })
         }
         _ => {
@@ -98,6 +101,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: vec![condition(rng, "x", 1), condition(rng, "q", 1)],
                 select: vec![out(lit(1))],
                 group: Vec::new(),
+                distinct: false,
             });
             let mut where_ = conditions(rng, "x");
             where_.push(Cond::Exists(Box::new(inner), rng.chance(30)));
@@ -106,6 +110,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: where_,
                 select: columns("x"),
                 group: Vec::new(),
+                distinct: false,
             })
         }
     }

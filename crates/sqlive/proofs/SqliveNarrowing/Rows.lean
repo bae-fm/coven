@@ -54,6 +54,14 @@ theorem mem_post {q : Query} {rows : List Row} {r : Row} (h : r ∈ q.post rows)
   · exact hs h (List.mem_of_mem_drop (List.mem_of_mem_take h))
   · exact hs h (List.mem_of_mem_drop h)
 
+/-- A row of a core's result is one of its rows. -/
+theorem mem_result {c : Core} {subs : Bind → Subs} {kept : List Bind} {r : Row}
+    (h : r ∈ c.result subs kept) : r ∈ c.rows subs kept := by
+  unfold Core.result at h
+  split at h
+  · exact List.mem_eraseDups.mp h
+  · exact h
+
 theorem mem_groupsOf {key : Bind → List Value} {bs g : List Bind} {b : Bind}
     (hg : g ∈ groupsOf key bs) (hb : b ∈ g) : b ∈ bs := by
   simp only [groupsOf, List.mem_map] at hg
@@ -98,7 +106,7 @@ theorem mem_query_single {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k : N
     r = [none] ∨ ∃ b' ∈ coreBindings s db (evalQuery s db f) b k,
       r = [e.eval b' (evalQuery s db f b')] := by
   simp only [evalQuery, queryRows, ha, List.map_cons, List.map_nil, combineAll_single] at hr
-  exact mem_rows_single ho (mem_post hr)
+  exact mem_rows_single ho (mem_result (mem_post hr))
 
 theorem mem_combine {op : Combine} {a b : List Row} {r : Row} (h : r ∈ combine op a b) :
     r ∈ a ∨ r ∈ b := by

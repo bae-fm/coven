@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 #[path = "narrowing_model/aggregate.rs"]
 mod aggregate;
+#[path = "narrowing_model/distinct.rs"]
+mod distinct;
 #[path = "narrowing_model/edge.rs"]
 mod edge;
 #[path = "narrowing_model/limit.rs"]
@@ -80,6 +82,7 @@ fn views() -> Vec<(&'static str, Query, Vec<&'static str>)> {
         conditions,
         select,
         group: Vec::new(),
+        distinct: false,
     };
     let four = vec!["id", "a", "b", "c"];
     vec![
@@ -128,6 +131,7 @@ fn views() -> Vec<(&'static str, Query, Vec<&'static str>)> {
                     Out::Count(Some("n".to_owned())),
                 ],
                 group: vec![col("x", "a")],
+                distinct: false,
             }),
             vec!["a", "n"],
         ),
@@ -535,6 +539,12 @@ async fn whole_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn aggregate_matches_lean() {
     differential("aggregate", aggregate::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn distinct_matches_lean() {
+    differential("distinct", distinct::statement).await;
 }
 
 #[tokio::test]

@@ -51,6 +51,7 @@ fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
         conditions,
         select: vec![Out::Count(None)],
         group: Vec::new(),
+        distinct: false,
     })
 }
 
@@ -89,6 +90,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions,
                 select: vec![out(col("d", pick(rng, &["id", "a", "c"])))],
                 group: Vec::new(),
+                distinct: false,
             });
             where_.push(Cond::InQuery(
                 col("x", pick(rng, &["id", "a", "c"])),
@@ -102,6 +104,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                     conditions: where_,
                     select: super::term::columns("x"),
                     group: Vec::new(),
+                    distinct: false,
                 })
             };
         }
@@ -122,6 +125,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: Vec::new(),
                 select: DERIVED.iter().map(|column| out(col("y", column))).collect(),
                 group: Vec::new(),
+                distinct: false,
             };
             if rng.chance(50) {
                 joined.conditions.push(condition(rng, "d", &DERIVED));
@@ -132,6 +136,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 conditions: Vec::new(),
                 select: vec![Out::Count(None)],
                 group: Vec::new(),
+                distinct: false,
             });
             return Query {
                 with,
@@ -140,6 +145,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                     conditions: Vec::new(),
                     select: vec![out(Expr::Sub(Box::new(count))), out(lit(1))],
                     group: Vec::new(),
+                    distinct: false,
                 })
             };
         }
@@ -157,6 +163,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions: where_,
             select: select_,
             group: Vec::new(),
+            distinct: false,
         })
     }
 }

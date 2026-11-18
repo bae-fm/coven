@@ -114,6 +114,9 @@ structure Core where
   conds : List (Cond × Place)
   output : List OutCol
   groupBy : List Expr
+  /-- `SELECT DISTINCT`: it keeps one of each set of its rows that compare
+  equal. -/
+  distinct : Bool := false
   deriving Repr, Inhabited
 
 /-- Whether a core makes one row of many: it groups or calls an aggregate. -/

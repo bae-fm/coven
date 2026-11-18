@@ -34,5 +34,5 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         conditions.push(super::term::condition(rng, "y", 1));
     }
     let select_ = vec![out(col("x", "id")), out(col("d", "a")), out(col("y", "c"))];
-    select(Core { from, conditions, select: select_, group: Vec::new() })
+    select(Core { from, conditions, select: select_, group: Vec::new(), distinct: false })
 }

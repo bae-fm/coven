@@ -2,8 +2,8 @@
 //! as its LIMIT depends only on the rows that sort at or before its last
 //! row, as a list window read as one live query does (§4). A LIMIT whose
 //! ORDER BY doesn't tell its rows apart depends on every column of its
-//! tables, and so does an aggregate whose rows follow the order SQLite reads
-//! its rows in.
+//! tables, and so do an aggregate, a DISTINCT and a compound whose rows
+//! follow the order SQLite reads its rows in.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -326,6 +326,35 @@ async fn a_grouped_value_that_compares_equal_to_another_and_differs_reruns_on_an
             .await;
         db.close();
     }
+}
+
+/// DISTINCT keeps the first of each set of rows that compare equal that
+/// SQLite reads, so a write to `v.a` changes the value a DISTINCT core of
+/// `v.b` or `v.t` returns, and a write to any column of `v` reruns the query.
+/// A DISTINCT core of INTEGER columns depends only on the columns the
+/// statement names.
+#[tokio::test]
+async fn a_distinct_value_that_compares_equal_to_another_and_differs_reruns_on_any_column() {
+    for sql in ["SELECT DISTINCT x.b FROM v AS x", "SELECT DISTINCT x.t FROM v AS x"] {
+        let db = TestDatabase::open(EQUAL);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[("UPDATE v SET a = 3 WHERE id = 2", true), ("UPDATE v SET x = 1 WHERE id = 1", true)],
+        )
+        .await;
+        db.close();
+    }
+    let db = TestDatabase::open(EQUAL);
+    follows(
+        &db,
+        "SELECT DISTINCT x.a, x.id FROM v AS x",
+        vec![],
+        &[("UPDATE v SET x = 1 WHERE id = 1", false), ("DELETE FROM v WHERE id = 2", true)],
+    )
+    .await;
+    db.close();
 }
 
 /// UNION, INTERSECT and EXCEPT keep one of each set of rows that compare

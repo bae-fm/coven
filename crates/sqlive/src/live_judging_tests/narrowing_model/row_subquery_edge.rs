@@ -30,14 +30,20 @@ fn subquery(rng: &mut Rng, name: &'static str, outer: &str, width: usize) -> Que
     if rng.chance(30) {
         conditions.push(eq(col("q", "c"), col(outer, "c")));
     }
-    let core =
-        Core { from: vec![table("q", name)], conditions, select: returned, group: Vec::new() };
+    let core = Core {
+        from: vec![table("q", name)],
+        conditions,
+        select: returned,
+        group: Vec::new(),
+        distinct: false,
+    };
     if rng.chance(15) {
         let other = Core {
             from: vec![table("p", pick(rng, &TABLES))],
             conditions: Vec::new(),
             select: (0..width).map(|_| out(col("p", pick(rng, &COLUMNS)))).collect(),
             group: Vec::new(),
+            distinct: false,
         };
         return Query { arms: vec![core, other], ops: vec!["UNION"], ..Query::default() };
     }
@@ -88,6 +94,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions: where_,
             select: select_,
             group: Vec::new(),
+            distinct: false,
         });
     }
     select(Core {
@@ -95,5 +102,6 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         conditions: where_,
         select: super::term::columns("x"),
         group: Vec::new(),
+        distinct: false,
     })
 }

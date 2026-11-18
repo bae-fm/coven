@@ -37,6 +37,8 @@ pub(super) struct Core {
     pub(super) conditions: Vec<Cond>,
     pub(super) select: Vec<Out>,
     pub(super) group: Vec<Expr>,
+    /// `SELECT DISTINCT`.
+    pub(super) distinct: bool,
 }
 
 #[derive(Clone)]
@@ -230,7 +232,8 @@ impl Query {
 impl Core {
     fn sql(&self) -> String {
         let columns: Vec<String> = self.select.iter().map(Out::sql).collect();
-        let mut sql = format!("SELECT {}", columns.join(", "));
+        let distinct = if self.distinct { "DISTINCT " } else { "" };
+        let mut sql = format!("SELECT {distinct}{}", columns.join(", "));
         for (position, item) in self.from.iter().enumerate() {
             let source = match &item.source {
                 Source::Table(name) | Source::View(name) => (*name).to_owned(),
@@ -310,6 +313,7 @@ impl Core {
             "where": self.conditions.iter().map(Cond::json).collect::<Vec<_>>(),
             "select": self.select.iter().map(Out::json).collect::<Vec<_>>(),
             "group": self.group.iter().map(Expr::json).collect::<Vec<_>>(),
+            "distinct": self.distinct,
         })
     }
 

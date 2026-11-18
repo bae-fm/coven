@@ -74,7 +74,7 @@ fn core(rng: &mut Rng) -> Core {
     if group.is_empty() && select_.iter().all(|column| matches!(column, Out::Expr(..))) {
         select_.push(Out::Count(names.next().unwrap()));
     }
-    Core { from, conditions, select: select_, group }
+    Core { from, conditions, select: select_, group, distinct: false }
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -87,5 +87,5 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         .map(|position| out(Expr::Col("d".to_owned(), ["v0", "v1", "v2", "v3"][position])))
         .collect();
     let from = vec![item("d", Source::Query(Box::new(select(core))), Join::Comma, Vec::new())];
-    select(Core { from, conditions: Vec::new(), select: shown, group: Vec::new() })
+    select(Core { from, conditions: Vec::new(), select: shown, group: Vec::new(), distinct: false })
 }

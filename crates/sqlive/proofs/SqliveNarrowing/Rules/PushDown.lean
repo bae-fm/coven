@@ -123,7 +123,7 @@ theorem push_down_sound {s : Statement} {q : Nat} {db : Db} {f : Nat} {b : Bind}
   | true => exact Or.inl rfl
   | false =>
     right
-    obtain ⟨b', hb', j, rfl⟩ := mem_rows_plain hagg hr
+    obtain ⟨b', hb', j, rfl⟩ := mem_rows_plain hagg (mem_result hr)
     refine ⟨b', hb', fun c j c' hc => ?_⟩
     simp [Row.cell, List.getElem?_map, hc, Expr.eval, OutCol.plain]
 

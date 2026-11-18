@@ -127,7 +127,7 @@ theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat
     r[i]? = some none ∨ ∃ b' ∈ coreBindings s db (evalQuery s db f) b k,
       r[i]? = some (e.eval b' (evalQuery s db f b')) := by
   simp only [evalQuery, queryRows, ha, List.map_cons, List.map_nil, combineAll_single] at hr
-  have hr := mem_post hr
+  have hr := mem_result (mem_post hr)
   unfold Core.rows at hr
   split at hr
   · simp only [List.mem_map] at hr

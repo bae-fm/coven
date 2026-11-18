@@ -254,12 +254,13 @@ fn a_core_whose_rows_follow_the_order_it_reads_them_in_reads_every_column() {
     }
 }
 
-/// UNION, INTERSECT and EXCEPT keep one of each set of rows that compare
-/// equal, which the order SQLite reads them in decides, so a compound reads
-/// every column of each table it reads unless each result column of each arm
-/// is a column whose equal values are the same.
+/// DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that
+/// compare equal, which the order SQLite reads them in decides, so a DISTINCT
+/// core or a compound reads every column of each table it reads unless each
+/// result column of the core, or of each arm, is a column whose equal values
+/// are the same.
 #[test]
-fn a_compound_of_values_that_compare_equal_and_differ_reads_every_column() {
+fn a_distinct_or_compound_of_values_that_compare_equal_and_differ_reads_every_column() {
     let connection = connection();
     connection
         .execute_batch(
@@ -272,6 +273,16 @@ fn a_compound_of_values_that_compare_equal_and_differ_reads_every_column() {
     let a_b: Vec<_> = a.iter().chain(&b).copied().collect();
     let a_c: Vec<_> = a.iter().chain(&c).copied().collect();
     for (sql, expected) in [
+        ("SELECT DISTINCT c.t FROM c", &c[..]),
+        ("SELECT DISTINCT c.x, c.u FROM c", &c[..]),
+        ("SELECT DISTINCT a.v + 1 FROM a", &a[..]),
+        ("SELECT DISTINCT * FROM a", &a[..]),
+        ("SELECT DISTINCT count(*) FROM a GROUP BY a.k", &a[..]),
+        ("SELECT a.v FROM a WHERE a.k IN (SELECT DISTINCT c.t FROM c)", &c[..]),
+        (
+            "SELECT s.v FROM (SELECT DISTINCT a.v FROM a JOIN (SELECT b.w FROM b) AS d) AS s",
+            &a_b[..],
+        ),
         ("SELECT c.t FROM c UNION SELECT a.v FROM a", &a_c[..]),
         ("SELECT a.v FROM a INTERSECT SELECT c.u FROM c", &a_c[..]),
         ("SELECT a.v + 1 FROM a EXCEPT SELECT b.w FROM b", &a_b[..]),
@@ -289,6 +300,8 @@ fn a_compound_of_values_that_compare_equal_and_differ_reads_every_column() {
         assert_eq!(found, pairs(expected), "{sql}");
     }
     for sql in [
+        "SELECT DISTINCT c.x, c.r, c.id FROM c",
+        "SELECT DISTINCT a.v, b.w FROM a JOIN b ON b.k = a.k",
         "SELECT a.v FROM a UNION SELECT b.w FROM b",
         "SELECT c.t FROM c UNION ALL SELECT a.v FROM a",
         "SELECT c.x, c.r, c.id FROM c EXCEPT SELECT a.k, a.v, rowid FROM a",

@@ -363,7 +363,8 @@ theorem closed_eval {s : Statement} {qs : List Nat} (h : closed s qs = true) (db
         rcases he with ⟨o, ho, he⟩ | he
         · exact Or.inl (Or.inl ⟨o, ho, e, he, hq'⟩)
         · exact Or.inr ⟨e, he, hq'⟩
-    show c.rows E (coreBindings s db E b k) = c.rows E (coreBindings s db E (R b) k)
+    show c.result E (coreBindings s db E b k) = c.result E (coreBindings s db E (R b) k)
+    unfold Core.result
     rw [← hrows (coreBindings s db E b k), hbind, hrows]
 
 /-- A query among queries that name nothing outside them returns the same

@@ -61,6 +61,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         conditions,
         select: select_,
         group: Vec::new(),
+        distinct: false,
     };
     match rng.below(6) {
         0 => {

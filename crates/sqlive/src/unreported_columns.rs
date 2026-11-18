@@ -36,11 +36,12 @@
 //! joins them, unless the call's own ORDER BY sorts by the rowid of each of
 //! the core's tables. The model states the rule as `Statement.followsOrder`.
 //!
-//! UNION, INTERSECT and EXCEPT keep one of each set of rows that compare
-//! equal, which the order SQLite reads them in decides, so every column of
-//! each table a compound reads counts as read unless each result column of
-//! each arm is a column whose equal values are the same. The model states the
-//! rule as `Statement.compoundFollowsOrder`.
+//! DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that
+//! compare equal, which the order SQLite reads them in decides, so every
+//! column of each table a DISTINCT core or a compound reads counts as read
+//! unless each result column of the core, or of each arm, is a column whose
+//! equal values are the same. The model states the rule as
+//! `Statement.distinctFollowsOrder` and `Statement.compoundFollowsOrder`.
 //!
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
@@ -56,8 +57,9 @@ use crate::select_syntax::{
 };
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    As, CompoundOperator, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name,
-    OneSelect, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
+    As, CompoundOperator, Distinctness, Expr, FromClause, JoinConstraint, JoinOperator, JoinType,
+    Name, OneSelect, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn,
+    WindowDef,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -261,7 +263,7 @@ impl Walk<'_> {
                     window_parts(&definition.window, &mut found);
                 }
                 reads.extend(self.selects(&found)?);
-                if self.follows_order(core, order_by)? {
+                if self.follows_order(core, order_by)? || self.distinct_follows_order(core)? {
                     self.picked.push(reads.clone());
                 }
             }
@@ -508,6 +510,17 @@ impl Walk<'_> {
             });
         }
         self.sorts_by_rowids(&items, &sorted)
+    }
+
+    /// Whether `core` is DISTINCT, which keeps one of each set of rows that
+    /// compare equal, the one SQLite reads first, and one of its result
+    /// columns can hold values that compare equal and differ: it is no column
+    /// whose equal values are the same (`returns_exactly`).
+    fn distinct_follows_order(&self, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
+        let OneSelect::Select { distinctness: Some(Distinctness::Distinct), .. } = core else {
+            return Ok(false);
+        };
+        Ok(!self.returns_exactly(core)?)
     }
 
     /// Whether `select` combines its arms by UNION, INTERSECT or EXCEPT, which

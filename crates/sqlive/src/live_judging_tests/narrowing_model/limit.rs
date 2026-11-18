@@ -22,7 +22,13 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         // reads first.
         let greatest = Expr::Greatest(Box::new(col("x", "a")), Box::new(col("x", "c")));
         return Query {
-            arms: vec![Core { from, conditions, select: vec![out(greatest)], group: Vec::new() }],
+            arms: vec![Core {
+                from,
+                conditions,
+                select: vec![out(greatest)],
+                group: Vec::new(),
+                distinct: false,
+            }],
             limit: super::limit(1 + rng.below(3) as u32),
             ..Query::default()
         };
@@ -54,7 +60,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         _ => vec![(0, false), (1, false)],
     };
     Query {
-        arms: vec![Core { from, conditions, select: select_, group: Vec::new() }],
+        arms: vec![Core { from, conditions, select: select_, group: Vec::new(), distinct: false }],
         order,
         order_named: rng.chance(85),
         limit: Some(Limit {

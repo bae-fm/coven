@@ -63,5 +63,6 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         conditions: where_,
         select: select_,
         group: Vec::new(),
+        distinct: false,
     })
 }

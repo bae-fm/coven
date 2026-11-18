@@ -140,8 +140,8 @@ partial def readSelect (schema : Schema) (j : Json) (parent : Option Nat)
   set { b with queries := b.queries.push { arms, ops, orderBy, orderNamed, limit, offset } }
   pure b.queries.size
 
-/-- Read one core's tree: its items, then its result columns, conditions and
-GROUP BY, reading each subquery where it appears. -/
+/-- Read one core's tree: its items, then its result columns, conditions,
+GROUP BY and DISTINCT, reading each subquery where it appears. -/
 partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
     (ctes : List (String × Json)) : M Nat := do
   let k := (← get).cores.size
@@ -179,11 +179,12 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
   let mut groupBy := []
   for e in list j "group" do
     groupBy := groupBy ++ [← readExpr schema e k ctes]
-  let core : Core := { parent, items, conds, output, groupBy }
+  let distinct := (field j "distinct").bind (·.getBool?.toOption) |>.getD false
+  let core : Core := { parent, items, conds, output, groupBy, distinct }
   if core.aggregated && core.windowed then
     lift (throw "the model numbers a window's rows only in a core that doesn't aggregate")
   modify fun b => { b with
-    cores := b.cores.modify k fun c => { c with conds, output, groupBy }
+    cores := b.cores.modify k fun c => { c with conds, output, groupBy, distinct }
     outNames := b.outNames.modify k fun _ => names }
   pure k
 

@@ -192,6 +192,11 @@ def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
   else
     kept.zipIdx.map fun (b, j) => c.output.map (OutCol.plain subs kept b j)
 
+/-- A core's rows as its query combines them: with DISTINCT, the first of
+each set of equal rows, in the order of its rows. -/
+def Core.result (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
+  if c.distinct then (c.rows subs kept).eraseDups else c.rows subs kept
+
 /-- The bindings core `k` keeps under the binding `outer` around it, with
 `eval` giving a query's rows under a binding. A core in no other, as a
 statement's own, a view's or a FROM subquery's of such a core, sees no row
@@ -213,7 +218,7 @@ def queryRows (s : Statement) (db : Db) (eval : Bind → Nat → List Row)
     (b : Bind) (q : Nat) : List Row :=
   let query := s.query q
   query.post <| combineAll query.ops <| query.arms.map fun k =>
-    (s.core k).rows eval (coreBindings s db eval b k)
+    (s.core k).result eval (coreBindings s db eval b k)
 
 /-- Query `q`'s rows under `b`, with `fuel` for its nesting. -/
 def evalQuery (s : Statement) (db : Db) : Nat → Bind → Nat → List Row

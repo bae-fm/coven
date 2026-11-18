@@ -44,6 +44,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions: Vec::new(),
             select: FIRST.iter().map(|column| out(col("p", column))).collect(),
             group: Vec::new(),
+            distinct: false,
         };
         from.push(item("x", Source::Query(Box::new(select(core))), Join::Comma, Vec::new()));
         from.push(table("z", pick(rng, &TABLES)));
@@ -95,6 +96,7 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         conditions,
         select: vec![out(col(shown, "id")), out(col("y", pick(rng, columns)))],
         group: Vec::new(),
+        distinct: false,
     });
     query.with = with;
     query

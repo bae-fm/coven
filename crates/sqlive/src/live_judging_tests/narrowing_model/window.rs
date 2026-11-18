@@ -51,7 +51,7 @@ fn core(rng: &mut Rng) -> Core {
     for position in 0..1 + rng.below(2) {
         select_.push(row_number(rng, &from, Some(format!("r{position}"))));
     }
-    Core { from, conditions, select: select_, group: Vec::new() }
+    Core { from, conditions, select: select_, group: Vec::new(), distinct: false }
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -69,7 +69,13 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             let shown = vec![out(col("d", "id")), out(col("d", "r0"))];
             let from =
                 vec![item("d", Source::Query(Box::new(select(core))), Join::Comma, Vec::new())];
-            select(Core { from, conditions: vec![condition], select: shown, group: Vec::new() })
+            select(Core {
+                from,
+                conditions: vec![condition],
+                select: shown,
+                group: Vec::new(),
+                distinct: false,
+            })
         }
         _ => Query {
             // Ordered by the core's own columns with a LIMIT: a row after

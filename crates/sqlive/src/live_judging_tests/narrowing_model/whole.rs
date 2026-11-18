@@ -25,12 +25,14 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions: vec![super::term::condition(rng, "x", 1)],
             select: vec![out(col("x", "id")), out(col("y", "b"))],
             group: Vec::new(),
+            distinct: false,
         }),
         _ => select(Core {
             from: vec![table("x", first)],
             conditions: Vec::new(),
             select: vec![Out::Count(None)],
             group: Vec::new(),
+            distinct: false,
         }),
     }
 }

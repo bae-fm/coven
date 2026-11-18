@@ -56,15 +56,15 @@ def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=
 
 /-- Whether query `q`'s ORDER BY tells every two of its rows apart. The query
 is one SELECT, and either it aggregates with no GROUP BY, so it returns one
-row, or it neither groups, aggregates nor calls a window function and its
-ORDER BY sorts by the rowid of each of its items as result columns
-(`Pick.fullyOrders_separates`). -/
+row, or it neither groups, aggregates, calls a window function nor is
+DISTINCT, as sqlive refuses, and its ORDER BY sorts by the rowid of each of
+its items as result columns (`Pick.fullyOrders_separates`). -/
 def Statement.fullyOrders (s : Statement) (q : Nat) : Bool :=
   match (s.query q).arms with
   | [k] =>
     let c := s.core k
     (c.aggregated && c.groupBy.isEmpty) ||
-      (!c.aggregated && !c.windowed && s.sortsByRowids k (s.orderExprs q k))
+      (!c.aggregated && !c.windowed && !c.distinct && s.sortsByRowids k (s.orderExprs q k))
   | _ => false
 
 /-- Whether `e` can take a different value in each binding of a group of a
@@ -113,6 +113,17 @@ def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
     | .max e => !s.comparesExactly k e
     | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (orderBy.map (·.1))
     | .count => false
+
+/-- Whether core `k`'s rows follow the order SQLite reads its rows in: it is
+DISTINCT, which keeps one of each set of rows that compare equal, the first it
+reads, and a result column can hold values that compare equal and differ, as
+any but a column whose equal values are the same can
+(`Pick.distinct_keeps_first`). -/
+def Statement.distinctFollowsOrder (s : Statement) (k : Nat) : Bool :=
+  let c := s.core k
+  c.distinct && c.output.any fun
+    | .expr e => !s.comparesExactly k e
+    | .count | .max _ | .concat .. | .rowNumber .. => true
 
 /-- Whether query `q`'s rows follow the order SQLite reads its arms' rows in:
 it combines its arms by UNION, INTERSECT or EXCEPT, which keep one of each set
@@ -163,8 +174,8 @@ the order SQLite reads its bindings in, reads. -/
 def Statement.pickedTables (s : Statement) : List Nat :=
   let picked := ((List.range s.queries.length).filter fun q =>
     s.picks q || s.compoundFollowsOrder q).flatMap s.queryItems
-  let followed := ((List.range s.cores.length).filter s.followsOrder).flatMap
-    (s.coreItemsWith s.queryItems)
+  let followed := ((List.range s.cores.length).filter fun k =>
+    s.followsOrder k || s.distinctFollowsOrder k).flatMap (s.coreItemsWith s.queryItems)
   (picked ++ followed).filterMap s.table?
 
 /-- How many columns table `t` has, as the items that read it list them. -/

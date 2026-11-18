@@ -22,10 +22,11 @@ first among values that compare equal (`max_keeps_first`), unless its
 argument is a column whose equal values are the same, and a GROUP BY term
 keeps the value it reads first among values that compare equal
 (`distinct_keeps_first`), so a result column that shows one follows that
-order, unless the term is such a column. UNION, INTERSECT and EXCEPT keep one
-of each set of rows that compare equal in the same way, so a compound whose
-arms return anything but such columns follows the order SQLite reads its
-arms' rows in (`Statement.compoundFollowsOrder`). A window numbers the
+order, unless the term is such a column. DISTINCT, UNION, INTERSECT and
+EXCEPT keep one of each set of rows that compare equal in the same way, so a
+DISTINCT core that returns anything but such columns follows the order SQLite
+reads its rows in (`Statement.distinctFollowsOrder`), and so does a compound
+whose arms do (`Statement.compoundFollowsOrder`). A window numbers the
 bindings its ORDER BY doesn't tell apart in that order too
 (`rowNumber_follows_order`), unless the ORDER BY sorts by the rowid of each
 of the core's tables. Such a core depends on every column of each table it
@@ -311,7 +312,7 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
   unfold Statement.fullyOrders at hfull
   rw [harms] at hfull
   simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true'] at hfull
-  rcases hfull with ⟨hagg, hgroup⟩ | ⟨⟨hagg, hwin⟩, hsorts⟩
+  rcases hfull with ⟨hagg, hgroup⟩ | ⟨⟨⟨hagg, hwin⟩, _⟩, hsorts⟩
   · intro a ha b hb _
     exact (one_row hagg hgroup ha).trans (one_row hagg hgroup hb).symm
   intro a ha b hb hkey
@@ -351,10 +352,11 @@ first column. -/
 theorem fullyOrders_sound {s : Statement} {db : Db} (hdb : db.Keyed) {q k : Nat}
     (hfull : s.fullyOrders q = true) (harms : (s.query q).arms = [k])
     {eval : Bind → Nat → List Row} {outer : Bind} {rows' : List Row}
-    (hperm : rows'.Perm ((s.core k).rows eval (coreBindings s db eval outer k))) :
+    (hperm : rows'.Perm ((s.core k).result eval (coreBindings s db eval outer k))) :
     (s.query q).post rows' =
-      (s.query q).post ((s.core k).rows eval (coreBindings s db eval outer k)) :=
-  post_perm hperm (fullyOrders_separates hdb hfull harms)
+      (s.query q).post ((s.core k).result eval (coreBindings s db eval outer k)) :=
+  post_perm hperm fun a ha b hb =>
+    fullyOrders_separates hdb hfull harms a (mem_result ha) b (mem_result hb)
 
 /-! A core that aggregates takes a plain result column's value from one
 binding of each group, which the order SQLite reads them in decides, and joins `group_concat`'s values in the
@@ -421,9 +423,9 @@ theorem max_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α} (h
     (hba : cmp b a = .eq) : keepMax cmp [a, b] = some a ∧ keepMax cmp [b, a] = some b := by
   simp [keepMax, hab, hba]
 
-/-- SQLite's GROUP BY over values that `cmp` orders: one value of each set of
-values that compare equal, the one it reads first, in the order it reads
-them. UNION, INTERSECT and EXCEPT keep one row of each set of rows that
+/-- SQLite's GROUP BY and DISTINCT over values that `cmp` orders: one value of
+each set of values that compare equal, the one it reads first, in the order it
+reads them. UNION, INTERSECT and EXCEPT keep one row of each set of rows that
 compare equal too: the first they read, or the last, which is the first in
 the reverse order, as their plan decides. -/
 def keepDistinct {α : Type} (cmp : α → α → Ordering) (vs : List α) : List α :=
@@ -435,7 +437,8 @@ NOCASE or `1` and `1.0`, give the group a different value read one way than
 the other. The model's values are integers, which compare equal only when
 they are the same, so a core that shows a GROUP BY term that can hold values
 that compare equal and differ follows the order SQLite reads its bindings in
-(`Statement.followsOrder`), and so does a compound that combines such values
+(`Statement.followsOrder`), and so do a DISTINCT core that returns such
+values (`Statement.distinctFollowsOrder`) and a compound that combines them
 (`Statement.compoundFollowsOrder`). -/
 theorem distinct_keeps_first {α : Type} {cmp : α → α → Ordering} {a b : α}
     (hab : cmp a b = .eq) (hba : cmp b a = .eq) :
@@ -561,11 +564,17 @@ theorem occurrences_perm {l₁ l₂ : List α} (h : l₁.Perm l₂) :
 
 end Occurrences
 
-/-- A core whose rows don't follow the order SQLite reads its bindings in
-gives, from any order of the bindings it keeps, the rows it gives from the
-order the model reads them in, in some order, on a database that keeps each
-row's rowid in its first column. -/
-theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
+/-- Two lists of the same elements, in any order, keep the same elements,
+in some order, when each keeps the first of each set of equal ones. -/
+theorem perm_eraseDups {α : Type} [BEq α] [LawfulBEq α] {l l' : List α} (h : l'.Perm l) :
+    l'.eraseDups.Perm l.eraseDups :=
+  (List.perm_ext_iff_of_nodup (nodup_eraseDups _) (nodup_eraseDups _)).mpr fun x => by
+    simp only [List.mem_eraseDups, h.mem_iff]
+
+/-- The rows of a core whose rows don't follow the order SQLite reads its
+bindings in, from any order of the bindings it keeps, are its rows from the
+order the model reads them in, in some order. -/
+theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
     (hfree : s.followsOrder k = false) {eval : Bind → Nat → List Row} {outer : Bind}
     {kept' : List Bind} (hperm : kept'.Perm (coreBindings s db eval outer k)) :
     ((s.core k).rows eval kept').Perm ((s.core k).rows eval (coreBindings s db eval outer k)) := by
@@ -718,6 +727,22 @@ theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
       have h2 := (List.mem_filter.mp hb').2
       simp only [beq_iff_eq] at h1 h2
       exact h1.trans h2.symm
+
+/-- A core whose rows don't follow the order SQLite reads its bindings in
+gives, from any order of the bindings it keeps, the rows it gives from the
+order the model reads them in, in some order, on a database that keeps each
+row's rowid in its first column. With DISTINCT it keeps the first of each set
+of equal rows, and the model's equal rows are the same row. -/
+theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
+    (hfree : s.followsOrder k = false) {eval : Bind → Nat → List Row} {outer : Bind}
+    {kept' : List Bind} (hperm : kept'.Perm (coreBindings s db eval outer k)) :
+    ((s.core k).result eval kept').Perm
+      ((s.core k).result eval (coreBindings s db eval outer k)) := by
+  have h := rows_perm_of_orderFree hdb hfree hperm
+  unfold Core.result
+  split
+  · exact perm_eraseDups h
+  · exact h
 
 /-! Every column of a table that a picked query, or a core whose rows follow
 the order SQLite reads them in, reads counts as read. -/
