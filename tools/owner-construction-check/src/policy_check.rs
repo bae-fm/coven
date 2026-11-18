@@ -165,7 +165,8 @@ fn invalid_capability_rows(code: &CrateCode, policy: &Policy) -> Vec<String> {
             .chain(capability.allowed.iter().map(CapabilityRow::Allowed));
         let mut seen = BTreeSet::new();
         for row in rows {
-            let (list, path, gate, named) = (row.list(), row.path(), row.gate(), row.named());
+            let (list, path, gate, named) =
+                (row.list().name(), row.path(), row.gate(), row.named());
             let listed = format!("capabilities.{list}: {name}");
             if !sources.contains(path) {
                 stale.push(format!("{listed}: {path} holds no source"));
@@ -210,10 +211,10 @@ enum CapabilityRow<'p> {
 }
 
 impl CapabilityRow<'_> {
-    fn list(self) -> &'static str {
+    fn list(self) -> ListKind {
         match self {
-            CapabilityRow::Frozen(_) => "frozen",
-            CapabilityRow::Allowed(_) => "allowed",
+            CapabilityRow::Frozen(_) => ListKind::Frozen,
+            CapabilityRow::Allowed(_) => ListKind::Allowed,
         }
     }
 
