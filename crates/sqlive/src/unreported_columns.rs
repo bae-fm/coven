@@ -462,9 +462,7 @@ impl Walk<'_> {
         });
         for item in listed {
             let SelectTable::Table(name, alias, _) = item else { return Ok(false) };
-            if self.cte(name).is_some() {
-                return Ok(false);
-            }
+            // A CTE's name names no table (`main`).
             let Some(table) = self.object(name, &["table"])? else { return Ok(false) };
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0,
