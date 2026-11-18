@@ -41,17 +41,31 @@ pub struct SyncStateRow {
 }
 
 /// One upload's phase as `coven_upload_phases` shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UploadPhaseRow {
-    /// The phase's kind, in snake case: `uploading`, `stored`, `waiting` or
-    /// `failed`.
-    pub phase: &'static str,
-    /// While it waits, what for, in snake case: `queued`, `paused` and the
-    /// rest; none otherwise.
-    pub wait: Option<&'static str>,
-    /// While it has failed, the pending record that says why, by its
-    /// position in `coven_pending`; none otherwise.
-    pub pending: Option<i64>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadPhaseRow {
+    /// An attempt is sending it now.
+    Uploading,
+    /// Storage holds its bytes; it waits for the rest of its move.
+    Stored,
+    /// It waits, for the wait this kind names in snake case: `queued`,
+    /// `paused` and the rest.
+    Waiting(&'static str),
+    /// It has failed, and the pending record at this position in
+    /// `coven_pending` says why.
+    Failed(i64),
+}
+
+impl UploadPhaseRow {
+    /// The row's columns: the phase's kind, what it waits for while it
+    /// waits, and the record a failure names.
+    fn columns(self) -> (&'static str, Option<&'static str>, Option<i64>) {
+        match self {
+            Self::Uploading => ("uploading", None, None),
+            Self::Stored => ("stored", None, None),
+            Self::Waiting(wait) => ("waiting", Some(wait), None),
+            Self::Failed(pending) => ("failed", None, Some(pending)),
+        }
+    }
 }
 
 type ComputeState = dyn Fn(&Context<'_>) -> Result<SyncStateRow, DbError> + Send + Sync;
@@ -114,12 +128,13 @@ impl SyncFunctions {
             crate::sync_facts::UPLOAD_PHASE_FACTS,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
             move |call| {
-                let row = upload_phase(call.context())
-                    .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))?;
+                let (phase, wait, pending) = upload_phase(call.context())
+                    .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))?
+                    .columns();
                 Ok(serde_json::json!({
-                    "phase": row.phase,
-                    "wait": row.wait,
-                    "pending": row.pending,
+                    "phase": phase,
+                    "wait": wait,
+                    "pending": pending,
                 })
                 .to_string())
             },

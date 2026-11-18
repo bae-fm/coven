@@ -100,16 +100,15 @@ fn upload_phase_row(facts: UploadPhaseFacts<PendingRecord>) -> Result<UploadPhas
         &facts.holds,
         &upload,
     );
-    Ok(UploadPhaseRow {
-        phase: phase.kind(),
-        wait: match &phase {
-            UploadPhase::Waiting(wait) => Some(wait.kind()),
-            UploadPhase::Uploading | UploadPhase::Stored | UploadPhase::Failed(_) => None,
-        },
-        pending: match phase {
-            UploadPhase::Failed(_) => position,
-            UploadPhase::Uploading | UploadPhase::Stored | UploadPhase::Waiting(_) => None,
-        },
+    Ok(match phase {
+        UploadPhase::Uploading => UploadPhaseRow::Uploading,
+        UploadPhase::Stored => UploadPhaseRow::Stored,
+        UploadPhase::Waiting(wait) => UploadPhaseRow::Waiting(wait.kind()),
+        // A failed phase names the upload's record, which came with its
+        // position.
+        UploadPhase::Failed(_) => UploadPhaseRow::Failed(position.ok_or(DbError::Invariant {
+            what: "a failed upload's record has its position in coven_pending",
+        })?),
     })
 }
 

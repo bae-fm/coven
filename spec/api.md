@@ -7128,6 +7128,12 @@ pub enum UploadPhase {
     Failed(PendingRecord),
 }
 
+impl UploadPhase {
+    /// The phase's kind, in snake case, as `coven_upload_phases.phase`
+    /// holds it (E4).
+    pub fn kind(&self) -> &'static str;
+}
+
 /// What a queued upload waits for, the first that holds (§17.9).
 pub enum UploadWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
@@ -7153,6 +7159,12 @@ pub enum UploadWait {
     Retrying { at: SystemTime },
     /// Its turn hasn't come.
     Queued,
+}
+
+impl UploadWait {
+    /// The wait's kind, in snake case, as `coven_upload_phases.wait` holds
+    /// it (E4).
+    pub fn kind(self) -> &'static str;
 }
 
 /// Encrypted bytes confirmed by the provider and persisted in the resumable

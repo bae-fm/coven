@@ -28,9 +28,7 @@ fn sync_functions() -> crate::SyncFunctions {
                 detail: serde_json::json!({}),
             })
         },
-        |_facts| {
-            Ok(crate::UploadPhaseRow { phase: "waiting", wait: Some("queued"), pending: None })
-        },
+        |_facts| Ok(crate::UploadPhaseRow::Waiting("queued")),
     )
 }
 

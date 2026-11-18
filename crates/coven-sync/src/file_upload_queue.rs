@@ -86,7 +86,7 @@ pub enum UploadWait {
 impl UploadPhase {
     /// The phase's kind, in snake case, as `coven_upload_phases.phase`
     /// holds it.
-    pub(crate) fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::Uploading => "uploading",
             Self::Stored => "stored",
@@ -99,7 +99,7 @@ impl UploadPhase {
 impl UploadWait {
     /// The wait's kind, in snake case, as `coven_upload_phases.wait` holds
     /// it.
-    pub(crate) fn kind(self) -> &'static str {
+    pub fn kind(self) -> &'static str {
         match self {
             Self::NotSyncing => "not_syncing",
             Self::CoolingDown { .. } => "cooling_down",
