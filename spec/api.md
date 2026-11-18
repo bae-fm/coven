@@ -5901,7 +5901,8 @@ pub struct PendingRecord {
     pub reason: PendingReason,
     /// The text of the error behind `reason`, naming every cause below it:
     /// an upload, download or read no caller awaited, an attempt of an
-    /// operation coven drives itself, or what blocked a slot.
+    /// operation coven drives itself, what blocked a slot, or, on the
+    /// `Connection` record, the failure that stopped a pass.
     /// `coven_pending.cause` keeps it, written with the record. Only the run
     /// that met the error writes one: opening clears every cause, and a
     /// failure that went back to an app call leaves none. Equality ignores

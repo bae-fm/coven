@@ -88,7 +88,13 @@ impl ConnectionRetry {
             *self = Self::Never(failure.clone());
             return Ok(failure);
         }
-        let record = PendingRecord::new(PendingSubject::Connection, reason);
+        // The loop runs the pass on its own, so the record keeps the
+        // error's text as its cause, as an operation's attempt does (E5).
+        let record = PendingRecord {
+            subject: PendingSubject::Connection,
+            reason,
+            cause: Some(error.cause().to_string()),
+        };
         let retry = match &error {
             SyncError::Pending(record) => record.retry(),
             _ => record.retry(),

@@ -119,6 +119,26 @@ async fn an_ended_wait_stays_ended_across_reopening() {
     database.close().await.unwrap();
 }
 
+/// Ana's phone can't reach storage. The connection's record keeps the
+/// failure's text as its cause, the text the last pass keeps, so an app
+/// shows why from the record alone (E5).
+#[tokio::test]
+async fn a_failed_pass_writes_its_error_as_the_connections_cause() {
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    let mut retry = ConnectionRetry::Automatic;
+    fail(&mut retry, &database, &waits, false).await;
+    let records = database.pending::<PendingRecord>().await.unwrap();
+    let [connection] = records.as_slice() else { panic!("one record: {records:?}") };
+    assert_eq!(connection.subject, PendingSubject::Connection);
+    let shown = crate::LastPass::from(crate::connection_failure(SyncError::Storage(
+        StorageError::Failure(StorageFailure::Network),
+    )));
+    let crate::LastPass::Offline { error, .. } = shown else { panic!("{shown:?}") };
+    assert_eq!(connection.cause.as_deref(), Some(error.as_str()));
+    database.close().await.unwrap();
+}
+
 /// A wait whose save failed holds for the app (§6.7): a report is no
 /// permission to retry it.
 #[tokio::test]
