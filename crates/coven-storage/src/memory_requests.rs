@@ -41,37 +41,24 @@ impl MemoryRequest {
     }
 }
 
-/// Which requests signed with an S3 key storage refuses.
+/// Which requests signed with an S3 key storage refuses
+/// (`MemoryStorage::refuse_s3_key`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum KeyRefusal {
-    /// Every request, as for a key the person deleted or mistyped.
+pub enum KeyRefusal {
+    /// Every request, with `Authentication` in a 403, as for a key the
+    /// person deleted or mistyped.
     Every,
-    /// Every write, as for a key that may only read.
+    /// Every write, with `PermissionDenied` in a 403, as for a key that may
+    /// only read; its reads go through.
     Writes,
 }
 
 impl MemoryStorage {
-    /// Refuse every request signed with the S3 key `access_key_id` from now
-    /// on, on every connection, as S3 storage refuses a key the person
-    /// deleted or mistyped: `Authentication`, in a 403.
-    pub async fn refuse_s3_key(&self, access_key_id: &str) {
-        self.provider
-            .state
-            .lock()
-            .await
-            .refused_s3_keys
-            .insert(access_key_id.into(), KeyRefusal::Every);
-    }
-    /// Refuse every write signed with the S3 key `access_key_id` from now
-    /// on, on every connection, as S3 storage refuses a key that may only
-    /// read: `PermissionDenied`, in a 403. Its reads go through.
-    pub async fn refuse_s3_key_writes(&self, access_key_id: &str) {
-        self.provider
-            .state
-            .lock()
-            .await
-            .refused_s3_keys
-            .insert(access_key_id.into(), KeyRefusal::Writes);
+    /// Refuse the requests `refusal` names when they are signed with the S3
+    /// key `access_key_id`, from now on and on every connection, as S3
+    /// storage refuses a key.
+    pub async fn refuse_s3_key(&self, access_key_id: &str, refusal: KeyRefusal) {
+        self.provider.state.lock().await.refused_s3_keys.insert(access_key_id.into(), refusal);
     }
 
     /// Attempted calls on this connection; `for_device` starts a separate trace.

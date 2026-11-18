@@ -477,7 +477,7 @@ async fn a_key_storage_refuses_changes_nothing() {
     let directory = install.app.store_dir(&owner.directory.id());
     let original = owner.s3_credentials().unwrap();
     let slot = next_slot(&owner).await;
-    owner.storage.refuse_s3_key("mistyped").await;
+    owner.storage.refuse_s3_key("mistyped", KeyRefusal::Every).await;
     let refused = use_key(&handle, &supplied_key("mistyped")).await;
     assert!(check_failed(&refused, StorageFailure::Authentication), "{refused:?}");
     assert_key(&install, directory.id(), &original);
@@ -501,7 +501,7 @@ async fn a_signed_out_device_saves_no_key_storage_refuses() {
     install.app.lose_storage_credentials(directory.id()).unwrap();
     let handle =
         install.builder(&owner, owner.storage.clone()).open(directory.id(), |_| ()).await.unwrap();
-    owner.storage.refuse_s3_key("mistyped").await;
+    owner.storage.refuse_s3_key("mistyped", KeyRefusal::Every).await;
     let refused = use_key(&handle, &supplied_key("mistyped")).await;
     assert!(check_failed(&refused, StorageFailure::Authentication), "{refused:?}");
     assert!(scoped(&install, &owner).storage_credentials().unwrap().is_none());
@@ -521,7 +521,7 @@ async fn a_key_that_cannot_write_fails_its_check() {
     let handle = install.restore(&owner).await;
     let directory = install.app.store_dir(&owner.directory.id());
     let original = owner.s3_credentials().unwrap();
-    owner.storage.refuse_s3_key_writes("read-only").await;
+    owner.storage.refuse_s3_key("read-only", KeyRefusal::Writes).await;
     let refused = use_key(&handle, &supplied_key("read-only")).await;
     assert!(
         matches!(&refused, Err(UseAccessKeyError::Check(StorageCheckError::ProviderCheck {
@@ -646,7 +646,7 @@ async fn a_refused_keys_entry_never_blocks_a_later_key() {
     assert_eq!(recorded(&handle).await, s3_access("owner-key"));
     assert!(!handle.pending().await.unwrap().is_empty());
     owner.storage.set_faults(Faults::none()).await;
-    owner.storage.refuse_s3_key("first").await;
+    owner.storage.refuse_s3_key("first", KeyRefusal::Every).await;
     let second = supplied_key("second");
     let used = use_key(&handle, &second).await.unwrap();
     assert_eq!(used.replaced.as_deref(), Some("owner-key"));

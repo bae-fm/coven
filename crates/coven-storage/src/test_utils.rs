@@ -26,7 +26,7 @@ pub use memory_reads::BodyFailure;
 mod memory_listing;
 #[path = "memory_requests.rs"]
 mod memory_requests;
-pub use memory_requests::MemoryRequest;
+pub use memory_requests::{KeyRefusal, MemoryRequest};
 
 #[path = "memory_faults.rs"]
 mod memory_faults;

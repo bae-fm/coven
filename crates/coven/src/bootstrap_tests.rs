@@ -3,7 +3,7 @@ use coven_crypto::custody::{Keychain, KeyringCustody};
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreLockProbe;
 use coven_storage::{
-    test_utils::{Faults, MemoryStorage},
+    test_utils::{Faults, KeyRefusal, MemoryStorage},
     ObjectPath, ObjectPrefix, S3Credentials, Storage, StorageFailure,
 };
 use std::num::NonZeroUsize;

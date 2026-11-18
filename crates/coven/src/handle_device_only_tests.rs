@@ -3,7 +3,7 @@
 //! call leaves, what other devices drop when the switch arrives, the stored
 //! bytes becoming deletion candidates, and two devices making one file
 //! device-only at once.
-use crate::tests::{cached, stored_path, wait_for_empty_queue, Device, Network};
+use crate::tests::{cached, stored_path, uncancelled, wait_for_empty_queue, Device, Network};
 use crate::*;
 use coven_storage::Storage;
 use std::path::Path;
@@ -88,11 +88,6 @@ async fn import(
 /// The path of the names in `relative`, written joined by `/` for short.
 fn path(relative: &str) -> RelativePath {
     RelativePath::new(relative.split('/')).unwrap()
-}
-
-/// A cancel that never comes.
-fn uncancelled() -> watch::Receiver<bool> {
-    watch::channel(false).1
 }
 
 /// Each name directly in `folder`, sorted.

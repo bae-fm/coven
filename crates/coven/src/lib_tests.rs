@@ -7,13 +7,13 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-/// Wait until the last pass, as the app's SQL reads it, is one `expected`
-/// accepts.
-/// A cancel nobody sends, for a call that takes one (E9).
+/// A cancel nobody sends, for a call that takes one.
 pub(crate) fn uncancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
 }
 
+/// Wait until the last pass, as the app's SQL reads it, is one `expected`
+/// accepts.
 pub(crate) async fn last_pass(
     handle: &CovenHandle,
     expected: impl FnMut(&Option<LastPass>) -> bool,
