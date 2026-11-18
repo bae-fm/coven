@@ -8,7 +8,7 @@
 
 use crate::finding::Finding;
 use crate::macro_expansion::expand_macros;
-use crate::policy::Policy;
+use crate::policy::{home_holds, Policy};
 use crate::sources::{SqlFile, Workspace};
 use crate::syntax::RustFile;
 use crate::test_code::{production_code, test_code};
@@ -65,6 +65,14 @@ impl CrateCode {
             whole: files.to_vec(),
             test_sql,
         }
+    }
+
+    /// Whether `home`, a file or a directory ending in `/`, holds a file of
+    /// the crates: production or test code, Rust or SQL.
+    pub(crate) fn home_holds_a_file(&self, home: &str) -> bool {
+        let rust = self.whole.iter().map(|file| &file.relative_path);
+        let sql = self.sql.iter().chain(&self.test_sql).map(|file| &file.relative_path);
+        rust.chain(sql).any(|path| home_holds(home, path))
     }
 }
 

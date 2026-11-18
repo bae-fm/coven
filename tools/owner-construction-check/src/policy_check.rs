@@ -659,8 +659,9 @@ fn invalid_domain_views(
     stale
 }
 
-/// Each domain has a unique name, homes that hold a source, Rust or SQL, and
-/// an owner the checker infers as one; no table is in two domains.
+/// Each domain has a unique name, homes that hold a file the database rule
+/// reads, production or test, Rust or SQL, and an owner the checker infers as
+/// one; no table is in two domains.
 fn invalid_domains(
     code: &CrateCode,
     database: &Database,
@@ -674,9 +675,7 @@ fn invalid_domains(
             stale.push(format!("database: domain {} is named twice", domain.name));
         }
         for home in &domain.homes {
-            if !holds_source(&code.written, home)
-                && !code.sql.iter().any(|file| home_holds(home, &file.relative_path))
-            {
+            if !code.home_holds_a_file(home) {
                 stale.push(format!(
                     "database: domain {} has home {home}, which holds no source",
                     domain.name

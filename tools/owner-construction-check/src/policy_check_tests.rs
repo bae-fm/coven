@@ -362,6 +362,66 @@ fn domains_place_each_schema_table_once() {
     );
 }
 
+/// A domain's home holds source when it holds code the database rule reads:
+/// production or test code, Rust or SQL. Test-support code, which only a
+/// test-only module declaration reaches, is source too.
+#[test]
+fn a_domain_home_holding_only_test_code_holds_source() {
+    let policy = Policy::fixture(
+        r#"rules = ["database-boundary"]
+        test_support_features = ["test-utils"]
+        capability_types = ["Connection"]
+        external_types = ["Connection"]
+        [database]
+        capability = "SQLite"
+        [[database.domains]]
+        name = "listing"
+        homes = [
+            "crates/app-foundation/src/listing.sql",
+            "crates/app-foundation/src/test_fixtures.rs",
+            "crates/app-foundation/src/test_fixtures/",
+            "crates/app-foundation/src/listing_tests.rs",
+            "crates/app-foundation/tests/",
+            "crates/app-foundation/src/gone/",
+        ]
+        tables = ["listing"]
+        owner = "Listing"
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-foundation/src/"]
+        "#,
+    );
+    let mut files = [
+        (
+            "crates/app-foundation/src/lib.rs",
+            r#"struct Listing { connection: Connection }
+            #[cfg(any(test, feature = "test-utils"))]
+            pub mod test_fixtures;"#,
+        ),
+        ("crates/app-foundation/src/test_fixtures.rs", "pub mod rows;"),
+        ("crates/app-foundation/src/test_fixtures/rows.rs", "pub fn seed() {}"),
+        ("crates/app-foundation/src/listing_tests.rs", "fn listed() {}"),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    crate::module_sources::mark_test_modules(&mut files, policy.test_support_features());
+    let mut workspace = workspace(files.into(), &[("crates/app-foundation", "app-foundation")]);
+    workspace.sql_files = [
+        ("crates/app-foundation/src/listing.sql", "CREATE TABLE IF NOT EXISTS listing (id TEXT);"),
+        ("crates/app-foundation/tests/fixture.sql", "INSERT INTO listing VALUES ('a');"),
+    ]
+    .map(|(path, text)| SqlFile {
+        relative_path: path.into(),
+        package_root: "crates/app-foundation/".into(),
+        package: "app-foundation".into(),
+        text: text.into(),
+    })
+    .into();
+    assert_eq!(
+        current_stale_rows(&workspace, &policy),
+        ["database: domain listing has home crates/app-foundation/src/gone/, which holds no source"]
+    );
+}
+
 /// Without a schema module, the schema's tables are what the crates' SQL
 /// files create: a domain may have a SQL file as its home, and temporary
 /// tables and tests' SQL make no table of the schema.
