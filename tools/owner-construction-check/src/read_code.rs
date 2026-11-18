@@ -22,7 +22,8 @@
 //! - every workspace function the read code calls, transitively, when the call
 //!   resolves, and every one it passes by path to any callee, which calls it
 //!   (`.map(Row::shown)`): a path (`NameResolver`), `Type::f`, `Self::f`,
-//!   `<Type>::f`, a parenthesized path (`(Type::f)(x)`), and a method call
+//!   `<Type>::f`, a parenthesized path (`(Type::f)(x)`), a macro's
+//!   fragment called so (`($convert)(x)`), and a method call
 //!   whose receiver's type is known: `self`, a field of a known type (through
 //!   shared pointers), a typed parameter or `let`, a `let` of a struct literal
 //!   or a `Type::ctor(..)`, and the return type of a resolved call, with `?`,
@@ -882,9 +883,15 @@ impl<'ast> Visit<'ast> for Walker<'_, '_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        // A macro's `$f:expr` reaches its expansion as a group with no
+        // delimiter, so `($f)(x)` calls a path inside a group and parentheses.
         let mut callee = node.func.as_ref();
-        while let syn::Expr::Paren(inner) = callee {
-            callee = &inner.expr;
+        loop {
+            match callee {
+                syn::Expr::Paren(inner) => callee = &inner.expr,
+                syn::Expr::Group(inner) => callee = &inner.expr,
+                _ => break,
+            }
         }
         let targets = match callee {
             syn::Expr::Path(path) => self.expr_path_targets(path),

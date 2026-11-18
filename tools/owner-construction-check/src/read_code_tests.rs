@@ -584,3 +584,48 @@ fn only_what_a_live_query_s_process_runs_and_no_other_read_code_reaches_is_proce
         assert!(!only(item), "{item}");
     }
 }
+
+/// A macro that calls `($convert)(value)` in read code gets the conversion
+/// as an expression fragment, which the expansion wraps in a group that has
+/// no delimiter: a function path given there is called as one written in
+/// place, as a closure given there is.
+#[test]
+fn a_function_path_a_macro_calls_in_read_code_is_reached() {
+    let found = units(&[(
+        "crates/app/src/a.rs",
+        r#"
+        mod types {
+            mod sync {
+                pub struct Snapshot;
+                impl Snapshot { pub fn from_core(value: u8) -> u8 { value } }
+                pub struct Status;
+                impl Status { pub fn from_core(value: u8) -> u8 { value } }
+            }
+            pub use sync::*;
+        }
+        macro_rules! pulled_calls {
+            ($object:ident, converted by $convert:expr) => {
+                impl $object {
+                    fn next(&self) -> u8 {
+                        let value = self.inner.value();
+                        ($convert)(value)
+                    }
+                }
+            };
+        }
+        struct SnapshotRead { inner: LiveQuery<u8> }
+        struct StatusRead { inner: LiveQuery<u8> }
+        pulled_calls! { SnapshotRead, converted by crate::types::Snapshot::from_core }
+        pulled_calls! { StatusRead, converted by |value: u8| crate::types::Status::from_core(value) }
+        "#,
+    )]);
+    assert_eq!(
+        found,
+        [
+            unit("Snapshot::from_core", Why::Reached),
+            unit("SnapshotRead::next", Why::Holds),
+            unit("Status::from_core", Why::Reached),
+            unit("StatusRead::next", Why::Holds),
+        ]
+    );
+}
