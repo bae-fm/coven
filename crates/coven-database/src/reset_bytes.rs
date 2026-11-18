@@ -24,24 +24,52 @@ pub(crate) enum Change {
     Slot(u64),
 }
 
+/// The bytes this device keeps for a file that the file's record doesn't
+/// need (§17.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unneeded {
+    /// None: the record puts the file on this device only.
+    Nothing,
+    /// The chunk hashes and coven's copy: the record names stored bytes,
+    /// and the original stays recorded.
+    Hashes,
+    /// Every one: the original, its chunk hashes and coven's copy.
+    /// `switched` when the record puts the file on another device only,
+    /// whose switch coven's copies in the person's folders lost to;
+    /// otherwise the file has no record.
+    All { switched: bool },
+}
+
+impl Unneeded {
+    /// What a file whose record puts it at `place`, or that has none,
+    /// doesn't need.
+    fn at(db: &StoreSql, place: Option<&Place>) -> Result<Self, DbError> {
+        Ok(match place {
+            Some(Place::DeviceOnly(device)) if *device == this_device(db)? => Self::Nothing,
+            Some(Place::Cloud(_)) => Self::Hashes,
+            Some(Place::DeviceOnly(_)) => Self::All { switched: true },
+            None => Self::All { switched: false },
+        })
+    }
+}
+
 /// Whether this device keeps bytes for `file` that its record, `shown` as
 /// the app sees it and `kept` while any audience still has it, doesn't
-/// need: all of them unless the record puts the file on this device only,
-/// and the chunk hashes and coven's copy once the file is stored (§17.3).
-fn unneeded(
+/// need.
+fn keeps_unneeded(
     db: &StoreSql,
     file: FileId,
     shown: Option<&Record>,
     kept: bool,
 ) -> Result<bool, DbError> {
     let place = shown.filter(|_| kept).map(|record| &record.place);
-    let sql = match place {
-        Some(Place::DeviceOnly(device)) if *device == this_device(db)? => return Ok(false),
-        Some(Place::Cloud(_)) => {
+    let sql = match Unneeded::at(db, place)? {
+        Unneeded::Nothing => return Ok(false),
+        Unneeded::Hashes => {
             "SELECT EXISTS(SELECT 1 FROM _coven_user_chunks WHERE file=?1)
                  OR EXISTS(SELECT 1 FROM _coven_device_files WHERE file=?1)"
         }
-        _ => {
+        Unneeded::All { .. } => {
             "SELECT EXISTS(SELECT 1 FROM _coven_user_files WHERE file=?1)
                  OR EXISTS(SELECT 1 FROM _coven_user_chunks WHERE file=?1)
                  OR EXISTS(SELECT 1 FROM _coven_device_files WHERE file=?1)"
@@ -80,7 +108,7 @@ pub(crate) fn changed(
     kept: bool,
     audience: Option<&Audience>,
 ) -> Result<(), DbError> {
-    if !unneeded(db, file, shown, kept)? {
+    if !keeps_unneeded(db, file, shown, kept)? {
         return Ok(());
     }
     let gone = match audience {
@@ -189,11 +217,9 @@ pub(crate) fn settle(db: &StoreSql, call: &StoreCall<'_>) -> Result<(), DbError>
     Ok(())
 }
 
-/// Forget the bytes of `file` that no record needs, unless a change a reset
-/// may undo still keeps them: none while the record puts the file here; the
-/// chunk hashes and coven's copy once it is stored; and on another device
-/// only, or with no record, every one, coven's copies in the person's
-/// folders lost to that device's switch (§17.3).
+/// Forget the bytes of `file` that its record doesn't need, unless a change
+/// a reset may undo still keeps them; on another device only, coven's
+/// copies in the person's folders are lost to that device's switch (§17.3).
 fn forget(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     if db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_undoable_files WHERE file=?1)",
@@ -202,11 +228,12 @@ fn forget(db: &StoreSql, file: FileId) -> Result<(), DbError> {
     )? {
         return Ok(());
     }
-    match Record::read(db, file)?.map(|record| record.place) {
-        Some(Place::DeviceOnly(device)) if device == this_device(db)? => return Ok(()),
-        Some(Place::Cloud(_)) => crate::user_file::stored(db, file)?,
-        Some(Place::DeviceOnly(_)) => crate::file_protection::elsewhere(db, file)?,
-        None => crate::user_file::forget(db, file)?,
+    let place = Record::read(db, file)?.map(|record| record.place);
+    match Unneeded::at(db, place.as_ref())? {
+        Unneeded::Nothing => return Ok(()),
+        Unneeded::Hashes => crate::user_file::stored(db, file)?,
+        Unneeded::All { switched: true } => crate::file_protection::elsewhere(db, file)?,
+        Unneeded::All { switched: false } => crate::user_file::forget(db, file)?,
     }
     crate::file_queue::forget_copy(db, file)
 }
