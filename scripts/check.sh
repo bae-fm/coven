@@ -583,6 +583,7 @@ proofs() {
         SQLIVE_NARROWING_LEAN="$runner" exact_ignored sqlive --all-features -- --nocapture \
             connection::live_judging::tests::narrowing_model::term_matches_lean \
             connection::live_judging::tests::narrowing_model::edge_matches_lean \
+            connection::live_judging::tests::narrowing_model::row_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::subquery_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_subquery_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::push_down_matches_lean \

@@ -846,7 +846,9 @@ columns and a column, or an expression over the columns, of one other table in
 the join. The expression holds no clock (`CURRENT_TIMESTAMP`, `date('now')`) and
 no function SQLite doesn't flag deterministic, as `random()` or an app function
 registered nondeterministic: a write's lookup evaluates it again and could get
-another answer than the query did, so such a join narrows nothing. The ON of a
+another answer than the query did, so such a join narrows nothing. A row value
+equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
+columns: SQLite gives it the truth of their AND, NULL included. The ON of a
 LEFT JOIN narrows only its right side: it decides which right rows join each
 left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
@@ -14737,6 +14739,7 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
+| A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |

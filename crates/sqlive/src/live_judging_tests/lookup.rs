@@ -889,3 +889,36 @@ async fn a_cte_of_a_using_join_lists_each_column_once() {
     .await;
     db.close();
 }
+
+/// A row value equality between two tables narrows as the equalities of
+/// its pairs: a state row of another hash and revision pair, or a CUE index
+/// of another sheet's track, wakes nothing.
+#[tokio::test]
+async fn a_row_value_join_narrows_as_its_column_equalities() {
+    let db = TestDatabase::open(
+        "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, hash TEXT, rev INTEGER);
+        CREATE TABLE state(id INTEGER PRIMARY KEY, hash TEXT, rev INTEGER, value TEXT);
+        CREATE TABLE cue_tracks(id INTEGER PRIMARY KEY, root TEXT, path TEXT, sheet TEXT, position INTEGER);
+        CREATE TABLE cue_index(id INTEGER PRIMARY KEY, root TEXT, path TEXT, sheet TEXT, position INTEGER, at INTEGER);
+        INSERT INTO scan VALUES (1,'/a','h1',1),(2,'/b','h2',1);
+        INSERT INTO state VALUES (1,'h1',1,'one'),(2,'h1',2,'old'),(3,'h2',1,'two');
+        INSERT INTO cue_tracks VALUES (1,'/m','/a','a.cue',1),(2,'/m','/b','b.cue',1);
+        INSERT INTO cue_index VALUES (1,'/m','/a','a.cue',1,0),(2,'/m','/b','b.cue',1,0)",
+    );
+    follows(&db, "SELECT s.value FROM scan c JOIN state s ON (s.hash, s.rev) = (c.hash, c.rev) WHERE c.path = '/a' ORDER BY s.id", vec![], &[
+        ("UPDATE state SET value = 'older' WHERE id = 2", false),
+        ("UPDATE state SET value = 'deux' WHERE id = 3", false),
+        ("UPDATE state SET value = 'uno' WHERE id = 1", true),
+        ("UPDATE scan SET rev = 2 WHERE id = 1", true),
+        ("UPDATE state SET value = 'one' WHERE id = 1", false),
+    ])
+    .await;
+    follows(&db, "SELECT i.at FROM cue_tracks t JOIN cue_index i ON (i.root, i.path, i.sheet, i.position) = (t.root, t.path, t.sheet, t.position) WHERE t.path = '/a' ORDER BY i.id", vec![], &[
+        ("UPDATE cue_index SET at = 5 WHERE id = 2", false),
+        ("INSERT INTO cue_index VALUES (3,'/m','/a','a.cue',2,0)", false),
+        ("UPDATE cue_index SET at = 7 WHERE id = 1", true),
+        ("UPDATE cue_index SET position = 1 WHERE id = 3", true),
+    ])
+    .await;
+    db.close();
+}

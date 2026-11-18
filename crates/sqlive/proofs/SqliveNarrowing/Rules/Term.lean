@@ -222,6 +222,7 @@ theorem read_sound {s : Statement} {i : Nat} {cd : Cond} {t : STerm}
   | inQuery e q n => simp [read] at h
   | «exists» q n => simp [read] at h
   | rowSub vs q isIn n => simp [read] at h
+  | rowEq ls rs => simp [read] at h
   | and l r ihl ihr =>
     simp only [Cond.eval, isTrue] at hc
     have hl : isTrue (l.eval b sub) ∧ isTrue (r.eval b sub) := by

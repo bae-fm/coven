@@ -31,6 +31,8 @@ inductive Cond where
   with the subquery on either side, or `(e1, ..., en) IN (query)` when
   `isIn`, `NOT IN` when `not`. -/
   | rowSub (values : List Expr) (query : Nat) (isIn : Bool) (not : Bool)
+  /-- `(l1, ..., ln) = (r1, ..., rn)`. -/
+  | rowEq (left right : List Expr)
   | and (left right : Cond)
   | or (left right : Cond)
   | not (c : Cond)
@@ -171,6 +173,7 @@ def Cond.refs : Cond → List (Nat × Nat)
   | .inQuery e _ _ => e.refs
   | .exists .. => []
   | .rowSub vs _ _ _ => vs.flatMap Expr.refs
+  | .rowEq ls rs => ls.flatMap Expr.refs ++ rs.flatMap Expr.refs
   | .and l r | .or l r => l.refs ++ r.refs
   | .not c => c.refs
 
@@ -183,6 +186,7 @@ def Cond.queries : Cond → List Nat
   | .inQuery e q _ => e.queries ++ [q]
   | .exists q _ => [q]
   | .rowSub vs q _ _ => vs.flatMap Expr.queries ++ [q]
+  | .rowEq ls rs => ls.flatMap Expr.queries ++ rs.flatMap Expr.queries
   | .and l r | .or l r => l.queries ++ r.queries
   | .not c => c.queries
 

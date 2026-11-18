@@ -27,6 +27,8 @@ mod mixed;
 mod nested_derived;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
+#[path = "narrowing_model/row_edge.rs"]
+mod row_edge;
 #[path = "narrowing_model/row_subquery_edge.rs"]
 mod row_subquery_edge;
 #[path = "narrowing_model/subquery_edge.rs"]
@@ -133,6 +135,8 @@ pub(super) enum Cond {
         first: bool,
         not: bool,
     },
+    /// `(l1, ..., ln) = (r1, ..., rn)`.
+    RowEq(Vec<Expr>, Vec<Expr>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
@@ -414,6 +418,13 @@ impl Cond {
                     }
                 }
             }
+            Self::RowEq(left, right) => {
+                let row = |values: &[Expr]| {
+                    let values: Vec<String> = values.iter().map(Expr::sql).collect();
+                    format!("({})", values.join(", "))
+                };
+                format!("{} = {}", row(left), row(right))
+            }
             Self::And(left, right) => format!("({} AND {})", left.sql(), right.sql()),
             Self::Or(left, right) => format!("({} OR {})", left.sql(), right.sql()),
             Self::Not(c) => format!("NOT ({})", c.sql()),
@@ -439,6 +450,10 @@ impl Cond {
                 "member": member,
                 "not": not,
             }),
+            Self::RowEq(left, right) => json!({"rows": [
+                left.iter().map(Expr::json).collect::<Vec<_>>(),
+                right.iter().map(Expr::json).collect::<Vec<_>>(),
+            ]}),
             Self::And(left, right) => json!({"and": [left.json(), right.json()]}),
             Self::Or(left, right) => json!({"or": [left.json(), right.json()]}),
             Self::Not(c) => json!({"negate": c.json()}),
@@ -457,6 +472,7 @@ impl Cond {
             Self::RowSub { values, query, member, .. } => {
                 !member || values.iter().any(Expr::ambiguous) || query.ambiguous()
             }
+            Self::RowEq(left, right) => left.iter().chain(right).any(Expr::ambiguous),
             Self::And(left, right) | Self::Or(left, right) => left.ambiguous() || right.ambiguous(),
             Self::Not(c) => c.ambiguous(),
         }
@@ -896,6 +912,12 @@ async fn term_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn edge_matches_lean() {
     differential("edge", edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn row_edge_matches_lean() {
+    differential("row edge", row_edge::statement).await;
 }
 
 #[tokio::test]

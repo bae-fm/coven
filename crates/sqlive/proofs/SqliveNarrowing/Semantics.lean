@@ -53,6 +53,7 @@ def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
         | some row => rowEqTruth values row
         | none => none
     if n then tnot t else t
+  | .rowEq ls rs => rowEqTruth (ls.map (Expr.eval b sub)) (rs.map (Expr.eval b sub))
   | .and l r => tand (l.eval b sub) (r.eval b sub)
   | .or l r => tor (l.eval b sub) (r.eval b sub)
   | .not c => tnot (c.eval b sub)

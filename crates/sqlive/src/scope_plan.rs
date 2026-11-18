@@ -828,8 +828,21 @@ fn read_condition<'a>(
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
     } else if let Expr::Binary(left, Operator::Equals, right) = condition {
-        for (member, other, first) in [(left, right, false), (right, left, true)] {
-            found.edges.extend(planner.edge(connection, core, member, other, first)?);
+        // A row value equality has the truth of its pairs' equalities joined
+        // by AND, NULLs included, so it narrows as they do.
+        let pairs: Vec<(&Expr<'_>, &Expr<'_>)> =
+            match (unparenthesized(left), unparenthesized(right)) {
+                (Expr::Parenthesized(lefts), Expr::Parenthesized(rights))
+                    if lefts.len() == rights.len() =>
+                {
+                    lefts.iter().zip(rights.iter()).collect()
+                }
+                _ => vec![(left, right)],
+            };
+        for (left, right) in pairs {
+            for (member, other, first) in [(left, right, false), (right, left, true)] {
+                found.edges.extend(planner.edge(connection, core, member, other, first)?);
+            }
         }
     }
     Ok(found)

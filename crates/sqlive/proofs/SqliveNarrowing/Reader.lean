@@ -69,6 +69,25 @@ theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by
           simp only [Cond.queries, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨v, hv, h⟩))
     rw [hvs, hs q (by simp [Cond.queries])]
+  | rowEq ls rs =>
+    simp only [Cond.eval]
+    have hls : ls.map (Expr.eval b sub) = ls.map (Expr.eval b' sub') := by
+      apply List.map_congr_left
+      intro v hv
+      exact v.eval_congr
+        (fun i c h => hb i c (by
+          simp only [Cond.refs, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨v, hv, h⟩))
+        (fun q h => hs q (by
+          simp only [Cond.queries, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨v, hv, h⟩))
+    have hrs : rs.map (Expr.eval b sub) = rs.map (Expr.eval b' sub') := by
+      apply List.map_congr_left
+      intro v hv
+      exact v.eval_congr
+        (fun i c h => hb i c (by
+          simp only [Cond.refs, List.mem_append, List.mem_flatMap]; exact Or.inr ⟨v, hv, h⟩))
+        (fun q h => hs q (by
+          simp only [Cond.queries, List.mem_append, List.mem_flatMap]; exact Or.inr ⟨v, hv, h⟩))
+    rw [hls, hrs]
   | and l r ihl ihr =>
     simp only [Cond.eval]
     rw [ihl (fun i c h => hb i c (by simp [Cond.refs, h]))

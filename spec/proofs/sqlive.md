@@ -69,6 +69,9 @@ promise of whichever rule reads it.
 - **An equality between two items.** `edge_sound` proves that `a.x = b.y`, true
   of a binding, makes `a.x` hold a value that `b`'s row gives, neither NULL,
   in either direction and for an expression over `b`'s columns.
+- **A row value equality between two items.** `row_edge_sound` proves the
+  same of each pair of `(a.x, a.y) = (b.z, b.w)`, which holds only where
+  every pair is equal.
 - **A column compared with a subquery's value.** `subquery_edge_sound` proves
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's
