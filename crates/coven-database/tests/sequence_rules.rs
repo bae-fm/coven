@@ -15,14 +15,22 @@ use coven_merge::{Audience, Change, ColumnValue, Operation, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Cursor};
 
+/// A record whose JSON has the shape coven's `coven_pending` reads: its
+/// subject is an enum variant, as sync's `PendingSubject` is.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {
-    subject: u64,
+    subject: Subject,
     cutoff: Option<(u64, String)>,
 }
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+enum Subject {
+    Slot(u64),
+    Operation(u64),
+    Audience,
+}
 impl PendingValue for Pending {
-    type Subject = u64;
-    fn subject(&self) -> &u64 {
+    type Subject = Subject;
+    fn subject(&self) -> &Subject {
         &self.subject
     }
     fn object(
@@ -44,7 +52,10 @@ impl PendingValue for Pending {
         None
     }
     fn slot(&self) -> Option<Slot> {
-        Slot::new(self.subject)
+        match self.subject {
+            Subject::Slot(slot) => Slot::new(slot),
+            Subject::Operation(_) | Subject::Audience => None,
+        }
     }
     fn ends_when_covered(&self) -> bool {
         false
@@ -60,13 +71,16 @@ impl PendingValue for Pending {
         self
     }
     fn reload(_: Audience) -> Self {
-        Self { subject: 0, cutoff: None }
+        Self { subject: Subject::Audience, cutoff: None }
     }
     fn provider_access(id: OperationId, _: String, _: bool) -> Self {
-        Self { subject: id.0 as u64, cutoff: None }
+        Self { subject: Subject::Operation(id.0 as u64), cutoff: None }
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff) -> Self {
-        Self { subject: slot.get(), cutoff: Some((cutoff.get(), format!("{cause:?}"))) }
+        Self {
+            subject: Subject::Slot(slot.get()),
+            cutoff: Some((cutoff.get(), format!("{cause:?}"))),
+        }
     }
 }
 async fn open(owned: bool) -> (tempfile::TempDir, StoreDatabase) {
@@ -405,8 +419,13 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
             3
         );
         assert_eq!(
-            db.pending::<Pending>().await.unwrap().iter().map(|p| p.subject).collect::<Vec<_>>(),
-            [3]
+            db.pending::<Pending>()
+                .await
+                .unwrap()
+                .iter()
+                .map(|p| p.subject.clone())
+                .collect::<Vec<_>>(),
+            [Subject::Slot(3)]
         );
         assert_eq!(db.pending::<Pending>().await.unwrap()[0].cutoff, Some((2, cause.into())));
         assert!(db.lost_values().await.unwrap().is_empty());

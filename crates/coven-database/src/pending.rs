@@ -20,6 +20,11 @@ pub enum FileWork {
 
 /// Sync supplies its complete typed record; the database owns its atomic lifetime.
 /// The associated subject is the stable key, independent of the reason.
+///
+/// `coven_pending` reads the record's JSON: its `subject` and `reason`, when
+/// present, are enum variants as serde writes them, and an `Original` reason's
+/// `path` is an array of the path's bytes. JSON of another shape fails the
+/// write that stores it as a damaged database.
 pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// Report a batch consumed after a preceding removal or key replacement.
     fn writes_refused(
