@@ -183,8 +183,8 @@ async fn an_offset_an_unreturned_column_or_an_expression_narrows_nothing_more() 
     db.close();
 }
 
-/// The tables of the narrowing differential, and its rows at seed 226 of its
-/// mixed shapes.
+/// Two tables with an index on a column the statements below never name,
+/// `u.a`, and rows whose order in that index differs from their rowid order.
 const PICKED: &str =
     "CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE);
 CREATE TABLE w(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE);
@@ -196,9 +196,8 @@ INSERT INTO w VALUES (0,1,NULL,5,2),(1,0,1,0,2),(2,3,1,5,0),(3,3,0,4,1),(4,2,NUL
 /// A LIMIT whose ORDER BY doesn't tell its rows apart keeps the rows SQLite
 /// reads first, in the order of the plan it picks: here the index on `u.a`,
 /// which the statement never names, so a write to `u.a` changes the row the
-/// subquery keeps, and a write to any column of `u` reruns the query. The
-/// narrowing differential found the first statement, among its mixed shapes
-/// at seed 226. A scalar subquery keeps its first row the same way.
+/// subquery keeps, and a write to any column of `u` reruns the query. A
+/// scalar subquery keeps its first row the same way.
 #[tokio::test]
 async fn a_limit_that_doesnt_tell_its_rows_apart_reruns_on_any_column() {
     let db = TestDatabase::open(PICKED);
