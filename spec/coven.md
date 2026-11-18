@@ -14222,8 +14222,9 @@ operations are reopened until they report completion.
 
 The pre-commit hook is `builds checks run`, which runs the lines of `.checks`
 that the staged files match: formatting, the rules of F.1 to F.5, the licenses
-and bans of `deny.toml`, clippy and a build without test code (check 7) over the
-crates holding a staged file, and the spec's own checks. It runs no tests; the
+and bans of `deny.toml`, and clippy, `cargo doc` with broken links denied (check
+6) and a build without test code (check 7) over the crates holding a staged file,
+and the spec's own checks. It runs no tests; the
 tests of the check scripts are `test` lines of `.checks`, which CI runs.
 
 ---
