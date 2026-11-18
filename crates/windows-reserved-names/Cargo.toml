@@ -3,6 +3,10 @@ name = "windows-reserved-names"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Tells whether a file name is one that Windows opens as a device, such as NUL or COM1."
+keywords = ["windows", "filename"]
+categories = ["filesystem", "os::windows-apis"]
 
 [lints]
 workspace = true

@@ -3,6 +3,10 @@ name = "panic-as-error"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Turns a panic into an error value that names where the panic began."
+keywords = ["panic", "error"]
+categories = ["rust-patterns"]
 
 [dependencies]
 tracing.workspace = true

@@ -17,6 +17,10 @@
 //! [`CheckpointedSize`] ([`Database::checkpointed_size`]), so the host can show the file's size
 //! without reading the file itself.
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod authorization;
 mod change_capture;
 mod checkpointed_size;

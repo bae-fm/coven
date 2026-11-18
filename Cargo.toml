@@ -7,13 +7,14 @@ members = ["crates/windows-reserved-names", "crates/panic-as-error", "crates/sql
 edition = "2021"
 version = "0.1.0"
 license = "Apache-2.0"
+repository = "https://github.com/bae-fm/coven"
 
 # One version per external dependency for the whole workspace (Appendix F.1). Members
 # name these with `workspace = true` and the features they need; they never
 # restate a version. The checker refuses a member dependency that does.
 [workspace.dependencies]
-windows-reserved-names = { path = "crates/windows-reserved-names" }
-panic-as-error = { path = "crates/panic-as-error" }
+windows-reserved-names = { path = "crates/windows-reserved-names", version = "0.1.0" }
+panic-as-error = { path = "crates/panic-as-error", version = "0.1.0" }
 sqlive = { path = "crates/sqlive" }
 coven-foundation = { path = "crates/coven-foundation" }
 coven-crypto = { path = "crates/coven-crypto" }
