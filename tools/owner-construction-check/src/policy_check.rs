@@ -17,7 +17,8 @@ use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::{
-    is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy, Shape,
+    home_holds, is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy,
+    Shape,
 };
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
@@ -109,14 +110,6 @@ fn unknown_libraries(workspace: &Workspace, policy: &Policy) -> Vec<String> {
 /// A home is a source file, or a directory (ending in `/`) holding one.
 fn holds_source(files: &[RustFile], home: &str) -> bool {
     files.iter().any(|file| home_holds(home, &file.relative_path))
-}
-
-fn home_holds(home: &str, path: &str) -> bool {
-    if home.ends_with('/') {
-        path.starts_with(home)
-    } else {
-        path == home
-    }
 }
 
 fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {

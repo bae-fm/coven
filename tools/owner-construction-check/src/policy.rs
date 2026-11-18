@@ -497,13 +497,7 @@ impl Capability {
             self.homes.iter().filter_map(|home| home.strip_suffix(".rs")).any(|stem| {
                 path == format!("{stem}_tests.rs") || path.starts_with(&format!("{stem}_tests/"))
             });
-        let test_home = self.test_homes.iter().any(|home| {
-            if home.ends_with('/') {
-                path.starts_with(home.as_str())
-            } else {
-                path == home
-            }
-        });
+        let test_home = self.test_homes.iter().any(|home| home_holds(home, path));
         self.holds(path) || tests_of_home || test_home
     }
 }
@@ -793,6 +787,16 @@ impl Policy {
     #[cfg(test)]
     pub(crate) fn gated_fixture() -> Policy {
         Policy::fixture(include_str!("policy_fixture.toml"))
+    }
+}
+
+/// Whether a home, a source file or a directory (ending in `/`) of them,
+/// holds the file at `path`.
+pub(crate) fn home_holds(home: &str, path: &str) -> bool {
+    if home.ends_with('/') {
+        path.starts_with(home)
+    } else {
+        path == home
     }
 }
 
