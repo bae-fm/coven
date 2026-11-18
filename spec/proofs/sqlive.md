@@ -123,6 +123,6 @@ Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model
 among rows that sort the same, so the test compares the rows there only
 through the reruns.
 
-The differential found that a write changing only a column a USING or NATURAL
-join compares didn't rerun the query: SQLite's authorizer reports no read of
-that column. sqlive now adds those columns to the statement's reads (§4).
+SQLite's authorizer reports no read of the columns a USING or NATURAL join
+compares, so sqlive adds those columns to a statement's reads (§4), and the
+model's reads and sqlive's agree.
