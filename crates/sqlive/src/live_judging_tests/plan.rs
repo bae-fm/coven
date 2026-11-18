@@ -142,7 +142,6 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         "SELECT value FROM (SELECT id, value, sum(value) OVER () AS total FROM items) WHERE id=1",
         "SELECT a.value FROM items a JOIN items b ON a.id<b.id WHERE b.value=90",
         "SELECT a.value FROM items a NATURAL JOIN items b WHERE a.id=1",
-        "SELECT a.value FROM items a JOIN items b USING (id) WHERE a.id=1",
         "SELECT value FROM items WHERE id=1 OR value>20",
     ] {
         let calls = Arc::new(AtomicUsize::new(0));

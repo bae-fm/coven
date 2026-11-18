@@ -5,7 +5,8 @@ import Lean.Data.Json
 alias, numbered as sqlive's planner reads it (`read_select`, `read_core`,
 `read_item`): a core before its items, a derived item after its own cores'
 items, and a core's subqueries after its items, in the order sqlive finds
-them (result columns, each ON in FROM order, the WHERE, GROUP BY). -/
+them (result columns, each ON in FROM order, the WHERE, GROUP BY). A join's
+USING columns read as the equalities they stand for, in its ON's place. -/
 namespace SqliveNarrowing.Json
 open Lean
 
@@ -61,7 +62,7 @@ def combineOp : String → Except String Combine
   | other => throw s!"unknown compound operator {other}"
 
 def wholeShape : String → Except String WholeShape
-  | "using" => pure .using | "natural" => pure .natural | "right" => pure .right
+  | "natural" => pure .natural | "right" => pure .right
   | "recursive" => pure .recursive | "in_table" => pure .inTable | "virtual" => pure .virtual
   | "parenthesized" => pure .parenthesized | "repeated_cte" => pure .repeatedCte
   | other => throw s!"unknown whole shape {other}"
@@ -86,6 +87,18 @@ def resolve (k : Nat) (alias column : String) : M (Nat × Nat) := do
         | some p => go f p
         | none => throw s!"{alias}.{column} names no item"
   lift (go (b.cores.size + 1) k)
+
+/-- The equality `JOIN` item `i` `USING (column)` stands for, after the items
+`before` in its FROM: `l.column = i.column`, with `l` the leftmost of them
+that has the column, which SQLite compares with `i`'s column, by `l`'s
+collation. -/
+def usingCond (before : List Nat) (i : Nat) (column : String) : M Cond := do
+  let b ← get
+  let position (j : Nat) := (b.named.getD j default).columns.findIdx? (· == some column)
+  let some (l, lc) := before.findSome? fun j => (position j).map (j, ·)
+    | lift (throw s!"no item before USING has column {column}")
+  let some rc := position i | lift (throw s!"a USING item has no column {column}")
+  pure (.cmp .eq (.col l lc) (.col i rc))
 
 /-- The conjuncts of a condition joined by AND (`conjuncts`). -/
 partial def conjuncts (j : Json) : List Json :=
@@ -126,15 +139,18 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
     cores := b.cores.push { parent, items := [], conds := [], output := [], groupBy := [] }
     outNames := b.outNames.push [] }
   let mut items := []
-  let mut ons : List (Nat × Json × Bool) := []
+  -- Each ON's conditions, as JSON, and each USING's equalities, read.
+  let mut ons : List (Nat × (Json ⊕ Cond) × Bool) := []
   for entry in list j "from" do
     let i ← readItem schema entry k parent ctes
+    let left := (field entry "left").bind (·.getBool?.toOption) |>.getD false
+    for column in list entry "using" do
+      ons := ons ++ [(i, .inr (← usingCond items i (← lift column.getStr?)), left)]
     items := items ++ [i]
     for shape in list entry "whole" do
       let shape ← lift (wholeShape (← lift shape.getStr?))
       modify fun b => { b with whole := b.whole ++ [shape] }
-    let left := (field entry "left").bind (·.getBool?.toOption) |>.getD false
-    ons := ons ++ (list entry "on").flatMap fun c => (conjuncts c).map ((i, ·, left))
+    ons := ons ++ (list entry "on").flatMap fun c => (conjuncts c).map ((i, .inl ·, left))
   modify fun b => { b with cores := b.cores.modify k fun c => { c with items } }
   let mut output := []
   let mut names := []
@@ -144,7 +160,10 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
     names := names ++ [name]
   let mut conds := []
   for (i, c, left) in ons do
-    conds := conds ++ [(← readCond schema c k ctes, if left then Place.leftOn i else .inner)]
+    let c ← match c with
+      | .inl c => readCond schema c k ctes
+      | .inr c => pure c
+    conds := conds ++ [(c, if left then Place.leftOn i else .inner)]
   for c in (list j "where").flatMap conjuncts do
     conds := conds ++ [(← readCond schema c k ctes, Place.inner)]
   let mut groupBy := []

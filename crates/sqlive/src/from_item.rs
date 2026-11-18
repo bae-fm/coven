@@ -73,6 +73,9 @@ pub(crate) struct FromItem {
     /// A subquery's, CTE's or view's cores, which conditions on its rows
     /// narrow.
     pub(crate) derived: Option<Derived>,
+    /// The columns, lowercase, a USING join compares with an item to its
+    /// left, which a bare name and a `*` take from that item instead.
+    pub(crate) using: Vec<String>,
 }
 
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
@@ -96,6 +99,7 @@ pub(crate) fn read_item<'a>(
         left_on: left.then(crate::scope_plan::Narrowing::default),
         core,
         derived,
+        using: Vec::new(),
     };
     match table {
         SelectTable::Table(name, alias, _) => {

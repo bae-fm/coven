@@ -13,8 +13,10 @@ random statements and writes and compares all three.
 [Syntax.lean](../../crates/sqlive/proofs/SqliveNarrowing/Syntax.lean) states a
 statement as the planner numbers it: its FROM items, the SELECT cores that hold
 them, the queries whose arms the cores are, and the conditions on each core's
-rows, each in the WHERE or in a LEFT JOIN's ON. A subquery is a query number,
-so an expression names it without nesting. A value is NULL or an integer, and
+rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
+equality of each column it names with the column of that name of the leftmost
+item before it that has one, as SQLite compares them. A subquery is a query
+number, so an expression names it without nesting. A value is NULL or an integer, and
 the differential's tables hold only those, in columns SQLite compares without
 converting a value.
 

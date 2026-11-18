@@ -406,15 +406,10 @@ impl Planner<'_> {
         if !is_name(member_expr) {
             return None;
         }
-        let items = &self.items;
         let (member, column) = self.resolve(core, member_expr)?;
-        if items[member].core != core {
+        if self.items[member].core != core {
             return None;
         }
-        if items[member].source.table.is_none() && items[member].derived.is_none() {
-            return None;
-        }
-        let affinity = items[member].columns.affinity(&column)?;
         let mut found = Vec::new();
         parts(other, &mut found);
         let mut partner = None;
@@ -431,36 +426,108 @@ impl Planner<'_> {
             partner = Some(item);
         }
         let partner = partner?;
-        items[partner].source.from.as_ref()?;
+        if is_name(other) {
+            let (_, partner_column) = self.resolve(core, other)?;
+            return self.column_edge((member, column), (partner, partner_column), first);
+        }
         if first && is_name(stripped(other)) {
             let (_, partner_column) = self.resolve(core, stripped(other))?;
             // A column sqlive gives an affinity compares by BINARY: a
             // table's, or a subquery's that passes such a column on.
-            items[partner].columns.affinity(&partner_column)?;
+            self.items[partner].columns.affinity(&partner_column)?;
         }
-        let value = if is_name(other) {
-            let (_, partner_column) = self.resolve(core, other)?;
-            match items[partner].columns.affinity(&partner_column) {
-                Some(partner_affinity) => {
-                    if partner_affinity != affinity {
-                        return None;
-                    }
-                    PartnerValue::Column(partner_column)
-                }
-                // A column sqlive gives no affinity, as a view's or a
-                // function's: a lookup compares it as the statement does,
-                // with whatever affinity SQLite gives it.
-                None => PartnerValue::Expression(other.to_string()),
+        match unparenthesized(other) {
+            // A cast or COLLATE gives the expression an affinity or a
+            // collation of its own, which SQLite's comparison would use.
+            Expr::Cast { .. } | Expr::Collate(..) => None,
+            _ => self.edge_to(member, column, partner, |_| {
+                Some(PartnerValue::Expression(other.to_string()))
+            }),
+        }
+    }
+
+    /// The edge `member.column = partner.column` gives, with `partner`'s
+    /// column first when `first`: a column first in an equality gives it its
+    /// collation, which is BINARY when sqlive gives the column an affinity.
+    fn column_edge(
+        &self,
+        (member, column): (usize, String),
+        (partner, partner_column): (usize, String),
+        first: bool,
+    ) -> Option<Edge> {
+        let partner_affinity = self.items[partner].columns.affinity(&partner_column);
+        if first && partner_affinity.is_none() {
+            return None;
+        }
+        self.edge_to(member, column, partner, |affinity| match partner_affinity {
+            Some(partner_affinity) => {
+                (partner_affinity == affinity).then_some(PartnerValue::Column(partner_column))
             }
-        } else {
-            match unparenthesized(other) {
-                // A cast or COLLATE gives the expression an affinity or a
-                // collation of its own, which SQLite's comparison would use.
-                Expr::Cast { .. } | Expr::Collate(..) => return None,
-                _ => PartnerValue::Expression(other.to_string()),
-            }
-        };
+            // A column sqlive gives no affinity, as a view's or a
+            // function's: a lookup compares it as the statement does, with
+            // whatever affinity SQLite gives it.
+            None => Some(PartnerValue::Expression(format!(
+                "{}.{}",
+                self.items[partner].source.qualifier,
+                crate::sql::identifier(&partner_column)
+            ))),
+        })
+    }
+
+    /// The edge from `member`'s `column` to `partner`, whose rows give the
+    /// value `value` makes for the column's affinity: when sqlive narrows by
+    /// the column, and can read the partner alone.
+    fn edge_to(
+        &self,
+        member: usize,
+        column: String,
+        partner: usize,
+        value: impl FnOnce(Affinity) -> Option<PartnerValue>,
+    ) -> Option<Edge> {
+        let items = &self.items;
+        if partner == member
+            || (items[member].source.table.is_none() && items[member].derived.is_none())
+        {
+            return None;
+        }
+        let affinity = items[member].columns.affinity(&column)?;
+        items[partner].source.from.as_ref()?;
+        let value = value(affinity)?;
         Some(Edge { member, column, affinity, partner, value, nested: false })
+    }
+
+    /// The narrowing `JOIN right USING (column)` gives, as the ON it stands
+    /// for: `left.column = right.column`, with `left` the leftmost item
+    /// before `right` that has the column (`using_left`).
+    fn using_narrowing(&self, left: (usize, String), right: (usize, String)) -> Narrowing {
+        let edges = [
+            self.column_edge(left.clone(), right.clone(), false),
+            self.column_edge(right, left, true),
+        ];
+        Narrowing { terms: Vec::new(), edges: edges.into_iter().flatten().collect() }
+    }
+
+    /// The leftmost item of `core` before `right` that has a column named
+    /// `column`, and that column, which SQLite compares `right`'s with;
+    /// `None` when an item before it may have the column under a name sqlive
+    /// doesn't know.
+    fn using_left(&self, core: usize, right: usize, column: &str) -> Option<(usize, String)> {
+        for &item in &self.cores[core].items {
+            if item == right {
+                break;
+            }
+            let columns = &self.items[item].columns;
+            if matches!(columns, Columns::Unknown) {
+                return None;
+            }
+            if let Some(found) = columns.named(&Name(column)) {
+                return Some((item, found));
+            }
+            if !columns.complete() {
+                return None;
+            }
+        }
+        None
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -495,8 +562,11 @@ impl Planner<'_> {
                     if items.clone().any(|(_, item)| matches!(item.columns, Columns::Unknown)) {
                         return None;
                     }
+                    // A USING join's right side leaves its compared
+                    // columns' bare names to the item on the left.
                     let mut found = items.clone().filter_map(|(position, item)| {
-                        Some((position, item.columns.named(&name)?))
+                        let column = item.columns.named(&name)?;
+                        (!item.using.contains(&column)).then_some((position, column))
                     });
                     if let Some(first) = found.next() {
                         return found.next().is_none().then_some(first);
@@ -692,7 +762,7 @@ fn read_core<'a>(
             }
         }
     }
-    let mut conditions: Vec<(&Expr<'_>, Place)> = Vec::new();
+    let mut conditions: Vec<(Written<'_>, Place)> = Vec::new();
     if let Some(from) = from {
         let tables = from
             .select
@@ -727,9 +797,21 @@ fn read_core<'a>(
                     parts(expr, &mut found);
                     let mut joined = Vec::new();
                     conjuncts(expr, &mut joined);
-                    conditions.extend(joined.into_iter().map(|expr| (expr, place)));
+                    conditions.extend(joined.into_iter().map(|expr| (Written::Expr(expr), place)));
                 }
-                Some(JoinConstraint::Using(_)) => return Ok(None),
+                Some(JoinConstraint::Using(names)) => {
+                    let right = planner.items.len() - 1;
+                    for name in names.iter() {
+                        let column = crate::sql::name(name.0).to_ascii_lowercase();
+                        let left = planner.using_left(core, right, &column);
+                        let right_column = planner.items[right].columns.named(&Name(&column));
+                        if let (Some(left), Some(right_column)) = (left, right_column) {
+                            let using = Written::Using { left, right: (right, right_column) };
+                            conditions.push((using, place));
+                        }
+                        planner.items[right].using.push(column);
+                    }
+                }
             }
         }
     }
@@ -737,7 +819,7 @@ fn read_core<'a>(
         parts(predicate, &mut found);
         let mut joined = Vec::new();
         conjuncts(predicate, &mut joined);
-        conditions.extend(joined.into_iter().map(|expr| (expr, Place::Inner)));
+        conditions.extend(joined.into_iter().map(|expr| (Written::Expr(expr), Place::Inner)));
     }
     for expr in group_by.iter().flat_map(|exprs| exprs.iter()) {
         parts(expr, &mut found);
@@ -753,7 +835,13 @@ fn read_core<'a>(
     };
     let mut read = Vec::new();
     for (condition, place) in conditions {
-        read.push((read_condition(connection, planner, core, condition, &subqueries)?, place));
+        let found = match condition {
+            Written::Expr(condition) => {
+                read_condition(connection, planner, core, condition, &subqueries)?
+            }
+            Written::Using { left, right } => planner.using_narrowing(left, right),
+        };
+        read.push((found, place));
     }
     // The conditions a row of NULLs fails come first, as they make LEFT JOINs
     // inner, which the others see.
@@ -773,6 +861,17 @@ fn read_core<'a>(
         crate::derived::push_down(planner, item, term, Vec::new());
     }
     Ok(Some(core))
+}
+
+/// A condition of a core as its SQL writes it.
+enum Written<'a> {
+    Expr(&'a Expr<'a>),
+    /// `JOIN right USING (column)`: the item and column to its left that
+    /// SQLite compares the right item's column with, and that one.
+    Using {
+        left: (usize, String),
+        right: (usize, String),
+    },
 }
 
 /// Read one condition of `core` into the terms and edges of the items

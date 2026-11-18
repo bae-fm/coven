@@ -1,7 +1,7 @@
 //! The columns a USING or NATURAL join compares, which SQLite's authorizer
 //! doesn't report as read though the join's rows depend on them (§4). A
-//! statement's reads add them for each table the join reads directly, in any
-//! SELECT of the statement and in any of the app's views it reads. A view's
+//! statement's reads add them for each table the join compares directly, in
+//! any SELECT of the statement and in any of the app's views it reads. A view's
 //! or a subquery's columns the join compares are named in its own SELECT,
 //! where the authorizer reports the columns of its tables itself. When the
 //! parser can't read the statement or a view it reads, the columns are
@@ -14,7 +14,7 @@ use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLE
 use crate::select_syntax::{parts, window_parts, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
-    Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
+    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, OneSelect, QualifiedName,
     ResultColumn, Select, SelectTable,
 };
 
@@ -63,8 +63,13 @@ pub(crate) fn joined_columns(
     connection: &Connection,
     select: &Select<'_>,
 ) -> rusqlite::Result<JoinedColumns> {
-    let mut walk =
-        Walk { connection, views: BTreeSet::new(), found: ColumnSet::new(), unread: None };
+    let mut walk = Walk {
+        connection,
+        views: BTreeSet::new(),
+        ctes: Vec::new(),
+        found: ColumnSet::new(),
+        unread: None,
+    };
     walk.select(select)?;
     match walk.unread {
         Some(why) => JoinedColumns::unknown(connection, why),
@@ -76,6 +81,9 @@ struct Walk<'c> {
     connection: &'c Connection,
     /// The views read so far, lowercase, so a view read twice is read once.
     views: BTreeSet<String>,
+    /// The names, lowercase, of the CTEs where the walk is, which a FROM
+    /// item's name means before any table or view of that name.
+    ctes: Vec<String>,
     found: ColumnSet,
     /// Why the parser couldn't read a view the statement reads.
     unread: Option<String>,
@@ -83,7 +91,11 @@ struct Walk<'c> {
 
 impl Walk<'_> {
     fn select(&mut self, select: &Select<'_>) -> rusqlite::Result<()> {
-        for cte in select.with.iter().flat_map(|with| with.ctes.iter()) {
+        let outer = self.ctes.len();
+        let ctes = select.with.iter().flat_map(|with| with.ctes.iter());
+        self.ctes
+            .extend(ctes.clone().map(|cte| crate::sql::name(cte.tbl_name.0).to_ascii_lowercase()));
+        for cte in ctes {
             self.select(cte.select)?;
         }
         let arms = std::iter::once(&select.body.select)
@@ -100,6 +112,7 @@ impl Walk<'_> {
                 self.expr(offset)?;
             }
         }
+        self.ctes.truncate(outer);
         Ok(())
     }
 
@@ -144,9 +157,10 @@ impl Walk<'_> {
     }
 
     /// Each FROM item, then each USING or NATURAL join's columns: a USING
-    /// column of each table before the join or joined that has it, and
-    /// every column of each such table for a NATURAL join, which compares
-    /// the columns the two sides share.
+    /// column of the joined table and of the leftmost item before the join
+    /// that has it, which SQLite compares it with, and every column of each
+    /// table before the join or joined for a NATURAL join, which compares the
+    /// columns the two sides share.
     fn from(&mut self, from: &FromClause<'_>) -> rusqlite::Result<()> {
         let items: Vec<&SelectTable<'_>> = from
             .select
@@ -160,34 +174,82 @@ impl Walk<'_> {
             if let Some(JoinConstraint::On(expr)) = &join.constraint {
                 self.expr(expr)?;
             }
-            let natural = matches!(
+            // The items before the join's own, which sits after the first.
+            let (before, joined) = (&items[..=position], items[position + 1]);
+            if matches!(
                 join.operator,
                 JoinOperator::TypedJoin(Some(kind)) if kind.contains(JoinType::NATURAL)
-            );
-            let using: Option<Vec<String>> = match &join.constraint {
-                Some(JoinConstraint::Using(names)) => Some(
-                    names
-                        .iter()
-                        .map(|name| crate::sql::name(name.0).to_ascii_lowercase())
-                        .collect(),
-                ),
-                _ => None,
-            };
-            if !natural && using.is_none() {
+            ) {
+                for item in before.iter().chain([&joined]) {
+                    if let Some((table, columns)) = self.table(item)? {
+                        for column in columns {
+                            self.found.insert((table.to_ascii_lowercase(), column));
+                        }
+                    }
+                }
                 continue;
             }
-            // The items up to the join's own, which sits after the first.
-            for item in &items[..position + 2] {
-                let SelectTable::Table(name, ..) = item else { continue };
-                let Some(table) = self.object(name, "table")? else { continue };
-                for column in self.columns(&table)? {
-                    if natural || using.as_ref().is_some_and(|using| using.contains(&column)) {
-                        self.found.insert((table.to_ascii_lowercase(), column));
+            let Some(JoinConstraint::Using(names)) = &join.constraint else { continue };
+            for name in names.iter() {
+                let column = crate::sql::name(name.0).to_ascii_lowercase();
+                self.table_column(joined, &column)?;
+                // Past an item whose columns this doesn't know, any table
+                // after it could be the one compared.
+                let mut known = true;
+                for item in before {
+                    match self.has_column(item, &column)? {
+                        Some(false) => {}
+                        Some(true) => {
+                            self.table_column(item, &column)?;
+                            if known {
+                                break;
+                            }
+                        }
+                        None => known = false,
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// The table `item` reads directly, and its columns, lowercase.
+    fn table(&self, item: &SelectTable<'_>) -> rusqlite::Result<Option<(String, Vec<String>)>> {
+        let SelectTable::Table(name, ..) = item else { return Ok(None) };
+        let Some(table) = self.object(name, "table")? else { return Ok(None) };
+        let columns = self.columns(&table)?;
+        Ok(Some((table, columns)))
+    }
+
+    /// Count `column` of the table `item` reads directly, when it has one.
+    fn table_column(&mut self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<()> {
+        if let Some((table, columns)) = self.table(item)? {
+            if columns.iter().any(|found| found == column) {
+                self.found.insert((table.to_ascii_lowercase(), column.to_owned()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `item` has a column named `column`, when this knows: a table
+    /// or a view of the main schema, or a subquery whose result columns
+    /// SQLite names by their aliases or the columns they name.
+    fn has_column(&self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<Option<bool>> {
+        let names = match item {
+            SelectTable::Table(name, ..) => {
+                let Some(object) = self.object(name, "table")?.or(self.object(name, "view")?)
+                else {
+                    return Ok(None);
+                };
+                self.columns(&object)?
+            }
+            SelectTable::Select(select, _) => {
+                let Some(names) = result_names(select) else { return Ok(None) };
+                names
+            }
+            SelectTable::TableCall(..) | SelectTable::Sub(..) => return Ok(None),
+        };
+        Ok(Some(names.iter().any(|found| found == column)))
     }
 
     fn item(&mut self, item: &SelectTable<'_>) -> rusqlite::Result<()> {
@@ -198,7 +260,11 @@ impl Walk<'_> {
                     return Ok(());
                 }
                 let connection = self.connection;
-                if let Err(why) = read_view(connection, &view, |_, select| self.select(select))? {
+                // A view's SELECT names no CTE of the statement.
+                let ctes = std::mem::take(&mut self.ctes);
+                let read = read_view(connection, &view, |_, select| self.select(select));
+                self.ctes = ctes;
+                if let Err(why) = read? {
                     self.unread.get_or_insert(why);
                 }
                 Ok(())
@@ -231,9 +297,12 @@ impl Walk<'_> {
 
     /// The stored name of the main schema's object of type `kind`, `table`
     /// or `view`, that `name` names. A name of another schema reads no table
-    /// of the app's.
+    /// of the app's, and a CTE's name none of the schema's objects.
     fn object(&self, name: &QualifiedName<'_>, kind: &str) -> rusqlite::Result<Option<String>> {
         if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
+            return Ok(None);
+        }
+        if name.db_name.is_none() && self.ctes.iter().any(|cte| name.name == cte.as_str()) {
             return Ok(None);
         }
         Ok(main_object(self.connection, &name.name)?
@@ -248,6 +317,37 @@ impl Walk<'_> {
             .map(|column| column.name.to_ascii_lowercase())
             .collect())
     }
+}
+
+/// The names, lowercase, SQLite gives the result columns of `select`'s first
+/// arm, when each is an alias or a column's name; `None` when one is an
+/// expression or a `*`.
+fn result_names(select: &Select<'_>) -> Option<Vec<String>> {
+    let OneSelect::Select { columns, .. } = &select.body.select else {
+        let OneSelect::Values(rows) = &select.body.select else { return None };
+        return Some(
+            (1..=rows.first().map_or(0, |row| row.len()))
+                .map(|position| format!("column{position}"))
+                .collect(),
+        );
+    };
+    columns
+        .iter()
+        .map(|column| {
+            let name = match column {
+                ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias))) => alias.0,
+                ResultColumn::Expr(expr, None) => match crate::sql::unparenthesized(expr) {
+                    Expr::Id(name) => name.0,
+                    Expr::Name(name)
+                    | Expr::Qualified(_, name)
+                    | Expr::DoublyQualified(_, _, name) => name.0,
+                    _ => return None,
+                },
+                ResultColumn::Star | ResultColumn::TableStar(_) => return None,
+            };
+            Some(crate::sql::name(name).to_ascii_lowercase())
+        })
+        .collect()
 }
 
 #[cfg(test)]

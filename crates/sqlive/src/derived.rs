@@ -271,8 +271,18 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 found.push(Output { name, passed });
             }
             ResultColumn::Star => {
+                // A USING join's right side leaves out the columns it
+                // compares, which the item on the left lists: among columns
+                // of names sqlive doesn't know, it can't tell which.
                 for item in &planner.cores[core].items {
-                    found.extend(every_column(&planner.items[*item], *item)?);
+                    let using = &planner.items[*item].using;
+                    if !using.is_empty() && !planner.items[*item].columns.complete() {
+                        return None;
+                    }
+                    let columns = every_column(&planner.items[*item], *item)?;
+                    found.extend(columns.into_iter().filter(|output| {
+                        output.name.as_ref().is_none_or(|name| !using.contains(name))
+                    }));
                 }
             }
             ResultColumn::TableStar(qualifier) => {

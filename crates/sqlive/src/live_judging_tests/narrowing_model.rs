@@ -29,6 +29,8 @@ mod push_down;
 mod subquery_edge;
 #[path = "narrowing_model/term.rs"]
 mod term;
+#[path = "narrowing_model/using.rs"]
+mod using;
 #[path = "narrowing_model/view.rs"]
 mod view;
 #[path = "narrowing_model/whole.rs"]
@@ -85,9 +87,13 @@ pub(super) enum Join {
     Comma,
     Inner,
     Left,
-    /// `JOIN ... USING (columns)`: the model reads it as its equalities with
-    /// the core's first item, and as a shape sqlive reads whole.
-    Using,
+    /// `JOIN ... USING (columns)`, or `LEFT JOIN` when `left`: the model reads
+    /// it as the equality of each column with the leftmost item before it
+    /// that has the column.
+    Using {
+        left: bool,
+        columns: &'static [&'static str],
+    },
     Natural,
 }
 
@@ -258,17 +264,10 @@ impl Core {
                 (_, Join::Left) => {
                     sql.push_str(&format!(" LEFT JOIN {source} AS {}{}", item.alias, on()));
                 }
-                (_, Join::Using) => {
-                    let columns: Vec<&str> = item
-                        .on
-                        .iter()
-                        .map(|condition| match condition {
-                            Cond::Cmp(_, Expr::Col(_, column), _) => *column,
-                            _ => unreachable!("a USING join's conditions are its equalities"),
-                        })
-                        .collect();
+                (_, Join::Using { left, columns }) => {
                     sql.push_str(&format!(
-                        " JOIN {source} AS {} USING ({})",
+                        " {}JOIN {source} AS {} USING ({})",
+                        if left { "LEFT " } else { "" },
                         item.alias,
                         columns.join(", ")
                     ));
@@ -294,15 +293,17 @@ impl Core {
             .from
             .iter()
             .map(|item| {
+                let (left, using) = match item.join {
+                    Join::Left => (true, &[][..]),
+                    Join::Using { left, columns } => (left, columns),
+                    _ => (false, &[][..]),
+                };
                 let mut entry = json!({
                     "alias": item.alias,
-                    "left": item.join == Join::Left,
+                    "left": left,
+                    "using": using,
                     "on": item.on.iter().map(Cond::json).collect::<Vec<_>>(),
-                    "whole": match item.join {
-                        Join::Using => vec!["using"],
-                        Join::Natural => vec!["natural"],
-                        _ => Vec::new(),
-                    },
+                    "whole": if item.join == Join::Natural { vec!["natural"] } else { Vec::new() },
                 });
                 let (key, value) = match &item.source {
                     Source::Table(name) => ("table", json!(name)),
@@ -875,6 +876,12 @@ async fn view_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn limit_matches_lean() {
     differential("limit", limit::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn using_matches_lean() {
+    differential("using", using::statement).await;
 }
 
 #[tokio::test]

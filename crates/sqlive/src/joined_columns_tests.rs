@@ -54,3 +54,32 @@ fn unknown_joins_count_every_column_of_every_table() {
         &pairs(&[("a", "id"), ("a", "k"), ("a", "v"), ("b", "id"), ("b", "k"), ("b", "w"),])
     );
 }
+
+/// A USING column compares with the leftmost item before the join that has
+/// it: a table after that item compares nothing, and a CTE of a table's name
+/// is not that table.
+#[test]
+fn a_using_join_names_the_leftmost_column_before_it() {
+    let connection = connection();
+    for (sql, expected) in [
+        ("SELECT a.v FROM a CROSS JOIN b AS c JOIN b USING (k)", &[("a", "k"), ("b", "k")][..]),
+        (
+            "WITH a AS (SELECT 1 AS id) SELECT * FROM a CROSS JOIN b AS c JOIN b USING (k)",
+            &[("b", "k")][..],
+        ),
+        ("SELECT * FROM (SELECT 1 AS k) AS s CROSS JOIN a JOIN b USING (k)", &[("b", "k")][..]),
+        (
+            "SELECT * FROM (SELECT a.id FROM a) AS s CROSS JOIN a JOIN b USING (k)",
+            &[("a", "k"), ("b", "k")][..],
+        ),
+        (
+            "SELECT * FROM (SELECT k + 1 FROM a) AS s CROSS JOIN a JOIN b USING (k)",
+            &[("a", "k"), ("b", "k")][..],
+        ),
+    ] {
+        let JoinedColumns::Known(found) = joined(&connection, sql) else {
+            panic!("the joins are known");
+        };
+        assert_eq!(found, pairs(expected), "{sql}");
+    }
+}

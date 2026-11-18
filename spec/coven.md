@@ -695,7 +695,7 @@ A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
 commit that changes none of those columns doesn't run the query again. SQLite
 leaves out the columns a USING or NATURAL join compares, so coven adds them
-itself, for each table such a join reads in the statement or in one of the
+itself, for each table such a join compares in the statement or in one of the
 app's views it reads: a write that changes only `tracks.release_id` reruns a
 query that joins `tracks` to `releases` with `USING (release_id)`. When coven
 can't parse the statement, or a view it reads, coven counts every column of
@@ -880,8 +880,10 @@ affinity, gives the looked-up value the joined column's, so a text `'5'` the
 expression makes equals the 5 an INTEGER column holds. Where coven couldn't
 compare as SQLite does, the join narrows nothing: between columns of different
 affinities, by a collation other than BINARY, as when its first side is a
-NOCASE column, and on anything but an equality. NATURAL, USING, RIGHT and FULL
-joins narrow nothing either.
+NOCASE column, and on anything but an equality. NATURAL, RIGHT and FULL joins
+narrow nothing either. A join with USING narrows as the ON it stands for: `JOIN
+r USING (k)` compares `r.k` with the `k` of the leftmost table before it that
+has one, by that table's collation.
 
 One of coven's views or a table function in a join narrows the tables beside
 it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view

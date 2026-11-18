@@ -772,3 +772,120 @@ INSERT INTO placement VALUES (1,X'41','candidate','A'),(2,X'42','candidate','B')
     }
     db.close();
 }
+
+const SCANS: &str = "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, root TEXT, hash TEXT);
+CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT, root TEXT, url TEXT);
+INSERT INTO scan VALUES (1,'/m/a','/m','h1'),(2,'/m/b','/m','h2');
+INSERT INTO covers VALUES (1,'h1','/m','one'),(2,'h2','/m','two')";
+
+fn path(path: &str) -> Vec<crate::SqlValue> {
+    vec![crate::SqlValue::Text(path.as_bytes().to_vec())]
+}
+
+/// A USING join narrows as the ON it stands for, whether its right side is
+/// a CTE, a table or a FROM subquery, by each of its columns.
+#[tokio::test]
+async fn a_using_join_narrows_as_its_on_does() {
+    let db = TestDatabase::open(SCANS);
+    for sql in [
+        "WITH c AS (SELECT hash FROM scan WHERE path = ?1) SELECT cv.url FROM covers cv JOIN c USING (hash) ORDER BY cv.id",
+        "SELECT cv.url FROM scan s JOIN covers cv USING (hash) WHERE s.path = ?1 ORDER BY cv.id",
+        "SELECT cv.url FROM covers cv JOIN (SELECT hash, root FROM scan WHERE path = ?1) USING (hash, root) ORDER BY cv.id",
+    ] {
+        follows(&db, sql, path("/m/a"), &[
+            ("INSERT INTO covers VALUES (3,'h2','/m','three')", false),
+            ("UPDATE scan SET root = '/n' WHERE id = 2", false),
+            ("UPDATE covers SET url = 'uno' WHERE id = 1", true),
+            ("UPDATE covers SET hash = 'h1' WHERE id = 3", true),
+            ("UPDATE scan SET hash = 'h2' WHERE id = 1", true),
+        ])
+        .await;
+        write(&db, "DELETE FROM covers WHERE id = 3; UPDATE covers SET url = 'one' WHERE id = 1; UPDATE scan SET hash = 'h1' WHERE id = 1; UPDATE scan SET root = '/m' WHERE id = 2");
+    }
+    db.close();
+}
+
+/// SQLite compares a USING column with the leftmost item before the join
+/// that has it, not with every item that does.
+#[tokio::test]
+async fn a_using_join_compares_with_the_leftmost_column() {
+    let db = TestDatabase::open(
+        "CREATE TABLE a(id INTEGER PRIMARY KEY, k INTEGER);
+        CREATE TABLE c(id INTEGER PRIMARY KEY, k INTEGER);
+        CREATE TABLE b(id INTEGER PRIMARY KEY, k INTEGER, w INTEGER);
+        INSERT INTO a VALUES (1,1); INSERT INTO c VALUES (1,2); INSERT INTO b VALUES (1,1,10)",
+    );
+    follows(
+        &db,
+        "SELECT b.w FROM a CROSS JOIN c JOIN b USING (k) WHERE a.id = 1 ORDER BY b.id",
+        vec![],
+        &[
+            ("INSERT INTO b VALUES (2,2,20)", false),
+            ("UPDATE b SET w = 11 WHERE id = 1", true),
+            ("UPDATE b SET k = 1 WHERE id = 2", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A LEFT JOIN's USING narrows its right side as its ON would: a row
+/// joining a left row that had none reruns the query.
+#[tokio::test]
+async fn a_left_join_using_narrows_its_right_side() {
+    let db = TestDatabase::open(SCANS);
+    write(&db, "INSERT INTO scan VALUES (3,'/m/c','/m','h3')");
+    follows(&db, "SELECT s.path || ':' || coalesce(cv.url, '-') FROM scan s LEFT JOIN covers cv USING (hash) WHERE s.root = '/m' AND s.id <> 2 ORDER BY s.id", vec![], &[
+        ("UPDATE covers SET url = 'deux' WHERE id = 2", false),
+        ("INSERT INTO covers VALUES (3,'h3','/m','three')", true),
+        ("UPDATE covers SET url = 'uno' WHERE id = 1", true),
+        ("INSERT INTO covers VALUES (4,'h4','/m','four')", false),
+    ])
+    .await;
+    db.close();
+}
+
+/// SQLite compares a USING column by the left column's collation: a NOCASE
+/// one joins values that differ in case, which sqlive can't look up, so the
+/// right side narrows nothing by it.
+#[tokio::test]
+async fn a_using_join_of_another_collation_narrows_nothing_there() {
+    let db = TestDatabase::open(
+        "CREATE TABLE names(id INTEGER PRIMARY KEY, k TEXT COLLATE NOCASE);
+        CREATE TABLE tags(id INTEGER PRIMARY KEY, k TEXT, tag TEXT);
+        INSERT INTO names VALUES (1,'X'),(2,'Y'); INSERT INTO tags VALUES (1,'X','one')",
+    );
+    follows(
+        &db,
+        "SELECT t.tag FROM names n JOIN tags t USING (k) WHERE n.id = 1 ORDER BY t.id",
+        vec![],
+        &[
+            ("UPDATE names SET k = 'Z' WHERE id = 2", false),
+            ("INSERT INTO tags VALUES (2,'x','two')", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A `*` over a USING join lists each compared column once, from the left
+/// item, so a condition on a CTE's column passes into the column of that
+/// name in each arm.
+#[tokio::test]
+async fn a_cte_of_a_using_join_lists_each_column_once() {
+    let db = TestDatabase::open(
+        "CREATE TABLE a(k INTEGER, v INTEGER);
+        CREATE TABLE b(id INTEGER PRIMARY KEY, k INTEGER, w INTEGER);
+        CREATE TABLE d(id INTEGER PRIMARY KEY, k INTEGER, v INTEGER, w INTEGER);
+        INSERT INTO a VALUES (1,10),(2,20); INSERT INTO b VALUES (1,1,5),(2,2,6);
+        INSERT INTO d VALUES (1,3,30,5),(2,4,40,6)",
+    );
+    follows(&db, "WITH x AS (SELECT * FROM a JOIN b USING (k) UNION ALL SELECT k, v, id, w FROM d) SELECT v FROM x WHERE w = 5 ORDER BY v", vec![], &[
+        ("UPDATE b SET k = 1 WHERE id = 2", false),
+        ("UPDATE d SET v = 41 WHERE id = 2", false),
+        ("UPDATE d SET v = 31 WHERE id = 1", true),
+        ("UPDATE b SET w = 5 WHERE id = 2", true),
+    ])
+    .await;
+    db.close();
+}
