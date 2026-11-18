@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::module_sources::mark_test_modules;
-use crate::syntax::RustFile;
+use crate::syntax::{is_in_test_directory, RustFile};
 
 pub(crate) struct Workspace {
     pub(crate) files: Vec<RustFile>,
@@ -35,9 +35,7 @@ impl SqlFile {
     /// A file under its member's own `tests/` or `examples/` directory, as
     /// a Rust file there is (`RustFile::is_in_test_directory`).
     pub(crate) fn is_test_source(&self) -> bool {
-        self.relative_path
-            .strip_prefix(self.package_root.as_str())
-            .is_some_and(|path| path.starts_with("tests/") || path.starts_with("examples/"))
+        is_in_test_directory(&self.relative_path, &self.package_root)
     }
 }
 

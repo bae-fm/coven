@@ -66,10 +66,16 @@ impl RustFile {
 
     /// A file under its member's own `tests/` or `examples/` directory.
     pub(crate) fn is_in_test_directory(&self) -> bool {
-        self.relative_path
-            .strip_prefix(self.package_root.as_str())
-            .is_some_and(|path| path.starts_with("tests/") || path.starts_with("examples/"))
+        is_in_test_directory(&self.relative_path, &self.package_root)
     }
+}
+
+/// Whether `relative_path` is under its member's own `tests/` or `examples/`
+/// directory: the one list of test directories, for Rust and SQL files.
+pub(crate) fn is_in_test_directory(relative_path: &str, package_root: &str) -> bool {
+    relative_path
+        .strip_prefix(package_root)
+        .is_some_and(|path| path.starts_with("tests/") || path.starts_with("examples/"))
 }
 
 /// The name of every type path and trait bound a type mentions, as `types`
