@@ -1,12 +1,13 @@
-//! One registered service, with independent entries for each store (E1).
+//! One registered service: independent entries for each store, and the
+//! device secrets that belong to no store (E1, E11).
 
+use super::app_secrets::{self, SecretsOwner};
 use super::platform::NativeKeychain;
 use super::{KeyError, KeyMaterial, PersonRestoreCode};
-use crate::{wire, MaterialError, MemberIdentity, SecretBytes, SecretText, StoreKeyring};
+use crate::{MaterialError, MemberIdentity, SecretBytes, SecretText, StoreKeyring};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use coven_foundation::locks::lock_unpoisoned;
 use std::{
-    collections::BTreeSet,
     marker::PhantomData,
     sync::{Arc, Mutex},
 };
@@ -20,7 +21,6 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
 
 const DEVICE_ID_ENTRY: &str = "device-id";
 const CREDENTIALS_ENTRY: &str = "storage-credentials";
-const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
 const INVITE_CODE_ENTRY: &str = "invite-code";
 const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
 const RESTORE_RECORD_ENTRY: &str = "restore-record";
@@ -77,7 +77,8 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
 pub struct Keychain {
     name: String,
     backend: Box<dyn KeychainBackend>,
-    host_secrets: Mutex<()>,
+    /// Serializes updates of the app's secret name lists (D.6).
+    secret_names: Mutex<()>,
 }
 
 impl Keychain {
@@ -90,7 +91,7 @@ impl Keychain {
         Ok(Arc::new(Self {
             name,
             backend: Box::new(NativeKeychain::new()?),
-            host_secrets: Mutex::new(()),
+            secret_names: Mutex::new(()),
         }))
     }
 
@@ -123,6 +124,42 @@ impl Keychain {
     /// The most bytes the person entry `account` may hold (§13.1).
     pub(super) fn person_value_limit(&self, account: &str) -> Option<usize> {
         self.backend.person_value_limit(&self.name, account)
+    }
+
+    /// This device's secret `name`, which belongs to no store, or `None` if
+    /// it was never set (E11). A second store on this device reads the same
+    /// secret; deleting a store leaves it.
+    pub fn device_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
+        app_secrets::read(self, SecretsOwner::Device, name)
+    }
+
+    /// Keep `value` as this device's secret `name`, in a device-only entry
+    /// with no store in its account, under the same access policy as coven's
+    /// keys (E11). Coven records the name in this device's secret list before
+    /// writing the value, so `delete_device_secrets` finds it; a failure
+    /// between the two may leave an extra name, and retrying is safe.
+    pub fn set_device_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
+        app_secrets::change(self, SecretsOwner::Device, name, Some(value))
+    }
+
+    /// Delete this device's secret `name` before its listed name; an absent
+    /// secret succeeds, and retrying after a failure is safe (E11).
+    pub fn delete_device_secret(&self, name: &str) -> Result<(), KeyError> {
+        app_secrets::change(self, SecretsOwner::Device, name, None)
+    }
+
+    /// Delete every listed device secret, then the list, without decoding a
+    /// value: an app's reset of this device (E11). Absent entries succeed,
+    /// so retrying after a failure finishes.
+    pub fn delete_device_secrets(&self) -> Result<(), KeyError> {
+        app_secrets::delete_all(self, SecretsOwner::Device)
+    }
+
+    /// Run `change` on the app's secret name lists, one change at a time in
+    /// this process (D.6).
+    pub(super) fn changing_secret_names<T>(&self, change: impl FnOnce() -> T) -> T {
+        let _guard = lock_unpoisoned(&self.secret_names);
+        change()
     }
 
     pub(super) fn read(
@@ -355,17 +392,12 @@ impl StoreKeychain {
     /// secrets, without opening the database or decoding the values. Delete
     /// listed secrets before the list, then coven's other entries. The person's
     /// restore code and S3 key stay: they serve the person's next devices
-    /// (§13.1). The caller holds the store's deletion lock;
-    /// repeating after a failure is safe, including absent listed entries.
+    /// (§13.1), and so do this device's own secrets, which belong to no store.
+    /// The caller holds the store's deletion lock; repeating after a failure
+    /// is safe, including absent listed entries.
     pub fn delete_device_entries(&self) -> Result<(), KeyError> {
-        let _guard = lock_unpoisoned(&self.keychain.host_secrets);
-        if let Some(bytes) = self.read(HOST_SECRET_NAMES_ENTRY)? {
-            for name in decode_host_secret_names(bytes.as_bytes())? {
-                self.remove(&host_secret_entry(name))?;
-            }
-        }
+        app_secrets::delete_all(&self.keychain, self.secrets())?;
         for name in [
-            HOST_SECRET_NAMES_ENTRY,
             StoreKeyring::ENTRY,
             MemberIdentity::ENTRY,
             DEVICE_ID_ENTRY,
@@ -380,64 +412,29 @@ impl StoreKeychain {
         Ok(())
     }
 
+    fn secrets(&self) -> SecretsOwner {
+        SecretsOwner::Store(self.store)
+    }
+
     /// Records the name in a device-only keychain list before writing the value
     /// to its own entry. Arbitrary names are encoded into native account names;
     /// each value retains the platform's per-entry size limit. A failed write
     /// may leave an extra name, so deletion can always find every saved secret.
     /// The caller holds the store's writer lock; this capability serializes updates.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
-        self.change_host_secret(name, Some(value))
+        app_secrets::change(&self.keychain, self.secrets(), name, Some(value))
     }
 
     /// The app secret, or `None` if it was never set (E11).
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a host secret fails only by not being UTF-8, which Encoding names"
-    )]
     pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
-        self.read(&host_secret_entry(name))?
-            .map(|bytes| {
-                std::str::from_utf8(bytes.as_bytes())
-                    .map(str::to_owned)
-                    .map_err(|_| MaterialError::Encoding.into())
-            })
-            .transpose()
+        app_secrets::read(&self.keychain, self.secrets(), name)
     }
 
     /// Removes the secret before its recorded name (E11); absent entries succeed.
     /// Failure can leave an extra name; retrying is safe. The caller holds the
     /// store's writer lock.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
-        self.change_host_secret(name, None)
-    }
-
-    fn change_host_secret(&self, name: &str, value: Option<&str>) -> Result<(), KeyError> {
-        let _guard = lock_unpoisoned(&self.keychain.host_secrets);
-        let bytes = self.read(HOST_SECRET_NAMES_ENTRY)?;
-        let mut names = match &bytes {
-            Some(bytes) => decode_host_secret_names(bytes.as_bytes())?,
-            None => BTreeSet::new(),
-        };
-        match value {
-            Some(value) => {
-                names.insert(name);
-                self.write_host_secret_names(&names)?;
-                self.write(&host_secret_entry(name), value.as_bytes())
-            }
-            None => {
-                self.remove(&host_secret_entry(name))?;
-                names.remove(name);
-                self.write_host_secret_names(&names)
-            }
-        }
-    }
-
-    fn write_host_secret_names(&self, names: &BTreeSet<&str>) -> Result<(), KeyError> {
-        if names.is_empty() {
-            self.remove(HOST_SECRET_NAMES_ENTRY)
-        } else {
-            self.write(HOST_SECRET_NAMES_ENTRY, encode_host_secret_names(names)?.as_bytes())
-        }
+        app_secrets::change(&self.keychain, self.secrets(), name, None)
     }
 }
 
@@ -451,51 +448,6 @@ impl std::fmt::Debug for StoreKeychain {
 /// entries alike: `<name>:<store>`.
 pub(super) fn account(name: &str, store: StoreId) -> String {
     format!("{name}:{store}")
-}
-
-// Hex keeps empty, NUL-containing and Unicode names distinct and separates every
-// app name from coven's own entries, even on case-insensitive native keychains.
-fn host_secret_entry(name: &str) -> String {
-    format!("host-secret-{}", hex::encode(name.as_bytes()))
-}
-
-// Local custody framing: a versioned prefix and length-prefixed UTF-8 names.
-// Values live in independent native entries and have no coven framing overhead.
-const HOST_SECRET_NAMES_PREFIX: &[u8] = b"CVHN\x01";
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a name list fails only by an invalid length or name: Encoding"
-)]
-fn decode_host_secret_names(mut bytes: &[u8]) -> Result<BTreeSet<&str>, MaterialError> {
-    wire::prefix(&mut bytes, HOST_SECRET_NAMES_PREFIX)?;
-    let mut names = BTreeSet::new();
-    while !bytes.is_empty() {
-        let len =
-            usize::try_from(wire::number(&mut bytes)?).map_err(|_| MaterialError::Encoding)?;
-        let name = std::str::from_utf8(wire::take(&mut bytes, len)?)
-            .map_err(|_| MaterialError::Encoding)?;
-        if !names.insert(name) {
-            return Err(MaterialError::Encoding);
-        }
-    }
-    Ok(names)
-}
-
-fn encode_host_secret_names(names: &BTreeSet<&str>) -> Result<SecretBytes, MaterialError> {
-    let len = names
-        .iter()
-        .try_fold(HOST_SECRET_NAMES_PREFIX.len(), |len, name| {
-            len.checked_add(8)?.checked_add(name.len())
-        })
-        .ok_or(MaterialError::Encoding)?;
-    let mut bytes = SecretBytes::new(Vec::with_capacity(len));
-    bytes.0.extend_from_slice(HOST_SECRET_NAMES_PREFIX);
-    for name in names {
-        bytes.0.extend_from_slice(&(name.len() as u64).to_le_bytes());
-        bytes.0.extend_from_slice(name.as_bytes());
-    }
-    Ok(bytes)
 }
 
 /// OS keychain custody for `StoreKeyring` or `MemberIdentity`, built at a composition root.

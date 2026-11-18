@@ -4529,6 +4529,14 @@ journal files.
   entries under the same access policy. Coven tracks their names so that deleting
   the local store removes them all, even when the database is damaged. Appendix
   D.6 gives the mechanics.
+- Some of the app's secrets belong to the device, not to one store. Ana's Mac
+  pairs with her kitchen speaker once, and the Household and Work stores on that
+  Mac both cast to it with the same pairing. Kept as a store's secret, the
+  pairing would go with that store, and every other store would pair again. So
+  the app can keep a *device secret*: one entry for the whole device, which
+  every store on it reads and deleting a store leaves. Coven lists device
+  secrets' names too, so an app that resets the device deletes them all without
+  naming them.
 
 ### 13. Joining and restoring
 
@@ -12937,7 +12945,8 @@ The floor body also carries key copies with their routing in the clear
 ### D.6 Where secrets live
 
 §12.4 says what custody holds. Each store has keychain entries in two scopes,
-each named `<entry>:<store>`. Block Store has no service of its own, so on
+each named `<entry>:<store>`, and the device has its own device secrets,
+named `<entry>` with no store. Block Store has no service of its own, so on
 Android the person's entries are named `<service>/<entry>:<store>`, which also
 keeps them apart from the app's own Block Store entries:
 
@@ -12945,6 +12954,7 @@ keeps them apart from the app's own Block Store entries:
 |---|---|---|
 | Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the invite code of a join under way, the record of a restore under way, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
+| Device-only, for the whole device: belongs to no store | the app's device secrets and their list | the app deletes it, or deletes every device secret (api.md [E11](api.md#e11-keys-and-secrets)) |
 
 On Apple devices the device-only entries can be read only while the device is
 unlocked (`WhenUnlockedThisDeviceOnly`). Opening reads the device id among them,
@@ -12957,16 +12967,21 @@ keys (api.md [E11](api.md#e11-keys-and-secrets)):
 - **Separate entries.** Each secret is its own keychain entry, under the same
   access policy as coven's keys and the platform's per-secret size limit.
 - **Names.** Names are arbitrary strings, encoded into native account names that
-  can't collide with coven's own entries.
+  can't collide with coven's own entries. A device secret's account has no
+  `:<store>` suffix, so it never names a store's entry.
 - **The list.** Coven records each store's saved names in another keychain entry,
-  outside the database.
+  outside the database, and the device secrets' names in one more, named for no
+  store.
 - **Order of steps.** Saving adds the name before writing the secret; deleting
   removes the secret before the name. So the list always covers every secret that
   exists. A failure or crash between steps can leave only a harmless extra name.
 - **Deleting the local store** removes every listed secret, then the list, then
   coven's other device-only entries (api.md [E1](api.md#e1-opening)). This works
   even when the database is damaged, and the app needn't supply names. The
-  person's entries stay for their next devices (§13.1).
+  person's entries stay for their next devices (§13.1), and the device secrets
+  stay for the device's other stores.
+- **Deleting every device secret** removes every listed one, then the list, and
+  leaves every store's entries and the person's.
 - **Retries are safe.** Removing an entry that's already absent succeeds.
 
 ---

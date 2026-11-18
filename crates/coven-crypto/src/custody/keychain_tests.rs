@@ -1,8 +1,12 @@
 use super::*;
+use crate::custody::app_secrets::{
+    decode_names, host_secret_entry, HOST_SECRET_NAMES_ENTRY, SECRET_NAMES_PREFIX,
+};
 use crate::custody::person_entries::{RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY};
 use crate::custody::{Custody, KeychainError, PersonEntries};
 use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 #[test]
@@ -395,11 +399,9 @@ fn fail_operation(fake: &Keychain, after: usize) {
 
 fn recorded_names(store: &StoreKeychain) -> BTreeSet<String> {
     match store.read(HOST_SECRET_NAMES_ENTRY).unwrap() {
-        Some(bytes) => decode_host_secret_names(bytes.as_bytes())
-            .unwrap()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+        Some(bytes) => {
+            decode_names(bytes.as_bytes()).unwrap().into_iter().map(str::to_owned).collect()
+        }
         None => BTreeSet::new(),
     }
 }
@@ -421,10 +423,10 @@ fn damaged_name_lists_refuse_mutations_without_losing_secrets() {
     store.set_device_id(DeviceId(42)).unwrap();
     let valid = store.read(HOST_SECRET_NAMES_ENTRY).unwrap().unwrap();
     let mut duplicate = valid.as_bytes().to_vec();
-    duplicate.extend_from_slice(&valid.as_bytes()[HOST_SECRET_NAMES_PREFIX.len()..]);
+    duplicate.extend_from_slice(&valid.as_bytes()[SECRET_NAMES_PREFIX.len()..]);
     let mut invalid_utf8 = valid.as_bytes().to_vec();
     *invalid_utf8.last_mut().unwrap() = 0xff;
-    let mut huge_length = HOST_SECRET_NAMES_PREFIX.to_vec();
+    let mut huge_length = SECRET_NAMES_PREFIX.to_vec();
     huge_length.extend_from_slice(&u64::MAX.to_le_bytes());
     for damaged in [
         Vec::new(),

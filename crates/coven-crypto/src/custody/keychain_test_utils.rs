@@ -3,6 +3,7 @@ use crate::custody::block_store::BlockStore;
 use crate::custody::block_store_test_utils::MemoryBlockStore;
 use crate::custody::person_entries::restore_code_store;
 use crate::custody::KeychainError;
+use crate::wire;
 use std::collections::BTreeMap;
 use std::path::Path;
 use zeroize::Zeroizing;
@@ -399,7 +400,7 @@ impl Keychain {
                 refuse_person: false,
                 panic_next: false,
             })),
-            host_secrets: Mutex::new(()),
+            secret_names: Mutex::new(()),
         }))
     }
 

@@ -4,6 +4,7 @@ use crate::{MaterialError, MemberIdentity, SecretBytes, StoreKeyring};
 use coven_foundation::files::StoreFile;
 use std::sync::Arc;
 
+mod app_secrets;
 #[cfg(any(target_os = "android", test, feature = "test-utils"))]
 mod block_store;
 #[cfg(target_os = "android")]

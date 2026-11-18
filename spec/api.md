@@ -10183,7 +10183,38 @@ impl CovenHandle {
     /// Failure or a crash between these steps may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError>;
 }
+
+impl Coven {
+    /// This device's secret, or `None` if it was never set. A device secret
+    /// belongs to the device, not to a store: every store on the device reads
+    /// the same one, and deleting a store leaves it.
+    pub fn device_secret(&self, name: &str) -> Result<Option<String>, KeyError>;
+
+    /// Keeps a device secret, such as a pairing with a speaker, in a
+    /// device-only entry under the app's keychain service, with the same
+    /// access policy as coven's keys. Coven records the name in the device's
+    /// secret list before writing the value; a failure between the two may
+    /// leave an extra name, and retrying is safe.
+    pub fn set_device_secret(&self, name: &str, value: &str) -> Result<(), KeyError>;
+
+    /// Deletes the device secret before its listed name; succeeds if absent.
+    pub fn delete_device_secret(&self, name: &str) -> Result<(), KeyError>;
+
+    /// Deletes every listed device secret, then the list, as an app's reset of
+    /// the device does; every store's entries and the person's stay. Absent
+    /// entries succeed, so retrying after a failure finishes.
+    pub fn delete_device_secrets(&self) -> Result<(), KeyError>;
+}
 ```
+
+- A store's host secrets go with the store; a device secret stays while any
+  store comes and goes. Ana's Mac keeps its pairing with her kitchen speaker
+  as a device secret, so a second store on the Mac casts to the speaker
+  without pairing again
+  ([§12.4](coven.md#124-custody), [Appendix D.6](coven.md#d6-where-secrets-live)).
+  The device's own keychain keeps it, never iCloud Keychain or Block Store, so
+  Ana's phone pairs on its own. Under `Coven::in_memory` device secrets live in
+  the test's in-memory keychain, as every other entry does.
 
 - A custody owner unlocks once at creation or open and retains the capability needed to
   persist through that session. Custom custody obeys the same lifetime:
