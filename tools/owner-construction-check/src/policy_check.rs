@@ -16,7 +16,9 @@ use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::{is_identifier, split_callable, Database, ListKind, Policy, Shape};
+use crate::policy::{
+    is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy, Shape,
+};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{type_name, type_names, RustFile, TypeNames};
@@ -163,44 +165,94 @@ fn invalid_capability_rows(code: &CrateCode, policy: &Policy) -> Vec<String> {
                 stale.push(format!("capabilities: {name} has gate kind {} twice", gate.kind));
             }
         }
-        let frozen = capability.frozen.iter().map(|row| {
-            let named = format!("{} ({})", row.path, row.gate);
-            ("frozen", &row.path, None, &row.gate, row.count, &row.finding, named)
-        });
-        let allowed = capability.allowed.iter().map(|row| {
-            let named = format!("{}: {} ({})", row.path, row.item, row.gate);
-            ("allowed", &row.path, Some(&row.item), &row.gate, row.count, &row.reason, named)
-        });
+        let rows = capability
+            .frozen
+            .iter()
+            .map(CapabilityRow::Frozen)
+            .chain(capability.allowed.iter().map(CapabilityRow::Allowed));
         let mut seen = BTreeSet::new();
-        for (list, path, item, gate, count, note, named) in frozen.chain(allowed) {
-            let row = format!("capabilities.{list}: {name}");
-            if !sources.contains(path.as_str()) {
-                stale.push(format!("{row}: {path} holds no source"));
+        for row in rows {
+            let (list, path, gate, named) = (row.list(), row.path(), row.gate(), row.named());
+            let listed = format!("capabilities.{list}: {name}");
+            if !sources.contains(path) {
+                stale.push(format!("{listed}: {path} holds no source"));
                 continue;
             }
-            if !kinds.contains(gate.as_str()) {
-                stale.push(format!("{row}: {path} names gate {gate}, which the capability lacks"));
-            }
-            if let Some(item) =
-                item.filter(|item| !items.contains(&(path.clone(), item.to_string())))
-            {
+            if !kinds.contains(gate) {
                 stale.push(format!(
-                    "{row}: {path}: {item} names no function, method, static or const there"
+                    "{listed}: {path} names gate {gate}, which the capability lacks"
                 ));
             }
-            if count == 0 {
-                stale.push(format!("{row}: {named} has a count of 0, not at least 1"));
+            if let CapabilityRow::Allowed(allowed) = row {
+                if !items.contains(&(allowed.path.clone(), allowed.item.clone())) {
+                    stale.push(format!(
+                        "{listed}: {path}: {} names no function, method, static or const there",
+                        allowed.item
+                    ));
+                }
             }
+            if row.count() == 0 {
+                stale.push(format!("{listed}: {named} has a count of 0, not at least 1"));
+            }
+            let (note, says) = match row {
+                CapabilityRow::Frozen(frozen) => (&frozen.finding, "finding"),
+                CapabilityRow::Allowed(allowed) => (&allowed.reason, "reason"),
+            };
             if note.trim().is_empty() {
-                let note = if list == "frozen" { "finding" } else { "reason" };
-                stale.push(format!("{row}: {named} states no {note}"));
+                stale.push(format!("{listed}: {named} states no {says}"));
             }
-            if !seen.insert((list, path, item, gate)) {
-                stale.push(format!("{row}: {named} is listed twice"));
+            if !seen.insert((list, named.clone())) {
+                stale.push(format!("{listed}: {named} is listed twice"));
             }
         }
     }
     stale
+}
+
+/// One of a capability's frozen or allowed rows.
+#[derive(Clone, Copy)]
+enum CapabilityRow<'p> {
+    Frozen(&'p FrozenUses),
+    Allowed(&'p AllowedUses),
+}
+
+impl CapabilityRow<'_> {
+    fn list(self) -> &'static str {
+        match self {
+            CapabilityRow::Frozen(_) => "frozen",
+            CapabilityRow::Allowed(_) => "allowed",
+        }
+    }
+
+    fn path(&self) -> &str {
+        match self {
+            CapabilityRow::Frozen(row) => &row.path,
+            CapabilityRow::Allowed(row) => &row.path,
+        }
+    }
+
+    fn gate(&self) -> &str {
+        match self {
+            CapabilityRow::Frozen(row) => &row.gate,
+            CapabilityRow::Allowed(row) => &row.gate,
+        }
+    }
+
+    fn count(self) -> usize {
+        match self {
+            CapabilityRow::Frozen(row) => row.count,
+            CapabilityRow::Allowed(row) => row.count,
+        }
+    }
+
+    /// The row's key as messages name it: `path (gate)` for a frozen row,
+    /// `path: item (gate)` for an allowed one.
+    fn named(self) -> String {
+        match self {
+            CapabilityRow::Frozen(row) => format!("{} ({})", row.path, row.gate),
+            CapabilityRow::Allowed(row) => format!("{}: {} ({})", row.path, row.item, row.gate),
+        }
+    }
 }
 
 /// Every free function and method of the crates' production code, keyed by
