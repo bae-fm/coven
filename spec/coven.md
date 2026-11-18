@@ -6307,13 +6307,17 @@ when the entry runs, and the entry ends without claiming, leaving the old key
 and the old record. One killed after the key is taken has the entry journaled,
 and the next pass claims it with the new key. A call that fails before it
 takes the key ends the entry it journaled in the same call, and has changed
-nothing. Once the key is taken, the call succeeds whether or not the claim
-lands in it: a claim that fails or stays uncertain keeps the entry
-journaled, and passes claim it with the new key. The one exception is a
-claim the caught-up history refuses because Dan's removal applied: the call
-fails with `Removed`, since the removal ends this device's use of the store
-(§14.1). A call made again with the same key runs the journaled entry at once
-instead of journaling a second. The call's journal write and key change
+nothing. Once the key is taken, a claim that storage fails or leaves
+uncertain doesn't fail the call: the entry stays journaled with the failure
+in its pending record, and passes claim it with the new key. Every other
+failure still reaches the caller, with the key taken. The caught-up history
+refuses Dan's entry only once Dan or this device has been removed, and the
+call fails with that refusal (`Rejected`), or with `Removed` when the
+removal applies as the call reads forward; the removal ends this device's
+use of the store (§14.1). A failure of the device itself, its database, a
+bug or the runtime shutting down, fails the call too. A call made again
+with the same key runs the journaled entry at once instead of journaling a
+second. The call's journal write and key change
 happen while no pass or other write runs, so a pass never finds the entry
 before its key.
 

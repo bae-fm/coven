@@ -8,6 +8,7 @@ use crate::{OperationOutcome, SyncError};
 use coven_crypto::MemberIdentity;
 use coven_database::ClaimWork;
 use coven_format::{admin::StoreChange, MemberAccess};
+use coven_foundation::task::CarriesBug as _;
 use coven_storage::StorageFailure;
 use std::future::Future;
 use std::sync::Arc;
@@ -25,10 +26,12 @@ impl SequenceSync {
     /// Answers the key id the record named, when the call has an entry.
     ///
     /// Before `take` succeeds the call fails having changed nothing: an
-    /// entry it journaled ends without claiming. Once the key is taken the
-    /// call fails only when the caught-up history refuses the entry or the
-    /// member's removal applies (§14.1); any other failure leaves the
-    /// entry journaled for passes to retry with the key.
+    /// entry it journaled ends without claiming. Once the key is taken, a
+    /// storage failure leaves the entry journaled with the failure in its
+    /// pending record, for passes to retry with the key, and the call
+    /// succeeds. Every other failure still fails it: the caught-up history
+    /// refusing the entry or a removal applying (§14.1), and a failure of
+    /// this device's database, a bug or a shutdown.
     pub(crate) async fn use_access_key(
         self: &Arc<Self>,
         access_key_id: String,
@@ -43,6 +46,15 @@ impl SequenceSync {
             member: member.member(),
             access: MemberAccess::S3AccessKey { access_key_id: access_key_id.clone() },
         });
+        // Validating an entry needs this member's record, and so does
+        // naming the key it replaces.
+        let recorded = session
+            .history
+            .state
+            .active_member(&member.member())
+            .ok_or(SyncError::Removed(coven_database::Removal::Member))?
+            .access
+            .clone();
         let earlier = self.journaled(|journaled| journaled.carries(&request)).await?;
         let entry = match earlier {
             Some(id) => Some(id),
@@ -52,16 +64,14 @@ impl SequenceSync {
                 Err(reason) => return Err(SyncError::Rejected(reason)),
             },
         };
-        let replaced = entry.and_then(|_| {
-            match &session.history.state.active_member(&member.member())?.access {
-                Some(MemberAccess::S3AccessKey { access_key_id: held })
-                    if *held != access_key_id =>
-                {
-                    Some(held.clone())
-                }
-                _ => None,
+        let replaced = match (entry, recorded) {
+            (Some(_), Some(MemberAccess::S3AccessKey { access_key_id: held }))
+                if held != access_key_id =>
+            {
+                Some(held)
             }
-        });
+            _ => None,
+        };
         if let Err(error) = take.await {
             // The key was not taken: the entry this call journaled ends
             // without claiming. One an earlier call journaled stays, and a
@@ -97,12 +107,18 @@ impl SequenceSync {
         };
         match claimed.await {
             Ok(_) => Ok(replaced),
-            Err(error @ (SyncError::Rejected(_) | SyncError::Removed(_))) => Err(error),
-            Err(error) => {
-                // The entry keeps its failure in its pending record.
+            // Storage failed or left uncertain a claim, this entry's or the
+            // earlier one it waits behind: the operation's pending record
+            // keeps the failure, and passes claim the entry with the key.
+            Err(SyncError::Storage(error)) if error.bug().is_none() => {
                 tracing::info!("the new access key's entry waits for a pass: {error}");
                 Ok(replaced)
             }
+            // A refusal of the caught-up history, which comes only once this
+            // member or device is removed, a removal, and a failure of this
+            // device itself, its database, a bug or a shutdown, reach the
+            // caller with the key taken.
+            Err(error) => Err(error),
         }
     }
 

@@ -8000,11 +8000,14 @@ impl CovenHandle {
     /// the connection holds the key: a device killed in between ends the
     /// entry without claiming, and keeps the old key and record. The call
     /// fails only when it changed nothing: one that fails taking the key
-    /// ends the entry it journaled. Once the key is taken the call returns
-    /// `Ok`, whether or not the claim lands in it: a failed or uncertain
-    /// claim stays journaled with the key taken, and passes retry it. The
-    /// exception is a claim the caught-up history refuses because this
-    /// member's removal applied, which fails the call. Calling again with
+    /// ends the entry it journaled. Once the key is taken, a claim storage
+    /// fails or leaves uncertain returns `Ok`: the entry stays journaled
+    /// with the failure in its pending record, and passes retry it. Any
+    /// other failure still fails the call with the key taken: the caught-up
+    /// history refusing the entry, which it does only once this member or
+    /// device is removed (`Sync(Rejected)`, or `Sync(Removed)` when the
+    /// removal applies as the call reads forward), and a failure of this
+    /// device's database, a bug or a shutdown. Calling again with
     /// the same key runs that entry at once, without waiting out its retry
     /// wait. Another key's entry whose claim is uncertain or refused never
     /// blocks the call: once the key is taken, the call runs that entry at
@@ -8082,9 +8085,10 @@ pub enum UseAccessKeyError {
     /// (`Authentication`, or `PermissionDenied` for a key that can't read
     /// and write the location), or the check couldn't finish.
     Check(StorageCheckError),
-    /// Anything else, before the key was taken; or, once it was taken, the
-    /// caught-up history refusing the entry because this member's removal
-    /// applied (§14.1).
+    /// Anything else. Before the key was taken, nothing changed. Once it
+    /// was taken: the caught-up history refusing the entry after this
+    /// member's or device's removal (§14.1), or a failure of this device's
+    /// database, a bug or a shutdown.
     Sync(SyncError),
 }
 

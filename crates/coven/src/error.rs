@@ -116,9 +116,10 @@ pub enum UseAccessKeyError {
     /// changed.
     #[error(transparent)]
     Check(StorageCheckError),
-    /// Anything else, before the key was taken, when nothing changed; or,
-    /// once it was taken, the caught-up history refusing the entry because
-    /// this member's removal applied (§14.1).
+    /// Anything else. Before the key was taken, nothing changed. Once it
+    /// was taken: the caught-up history refusing the entry after this
+    /// member's or device's removal (§14.1), or a failure of this device's
+    /// database, a bug or a shutdown.
     #[error(transparent)]
     Sync(SyncError),
 }

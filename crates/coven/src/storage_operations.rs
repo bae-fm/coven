@@ -88,8 +88,9 @@ impl StorageConnections {
     /// nothing. Without a connection, the checked one becomes the store's,
     /// and goes again if the key isn't taken. The whole call runs as one
     /// task, so a dropped app future can't stop it between the entry and
-    /// the key. It fails only when nothing changed, or when this member's
-    /// removal applies.
+    /// the key. Once the key is taken, a storage failure of the claim leaves
+    /// the entry for passes and the call succeeds; any other failure fails
+    /// it (§14.3).
     pub(crate) async fn use_access_key(
         self: &Arc<Self>,
         key: coven_storage::S3Credentials,
