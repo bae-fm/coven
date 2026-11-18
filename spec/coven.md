@@ -969,9 +969,14 @@ comes of many rows of its tables, or depends on which other rows there are, so a
 condition on it says nothing of each. Coven's own views are read whole, since
 what they show changes with what coven holds in memory too. A view coven can't
 read this way, as one with a recursive CTE, is read whole; a lookup still asks
-it, so it narrows the tables beside it. A statement with a recursive CTE of its
-own, or with `x IN table`, narrows nothing: it depends on every row of each
-table it read.
+it, so it narrows the tables beside it. A CTE gives the tables joined to it
+their values wherever the statement reads it, in a subquery or in another CTE
+too, and so does a subquery in FROM, as long as its SQL names no row of the
+query around it. One that names such a row, as a subquery correlated with the
+row around it, lists rows only beside that row, so a lookup can't ask it
+alone, and the tables joined to it narrow by their own conditions only. A
+statement with a recursive CTE of its own, or with `x IN table`, narrows
+nothing: it depends on every row of each table it read.
 
 Applying another device's slot narrows the same way. As the slot's rows change,
 coven notes each table's changed columns and, for a table a live query
@@ -14733,6 +14738,7 @@ Write-ups explain each model and state its assumptions:
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
 | A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row | `push_down_sound`, `renamed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
+| A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row, which the bound's scope passes | `limit_sound`, `atOrBefore_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |

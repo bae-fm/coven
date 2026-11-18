@@ -23,6 +23,8 @@ mod edge;
 mod limit;
 #[path = "narrowing_model/mixed.rs"]
 mod mixed;
+#[path = "narrowing_model/nested_derived.rs"]
+mod nested_derived;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
 #[path = "narrowing_model/subquery_edge.rs"]
@@ -870,6 +872,12 @@ async fn push_down_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn view_matches_lean() {
     differential("view", view::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn nested_derived_matches_lean() {
+    differential("nested derived", nested_derived::statement).await;
 }
 
 #[tokio::test]

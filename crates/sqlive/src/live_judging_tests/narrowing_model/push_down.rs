@@ -151,7 +151,7 @@ pub(super) fn around(rng: &mut Rng, source: Source, columns: &[&'static str]) ->
         }
         _ => {
             // Inside a subquery, a derived item takes values from the item
-            // around it, but a lookup can't read it alone.
+            // around it.
             let table_ = pick(rng, &TABLES);
             let inner = select(Core {
                 from: vec![item("d", source, Join::Comma, Vec::new())],

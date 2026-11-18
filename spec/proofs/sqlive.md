@@ -81,7 +81,12 @@ promise of whichever rule reads it.
 - **A view or FROM subquery read alone.** `view_sound` proves that a query
   whose arms sit in no other core returns the same rows under every binding
   around it, so a lookup that reads it alone reads the rows the statement
-  reads.
+  reads. `closed_eval` proves that queries whose cores name only their own
+  items, read no other query and hold no other subquery return under a
+  binding the rows they return under its rows of their own items, and
+  `closed_sound` that a FROM subquery or CTE of such queries, inside an
+  expression subquery, returns under a binding of none of its items the rows
+  a lookup reads alone.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. `atOrBefore_passes` proves that the bound's scope passes

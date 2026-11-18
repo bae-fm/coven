@@ -8,7 +8,7 @@
 //! joins. Each table's rows are narrowed by the conditions its own core
 //! forces on the rows that can reach the result: constants compared with its
 //! columns, and equalities with earlier sources of the core or of a core it
-//! sits in, which a write that changes the table looks up
+//! sits in (`scope_edge.rs`), which a write that changes the table looks up
 //! (`scope_lookup.rs`). Values pass
 //! into a subquery: whether a subquery finds a row doesn't narrow the core
 //! around it, and only the column a subquery returns as it is does come out
@@ -31,7 +31,7 @@ use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
-use crate::select_syntax::{conjuncts, number_parameters, parts, repeatable, window_parts, Part};
+use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use rusqlite::{Connection, Statement};
@@ -130,8 +130,8 @@ pub(crate) struct Source {
     pub(crate) table: Option<String>,
     /// The FROM item as sqlive's own SQL names it, with its qualifier;
     /// `None` for a table function of another source's columns, or a
-    /// subquery or CTE inside another, whose rows exist only beside that
-    /// source's and so can't be read alone.
+    /// subquery or CTE whose SQL names a row around it, whose rows exist
+    /// only beside that row and so can't be read alone.
     pub(crate) from: Option<String>,
     /// How the statement names this source's columns.
     pub(crate) qualifier: String,
@@ -170,6 +170,9 @@ pub(crate) struct Core {
     /// The names its result columns are given, which SQLite resolves a bare
     /// name to when no FROM item has that column.
     aliases: Vec<String>,
+    /// The item each name in its clauses resolves to, `None` for a name
+    /// sqlive can't place.
+    names: Vec<Option<usize>>,
 }
 
 /// Where a condition was written: the WHERE or an inner join's ON, or the
@@ -371,131 +374,6 @@ impl Planner<'_> {
         waiting
     }
 
-    /// The edge `member_expr = other` gives, written in `core` with `other`
-    /// first when `first`, when `member_expr` is a column of one of the
-    /// core's sources and `other` reads columns of one other source only,
-    /// of this core or one it sits in, which sqlive can read alone; and when
-    /// SQLite compares them by BINARY, as sqlive does: the comparison takes
-    /// the collation of a COLLATE in either side, else of the first side
-    /// when that is a column. `other` holds no clock and no function the
-    /// connection doesn't flag deterministic: a lookup evaluates it again, and
-    /// would get another answer than the query did.
-    fn edge(
-        &self,
-        connection: &Connection,
-        core: usize,
-        member_expr: &Expr<'_>,
-        other: &Expr<'_>,
-        first: bool,
-    ) -> rusqlite::Result<Option<Edge>> {
-        let Some(edge) = self.edge_between(core, member_expr, other, first) else {
-            return Ok(None);
-        };
-        let mut found = Vec::new();
-        parts(other, &mut found);
-        Ok(repeatable(connection, &found)?.then_some(edge))
-    }
-
-    fn edge_between(
-        &self,
-        core: usize,
-        member_expr: &Expr<'_>,
-        other: &Expr<'_>,
-        first: bool,
-    ) -> Option<Edge> {
-        if !is_name(member_expr) {
-            return None;
-        }
-        let (member, column) = self.resolve(core, member_expr)?;
-        if self.items[member].core != core {
-            return None;
-        }
-        let mut found = Vec::new();
-        parts(other, &mut found);
-        let mut partner = None;
-        for part in found {
-            let name = match part {
-                Part::Name(name) => name,
-                Part::Function(..) | Part::Clock => continue,
-                Part::Select(_) | Part::Table | Part::Collation => return None,
-            };
-            let (item, _) = self.resolve(core, name)?;
-            if item == member || partner.is_some_and(|partner| partner != item) {
-                return None;
-            }
-            partner = Some(item);
-        }
-        let partner = partner?;
-        if is_name(other) {
-            let (_, partner_column) = self.resolve(core, other)?;
-            return self.column_edge((member, column), (partner, partner_column), first);
-        }
-        if first && is_name(stripped(other)) {
-            let (_, partner_column) = self.resolve(core, stripped(other))?;
-            // A column sqlive gives an affinity compares by BINARY: a
-            // table's, or a subquery's that passes such a column on.
-            self.items[partner].columns.affinity(&partner_column)?;
-        }
-        match unparenthesized(other) {
-            // A cast or COLLATE gives the expression an affinity or a
-            // collation of its own, which SQLite's comparison would use.
-            Expr::Cast { .. } | Expr::Collate(..) => None,
-            _ => self.edge_to(member, column, partner, |_| {
-                Some(PartnerValue::Expression(other.to_string()))
-            }),
-        }
-    }
-
-    /// The edge `member.column = partner.column` gives, with `partner`'s
-    /// column first when `first`: a column first in an equality gives it its
-    /// collation, which is BINARY when sqlive gives the column an affinity.
-    fn column_edge(
-        &self,
-        (member, column): (usize, String),
-        (partner, partner_column): (usize, String),
-        first: bool,
-    ) -> Option<Edge> {
-        let partner_affinity = self.items[partner].columns.affinity(&partner_column);
-        if first && partner_affinity.is_none() {
-            return None;
-        }
-        self.edge_to(member, column, partner, |affinity| match partner_affinity {
-            Some(partner_affinity) => {
-                (partner_affinity == affinity).then_some(PartnerValue::Column(partner_column))
-            }
-            // A column sqlive gives no affinity, as a view's or a
-            // function's: a lookup compares it as the statement does, with
-            // whatever affinity SQLite gives it.
-            None => Some(PartnerValue::Expression(format!(
-                "{}.{}",
-                self.items[partner].source.qualifier,
-                crate::sql::identifier(&partner_column)
-            ))),
-        })
-    }
-
-    /// The edge from `member`'s `column` to `partner`, whose rows give the
-    /// value `value` makes for the column's affinity: when sqlive narrows by
-    /// the column, and can read the partner alone.
-    fn edge_to(
-        &self,
-        member: usize,
-        column: String,
-        partner: usize,
-        value: impl FnOnce(Affinity) -> Option<PartnerValue>,
-    ) -> Option<Edge> {
-        let items = &self.items;
-        if partner == member
-            || (items[member].source.table.is_none() && items[member].derived.is_none())
-        {
-            return None;
-        }
-        let affinity = items[member].columns.affinity(&column)?;
-        items[partner].source.from.as_ref()?;
-        let value = value(affinity)?;
-        Some(Edge { member, column, affinity, partner, value, nested: false })
-    }
-
     /// The narrowing `JOIN right USING (column)` gives, as the ON it stands
     /// for: `left.column = right.column`, with `left` the leftmost item
     /// before `right` that has the column (`using_left`).
@@ -505,29 +383,6 @@ impl Planner<'_> {
             self.column_edge(right, left, true),
         ];
         Narrowing { terms: Vec::new(), edges: edges.into_iter().flatten().collect() }
-    }
-
-    /// The leftmost item of `core` before `right` that has a column named
-    /// `column`, and that column, which SQLite compares `right`'s with;
-    /// `None` when an item before it may have the column under a name sqlive
-    /// doesn't know.
-    fn using_left(&self, core: usize, right: usize, column: &str) -> Option<(usize, String)> {
-        for &item in &self.cores[core].items {
-            if item == right {
-                break;
-            }
-            let columns = &self.items[item].columns;
-            if matches!(columns, Columns::Unknown) {
-                return None;
-            }
-            if let Some(found) = columns.named(&Name(column)) {
-                return Some((item, found));
-            }
-            if !columns.complete() {
-                return None;
-            }
-        }
-        None
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -585,6 +440,36 @@ impl Planner<'_> {
             scope = self.cores[current].parent;
         }
         None
+    }
+
+    /// Note the items the names among `found`, written in `core`, resolve
+    /// to.
+    fn note_names(&mut self, core: usize, found: &[Part<'_>]) {
+        let names: Vec<Option<usize>> = found
+            .iter()
+            .filter_map(|part| match part {
+                Part::Name(name) => Some(self.resolve(core, name).map(|(item, _)| item)),
+                _ => None,
+            })
+            .collect();
+        self.cores[core].names.extend(names);
+    }
+
+    /// Whether a FROM subquery or CTE read in a core that sits in `parent`,
+    /// as the items from `items` on and the cores from `cores` on, can be
+    /// read alone: its core sits in no other, or every name in its cores'
+    /// clauses names one of its own items, so it returns the same rows
+    /// wherever the statement reads it.
+    pub(crate) fn alone(&self, parent: Option<usize>, items: usize, cores: usize) -> bool {
+        parent.is_none()
+            || self.cores[cores..]
+                .iter()
+                .all(|core| core.names.iter().all(|item| item.is_some_and(|item| item >= items)))
+    }
+
+    /// The CTEs, lowercase, that the items from `items` on read.
+    pub(crate) fn ctes_read(&self, items: usize) -> Vec<String> {
+        self.items[items..].iter().filter_map(|item| item.cte.clone()).collect()
     }
 
     /// Narrow the sources by `found`, which conditions on the joined rows
@@ -657,7 +542,7 @@ pub(crate) fn read_select<'a>(
     let inner;
     let ctes = match &select.with {
         Some(with) => {
-            let Some(with) = ctes.with(with, planner.whole) else {
+            let Some(with) = ctes.with(with, planner.whole, parent.is_none()) else {
                 return Ok(None);
             };
             inner = with;
@@ -682,7 +567,10 @@ pub(crate) fn read_select<'a>(
     // its terms to result columns instead, whose SELECTs are read where
     // they are.
     let order = match cores[..] {
-        [core] => Some(core),
+        [core] => {
+            planner.note_names(core, &found);
+            Some(core)
+        }
         _ if found.iter().any(|part| matches!(part, Part::Select(_) | Part::Table)) => {
             return Ok(None)
         }
@@ -741,13 +629,14 @@ fn read_core<'a>(
     ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<usize>> {
     let core = planner.cores.len();
-    planner.cores.push(Core { parent, items: Vec::new(), aliases: Vec::new() });
+    planner.cores.push(Core { parent, items: Vec::new(), aliases: Vec::new(), names: Vec::new() });
     let mut found = Vec::new();
     let (columns, from, where_clause, group_by, having, window_clause) = match select {
         OneSelect::Values(rows) => {
             for expr in rows.iter().flat_map(|row| row.iter()) {
                 parts(expr, &mut found);
             }
+            planner.note_names(core, &found);
             return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|_| core));
         }
         OneSelect::Select {
@@ -830,6 +719,7 @@ fn read_core<'a>(
     for definition in window_clause.iter().flat_map(|windows| windows.iter()) {
         window_parts(&definition.window, &mut found);
     }
+    planner.note_names(core, &found);
     let Some(subqueries) = read_nested(connection, planner, &found, Some(core), ctes)? else {
         return Ok(None);
     };
@@ -980,16 +870,6 @@ pub(crate) struct Edge {
     /// member's column is compared with, which sits in a core inside the
     /// member's: the member waits for it.
     pub(crate) nested: bool,
-}
-
-/// `expr` without the `+` and CAST SQLite still reads as the column under
-/// them, when it chooses a comparison's collation.
-fn stripped<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
-    match unparenthesized(expr) {
-        Expr::Unary(sqlite3_parser::ast::UnaryOperator::Positive, expr)
-        | Expr::Cast { expr, .. } => stripped(expr),
-        expr => expr,
-    }
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {

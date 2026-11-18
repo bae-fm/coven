@@ -100,6 +100,15 @@ def usingCond (before : List Nat) (i : Nat) (column : String) : M Cond := do
   let some rc := position i | lift (throw s!"a USING item has no column {column}")
   pure (.cmp .eq (.col l lc) (.col i rc))
 
+/-- Whether query `q`, read as the queries from `first` to `q`, names
+nothing outside them (`View.closed`). -/
+def closedSince (first q : Nat) : M Bool := do
+  let b ← get
+  let s : Statement :=
+    { items := b.items.toList, cores := b.cores.toList, queries := b.queries.toList
+      root := q, whole := [] }
+  pure (View.closed s ((List.range (q + 1 - first)).map (first + ·)))
+
 /-- The conjuncts of a condition joined by AND (`conjuncts`). -/
 partial def conjuncts (j : Json) : List Json :=
   match field j "and" with
@@ -191,19 +200,21 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
       | some (_, query) => do
         let q ← readSelect schema query none []
         let (names, columns) ← derivedColumns q
-        pure (ItemKind.derived q true, columns, names, View.readable true parent)
+        pure (ItemKind.derived q true, columns, names, View.readable true parent false)
       | none => lift (throw s!"no view {name}")
     | _, _, some (.str name), _ =>
       match ctes.reverse.find? (·.1 == name) with
       | some (_, query) => do
+        let first := (← get).queries.size
         let q ← readSelect schema query parent ctes
         let (names, columns) ← derivedColumns q
-        pure (ItemKind.derived q false, columns, names, View.readable false parent)
+        pure (ItemKind.derived q false, columns, names, View.readable false parent (← closedSince first q))
       | none => lift (throw s!"no CTE {name}")
     | _, _, _, some query => do
+      let first := (← get).queries.size
       let q ← readSelect schema query parent ctes
       let (names, columns) ← derivedColumns q
-      pure (ItemKind.derived q false, columns, names, View.readable false parent)
+      pure (ItemKind.derived q false, columns, names, View.readable false parent (← closedSince first q))
     | _, _, _, _ => lift (throw "a FROM item names no source")
   let b ← get
   set { b with

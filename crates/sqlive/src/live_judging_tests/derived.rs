@@ -197,3 +197,77 @@ async fn a_view_with_a_recursive_cte_keeps_its_tables_whole() {
     .await;
     db.close();
 }
+
+const SCANS: &str = "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, root TEXT, hash TEXT);
+CREATE TABLE files(id INTEGER PRIMARY KEY, root TEXT, path TEXT, name TEXT);
+CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT, url TEXT);
+INSERT INTO scan VALUES (1,'/m/a','/m','h1'),(2,'/m/b','/m','h2');
+INSERT INTO files VALUES (1,'/m','/m/a','a.flac'),(2,'/m','/m/b','b.flac');
+INSERT INTO covers VALUES (1,'h1','one'),(2,'h2','two')";
+
+fn path(path: &str) -> Vec<crate::SqlValue> {
+    vec![crate::SqlValue::Text(path.as_bytes().to_vec())]
+}
+
+/// A CTE of the statement's own WITH gives the tables joined to it their
+/// values wherever the statement reads it: in a scalar subquery, as a
+/// subquery's value, and inside another CTE read only in a subquery.
+#[tokio::test]
+async fn a_cte_read_in_a_subquery_gives_values() {
+    let db = TestDatabase::open(SCANS);
+    for sql in [
+        "WITH c AS (SELECT root, path FROM scan WHERE path = ?1) SELECT (SELECT count(*) || ':' || group_concat(f.name) FROM files f JOIN c ON f.root = c.root AND f.path = c.path)",
+        "WITH c AS (SELECT root FROM scan WHERE path = ?1 LIMIT 1) SELECT group_concat(name) FROM files WHERE root = (SELECT root FROM c) AND path = ?1",
+        "WITH c AS (SELECT root, path FROM scan WHERE path = ?1), f AS (SELECT files.name FROM files JOIN c ON files.root = c.root AND files.path = c.path) SELECT (SELECT group_concat(name) FROM f)",
+    ] {
+        follows(&db, sql, path("/m/a"), &[
+            ("INSERT INTO files VALUES (3,'/m','/m/b','c.flac')", false),
+            ("INSERT INTO files VALUES (4,'/n','/m/a','d.flac')", false),
+            ("UPDATE files SET name = 'a2.flac' WHERE id = 1", true),
+            ("UPDATE scan SET root = '/n' WHERE id = 1", true),
+        ])
+        .await;
+        write(&db, "DELETE FROM files WHERE id IN (3, 4); UPDATE files SET name = 'a.flac' WHERE id = 1; UPDATE scan SET root = '/m' WHERE id = 1");
+    }
+    db.close();
+}
+
+/// A CTE declared inside a subquery, or a subquery in FROM there, gives the
+/// tables joined to it their values when its SQL names no row around it.
+#[tokio::test]
+async fn a_with_inside_a_subquery_gives_values_when_it_names_nothing_around_it() {
+    let db = TestDatabase::open(SCANS);
+    for sql in [
+        "SELECT (WITH c AS (SELECT hash FROM scan WHERE path = ?1) SELECT count(*) FROM covers cv JOIN c ON cv.hash = c.hash)",
+        "SELECT (SELECT count(*) FROM covers cv JOIN (SELECT hash FROM scan WHERE path = ?1) AS c ON cv.hash = c.hash)",
+    ] {
+        follows(&db, sql, path("/m/a"), &[
+            ("INSERT INTO covers VALUES (3,'h2','three')", false),
+            ("INSERT INTO covers VALUES (4,'h1','four')", true),
+            ("UPDATE scan SET hash = 'h2' WHERE id = 1", true),
+        ])
+        .await;
+        write(&db, "DELETE FROM covers WHERE id IN (3, 4); UPDATE scan SET hash = 'h1' WHERE id = 1");
+    }
+    db.close();
+}
+
+/// A CTE that names the row around it lists rows only beside that row, so
+/// a lookup can't ask it alone: the tables joined to it narrow by their own
+/// conditions only, and every lookup a write runs still prepares.
+#[tokio::test]
+async fn a_correlated_cte_gives_no_values() {
+    let db = TestDatabase::open(SCANS);
+    follows(
+        &db,
+        "SELECT (WITH c AS (SELECT s.hash AS hash) SELECT count(*) FROM covers cv JOIN c ON cv.hash = c.hash) FROM scan s WHERE s.path = ?1",
+        path("/m/a"),
+        &[
+            ("UPDATE scan SET root = '/n' WHERE id = 2", false),
+            ("INSERT INTO covers VALUES (3,'h2','three')", true),
+            ("INSERT INTO covers VALUES (4,'h1','four')", true),
+        ],
+    )
+    .await;
+    db.close();
+}

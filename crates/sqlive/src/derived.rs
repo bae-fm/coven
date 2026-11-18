@@ -20,37 +20,53 @@ use sqlite3_parser::ast::{As, CommonTableExpr, Name, OneSelect, ResultColumn, Se
 /// being read now, which naming again would recurse.
 #[derive(Clone, Default)]
 pub(crate) struct Ctes<'a> {
-    visible: Vec<&'a CommonTableExpr<'a>>,
+    /// Each CTE, and whether its WITH sits in no other core, where its SQL
+    /// can name no row around it.
+    visible: Vec<(&'a CommonTableExpr<'a>, bool)>,
     reading: Vec<String>,
 }
 
 impl<'a> Ctes<'a> {
-    /// These CTEs and `with`'s, or `None` in two cases. When a name repeats,
-    /// SQLite resolves it by where each CTE is, which sqlive doesn't follow.
-    /// When a CTE has the name of a view read whole, sqlive couldn't tell
-    /// reads through the CTE from reads of the view.
-    pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews) -> Option<Self> {
+    /// These CTEs and `with`'s, which sits in no other core when `alone`,
+    /// or `None` in two cases. When a name repeats, SQLite resolves it by
+    /// where each CTE is, which sqlive doesn't follow. When a CTE has the
+    /// name of a view read whole, sqlive couldn't tell reads through the CTE
+    /// from reads of the view.
+    pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews, alone: bool) -> Option<Self> {
         let mut visible = self.visible.clone();
         for cte in with.ctes.iter() {
-            if visible.iter().any(|seen| seen.tbl_name == cte.tbl_name)
+            if visible.iter().any(|(seen, _)| seen.tbl_name == cte.tbl_name)
                 || whole.contains(&crate::sql::name(cte.tbl_name.0))
             {
                 return None;
             }
-            visible.push(cte);
+            visible.push((cte, alone));
         }
         Some(Self { visible, reading: self.reading.clone() })
     }
 
     /// The CTE `name` names.
     pub(crate) fn named(&self, name: &Name<'_>) -> Option<&'a CommonTableExpr<'a>> {
-        self.visible.iter().copied().find(|cte| cte.tbl_name == *name)
+        self.visible.iter().map(|(cte, _)| *cte).find(|cte| cte.tbl_name == *name)
     }
 
-    /// Every CTE, as a WITH clause.
-    fn clause(&self) -> String {
-        let ctes: Vec<String> = self.visible.iter().map(|cte| text(*cte)).collect();
-        format!("WITH {}", ctes.join(","))
+    /// Whether `cte`'s WITH sits in no other core.
+    fn alone(&self, cte: &CommonTableExpr<'_>) -> bool {
+        self.visible.iter().any(|(seen, alone)| *alone && std::ptr::eq(*seen, cte))
+    }
+
+    /// The CTEs `names` names, lowercase, as a WITH clause, or `None` for
+    /// none.
+    fn clause(&self, names: &[String]) -> Option<String> {
+        let ctes: Vec<String> = self
+            .visible
+            .iter()
+            .filter(|(cte, _)| {
+                names.contains(&crate::sql::name(cte.tbl_name.0).to_ascii_lowercase())
+            })
+            .map(|(cte, _)| text(*cte))
+            .collect();
+        (!ctes.is_empty()).then(|| format!("WITH {}", ctes.join(",")))
     }
 }
 
@@ -79,18 +95,24 @@ pub(crate) fn read_derived_item<'a>(
     parent: Option<usize>,
     ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<(Source, Columns, Derived)>> {
+    // What reading it adds to the planner: its own items and cores.
+    let (items, cores) = (planner.items.len(), planner.cores.len());
     let found = match named {
         Named::Subquery(select) => {
             // A subquery reads the names around its core, not its core's.
-            let from = parent.is_none().then(|| {
-                if ctes.visible.is_empty() {
-                    format!("({}) AS {qualifier}", text(select))
-                } else {
-                    format!("({} SELECT * FROM ({})) AS {qualifier}", ctes.clause(), text(select))
-                }
-            });
-            read_derived(connection, planner, select, None, parent, ctes)?
-                .map(|(columns, derived)| (from, columns, derived))
+            read_derived(connection, planner, select, None, parent, ctes)?.map(
+                |(columns, derived)| {
+                    let from = planner.alone(parent, items, cores).then(|| {
+                        match ctes.clause(&planner.ctes_read(items)) {
+                            Some(with) => {
+                                format!("({with} SELECT * FROM ({})) AS {qualifier}", text(select))
+                            }
+                            None => format!("({}) AS {qualifier}", text(select)),
+                        }
+                    });
+                    (from, columns, derived)
+                },
+            )
         }
         Named::Cte(cte) => {
             let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
@@ -98,24 +120,32 @@ pub(crate) fn read_derived_item<'a>(
             if ctes.reading.contains(&name) {
                 return Ok(None);
             }
-            let from = parent.is_none().then(|| {
-                format!(
-                    "({} SELECT * FROM {}) AS {qualifier}",
-                    ctes.clause(),
-                    crate::sql::identifier(&name)
-                )
-            });
             let mut inner = ctes.clone();
             inner.reading.push(name.clone());
-            planner.inlined.push(name);
+            planner.inlined.push(name.clone());
             let names = cte.columns.map(|columns| {
                 columns
                     .iter()
                     .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
                     .collect()
             });
-            read_derived(connection, planner, cte.select, names, parent, &inner)?
-                .map(|(columns, derived)| (from, columns, derived))
+            read_derived(connection, planner, cte.select, names, parent, &inner)?.map(
+                |(columns, derived)| {
+                    // A CTE of a WITH in no other core names no row around
+                    // it, wherever the statement reads it.
+                    let alone = ctes.alone(cte) || planner.alone(parent, items, cores);
+                    let from = alone.then(|| {
+                        let mut named = planner.ctes_read(items);
+                        named.push(name.clone());
+                        let with = ctes.clause(&named).expect("a CTE is visible where it is read");
+                        format!(
+                            "({with} SELECT * FROM {}) AS {qualifier}",
+                            crate::sql::identifier(&name)
+                        )
+                    });
+                    (from, columns, derived)
+                },
+            )
         }
         Named::View(stored) => {
             let read = read_view(connection, stored, |columns, select| {

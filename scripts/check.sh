@@ -586,6 +586,7 @@ proofs() {
             connection::live_judging::tests::narrowing_model::subquery_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::push_down_matches_lean \
             connection::live_judging::tests::narrowing_model::view_matches_lean \
+            connection::live_judging::tests::narrowing_model::nested_derived_matches_lean \
             connection::live_judging::tests::narrowing_model::limit_matches_lean \
             connection::live_judging::tests::narrowing_model::using_matches_lean \
             connection::live_judging::tests::narrowing_model::whole_matches_lean \

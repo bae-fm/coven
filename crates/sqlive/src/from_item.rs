@@ -76,6 +76,8 @@ pub(crate) struct FromItem {
     /// The columns, lowercase, a USING join compares with an item to its
     /// left, which a bare name and a `*` take from that item instead.
     pub(crate) using: Vec<String>,
+    /// The CTE it reads, by its name, lowercase.
+    pub(crate) cte: Option<String>,
 }
 
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
@@ -100,6 +102,7 @@ pub(crate) fn read_item<'a>(
         core,
         derived,
         using: Vec::new(),
+        cte: None,
     };
     match table {
         SelectTable::Table(name, alias, _) => {
@@ -115,7 +118,10 @@ pub(crate) fn read_item<'a>(
                         ctes,
                     )
                     .map(|found| {
-                        found.map(|(source, columns, derived)| item(source, columns, Some(derived)))
+                        found.map(|(source, columns, derived)| FromItem {
+                            cte: Some(crate::sql::name(cte.tbl_name.0).to_ascii_lowercase()),
+                            ..item(source, columns, Some(derived))
+                        })
                     });
                 }
             }
