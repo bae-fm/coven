@@ -159,6 +159,38 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     db.close();
 }
 
+/// SQLite's authorizer reports no read of the columns a USING or NATURAL
+/// join compares, though the join's rows depend on them: a write that changes
+/// only such a column, of a table the join reads directly, through a view or
+/// inside a subquery, reruns the query.
+#[tokio::test]
+async fn a_using_or_natural_joins_compared_columns_rerun_the_query() {
+    let schema = "CREATE TABLE a(id INTEGER PRIMARY KEY, k INTEGER, v INTEGER);
+        CREATE TABLE b(id INTEGER PRIMARY KEY, k INTEGER, w INTEGER);
+        INSERT INTO a VALUES (1,1,10),(2,2,20); INSERT INTO b VALUES (1,1,100),(2,2,200);
+        CREATE VIEW ab AS SELECT a.v, b.w FROM a JOIN b USING (k)";
+    for (sql, change) in [
+        ("SELECT a.v, b.w FROM a JOIN b USING (k) ORDER BY 1, 2", "UPDATE b SET k=1 WHERE id=2"),
+        ("SELECT a.v, b.w FROM a JOIN b USING (k) ORDER BY 1, 2", "UPDATE a SET k=1 WHERE id=2"),
+        ("SELECT a.v, b.w FROM a NATURAL JOIN b ORDER BY 1, 2", "UPDATE b SET k=5 WHERE id=1"),
+        ("SELECT v, w FROM ab ORDER BY 1, 2", "UPDATE b SET k=1 WHERE id=2"),
+        (
+            "SELECT a.v, 0 FROM a WHERE EXISTS (SELECT 1 FROM a AS x JOIN b USING (k) WHERE x.id = a.id) ORDER BY 1",
+            "UPDATE b SET k=5 WHERE id=1",
+        ),
+    ] {
+        let db = TestDatabase::open(schema);
+        let mut query = db.subscribe(move |db| {
+            Ok(db.query(sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
+        });
+        let before = next(&mut query).await;
+        write(&db, change);
+        assert!(query.is_marked_for_rerun(), "{sql} after {change}");
+        assert_ne!(next(&mut query).await, before, "{sql} after {change}");
+        db.close();
+    }
+}
+
 /// Functions, aggregates, grouping, ordering and limits act on the rows the
 /// WHERE already chose, so they keep its range.
 #[tokio::test]

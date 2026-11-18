@@ -185,6 +185,9 @@ impl RowScope {
 pub struct Scopes {
     pub(crate) tables: BTreeMap<String, RowScope>,
     pub(crate) inlined: BTreeSet<String>,
+    /// Columns the statement reads that SQLite's authorizer doesn't report:
+    /// those its USING and NATURAL joins compare.
+    pub(crate) joined: crate::read_set::ColumnSet,
 }
 
 /// The values of some of a changed row's columns, as a write recorded them:

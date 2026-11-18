@@ -23,7 +23,9 @@ use std::collections::BTreeSet;
 
 use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
+use crate::joined_columns::joined_columns;
 use crate::read_capture::WholeViews;
+use crate::read_set::ColumnSet;
 use crate::row_scope::Scopes;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::row_term;
@@ -47,6 +49,9 @@ use sqlite3_parser::{
 pub(crate) struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
     sources: Option<Sources>,
+    /// The columns its USING and NATURAL joins compare, which SQLite's
+    /// authorizer doesn't report (`joined_columns.rs`).
+    joined: ColumnSet,
 }
 
 impl ScopePlan {
@@ -57,7 +62,24 @@ impl ScopePlan {
         statement: &Statement<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        Ok(Self { sources: Sources::read(connection, sql, statement, whole)? })
+        let unread = Self { sources: None, joined: ColumnSet::new() };
+        let Some(sql) = number_parameters(sql, statement)? else {
+            return Ok(unread);
+        };
+        let bump = Bump::new();
+        let mut parser = Parser::new(&bump, sql.as_bytes());
+        // SQLite and the parser can accept different language versions. A
+        // SQL form this parser cannot represent depends on whole tables.
+        let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
+            return Ok(unread);
+        };
+        if !matches!(parser.next(), Ok(None)) {
+            return Ok(unread);
+        }
+        Ok(Self {
+            sources: Sources::read(connection, select, whole)?,
+            joined: joined_columns(connection, select)?,
+        })
     }
 
     /// Where a run bound to `parameters` finds the row its scope ends at, or
@@ -71,10 +93,12 @@ impl ScopePlan {
     /// values of the row `last_row` names, when it returned that many rows. A
     /// table the plan doesn't name depends on every row.
     pub(crate) fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
-        match &self.sources {
+        let mut scopes = match &self.sources {
             Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             None => Scopes::default(),
-        }
+        };
+        scopes.joined = self.joined.clone();
+        scopes
     }
 }
 
@@ -151,23 +175,9 @@ enum Place {
 impl Sources {
     fn read(
         connection: &Connection,
-        sql: &str,
-        statement: &Statement<'_>,
+        select: &Select<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Option<Self>> {
-        let Some(sql) = number_parameters(sql, statement)? else {
-            return Ok(None);
-        };
-        let bump = Bump::new();
-        let mut parser = Parser::new(&bump, sql.as_bytes());
-        // SQLite and the parser can accept different language versions. A
-        // SQL form this parser cannot represent depends on whole tables.
-        let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
-            return Ok(None);
-        };
-        if !matches!(parser.next(), Ok(None)) {
-            return Ok(None);
-        }
         let mut planner = Planner {
             items: Vec::new(),
             cores: Vec::new(),

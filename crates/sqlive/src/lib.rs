@@ -33,6 +33,7 @@ mod derived;
 mod error;
 mod from_item;
 mod handle;
+mod joined_columns;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;

@@ -84,7 +84,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         };
         scopes.insert(table.clone(), scope);
     }
-    Scopes { tables: scopes, inlined: sources.inlined.clone() }
+    Scopes { tables: scopes, inlined: sources.inlined.clone(), ..Scopes::default() }
 }
 
 /// A join's lookup: whether a row of the partner FROM item, in the scope the
