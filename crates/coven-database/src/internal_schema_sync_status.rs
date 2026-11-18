@@ -75,6 +75,19 @@ impl<P> RecordedLocation<P> {
             Self::Connected(provider) => RecordedLocation::Connected(name(provider)),
         }
     }
+
+    /// The same location, with its provider as `name` gives it, or the
+    /// error `name` fails with.
+    pub fn try_map<Q, E>(
+        self,
+        name: impl FnOnce(P) -> Result<Q, E>,
+    ) -> Result<RecordedLocation<Q>, E> {
+        Ok(match self {
+            Self::None => RecordedLocation::None,
+            Self::SignedOut(provider) => RecordedLocation::SignedOut(name(provider)?),
+            Self::Connected(provider) => RecordedLocation::Connected(name(provider)?),
+        })
+    }
 }
 
 /// What a running pass moved: a slot it read that it hadn't, or one it claimed

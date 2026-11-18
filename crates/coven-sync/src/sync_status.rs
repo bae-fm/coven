@@ -750,16 +750,11 @@ pub async fn record_location(
 fn stored(
     location: RecordedLocation<coven_storage::StorageConfig>,
 ) -> Result<RecordedLocation<coven_database::StoredLocation>, SyncError> {
-    let store = |location: coven_storage::StorageConfig| {
-        Ok::<_, SyncError>(coven_database::StoredLocation {
+    location.try_map(|location| {
+        Ok(coven_database::StoredLocation {
             provider: location.provider().name().to_owned(),
             location: location.recorded_text()?,
         })
-    };
-    Ok(match location {
-        RecordedLocation::None => RecordedLocation::None,
-        RecordedLocation::SignedOut(location) => RecordedLocation::SignedOut(store(location)?),
-        RecordedLocation::Connected(location) => RecordedLocation::Connected(store(location)?),
     })
 }
 
