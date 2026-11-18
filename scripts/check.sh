@@ -48,9 +48,20 @@ step() { echo ""; echo "── $1"; }
 # all of them; `changed` selects from the files that differ from its base.
 crates=()
 proof_packages=()
+# Every proof package: those under spec/proofs/, and a crate's own under
+# crates/<crate>/proofs/, which takes the crate's name.
+all_proof_packages=(storage merge queue io sequence sqlive)
+# A proof package's directory.
+proof_dir() {
+    if [ -d "spec/proofs/$1" ]; then
+        echo "spec/proofs/$1"
+    else
+        echo "crates/$1/proofs"
+    fi
+}
 select_all() {
     crates=(all)
-    proof_packages=(storage merge queue io sequence)
+    proof_packages=("${all_proof_packages[@]}")
 }
 select_changed() {
     local files
@@ -88,16 +99,16 @@ print("\n".join(sorted(chosen)))
     # requires one through a lakefile path dependency.
     local package required changed=1
     proof_packages=()
-    for package in storage merge queue io sequence; do
-        if printf '%s\n' "$files" | grep -q "^spec/proofs/$package/"; then
+    for package in "${all_proof_packages[@]}"; do
+        if printf '%s\n' "$files" | grep -q "^$(proof_dir "$package")/"; then
             proof_packages+=("$package")
         fi
     done
     while [ "$changed" = 1 ]; do
         changed=0
-        for package in storage merge queue io sequence; do
+        for package in "${all_proof_packages[@]}"; do
             proof_selected "$package" && continue
-            for required in $(grep -A2 '\[\[require\]\]' "spec/proofs/$package/lakefile.toml" | sed -n 's/.*path = "\.\.\/\(.*\)"/\1/p'); do
+            for required in $(grep -A2 '\[\[require\]\]' "$(proof_dir "$package")/lakefile.toml" | sed -n 's/.*path = "\.\.\/\(.*\)"/\1/p'); do
                 if proof_selected "$required"; then
                     proof_packages+=("$package")
                     changed=1
@@ -295,13 +306,14 @@ for package in sorted(meta["packages"], key=lambda package: package["name"]):
 ' | tr -d '\r'
 }
 
-# A Lean proof, built from scratch in a full run and incrementally in a changed
-# one: every module is imported by its root, so none can drop out of the build;
-# no `sorry`, and no axiom beyond Lean's own.
+# A Lean proof package, by name, built from scratch in a full run and
+# incrementally in a changed one: every module is imported by its root, so
+# none can drop out of the build; no `sorry`, and no axiom beyond Lean's own.
 lean_proof() {
-    local what=$1 proof=$2 lib=$3 package=$4
+    local what=$1 name=$2 lib=$3 package=$4 proof
+    proof=$(proof_dir "$name")
     shift 4
-    proof_selected "${proof#spec/proofs/}" || return 0
+    proof_selected "$name" || return 0
     step "Lean proof of $what"
     # Path dependencies are checked separately; preserve their runner binaries.
     # The build's report is shown as it runs and kept for the check below.
@@ -358,10 +370,10 @@ lean_proof() {
 runner() {
     local package=$1 exe=$2
     if ! proof_selected "$package"; then
-        (cd "spec/proofs/$package" && lake build "$exe" > /dev/null)
+        (cd "$(proof_dir "$package")" && lake build "$exe" > /dev/null)
     fi
     local path
-    path="$(cd "spec/proofs/$package" && pwd)/.lake/build/bin/$exe"
+    path="$(cd "$(proof_dir "$package")" && pwd)/.lake/build/bin/$exe"
     if [ -f "$path.exe" ]; then
         path="$path.exe"
     fi
@@ -407,14 +419,15 @@ exact_ignored() {
 
 # Each differential runs when its model or the Rust crate it compares is selected.
 proofs() {
-    lean_proof "storage publication, files and clocks" spec/proofs/storage CovenStorage covenStorage
-    lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
-    lean_proof "queued originals and conversion" spec/proofs/queue CovenQueue covenQueue
+    lean_proof "storage publication, files and clocks" storage CovenStorage covenStorage
+    lean_proof "the merge" merge CovenMerge covenMerge
+    lean_proof "queued originals and conversion" queue CovenQueue covenQueue
     # The sequence comes first: the IO package requires it, and cleaning it
     # after that package's build would build it twice.
-    lean_proof "the store sequence and its JSON runner" spec/proofs/sequence CovenSequence covenSequence \
+    lean_proof "the store sequence and its JSON runner" sequence CovenSequence covenSequence \
         CovenSequence sequenceRunner SequenceTests
-    lean_proof "file IO, retries and wakes" spec/proofs/io CovenIO covenIO
+    lean_proof "file IO, retries and wakes" io CovenIO covenIO
+    lean_proof "sqlive's narrowing and its JSON runner" sqlive SqliveNarrowing sqliveNarrowing
 
     local runner
     if proof_selected sequence || crate_selected coven-merge; then
@@ -563,6 +576,19 @@ proofs() {
             providers::s3::tests::gcs::lean_differential_s3_create \
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_create \
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_records_before_initiation
+    fi
+    if proof_selected sqlive || crate_selected sqlive; then
+        runner=$(runner sqlive narrowingRunner)
+        step "Rust / Lean / SQLite live query narrowing"
+        SQLIVE_NARROWING_LEAN="$runner" exact_ignored sqlive --all-features -- --nocapture \
+            connection::live_judging::tests::narrowing_model::term_matches_lean \
+            connection::live_judging::tests::narrowing_model::edge_matches_lean \
+            connection::live_judging::tests::narrowing_model::subquery_edge_matches_lean \
+            connection::live_judging::tests::narrowing_model::push_down_matches_lean \
+            connection::live_judging::tests::narrowing_model::view_matches_lean \
+            connection::live_judging::tests::narrowing_model::limit_matches_lean \
+            connection::live_judging::tests::narrowing_model::whole_matches_lean \
+            connection::live_judging::tests::narrowing_model::mixed_shapes_match_lean
     fi
 }
 
