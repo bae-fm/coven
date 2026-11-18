@@ -135,7 +135,9 @@ pub use coven_sync::{
     Joiner, PairingInfo, UnreadableSavedCode,
 };
 pub use coven_sync::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
-pub use coven_sync::{ChangeOutcome, FreshChangeOutcome, InviteOutcome, StorageSetupOutcome};
+pub use coven_sync::{
+    ChangeOutcome, FreshChangeOutcome, InviteOutcome, ListedOutcome, StorageSetupOutcome,
+};
 pub use coven_sync::{
     Circle, CircleMemberInfo, CutOffRefusal, DamagedObject, DeviceIdEvidence, DeviceInfo,
     DeviceState, DeviceStop, EntryTarget, FileMissingReason, FileSourceFailure, Invite,
