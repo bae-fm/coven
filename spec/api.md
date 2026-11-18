@@ -7898,9 +7898,11 @@ match stream.read_at(resume_at, 256 * 1024).await {
   S3 replacement for another member. Authority uses the author's role in the
   state immediately preceding its slot.
   To replace their S3 key, the person makes a new one in the provider's
-  console (§14.3): `use_access_key` installs it on one device and records
-  it. Each of the member's other devices needs the new key from the person,
-  through `use_access_key` too.
+  console (§14.3): `use_access_key` checks it with storage, installs it on
+  one device and records it, and returns the key id the record named
+  before, for the app to tell the person to delete. Each of the member's
+  other devices needs the new key from the person, through `use_access_key`
+  too.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide approval/bootstrap (E10), subject to provider
@@ -7976,33 +7978,47 @@ impl CovenHandle {
 
     /// On S3: this device connects with a key the person made in the
     /// provider's console (§20.10, §14.3), whatever the reason: a
-    /// replacement, or a key that stopped being accepted. The call journals
-    /// the admin entry that sets this member's access record to the key
-    /// (§10), takes the key in custody and the connection, and claims the
-    /// entry with it; when the record already names the key, nothing is
-    /// journaled. Without a connection the call connects with the new key
-    /// first, and fails, changing nothing, if it can't. The member identity,
-    /// location and restore code do not change. The person keeps the key for
-    /// their other devices, calls this on each, and deletes the old key in the
-    /// provider's console; coven forgets it (§14.3).
+    /// replacement, or a key that stopped being accepted. The call first
+    /// checks the key with storage (§20.8): on a connection of its own to
+    /// the recorded location, signed with the key, it reads the location
+    /// marker and runs the provider check, with a minute of its own for
+    /// rate limits, while sync goes on with the old key. A key storage
+    /// refuses, or one that can't write, fails the check with `Check`, and
+    /// nothing changes. `cancel` stops the check after its step in flight,
+    /// deleting its test object, and the call fails `Cancelled`; once the
+    /// check passed, the call ignores it and runs to its end.
+    /// Then the call journals the admin entry that sets this member's
+    /// access record to the key (§10), takes the key in custody and the
+    /// connection, and claims the entry through the checked connection;
+    /// when the record already names the key, nothing is journaled. Without
+    /// a connection, the checked one becomes the store's. The member
+    /// identity, location and restore code do not change. The person keeps
+    /// the key for their other devices, calls this on each, and deletes
+    /// the old key, which the result names, in the provider's console;
+    /// coven forgets it (§14.3).
     /// The entry is journaled before the key is taken, and runs only while
     /// the connection holds the key: a device killed in between ends the
-    /// entry without claiming, and keeps the old key and record. A call that
-    /// fails taking the key ends its entry and fails with that error. A
-    /// failed or uncertain claim stays journaled with the key taken, and
-    /// passes retry it; calling again with the same key runs that entry at
-    /// once, without waiting out its retry wait, and returns its result.
-    /// While another key's claim is uncertain, the call first runs that
-    /// entry at once, and fails, taking nothing, if it still fails. An
-    /// invalidated operation settles any uncertain claim before
-    /// undo (§11). Once this member's removal applies, returns Removed and
-    /// saves nothing: the key would return to the saved entries the removal
-    /// emptied (§14.1).
+    /// entry without claiming, and keeps the old key and record. The call
+    /// fails only when it changed nothing: one that fails taking the key
+    /// ends the entry it journaled. Once the key is taken the call returns
+    /// `Ok`, whether or not the claim lands in it: a failed or uncertain
+    /// claim stays journaled with the key taken, and passes retry it. The
+    /// exception is a claim the caught-up history refuses because this
+    /// member's removal applied, which fails the call. Calling again with
+    /// the same key runs that entry at once, without waiting out its retry
+    /// wait. Another key's entry whose claim is uncertain or refused never
+    /// blocks the call: once the key is taken, the call runs that entry at
+    /// once through the new key's connection, and it lands or ends without
+    /// claiming. An invalidated operation settles any uncertain claim before
+    /// undo (§11). Once this member's removal applies, returns
+    /// `Sync(Removed)` and saves nothing: the key would return to the saved
+    /// entries the removal emptied (§14.1).
     pub async fn use_access_key(
         &self,
         access_key_id: String,
         secret_access_key: SecretText,
-    ) -> Result<(), SyncError>;
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<AccessKeyUsed, UseAccessKeyError>;
 
     /// Changes a member's role, in a write of its own (`CovenWrite::set_member_role`).
     pub async fn set_member_role(
@@ -8047,6 +8063,29 @@ impl CovenHandle {
     /// account holds the store. Reads the sequence forward first; needs the
     /// connection (`NoStorage`).
     pub async fn holds_store(&self) -> Result<bool, SyncError>;
+}
+
+/// What using a new S3 key did (§14.3).
+pub struct AccessKeyUsed {
+    /// The key id this member's access record named before the call, when
+    /// the call recorded another: the key the person deletes in the
+    /// provider's console. None when the record already named the new key.
+    pub replaced: Option<String>,
+}
+
+/// Why `use_access_key` failed. Each failure before the call takes the
+/// key leaves everything as it was.
+pub enum UseAccessKeyError {
+    /// The app cancelled while the call checked the key.
+    Cancelled,
+    /// Checking the key with storage failed: storage refused the key
+    /// (`Authentication`, or `PermissionDenied` for a key that can't read
+    /// and write the location), or the check couldn't finish.
+    Check(StorageCheckError),
+    /// Anything else, before the key was taken; or, once it was taken, the
+    /// caught-up history refusing the entry because this member's removal
+    /// applied (§14.1).
+    Sync(SyncError),
 }
 
 impl CovenWrite<'_> {
@@ -10656,7 +10695,8 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
   work, wherever a disk failure would appear, and a `Shutdown` variant of
   `CovenError`, `KeyError`, `SyncError`, `StorageSetupError`,
   `StoreKeyUnlockError`, `StoreCreationError`, `StoreDeletionError` and
-  `BootstrapError` for the calls above. `SyncError` takes a database call's
+  `BootstrapError` for the calls above; `UseAccessKeyError` keeps
+  `SyncError`'s in `Sync`. `SyncError` takes a database call's
   `Shutdown` as its own and reports it as `LocalFailure::Shutdown`, which
   clears by itself: the next process runs the work again, and a slot whose
   application it stopped is not blocked (§19.1).
@@ -10714,8 +10754,8 @@ call's own error says it was a bug.
   same: `DbError`, `IdentityError`, `SettingsError`, `CovenError`,
   `SyncError`, `StorageSetupError`, `FileReadError`, `CopyPathError`,
   `DeviceOnlyError`, `BootstrapDirectoryError`, `BootstrapError`,
-  `StoreCreationError`, `StoreDeletionError`, `StoreKeyUnlockError` and
-  `ReadOnlyOpenError`.
+  `StoreCreationError`, `StoreDeletionError`, `StoreKeyUnlockError`,
+  `UseAccessKeyError` and `ReadOnlyOpenError`.
 - `CovenError` keeps a database call's bug as
   `CovenError::Database(DbError::Bug)`, as it keeps the call's other
   failures, and a sync step's bug as `CovenError::Bug`.

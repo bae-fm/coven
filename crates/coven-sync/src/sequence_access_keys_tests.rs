@@ -49,31 +49,36 @@ async fn a_key_that_cannot_be_taken_ends_its_entry_without_claiming() {
     ana.sync.database.close().await.unwrap();
 }
 
-/// A call whose key is taken claims its entry with that key.
+/// A call whose key is taken claims its entry with that key, and answers the
+/// key the record named.
 #[tokio::test]
 async fn a_key_that_is_taken_is_claimed_and_recorded() {
     let group = Group::new();
     let ana = ana(&group).await;
     let before = slots(&ana).await;
     let storage = ana.storage.clone();
-    ana.sync
+    let replaced = ana
+        .sync
         .use_access_key("new".into(), async move {
             storage.set_s3_credentials(key("new")).await.map_err(SyncError::from)
         })
         .await
         .unwrap();
+    assert_eq!(replaced.as_deref(), Some("ana"));
     assert_eq!(slots(&ana).await, before + 1);
     assert_eq!(recorded(&ana).await, group.access("new"));
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     // The record names the key now: another call takes the key and journals
     // nothing.
     let storage = ana.storage.clone();
-    ana.sync
+    let replaced = ana
+        .sync
         .use_access_key("new".into(), async move {
             storage.set_s3_credentials(key("new")).await.map_err(SyncError::from)
         })
         .await
         .unwrap();
+    assert_eq!(replaced, None);
     assert_eq!(slots(&ana).await, before + 1);
     ana.sync.database.close().await.unwrap();
 }

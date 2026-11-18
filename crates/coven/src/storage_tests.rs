@@ -176,7 +176,11 @@ async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     let code = f.handle.restore_code().await.unwrap();
     f.handle
-        .use_access_key("replacement".into(), SecretText::new("replacement secret".into()))
+        .use_access_key(
+            "replacement".into(),
+            SecretText::new("replacement secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     assert_eq!(f.handle.restore_code().await.unwrap(), code);

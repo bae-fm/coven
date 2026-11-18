@@ -21,7 +21,59 @@ pub enum MemoryRequest {
     Other(&'static str),
 }
 
+impl MemoryRequest {
+    /// Whether the request changes what storage holds.
+    fn writes(&self) -> bool {
+        match self {
+            Self::Create(_) | Self::Replace(_) | Self::Delete(_) => true,
+            Self::Read(..) | Self::List(_) | Self::Status(_) => false,
+            Self::Other(call) => matches!(
+                *call,
+                "create_location_marker"
+                    | "begin_upload"
+                    | "initiate_upload"
+                    | "upload_part"
+                    | "finish_upload"
+                    | "abort_upload"
+                    | "end_left_upload"
+            ),
+        }
+    }
+}
+
+/// Which requests signed with an S3 key storage refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyRefusal {
+    /// Every request, as for a key the person deleted or mistyped.
+    Every,
+    /// Every write, as for a key that may only read.
+    Writes,
+}
+
 impl MemoryStorage {
+    /// Refuse every request signed with the S3 key `access_key_id` from now
+    /// on, on every connection, as S3 storage refuses a key the person
+    /// deleted or mistyped: `Authentication`, in a 403.
+    pub async fn refuse_s3_key(&self, access_key_id: &str) {
+        self.provider
+            .state
+            .lock()
+            .await
+            .refused_s3_keys
+            .insert(access_key_id.into(), KeyRefusal::Every);
+    }
+    /// Refuse every write signed with the S3 key `access_key_id` from now
+    /// on, on every connection, as S3 storage refuses a key that may only
+    /// read: `PermissionDenied`, in a 403. Its reads go through.
+    pub async fn refuse_s3_key_writes(&self, access_key_id: &str) {
+        self.provider
+            .state
+            .lock()
+            .await
+            .refused_s3_keys
+            .insert(access_key_id.into(), KeyRefusal::Writes);
+    }
+
     /// Attempted calls on this connection; `for_device` starts a separate trace.
     pub fn request_trace(&self) -> Vec<MemoryRequest> {
         self.provider.request_trace.lock().expect("request trace poisoned").clone()
@@ -197,8 +249,30 @@ impl MemoryProvider {
         }
         match failure {
             Some(failure) => Err(self.injected(failure)),
-            None => self.authorize(request).await,
+            None => {
+                self.refuse_key(&request).await?;
+                self.authorize(request).await
+            }
         }
+    }
+    /// Refuse `request` when storage refuses the S3 key this connection
+    /// signs with, as `KeyRefusal` says.
+    async fn refuse_key(&self, request: &MemoryRequest) -> Result<(), StorageError> {
+        let Some(key) = self.s3_key.lock().await.as_ref().map(|key| key.access_key_id.clone())
+        else {
+            return Ok(());
+        };
+        let failure = match self.state.lock().await.refused_s3_keys.get(&key) {
+            Some(KeyRefusal::Every) => StorageFailure::Authentication,
+            Some(KeyRefusal::Writes) if request.writes() => StorageFailure::PermissionDenied,
+            Some(KeyRefusal::Writes) | None => return Ok(()),
+        };
+        Err(crate::providers::ProviderResponse::injected(
+            self.config.provider(),
+            failure,
+            403,
+            None,
+        ))
     }
     /// An injected failure, as `Faults` describes it: no response without a
     /// status or a `Retry-After`, else a response, a 429 unless it names

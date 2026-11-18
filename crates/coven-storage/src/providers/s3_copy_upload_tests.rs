@@ -123,7 +123,9 @@ async fn gcs_create_preserves_an_occupied_path() {
     let result = storage.create(&path, b"replacement").await;
     assert!(matches!(result, Err(error) if error.failure() == StorageFailure::AlreadyExists));
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
-    check_provider(&storage, &ObjectPath::floor(STORE_ID), b"sealed check bytes").await.unwrap();
+    check_provider(&storage, &ObjectPath::floor(STORE_ID), b"sealed check bytes", || false)
+        .await
+        .unwrap();
 }
 
 #[test]

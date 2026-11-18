@@ -541,7 +541,7 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let storage = provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     state.lock().unwrap().lose_create_reply = true;
-    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
+    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes", || false)
             .await
             .unwrap_err(), StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network));
     assert!(state.lock().unwrap().objects.is_empty());
@@ -551,7 +551,7 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let StorageCheckError::ProviderCheck {
         check: StorageCheck::Create,
         source: StorageError::Cleanup { operation, cleanup },
-    } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
+    } = check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap_err()
     else {
         panic!("both failures must reach the caller")
     };
@@ -561,11 +561,11 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     assert!(matches!(*cleanup, StorageError::Provider { .. }));
     state.lock().unwrap().refuse_delete = false;
     storage.delete(&path).await.unwrap();
-    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+    check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
     storage.create(&path, b"preexisting").await.unwrap();
     let deletes = state.lock().unwrap().deletions;
-    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
+    assert!(matches!(check_provider(&storage, &path, b"sealed test bytes", || false)
             .await
             .unwrap_err(), StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists));
     assert_eq!(state.lock().unwrap().deletions, deletes);
@@ -832,7 +832,8 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
             coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xab; 16])),
         );
         state.lock().unwrap().broken_check = Some(check);
-        let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
+        let error =
+            check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap_err();
         assert!(
             matches!(error, StorageCheckError::ProviderCheck { check: actual, source } if actual == check && source.failure() == if check == StorageCheck::Create {
                 StorageFailure::PermissionDenied
@@ -856,7 +857,7 @@ async fn provider_check_preserves_unrelated_contents() {
         coven_foundation::id_source::DeviceId(31),
         coven_foundation::id_source::ObjectId(uuid::Uuid::from_bytes([0xab; 16])),
     );
-    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+    check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap();
     assert_eq!(
         state.lock().unwrap().objects,
         BTreeMap::from([("unrelated".into(), b"kept".to_vec())])

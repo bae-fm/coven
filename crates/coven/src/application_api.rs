@@ -15,7 +15,7 @@ pub use crate::coven_write::CovenWrite;
 pub use crate::dev_tools::empty_s3_bucket;
 pub use crate::error::{
     ReadOnlyOpenError, StorageSetupError, StoreCreationError, StoreDeletionError,
-    StoreKeyUnlockError,
+    StoreKeyUnlockError, UseAccessKeyError,
 };
 pub use crate::handle::{Circles, CovenHandle, IfUnsent};
 pub use crate::member_write::MemberWrite;
@@ -28,7 +28,8 @@ pub use crate::readable_objects::{
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
 pub use crate::storage::{
-    ConnectedStorage, SetupCancellation, StorageSetup, StorageSetupStep, StoreKeyState,
+    AccessKeyUsed, ConnectedStorage, SetupCancellation, StorageSetup, StorageSetupStep,
+    StoreKeyState,
 };
 pub use coven_crypto::custody::{
     Custody, CustodyChoice, IdentityError, KeyError, KeyMaterial, KeychainError, Passphrase,

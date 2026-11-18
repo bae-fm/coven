@@ -188,8 +188,9 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
         StorageConfig::Dropbox { .. }
     ));
     assert!(matches!(
-        handle.use_access_key("s3-id".into(), SecretText::new("s3-secret".into())).await,
-        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration
+        handle.use_access_key("s3-id".into(), SecretText::new("s3-secret".into()), &crate::tests::uncancelled()).await,
+        Err(UseAccessKeyError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::InvalidConfiguration
     ));
     handle.close().await.unwrap();
     person.delete_restore_code().unwrap();

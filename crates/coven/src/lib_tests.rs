@@ -9,6 +9,11 @@ use std::{
 
 /// Wait until the last pass, as the app's SQL reads it, is one `expected`
 /// accepts.
+/// A cancel nobody sends, for a call that takes one (E9).
+pub(crate) fn uncancelled() -> tokio::sync::watch::Receiver<bool> {
+    tokio::sync::watch::channel(false).1
+}
+
 pub(crate) async fn last_pass(
     handle: &CovenHandle,
     expected: impl FnMut(&Option<LastPass>) -> bool,

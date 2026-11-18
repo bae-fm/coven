@@ -668,7 +668,9 @@ fn print_profile(
 pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
     crate::test_utils::Conformance::new(connected.clone(), store).run().await.unwrap();
     let path = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
-    check_provider(connected.as_ref(), &path, b"sealed live provider check").await.unwrap();
+    check_provider(connected.as_ref(), &path, b"sealed live provider check", || false)
+        .await
+        .unwrap();
 }
 
 pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
@@ -687,7 +689,9 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     connected.delete(&path).await.unwrap();
     // The deleted name passes the provider check again. That check replaces
     // its test object in one request, so it takes setup's small sealed bytes.
-    check_provider(connected.as_ref(), &path, b"sealed live provider check").await.unwrap();
+    check_provider(connected.as_ref(), &path, b"sealed live provider check", || false)
+        .await
+        .unwrap();
 
     let mut session = connected.begin_upload(&path, bytes.len() as u64).await.unwrap();
     let recording = session.encode().unwrap();

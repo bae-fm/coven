@@ -102,6 +102,8 @@ struct MemoryState {
     held_request: Option<HeldNext>,
     held_access: Option<memory_requests::HeldAccess>,
     rejected_tokens: std::collections::BTreeSet<String>,
+    /// S3 keys storage refuses, by key id (`MemoryStorage::refuse_s3_key`).
+    refused_s3_keys: BTreeMap<String, memory_requests::KeyRefusal>,
 }
 
 impl MemoryState {

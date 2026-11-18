@@ -174,13 +174,21 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     let member = coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes();
     let location = coven_storage::recorded_config(&f.directory).unwrap();
     f.handle
-        .use_access_key("connected".into(), SecretText::new("connected-secret".into()))
+        .use_access_key(
+            "connected".into(),
+            SecretText::new("connected-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     assert_connected_key(&f, "connected", "connected-secret").await;
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     f.handle
-        .use_access_key("published".into(), SecretText::new("published-secret".into()))
+        .use_access_key(
+            "published".into(),
+            SecretText::new("published-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     assert_connected_key(&f, "published", "published-secret").await;
@@ -197,7 +205,11 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     );
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle
-        .use_access_key("signed-out".into(), SecretText::new("signed-out-secret".into()))
+        .use_access_key(
+            "signed-out".into(),
+            SecretText::new("signed-out-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     f.advance(Duration::from_secs(1));
@@ -232,10 +244,14 @@ async fn dropping_a_key_waiter_does_not_interrupt_key_installation_or_publicatio
     let before = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed).await;
+    f.storage.hold_next_creation(ObjectPrefix::slots(f.directory.id()), entered, resumed).await;
+    let cancel = crate::tests::uncancelled();
     {
-        let call =
-            f.handle.use_access_key("retained".into(), SecretText::new("retained-secret".into()));
+        let call = f.handle.use_access_key(
+            "retained".into(),
+            SecretText::new("retained-secret".into()),
+            &cancel,
+        );
         tokio::pin!(call);
         tokio::select! {
             result = &mut call => panic!("publication was not held: {result:?}"),
@@ -272,10 +288,14 @@ async fn a_dropped_key_call_finishes_before_its_connection_closes() {
     f.handle.unlock_store_key().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed).await;
+    f.storage.hold_next_creation(ObjectPrefix::slots(f.directory.id()), entered, resumed).await;
+    let cancel = crate::tests::uncancelled();
     {
-        let replacement =
-            f.handle.use_access_key("retained".into(), SecretText::new("retained-secret".into()));
+        let replacement = f.handle.use_access_key(
+            "retained".into(),
+            SecretText::new("retained-secret".into()),
+            &cancel,
+        );
         tokio::pin!(replacement);
         tokio::select! {
             result = &mut replacement => panic!("publication was not held: {result:?}"),
@@ -341,10 +361,10 @@ async fn a_panicking_key_forget_fails_with_its_bug() {
     handle.close().await.unwrap();
 }
 
-/// Ben's phone is cut while his entry recording a new S3 key is refused its
-/// claim: the entry is journaled and the key is taken. Reopened and synced,
-/// the phone uses the new key, and calling again runs the entry, so the
-/// record follows the key (§14.3).
+/// Ben's phone is cut after his entry recording a new S3 key is refused its
+/// claim: the call succeeded, since the entry is journaled and the key is
+/// taken. Reopened and synced, the phone uses the new key, and calling again
+/// runs the entry, so the record follows the key (§14.3).
 #[tokio::test]
 async fn a_key_call_cut_at_its_claim_leaves_the_entry_journaled_with_the_key_taken() {
     let f = Fixture::new().await;
@@ -370,9 +390,14 @@ async fn a_key_call_cut_at_its_claim_leaves_the_entry_journaled_with_the_key_tak
         })
         .await;
     f.handle
-        .use_access_key("replacement".into(), SecretText::new("replacement-secret".into()))
+        .use_access_key(
+            "replacement".into(),
+            SecretText::new("replacement-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
-        .unwrap_err();
+        .unwrap();
+    assert!(!f.handle.pending().await.unwrap().is_empty());
     f.handle.close().await.unwrap();
     f.storage.set_faults(Faults::none()).await;
     let handle = builder(&f.app, f.clock.clone(), f.connector.clone())
@@ -384,7 +409,11 @@ async fn a_key_call_cut_at_its_claim_leaves_the_entry_journaled_with_the_key_tak
     synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "replacement", "replacement-secret").await;
     handle
-        .use_access_key("replacement".into(), SecretText::new("replacement-secret".into()))
+        .use_access_key(
+            "replacement".into(),
+            SecretText::new("replacement-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();

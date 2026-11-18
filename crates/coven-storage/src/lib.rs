@@ -34,7 +34,7 @@ mod provider_ops;
 mod publication;
 mod request_tally;
 mod setup_waits;
-pub use provider_check::check_provider;
+pub use provider_check::{check_provider, CheckEnd};
 pub use provider_ops::ProviderOps;
 pub use publication::{PublicationGate, PublicationRequest};
 pub use request_tally::{RequestCounts, RequestKind, RequestTotal};

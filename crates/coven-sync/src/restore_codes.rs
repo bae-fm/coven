@@ -194,30 +194,29 @@ impl RestoreCodes {
         Ok(next)
     }
 
-    /// Use the S3 key the person made in the provider's console, without
-    /// changing identity, location or code (§14.3): journal the entry that
-    /// records it as this member's access, take it in custody and on `sync`,
-    /// the connection's sequence owner, and claim the entry with it. When
-    /// `connected_with_key`, `sync`'s connection already signs with the key
-    /// and only custody takes it. A member whose removal applied gets
-    /// `Removed` (§14.1). The change holds this owner as `replace_member_keys`
-    /// does.
+    /// Use the S3 key the person made in the provider's console, once its
+    /// provider check passed, without changing identity, location or code
+    /// (§14.3): journal the entry that records it as this member's access
+    /// on `sync`, whose connection signs with the key; take it in custody
+    /// and on `live`, the owner of the store's connection when that is
+    /// another; and claim the entry with it. Answers the key id the record
+    /// named before, when the call has an entry. A member whose removal
+    /// applied gets `Removed` (§14.1). The change holds this owner as
+    /// `replace_member_keys` does.
     pub async fn use_access_key(
         &self,
         sync: Arc<crate::SequenceSync>,
-        access_key_id: String,
-        secret_access_key: SecretText,
-        connected_with_key: bool,
-    ) -> Result<(), SyncError> {
+        live: Option<Arc<crate::SequenceSync>>,
+        key: S3Credentials,
+    ) -> Result<Option<String>, SyncError> {
         let guard = self.inner.clone().lock_owned().await;
         let using = async move {
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            let key = S3Credentials { access_key_id: access_key_id.clone(), secret_access_key };
+            let access_key_id = key.access_key_id.clone();
             let next = owner.s3_connection(key)?;
             next.validate()?;
             refuse_after_leaving(&owner.database, &owner.identity).await?;
-            let live = (!connected_with_key).then_some(&*sync);
-            sync.use_access_key(access_key_id, owner.install(next, live)).await
+            sync.use_access_key(access_key_id, owner.install(next, live.as_deref())).await
         };
         coven_foundation::task::spawn_completing("use the access key", self.bugs.clone(), using)
             .await?

@@ -3,6 +3,16 @@ use crate::{
     StorageFailure,
 };
 
+/// How a provider check ended when nothing failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckEnd {
+    /// Every step passed.
+    Passed,
+    /// The caller stopped the check between two of its steps; the test
+    /// object, if the check made it, is deleted.
+    Stopped,
+}
+
 /// Check a candidate provider before reserving or publishing setup state.
 /// The storage owner supplies a fresh path and sealed bytes: at least three,
 /// and within the single-request limit, because the conditional replacement
@@ -12,26 +22,35 @@ use crate::{
 /// The caller must await cleanup even if its app waiter is cancelled.
 /// During setup the connection sends rate-limited requests again (§20.8),
 /// so a refusal fails the check only once the setup call's minute is spent.
+/// Before each step the check asks `stopped`, and once it answers true the
+/// check sends no further step: it deletes its test object and ends
+/// `Stopped`.
 pub async fn check_provider(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     encrypted_bytes: &[u8],
-) -> Result<(), StorageCheckError> {
+    stopped: impl Fn() -> bool,
+) -> Result<CheckEnd, StorageCheckError> {
     let end = encrypted_bytes
         .len()
         .checked_sub(1)
         .ok_or(StorageError::Failure(StorageFailure::InvalidRange))?;
     let range = ByteRange::new(1, end as u64)?;
-    let created = storage.create(path, encrypted_bytes).await;
-    if created.as_ref().is_err_and(|error| error.failure() == StorageFailure::AlreadyExists) {
-        return created.map(drop).map_err(|source| StorageCheckError::ProviderCheck {
-            check: StorageCheck::Create,
-            source,
-        });
+    if stopped() {
+        return Ok(CheckEnd::Stopped);
     }
+    let created = match storage.create(path, encrypted_bytes).await {
+        Err(source) if source.failure() == StorageFailure::AlreadyExists => {
+            return Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
+        }
+        created => created,
+    };
     let mut check = StorageCheck::Create;
     let result = async {
         created?;
+        if stopped() {
+            return Ok(CheckEnd::Stopped);
+        }
         check = StorageCheck::CreateOnce;
         match storage.create(path, encrypted_bytes).await {
             Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {}
@@ -42,13 +61,22 @@ pub async fn check_provider(
                 )
             }
         }
+        if stopped() {
+            return Ok(CheckEnd::Stopped);
+        }
         check = StorageCheck::Read;
         if storage.read(path).await? != encrypted_bytes {
             return Err(StorageFailure::Protocol.with_source("whole read disagrees with upload"));
         }
+        if stopped() {
+            return Ok(CheckEnd::Stopped);
+        }
         check = StorageCheck::ReadRange;
         if storage.read_range(path, range).await? != encrypted_bytes[1..end] {
             return Err(StorageFailure::Protocol.with_source("range read disagrees with upload"));
+        }
+        if stopped() {
+            return Ok(CheckEnd::Stopped);
         }
         check = StorageCheck::ConditionalReplace;
         let previous = storage.status(path).await?.ok_or(StorageFailure::NotFound)?;
@@ -67,6 +95,9 @@ pub async fn check_provider(
             return Err(StorageFailure::Protocol
                 .with_source("conditional replacement changed the wrong bytes"));
         }
+        if stopped() {
+            return Ok(CheckEnd::Stopped);
+        }
         check = StorageCheck::List;
         if storage
             .list(&ObjectPrefix::all(path.store()))
@@ -78,7 +109,7 @@ pub async fn check_provider(
                 StorageFailure::Protocol.with_source("test object has wrong size in listing")
             );
         }
-        Ok(())
+        Ok(CheckEnd::Passed)
     }
     .await;
     let cleanup = async {
@@ -92,7 +123,8 @@ pub async fn check_provider(
         }
     }
     .await;
-    // A check that passed and failed only to delete its object failed deleting.
+    // A check that passed or stopped, and failed only to delete its object,
+    // failed deleting.
     if result.is_ok() && cleanup.is_err() {
         check = StorageCheck::Delete;
     }

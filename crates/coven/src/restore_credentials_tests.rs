@@ -278,10 +278,16 @@ async fn non_s3_handles_refuse_a_new_access_key() {
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive, CloudProvider::CloudKit] {
         let owner = Owner::new(provider, false).await;
         let before = owner.handle.restore_code().await.unwrap();
-        let result =
-            owner.handle.use_access_key("key".into(), SecretText::new("secret".into())).await;
+        let result = owner
+            .handle
+            .use_access_key(
+                "key".into(),
+                SecretText::new("secret".into()),
+                &crate::tests::uncancelled(),
+            )
+            .await;
         assert!(
-            matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
+            matches!(result, Err(UseAccessKeyError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::InvalidConfiguration)
         );
         assert_eq!(owner.handle.restore_code().await.unwrap(), before);
         owner.close().await;
@@ -299,8 +305,14 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
         install.keychain.fail_operations_after(&[after]);
         assert!(
             matches!(
-                handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await,
-                Err(SyncError::SecureStorage(_))
+                handle
+                    .use_access_key(
+                        "replacement".into(),
+                        SecretText::new("secret".into()),
+                        &crate::tests::uncancelled()
+                    )
+                    .await,
+                Err(UseAccessKeyError::Sync(SyncError::SecureStorage(_)))
             ),
             "operation {after}"
         );
@@ -310,12 +322,16 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
     for cleanup in 0..2 {
         install.keychain.fail_operations_after(&[4, cleanup]);
         assert!(
-            matches!(handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await,
-            Err(SyncError::Cleanup { operation, cleanup }) if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
+            matches!(handle.use_access_key("replacement".into(), SecretText::new("secret".into()), &crate::tests::uncancelled()).await,
+            Err(UseAccessKeyError::Sync(SyncError::Cleanup { operation, cleanup })) if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
         );
         assert_eq!(handle.restore_code().await.unwrap(), before);
         handle
-            .use_access_key(original.access_key_id.clone(), original.secret_access_key.clone())
+            .use_access_key(
+                original.access_key_id.clone(),
+                original.secret_access_key.clone(),
+                &crate::tests::uncancelled(),
+            )
             .await
             .unwrap();
         assert_key(&install, owner.directory.id(), &original);
@@ -384,17 +400,9 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     owner.close().await;
 }
 
-/// A call whose entry is journaled and refused has taken its key. Another key
-/// then runs that entry first, ignoring its retry wait: while the provider
-/// refuses it the call fails taking nothing, and once it lands the second
-/// key's entry follows, so the record ends on the last key (§14.3).
-#[tokio::test]
-async fn a_second_key_runs_a_refused_ones_entry_first_and_ends_as_the_members_key() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let install = Installation::new();
-    let handle = install.restore(&owner).await;
-    let directory = install.app.store_dir(&owner.directory.id());
-    let next = crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+/// The path of the slot after the last one stored.
+async fn next_slot(owner: &Owner) -> ObjectPath {
+    let last = crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
         path.slot_number().is_some()
     })
     .await
@@ -402,44 +410,289 @@ async fn a_second_key_runs_a_refused_ones_entry_first_and_ends_as_the_members_ke
     .filter_map(|object| object.path.slot_number())
     .map(|slot| slot.get())
     .max()
-    .unwrap()
-        + 1;
+    .unwrap();
+    ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(last + 1).unwrap())
+}
+
+/// Storage refuses the create of `slot`, as it would a claim it refused.
+async fn refuse_claim(owner: &Owner, slot: ObjectPath) {
     owner
         .storage
         .set_faults(Faults {
-            create_failures: [(
-                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
-                (StorageFailure::PermissionDenied, 403),
-            )]
-            .into(),
+            create_failures: [(slot, (StorageFailure::PermissionDenied, 403))].into(),
             ..Faults::none()
         })
         .await;
-    let first = supplied_key("first");
-    let refused =
-        handle.use_access_key(first.access_key_id.clone(), first.secret_access_key.clone()).await;
-    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
-    assert_key(&install, directory.id(), &first);
-    let second = supplied_key("second");
-    let waiting =
-        handle.use_access_key(second.access_key_id.clone(), second.secret_access_key.clone()).await;
-    assert!(waiting.is_err(), "{waiting:?}");
-    // Nothing of the second key was taken.
-    assert_key(&install, directory.id(), &first);
-    owner.storage.set_faults(Faults::none()).await;
+}
+
+/// This member's access as `handle`'s store records it.
+async fn recorded(handle: &CovenHandle) -> Option<MemberAccess> {
+    handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().access
+}
+
+fn s3_access(id: &str) -> Option<MemberAccess> {
+    Some(MemberAccess::S3AccessKey { access_key_id: id.into() })
+}
+
+/// Whether the key's check failed with `failure`.
+fn check_failed(
+    result: &Result<AccessKeyUsed, UseAccessKeyError>,
+    failure: StorageFailure,
+) -> bool {
+    matches!(result, Err(UseAccessKeyError::Check(
+        StorageCheckError::Storage(error) | StorageCheckError::ProviderCheck { source: error, .. },
+    )) if error.failure() == failure)
+}
+
+async fn use_key(
+    handle: &CovenHandle,
+    key: &S3Credentials,
+) -> Result<AccessKeyUsed, UseAccessKeyError> {
     handle
-        .use_access_key(second.access_key_id.clone(), second.secret_access_key.clone())
+        .use_access_key(
+            key.access_key_id.clone(),
+            key.secret_access_key.clone(),
+            &crate::tests::uncancelled(),
+        )
         .await
-        .unwrap();
-    let me = handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
-    assert_eq!(me.access, Some(MemberAccess::S3AccessKey { access_key_id: "second".into() }));
-    assert_key(&install, directory.id(), &second);
+}
+
+/// One pass of `handle`'s at the clock's current time.
+async fn synced_now(handle: &CovenHandle) {
+    handle.start_sync().await.unwrap();
+    match handle.retry_now().await.unwrap().await {
+        RetryOutcome::Synced { .. } => {}
+        outcome => panic!("the pass: {outcome:?}"),
+    }
+}
+
+/// Ana mistypes her new key's secret, and S3 storage refuses it: the call
+/// fails with the check, and her laptop keeps the key it had, the record and
+/// an empty journal, and goes on syncing with the old key (§14.3).
+#[tokio::test]
+async fn a_key_storage_refuses_changes_nothing() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let original = owner.s3_credentials().unwrap();
+    let slot = next_slot(&owner).await;
+    owner.storage.refuse_s3_key("mistyped").await;
+    let refused = use_key(&handle, &supplied_key("mistyped")).await;
+    assert!(check_failed(&refused, StorageFailure::Authentication), "{refused:?}");
+    assert_key(&install, directory.id(), &original);
+    assert_eq!(recorded(&handle).await, s3_access(&original.access_key_id));
+    assert!(handle.pending().await.unwrap().is_empty());
+    synced_now(&handle).await;
+    assert_eq!(next_slot(&owner).await, slot);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// Calling again with the key whose entry was journaled and refused runs
-/// that entry now rather than journaling a second one, and finishes it once
+/// Ben's laptop lost its key, and he enters one S3 storage refuses: the call
+/// fails with the check and saves nothing (§14.3).
+#[tokio::test]
+async fn a_signed_out_device_saves_no_key_storage_refuses() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    handle.close().await.unwrap();
+    install.app.lose_storage_credentials(directory.id()).unwrap();
+    let handle =
+        install.builder(&owner, owner.storage.clone()).open(directory.id(), |_| ()).await.unwrap();
+    owner.storage.refuse_s3_key("mistyped").await;
+    let refused = use_key(&handle, &supplied_key("mistyped")).await;
+    assert!(check_failed(&refused, StorageFailure::Authentication), "{refused:?}");
+    assert!(scoped(&install, &owner).storage_credentials().unwrap().is_none());
+    let person = person_entries(&install, &owner).s3_credentials().unwrap().unwrap();
+    assert_eq!(S3Credentials::decode(person.as_bytes()).unwrap().access_key_id, "owner-key");
+    assert!(handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// A key that may read the store but not write it fails the provider check's
+/// first write, and nothing changes (§20.8).
+#[tokio::test]
+async fn a_key_that_cannot_write_fails_its_check() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let original = owner.s3_credentials().unwrap();
+    owner.storage.refuse_s3_key_writes("read-only").await;
+    let refused = use_key(&handle, &supplied_key("read-only")).await;
+    assert!(
+        matches!(&refused, Err(UseAccessKeyError::Check(StorageCheckError::ProviderCheck {
+            check: StorageCheck::Create, source,
+        })) if source.failure() == StorageFailure::PermissionDenied),
+        "{refused:?}"
+    );
+    assert_key(&install, directory.id(), &original);
+    assert_eq!(recorded(&handle).await, s3_access(&original.access_key_id));
+    assert!(handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// The app cancels while the key's check runs: the check stops after its
+/// step in flight, deletes its test object and fails `Cancelled`, and
+/// nothing changes (§14.3).
+#[tokio::test]
+async fn a_cancel_during_the_check_changes_nothing() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let original = owner.s3_credentials().unwrap();
+    let files = ObjectPrefix::files(owner.directory.id());
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    owner.storage.hold_next_creation(files.clone(), started, resumed).await;
+    let (cancel, cancelled) = watch::channel(false);
+    let key = supplied_key("replacement");
+    let call = handle.use_access_key(key.access_key_id, key.secret_access_key, &cancelled);
+    let cancelling = async {
+        starting.await.unwrap();
+        cancel.send(true).unwrap();
+        resume.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(call, cancelling);
+    assert!(matches!(result, Err(UseAccessKeyError::Cancelled)), "{result:?}");
+    assert!(crate::tests::stored(&owner.storage, owner.directory.id(), |path| files
+        .contains(path))
+    .await
+    .is_empty());
+    assert_key(&install, directory.id(), &original);
+    assert_eq!(recorded(&handle).await, s3_access(&original.access_key_id));
+    assert!(handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// A key storage accepts replaces the recorded one: the call says which key
+/// the record named, the record names the new key, and this device's entry
+/// and the person's hold it (§14.3).
+#[tokio::test]
+async fn a_good_key_replaces_the_recorded_one() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let key = supplied_key("replacement");
+    let used = use_key(&handle, &key).await.unwrap();
+    assert_eq!(used.replaced.as_deref(), Some("owner-key"));
+    assert_eq!(recorded(&handle).await, s3_access("replacement"));
+    assert_key(&install, directory.id(), &key);
+    assert!(handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// The provider check's requests that S3 storage refuses for rate limiting
+/// are sent again within the call's minute, and the key is used (§20.8).
+#[tokio::test]
+async fn a_rate_limited_check_is_waited_out() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.stop_sync().await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    owner
+        .storage
+        .set_faults(Faults {
+            fail_next: 2,
+            failure: StorageFailure::RateLimited,
+            response: Some(429),
+            ..Faults::none()
+        })
+        .await;
+    let started = owner.clock.elapsed();
+    let key = supplied_key("replacement");
+    let call = use_key(&handle, &key);
+    tokio::pin!(call);
+    let mut seen = owner.clock.sleeps_begun();
+    let used = loop {
+        tokio::select! {
+            result = &mut call => break result,
+            (begun, deadline) = owner.clock.sleep_begun_after(seen) => {
+                seen = begun;
+                owner.clock.advance(deadline.saturating_sub(owner.clock.elapsed()));
+            }
+        }
+    };
+    assert_eq!(used.unwrap().replaced.as_deref(), Some("owner-key"));
+    assert!(owner.clock.elapsed() >= started + Duration::from_secs(1 + 2));
+    assert_eq!(recorded(&handle).await, s3_access("replacement"));
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Ana's first new key passed its check, and its claim was refused; then
+/// she deleted it in the console. Her next key passes its check, the first
+/// key's entry ends without claiming, and the record ends on the next key:
+/// a refused key never blocks a later one (§14.3).
+#[tokio::test]
+async fn a_refused_keys_entry_never_blocks_a_later_key() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    refuse_claim(&owner, next_slot(&owner).await).await;
+    let first = supplied_key("first");
+    let used = use_key(&handle, &first).await.unwrap();
+    assert_eq!(used.replaced.as_deref(), Some("owner-key"));
+    assert_key(&install, directory.id(), &first);
+    assert_eq!(recorded(&handle).await, s3_access("owner-key"));
+    assert!(!handle.pending().await.unwrap().is_empty());
+    owner.storage.set_faults(Faults::none()).await;
+    owner.storage.refuse_s3_key("first").await;
+    let second = supplied_key("second");
+    let used = use_key(&handle, &second).await.unwrap();
+    assert_eq!(used.replaced.as_deref(), Some("owner-key"));
+    assert_eq!(recorded(&handle).await, s3_access("second"));
+    assert_key(&install, directory.id(), &second);
+    assert!(handle.pending().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// The key passed its check and was taken, and the network dropped as the
+/// entry's claim went out: the call succeeds, the entry stays journaled, and
+/// the next pass claims it with the key (§14.3).
+#[tokio::test]
+async fn a_claim_that_fails_after_the_check_waits_for_a_pass() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    let directory = install.app.store_dir(&owner.directory.id());
+    let slot = next_slot(&owner).await;
+    // The network drops as the claim goes out.
+    owner
+        .storage
+        .set_faults(Faults {
+            create_failures: [(slot.clone(), (StorageFailure::Network, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    let replacement = supplied_key("replacement");
+    let used = use_key(&handle, &replacement).await.unwrap();
+    assert_eq!(used.replaced.as_deref(), Some("owner-key"));
+    assert_key(&install, directory.id(), &replacement);
+    assert_eq!(recorded(&handle).await, s3_access("owner-key"));
+    assert!(!handle.pending().await.unwrap().is_empty());
+    owner.storage.set_faults(Faults::none()).await;
+    owner.clock.advance(Duration::from_secs(600));
+    synced_now(&handle).await;
+    assert_eq!(recorded(&handle).await, s3_access("replacement"));
+    assert!(handle.pending().await.unwrap().is_empty());
+    assert_ne!(next_slot(&owner).await, slot);
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Calling again with the key whose entry's claim was refused runs that
+/// entry now rather than journaling a second one, and finishes it once
 /// (§14.3, E9).
 #[tokio::test]
 async fn retrying_a_refused_key_finishes_it_once() {
@@ -452,73 +705,51 @@ async fn retrying_a_refused_key_finishes_it_once() {
             path.slot_number().is_some()
         })
         .await
-        .iter()
-        .filter_map(|object| object.path.slot_number())
-        .map(|slot| slot.get())
-        .collect::<Vec<_>>()
+        .len()
     };
     let before = slots().await;
-    let next = before.iter().max().unwrap() + 1;
-    owner
-        .storage
-        .set_faults(Faults {
-            create_failures: [(
-                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
-                (StorageFailure::PermissionDenied, 403),
-            )]
-            .into(),
-            ..Faults::none()
-        })
-        .await;
+    refuse_claim(&owner, next_slot(&owner).await).await;
     let replacement = supplied_key("replacement");
-    let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
-    let refused = handle.use_access_key(id.clone(), secret.clone()).await;
-    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
-    // The key was taken before the entry was claimed.
+    use_key(&handle, &replacement).await.unwrap();
     assert_key(&install, directory.id(), &replacement);
     handle.close().await.unwrap();
     owner.storage.set_faults(Faults::none()).await;
 
     let handle = install.handle(directory.clone(), &owner).await;
-    let retried = handle.use_access_key(id.clone(), secret.clone()).await;
-    assert!(retried.is_ok(), "{retried:?}");
+    use_key(&handle, &replacement).await.unwrap();
     assert_key(&install, directory.id(), &replacement);
+    assert_eq!(recorded(&handle).await, s3_access("replacement"));
     assert!(handle.pending().await.unwrap().is_empty());
     owner.sync().await;
-    assert_eq!(slots().await.len(), before.len() + 1);
+    assert_eq!(slots().await, before + 1);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// Calling with the key the member's record already names journals nothing
-/// and claims no slot (§14.3).
+/// Calling with the key the member's record already names journals nothing,
+/// claims no slot and names no replaced key (§14.3).
 #[tokio::test]
 async fn the_key_the_record_names_journals_no_entry() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.app.store_dir(&owner.directory.id());
-    let slots = || async {
-        crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
-            path.slot_number().is_some()
-        })
-        .await
-        .len()
-    };
+    let slot = || next_slot(&owner);
     let key = supplied_key("fresh");
-    handle.use_access_key(key.access_key_id.clone(), key.secret_access_key.clone()).await.unwrap();
-    let recorded = slots().await;
-    handle.use_access_key(key.access_key_id.clone(), key.secret_access_key.clone()).await.unwrap();
-    assert_eq!(slots().await, recorded);
+    assert_eq!(use_key(&handle, &key).await.unwrap().replaced.as_deref(), Some("owner-key"));
+    let recorded = slot().await;
+    assert_eq!(use_key(&handle, &key).await.unwrap().replaced, None);
+    assert_eq!(slot().await, recorded);
     assert!(handle.pending().await.unwrap().is_empty());
     assert_key(&install, directory.id(), &key);
     handle.close().await.unwrap();
     owner.close().await;
 }
 
-/// A provider's cooldown holds a retried call as it holds every request: the
-/// call sends nothing and fails `RateLimited`, and the journaled entry stays
-/// for a pass to finish once the cooldown ends (§6.7, §14.3).
+/// A provider's cooldown holds a retried call as it holds every request:
+/// the key's check sends nothing and fails `RateLimited`, and the entry an
+/// earlier call journaled stays for a pass to finish once the cooldown ends
+/// (§6.7, §14.3).
 #[tokio::test]
 async fn a_cooldown_holds_a_retried_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -526,31 +757,9 @@ async fn a_cooldown_holds_a_retried_key() {
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.app.store_dir(&owner.directory.id());
-    let next = crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
-        path.slot_number().is_some()
-    })
-    .await
-    .iter()
-    .filter_map(|object| object.path.slot_number())
-    .map(|slot| slot.get())
-    .max()
-    .unwrap()
-        + 1;
-    owner
-        .storage
-        .set_faults(Faults {
-            create_failures: [(
-                ObjectPath::slot(owner.directory.id(), std::num::NonZeroU64::new(next).unwrap()),
-                (StorageFailure::PermissionDenied, 403),
-            )]
-            .into(),
-            ..Faults::none()
-        })
-        .await;
+    refuse_claim(&owner, next_slot(&owner).await).await;
     let replacement = supplied_key("replacement");
-    let (id, secret) = (&replacement.access_key_id, &replacement.secret_access_key);
-    let refused = handle.use_access_key(id.clone(), secret.clone()).await;
-    assert!(matches!(refused, Err(SyncError::Storage(_))), "{refused:?}");
+    use_key(&handle, &replacement).await.unwrap();
     // The provider answers the next request with 429 and Retry-After.
     owner
         .storage
@@ -561,16 +770,12 @@ async fn a_cooldown_holds_a_retried_key() {
             ..Faults::none()
         })
         .await;
-    let rate_limited = |result: &Result<(), SyncError>| {
-        matches!(result, Err(SyncError::Storage(error))
-            if error.failure() == StorageFailure::RateLimited)
-    };
-    let answered = handle.use_access_key(id.clone(), secret.clone()).await;
-    assert!(rate_limited(&answered), "{answered:?}");
+    let answered = use_key(&handle, &replacement).await;
+    assert!(check_failed(&answered, StorageFailure::RateLimited), "{answered:?}");
     handle.test_parked().await;
     let requests = owner.storage.request_count();
-    let held = handle.use_access_key(id.clone(), secret.clone()).await;
-    assert!(rate_limited(&held), "{held:?}");
+    let held = use_key(&handle, &replacement).await;
+    assert!(check_failed(&held, StorageFailure::RateLimited), "{held:?}");
     handle.test_parked().await;
     assert_eq!(owner.storage.request_count(), requests, "the retry sent a request");
     assert_key(&install, directory.id(), &replacement);

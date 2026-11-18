@@ -1433,6 +1433,25 @@ A, has a counterexample:
   journaled; nothing is then enabled, so history never records B and
   custody never takes it.
 
+`Later` models a later key C after a refused one: B passed its check and was
+taken, its claim was refused, and the person may delete B in the console. Under
+`Rules.takeFirst` the call with C journals C's entry, takes C, and then runs
+B's entry through C's connection, which ends it without claiming:
+
+- `later_custody_has_record_or_entry`: in every state reachable from the
+  stranded device, kills between any two steps included, custody holds a key
+  history records or whose entry is journaled.
+- `later_key_finishes`: from every such state, the call with C finishes:
+  history records C, custody holds C, and no entry stays journaled, so B's
+  entry never blocks C.
+
+`Rules.settleFirst`, which ran B's entry through C's connection before taking
+C, has a counterexample:
+
+- `settling_first_misrecords`: once B is deleted, B's entry ends while
+  custody still holds B, and a kill then leaves custody on a key no record or
+  entry names.
+
 [`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
 join reports across its checks and across the calls that resume it: a call
 may stop between checks, or in the check whose copies opened its keys, after

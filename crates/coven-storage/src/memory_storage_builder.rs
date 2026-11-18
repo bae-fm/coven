@@ -138,6 +138,7 @@ impl MemoryStorageBuilder {
                 held_request: None,
                 held_access: None,
                 rejected_tokens: Default::default(),
+                refused_s3_keys: Default::default(),
             })),
         })))
     }

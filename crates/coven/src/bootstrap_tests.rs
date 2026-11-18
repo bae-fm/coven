@@ -472,7 +472,11 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         secret_access_key: SecretText::new("new-secret".into()),
     };
     handle
-        .use_access_key(replacement.access_key_id.clone(), replacement.secret_access_key.clone())
+        .use_access_key(
+            replacement.access_key_id.clone(),
+            replacement.secret_access_key.clone(),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
@@ -490,7 +494,11 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     );
     restore_credentials::assert_key(&install, directory.id(), &replacement);
     handle
-        .use_access_key("retained-device".into(), SecretText::new("retained-secret".into()))
+        .use_access_key(
+            "retained-device".into(),
+            SecretText::new("retained-secret".into()),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
@@ -507,7 +515,11 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     assert_eq!(handle.restore_code().await.unwrap(), before);
     let original = owner.s3_credentials().unwrap();
     handle
-        .use_access_key(original.access_key_id.clone(), original.secret_access_key.clone())
+        .use_access_key(
+            original.access_key_id.clone(),
+            original.secret_access_key.clone(),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     restore_credentials::assert_key(&install, directory.id(), &original);
@@ -584,8 +596,14 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
         );
         let (result, member) = owner.join_and_approve(joining, &control, |_| async {}).await;
         let handle = result.unwrap().unwrap();
-        let replace =
-            || handle.use_access_key("new-member-key".into(), SecretText::new("new-secret".into()));
+        let cancel = crate::tests::uncancelled();
+        let replace = || {
+            handle.use_access_key(
+                "new-member-key".into(),
+                SecretText::new("new-secret".into()),
+                &cancel,
+            )
+        };
         if concurrent {
             let (listed, listing) = tokio::sync::oneshot::channel();
             let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -622,11 +640,10 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
     }
 }
 
-/// A call that fails before its key is taken changes nothing: custody keeps
-/// the old key, no entry stays journaled, and calling again finishes once
-/// (§14.3).
+/// A call whose check fails changes nothing: custody keeps the old key, no
+/// entry stays journaled, and calling again finishes once (§14.3).
 #[tokio::test]
-async fn failed_access_publication_changes_nothing_and_retry_finishes_once() {
+async fn a_failed_check_changes_nothing_and_retry_finishes_once() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
@@ -647,8 +664,14 @@ async fn failed_access_publication_changes_nothing_and_retry_finishes_once() {
     };
     owner.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
     assert!(matches!(
-        handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await,
-        Err(SyncError::Storage(_))
+        handle
+            .use_access_key(
+                "replacement".into(),
+                SecretText::new("secret".into()),
+                &crate::tests::uncancelled()
+            )
+            .await,
+        Err(UseAccessKeyError::Check(_))
     ));
     let retained = handle.restore_code().await.unwrap();
     assert_eq!(retained, before);
@@ -658,7 +681,11 @@ async fn failed_access_publication_changes_nothing_and_retry_finishes_once() {
     let handle = install.handle(directory.clone(), &owner).await;
     for _ in 0..2 {
         handle
-            .use_access_key("replacement".into(), SecretText::new("secret".into()))
+            .use_access_key(
+                "replacement".into(),
+                SecretText::new("secret".into()),
+                &crate::tests::uncancelled(),
+            )
             .await
             .unwrap();
         assert_eq!(handle.restore_code().await.unwrap(), retained);

@@ -6268,15 +6268,32 @@ replaces his key to lock out a lost device, or his key stopped being accepted
 console and gives it to a device he keeps with one call, `use_access_key`. The
 call journals the entry that sets Dan's access record to the new key, then
 the device connects with the key, and the entry is claimed with it. When the
-record already names the key, it journals nothing. His other devices need
-the new key from Dan; the old key keeps working until he deletes it in the
-console.
+record already names the key, it journals nothing. The call returns the key
+id the record named before, which the app tells Dan to delete in the
+console, or none when the record already named the new key. His other
+devices need the new key from Dan; the old key keeps working until he
+deletes it in the console.
+
+**The call checks the key first.** Dan mistypes the secret. Had the device
+taken that key, every request it signed would be refused, and Dan's device
+would stop syncing until he typed the key again. So before it changes
+anything, the call checks the key with storage as setup checks a provider
+(§20.8): on a connection of its own to the recorded location, signed with
+the new key, it reads the location marker and runs the provider check.
+Detection doesn't run, since the location's settings are recorded, and sync
+goes on with the old key meanwhile. A key storage refuses fails the check,
+and so does one that can read the store but not write it: the device keeps
+its key, the record and its journal as they were. The app can cancel the
+call while the check runs. The check then stops after its step in flight
+and deletes its test object, and nothing changes. Once the check passes, the
+call ignores a cancel and runs to its end.
 
 Nothing is held back until the entry lands. Whether a key reaches storage is
 the provider's business: a key made in the console works whether or not a
 device uses it, and deleting the old key never waits for coven. The record
-only tells the person which key to delete when Dan is removed or an invite
-ends. Claiming with the new key also lets a device whose old key is already
+tells the person which key to delete: the call returns the key id the
+record named before, and the app names a member's key when they are removed
+or an invite ends. Claiming with the new key also lets a device whose old key is already
 deleted record its new one. Keeping the new key apart until the entry landed,
 claimed with the old key, could not: the claim was refused, the new key was
 never used, and the device stayed stranded
@@ -6288,15 +6305,28 @@ the record doesn't name without an entry that will name it: a device killed
 after the entry is journaled and before the key is taken holds the old key
 when the entry runs, and the entry ends without claiming, leaving the old key
 and the old record. One killed after the key is taken has the entry journaled,
-and the next pass claims it with the new key. A call that fails after
-journaling ends its entry in the same call. A call made again with the same
-key runs the journaled entry at once instead of journaling a second.
-While the first call's claim is uncertain, a call with another key first
-runs that entry now, without waiting out its retry wait. If the claim still
-fails, the call fails and takes nothing; once it lands, the second key's entry
-follows.
-The call's journal write and key change happen while no pass or other write
-runs, so a pass never finds the entry before its key.
+and the next pass claims it with the new key. A call that fails before it
+takes the key ends the entry it journaled in the same call, and has changed
+nothing. Once the key is taken, the call succeeds whether or not the claim
+lands in it: a claim that fails or stays uncertain keeps the entry
+journaled, and passes claim it with the new key. The one exception is a
+claim the caught-up history refuses because Dan's removal applied: the call
+fails with `Removed`, since the removal ends this device's use of the store
+(§14.1). A call made again with the same key runs the journaled entry at once
+instead of journaling a second. The call's journal write and key change
+happen while no pass or other write runs, so a pass never finds the entry
+before its key.
+
+**An earlier key never blocks a later one.** Dan's first new key passed its
+check and was taken, its claim was refused, and then he deleted that key in
+the console. His next key passes its check, and the call journals its entry
+and takes the key. Then, through the new key's connection, it runs the first
+key's entry at once, without waiting out its retry wait: the entry lands if
+its claim had landed, and otherwise ends without claiming, since the device
+no longer holds that key. The new key's entry is claimed after it. Had the
+call run the first key's entry before taking the new key, a kill between the
+two would leave the device on the first key with no record or entry naming
+it ([`settling_first_misrecords`](proofs/sequence/CovenSequence/AccessKeyReplacement.lean)).
 
 **When a key stops being used.** Removing a member, replacing a member's key, or
 ending an invite usually leaves a key nobody in the store uses. Coven forgets
@@ -11828,8 +11858,10 @@ E.6 how to run the suite.
 
 Every storage setup, including reconnecting an existing device, checks the
 provider with the supplied credentials before it prepares an admin claim or
-commits credentials, keys, location or restore code. A check that runs against
-the real server catches what a service's claims and its profile can't.
+commits credentials, keys, location or restore code. So does every new S3
+key a device takes with `use_access_key` (§14.3), before it journals or
+saves anything. A check that runs against the real server catches what a
+service's claims and its profile can't.
 
 On S3 the **safety check** runs first. Detection runs, and whatever chose the
 settings, detected, named or custom, they must agree with what detection observed.
@@ -11859,7 +11891,14 @@ Then the **provider check** runs on every provider:
 4. Delete it, and confirm absence by an exact-path read.
 
 It also tests conditional replacement of the floor (§20.1). A failure names the
-failed check and leaves the previous connection in place (api.md E5).
+failed check and leaves the previous connection in place (api.md E5). A
+caller can stop the check between its steps: setup stops it when the app
+cancels setup, and `use_access_key` when the app cancels the call. A stopped
+check deletes its test object and sends no further step.
+
+A new S3 key's check reads the location marker with the key, then runs the
+provider check alone. The location's settings are already recorded, so
+detection and the safety check don't run (§14.3).
 
 Every S3 location, whether known, named, custom or detected, runs both checks,
 including `CreateOnce`. Accepting a second create is a protocol failure even if
@@ -11877,7 +11916,8 @@ cooldown (§6.7) counts as one.
   and the admin claim all draw on it. Past the minute, or for a requested wait
   longer than what is left, setup fails with the refusal, `RateLimited`. A
   detection the app runs on its own (`detect_s3_settings`) has a minute of its
-  own.
+  own, and so does a new S3 key's check, on its own connection beside the
+  store's.
 - **A resend can meet its own earlier attempt.** A refusal usually stored
   nothing, but a copy publication (§20.6) can publish the object and then have
   its temporary's deletion refused. Sent again, its create finds an occupied
@@ -14460,6 +14500,8 @@ Write-ups explain each model and state its assumptions:
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
 | A device's custody holds a member's new S3 key only where history records it or an entry for it is journaled, whatever kill cuts the call; an entry that finds the old key in custody ends without claiming; from every reachable state coven's own steps end with no entry journaled and custody on the key history records, and a call with the key finishes | `custody_has_record_or_entry`, `record_follows_custody`, `coven_settles`, `retry_finishes` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* Keeping the new key apart until history records it, claiming with the old one, strands a device whose old key is deleted first | `kept_apart_strands` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
+| A later key after a refused one: custody holds a key history records or whose entry is journaled, whatever kill cuts the call, and the call with the later key finishes with history and custody on it and no entry journaled | `later_custody_has_record_or_entry`, `later_key_finishes` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
+| *Body.* Running the refused key's entry before the later key is taken leaves custody on a key no record or entry names, once a kill cuts the call | `settling_first_misrecords` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied admission still admits a member not subsequently removed, with the device it registered. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
 | A join whose proven access is gone before its keys open ends as a declined one, whether or not its request is still there; keys that opened win over lost access, since the join is then a published store | `lost_access_ends`, `opened_wins_over_lost_access` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |

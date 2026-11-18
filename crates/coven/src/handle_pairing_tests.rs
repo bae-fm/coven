@@ -74,7 +74,11 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         secret_access_key: SecretText::new("replaced-secret".into()),
     };
     handle
-        .use_access_key(replaced.access_key_id.clone(), replaced.secret_access_key.clone())
+        .use_access_key(
+            replaced.access_key_id.clone(),
+            replaced.secret_access_key.clone(),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     same_key(&carried_key(&handle.add_device().await.unwrap().qr_code).unwrap(), &replaced);
@@ -83,7 +87,11 @@ async fn an_s3_pairings_qr_code_carries_the_key_this_device_uses_now() {
         secret_access_key: SecretText::new("updated-secret".into()),
     };
     handle
-        .use_access_key(updated.access_key_id.clone(), updated.secret_access_key.clone())
+        .use_access_key(
+            updated.access_key_id.clone(),
+            updated.secret_access_key.clone(),
+            &crate::tests::uncancelled(),
+        )
         .await
         .unwrap();
     same_key(&carried_key(&handle.add_device().await.unwrap().qr_code).unwrap(), &updated);

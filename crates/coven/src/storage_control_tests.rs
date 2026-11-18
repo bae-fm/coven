@@ -160,7 +160,11 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
             "{failure:?} must not retry by time or repeated start"
         );
         f.handle
-            .use_access_key("replacement".into(), SecretText::new("secret".into()))
+            .use_access_key(
+                "replacement".into(),
+                SecretText::new("secret".into()),
+                &crate::tests::uncancelled(),
+            )
             .await
             .unwrap();
         synced(&f.handle).await;
@@ -190,7 +194,14 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
     f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests);
     f.storage.set_faults(Faults::none()).await;
-    f.handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await.unwrap();
+    f.handle
+        .use_access_key(
+            "replacement".into(),
+            SecretText::new("secret".into()),
+            &crate::tests::uncancelled(),
+        )
+        .await
+        .unwrap();
     synced(&f.handle).await;
     f.handle.close().await.unwrap();
 }
@@ -232,7 +243,9 @@ async fn a_key_call_during_a_failed_pass_waits_for_it_and_then_takes_the_key() {
     f.handle.sync_now();
     entering.await.unwrap();
     // The call waits for the pass in flight, then takes the key.
-    let call = f.handle.use_access_key("replacement".into(), SecretText::new("secret".into()));
+    let cancel = crate::tests::uncancelled();
+    let call =
+        f.handle.use_access_key("replacement".into(), SecretText::new("secret".into()), &cancel);
     let pass = async {
         f.storage.set_faults(Faults::none()).await;
         // The clock moves, so the end of the pass after the failed one moves
@@ -617,7 +630,14 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
     assert_eq!(f.storage.request_count(), requests, "the held pass ran");
     assert_eq!(effect(&f).await, RetryEffect::Failed);
     f.storage.set_faults(Faults::none()).await;
-    f.handle.use_access_key("replacement".into(), SecretText::new("secret".into())).await.unwrap();
+    f.handle
+        .use_access_key(
+            "replacement".into(),
+            SecretText::new("secret".into()),
+            &crate::tests::uncancelled(),
+        )
+        .await
+        .unwrap();
     effect_becomes(&f, RetryEffect::Pass).await;
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");

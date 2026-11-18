@@ -178,4 +178,155 @@ theorem kept_apart_strands :
   intro a
   cases a <;> simp [enabled, act, Rules.keptApart, start]
 
+/-!
+## A later key after a refused one
+
+Dan's first new key B passed its check and was taken, and its entry's claim
+was refused; then Dan deleted B in the provider's console. He gives the device
+a later key C, which storage accepts (§14.3). The call checks C, journals C's
+entry, takes C, and only then runs B's entry through C's connection: B's
+entry ends without claiming, since custody no longer holds B, and C's entry is
+claimed. `Rules.takeFirst` is that order. `Rules.settleFirst` runs B's entry
+through C's connection before C is taken, while custody still holds B.
+
+A key is A, B or C. Only C is journaled and taken here, B having been taken
+already; A is the key history records at the start.
+-/
+namespace Later
+
+inductive Key where
+  | a
+  | b
+  | c
+  deriving DecidableEq, Repr
+
+structure World where
+  /-- The key custody connects with. -/
+  custody : Key
+  /-- B's entry is journaled. -/
+  rowB : Bool
+  /-- C's entry is journaled. -/
+  rowC : Bool
+  /-- The key history records as the member's. -/
+  history : Key
+  /-- The provider still accepts B. -/
+  bLive : Bool
+  deriving DecidableEq, Repr
+
+/-- The device after B was taken and its claim refused: custody holds B,
+B's entry is journaled, and history records A. -/
+def stranded : World := ⟨.b, true, false, .a, true⟩
+
+structure Rules where
+  /-- The call runs B's entry through C's connection before it takes C. -/
+  earlierFirst : Bool
+  deriving DecidableEq, Repr
+
+def Rules.takeFirst : Rules := ⟨false⟩
+def Rules.settleFirst : Rules := ⟨true⟩
+
+inductive Act where
+  /-- The call journals C's entry, once C passed its check. -/
+  | journalC
+  /-- Custody connects with C. -/
+  | installC
+  /-- B's claim lands: history records B. -/
+  | landB
+  /-- B's entry runs on a connection that doesn't sign with B: it ends
+  without claiming. -/
+  | rollbackB
+  /-- C's claim lands, once B's entry no longer holds it back. -/
+  | landC
+  /-- C's entry runs while custody holds another key: it ends without
+  claiming. -/
+  | rollbackC
+  /-- The person deletes B in the provider's console. -/
+  | consoleDeleteB
+  deriving DecidableEq, Repr
+
+def enabled (R : Rules) (w : World) : Act → Bool
+  | .journalC => !w.rowC && w.history != .c && w.custody != .c
+  | .installC => w.rowC && w.custody != .c
+  | .landB => w.rowB && w.custody == .b && w.bLive
+  | .rollbackB => w.rowB && (R.earlierFirst || w.custody != .b)
+  | .landC => w.rowC && w.custody == .c && !w.rowB
+  | .rollbackC => w.rowC && w.custody != .c
+  | .consoleDeleteB => w.bLive
+
+def act (w : World) : Act → World
+  | .journalC => { w with rowC := true }
+  | .installC => { w with custody := .c }
+  | .landB => { w with rowB := false, history := .b }
+  | .rollbackB => { w with rowB := false }
+  | .landC => { w with rowC := false, history := .c }
+  | .rollbackC => { w with rowC := false }
+  | .consoleDeleteB => { w with bLive := false }
+
+inductive Steps (R : Rules) : World → World → Prop
+  | refl (w : World) : Steps R w w
+  | step {w w' : World} (a : Act) : enabled R w a = true → Steps R (act w a) w' → Steps R w w'
+
+def Reachable (R : Rules) (w : World) : Prop := Steps R stranded w
+
+def trace (R : Rules) : World → List Act → Option World
+  | w, [] => some w
+  | w, a :: rest => if enabled R w a then trace R (act w a) rest else none
+
+/-- Custody's key is the one history records or one whose entry is
+journaled, and history records C only where custody holds C. -/
+def Inv (w : World) : Prop :=
+  (w.custody = w.history ∨ (w.custody = .b ∧ w.rowB = true) ∨
+      (w.custody = .c ∧ w.rowC = true)) ∧
+    (w.history = .c → w.custody = .c)
+
+theorem later_inv_step (w : World) (a : Act) (inv : Inv w)
+    (e : enabled Rules.takeFirst w a = true) : Inv (act w a) := by
+  obtain ⟨cu, rb, rc, h, l⟩ := w
+  cases a <;> cases cu <;> cases rb <;> cases rc <;> cases h <;> cases l <;>
+    simp_all [Inv, act, enabled, Rules.takeFirst]
+
+theorem later_reachable_inv {w w' : World} (h : Steps Rules.takeFirst w w') (inv : Inv w) :
+    Inv w' := by
+  induction h with
+  | refl => exact inv
+  | step a e _ ih => exact ih (later_inv_step _ a inv e)
+
+/-- In every world the take-first order reaches from the stranded device,
+kills between any two steps included, custody holds a key that history
+records or whose entry is journaled. -/
+theorem later_custody_has_record_or_entry {w : World} (h : Reachable Rules.takeFirst w) :
+    w.custody = w.history ∨ (w.custody = .b ∧ w.rowB = true) ∨
+      (w.custody = .c ∧ w.rowC = true) :=
+  (later_reachable_inv h (by simp [Inv, stranded])).1
+
+/-- The call's steps with C from `w`: it journals C's entry unless one is
+journaled or C is recorded, takes C, ends B's entry, and C's claim lands. -/
+def calling (w : World) : List Act :=
+  (if w.rowC || w.history == .c then [] else [.journalC]) ++
+    (if w.custody == .c then [] else [.installC]) ++
+    (if w.rowB then [.rollbackB] else []) ++
+    (if w.rowC || w.history != .c then [.landC] else [])
+
+/-- From every world the take-first order reaches, B refused or not, the
+call with C finishes: history records C, custody holds C, and no entry stays
+journaled. B's entry never blocks C's. -/
+theorem later_key_finishes {w : World} (h : Reachable Rules.takeFirst w) :
+    ∃ w', trace Rules.takeFirst w (calling w) = some w' ∧
+      w'.rowB = false ∧ w'.rowC = false ∧ w'.history = .c ∧ w'.custody = .c := by
+  have inv := later_reachable_inv h (by simp [Inv, stranded])
+  obtain ⟨cu, rb, rc, hi, l⟩ := w
+  cases cu <;> cases rb <;> cases rc <;> cases hi <;> cases l <;>
+    simp_all [Inv, calling, trace, enabled, act, Rules.takeFirst]
+
+/-- *Before.* Running B's entry through C's connection before C is taken:
+once B is deleted, B's entry ends while custody still holds B, and a kill
+before C is journaled leaves custody on a key that history doesn't record
+and no entry names. -/
+theorem settling_first_misrecords :
+    ∃ w, trace Rules.settleFirst stranded [.consoleDeleteB, .rollbackB] = some w ∧
+      w.custody = .b ∧ w.history = .a ∧ w.rowB = false ∧ w.rowC = false :=
+  ⟨_, rfl, rfl, rfl, rfl, rfl⟩
+
+end Later
+
 end CovenSequence.AccessKeyReplacement

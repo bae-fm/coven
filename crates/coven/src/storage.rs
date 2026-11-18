@@ -50,6 +50,15 @@ pub struct StorageSetup {
     pub restore_code: SecretText,
 }
 
+/// What using a new S3 key did (E9, §14.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessKeyUsed {
+    /// The key id this member's access record named before the call, when
+    /// the call recorded another: the key the person deletes in the
+    /// provider's console. None when the record already named the new key.
+    pub replaced: Option<String>,
+}
+
 /// Where a setup call reports its steps, for the handle to forward to the app.
 pub(crate) type SetupProgress = tokio::sync::watch::Sender<Option<Progress<StorageSetupStep>>>;
 
@@ -502,10 +511,7 @@ impl StorageConnections {
             )
             .await?;
         storage.check_location_claim(self.store()).await?;
-        // The folder's label as its provider names it now, so a rename since
-        // the last connection shows (§20.2).
-        self.codes.record_labels(&storage.labelled_config().await?).await?;
-        s3::end_detection_runs(&self.database, self.store(), &data.location, &storage).await?;
+        record_reached(&self.codes, &self.database, self.store(), &data.location, &storage).await?;
         self.attach(live, storage).await
     }
 
@@ -801,6 +807,21 @@ pub use admin::GuidedAccessKey;
 
 #[path = "storage_operations.rs"]
 mod operations;
+
+/// Record what `storage`, a new connection to `location` whose claim it
+/// checked, finds as it attaches: the folder's label as its provider names it
+/// now, so a rename since the last connection shows (§20.2), and the end of
+/// each detection run whose probes it removed (§20.7).
+pub(crate) async fn record_reached(
+    codes: &RestoreCodes,
+    database: &coven_database::StoreDatabase,
+    store: StoreId,
+    location: &StorageConfig,
+    storage: &StorageConnection,
+) -> Result<(), SyncError> {
+    codes.record_labels(&storage.labelled_config().await?).await?;
+    s3::end_detection_runs(database, store, location, storage).await
+}
 
 /// How this member reaches storage over `storage` signed in with
 /// `credentials`: the S3 key, or the signed-in account (§20.2).

@@ -9,6 +9,7 @@
 use super::*;
 use coven_crypto::custody::StoreKeychain;
 use coven_database::{OperationOutcome, OperationRejection, UndoCause};
+use coven_storage::CheckEnd;
 use coven_sync::SetupJournal;
 
 /// Where this session's storage setup stands, which a cancel reads (E5).
@@ -404,19 +405,11 @@ impl StorageConnections {
         // passed (§20.2).
         let config = setup.labelled_config().await?;
         let path = ObjectPath::file(self.store(), self.device, ObjectId(self.ids.new_id()));
-        let plaintext = b"coven storage check";
-        let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
-        let key = coven_crypto::FileKey::generate()
-            .map_err(|error| StorageSetupError::Internal(Box::new(error)))?;
-        let mut bytes = header.encode().to_vec();
-        bytes.extend(
-            header
-                .seal_chunk(&key, path.as_str(), 0, plaintext)
-                .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
-        );
-        {
-            let _permit = self.state.permit_provider_check(&path);
-            coven_storage::check_provider(setup.as_ref(), &path, &bytes).await?;
+        let checked = check_provider(&setup, &self.state, path, || self.check_cancel().is_err());
+        match checked.await.map_err(setup_error)? {
+            Ok(CheckEnd::Passed) => {}
+            Ok(CheckEnd::Stopped) => return Err(StorageSetupError::Cancelled),
+            Err(error) => return Err(error.into()),
         }
         progress.done(1);
         self.reached(SetupStop::Checked).await?;
@@ -685,6 +678,30 @@ impl StorageConnections {
             Err(cleanup) => SyncError::cleanup(error, cleanup),
         }
     }
+}
+
+/// Run the provider check (§20.8) on `connection` with a sealed test object
+/// at `path`, which `state` lets the check publish, stopping between its
+/// steps once `stopped` answers true. The outer error is a failure to seal
+/// the object; the inner one the check's.
+pub(super) async fn check_provider(
+    connection: &StorageConnection,
+    state: &coven_sync::SequenceState,
+    path: ObjectPath,
+    stopped: impl Fn() -> bool,
+) -> Result<Result<CheckEnd, StorageCheckError>, SyncError> {
+    let plaintext = b"coven storage check";
+    let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
+    let key = coven_crypto::FileKey::generate()?;
+    let mut bytes = header.encode().to_vec();
+    bytes.extend(header.seal_chunk(&key, path.as_str(), 0, plaintext).map_err(
+        |error| match error {
+            coven_format::file::FileError::Format(error) => SyncError::from(error),
+            coven_format::file::FileError::Crypto(error) => SyncError::from(error),
+        },
+    )?);
+    let _permit = state.permit_provider_check(&path);
+    Ok(coven_storage::check_provider(connection, &path, &bytes, stopped).await)
 }
 
 /// Whether a claim past the point of no return was refused before it

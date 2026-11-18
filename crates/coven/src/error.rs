@@ -103,6 +103,54 @@ impl From<coven_foundation::task::TaskFailed> for StorageSetupError {
     }
 }
 
+/// Why `use_access_key` failed (E9, §14.3). Before the call takes the key,
+/// each failure leaves everything as it was.
+#[derive(Debug, thiserror::Error)]
+pub enum UseAccessKeyError {
+    /// The app cancelled while the call checked the key. Nothing changed.
+    #[error("using the access key was cancelled while its check ran")]
+    Cancelled,
+    /// Checking the key with storage failed: storage refused the key
+    /// (`Authentication`, or `PermissionDenied` for a key that can't read
+    /// and write the location), or the check couldn't finish. Nothing
+    /// changed.
+    #[error(transparent)]
+    Check(StorageCheckError),
+    /// Anything else, before the key was taken, when nothing changed; or,
+    /// once it was taken, the caught-up history refusing the entry because
+    /// this member's removal applied (§14.1).
+    #[error(transparent)]
+    Sync(SyncError),
+}
+
+impl coven_foundation::task::CarriesBug for UseAccessKeyError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Cancelled => None,
+            Self::Check(error) => error.bug(),
+            Self::Sync(error) => error.bug(),
+        }
+    }
+}
+
+impl From<SyncError> for UseAccessKeyError {
+    fn from(error: SyncError) -> Self {
+        Self::Sync(error)
+    }
+}
+
+impl From<KeyError> for UseAccessKeyError {
+    fn from(error: KeyError) -> Self {
+        Self::Sync(error.into())
+    }
+}
+
+impl From<coven_foundation::task::TaskFailed> for UseAccessKeyError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        Self::Sync(failed.into())
+    }
+}
+
 /// Creating a store failed, with publication and rollback made explicit (E1).
 #[derive(Debug, thiserror::Error)]
 pub enum StoreCreationError {

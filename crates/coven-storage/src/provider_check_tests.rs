@@ -10,7 +10,7 @@ async fn provider_check_preserves_an_occupied_path() {
     let path = ObjectPath::floor(STORE_ID);
     storage.create(&path, b"existing floor").await.unwrap();
     assert!(matches!(
-        check_provider(&storage, &path, b"test bytes").await,
+        check_provider(&storage, &path, b"test bytes", || false).await,
         Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::AlreadyExists
     ));
@@ -25,7 +25,7 @@ async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
     let StorageCheckError::ProviderCheck {
         check: StorageCheck::CreateOnce,
         source: StorageError::Cleanup { operation, cleanup },
-    } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
+    } = check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap_err()
     else {
         panic!("duplicate upload cleanup failure was lost");
     };
@@ -46,7 +46,7 @@ async fn fresh_probe_may_be_omitted_from_setup_listing() {
         let storage = MemoryStorage::builder().provider(provider).build().unwrap();
         storage.set_faults(Faults { hide_listings: true, ..Faults::none() }).await;
         let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(8)));
-        check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+        check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
 }
@@ -105,7 +105,7 @@ async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_back
     for (retry_after, expected) in [(None, [1, 2]), (Some(5), [5, 5])] {
         let (storage, waits) = rate_limited(2, retry_after).await;
         let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(2)));
-        check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+        check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap();
         assert_eq!(*waits.0.lock().unwrap(), expected.map(Duration::from_secs));
         assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     }
@@ -116,7 +116,7 @@ async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent(
     let (storage, waits) = rate_limited(usize::MAX, None).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(3)));
     let StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } =
-        check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
+        check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap_err()
     else {
         panic!("a rate-limited check named the wrong step");
     };
@@ -125,7 +125,7 @@ async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent(
     assert_eq!(*waits.0.lock().unwrap(), [1, 2, 4, 8, 16].map(Duration::from_secs));
     // A Retry-After longer than what is left of the bound fails at once.
     let (storage, waits) = rate_limited(usize::MAX, Some(120)).await;
-    let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
+    let error = check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap_err();
     assert!(matches!(
         error,
         StorageCheckError::ProviderCheck { check: StorageCheck::Create, source }
@@ -141,7 +141,7 @@ async fn a_resend_that_meets_its_own_stored_attempt_settles_by_its_bytes() {
     let (storage, waits) = rate_limited(0, None).await;
     storage.set_faults(Faults { refuse_after_storing: 2, ..Faults::none() }).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(4)));
-    check_provider(&storage, &path, b"sealed test bytes").await.unwrap();
+    check_provider(&storage, &path, b"sealed test bytes", || false).await.unwrap();
     assert_eq!(*waits.0.lock().unwrap(), [1, 2].map(Duration::from_secs));
     assert_eq!(storage.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
 }
@@ -159,7 +159,7 @@ async fn a_connection_outside_setup_never_resends() {
         .await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(5)));
     assert!(matches!(
-        check_provider(&storage, &path, b"sealed test bytes").await,
+        check_provider(&storage, &path, b"sealed test bytes", || false).await,
         Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::RateLimited
     ));
@@ -181,13 +181,34 @@ async fn only_a_setup_calls_own_connection_resends() {
     let setup = storage.during_setup(crate::SetupWaits::default());
     let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(6)));
     storage.set_faults(limit()).await;
-    check_provider(&setup, &path, b"sealed test bytes").await.unwrap();
+    check_provider(&setup, &path, b"sealed test bytes", || false).await.unwrap();
     assert_eq!(*clock.0.lock().unwrap(), [Duration::from_secs(1)]);
     drop(setup);
     storage.set_faults(limit()).await;
     assert!(matches!(
-        check_provider(&storage, &path, b"sealed test bytes").await,
+        check_provider(&storage, &path, b"sealed test bytes", || false).await,
         Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::RateLimited
     ));
+}
+
+/// A check its caller stops after the first create sends no later step: it
+/// deletes its test object, confirms it gone and ends `Stopped`.
+#[tokio::test]
+async fn a_stopped_check_deletes_its_object_and_sends_no_later_step() {
+    use crate::test_utils::MemoryRequest;
+    let storage = MemoryStorage::builder().build().unwrap();
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), ObjectId(uuid::Uuid::from_u128(9)));
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+    let ended = check_provider(&storage, &path, b"sealed test bytes", stopped).await.unwrap();
+    assert_eq!(ended, CheckEnd::Stopped);
+    assert_eq!(
+        storage.request_trace(),
+        [
+            MemoryRequest::Create(path.clone()),
+            MemoryRequest::Delete(path.clone()),
+            MemoryRequest::Read(path.clone(), None),
+        ]
+    );
 }

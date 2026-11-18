@@ -14,69 +14,95 @@ use std::sync::Arc;
 
 impl SequenceSync {
     /// Record a key made in the provider's console as this member's own and
-    /// take it (§14.3). The entry setting the access record is journaled
-    /// first; `take` then makes this connection and custody hold the key; the
-    /// entry is claimed with it. Passes and other writes wait for the
+    /// take it (§14.3). This owner's connection signs with the key, which
+    /// passed its provider check. The entry setting the access record is
+    /// journaled first; `take` then makes custody, and the store's
+    /// connection, hold the key; then the entry and an earlier claim that
+    /// holds it back run with the key. Passes and other writes wait for the
     /// session throughout, so none runs the entry before its key is taken.
-    /// A record that already names the key journals nothing, and `take` still
-    /// runs. A journaled entry for the same key is the one that runs.
+    /// A record that already names the key journals nothing, and `take`
+    /// still runs. A journaled entry for the same key is the one that runs.
+    /// Answers the key id the record named, when the call has an entry.
     ///
-    /// If `take` fails, the entry ends in this call without claiming, and the
-    /// call fails with that error. The entry's claim failing leaves it
-    /// journaled for passes to retry.
+    /// Before `take` succeeds the call fails having changed nothing: an
+    /// entry it journaled ends without claiming. Once the key is taken the
+    /// call fails only when the caught-up history refuses the entry or the
+    /// member's removal applies (§14.1); any other failure leaves the
+    /// entry journaled for passes to retry with the key.
     pub(crate) async fn use_access_key(
         self: &Arc<Self>,
         access_key_id: String,
         take: impl Future<Output = Result<(), SyncError>> + Send,
-    ) -> Result<(), SyncError> {
+    ) -> Result<Option<String>, SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
-        // Another operation's uncertain claim would hold this entry's back:
-        // run that operation now, without waiting out its retry wait, so it
-        // lands or ends before this call takes its key (§11.4).
-        if let Some(claim) = self.database.current_claim().await? {
-            if let ClaimWork::Operation(other) = claim.work {
-                self.retry_operation(other).await?;
-                self.run_administration(&mut session, &mut ring, &member, other).await?;
-            }
-        }
-        self.resume_administration(&mut session, &mut ring, &member).await?;
         let request = Request::Change(StoreChange::SetAccess {
             member: member.member(),
-            access: MemberAccess::S3AccessKey { access_key_id },
+            access: MemberAccess::S3AccessKey { access_key_id: access_key_id.clone() },
         });
-        let entry = match self.journaled(|journaled| journaled.carries(&request)).await? {
+        let earlier = self.journaled(|journaled| journaled.carries(&request)).await?;
+        let entry = match earlier {
             Some(id) => Some(id),
             None => match self.validate_request(&session, &member, &request)? {
                 Ok(true) => Some(self.start_request_row(request, "operation").await?),
                 Ok(false) => None,
-                Err(reason) => {
-                    return crate::operation_outcome::into_slot(OperationOutcome::Rejected(reason))
-                        .map(drop)
-                }
+                Err(reason) => return Err(SyncError::Rejected(reason)),
             },
         };
-        if let Err(error) = take.await {
-            // The key was not taken: the entry ends without claiming.
-            if let Some(id) = entry {
-                if let Err(cleanup) =
-                    self.run_administration(&mut session, &mut ring, &member, id).await
+        let replaced = entry.and_then(|_| {
+            match &session.history.state.active_member(&member.member())?.access {
+                Some(MemberAccess::S3AccessKey { access_key_id: held })
+                    if *held != access_key_id =>
                 {
-                    return Err(SyncError::cleanup(error, cleanup));
+                    Some(held.clone())
+                }
+                _ => None,
+            }
+        });
+        if let Err(error) = take.await {
+            // The key was not taken: the entry this call journaled ends
+            // without claiming. One an earlier call journaled stays, and a
+            // pass ends it so while custody holds another key.
+            if let Some(id) = entry.filter(|_| earlier.is_none()) {
+                let ended =
+                    self.database.finish_operation_with_outcome(id, OperationOutcome::Satisfied);
+                if let Err(cleanup) = ended.await {
+                    return Err(SyncError::cleanup(error, cleanup.into()));
                 }
             }
             return Err(error);
         }
-        match entry {
-            Some(id) => self
-                .run_administration(&mut session, &mut ring, &member, id)
+        let Some(id) = entry else {
+            return Ok(None);
+        };
+        // The key is taken. An earlier claim holds the entry's back: run its
+        // operation now, without waiting out its retry wait, with the key.
+        // Another key's entry ends without claiming (§11.4).
+        let claimed = async {
+            if let Some(claim) = self.database.current_claim().await? {
+                match claim.work {
+                    ClaimWork::Operation(other) if other != id => {
+                        self.retry_operation(other).await?;
+                        self.run_administration(&mut session, &mut ring, &member, other).await?;
+                    }
+                    _ => {}
+                }
+            }
+            self.run_administration(&mut session, &mut ring, &member, id)
                 .await
                 .and_then(crate::operation_outcome::into_slot)
-                .map(drop),
-            None => Ok(()),
+        };
+        match claimed.await {
+            Ok(_) => Ok(replaced),
+            Err(error @ (SyncError::Rejected(_) | SyncError::Removed(_))) => Err(error),
+            Err(error) => {
+                // The entry keeps its failure in its pending record.
+                tracing::info!("the new access key's entry waits for a pass: {error}");
+                Ok(replaced)
+            }
         }
     }
 
