@@ -164,7 +164,9 @@ fn an_app_trigger_reads_a_recorded_original_outside_a_store() {
         )
         .unwrap();
     let file = FileId(uuid::Uuid::from_bytes([3; 16]));
-    let modified_at = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 250);
+    // Nanoseconds in 100 ns steps, a precision every platform keeps: Windows
+    // keeps 100 ns.
+    let modified_at = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 300);
     let path = std::path::Path::new("/music/track 1.flac");
     record_user_file(&outside, file, path, modified_at, b"track one's bytes").unwrap();
 
@@ -174,5 +176,5 @@ fn an_app_trigger_reads_a_recorded_original_outside_a_store() {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .unwrap();
-    assert_eq!(original, (1, "/music/track 1.flac".to_owned(), 17, 1_700_000_000, 250));
+    assert_eq!(original, (1, "/music/track 1.flac".to_owned(), 17, 1_700_000_000, 300));
 }
