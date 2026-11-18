@@ -61,8 +61,6 @@ pub(super) struct Query {
     /// Whether the ORDER BY names each term's column instead of its position.
     pub(super) order_named: bool,
     pub(super) limit: Option<u32>,
-    /// Shapes sqlive reads whole that the SQL holds.
-    pub(super) whole: Vec<&'static str>,
 }
 
 #[derive(Clone, Default)]
@@ -220,7 +218,6 @@ impl Query {
             "order": order,
             "order_named": self.order_named,
             "limit": self.limit,
-            "whole": self.whole,
         })
     }
 

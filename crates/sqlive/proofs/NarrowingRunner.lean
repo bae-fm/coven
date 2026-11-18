@@ -3,11 +3,11 @@ import SqliveNarrowing.Json
 /-! The model's runner: one case per process on stdin, the answer on stdout;
 a case it can't read fails on stderr with a nonzero exit.
 
-Input: `schema` (`tables`, `views`), `statement` (a query tree with `whole`
-shapes), the database `before` and `after` a write, and the write's row
-`changes` in order. Output:
-whether the write reruns the statement, whether the model reads it whole,
-each table's scope, and the statement's rows before and after. -/
+Input: `schema` (`tables`, `views`), `statement` (a query tree whose FROM
+items name the shapes sqlive reads whole), the database `before` and `after`
+a write, and the write's row `changes` in order. Output: whether the write
+reruns the statement, whether the model reads it whole, each table's scope,
+and the statement's rows before and after. -/
 open Lean SqliveNarrowing
 
 def rowsJson (rows : List Row) : Json :=

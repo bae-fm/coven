@@ -288,9 +288,8 @@ def readSchema (j : Json) : Except String Schema := do
 /-- The statement the tree `j` holds. -/
 def readStatement (schema : Schema) (j : Json) : Except String Statement := do
   let (root, b) ← (readSelect schema j none []).run {}
-  let whole ← (list j "whole").mapM fun s => do wholeShape (← s.getStr?)
   pure { items := b.items.toList, cores := b.cores.toList, queries := b.queries.toList,
-         root, whole := b.whole ++ whole }
+         root, whole := b.whole }
 
 /-- A database: each table's rows, keyed by the rowid in their first column. -/
 def readDb (schema : Schema) (j : Json) : Except String Db := do
