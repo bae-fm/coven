@@ -32,6 +32,10 @@ pub struct Task {
 pub struct Query;
 pub struct Requests;
 pub struct Directory;
+/// Holds its clocks in a `Vec`, which keeps them behind a raw pointer.
+pub struct Clocks {
+    clocks: Vec<SystemClock>,
+}
 
 impl Builder {
     pub fn open() -> Service {
@@ -52,6 +56,7 @@ impl Builder {
         let _ = <SystemClock as Default>::default(); // finding
         let _ = Task { counter: Counter { count: AtomicU64::new(0) } }; // finding
         let _ = || SystemClock; // finding
+        let _ = Clocks { clocks: Vec::new() }; // finding
     }
 
     pub fn borrow(service: &Service, shared: &Shared, task: &Task) -> u32 {

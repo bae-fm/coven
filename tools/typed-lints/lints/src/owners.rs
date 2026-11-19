@@ -7,7 +7,8 @@
 //! with its type arguments substituted, except what a callback takes, which
 //! its caller gives it, and the type arguments of a type that never holds
 //! one (`Router<AppState>` holds no `AppState`), which the type's own fields
-//! tell. A trait object or an opaque type holds what its associated types
+//! tell. A `PhantomData<T>` holds its `T`: it stands for one its holder owns,
+//! as a `Vec<T>` owns its items behind a raw pointer. A trait object or an opaque type holds what its associated types
 //! name, such as an iterator's items or a callback's result. A projection the
 //! compiler can't resolve, as `M::Open` in a type generic over `M`, holds
 //! every type the impls of its trait give it. The model looks inside the
@@ -371,8 +372,8 @@ impl<'tcx> Owners<'tcx> {
     }
 
     /// Which of `id`'s type parameters its fields hold, by index: for a
-    /// struct, enum or union, the parameters some field holds; for any other
-    /// type, all of them.
+    /// struct, enum or union, the parameters some field holds; for
+    /// `PhantomData` and any other type, all of them.
     fn held_parameters(&self, id: DefId) -> Vec<bool> {
         if let Some(Some(held)) = self.held_parameters.borrow().get(&id) {
             return held.clone();
@@ -380,7 +381,9 @@ impl<'tcx> Owners<'tcx> {
         let tcx = self.tcx;
         let generics = tcx.generics_of(id);
         let count = generics.count();
-        if !matches!(tcx.def_kind(id), DefKind::Struct | DefKind::Enum | DefKind::Union) {
+        if !matches!(tcx.def_kind(id), DefKind::Struct | DefKind::Enum | DefKind::Union)
+            || tcx.adt_def(id).is_phantom_data()
+        {
             return vec![true; count];
         }
         // A type that holds itself, as a list's node does, holds through
