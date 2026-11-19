@@ -121,6 +121,12 @@ impl SequenceSync {
         if let Some(record) = &blocked {
             state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         }
+        // A device the applied state removes, or whose member it removes, has
+        // stopped for good: it reads no slot after the removal and loads no
+        // floor past it (§14.1).
+        if let Some(coven_database::DeviceStop::Removed(removal)) = database.device_stop().await? {
+            state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed(removal)));
+        }
         Ok(Self {
             database,
             storage,
@@ -696,6 +702,21 @@ impl History {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<Self, SyncError> {
+        Self::restore_while(originals, store, ring, member, |_, _| true)
+    }
+
+    /// `restore`, consuming the originals in order until `go_on` refuses the
+    /// history one has just made and the slot it consumed as.
+    pub(crate) fn restore_while(
+        originals: &[OriginalSlot],
+        store: StoreId,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        mut go_on: impl FnMut(
+            &Self,
+            &IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>>,
+        ) -> bool,
+    ) -> Result<Self, SyncError> {
         for original in originals {
             snapshot_object::open_routing(original, store, ring, member)?;
         }
@@ -704,7 +725,10 @@ impl History {
             let path = original.path(store);
             let received =
                 slot_object::open_bounded(original.object.clone(), &path, ring, &history)?;
-            history.consume(received, member.member());
+            let incoming = history.consume(received, member.member());
+            if !go_on(&history, &incoming) {
+                break;
+            }
         }
         history.acquire(ring, member)?;
         Ok(history)

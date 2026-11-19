@@ -647,6 +647,34 @@ These hold for every start whose circles keep `Wf`: a deleted circle was made
 and has no members, and a live one has a member. A store with no circles
 keeps it.
 
+## A reload past a device's own removal
+
+A device offline until retention deleted the slot that removes it, or its
+member, reloads from the floor instead of reading that slot (coven.md §6.1,
+§16.5). [`RemovedReload`](sequence/CovenSequence/RemovedReload.lean) models
+the state such a reload installs. The reload reads history's states, in slot
+order, up to its target. At the first slot whose state stops the device, it
+stops, and installs what a device that read that slot installs, from the
+states just before and after it (`reload`). Otherwise it installs history's
+state at its target.
+
+- `reload_eq_slotPath`: for any stop and anything a device installs at it, a
+  reload to any target installs what the slot path holds there (`slotPath`),
+  when the device is not stopped at the start and a stop lasts. A device's own
+  removal is the stop where it installs history's state at the slot.
+- `becomes_removed`: in `CircleLifecycle`, only the store's removal of a
+  member removes it, and the member was active before it.
+- `own_reload`, `reload_keeps_circles_at_removal`: with the member's removal
+  as the stop and `keep` as what the device installs, a device of a member
+  that reloads holds exactly what `ownStateAt` holds. Past the removal, it
+  installs the member removed and every circle as history held it just before
+  the slot, and nothing of history after it (coven.md §14.1).
+
+Rows are not in the model. Rust's reload installs none of the snapshots' rows
+when it stops at the removal, and the device keeps the rows of its copy. The
+Rust differential follows what a reload to each slot installs on the devices
+of two members through the same histories as `CircleLifecycle`'s.
+
 A write into a circle is refused on the writing device with `NotInCircle`
 when its member isn't in the circle or the circle is absent from the
 membership the device has applied, and with `DeletedCircle` when that
@@ -2404,7 +2432,9 @@ each of `people`) and `circles` (`[circle, null]` for one not made, else
 deleting slot or null). An optional `devices` lists distinct members of
 `people`, none when it is missing. Each slot's entry also has `devices`, with
 `[member, {standing, circles}]` for each member it lists: the state a device of
-that member holds after the slot (`ownStep`).
+that member holds after the slot (`ownStep`). Its `reloads`, in the same shape,
+holds the state a device of that member installs when it reloads to the slot
+from history's states (`RemovedReload.reload`).
 
 **`inviteLifecycle`** runs one invite's events through `InviteLifecycle`'s
 steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).

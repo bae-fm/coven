@@ -233,6 +233,7 @@ pub mod test_utils;
 pub(crate) mod tests;
 
 mod operation;
+mod own_removal;
 pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate};
 pub mod operation_kind;
 mod operation_outcome;

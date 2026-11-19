@@ -488,3 +488,148 @@ async fn a_removed_members_own_device_keeps_their_circle_and_writes_into_it() {
     assert_eq!(ids(network.rows(0).await.0), ["1"]);
     network.close().await;
 }
+
+/// Ben's write of the store row `id` and of the note `id` in `circle`.
+fn row_and_note(
+    circle: CircleId,
+    id: &'static str,
+) -> impl FnOnce(CovenWrite<'_>) -> Result<(), CovenError> + Send + 'static {
+    move |sql| {
+        sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [id])?;
+        sql.execute(
+            "INSERT INTO circle_notes(id,value,audience) VALUES(?1,1,?2)",
+            [note(id), circle.to_string()],
+        )?;
+        Ok(())
+    }
+}
+
+/// The id of note `id`.
+fn note(id: &str) -> String {
+    format!("00000000-0000-7000-8000-00000000{id:0>4}")
+}
+
+/// Ana's device writes past `removal`, Ben's removal or his member's, which
+/// landed at that slot: its large row makes it snapshot what it reads, and
+/// once the snapshots of every audience have passed grace, retention has
+/// deleted the removal's slot (§16.2, §16.6).
+async fn retain_past(network: &Network, removal: Slot) {
+    let large = "x".repeat(1024 * 1024 + 1);
+    network.devices[0]
+        .handle
+        .write(move |sql| {
+            sql.execute("INSERT INTO parents(id,label,value) VALUES('after',?1,9)", [large])?;
+            Ok::<_, CovenError>(())
+        })
+        .await
+        .unwrap();
+    network.sync(0).await;
+    for _ in 0..2 {
+        network.move_clock(std::time::Duration::from_secs(31 * 24 * 3600));
+        network.sync(0).await;
+        network.sync(0).await;
+    }
+    let device = &network.devices[0];
+    let path = coven_storage::ObjectPath::slot(device.store, removal.into());
+    assert!(device.storage.status(&path).await.unwrap().is_none());
+}
+
+/// Ana removes Ben's phone, or Ben, while the phone is offline, and writes
+/// on, and retention deletes the removal's slot before the phone syncs
+/// again. Then the phone writes once more, and a pass of it ends as
+/// `ended` says. The phone holds its rows and none of Ana's later rows.
+/// Returns the network, Ben's member and Gifts, in which he writes his
+/// notes.
+async fn removed_offline_until_retention(
+    removal: Removal,
+    ended: impl Fn(&SyncState) -> bool,
+) -> (Network, MemberId, CircleId) {
+    let network = Network::new(2).await;
+    let (ana, ben) = (&network.devices[0].handle, &network.devices[1].handle);
+    let member = ben.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id;
+    // Ana is in Gifts too: her device snapshots it, so retention can delete
+    // its slots. Nobody snapshots a circle only Ben reads, so retention
+    // never deletes slots that hold its parts.
+    let gifts = crate::tests::circle(ana, "Gifts").await;
+    crate::tests::landed(ana, ana.circles().add_member(gifts, &member).await.unwrap()).await;
+    network.sync(1).await;
+    ben.write(row_and_note(gifts, "1")).await.unwrap();
+    network.sync(1).await;
+    network.devices[1].stop_sync().await;
+    ben.write(row_and_note(gifts, "2")).await.unwrap();
+    let journaled = match removal {
+        Removal::Device => ana.remove_device(ben.device_id()).await.unwrap().0,
+        _ => ana.remove_member(&member).await.unwrap(),
+    };
+    let slot = crate::tests::landed(ana, journaled).await;
+    retain_past(&network, slot).await;
+    let mut status = ben.test_sync_status();
+    ben.start_sync().await.unwrap();
+    ben.sync_now();
+    status.wait_for(|status| ended(&status.state)).await;
+
+    ben.write(row_and_note(gifts, "3")).await.unwrap();
+    assert_rows(&network).await;
+    (network, member, gifts)
+}
+
+/// Ben's phone holds the rows and notes it wrote, and none of Ana's.
+async fn assert_rows(network: &Network) {
+    let ids =
+        |rows: Vec<(String, String, i64)>| rows.into_iter().map(|row| row.0).collect::<Vec<_>>();
+    let (parents, _, notes) = network.rows(1).await;
+    assert_eq!(ids(parents), ["1", "2", "3"]);
+    let notes: Vec<_> = notes.into_iter().map(|note| note.0).collect();
+    assert_eq!(notes, ["1", "2", "3"].map(note));
+}
+
+/// Ana removes Ben's phone while it is offline, and retention deletes the
+/// removal's slot before the phone syncs again. The phone reloads from the
+/// floor, stops at its removal and keeps its copy, as reading the removal's
+/// slot leaves it: its rows, its queued write and the device's removal,
+/// none of Ana's later rows, and it keeps writing. Reopened, it stays as it
+/// is (§14.1, §16.5).
+#[tokio::test]
+async fn a_removed_device_offline_until_retention_keeps_its_copy() {
+    let (mut network, ..) = removed_offline_until_retention(Removal::Device, |state| {
+        matches!(state, SyncState::Removed { .. })
+    })
+    .await;
+    let removed =
+        SyncState::Removed { removal: Removal::Device, unsent: UnsentWork { writes: 2, files: 0 } };
+    assert_eq!(network.devices[1].handle.sync_status().await.unwrap().state, removed);
+    let device = &network.devices[1];
+    assert!(!device.handle.store_state().await.devices[&device.handle.device_id()].active());
+    device.handle.close().await.unwrap();
+    let handle = network.reopen(device).open(device.store, |_| ()).await.unwrap();
+    handle.start_sync().await.unwrap();
+    handle.sync_now();
+    handle.test_sync_status().wait_for(|status| status.state == removed).await;
+    network.devices[1].handle = handle;
+    assert_rows(&network).await;
+    network.close().await;
+}
+
+/// Ana removes Ben while his phone is offline, and retention deletes the
+/// removal's slot before the phone syncs again. Ana's device replaced every
+/// key Ben held, so the phone can't open the floor's snapshots, and it
+/// installs nothing: it keeps its rows and its circles as they were, Ben in
+/// Gifts and in the circle he alone was in, and keeps writing (§14.1,
+/// §15.8).
+#[tokio::test]
+async fn a_removed_members_device_offline_until_retention_keeps_their_circles() {
+    let (network, member, gifts) = removed_offline_until_retention(Removal::Member, |state| {
+        matches!(state, SyncState::Failed(_))
+    })
+    .await;
+    let kept = network.devices[1].handle.store_state().await;
+    let own = kept.circles.iter().find(|(_, circle)| circle.name == crate::tests::CIRCLE);
+    let (own, record) = own.unwrap();
+    assert!(record.members.contains(&member));
+    assert!(kept.circles[&gifts].members.contains(&member));
+    assert!(kept.circle_deletions.is_empty());
+    let history = network.devices[0].handle.store_state().await;
+    assert!(history.circle_deletions.contains_key(own));
+    assert!(!history.circles[&gifts].members.contains(&member));
+    network.close().await;
+}

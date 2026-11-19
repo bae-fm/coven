@@ -274,14 +274,48 @@ fn own_device(
     next
 }
 
-fn observe(state: &StoreState, outcome: &str, devices: &[StoreState]) -> Value {
+/// What a device of `own` installs when it reloads to the slot that takes
+/// history from `before` to `after` through `change`, given what a reload
+/// to the slot before installs: history's state, until the slot that
+/// removes `own`. A reload stops there and installs the removal as the slot
+/// installs it, with every circle kept, and installs nothing after it
+/// (`OwnRemoval`, Lean `RemovedReload.reload`).
+fn reloaded(
+    own: u128,
+    reloaded: &StoreState,
+    before: &StoreState,
+    after: &StoreState,
+    change: &StoreChange,
+) -> StoreState {
+    if crate::effects::left(before, &id(own)) {
+        return reloaded.clone();
+    }
+    let mut installed = after.clone();
+    if let Some(kept) = crate::circle_effects::KeptCircles::through(&id(own), change, before) {
+        if crate::effects::left(after, &id(own)) {
+            kept.install(&mut installed);
+        }
+    }
+    installed
+}
+
+fn observe(
+    state: &StoreState,
+    outcome: &str,
+    devices: &[StoreState],
+    reloads: &[StoreState],
+) -> Value {
+    let held = |states: &[StoreState]| -> Value {
+        DEVICES
+            .iter()
+            .zip(states)
+            .map(|(&own, held)| json!([own as u64, state_fields(held)]))
+            .collect()
+    };
     let mut observed = state_fields(state);
     observed["outcome"] = json!(outcome);
-    observed["devices"] = DEVICES
-        .iter()
-        .zip(devices)
-        .map(|(&own, held)| json!([own as u64, state_fields(held)]))
-        .collect();
+    observed["devices"] = held(devices);
+    observed["reloads"] = held(reloads);
     observed
 }
 
@@ -359,6 +393,7 @@ fn circle_lifecycle_matches_lean() {
         assert_eq!(expected.as_array().unwrap().len(), history.len(), "{}", json!(case));
         let mut state = start.clone();
         let mut devices = DEVICES.map(|_| start.clone());
+        let mut reloads = DEVICES.map(|_| start.clone());
         for (i, entry) in history.iter().enumerate() {
             let slot = slot(BEFORE + i as u64 + 1);
             let author = entry.author();
@@ -378,11 +413,15 @@ fn circle_lifecycle_matches_lean() {
             }
             let outcome = outcome(&checked);
             *seen.entry(outcome).or_default() += 1;
+            let before = state.clone();
             if let Ok(Some(effect)) = checked {
                 state = effect.state;
             }
+            for (reload, own) in reloads.iter_mut().zip(DEVICES) {
+                *reload = reloaded(own, reload, &before, &state, &change);
+            }
             assert_eq!(
-                observe(&state, outcome, &devices),
+                observe(&state, outcome, &devices, &reloads),
                 expected[i],
                 "slot {} of {}",
                 i + 1,

@@ -390,6 +390,39 @@ impl StoreDatabase {
         .await
     }
 
+    /// Stop at this device's own removal, or its member's, which a reload
+    /// found in history past the slots this device applied: install `state`,
+    /// what the device keeps at the removal, over the device's own rows, and
+    /// end what its app journaled, as the transaction applying the removal's
+    /// slot does. The device keeps its copy and its applied slot (§14.1,
+    /// §16.5).
+    pub async fn stop_at_removal(&self, state: crate::StoreState) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.database.reader();
+            inner.with_files("stop at the device's removal", |writer, call, files| {
+                inner.access.with_leased(&reader, |reader, reader_call| {
+                    crate::transaction_constants::read_with_constants(reader, reader_call, || {
+                        crate::write_schema::prepare_evaluators(
+                            reader,
+                            &inner.access.write_schema,
+                        )?;
+                        crate::transaction_constants::schema_version(reader, reader_call)?;
+                        crate::own_removal::stop(
+                            writer,
+                            call,
+                            reader,
+                            reader_call,
+                            &inner.access.write_schema,
+                            &state,
+                            files,
+                        )
+                    })
+                })
+            })
+        })
+        .await
+    }
+
     /// How the applied state stops this installation for good, if it does:
     /// its device removed or replaced, its member removed, or its member
     /// bound to a pair it doesn't hold (§14.1). `None` while the applied

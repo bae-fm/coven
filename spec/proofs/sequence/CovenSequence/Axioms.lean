@@ -257,6 +257,10 @@ import SequenceApply
 #print axioms CovenSequence.CircleLifecycle.own_agrees_until_removal
 #print axioms CovenSequence.CircleLifecycle.removed_member_keeps_circles
 #print axioms CovenSequence.CircleLifecycle.removed_member_keeps_writing
+#print axioms CovenSequence.RemovedReload.reload_eq_slotPath
+#print axioms CovenSequence.RemovedReload.becomes_removed
+#print axioms CovenSequence.RemovedReload.own_reload
+#print axioms CovenSequence.RemovedReload.reload_keeps_circles_at_removal
 #print axioms CovenSequence.WriteVersion.step_version
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts

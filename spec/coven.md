@@ -6571,6 +6571,25 @@ the laptop's do. Every other device takes Ben out of each circle at slot 52
 and deletes the circles he alone was in (§15.8). Without this, removing a
 person would also delete their private rows on their own devices.
 
+A device that never read the slot of its removal, or its member's, stops at
+that slot too. Ana removes Ben's laptop at slot 60 while it is off, and the
+laptop stays off until retention has deleted slot 60. The laptop then reloads
+from the floor (§16.5), whose snapshots cover a slot past 60, and the history
+it reads there removes it at slot 60. The reload stops at slot 60 and loads
+none of the snapshots' rows or the later slots: the laptop keeps the rows it
+holds and its queued writes, takes the store's state at slot 60 as reading
+that slot would leave it, and stops as above, reporting `Removed`. When Ana
+removes Ben himself and his device can open the floor's snapshots, that
+state keeps his circles as they were
+([`own_reload`, `reload_keeps_circles_at_removal`](proofs/sequence/CovenSequence/RemovedReload.lean)).
+Once Ana's device has replaced every key Ben held (§12.2), his devices can't
+open a floor written after it: each installs nothing, keeps its copy as it
+is, and fails each pass for the key it lacks. Without this, the laptop would
+take in what others wrote after its removal, and a removed member's device
+would delete the circle the member alone was in. Once a device has stopped at
+its removal, by its slot or by a reload, it reads no slot and loads no floor
+again, after a restart too.
+
 A joined store whose admission its history refused stops the same way, for
 good, reporting `Removed(NeverAdmitted)` (§13.2): its device was never a member. No slot
 applies that stop. It comes in a pass, or the joined store's first load, that
@@ -7613,6 +7632,11 @@ naming them. Tried again, it selects the newest snapshots and loads.
 **A reload commits all at once:** rows, merge records, lost values, source
 verdicts and the applied slot, in one transaction. A failed reload leaves the old
 state visible.
+
+**A reload past the device's own removal stops there.** When the history a
+reload reads up to its target removes this device, or its member, the reload
+commits none of what it loaded. The device keeps its copy and stops at the
+removal (§14.1).
 
 **The floor before the commit.** Before committing, the reload reads the floor
 again. If its first kept slot has passed the slots the starts need, loading
@@ -15143,6 +15167,7 @@ Write-ups explain each model and state its assumptions:
 | A circle's name is its creation's, then each valid rename's in slot order; once it is deleted, a rename of it, an addition to it or a removal from it is refused because its target is gone | `name_is_latest_rename`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.5 |
 | A live circle always has a member: a circle is deleted at the slot that takes its last member out, whether the member left it or was removed from the store, as the circle's members before that slot decide; no slot records another slot's deletion | `live_has_member`, `leaving_deletes`, `member_removal_deletes`, `deleted_at_slot` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8 |
 | A device of the member a store's removal removes holds history's state until that slot; from it on, the device holds the member removed and every circle as history held it before the slot, the member in each and none deleted, so it keeps taking the member's local writes into each circle they were in, while history deletes the circle the member alone was in | `own_agrees_until_removal`, `removed_member_keeps_circles`, `removed_member_keeps_writing` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §14.1, §15.8 |
+| *Body.* A reload that reads history's states up to its target and stops at the first slot that stops the device installs what a device that read every slot holds; a device of the member a store's removal removes that reloads past the removal installs the member removed and every circle as history held it before the slot, and nothing of history after it | `reload_eq_slotPath`, `own_reload`, `reload_keeps_circles_at_removal` | `proofs/sequence/CovenSequence/RemovedReload.lean` | §14.1, §16.5 |
 | A deletion is permanent: the deleted circle keeps no members and its deletion slot at every later prefix, and making a circle under its id is refused | `deleted_stays`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8, §15.9 |
 | An admission or a recovery makes its member's circle with the member alone in it, refuses a circle id already used, live or deleted, and changes nothing when repeated once the circle holds the member under that name | `admission_makes_circle`, `used_circle_refuses_admission`, `admission_repeat_unchanged` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §13.2, §15.5 |
 | A recovery takes its member out of every live circle they alone are in, which deletes it at the recovery's slot, and keeps them in every circle someone else is in; after it, the member no longer reads such a circle, and still reads the shared ones and the new circle with the new pair | `recovery_deletes_lone_circles`, `recovery_keeps_shared_circles`, `recovery_leaves_lone_circle` | `proofs/sequence/CovenSequence/CircleLifecycle.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §13.3, §15.8 |

@@ -724,6 +724,10 @@ def keyCase (slots held current : List Json) : Json := json% {
       "circles": [[1, {"name": "Presents", "members": [3], "deleted": null}]]}]])
   checkField out (slots ++ ["4", "devices"]) kept
   checkField out (slots ++ ["9", "devices"]) kept
+  -- A device of Cy that reloads to any slot from his removal on stops there
+  -- and installs what the device that read every slot keeps.
+  checkField out (slots ++ ["4", "reloads"]) kept
+  checkField out (slots ++ ["9", "reloads"]) kept
   checkField out (slots ++ ["3", "circles"])
     (json% [[1, {"name": "Presents", "members": [3], "deleted": null}]])
   checkField out (slots ++ ["4", "circles"])

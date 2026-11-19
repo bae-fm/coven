@@ -21,6 +21,7 @@ import CovenSequence.Registration
 import CovenSequence.Preparations
 import CovenSequence.CircleRaise
 import CovenSequence.CircleLifecycle
+import CovenSequence.RemovedReload
 import CovenSequence.WriteVersion
 import CovenSequence.RaiseBody
 import CovenSequence.SecondRaise

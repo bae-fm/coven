@@ -225,18 +225,7 @@ fn apply_in<P: crate::PendingValue>(
                         )?;
                     }
                     crate::provider_access::adopt::<P>(db, &effect.provider_access)?;
-                    for circle in effect
-                        .state
-                        .circle_deletions
-                        .keys()
-                        .filter(|circle| !old.contains_key(circle))
-                    {
-                        touched.extend(db.query(
-                            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
-                            [coven_merge::Audience::Circle(*circle)],
-                            crate::row_queries::read_identity,
-                        )?);
-                    }
+                    touched.extend(newly_deleted_rows(db, &old, &effect.state)?);
                     if let Some(boundary) = effect.boundary {
                         crate::write_boundary::record(db, &boundary)?;
                     }
@@ -279,6 +268,24 @@ fn apply_in<P: crate::PendingValue>(
         crate::operation::end_on_stop(db)?;
         Ok(crate::ApplyOutcome::Applied)
     }
+}
+
+/// The rows of each circle `state` deletes that the deletions before it,
+/// `old`, don't: the removal rules take them out (§15.9).
+pub(crate) fn newly_deleted_rows(
+    db: &StoreSql,
+    old: &std::collections::BTreeMap<coven_foundation::id_source::CircleId, Slot>,
+    state: &StoreState,
+) -> Result<Vec<coven_merge::RowId>, DbError> {
+    let mut rows = Vec::new();
+    for circle in state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
+        rows.extend(db.query(
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
+            [coven_merge::Audience::Circle(*circle)],
+            crate::row_queries::read_identity,
+        )?);
+    }
+    Ok(rows)
 }
 
 /// `announcement` was accepted, so no later reset of its audience names

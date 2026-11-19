@@ -570,28 +570,29 @@ impl SequenceSync {
             .min()
             .expect("reload audience");
         let mut rows = 0;
-        let (mut at_target, store_covers) = match starts.iter().find_map(|start| match start {
-            ReloadStart::Stored(snapshot)
-                if snapshot.announcement().snapshot.audience == Audience::Store =>
-            {
-                Some(snapshot)
+        let (mut at_target, store_covers, mut removed) = match starts.iter().find_map(|start| {
+            match start {
+                ReloadStart::Stored(snapshot)
+                    if snapshot.announcement().snapshot.audience == Audience::Store =>
+                {
+                    Some(snapshot)
+                }
+                _ => None,
             }
-            _ => None,
         }) {
             Some(store_snapshot) => {
                 let body = store_snapshot.body();
                 rows = body.header.merge_rows();
-                (
-                    History::restore(&body.originals, self.store(), ring, member)?,
-                    store_snapshot.announcement().covers,
-                )
+                let (history, removed) = self.restore_to_removal(&body.originals, ring, member)?;
+                (history, store_snapshot.announcement().covers, removed)
             }
             None => match &store_history {
-                Some(read) => (
-                    History::restore(&read.body().originals, self.store(), ring, member)?,
-                    read.announcement().covers,
-                ),
-                None => (session.history.clone(), session.through),
+                Some(read) => {
+                    let (history, removed) =
+                        self.restore_to_removal(&read.body().originals, ring, member)?;
+                    (history, read.announcement().covers, removed)
+                }
+                None => (session.history.clone(), session.through, None),
             },
         };
         let started = self.clock.elapsed();
@@ -602,6 +603,9 @@ impl SequenceSync {
         let range = SlotRange::new(from, target);
         let mut reads = crate::sequence_sync::SlotReads::new(self, range);
         for number in range {
+            if removed.is_some() {
+                break;
+            }
             let path = self.path(number);
             let Some(input) = reads.next().await? else {
                 missing = Some(number);
@@ -618,11 +622,18 @@ impl SequenceSync {
             let incoming = if number.get() > store_covers {
                 let incoming = at_target.consume(received, member.member());
                 at_target.acquire(ring, member)?;
+                removed = OwnRemoval::at(&at_target, self.device, &incoming);
                 incoming
             } else {
                 retained_slot(received)
             };
             slots.push(incoming);
+        }
+        // A reload past this device's own removal, or its member's, stops
+        // there, as reading the removal's slot does: it installs none of
+        // what it read (§14.1).
+        if let Some(removed) = removed {
+            return Err(self.stop_at_removal(session, &at_target, removed, member).await);
         }
         let floor = self.read_floor(previous_floor, ring, member).await?;
         if floor.as_ref().is_some_and(|floor| floor.header.first > from) {
@@ -736,6 +747,79 @@ impl SequenceSync {
         Ok(None)
     }
 }
+/// This device's own removal, or its member's, that a reload to a target
+/// past it finds in history. The reload stops there, and the device keeps
+/// its copy, with the state reading the removal's slot leaves it (§14.1).
+struct OwnRemoval {
+    removal: coven_database::Removal,
+    /// What the device keeps at the removal: history's state, with every
+    /// circle as it was before the slot when the removal is its member's
+    /// (`History::consume`).
+    state: coven_database::StoreState,
+}
+
+impl OwnRemoval {
+    /// The removal of `device`, or of its member, that `incoming` is, once
+    /// `history` has consumed it, when history stopped the device at no
+    /// earlier slot.
+    fn at(
+        history: &History,
+        device: coven_foundation::id_source::DeviceId,
+        incoming: &IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>>,
+    ) -> Option<Self> {
+        let (slot, coven_database::DeviceStop::Removed(removal)) = history.gone_for_good(device)?
+        else {
+            return None;
+        };
+        let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content else {
+            return None;
+        };
+        (slot == incoming.slot).then(|| Self { removal, state: effect.state.clone() })
+    }
+}
+
+impl SequenceSync {
+    /// History from a store snapshot's `originals`, which stops at this
+    /// device's removal, or its member's, when they hold it.
+    fn restore_to_removal(
+        &self,
+        originals: &[coven_format::floor::OriginalSlot],
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(History, Option<OwnRemoval>), SyncError> {
+        let mut removed = None;
+        let history =
+            History::restore_while(originals, self.store(), ring, member, |history, incoming| {
+                removed = OwnRemoval::at(history, self.device, incoming);
+                removed.is_none()
+            })?;
+        Ok((history, removed))
+    }
+
+    /// Stop for good at `removed`, the removal `history` ends at, which a
+    /// reload found past the slots this device applied. When the removal is
+    /// the member's, the person's saved entries go first, as before the
+    /// removal's slot applies. The device then keeps its copy with the
+    /// removal's state, and its app's operations end (§14.1).
+    async fn stop_at_removal(
+        &self,
+        session: &Session,
+        history: &History,
+        removed: OwnRemoval,
+        member: &MemberIdentity,
+    ) -> SyncError {
+        if let Err(error) = self.follow_person_entries(&session.history, history, member) {
+            return error;
+        }
+        if let Err(error) = self.database.stop_at_removal(removed.state).await {
+            return error.into();
+        }
+        self.state
+            .set(crate::SequenceStatus::Stopped(crate::SyncFailure::Removed(removed.removal)));
+        SyncError::Removed(removed.removal)
+    }
+}
+
 /// A slot at or below the store snapshot's coverage: the snapshot, or this
 /// device when none is loaded, already holds its kept originals.
 pub(crate) fn retained_slot(
