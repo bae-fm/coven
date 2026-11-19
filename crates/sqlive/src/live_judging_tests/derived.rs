@@ -1,9 +1,8 @@
 //! A subquery in FROM, a CTE or one of the app's views is read as cores of
 //! its own, and the conditions on its rows narrow its tables.
 
-use crate::tests::{next, QueryError, TestDatabase};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use super::lookup::follows;
+use crate::tests::TestDatabase;
 
 fn write(db: &TestDatabase, sql: &str) {
     db.commit(sql);
@@ -17,47 +16,6 @@ CREATE VIEW names(key, name) AS SELECT release, title FROM tracks UNION ALL SELE
 CREATE VIEW later AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id > c.id) SELECT id FROM c;
 INSERT INTO releases VALUES ('r1','x',2001),('r2','x',2002),('r3','y',2003);
 INSERT INTO tracks VALUES (1,'r1',1,'one'),(2,'r1',2,'two'),(3,'r2',1,'three'),(4,'r3',1,'four')";
-
-/// Run `sql` live, then each write: `false` must leave it unmarked, `true`
-/// must rerun it, and the rerun must read what a one-shot read does.
-async fn follows(
-    db: &TestDatabase,
-    sql: &'static str,
-    parameters: Vec<crate::SqlValue>,
-    writes: &[(&str, bool)],
-) {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
-    let bound = parameters.clone();
-    let mut query = db.subscribe(move |db| {
-        let run = count.fetch_add(1, Ordering::SeqCst);
-        let rows =
-            db.query(sql, rusqlite::params_from_iter(&bound), |r| r.get::<_, crate::SqlValue>(0))?;
-        Ok((run, rows))
-    });
-    let mut runs = next(&mut query).await.0;
-    for (write_sql, reruns) in writes {
-        write(db, write_sql);
-        if *reruns {
-            let (run, rows) = next(&mut query).await;
-            assert!(run > runs, "{sql} after {write_sql}");
-            runs = run;
-            let parameters = parameters.clone();
-            let fresh = db
-                .read_app(move |db| {
-                    Ok::<_, QueryError>(db.query(
-                        sql,
-                        rusqlite::params_from_iter(&parameters),
-                        |r| r.get::<_, crate::SqlValue>(0),
-                    )?)
-                })
-                .unwrap();
-            assert_eq!(rows, fresh, "{sql} after {write_sql}");
-        } else {
-            assert!(!query.is_marked_for_rerun(), "{sql} after {write_sql}");
-        }
-    }
-}
 
 /// A condition on a column that passes a table's column on unchanged
 /// narrows that table, through a CTE, a subquery or a view, and through a
