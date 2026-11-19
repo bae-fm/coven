@@ -367,39 +367,46 @@ fn clones_each_field(cx: &LateContext<'_>, callable: DefId) -> bool {
     })
 }
 
-/// Stops the compile at each capability factory row whose file is in the
-/// crate's package and declares no such method: a method of the named type,
-/// taking `self`, whose result holds the product by value.
+/// Stops the compile at each capability factory row whose file the crate
+/// compiles and declares no such method: a method of the named type, taking
+/// `self`, whose result holds the product by value. A row whose file is in
+/// the crate's package and is gone stops it too; another crate of the
+/// package, as a test crate is, compiles none of the row's file.
 fn check_factory_rows<'tcx>(owners: &Owners<'tcx>, tcx: TyCtxt<'tcx>) {
-    let policy = &owners.workspace.policy;
-    for (factory, products) in policy.capability_factories.iter().zip(&owners.rows.factory_products)
+    let workspace = owners.workspace;
+    for (factory, products) in
+        workspace.policy.capability_factories.iter().zip(&owners.rows.factory_products)
     {
-        if !owners.workspace.package_holds(&factory.path) {
+        let compiled = workspace.compiles(tcx, &factory.path);
+        if !compiled
+            && (!workspace.package_holds(&factory.path) || workspace.has_file(&factory.path))
+        {
             continue;
         }
-        let declared = tcx.hir_crate_items(()).definitions().any(|local| {
-            let id = local.to_def_id();
-            tcx.def_kind(id) == DefKind::AssocFn
-                && tcx.opt_associated_item(id).is_some_and(|item| item.is_method())
-                && tcx.item_name(id).as_str() == factory.method
-                && type_name(tcx, id) == factory.owner
-                && owners.workspace.relative_path(tcx, tcx.def_span(id)).as_deref()
-                    == Some(factory.path.as_str())
-                && {
-                    let output = tcx
-                        .fn_sig(id)
-                        .instantiate_identity()
-                        .skip_norm_wip()
-                        .output()
-                        .skip_binder();
-                    let mut holds = false;
-                    owners.walk(output, false, false, &mut |held| {
-                        holds |= matches!(held, Held::Part(part)
+        let declared = compiled
+            && tcx.hir_crate_items(()).definitions().any(|local| {
+                let id = local.to_def_id();
+                tcx.def_kind(id) == DefKind::AssocFn
+                    && tcx.opt_associated_item(id).is_some_and(|item| item.is_method())
+                    && tcx.item_name(id).as_str() == factory.method
+                    && type_name(tcx, id) == factory.owner
+                    && workspace.relative_path(tcx, tcx.def_span(id)).as_deref()
+                        == Some(factory.path.as_str())
+                    && {
+                        let output = tcx
+                            .fn_sig(id)
+                            .instantiate_identity()
+                            .skip_norm_wip()
+                            .output()
+                            .skip_binder();
+                        let mut holds = false;
+                        owners.walk(output, false, false, &mut |held| {
+                            holds |= matches!(held, Held::Part(part)
                             if !part.borrowed && products.contains(&part.id));
-                    });
-                    holds
-                }
-        });
+                        });
+                        holds
+                    }
+            });
         if !declared {
             tcx.dcx().fatal(format!(
                 "typed lints: {FILE_NAME}'s capability_factories names {}: {}::{}, which is no \

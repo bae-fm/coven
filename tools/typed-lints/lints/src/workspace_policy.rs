@@ -21,7 +21,7 @@ use rustc_attr_ir::CfgEntry;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::{HirId, find_attr};
 use rustc_middle::ty::TyCtxt;
-use rustc_span::{Span, Symbol, sym};
+use rustc_span::{FileName, Span, Symbol, sym};
 
 /// The workspace's policy, and where the workspace and the crate being
 /// compiled are, for the paths the policy names.
@@ -104,6 +104,12 @@ impl WorkspacePolicy {
     /// a macro writes, the file of the macro's call.
     pub(crate) fn relative_path(&self, tcx: TyCtxt<'_>, span: Span) -> Option<String> {
         let file = self.source_file(tcx, span)?;
+        self.relative(&file)
+    }
+
+    /// `file`, a path with every link followed, relative to the workspace's
+    /// root as the policy names files.
+    fn relative(&self, file: &Path) -> Option<String> {
         let relative = file.strip_prefix(&self.root).ok()?;
         Some(
             relative
@@ -114,12 +120,33 @@ impl WorkspacePolicy {
         )
     }
 
+    /// Whether the crate being compiled reads the policy's `path`, a source
+    /// file relative to the workspace's root, as one of its own.
+    pub(crate) fn compiles(&self, tcx: TyCtxt<'_>, path: &str) -> bool {
+        let files = tcx.sess.source_map().files();
+        files.iter().filter(|file| file.cnum == LOCAL_CRATE).any(|file| {
+            self.file_on_disk(tcx, file.name.clone())
+                .is_some_and(|file| self.relative(&file).as_deref() == Some(path))
+        })
+    }
+
+    /// Whether the policy's `path`, a source file relative to the
+    /// workspace's root, is on disk.
+    pub(crate) fn has_file(&self, path: &str) -> bool {
+        self.root.join(path).is_file()
+    }
+
     /// The source file `span` is written in, with every link followed: none
     /// for code no file holds, such as what a procedural macro writes from
     /// nothing it was given. A source file the compile read that can't be
     /// found again stops the compile.
     fn source_file(&self, tcx: TyCtxt<'_>, span: Span) -> Option<PathBuf> {
-        let name = tcx.sess.source_map().span_to_filename(span.source_callsite());
+        self.file_on_disk(tcx, tcx.sess.source_map().span_to_filename(span.source_callsite()))
+    }
+
+    /// The file on disk the source map's `name` stands for, as `source_file`
+    /// finds it.
+    fn file_on_disk(&self, tcx: TyCtxt<'_>, name: FileName) -> Option<PathBuf> {
         let local = name.into_local_path()?;
         let absolute = if local.is_absolute() { local } else { self.working_folder.join(local) };
         let canonical = absolute.canonicalize().unwrap_or_else(|error| {

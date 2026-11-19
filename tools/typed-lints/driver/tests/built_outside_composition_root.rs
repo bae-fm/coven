@@ -4,7 +4,9 @@
 //! fixture depends on: the lint finds each owner, construction-only
 //! capability and handle built outside a composition root, and each static
 //! that shares state and is no root, and nothing else; it finds nothing in
-//! test code; and the fixture's mark holds.
+//! test code; and the fixture's mark holds. The fixture's dependency is a
+//! crate of the same package, which compiles none of the files the policy's
+//! capability factories name, and the lint finds nothing there.
 
 mod support;
 
@@ -15,7 +17,8 @@ fn finds_what_is_built_outside_a_composition_root_and_nothing_else() {
     let out_dir = out_dir("built_outside_composition_root");
     let base =
         Fixture { source: "owners/base.rs", crate_name: "owners_base", manifest_dir: "owners" };
-    base.compile(&out_dir, ["--cap-lints=allow"]);
+    let diagnostics = base.compile(&out_dir, [] as [&str; 0]);
+    base.assert_findings("clippy::built_outside_composition_root", &diagnostics);
     let fixture =
         Fixture { source: "owners/src/lib.rs", crate_name: "owners", manifest_dir: "owners" };
     let test_builds = ["--cfg", "feature=\"test-utils\""].map(String::from);
