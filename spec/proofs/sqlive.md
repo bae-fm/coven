@@ -557,6 +557,10 @@ derived item's term holds of it (`scopeAt_parts`), and it holds a value in
 the member column of each of the derived item's memberships and passed edges
 that compares by `=` (`membershipScope_value`). `plan_semTests` gives the
 planned state's facts for those tests.
+`plan_membersEdges` proves that each item's memberships are edges of the
+planned state: the planner takes them from the state's edges as it places
+the item, and no step drops an edge, so what the invariant says of the
+state's edges it says of each membership.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the planned state's facts at a binding that matters, with the order the

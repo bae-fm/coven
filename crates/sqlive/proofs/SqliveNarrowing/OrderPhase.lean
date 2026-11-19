@@ -13,7 +13,8 @@ holds of each binding a core keeps that matters (`plan_sem`), and a row
 a derived item's query's test keeps passes the derived item's term and
 holds a value in each member column its memberships and passed edges
 compare by `=`, so the tests the planner's scopes give are such tests
-(`plan_semTests`). -/
+(`plan_semTests`). Each item's memberships are edges of the planned state
+(`plan_membersEdges`), so the invariant speaks of them. -/
 namespace SqliveNarrowing
 
 attribute [local instance] Classical.propDecidable
@@ -497,5 +498,155 @@ theorem plan_semTests {s : Statement} (h : s.wellFormed = true) (last : Option (
     (rowsOf : Nat → List Row) :
     (plan s).state.Sem s (endCls s ((plan s).queryTest s ((plan s).scopes last) rowsOf)) :=
   plan_sem h fun _ _ _ hd hkind hlim hoff _ hr => queryTest_good last rowsOf hd hkind hlim hoff hr
+
+/-! Memberships are edges of the state. -/
+
+/-- `st'` holds every edge `st` holds. -/
+def PState.EdgesGrow (st st' : PState) : Prop := ∀ e ∈ st.edges, e ∈ st'.edges
+
+theorem PState.EdgesGrow.refl (st : PState) : st.EdgesGrow st := fun _ h => h
+
+theorem PState.EdgesGrow.trans {a b c : PState} (hab : a.EdgesGrow b) (hbc : b.EdgesGrow c) :
+    a.EdgesGrow c := fun e h => hbc e (hab e h)
+
+theorem PState.EdgesGrow.foldl {α : Type} {g : PState → α → PState}
+    (hg : ∀ (st : PState) (x : α), st.EdgesGrow (g st x)) :
+    ∀ (l : List α) (st : PState), st.EdgesGrow (l.foldl g st)
+  | [], st => PState.EdgesGrow.refl st
+  | x :: l, st => (hg st x).trans (PState.EdgesGrow.foldl hg l (g st x))
+
+theorem PState.edgesGrow_update (st : PState) (i : Nat) (f : PItem → PItem) :
+    st.EdgesGrow (st.update i f) := fun _ h => h
+
+theorem PState.edgesGrow_add (st : PState) (n : Narrowing) : st.EdgesGrow (st.add n).1 := by
+  have hterms : ∀ (l : List (Nat × STerm)) (st : PState),
+      (l.foldl (fun st (x : Nat × STerm) => st.addTerm x.1 x.2) st).edges = st.edges := by
+    intro l
+    induction l with
+    | nil => intro st; rfl
+    | cons x l ih => intro st; rw [List.foldl_cons, ih]; rfl
+  have hors : ∀ (l : List Disjunction) (st : PState),
+      (l.foldl (fun st (d : Disjunction) =>
+        st.update d.item fun p => { p with ors := p.ors ++ [d.sides] }) st).edges = st.edges := by
+    intro l
+    induction l with
+    | nil => intro st; rfl
+    | cons x l ih => intro st; rw [List.foldl_cons, ih]; rfl
+  intro e he
+  simp only [PState.add]
+  rw [hors, hterms]
+  exact List.mem_append_left _ he
+
+theorem PState.edgesGrow_narrow : ∀ (fuel : Nat) (st : PState) (n : Narrowing),
+    st.EdgesGrow (PState.narrow fuel st n)
+  | 0, st, _ => PState.EdgesGrow.refl st
+  | fuel + 1, st, n => by
+    simp only [PState.narrow]
+    refine (PState.edgesGrow_add st _).trans (PState.EdgesGrow.foldl (fun st' i => ?_) _ _)
+    split
+    · exact (PState.edgesGrow_update _ _ _).trans (PState.edgesGrow_narrow fuel _ _)
+    · exact PState.EdgesGrow.refl _
+
+theorem PState.edgesGrow_joinInner (fuel : Nat) (st : PState) (i : Nat) :
+    st.EdgesGrow (st.joinInner fuel i) := by
+  unfold PState.joinInner
+  split
+  · exact (PState.edgesGrow_update _ _ _).trans (PState.edgesGrow_narrow fuel _ _)
+  · exact PState.EdgesGrow.refl _
+
+theorem PState.edgesGrow_narrowOn (fuel : Nat) (st : PState) (i : Nat) (n : Narrowing) :
+    st.EdgesGrow (st.narrowOn fuel i n) := by
+  unfold PState.narrowOn
+  generalize n.split i = x
+  obtain ⟨own, others⟩ := x
+  simp only
+  refine (PState.edgesGrow_add st own).trans ?_
+  split
+  · exact PState.edgesGrow_update _ _ _
+  · exact PState.edgesGrow_narrow fuel _ _
+
+theorem PushDown.edgesGrow_pushDown (s : Statement) (narrowFuel : Nat) :
+    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm) (edges : List Edge),
+      st.EdgesGrow (PushDown.pushDown s narrowFuel fuel st item term edges)
+  | 0, st, _, _, _ => PState.EdgesGrow.refl st
+  | fuel + 1, st, item, term, edges => by
+    simp only [PushDown.pushDown]
+    split
+    · exact PState.EdgesGrow.refl st
+    · split
+      · exact PState.EdgesGrow.refl st
+      · refine PState.EdgesGrow.foldl (fun st0 arm => ?_) _ st
+        refine PState.EdgesGrow.foldl (fun st1 target => ?_) _ st0
+        refine PState.EdgesGrow.trans ?_ (PushDown.edgesGrow_pushDown s narrowFuel fuel _ _ _ _)
+        have h2 : ∀ (renamed : Option STerm), st1.EdgesGrow (match renamed with
+            | some r => st1.addTerm target r
+            | none => st1) := by
+          intro renamed
+          cases renamed
+          · exact PState.EdgesGrow.refl st1
+          · exact PState.edgesGrow_update _ _ _
+        have hrec : ∀ (st2 : PState) (passed : List Edge),
+            st2.EdgesGrow { st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :=
+          fun _ _ _ h => List.mem_append_left _ h
+        split
+        · exact (h2 _).trans ((hrec _ _).trans (PState.edgesGrow_joinInner _ _ _))
+        · exact (h2 _).trans (hrec _ _)
+
+theorem edgesGrow_readCore (s : Statement) (st : PState) (k : Nat) :
+    st.EdgesGrow (readCore s st k) := by
+  unfold readCore
+  simp only
+  refine PState.EdgesGrow.trans ?_ (PState.EdgesGrow.foldl
+    (fun st i => PushDown.edgesGrow_pushDown s _ _ st i _ _) _ _)
+  refine PState.EdgesGrow.trans ?_ (PState.EdgesGrow.foldl (fun st (x : Nat × STerm) => by
+    unfold Transfer.addCarried
+    exact PState.edgesGrow_update _ _ _) _ _)
+  refine PState.EdgesGrow.foldl (fun st x => ?_) _ st
+  obtain ⟨n, p⟩ := x
+  cases p
+  · exact PState.edgesGrow_narrow _ _ _
+  · exact PState.edgesGrow_narrowOn _ _ _ _
+
+/-- Whether each item's memberships are edges of the state. -/
+def PState.MembersEdges (st : PState) : Prop :=
+  ∀ i, ∀ m ∈ (st.items i).memberships, m ∈ st.edges
+
+/-- A step that keeps each item's memberships and every edge keeps
+memberships edges. -/
+theorem PState.MembersEdges.of_same {st st' : PState} (h : st.MembersEdges) (hl : st.SameLinks st')
+    (he : st.EdgesGrow st') : st'.MembersEdges := fun i m hm =>
+  he m (h i m (by rw [← (hl i).1]; exact hm))
+
+theorem ordered_go_membersEdges (s : Statement) :
+    ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat), st.MembersEdges →
+      (ordered.go s fuel all st order waited).1.MembersEdges
+  | 0, _, _, _, _, h => h
+  | fuel + 1, all, st, order, waited, h => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', _, heq⟩
+    · rw [heq]; exact h
+    · rw [heq]
+      refine ordered_go_membersEdges s fuel all _ _ _ ?_
+      unfold ordered.placed
+      simp only
+      refine PState.MembersEdges.of_same (fun i m hm => ?_)
+        (PushDown.sameLinks_pushDown s _ _ _ _ _ _) (PushDown.edgesGrow_pushDown s _ _ _ _ _ _)
+      simp only [PState.update] at hm ⊢
+      split at hm
+      · rename_i hi
+        subst hi
+        rcases List.mem_append.mp hm with hm | hm
+        · exact h _ m hm
+        · exact (List.mem_filter.mp hm).1
+      · exact h i m hm
+
+/-- Each item's memberships are edges of the planned state. -/
+theorem plan_membersEdges (s : Statement) : (plan s).state.MembersEdges := by
+  unfold plan ordered
+  simp only
+  refine ordered_go_membersEdges s _ _ _ _ _ ?_
+  refine PState.MembersEdges.of_same (st := PState.initial s) (fun i m hm => by
+    simp [PState.initial] at hm) ?_ ?_
+  · exact PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) _ _
+  · exact PState.EdgesGrow.foldl (fun st k => edgesGrow_readCore s st k) _ _
 
 end SqliveNarrowing

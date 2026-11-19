@@ -95,3 +95,4 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.membershipScope_value
 #print axioms SqliveNarrowing.queryTest_good
 #print axioms SqliveNarrowing.plan_semTests
+#print axioms SqliveNarrowing.plan_membersEdges
