@@ -43,18 +43,92 @@ use crate::row_scope::RowScope;
 use crate::scope_plan::{is_name, Membership, Planner};
 use crate::scope_row::{item_row_term, RowCondition, RowExpression, RowTerm, RowTest};
 use crate::scope_term::{operand, Affinity, Operand};
-use crate::select_syntax::{order_term, parts, OrderTerm, Part};
+use crate::select_syntax::{order_term, parts, Functions, OrderTerm, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
-use sqlite3_parser::ast::{Expr, OneSelect, ResultColumn, Select, SortOrder};
+use sqlite3_parser::ast::{
+    Distinctness, Expr, OneSelect, ResultColumn, Select, SortOrder, SortedColumn,
+};
 
 /// A statement's order and LIMIT, which a full run's last row bounds.
 pub(crate) struct SortedLimit {
     /// The ORDER BY's terms, in runs of consecutive terms over one source.
     runs: Vec<SortRun>,
-    /// The LIMIT's value.
-    limit: Operand,
+    limit: RunLimit,
+}
+
+/// A LIMIT whose value a run's parameters can give.
+#[derive(Clone, Debug)]
+pub(crate) struct RunLimit(Operand);
+
+impl RunLimit {
+    /// The LIMIT's value for a run bound to `parameters`, or `None` when it
+    /// is not a positive integer.
+    pub(crate) fn value(&self, parameters: &[Value]) -> Option<usize> {
+        let Value::Integer(limit) = self.0.value(parameters) else {
+            return None;
+        };
+        usize::try_from(*limit).ok().filter(|limit| *limit > 0)
+    }
+}
+
+/// One SELECT that keeps the first rows of its ORDER BY by a LIMIT with no
+/// OFFSET, each of whose rows comes of one row of its tables: no GROUP BY,
+/// HAVING or WINDOW clause, and no aggregate or window function in its
+/// result columns.
+pub(crate) struct OrderedLimit<'a> {
+    pub(crate) columns: &'a [ResultColumn<'a>],
+    pub(crate) where_clause: Option<&'a Expr<'a>>,
+    pub(crate) distinct: bool,
+    pub(crate) order_by: &'a [SortedColumn<'a>],
+    pub(crate) limit: RunLimit,
+}
+
+/// `select` as an `OrderedLimit`, when it is one; the connection's
+/// `functions` tell an aggregate call.
+pub(crate) fn ordered_limit<'a>(
+    connection: &Connection,
+    functions: &Functions,
+    select: &'a Select<'a>,
+) -> rusqlite::Result<Option<OrderedLimit<'a>>> {
+    let (Some(limit), Some(order_by)) = (select.limit, select.order_by) else {
+        return Ok(None);
+    };
+    if limit.offset.is_some() || select.body.compounds.is_some() {
+        return Ok(None);
+    }
+    let OneSelect::Select {
+        distinctness,
+        columns,
+        where_clause,
+        group_by: None,
+        having: None,
+        window_clause: None,
+        ..
+    } = &select.body.select
+    else {
+        return Ok(None);
+    };
+    let mut found = Vec::new();
+    for column in columns.iter() {
+        if let ResultColumn::Expr(expr, _) = column {
+            crate::select_syntax::parts(expr, &mut found);
+        }
+    }
+    if found.iter().any(|part| part.many_rows(functions)) {
+        return Ok(None);
+    }
+    let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {
+        return Ok(None);
+    };
+    Ok(Some(OrderedLimit {
+        columns,
+        where_clause: *where_clause,
+        distinct: matches!(distinctness, Some(Distinctness::Distinct)),
+        order_by,
+        limit: RunLimit(limit),
+    }))
 }
 
 /// Consecutive ORDER BY terms over one source.
@@ -145,11 +219,8 @@ impl SortedLimit {
     /// Where a run bound to `parameters` finds its last row, or `None` when
     /// the LIMIT's value is not a positive integer.
     pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
-        let Value::Integer(limit) = self.limit.value(parameters) else {
-            return None;
-        };
         Some(LastRow {
-            limit: usize::try_from(*limit).ok().filter(|limit| *limit > 0)?,
+            limit: self.limit.value(parameters)?,
             positions: self
                 .runs
                 .iter()
@@ -206,27 +277,9 @@ pub(crate) fn sorted_limit(
     select: &Select<'_>,
     core: usize,
 ) -> rusqlite::Result<Option<SortedLimit>> {
-    let (Some(limit), Some(order_by)) = (select.limit, select.order_by) else {
-        return Ok(None);
-    };
-    if limit.offset.is_some() || select.body.compounds.is_some() {
-        return Ok(None);
-    }
-    let OneSelect::Select { columns, group_by: None, having: None, window_clause: None, .. } =
-        &select.body.select
+    let Some(OrderedLimit { columns, order_by, limit, .. }) =
+        ordered_limit(connection, planner.functions, select)?
     else {
-        return Ok(None);
-    };
-    let mut found = Vec::new();
-    for column in columns.iter() {
-        if let ResultColumn::Expr(expr, _) = column {
-            crate::select_syntax::parts(expr, &mut found);
-        }
-    }
-    if found.iter().any(|part| part.many_rows(planner.functions)) {
-        return Ok(None);
-    }
-    let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {
         return Ok(None);
     };
     let mut runs: Vec<SortRun> = Vec::new();

@@ -37,16 +37,14 @@ use std::sync::Arc;
 
 use crate::row_scope::{RowImage, RowScope};
 use crate::scope_edge::MemberValue;
+use crate::scope_order::{ordered_limit, OrderedLimit, RunLimit};
 use crate::scope_plan::{is_name, Planner};
 use crate::scope_row::{item_row_term, typed, RowTerm};
-use crate::scope_term::{operand, Affinity, Operand};
 use crate::select_syntax::{conjuncts, order_term, parts, OrderTerm, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
-use sqlite3_parser::ast::{
-    Distinctness, Expr, OneSelect, Operator, ResultColumn, Select, SortOrder,
-};
+use sqlite3_parser::ast::{Expr, Operator, Select, SortOrder};
 
 /// A subquery whose rows, for each row around it, are the first rows of
 /// that row's window, before the run's values.
@@ -65,7 +63,7 @@ pub(crate) struct Window {
     partition: Vec<String>,
     /// The ORDER BY's terms, each descending when `true`.
     keys: Vec<(Arc<RowTerm>, bool)>,
-    limit: Operand,
+    limit: RunLimit,
 }
 
 /// The window of `select`, a subquery whose one core is `core`, when its
@@ -78,27 +76,11 @@ pub(crate) fn read_window(
     select: &Select<'_>,
     core: usize,
 ) -> rusqlite::Result<Option<Window>> {
-    let (Some(limit), Some(order_by)) = (&select.limit, &select.order_by) else {
-        return Ok(None);
-    };
-    let OneSelect::Select {
-        distinctness,
-        columns,
-        where_clause,
-        group_by: None,
-        having: None,
-        window_clause: None,
-        ..
-    } = &select.body.select
+    let Some(OrderedLimit { columns, where_clause, distinct, order_by, limit }) =
+        ordered_limit(connection, planner.functions, select)?
     else {
         return Ok(None);
     };
-    if limit.offset.is_some()
-        || select.body.compounds.is_some()
-        || matches!(distinctness, Some(Distinctness::Distinct))
-    {
-        return Ok(None);
-    }
     let [item] = planner.cores[core].items[..] else {
         return Ok(None);
     };
@@ -107,20 +89,12 @@ pub(crate) fn read_window(
         return Ok(None);
     };
     let mut found = Vec::new();
-    for column in columns.iter() {
-        if let ResultColumn::Expr(expr, _) = column {
-            parts(expr, &mut found);
-        }
-    }
     for term in order_by.iter() {
         parts(&term.expr, &mut found);
     }
-    if found.iter().any(|part| part.many_rows(planner.functions)) {
+    if distinct || found.iter().any(|part| part.many_rows(planner.functions)) {
         return Ok(None);
     }
-    let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {
-        return Ok(None);
-    };
     let mut keys = Vec::new();
     for term in order_by.iter() {
         let sorted = match order_term(columns, &term.expr) {
@@ -232,16 +206,12 @@ impl Window {
     /// `parameters`, or `None` when the LIMIT's value is not a positive
     /// integer.
     pub(crate) fn bind(&self, parameters: &[Value]) -> Option<RowScope> {
-        let Value::Integer(limit) = self.limit.value(parameters) else {
-            return None;
-        };
-        (*limit > 0).then(|| {
-            RowScope::Window(Arc::new(RowWindow {
-                window: self.clone(),
-                limit: *limit,
-                parameters: parameters.to_vec(),
-            }))
-        })
+        let limit = self.limit.value(parameters)?;
+        Some(RowScope::Window(Arc::new(RowWindow {
+            window: self.clone(),
+            limit,
+            parameters: parameters.to_vec(),
+        })))
     }
 }
 
@@ -250,7 +220,7 @@ impl Window {
 #[derive(Debug)]
 pub struct RowWindow {
     window: Window,
-    limit: i64,
+    limit: usize,
     /// The run's parameters, which the conditions and terms name.
     parameters: Vec<Value>,
 }
