@@ -1,17 +1,18 @@
 #!/bin/bash
 # Runs clippy, with the typed lints beside clippy's own, over coven's
 # workspace: `tools/typed-lints/clippy.sh <cargo args> [-- <clippy args>]`,
-# as `cargo clippy` takes them. It builds the driver (release, so linting
-# stays fast), then does what cargo-clippy does with clippy-driver: runs
-# `cargo check` with the driver as the workspace's rustc wrapper and the
-# clippy arguments in CLIPPY_ARGS, which the driver reads.
-#
-# The driver is built on this machine, so cargo runs here
-# (BUILDS_CARGO_HOST=local) and not on another build host.
+# as `cargo clippy` takes them. It does what cargo-clippy does with
+# clippy-driver: runs `cargo check` with the typed lints' driver as the
+# workspace's rustc wrapper and the clippy arguments in CLIPPY_ARGS, which the
+# driver reads. cargo may run on another build machine: driver.sh runs first
+# on whichever machine runs it and points tools/typed-lints/built at the
+# driver there.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-tools/typed-lints/cargo.sh build --quiet --release -p typed-lints-driver
-driver="$PWD/target/typed-lints/release/typed-lints-driver"
+case "$(rustc -vV | sed -n 's/^host: //p')" in
+*windows*) exe=.exe ;;
+*) exe= ;;
+esac
 
 cargo_args=()
 clippy_args=""
@@ -24,5 +25,7 @@ for arg in "$@"; do
     clippy_args+="${arg}__CLIPPY_HACKERY__"
 done
 
-BUILDS_CARGO_HOST=local RUSTC_WORKSPACE_WRAPPER="$driver" CLIPPY_ARGS="$clippy_args" \
+BUILDS_CARGO_BEFORE=tools/typed-lints/driver.sh \
+    RUSTC_WORKSPACE_WRAPPER="$PWD/tools/typed-lints/built/typed-lints-driver$exe" \
+    CLIPPY_ARGS="$clippy_args" \
     exec scripts/cargo.sh check "${cargo_args[@]}"

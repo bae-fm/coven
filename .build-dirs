@@ -23,3 +23,13 @@ spec/proofs/queue/.lake    1G
 spec/proofs/sequence/.lake 1G
 spec/proofs/storage/.lake  1G
 crates/sqlive/proofs/.lake 1G
+
+# The typed lints (tools/typed-lints). Setup runs prepare-build.sh, which
+# installs the toolchain's compiler crates and points tools/typed-lints/clippy
+# at clippy's source for the toolchain, fetched once per machine into
+# ~/.cache/typed-lints/<toolchain>, which no checkout keeps once none pins it.
+# builds keeps one build of the lints' driver per key on each machine and
+# points tools/typed-lints/built at it (tool.sh).
+prepare tools/typed-lints/prepare-build.sh
+installed typed-lints rust-toolchain.toml
+tool typed-lints tools/typed-lints/tool.sh tools/typed-lints/built

@@ -1,6 +1,8 @@
 //! The version `--version` prints, as clippy's build script sets it, and the
 //! toolchain's library folder, where the driver finds the compiler's shared
-//! libraries (librustc_driver and libLLVM) when it links and when it runs.
+//! libraries (librustc_driver and libLLVM) when it links and when it runs:
+//! the folder this machine's toolchain has, then `toolchain-lib` beside the
+//! driver.
 
 use std::process::Command;
 
@@ -15,8 +17,14 @@ fn main() {
     let library = format!("{}/lib", sysroot.trim());
     println!("cargo:rustc-link-search=native={library}");
     // Windows finds a DLL through PATH, which holds the toolchain's bin folder
-    // when rustup runs cargo; elsewhere the driver records the folder.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{library}");
-    }
+    // when rustup runs cargo; elsewhere the driver records the folder, and a
+    // toolchain-lib beside the driver, which a copy of the driver on another
+    // machine points at that machine's folder (tool.sh's check).
+    let beside = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => return,
+        Ok("macos") => "@executable_path/toolchain-lib",
+        _ => "$ORIGIN/toolchain-lib",
+    };
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{library}");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{beside}");
 }

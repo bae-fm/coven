@@ -12,10 +12,10 @@ if ! has_rustc_dev; then
     missing=1
 fi
 if [ "$clippy_commit" != "$commit" ]; then
-    echo "typed lints: tools/typed-lints/clippy holds clippy's source at ${clippy_commit:-no commit}, not at $commit, the commit $toolchain's rustc was built from" >&2
+    echo "typed lints: tools/typed-lints/clippy leads to clippy's source at ${clippy_commit:-no commit}, not at $commit, the commit $toolchain's rustc was built from" >&2
     missing=1
 fi
 if [ "$missing" = 1 ]; then
-    echo "typed lints: tools/typed-lints/prepare-build.sh puts both in place" >&2
+    echo "typed lints: tools/typed-lints/prepare-build.sh puts both in place (builds setup runs it)" >&2
     exit 1
 fi

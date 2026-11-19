@@ -6,4 +6,5 @@
 .DS_Store
 plans/
 .worktrees/
-/tools/typed-lints/clippy/
+/tools/typed-lints/clippy
+/tools/typed-lints/built
