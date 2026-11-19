@@ -400,8 +400,11 @@ impl FilesInner {
 
     async fn serve_uploads(&self) -> Result<DrainOutcome, SyncError> {
         // Observe before reading the queue, so nothing that happens while it
-        // is read is missed.
-        let mut changes = self.database.queued_work_changes();
+        // is read is missed. Only commits count: the read covers the state
+        // before it, and a report of that state would say a bound upload may
+        // have been queued since the read, so the run would read the queue
+        // again while no slot is free and take an app retry there.
+        let mut changes = self.database.queued_work_commits();
         let mut sending = self.send.watch();
         let mut reports = self.waits.network_reports();
         let mut rearmed = self.waits.rearmed();
