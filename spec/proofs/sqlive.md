@@ -383,6 +383,12 @@ it for good. The restriction lets a binding hold no row only of such an
 item. `plan_order` proves that the planner places each item once, and every
 item of every core: each step places one item that is not placed yet, and
 the planner takes a step for each item. `Planned.scopes_eq` takes both.
+`plan_pushed` proves that each edge the planner passes into a derived item's
+arms comes from an edge the derived item holds, as a membership or as an edge
+passed into it, through the result column that an arm passes the target's
+column on to unchanged, and that the target is an inner join's. The planner
+keeps the edges it passes in a list of their own (`PState.pushed`), apart
+from the edges conditions give, and no step of the planner reads that list.
 Whether the planner's state gives each item terms, edges and ORs that hold of
 the bindings that matter, through the conditions it reads, the ON conditions it
 holds back, the terms it carries and passes into derived items, and the order

@@ -272,6 +272,11 @@ structure PItem where
 structure PState where
   items : Nat → PItem
   edges : List Edge
+  /-- The edges `PushDown.pushDown` passes into derived items' arms, each with
+  its target as member. They are among `edges` too; no step of the planner
+  reads this list, which the proofs read to tell a pushed edge from one a
+  condition gives. -/
+  pushed : List Edge := []
 
 def PState.update (st : PState) (i : Nat) (f : PItem → PItem) : PState :=
   { st with items := fun j => if j = i then f (st.items j) else st.items j }

@@ -64,4 +64,5 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.scopeAt_passes
 #print axioms SqliveNarrowing.Planned.scopes_eq
 #print axioms SqliveNarrowing.plan_leftOn
+#print axioms SqliveNarrowing.plan_pushed
 #print axioms SqliveNarrowing.plan_order
