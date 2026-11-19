@@ -4,9 +4,13 @@ use crate::sources::{Manifest, SqlFile};
 
 /// The rows of `policy` that name what `workspace` does not hold, read as
 /// the checker reads them.
-fn current_stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> {
-    let code = CrateCode::read(workspace, policy);
-    stale_rows(workspace, &code, &OwnerGraph::collect(&code.expanded, policy), policy)
+fn current_stale_rows(workspace: &Workspace, policy: Policy) -> Vec<String> {
+    let rows = NamedTypes::of(&policy);
+    let mut policy = policy;
+    crate::type_rows::read_by_name(&mut policy);
+    let code = CrateCode::read(workspace, &policy);
+    let graph = OwnerGraph::collect(&code.expanded, &policy);
+    stale_rows(workspace, &code, &graph, &policy, &rows)
 }
 
 fn workspace(files: Vec<RustFile>, members: &[(&str, &str)]) -> Workspace {
@@ -28,7 +32,7 @@ fn stale(files: Vec<RustFile>, rows: &str) -> Vec<String> {
     let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
     let workspace = workspace(files, &members);
     let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
-    current_stale_rows(&workspace, &policy)
+    current_stale_rows(&workspace, policy)
 }
 
 #[test]
@@ -59,7 +63,7 @@ fn a_policy_naming_only_what_exists_is_current() {
 #[test]
 fn a_policy_must_select_rules() {
     let (workspace, policy) = (workspace(Vec::new(), &[]), Policy::fixture(""));
-    let rows = current_stale_rows(&workspace, &policy);
+    let rows = current_stale_rows(&workspace, policy);
     assert_eq!(rows, ["rules: the policy selects no rules"]);
 }
 
@@ -96,7 +100,7 @@ fn library_names_name_a_dependency() {
         library_names = { "coreaudio-rs" = "coreaudio", "objc2-rs" = "objc2" }"#,
     );
     assert_eq!(
-        current_stale_rows(&workspace, &policy),
+        current_stale_rows(&workspace, policy),
         ["library_names: no member depends on objc2-rs"]
     );
 }
@@ -228,7 +232,7 @@ fn every_type_the_policy_names_is_declared_by_a_crate() {
     assert_eq!(
         {
             let workspace = workspace(files, &members);
-            current_stale_rows(&workspace, &policy)
+            current_stale_rows(&workspace, policy)
         },
         [
             "capability_types: no crate declares Fixture",
@@ -415,7 +419,7 @@ fn a_domain_home_holding_only_test_code_holds_source() {
     })
     .into();
     assert_eq!(
-        current_stale_rows(&workspace, &policy),
+        current_stale_rows(&workspace, policy),
         ["database: domain listing has home crates/app-foundation/src/gone/, which holds no source"]
     );
 }
@@ -465,7 +469,7 @@ fn sql_files_create_the_schemas_tables() {
         "#,
     );
     assert_eq!(
-        current_stale_rows(&workspace, &policy),
+        current_stale_rows(&workspace, policy),
         [
             "database: schema table listing_search is in no domain",
             "database: domain table gone is not a schema table",
@@ -520,7 +524,7 @@ fn domains_name_views_the_sql_creates() {
         "#,
     );
     assert_eq!(
-        current_stale_rows(&workspace, &policy),
+        current_stale_rows(&workspace, policy),
         [
             "database: domain listing names view listing, which is a schema table",
             "database: domain listing names view fixture, which the SQL never creates",
@@ -552,6 +556,37 @@ fn external_types_are_named_by_a_crate_and_declared_by_none() {
             "external_types: no crate names Local",
             "external_types: no crate names Unused",
             "external_types: no type row names Unused",
+        ]
+    );
+}
+
+/// A row naming its type by path names a dependency's type when the path's
+/// crate is no crate of the workspace: a crate names it, and declares no
+/// type of its name, without an external_types row.
+#[test]
+fn a_row_naming_its_type_by_path_tells_a_dependency_s_type_by_its_crate() {
+    let files = vec![
+        RustFile::fixture("crates/app-foundation/src/clock.rs", "pub struct Clock; struct Local;"),
+        RustFile::fixture(
+            "crates/app/src/lib.rs",
+            "struct Worker { runtime: tokio::runtime::Runtime, local: tokio::sync::Local }",
+        ),
+    ];
+    let rows = r#"
+        capability_types = [
+            "app_foundation::clock::Clock",
+            "app::Missing",
+            "tokio::runtime::Runtime",
+            "tokio::sync::Local",
+            "tokio::Gone",
+        ]
+    "#;
+    assert_eq!(
+        stale(files, rows),
+        [
+            "capability_types: no crate declares app::Missing",
+            "capability_types: no crate names tokio::Gone",
+            "capability_types: tokio::sync::Local shares its name with a type a crate declares",
         ]
     );
 }
@@ -767,7 +802,7 @@ fn a_kept_state_row_names_a_type_or_a_function_and_a_counter_row_a_sql_column() 
     }];
     let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
     assert_eq!(
-        current_stale_rows(&workspace, &policy),
+        current_stale_rows(&workspace, policy),
         [
             "read_shapes.frozen: crates/app/src/reads.rs: Gone names no type or function there",
             "read_shapes.frozen: crates/app/src/schema.sql: v.gone is no column the SQL there increases",

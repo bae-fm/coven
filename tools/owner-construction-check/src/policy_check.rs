@@ -25,16 +25,28 @@ use owner_construction_policy::{
     Shape,
 };
 
+/// Every type the policy names, with its row, as the file names it: the
+/// owner rules' rows by path, before the checker reads them by name
+/// (`type_rows.rs`).
+pub(crate) struct NamedTypes(Vec<(&'static str, String)>);
+
+impl NamedTypes {
+    pub(crate) fn of(policy: &Policy) -> Self {
+        Self(policy.named_types().into_iter().map(|(row, name)| (row, name.to_string())).collect())
+    }
+}
+
 /// Each policy row that names something the workspace does not hold. Rows
 /// naming code are held against the crates' code with their macros
 /// expanded, so a method a macro writes can be a composition root; the
 /// schema's table macros are read as written. `graph` is the owner graph of
-/// those expanded files.
+/// those expanded files, and `rows` the types the policy file names.
 pub(crate) fn stale_rows(
     workspace: &Workspace,
     code: &CrateCode,
     graph: &OwnerGraph,
     policy: &Policy,
+    rows: &NamedTypes,
 ) -> Vec<String> {
     let crate_files = &code.expanded;
     let identity = &graph.identity;
@@ -50,7 +62,7 @@ pub(crate) fn stale_rows(
     stale.extend(invalid_capability_factories(crate_files, identity, policy));
     stale.extend(invalid_handles(crate_files, identity, policy));
     stale.extend(overlapping_state_rows(policy));
-    stale.extend(undeclared_types(crate_files, graph, policy));
+    stale.extend(undeclared_types(code, graph, policy, rows));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, graph, policy));
     stale.extend(invalid_read_shapes(crate_files, code, graph, policy));
@@ -454,16 +466,24 @@ fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
     stale
 }
 
-/// Each type the policy names must be one a crate declares, or one of the
-/// policy's external types: a crate's production source names it, as a type
-/// or as a trait a bound names (`impl coven::SqlRead`), and no crate declares
-/// it. Returns a message for each type that breaks this.
-fn undeclared_types(crate_files: &[RustFile], graph: &OwnerGraph, policy: &Policy) -> Vec<String> {
+/// Each type the policy names must be one a crate declares, or a
+/// dependency's: a crate's production source names it, as a type or as a
+/// trait a bound names (`impl coven::SqlRead`), and no crate declares a type
+/// of its name. A row naming its type by path names a dependency's when the
+/// path's crate is no crate of the workspace; a row naming it by name alone,
+/// when the name is one of the policy's external types. Returns a message
+/// for each type that breaks this.
+fn undeclared_types(
+    code: &CrateCode,
+    graph: &OwnerGraph,
+    policy: &Policy,
+    rows: &NamedTypes,
+) -> Vec<String> {
     let (identity, declared) = (&graph.identity, &graph.types);
     // Every name, type arguments of phantom generics included.
     let every_argument = BTreeSet::new();
     let mut mentioned = BTreeSet::new();
-    for file in crate_files {
+    for file in &code.expanded {
         let names = identity.in_file(&file.relative_path).with_phantoms(&every_argument);
         let mut names = TypeNames::new(names);
         names.visit_file(&file.syntax);
@@ -472,12 +492,28 @@ fn undeclared_types(crate_files: &[RustFile], graph: &OwnerGraph, policy: &Polic
         bounds.visit_file(&file.syntax);
         mentioned.extend(bounds.0);
     }
-    let named = policy.named_types();
-    let mut stale = named
-        .iter()
-        .filter(|(_, name)| !policy.external_types.contains(*name) && !declared.contains_key(*name))
-        .map(|(row, name)| format!("{row}: no crate declares {name}"))
-        .collect::<Vec<_>>();
+    let crates =
+        code.whole.iter().map(|file| file.package.replace('-', "_")).collect::<BTreeSet<_>>();
+    let mut stale = Vec::new();
+    for (row, named) in &rows.0 {
+        let name = owner_construction_policy::type_name(named);
+        let dependency = match named.split_once("::") {
+            Some((krate, _)) => !crates.contains(krate),
+            None => policy.external_types.contains(named),
+        };
+        if !dependency {
+            if !declared.contains_key(name) {
+                stale.push(format!("{row}: no crate declares {named}"));
+            }
+        } else if named.contains("::") {
+            if declared.contains_key(name) {
+                stale.push(format!("{row}: {named} shares its name with a type a crate declares"));
+            }
+            if !mentioned.contains(name) {
+                stale.push(format!("{row}: no crate names {named}"));
+            }
+        }
+    }
     for name in &policy.external_types {
         if declared.contains_key(name) {
             stale.push(format!("external_types: a crate declares {name}"));
@@ -485,7 +521,7 @@ fn undeclared_types(crate_files: &[RustFile], graph: &OwnerGraph, policy: &Polic
         if !mentioned.contains(name) {
             stale.push(format!("external_types: no crate names {name}"));
         }
-        if !named.iter().any(|(_, named)| named == name) {
+        if !rows.0.iter().any(|(_, named)| named == name) {
             stale.push(format!("external_types: no type row names {name}"));
         }
     }

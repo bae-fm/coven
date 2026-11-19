@@ -51,6 +51,7 @@ mod task_state;
 mod test_code;
 mod test_layout;
 mod type_identity;
+mod type_rows;
 mod typed_errors;
 mod unique_type_names;
 
@@ -69,13 +70,15 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let policy = match owner_construction_policy::Policy::read(&root) {
+    let mut policy = match owner_construction_policy::Policy::read(&root) {
         Ok(policy) => policy,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");
             std::process::exit(2);
         }
     };
+    let rows = policy_check::NamedTypes::of(&policy);
+    type_rows::read_by_name(&mut policy);
     let workspace =
         match sources::load(&root, &policy.library_names, policy.test_support_features()) {
             Ok(workspace) => workspace,
@@ -86,7 +89,7 @@ fn main() {
         };
     let code = crate_code::CrateCode::read(&workspace, &policy);
     let graph = owner_graph::OwnerGraph::collect(&code.expanded, &policy);
-    let stale = policy_check::stale_rows(&workspace, &code, &graph, &policy);
+    let stale = policy_check::stale_rows(&workspace, &code, &graph, &policy, &rows);
     if !stale.is_empty() {
         eprintln!(
             "owner-construction-check: {} names what the workspace does not hold:",

@@ -44,465 +44,450 @@ separated_crates = [["coven-database", "coven-storage"]]
 # These are the leaf capabilities. Owners retaining them receive them
 # through constructors; their implementations keep raw OS handles private.
 capability_types = [
-    "Clock",
-    "ClockRef",
-    "SystemClock",
-    "IdSource",
-    "IdSourceRef",
-    "UuidIds",
-    "StoreDirectories",
-    "BootstrapStore",
-    "ReplacementStore",
-    "StoreDir",
-    "AtomicFile",
-    "FileWriter",
-    "WriterFolder",
-    "FileReader",
+    "coven_foundation::clock::Clock",
+    "coven_foundation::clock::ClockRef",
+    "coven_foundation::clock::SystemClock",
+    "coven_foundation::id_source::IdSource",
+    "coven_foundation::id_source::IdSourceRef",
+    "coven_foundation::id_source::UuidIds",
+    "coven_foundation::files::layout::StoreDirectories",
+    "coven_foundation::files::bootstrap::BootstrapStore",
+    "coven_foundation::files::replacement::ReplacementStore",
+    "coven_foundation::files::directory::StoreDir",
+    "coven_foundation::files::atomic_file::AtomicFile",
+    "coven_foundation::files::atomic_file::FileWriter",
+    "coven_foundation::files::atomic_file::WriterFolder",
+    "coven_foundation::files::file_reader::FileReader",
     # The app's places for open files, made once when it starts and given to
     # coven (api.md E1).
-    "FileBudget",
+    "coven_foundation::files::file_budget::FileBudget",
     # The places outside coven's directories an app's call names (F.2): a
     # user's original, the folder the person picked for device-only copies
     # with the copies and folders coven records there, and the folder for
     # SQLite's temporary tables.
-    "UserOriginal",
-    "CopyFolder",
-    "RecordedCopy",
-    "MadeFolder",
-    "AssetFiles",
-    "AssetFile",
-    "StoreLock",
-    "StoreReadLock",
-    "ClosedStoreLock",
-    "StoreDeletionLock",
-    "Keychain",
-    "StoreKeychain",
-    "PersonEntries",
-    "KeyringCustody",
-    "Custody",
-    "StorageConnector",
-    "Storage",
-    "ProviderOps",
-    "OAuthClients",
-    "OAuthPresenter",
-    "OAuthSession",
-    "HostSql",
+    "coven_foundation::files::observed_file::UserOriginal",
+    "coven_foundation::files::folder_copy::CopyFolder",
+    "coven_foundation::files::folder_copy::RecordedCopy",
+    "coven_foundation::files::folder_copy::MadeFolder",
+    "coven_foundation::files::asset_files::AssetFiles",
+    "coven_foundation::files::asset_files::AssetFile",
+    "coven_foundation::files::lock::StoreLock",
+    "coven_foundation::files::lock::StoreReadLock",
+    "coven_foundation::files::lock::ClosedStoreLock",
+    "coven_foundation::files::lock::StoreDeletionLock",
+    "coven_crypto::custody::keychain::Keychain",
+    "coven_crypto::custody::keychain::StoreKeychain",
+    "coven_crypto::custody::person_entries::PersonEntries",
+    "coven_crypto::custody::keychain::KeyringCustody",
+    "coven_crypto::custody::Custody",
+    "coven_storage::providers::connector::StorageConnector",
+    "coven_storage::storage::Storage",
+    "coven_storage::provider_ops::ProviderOps",
+    "coven_storage::providers::oauth::OAuthClients",
+    "coven_storage::providers::oauth::OAuthPresenter",
+    "coven_storage::providers::http::OAuthSession",
+    "sqlive::connection::HostSql",
     # The reqwest client every HTTPS request goes through, with the clock its
     # stall window is timed by (§6.7, F.1): the provider connector holds one
     # and the sign-in exchange another, each built where its holder is.
-    "HttpClient",
+    "coven_storage::providers::http_client::HttpClient",
 ]
 # Shared in-memory state (F.2): whoever holds one shares it with the others
 # that do, so it is shared on purpose, by an owner, and leaves that owner only
 # inside a handle.
 shared_state_types = [
-    "Semaphore",
-    "JoinHandle",
-    "AtomicBool",
-    "AtomicI64",
-    "AtomicU64",
-    "AtomicUsize",
-    "OnceLock",
-    "LazyLock",
-    "Notify",
-    "Sender",
-    "UnboundedSender",
-    "Receiver",
-    "UnboundedReceiver",
+    "tokio::sync::Semaphore",
+    "std::thread::JoinHandle",
+    "tokio::task::JoinHandle",
+    "std::sync::atomic::AtomicBool",
+    "std::sync::atomic::AtomicI64",
+    "std::sync::atomic::AtomicU64",
+    "std::sync::atomic::AtomicUsize",
+    "std::sync::OnceLock",
+    "std::sync::LazyLock",
+    "tokio::sync::Notify",
+    "std::sync::mpsc::Sender",
+    "tokio::sync::mpsc::Sender",
+    "tokio::sync::oneshot::Sender",
+    "tokio::sync::watch::Sender",
+    "tokio::sync::mpsc::UnboundedSender",
+    "std::sync::mpsc::Receiver",
+    "tokio::sync::mpsc::Receiver",
+    "tokio::sync::oneshot::Receiver",
+    "tokio::sync::watch::Receiver",
+    "tokio::sync::mpsc::UnboundedReceiver",
 ]
 # A lock is its holder's private state while one owner holds it by value;
 # held through a shared pointer or a reference, by itself or inside what is,
 # it is shared state.
-private_state_types = ["Mutex", "RwLock", "Condvar"]
+private_state_types = ["std::sync::Mutex", "tokio::sync::Mutex", "std::sync::RwLock", "tokio::sync::RwLock", "std::sync::Condvar"]
 # Every holder of one of these shares what it points at with the others.
-shared_pointer_types = ["Arc", "Rc", "Weak"]
+shared_pointer_types = ["std::sync::Arc", "std::rc::Rc", "std::sync::Weak"]
 capability_traits = [
-    "Clock",
-    "IdSource",
-    "Custody",
-    "StorageConnector",
-    "Storage",
-    "ProviderOps",
-    "OAuthPresenter",
+    "coven_foundation::clock::Clock",
+    "coven_foundation::id_source::IdSource",
+    "coven_crypto::custody::Custody",
+    "coven_storage::providers::connector::StorageConnector",
+    "coven_storage::storage::Storage",
+    "coven_storage::provider_ops::ProviderOps",
+    "coven_storage::providers::oauth::OAuthPresenter",
 ]
 construction_only_capability_types = [
-    "AssetFiles",
-    "StoreDirectories",
-    "FileReader",
-    "FileBudget",
-    "WriterFolder",
-    "UserOriginal",
-    "CopyFolder",
-    "RecordedCopy",
-    "MadeFolder",
-    "StoreDir",
-    "StoreLock",
-    "StoreReadLock",
-    "ClosedStoreLock",
-    "AtomicFile",
-    "ClockRef",
-    "IdSourceRef",
-    "Keychain",
-    "StoreKeychain",
-    "PersonEntries",
-    "OAuthClients",
-    "OAuthSession",
-    "HostSql",
-    "HttpClient",
+    "coven_foundation::files::asset_files::AssetFiles",
+    "coven_foundation::files::layout::StoreDirectories",
+    "coven_foundation::files::file_reader::FileReader",
+    "coven_foundation::files::file_budget::FileBudget",
+    "coven_foundation::files::atomic_file::WriterFolder",
+    "coven_foundation::files::observed_file::UserOriginal",
+    "coven_foundation::files::folder_copy::CopyFolder",
+    "coven_foundation::files::folder_copy::RecordedCopy",
+    "coven_foundation::files::folder_copy::MadeFolder",
+    "coven_foundation::files::directory::StoreDir",
+    "coven_foundation::files::lock::StoreLock",
+    "coven_foundation::files::lock::StoreReadLock",
+    "coven_foundation::files::lock::ClosedStoreLock",
+    "coven_foundation::files::atomic_file::AtomicFile",
+    "coven_foundation::clock::ClockRef",
+    "coven_foundation::id_source::IdSourceRef",
+    "coven_crypto::custody::keychain::Keychain",
+    "coven_crypto::custody::keychain::StoreKeychain",
+    "coven_crypto::custody::person_entries::PersonEntries",
+    "coven_storage::providers::oauth::OAuthClients",
+    "coven_storage::providers::http::OAuthSession",
+    "sqlive::connection::HostSql",
+    "coven_storage::providers::http_client::HttpClient",
 ]
 non_owner_types = [
     # Failure transport may carry a published handle; it does not own store lifetime.
-    "BootstrapError",
-    "StoreCreationError",
-    "CustodyChoice",
-    "Command",
-    "Request",
+    "coven::builder::bootstrap::error::BootstrapError",
+    "coven::error::StoreCreationError",
+    "coven_crypto::custody::CustodyChoice",
+    "coven_sync::sequence_sync::sync_loop::Command",
+    "coven_sync::sequence_sync::sequence_operations::Request",
     # An approved join request's admission as its operation journals it: the
     # entry and the joiner's own copy, kept as written.
-    "ApprovedAdmission",
+    "coven_sync::sequence_sync::sequence_copies::ApprovedAdmission",
     # What stops a connection's lookups that run too long, shared with
     # that connection's progress handler; it lives with the connection.
-    "LookupLimit",
-    "LookupState",
+    "sqlive::connection::live_judging::LookupLimit",
+    "sqlive::connection::live_judging::LookupState",
     # What coven's tests read back of a store's work. The store's
     # DatabaseAccess and its input database each hold one beside their
     # connections, and each call on those connections records into it.
-    "TestRecords",
+    "coven_database::store_call::TestRecords",
 ]
 # An API namespace that borrows an owner without becoming one: a store's
 # circles, which the app reaches through its handle.
-borrowed_facade_types = ["Circles"]
+borrowed_facade_types = ["coven::handle::circles::Circles"]
 task_types = [
     # How often one loop has polled everything it waits on and found nothing
     # ready, shared by its task and its owner for a test to wait on, and
     # what the task holds while it runs.
-    "Parks",
-    "LoopRunning",
+    "coven_sync::parks::Parks",
+    "coven_sync::parks::LoopRunning",
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
-    "HeaderCapture",
+    "coven_storage::providers::s3_detect_headers::HeaderCapture",
     # Whether one planned upload's start went out, shared with the HTTP
     # client each of its attempts goes through, and that start as the
     # in-memory provider lets it out (Appendix E.10).
-    "StartSent",
+    "coven_storage::session::StartSent",
     # One copy being written under its temporary name in the folder the
     # person picked, whose file its blocking writes share (§17.3).
-    "CopyWriter",
+    "coven_foundation::files::folder_copy::CopyWriter",
     # One storage setup call until it journals itself, which a cancel
     # already reaches and whose end before the journal ends it (§11.6).
-    "SetupCall",
+    "coven::storage::setup::SetupCall",
     # One of a store's calls running on a thread, which claims the bug its
     # work fails the handle with, and puts back the call it ran inside as
     # it ends (api.md E15).
-    "CallScope",
+    "sqlive::handle::CallScope",
     # What one storage setup call has spent waiting to resend refused
     # requests, which its steps draw on and then the connection it makes for
     # its own requests (§20.8).
-    "SetupWaits",
+    "coven_storage::setup_waits::SetupWaits",
     # How the authorizer judges the SQL of one scope: coven's own, a
     # write's, a bulk write's, the local scope's, one step's or one read's,
     # and the reads one statement makes while it is prepared.
-    "InternalSql",
+    "sqlive::authorization::InternalSql",
     # A scope of coven's own work its policy judges differently, and the
     # connection's hold on it while that work runs.
-    "CovenScope",
-    "EnteredScope",
-    "WriteSql",
-    "BulkSql",
-    "LocalSql",
-    "StepSql",
-    "ReadingSql",
-    "ObservedReads",
+    "coven_database::app_policy::CovenScope",
+    "sqlive::connection::EnteredScope",
+    "sqlive::authorization::WriteSql",
+    "sqlive::authorization::BulkSql",
+    "sqlive::authorization::LocalSql",
+    "sqlive::authorization::StepSql",
+    "sqlive::authorization::ReadingSql",
+    "sqlive::authorization::ObservedReads",
     # A first installation's, and a replacement's, unpublished store and
     # its bootstrap lock, for that one call.
-    "BootstrapStore",
-    "ReplacementStore",
-    "OpenFile",
-    "LocalFileReader",
-    "LockedWriter",
+    "coven_foundation::files::bootstrap::BootstrapStore",
+    "coven_foundation::files::replacement::ReplacementStore",
+    "coven_sync::files::file_read::OpenFile",
+    "coven_database::file_ref::local_file::LocalFileReader",
+    "coven_foundation::files::atomic_file::LockedWriter",
     # The files one commit records, and each folder they were made in,
     # until the flush before that commit (Appendix C.3).
-    "FlushBatch",
-    "BatchFolder",
-    "CacheReservation",
+    "coven_foundation::files::flush_batch::FlushBatch",
+    "coven_foundation::files::flush_batch::BatchFolder",
+    "coven_database::database::file_database::CacheReservation",
     # What a cache or copy reservation holds while its bytes are written:
     # close's lease and the open store (Appendix C.3, F.4).
-    "BytesWriting",
+    "coven_database::database::file_database::BytesWriting",
     # App bytes one staging wrote, until the write that takes them
     # (§17.3).
-    "StagedFiles",
+    "coven_database::database::file_staging::StagedFiles",
     # A connection one upload attempt took beside its own for a part it
     # sends together, held until the part ends; and what that attempt's
     # parts in flight have moved, which each tells as its bytes go (§17.9).
-    "SpareConnection",
-    "PartsMoving",
+    "coven_sync::files::file_upload_connections::SpareConnection",
+    "coven_sync::recorded_upload::together::PartsMoving",
     # What one pin's download of a file has in hand, written and received,
     # which its requests in flight tell as their bytes arrive (§17.8).
-    "WholeProgress",
+    "coven_sync::files::file_read::whole::WholeProgress",
     # The parts one open file holds on a provider whose ranged read moves
     # whole parts, each with the requests waiting for its fetch (§17.7).
-    "HeldParts",
-    "HeldPart",
-    "PartWaiters",
+    "coven_sync::files::file_read::parts::HeldParts",
+    "coven_sync::files::file_read::parts::HeldPart",
+    "coven_sync::files::file_read::parts::PartWaiters",
     # Whole copies one pin prepared, until the write that keeps them
     # (§17.8), and what preparing found for each file.
-    "PreparedPin",
-    "PreparedFile",
+    "coven_database::database::file_database::prepared_pin::PreparedPin",
+    "coven_sync::files::file_cache::PreparedFile",
     # The copies one call making files device-only wrote, until the
     # write that switches them (§17.3).
-    "PreparedDeviceOnly",
+    "coven_database::database::file_database::copies::PreparedDeviceOnly",
     # The copies one call making files device-only is writing (§17.3).
-    "CopyReservation",
+    "coven_database::database::file_database::copies::CopyReservation",
     # Which of them removals skip, until the last of the call's
     # reservation and the steps it runs drops (§17.3).
-    "CopyNames",
+    "coven_database::database::file_database::copies::CopyNames",
     # One change of the files owner's connection, which holds its upload
     # runs until it ends.
-    "ConnectionChange",
-    "UploadedFile",
-    "RetainedInput",
-    "ObjectInput",
-    "InputStream",
+    "coven_sync::files::ConnectionChange",
+    "coven_sync::files::file_read::UploadedFile",
+    "coven_database::database::input_database::RetainedInput",
+    "coven_sync::object_input::ObjectInput",
+    "coven_sync::object_input::stream::InputStream",
     # One floor observation, snapshot read or upload source.
-    "FloorObject",
-    "SnapshotObject",
-    "ReadSnapshot",
-    "SelectedSnapshot",
+    "coven_sync::floor_object::FloorObject",
+    "coven_sync::snapshot_object::SnapshotObject",
+    "coven_sync::sequence_sync::sequence_reload::snapshot::ReadSnapshot",
+    "coven_sync::sequence_sync::sequence_reload::snapshot::SelectedSnapshot",
     # One snapshot's staging: its records, from the first batch of its
     # body to the load or file check that reads them.
-    "SnapshotStaging",
+    "coven_database::database::input_database::staging::SnapshotStaging",
     # One rebuild's store, in the real store's folder, until the rebuild
     # discards it (§18.3).
-    "RebuildDatabase",
-    "ReloadStart",
+    "coven_database::database::circle_rebuild::RebuildDatabase",
+    "coven_sync::sequence_sync::sequence_reload::ReloadStart",
     # One reload's selected streams and installation target.
-    "ReloadInputs",
-    "ClaimSource",
-    "SnapshotUploadSource",
-    "FloorUploadSource",
-    "FileTransfer",
-    "FileRangeStream",
-    "LocalFileStream",
-    "FileStream",
+    "coven_sync::sequence_sync::sequence_reload::ReloadInputs",
+    "coven_sync::sequence_sync::sequence_claim::ClaimSource",
+    "coven_sync::sequence_sync::snapshot_upload::SnapshotUploadSource",
+    "coven_sync::sequence_sync::sequence_retention::floor_upload::FloorUploadSource",
+    "coven_sync::files::file_upload::FileTransfer",
+    "coven_sync::files::file_read::FileRangeStream",
+    "coven_database::file_ref::local_file::LocalFileStream",
+    "coven_sync::files::file_read::FileStream",
     # An open file's read position and the read ahead it started, which
     # its stream aborts when dropped.
-    "FileStreamState",
-    "FileStaging",
+    "coven_sync::files::file_read::FileStreamState",
+    "coven_database::database::file_staging::FileStaging",
     # A read's call on the blocking pool, awaited by its read.
-    "RunningRead",
+    "coven_database::read::RunningRead",
     # One read's response body, holding that read's place under the
     # store's download limit until it ends (api.md E5).
-    "ObjectStream",
-    "StreamState",
-    "DownloadLease",
+    "coven_storage::object_stream::ObjectStream",
+    "coven_storage::object_stream::StreamState",
+    "coven_storage::transfer_budget::DownloadLease",
     # One snapshot body read, hashing the stream it reads.
-    "HashedBody",
+    "coven_sync::snapshot_object::body::HashedBody",
     # One CloudKit operation, cancelled if dropped, the reply its
     # completion sends, and what its callbacks answer it with until then.
-    "CloudKitRequest",
-    "CloudKitReply",
-    "CloudKitCompletion",
-    "Unanswered",
+    "coven_storage::providers::cloudkit::native::CloudKitRequest",
+    "coven_storage::providers::cloudkit::native::CloudKitReply",
+    "coven_storage::providers::cloudkit::native::CloudKitCompletion",
+    "coven_storage::providers::cloudkit::native::Unanswered",
     # The retry requests one pass took, answered when it ends.
-    "PassRequests",
+    "coven_sync::retry_waits::retry_answer::PassRequests",
     # An app's early retry of its uploads, waiting for its answer.
-    "AppRetry",
+    "coven_sync::files::file_upload_pool::AppRetry",
     # One operation's wait, and the commits it watches for.
-    "Wait",
+    "coven_sync::retry_waits::operation_evidence::Wait",
     # One attempt's commits, from its start until it names the rows its wait
     # depends on (§6.7).
-    "AttemptCommits",
+    "sqlive::handle::AttemptCommits",
     # One write's changes, and each live query's verdict on them, until it
     # commits (§4).
-    "Judged",
+    "sqlive::handle::Judged",
     # One attempt to transfer a stored object, and what tells it how far it
     # has got.
-    "Transferring",
-    "TransferMeter",
+    "coven_database::transfers_in_flight::Transferring",
+    "coven_database::transfers_in_flight::TransferMeter",
     # Where one run of a file's chunks goes: the cache, or a pin's whole file.
-    "ChunkDestination",
+    "coven_sync::files::file_read::ChunkDestination",
     # One journal stream's bytes, from the committed reader to the claim that
     # sends them, and where that reader sends them.
-    "StreamInput",
-    "StreamSender",
+    "coven_sync::stream_input::StreamInput",
+    "coven_sync::stream_input::StreamSender",
     # One try at a store's lock: the closing holder it waits for, or the
     # registration it reserved.
-    "Acquisition",
+    "coven_foundation::files::lock_registry::Acquisition",
     # One migration run's capture of the synced state, the temporary tables
     # holding it, and the rows removal rules hid before it, on the connection
     # the run migrates (§18.1, §18.7).
-    "MigrationCapture",
-    "MigrationSnapshot",
-    "Hidden",
+    "coven_database::migration_snapshot::MigrationCapture",
+    "coven_database::migration_snapshot::MigrationSnapshot",
+    "coven_database::migration_hidden::Hidden",
     # The judging of one write: the schema it was authored under, one child
     # row through its steps, the owners of the rows it changes, and where its
     # original records are read, on the connection that judges it (§9.6).
-    "Authoring",
-    "ChildView",
-    "Owners",
-    "Originals",
+    "coven_database::judge_view::Authoring",
+    "coven_database::judge_view::ChildView",
+    "coven_database::judge::Owners",
+    "coven_database::judge::Originals",
     # One received write's interpretation, admitting its parts on the
     # connection that stages it (§9.5, §9.6).
-    "Interpreter",
+    "coven_database::interpretation::Interpreter",
     # Whether one transaction's materialization has deferred foreign keys on
     # its connection.
-    "Deferral",
+    "coven_database::removal::Deferral",
     # One join's request and the bootstrap file that keeps it, from preparing
     # or resuming the request until the join ends (§13.2).
-    "JoiningIdentity",
+    "coven_sync::joining_identity::JoiningIdentity",
     # One read's or write's open file, one CloudKit request's asset, and one
     # deletion's locks, which the owner of the store's files makes for that
     # operation.
-    "FileReader",
-    "FileWriter",
-    "AssetFile",
-    "StoreDeletionLock",
+    "coven_foundation::files::file_reader::FileReader",
+    "coven_foundation::files::atomic_file::FileWriter",
+    "coven_foundation::files::asset_files::AssetFile",
+    "coven_foundation::files::lock::StoreDeletionLock",
     # One piece of work's places of the app's budget, one place of them for
     # one open, and the open file holding its place (api.md E1).
-    "FileLease",
-    "LeasePlace",
-    "LeasedFile",
-    "ReaderFile",
+    "coven_foundation::files::file_budget::FileLease",
+    "coven_foundation::files::file_budget::LeasePlace",
+    "coven_foundation::files::file_budget::LeasedFile",
+    "coven_foundation::files::file_reader::ReaderFile",
     # When one HTTP exchange last moved bytes; it lives for that exchange.
-    "ExchangeProgress",
+    "coven_storage::providers::http_client::ExchangeProgress",
     # One long operation's progress reports, paced by the operation's clock.
-    "ProgressReport",
+    "coven_foundation::progress::ProgressReport",
     # A cursor over one input object's retained bytes on the input
     # connection, and what one received slot decodes from them: its
     # plaintext, each part's, its body, and the slot itself.
-    "RetainedBytes",
-    "SlotPlaintext",
-    "PartPlaintext",
-    "SlotBody",
-    "ReceivedSlot",
+    "coven_database::database::input_database::bytes::RetainedBytes",
+    "coven_sync::chunk_reader::SlotPlaintext",
+    "coven_sync::chunk_reader::PartPlaintext",
+    "coven_sync::slot_object::SlotBody",
+    "coven_sync::slot_object::ReceivedSlot",
     # One HTTP exchange's request and response bodies.
-    "UploadBody",
-    "DownloadBody",
+    "coven_storage::providers::http_client::UploadBody",
+    "coven_storage::providers::http_client::DownloadBody",
     # One scan of the sequence for the keys of a join or a reload.
-    "KeyScan",
+    "coven_sync::sequence_sync::sequence_bootstrap::KeyScan",
     # One join's bootstrap file, one folder request's sign-in, one S3
     # detection's probes and one connection attempt (§13.2, §20.7).
-    "InviteJoin",
-    "OAuthFolders",
-    "Probes",
-    "ConnectionAttempt",
+    "coven::builder::bootstrap::join::InviteJoin",
+    "coven_storage::providers::oauth_folders::OAuthFolders",
+    "coven_storage::providers::s3_detect::Probes",
+    "coven::storage::ConnectionAttempt",
     # A database being built for one open or create, which it ends.
-    "DatabaseBuilder",
+    "coven_database::database::builder::DatabaseBuilder",
     # One read's, one write's and one transaction's values, each borrowing
     # the connection or the owner it works on for that operation, and the
     # parts they are made of: a merge's row values, a removal view's states
     # and a write's journal for sync's steps.
-    "RowValues",
-    "States",
-    "Journal",
-    "SnapshotMetadata",
+    "coven_database::merge_store::RowValues",
+    "coven_database::removal_view::States",
+    "coven_database::file_write::journal::Journal",
+    "coven_database::snapshot_metadata::SnapshotMetadata",
     # A run of slot reads borrows the sequence owner and hands each slot's
     # bytes to its reader in order.
-    "SlotReads",
+    "coven_sync::sequence_sync::slot_reads::SlotReads",
     # Readers that borrow a connection for one committed read or transaction.
-    "DatabaseMetadata",
-    "PreparedBytes",
-    "PreparedInputs",
-    "PreparedRecords",
-    "PreparedWrite",
-    "PreparedPart",
-    "PreparedSnapshot",
+    "coven_database::write_metadata::DatabaseMetadata",
+    "coven_database::claim_preparation::PreparedBytes",
+    "coven_database::input_preparation::PreparedInputs",
+    "coven_database::input_preparation::PreparedRecords",
+    "coven_database::download_stream::PreparedWrite",
+    "coven_database::download_stream::PreparedPart",
+    "coven_database::snapshot_preparation::PreparedSnapshot",
     # One batch of a snapshot's staging writes its records through the
     # input connection's transaction for that batch.
-    "RecordStaging",
-    "ClaimBytes",
-    "FileWrite",
+    "coven_database::database::input_database::staging::RecordStaging",
+    "coven_database::claim::ClaimBytes",
+    "coven_database::file_write::FileWrite",
     # One write call's files borrow the store's id source and its
     # reservations; each transaction of the call works on them.
-    "WriteFiles",
+    "coven_database::file_write::WriteFiles",
     # A write's batch borrows the store's id source while the app
     # stages its files, giving each a new id.
-    "WriteBatch",
-    "SqlReadContext",
-    "Read",
-    "ChangeCapture",
-    "StreamCapture",
-    "SupplementalChanges",
-    "Observing",
-    "MigrationContext",
-    "SqlContext",
+    "coven_database::write_batch::WriteBatch",
+    "coven_database::read::SqlReadContext",
+    "coven_database::read::Read",
+    "sqlive::connection::transaction_capture::ChangeCapture",
+    "sqlive::connection::stream_capture::StreamCapture",
+    "sqlive::connection::transaction_capture::SupplementalChanges",
+    "sqlive::connection::Observing",
+    "coven_database::migration::MigrationContext",
+    "coven_database::write::SqlContext",
     # An app's joining write borrows the transaction's writes for that one
     # transaction, with what the transaction owes it.
-    "JoiningWrite",
-    "Registering",
+    "coven_database::joining_write::JoiningWrite",
+    "coven_database::joining_write::Registering",
     # The app's before-commit function borrows the transaction's connection
     # for that one transaction.
-    "CommitSql",
+    "coven_database::before_commit::CommitSql",
     # An app's write borrows the store's operation steps and files for that
     # one transaction.
-    "CovenWrite",
+    "coven::coven_write::CovenWrite",
     # The creator's first write borrows the writer's SQL for the one
     # transaction that commits it before the store is visible.
-    "MemberWrite",
+    "coven::member_write::MemberWrite",
     # A bulk write's SQL borrows the writer connection for its one
     # transaction, as a write's does.
-    "BulkSqlContext",
-    "SqlTransaction",
+    "coven_database::write::BulkSqlContext",
+    "sqlive::connection::rolled_back::SqlTransaction",
     # A write transaction holds the writer from BEGIN to its end and sets
     # and removes the hooks that observe it.
-    "WriteTransaction",
+    "sqlive::connection::write_transaction::WriteTransaction",
     # A reader a call reserves from a database until the lease drops.
-    "Reader",
-    "AppView",
-    "MergeStore",
-    "WriteMetadata",
-    "DatabaseRemovalView",
-    "WriteApply",
+    "sqlive::database::read_pool::Reader",
+    "coven_database::write_rows::AppView",
+    "coven_database::merge_store::MergeStore",
+    "coven_database::merge_store::WriteMetadata",
+    "coven_database::removal_view::DatabaseRemovalView",
+    "coven_database::write_apply::WriteApply",
     # A local write's operation hook and its capture borrow
     # the writer connection for one transaction.
-    "EventCapture",
-    "Tracker",
-    "PreWrite",
+    "sqlive::connection::event_capture::EventCapture",
+    "coven_database::execution_capture::Tracker",
+    "coven_database::write_sources::PreWrite",
     # One read's body, counted in its connection's request totals.
-    "CountedBody",
+    "coven_storage::object_stream::CountedBody",
 ]
-# The shared in-memory state the runtime and the standard library declare.
-external_types = [
-    "Semaphore",
-    "RwLock",
-    "JoinHandle",
-    "AtomicBool",
-    "AtomicI64",
-    "AtomicU64",
-    "AtomicUsize",
-    "OnceLock",
-    "LazyLock",
-    "Notify",
-    "Sender",
-    "UnboundedSender",
-    "Receiver",
-    "UnboundedReceiver",
-    "Arc",
-    "Rc",
-    "Weak",
-    "Mutex",
-    "Condvar",
-]
-internal_dependency_types = ["HostSql"]
+internal_dependency_types = ["sqlive::connection::HostSql"]
 closed_session_types = [
-    "FileWrite",
-    "JoiningWrite",
-    "CommitSql",
-    "Registering",
-    "SqlReadContext",
-    "MigrationContext",
-    "SqlContext",
-    "BulkSqlContext",
-    "AppView",
-    "MergeStore",
-    "WriteMetadata",
-    "DatabaseRemovalView",
-    "WriteApply",
+    "coven_database::file_write::FileWrite",
+    "coven_database::joining_write::JoiningWrite",
+    "coven_database::before_commit::CommitSql",
+    "coven_database::joining_write::Registering",
+    "coven_database::read::SqlReadContext",
+    "coven_database::migration::MigrationContext",
+    "coven_database::write::SqlContext",
+    "coven_database::write::BulkSqlContext",
+    "coven_database::write_rows::AppView",
+    "coven_database::merge_store::MergeStore",
+    "coven_database::merge_store::WriteMetadata",
+    "coven_database::removal_view::DatabaseRemovalView",
+    "coven_database::write_apply::WriteApply",
     # A local write's operation hook and its capture borrow
     # the writer connection for one transaction.
-    "EventCapture",
-    "Tracker",
-    "PreWrite",
+    "sqlive::connection::event_capture::EventCapture",
+    "coven_database::execution_capture::Tracker",
+    "coven_database::write_sources::PreWrite",
 ]
 
 # Handles (F.3): what an owner makes from its own state to be shared. Only
@@ -511,67 +496,67 @@ closed_session_types = [
 [handles]
 # A live query the database makes from its readers and commit observer for
 # the app, which keeps it as long as it follows the results (api.md E4).
-LiveQuery = "StoreDatabase"
-ReconfigurableLiveQuery = "StoreDatabase"
+"sqlive::live_query::LiveQuery" = "coven_database::database::StoreDatabase"
+"sqlive::live_query::ReconfigurableLiveQuery" = "coven_database::database::StoreDatabase"
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
-LiveQueryRequests = "ReconfigurableLiveQuery"
+"sqlive::live_query::LiveQueryRequests" = "sqlive::live_query::ReconfigurableLiveQuery"
 # An app's request for idle passes at most its interval apart, held until it
 # drops (api.md E5, §13.2), and an owner's view of the shortest one held:
 # the sync loop's, and a waiting join's.
-SyncOftenGuard = "SyncOften"
-HeldIntervals = "SyncOften"
+"coven_sync::sync_often::SyncOftenGuard" = "coven_sync::sync_often::SyncOften"
+"coven_sync::sync_often::HeldIntervals" = "coven_sync::sync_often::SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
 # A provider check's object while permitted, held for the check's scope.
-ProviderCheckPermit = "SequenceState"
-SequenceStatusWatch = "SequenceState"
+"coven_sync::sequence_state::ProviderCheckPermit" = "coven_sync::sequence_state::SequenceState"
+"coven_sync::sequence_state::SequenceStatusWatch" = "coven_sync::sequence_state::SequenceState"
 # The running pass's first move, for the sync loop to write that it moves.
-PassMoves = "SequenceState"
+"coven_sync::sequence_state::PassMoves" = "coven_sync::sequence_state::SequenceState"
 # The progress one kind of operation reports, such as a store's open or a
 # load from storage, for the host drawing it (api.md E1).
-ProgressWatch = "ProgressChannel"
+"coven_foundation::progress::ProgressWatch" = "coven_foundation::progress::ProgressChannel"
 # The answer to the person's retry: how the first pass after it ended
 # (api.md E5).
-RetryAnswer = "RetryWaits"
+"coven_sync::retry_waits::retry_answer::RetryAnswer" = "coven_sync::retry_waits::RetryWaits"
 # Each network or retry report, for an owner waiting on its own timers
 # (§6.7).
-NetworkReportWatch = "RetryWaits"
+"coven_sync::retry_waits::network_report::NetworkReportWatch" = "coven_sync::retry_waits::RetryWaits"
 # Each wait a failed attempt arms, so an owner plans again (§6.7).
-RearmWatch = "RetryWaits"
+"coven_sync::retry_waits::RearmWatch" = "coven_sync::retry_waits::RetryWaits"
 # What the store's watch knows of the device's network, for each owner that
 # acts on it (§6.7, §17.9).
-NetworkView = "NetworkWatch"
+"coven_foundation::network_watch::NetworkView" = "coven_foundation::network_watch::NetworkWatch"
 # Sync starting and stopping, for the upload worker, which runs only while
 # sync is started (§17.4).
-SyncingWatch = "RetryWaits"
+"coven_sync::retry_waits::SyncingWatch" = "coven_sync::retry_waits::RetryWaits"
 # The answer to an app's early retry of its uploads (§17.9).
-UploadRetryAnswer = "FilesInner"
+"coven_sync::files::file_upload_pool::UploadRetryAnswer" = "coven_sync::files::FilesInner"
 # What the file layer's storage is now, which readers match on, and the
 # mark of a running connection attempt that keeps them waiting (§17.7).
-StorageState = "StorageSlot"
-ConnectionComing = "Files"
+"coven_sync::files::file_storage::StorageState" = "coven_sync::files::file_storage::StorageSlot"
+"coven_sync::files::file_storage::ConnectionComing" = "coven_sync::files::Files"
 # One observation of the store's commits, shared by the handle that tells
 # it of each and what it watches for (§4).
-CommitSubscription = "Handle"
+"sqlive::handle::CommitSubscription" = "sqlive::handle::Handle"
 # Commits to the rows a worker waits on, coalesced (§4).
-DatabaseChanges = "Handle"
+"sqlive::database_changes::DatabaseChanges" = "sqlive::handle::Handle"
 # The main database file's size after each checkpoint, for the host.
-CheckpointedSize = "Database"
+"sqlive::checkpointed_size::CheckpointedSize" = "sqlive::database::Database"
 # How far each file in flight one way has got (api.md E7, E8).
-TransferWatch = "InFlight"
+"coven_database::transfer_watch::TransferWatch" = "coven_database::transfers_in_flight::InFlight"
 # The files in flight one way, which the worker moving them marks as each
 # attempt starts and ends (§17.8, §17.9).
-InFlight = "TransfersInFlight"
+"coven_database::transfers_in_flight::InFlight" = "coven_database::transfers_in_flight::TransfersInFlight"
 # A value the host keeps in memory, as one connection's transactions take
 # it at their snapshots, for the functions its setup registers (§4).
-SnapshotValue = "SnapshotValues"
+"sqlive::snapshot_values::SnapshotValue" = "sqlive::snapshot_values::SnapshotValues"
 # Marks a store closing when its owner's scope ends, without holding its
 # lock, so a reopen in this process waits for its release (F.4).
-StoreClosingGuard = "LockRegistration"
+"coven_foundation::files::lock_registry::StoreClosingGuard" = "coven_foundation::files::lock_registry::LockRegistration"
 # One input object's reading: every retained input of that object shares it,
 # and the input database keeps its bytes while any does.
-InputRead = "InputDatabase"
+"coven_database::database::input_database::InputRead" = "coven_database::database::input_database::InputDatabase"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -1751,33 +1736,33 @@ tables = [
 # These methods derive a scoped capability from their injected directory.
 # They do not acquire an unrelated directory or file for another owner.
 [capability_factories."crates/coven-foundation/src/files/layout.rs"]
-"StoreDirectories::store_dir" = "StoreDir"
+"StoreDirectories::store_dir" = "coven_foundation::files::directory::StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/bootstrap.rs"]
-"BootstrapStore::directory" = "StoreDir"
+"BootstrapStore::directory" = "coven_foundation::files::directory::StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/replacement.rs"]
-"ReplacementStore::directory" = "StoreDir"
+"ReplacementStore::directory" = "coven_foundation::files::directory::StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/atomic_file.rs"]
-"AtomicFile::open_reader" = "FileReader"
+"AtomicFile::open_reader" = "coven_foundation::files::file_reader::FileReader"
 
 [capability_factories."crates/coven-foundation/src/files/observed_file.rs"]
-"UserOriginal::open_reader" = "FileReader"
+"UserOriginal::open_reader" = "coven_foundation::files::file_reader::FileReader"
 
 [capability_factories."crates/coven-foundation/src/files/folder_copy.rs"]
-"CopyFolder::clone_handle" = "CopyFolder"
+"CopyFolder::clone_handle" = "coven_foundation::files::folder_copy::CopyFolder"
 
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
-"StoreDir::rebuild_directory" = "StoreDir"
-"StoreDir::lock_read_only" = "StoreReadLock"
-"StoreDir::lock_for_open" = "StoreLock"
-"StoreDir::lock_closed" = "ClosedStoreLock"
-"StoreDir::owned_file" = "AtomicFile"
-"StoreDir::file" = "AtomicFile"
-"StoreDir::writer_folder" = "WriterFolder"
-"StoreDir::staged_file" = "AtomicFile"
-"StoreDir::staging_folder" = "WriterFolder"
+"StoreDir::rebuild_directory" = "coven_foundation::files::directory::StoreDir"
+"StoreDir::lock_read_only" = "coven_foundation::files::lock::StoreReadLock"
+"StoreDir::lock_for_open" = "coven_foundation::files::lock::StoreLock"
+"StoreDir::lock_closed" = "coven_foundation::files::lock::ClosedStoreLock"
+"StoreDir::owned_file" = "coven_foundation::files::atomic_file::AtomicFile"
+"StoreDir::file" = "coven_foundation::files::atomic_file::AtomicFile"
+"StoreDir::writer_folder" = "coven_foundation::files::atomic_file::WriterFolder"
+"StoreDir::staged_file" = "coven_foundation::files::atomic_file::AtomicFile"
+"StoreDir::staging_folder" = "coven_foundation::files::atomic_file::WriterFolder"
 
 [[background_starts]]
 kind = "runtime construction"

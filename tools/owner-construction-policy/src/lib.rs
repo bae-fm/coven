@@ -12,6 +12,12 @@
 //! something that moved fails instead of covering nothing: the checker before
 //! any rule runs (its `policy_check.rs`), and a typed lint when it resolves the
 //! row's path in the crate the path names.
+//!
+//! The rows of the owner rules name each type by its path: the crate as Rust
+//! names it, its modules and the type, `coven_foundation::clock::Clock` or
+//! `std::sync::Arc` ([`Policy::owner_type_rows`]). A dependency's type goes by
+//! the path its crate gives it, a re-export's included. The other rows name a
+//! type by its name alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -145,38 +151,40 @@ pub struct Policy {
     pub background_starts: Vec<Gate>,
     /// Receiver methods through which an owner may derive a capability from the
     /// one it was given, such as a directory naming one of its files. The file
-    /// lists them by source file: `"Type::method" = "Product"`.
+    /// lists them by source file, the product by path:
+    /// `"Type::method" = "app_foundation::files::AtomicFile"`.
     #[serde(default, deserialize_with = "capability_factories")]
     pub capability_factories: Vec<CapabilityFactory>,
-    /// Types that hold a capability. A type holding one of these, or holding
-    /// an owner, is an owner.
+    /// Types that hold a capability, by path. A type holding one of these, or
+    /// holding an owner, is an owner.
     #[serde(default)]
     pub capability_types: BTreeSet<String>,
-    /// Shared in-memory state (Appendix F.2), such as a lock or a channel's
-    /// end, which the standard library and the runtime declare: whoever holds
+    /// Shared in-memory state (Appendix F.2), by path, such as a lock or a
+    /// channel's end, which the standard library and the runtime declare: whoever holds
     /// one shares it with the others that do. A type holding one is an owner,
     /// as one holding a capability is, and it leaves its owner only inside a
     /// handle: no method crossing its module returns one, held or new.
     #[serde(default)]
     pub shared_state_types: BTreeSet<String>,
     /// In-memory state its holder keeps to itself while it holds it by
-    /// value, as an owner keeps a lock no one else reaches. Held through one
+    /// value, by path, as an owner keeps a lock no one else reaches. Held through one
     /// of `shared_pointer_types` or a reference, by itself or inside a type
     /// that holds it by value, it is shared state, as `shared_state_types`
     /// are: `Arc<Mutex<State>>`, or `Arc<Inner>` where `Inner` holds a
     /// `Mutex`.
     #[serde(default)]
     pub private_state_types: BTreeSet<String>,
-    /// Pointers whose every holder shares the value they point at, such as
-    /// `Arc`: what one holds through them is shared with the others.
+    /// Pointers whose every holder shares the value they point at, by path,
+    /// such as `std::sync::Arc`: what one holds through them is shared with
+    /// the others.
     #[serde(default)]
     pub shared_pointer_types: BTreeSet<String>,
-    /// Capability interfaces. Every workspace implementation outside test code
-    /// is construction-only, including generic implementations.
+    /// Capability interfaces, by path. Every workspace implementation outside
+    /// test code is construction-only, including generic implementations.
     #[serde(default)]
     pub capability_traits: BTreeSet<String>,
-    /// Handles (Appendix F.3), each with the type that makes it:
-    /// `LiveQueryRequests = "LiveQuery"`. A handle is a capability its owner
+    /// Handles (Appendix F.3), each with the type that makes it, both by path:
+    /// `"sqlive::LiveQueryRequests" = "sqlive::LiveQuery"`. A handle is a capability its owner
     /// makes from its own state to hand out: only that owner (or the handle,
     /// cloning itself) makes one; that owner returns one, and so does an
     /// owner holding it, at any depth, passing up a fresh one, but nothing
@@ -185,28 +193,28 @@ pub struct Policy {
     #[serde(default)]
     pub handles: BTreeMap<String, String>,
     /// Raw capabilities fixed when the owner graph is built, which have no
-    /// capability trait. These and the implementations of `capability_traits`
+    /// capability trait, by path. These and the implementations of `capability_traits`
     /// may be acquired only at composition roots, and accepted as parameters
     /// only by constructors and composition roots.
     #[serde(default)]
     pub construction_only_capability_types: BTreeSet<String>,
     /// Values, configuration and proofs that name a capability in a field but
-    /// do not own its lifetime.
+    /// do not own its lifetime, by path.
     #[serde(default)]
     pub non_owner_types: BTreeSet<String>,
-    /// API namespaces that borrow an owner without becoming one.
+    /// API namespaces that borrow an owner without becoming one, by path.
     #[serde(default)]
     pub borrowed_facade_types: BTreeSet<String>,
-    /// Tasks (Appendix F.3): values that live for one piece of work and are
-    /// then dropped.
+    /// Tasks (Appendix F.3), by path: values that live for one piece of work
+    /// and are then dropped.
     #[serde(default)]
     pub task_types: BTreeSet<String>,
-    /// Dependencies an owner keeps to itself; returning one it retains leaks
-    /// it. The raw SQLite handles are always included.
+    /// Dependencies an owner keeps to itself, by path; returning one it
+    /// retains leaks it. The raw SQLite handles are always included.
     #[serde(default)]
     pub internal_dependency_types: BTreeSet<String>,
-    /// Sessions that borrow internal dependencies for closed work. One
-    /// declared at a crate root would expose those dependencies to every
+    /// Sessions that borrow internal dependencies for closed work, by path.
+    /// One declared at a crate root would expose those dependencies to every
     /// module of the crate.
     #[serde(default)]
     pub closed_session_types: BTreeSet<String>,
@@ -222,10 +230,11 @@ pub struct Policy {
     /// library's own name reaches it only here.
     #[serde(default)]
     pub library_names: BTreeMap<String, String>,
-    /// Names the type rows use for types that dependencies outside the
-    /// workspace declare, such as a runtime handle or a lock. The rules match
+    /// Names the rows that name a type by its name alone use for types that
+    /// dependencies outside the workspace declare. The checker's rules match
     /// types by name, so each must be named by a crate source and declared by
-    /// none.
+    /// none. A row that names its type by path needs none: the path's crate
+    /// says whether a dependency declares it.
     #[serde(default)]
     pub external_types: BTreeSet<String>,
     /// The read rule's rows, for a workspace that selects `read-shapes`.
@@ -512,7 +521,7 @@ pub struct CapabilityFactory {
     pub owner: String,
     /// The receiver method.
     pub method: String,
-    /// The capability the method derives.
+    /// The capability the method derives, by path.
     pub product: String,
 }
 
@@ -806,9 +815,10 @@ impl Policy {
         self.handles.get(handle).is_some_and(|owner| owner == maker || handle == maker)
     }
 
-    /// Every type name the policy holds, with the row it came from.
-    pub fn named_types(&self) -> Vec<(&'static str, &str)> {
-        let lists: [(&str, &BTreeSet<String>); 12] = [
+    /// Every type the owner rules' rows name, by path, with the row it came
+    /// from.
+    pub fn owner_type_rows(&self) -> Vec<(&'static str, &str)> {
+        let lists: [(&str, &BTreeSet<String>); 11] = [
             ("capability_types", &self.capability_types),
             ("shared_state_types", &self.shared_state_types),
             ("private_state_types", &self.private_state_types),
@@ -820,20 +830,34 @@ impl Policy {
             ("task_types", &self.task_types),
             ("internal_dependency_types", &self.internal_dependency_types),
             ("closed_session_types", &self.closed_session_types),
-            ("phantom_type_arguments", &self.phantom_type_arguments),
         ];
         let mut named = lists
             .into_iter()
             .flat_map(|(row, names)| names.iter().map(move |name| (row, name.as_str())))
             .collect::<Vec<_>>();
+        for (handle, owner) in &self.handles {
+            named.push(("handles", handle.as_str()));
+            named.push(("handles", owner.as_str()));
+        }
+        for factory in &self.capability_factories {
+            named.push(("capability_factories", factory.product.as_str()));
+        }
+        named
+    }
+
+    /// Every type the policy names, with the row it came from: the owner
+    /// rules' rows by path ([`Policy::owner_type_rows`]), the others by name.
+    pub fn named_types(&self) -> Vec<(&'static str, &str)> {
+        let mut named = self.owner_type_rows();
+        named.extend(
+            self.phantom_type_arguments
+                .iter()
+                .map(|name| ("phantom_type_arguments", name.as_str())),
+        );
         for root in &self.composition_roots {
             if root.owner != "<free>" {
                 named.push(("composition_roots", root.owner.as_str()));
             }
-        }
-        for (handle, owner) in &self.handles {
-            named.push(("handles", handle.as_str()));
-            named.push(("handles", owner.as_str()));
         }
         for domain in self.database.iter().flat_map(|database| &database.domains) {
             named.push(("database.domains", domain.owner.as_str()));
@@ -855,7 +879,6 @@ impl Policy {
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));
-            named.push(("capability_factories", factory.product.as_str()));
         }
         named
     }
@@ -900,7 +923,7 @@ fn composition_roots<'de, D: Deserializer<'de>>(
                 None => {
                     return Err(D::Error::custom(format!(
                         "composition root {callable:?} in {path} is neither `Type::method` nor a function name"
-                    )))
+                    )));
                 }
             };
             roots.push(CompositionRoot { path: path.clone(), owner, method });
@@ -931,6 +954,11 @@ fn capability_factories<'de, D: Deserializer<'de>>(
         }
     }
     Ok(factories)
+}
+
+/// The type a path names, by its own name: the path's last segment.
+pub fn type_name(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
 }
 
 /// `Type::method`, both parts identifiers.

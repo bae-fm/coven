@@ -14695,7 +14695,9 @@ the same on any platform.
    invocation is in. A definition is no code until it is used. An invocation
    the checker cannot expand fails the check, since what it writes would
    otherwise go unchecked.
-   The rules match types by name, and the policy names them so: coven's own
+   The policy names each type of the owner rules (F.3) by its path, as
+   `coven_foundation::clock::Clock` and `std::sync::Arc`, and the rest by
+   name. The rules match types by name, a path by its last part: coven's own
    types each have one declaration, and a dependency's type goes by its name
    unless one of coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
