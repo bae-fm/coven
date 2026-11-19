@@ -128,6 +128,14 @@ struct Tracked {
     epoch: u64,
 }
 
+impl Tracked {
+    /// Track commits as `tracking` from now on, at the next epoch.
+    fn set(&mut self, tracking: Tracking) {
+        self.tracking = tracking;
+        self.epoch += 1;
+    }
+}
+
 /// What a subscription shares with its handle: its tracking, behind its own
 /// lock, and what it has seen of the handle.
 struct Entry {
@@ -291,8 +299,7 @@ impl CommitSubscription {
     pub fn begin(&self) {
         self.track(|tracked| {
             let previous = Arc::clone(tracked.tracking.scoped());
-            tracked.tracking = Tracking::Reading { commits: Vec::new(), previous };
-            tracked.epoch += 1;
+            tracked.set(Tracking::Reading { commits: Vec::new(), previous });
         });
         self.shared.entry.state.send_modify(|state| state.changed = false);
     }
@@ -301,8 +308,7 @@ impl CommitSubscription {
     /// ended on a bug, so what its run read is unknown (E15).
     pub fn stop(&self) {
         self.track(|tracked| {
-            tracked.tracking = Tracking::Waiting(Arc::new(Vec::new()));
-            tracked.epoch += 1;
+            tracked.set(Tracking::Waiting(Arc::new(Vec::new())));
         });
     }
 
@@ -340,8 +346,7 @@ impl CommitSubscription {
                 if !commits.is_empty() {
                     return Some(std::mem::take(commits));
                 }
-                tracked.tracking = Tracking::Waiting(Arc::clone(&reads));
-                tracked.epoch += 1;
+                tracked.set(Tracking::Waiting(Arc::clone(&reads)));
                 self.shared.entry.state.send_modify(|state| state.changed = changed);
                 None
             });
