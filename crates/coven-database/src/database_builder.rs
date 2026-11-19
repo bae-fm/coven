@@ -420,7 +420,7 @@ impl DatabaseBuilder {
             database.checkpointed_size(),
             input.checkpointed_size(),
         );
-        database.host(|writer| sizes.record_opened(writer))?;
+        database.host(|writer| super::library_bytes::record_opened(writer, &mut sizes))?;
         // Record each archive that resets kept and that no row names yet
         // (§19.3).
         database.host(|writer| super::archive_bytes::record_opened(writer, &self.directory))?;

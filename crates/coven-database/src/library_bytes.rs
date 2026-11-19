@@ -137,13 +137,16 @@ impl DatabaseSizes {
         };
         Some(self.now())
     }
+}
 
-    /// Write both sizes as they are now on `writer`, the opening store's,
-    /// failing the handle if the write fails.
-    pub(crate) fn record_opened(&mut self, writer: &mut StoreSql) -> Result<(), DbError> {
-        let (database, inputs) = self.now();
-        crate::pending::state_transaction(writer, |db| record(db, database, inputs))
-    }
+/// Write both of `sizes` as they are now on `writer`, the opening store's,
+/// failing the handle if the write fails.
+pub(crate) fn record_opened(
+    writer: &mut StoreSql,
+    sizes: &mut DatabaseSizes,
+) -> Result<(), DbError> {
+    let (database, inputs) = sizes.now();
+    crate::pending::state_transaction(writer, |db| record(db, database, inputs))
 }
 
 impl StoreDatabase {
