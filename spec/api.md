@@ -7664,7 +7664,7 @@ impl CovenHandle {
     /// kept or released, a captured body, a rebuild's store or an archive. Reading a cached
     /// file updates when coven last read it, and the query does not run
     /// again for that.
-    pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes>;
+    pub fn subscribe_local_bytes(&self) -> LiveQuery<LocalBytes, CovenError>;
 }
 
 /// What a store keeps on this device, in bytes on disk (§17.8, §19.3).
