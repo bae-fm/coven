@@ -21,15 +21,25 @@ fn main() -> ExitCode {
     if let Some(name) = crate_name(&arguments) {
         command.arg("-Zalways-encode-mir").env("RUSTC_BOOTSTRAP", name);
     }
+    let error = run(&mut command);
+    eprintln!("typed lints: {}: {error}", driver.display());
+    ExitCode::FAILURE
+}
+
+/// Runs the driver in this process's place, so cargo sees its exit as the
+/// driver's own, a signal's included; returns only when it can't start.
+#[cfg(unix)]
+fn run(command: &mut Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    command.exec()
+}
+
+/// Runs the driver and exits with its exit code, which Windows always gives.
+#[cfg(not(unix))]
+fn run(command: &mut Command) -> std::io::Error {
     match command.status() {
-        Ok(status) => match status.code() {
-            Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-            None => ExitCode::FAILURE,
-        },
-        Err(error) => {
-            eprintln!("typed lints: {}: {error}", driver.display());
-            ExitCode::FAILURE
-        }
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(error) => error,
     }
 }
 
