@@ -19,9 +19,9 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
-use crate::policy::Shape;
 use crate::read_code::{call_site, Body, ReadCode};
 use crate::read_statements::{RowDepth, Statement, VisitRows};
+use owner_construction_policy::Shape;
 
 /// One place read code works on rows.
 pub(crate) struct Hit {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::crate_code::checked;
-use crate::policy::Policy;
+use owner_construction_policy::Policy;
 
 fn policy() -> Policy {
     Policy::fixture(

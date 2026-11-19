@@ -1,7 +1,7 @@
 # coven, as spec/coven.md describes it.
 [workspace]
 resolver = "2"
-members = ["crates/windows-reserved-names", "crates/panic-as-error", "crates/sqlive", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-check"]
+members = ["crates/windows-reserved-names", "crates/panic-as-error", "crates/sqlive", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-policy", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -23,6 +23,7 @@ coven-format = { path = "crates/coven-format" }
 coven-database = { path = "crates/coven-database" }
 coven-storage = { path = "crates/coven-storage" }
 coven-sync = { path = "crates/coven-sync" }
+owner-construction-policy = { path = "tools/owner-construction-policy" }
 rusqlite = { version = "0.42", features = ["bundled"] }
 sqlite3-parser = "0.17.0"
 async-trait = "0.1.92"

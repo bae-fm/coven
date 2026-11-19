@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::name_resolution::{ItemPath, NameResolver};
-use crate::policy::{Policy, ReadShapes};
 use crate::syntax::{type_name, RustFile};
+use owner_construction_policy::{Policy, ReadShapes};
 
 /// The names in a type's paths, bounds and arguments; the arguments a
 /// callback type is given only when `callbacks`.

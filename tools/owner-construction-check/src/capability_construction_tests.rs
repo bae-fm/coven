@@ -175,7 +175,7 @@ fn binding_scopes_do_not_hide_factory_references_after_they_end() {
 fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
     let mut derived = policy();
     derived.capability_types.insert("StoreDir".into());
-    derived.capability_factories.push(crate::policy::CapabilityFactory {
+    derived.capability_factories.push(owner_construction_policy::CapabilityFactory {
         path: "crates/app-foundation/src/directory.rs".into(),
         owner: "StoreDir".into(),
         method: "file".into(),

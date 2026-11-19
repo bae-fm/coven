@@ -1,7 +1,7 @@
 use super::*;
 use crate::crate_code::checked;
-use crate::policy::Policy;
 use crate::syntax::RustFile;
+use owner_construction_policy::Policy;
 
 fn policy() -> Policy {
     Policy::fixture(

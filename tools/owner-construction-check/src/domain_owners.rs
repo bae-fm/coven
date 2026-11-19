@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::{type_name, RustFile};
+use owner_construction_policy::Policy;
 
 pub(crate) fn find_domain_owner_forwarding(
     files: &[RustFile],

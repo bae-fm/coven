@@ -24,12 +24,12 @@ use syn::visit::{self, Visit};
 
 use crate::kept_capture::captured_state;
 use crate::macros::parse_macro_body;
-use crate::policy::{ReadShapes, Shape};
 use crate::read_code::{Body, ReadCode};
 use crate::read_index::Index;
 use crate::retained_types::Graph;
 use crate::row_work::Hit;
 use crate::syntax::{RustFile, StructInfo};
+use owner_construction_policy::{ReadShapes, Shape};
 
 /// A type that holds a live query or a value stream, with the other fields
 /// it has beside that one.

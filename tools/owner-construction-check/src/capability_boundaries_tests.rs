@@ -24,7 +24,7 @@ fn violations(path: &str, source: &str) -> Vec<Finding> {
 }
 
 fn files_violations(files: &[RustFile]) -> Vec<Finding> {
-    let policy = Policy::gated_fixture();
+    let policy = crate::gated_policy();
     rule(files, &policy)
 }
 
@@ -174,8 +174,8 @@ fn runtime_construction_is_rejected_outside_composition_roots() {
 
 #[test]
 fn a_lifetime_authority_starts_its_work() {
-    let mut authority = Policy::gated_fixture();
-    authority.composition_roots.push(crate::policy::CompositionRoot {
+    let mut authority = crate::gated_policy();
+    authority.composition_roots.push(owner_construction_policy::CompositionRoot {
         path: "crates/app-sync/src/sync_loop.rs".into(),
         owner: "<free>".into(),
         method: "start".into(),
@@ -202,8 +202,8 @@ fn a_lifetime_authority_starts_its_work() {
 /// A static listed as a root builds its value there, a runtime included.
 #[test]
 fn a_static_listed_as_a_root_may_start_its_work() {
-    let mut authority = Policy::gated_fixture();
-    authority.composition_roots.push(crate::policy::CompositionRoot {
+    let mut authority = crate::gated_policy();
+    authority.composition_roots.push(owner_construction_policy::CompositionRoot {
         path: "crates/app-sync/src/runtime.rs".into(),
         owner: "<free>".into(),
         method: "RUNTIME".into(),
@@ -720,7 +720,9 @@ fn a_frozen_row_over_the_code_says_to_lower_or_remove_it() {
             "capabilities.frozen: file system: crates/app/src/staging.rs (temporary files) lists 3 findings but the code has 2: lower the count to 2",
         ]
     );
-    assert!(found.iter().all(|(path, line, _)| path == crate::policy::FILE_NAME && *line == 1));
+    assert!(found
+        .iter()
+        .all(|(path, line, _)| path == owner_construction_policy::FILE_NAME && *line == 1));
 }
 
 #[test]

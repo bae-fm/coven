@@ -6,12 +6,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
+owner-construction-policy.workspace = true
 proc-macro2.workspace = true
 quote.workspace = true
-serde = { workspace = true, features = ["derive"] }
 syn = { workspace = true, features = ["visit-mut"] }
 thiserror.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+owner-construction-policy = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

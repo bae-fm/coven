@@ -23,12 +23,12 @@ use syn::visit::{self, Visit};
 use crate::crate_code::CrateCode;
 use crate::database_boundary::production_sql;
 use crate::macros::parse_macro_body;
-use crate::policy::{ReadShapes, Shape};
 use crate::read_code::ReadCode;
 use crate::read_index::names;
 use crate::row_work::Hit;
 use crate::sql_statements::statements;
 use crate::syntax::RustFile;
+use owner_construction_policy::{ReadShapes, Shape};
 
 /// What the SQL does to one column.
 #[derive(Default)]

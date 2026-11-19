@@ -1,9 +1,9 @@
 //! The single field graph and owner inference shared by every owner rule,
 //! and the names its types go by (`type_identity.rs`).
 
-use crate::policy::Policy;
 use crate::syntax::{collect_declared_types, RustFile, StructInfo};
 use crate::type_identity::TypeIdentity;
+use owner_construction_policy::Policy;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct OwnerGraph {

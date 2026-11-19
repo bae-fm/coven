@@ -16,8 +16,8 @@ use syn::spanned::Spanned;
 use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::{output_contains_owner, supplied_type_names, type_name, RustFile};
+use owner_construction_policy::Policy;
 
 pub(crate) fn find_retained_capability_parameter_violations(
     files: &[RustFile],

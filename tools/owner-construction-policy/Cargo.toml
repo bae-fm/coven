@@ -1,0 +1,18 @@
+[package]
+name = "owner-construction-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Policy::fixture, for the tests of the tools that read the policy.
+test-utils = []
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

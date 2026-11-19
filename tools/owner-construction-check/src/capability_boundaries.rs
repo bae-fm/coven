@@ -36,8 +36,8 @@ use crate::crate_code::CrateCode;
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
 use crate::name_resolution::{qualified_path, NameResolver, ResolutionError};
-use crate::policy::{describe_homes, Capability, Gate, Policy, FILE_NAME};
 use crate::syntax::{flatten_use_tree, type_name, RustFile};
+use owner_construction_policy::{describe_homes, Capability, Gate, Policy, FILE_NAME};
 
 /// The rule over the crates' production code with its macros expanded, and
 /// over their test code as written for the capabilities that read it.

@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::RustFile;
+use owner_construction_policy::Policy;
 
 pub(crate) fn find_unique_type_name_violations(
     files: &[RustFile],

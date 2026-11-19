@@ -30,12 +30,12 @@ use crate::database_boundary::RAW_SQLITE_HANDLES;
 use crate::finding::Finding;
 use crate::made_here::{callback_argument_made_here, returns_made_here};
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::{
     kept_callback_arguments, shared_type_names, supplied_type_names, type_name, type_names,
     visibility_crosses_owner, RustFile,
 };
 use crate::type_identity::TypeIdentity;
+use owner_construction_policy::Policy;
 
 struct OwnerMethod {
     path: String,

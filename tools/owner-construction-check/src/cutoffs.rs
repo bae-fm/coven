@@ -11,10 +11,10 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
-use crate::policy::Shape;
 use crate::read_code::{call_site, Body, ReadCode};
 use crate::row_work::Hit;
 use crate::syntax::RustFile;
+use owner_construction_policy::Shape;
 
 const INTEGERS: [&str; 12] =
     ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];

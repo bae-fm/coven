@@ -1,8 +1,8 @@
 use super::*;
 use crate::crate_code::CrateCode;
-use crate::policy::Policy;
 use crate::sources::SqlFile;
 use crate::syntax::RustFile;
+use owner_construction_policy::Policy;
 
 fn policy() -> Policy {
     Policy::fixture(

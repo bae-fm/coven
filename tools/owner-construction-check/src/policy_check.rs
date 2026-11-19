@@ -16,14 +16,14 @@ use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::{
-    home_holds, is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy,
-    Shape,
-};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{type_name, type_names, RustFile, TypeNames};
 use crate::type_identity::TypeIdentity;
+use owner_construction_policy::{
+    home_holds, is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy,
+    Shape,
+};
 
 /// Each policy row that names something the workspace does not hold. Rows
 /// naming code are held against the crates' code with their macros

@@ -49,10 +49,10 @@ use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
 use crate::name_resolution::{qualified_path, NameResolver};
-use crate::policy::{Policy, ReadShapes};
 use crate::read_index::{names, peel, Callable, Index};
 use crate::retained_types::Graph;
 use crate::syntax::{type_name, RustFile};
+use owner_construction_policy::{Policy, ReadShapes};
 
 /// Where a call is in its file: the line and column of its method's name, or
 /// of the whole call for a path call.

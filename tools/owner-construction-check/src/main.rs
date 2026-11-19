@@ -33,7 +33,6 @@ mod module_sources;
 mod name_resolution;
 mod owner_dependency_boundary;
 mod owner_graph;
-mod policy;
 mod policy_check;
 mod read_code;
 mod read_index;
@@ -70,7 +69,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let policy = match policy::Policy::read(&root) {
+    let policy = match owner_construction_policy::Policy::read(&root) {
         Ok(policy) => policy,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");
@@ -91,7 +90,7 @@ fn main() {
     if !stale.is_empty() {
         eprintln!(
             "owner-construction-check: {} names what the workspace does not hold:",
-            policy::FILE_NAME
+            owner_construction_policy::FILE_NAME
         );
         for row in stale {
             eprintln!("  {row}");
@@ -111,4 +110,11 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// The fixture policy the rule tests share: every rule, and the capability
+/// table and background work starts of a workspace of `app-*` crates.
+#[cfg(test)]
+fn gated_policy() -> owner_construction_policy::Policy {
+    owner_construction_policy::Policy::fixture(include_str!("policy_fixture.toml"))
 }

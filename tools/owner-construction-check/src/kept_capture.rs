@@ -10,12 +10,12 @@ use syn::visit::{self, Visit};
 
 use crate::kept_state::{is_compound_assignment, self_field, takes_mut_self};
 use crate::macros::parse_macro_body;
-use crate::policy::Shape;
 use crate::read_code::{Body, ReadClosure, ReadCode};
 use crate::read_index::names;
 use crate::retained_types::Graph;
 use crate::row_work::Hit;
 use crate::syntax::RustFile;
+use owner_construction_policy::Shape;
 
 pub(crate) fn captured_state(
     read: &ReadCode<'_>,

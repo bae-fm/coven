@@ -15,8 +15,9 @@ rules = [
     "conventions",
 ]
 
-# The checker itself answers only to the conventions.
-tools = ["owner-construction-check"]
+# The checker, and the policy model it shares with the typed lints, answer
+# only to the conventions.
+tools = ["owner-construction-policy", "owner-construction-check"]
 
 # These are the features only tests turn on.
 test_support_features = ["test-utils", "profiles"]

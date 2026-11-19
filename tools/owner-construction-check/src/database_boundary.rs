@@ -51,10 +51,10 @@ use syn::visit::{self, Visit};
 use crate::crate_code::CrateCode;
 use crate::macros::{parse_macro_body, token_paths, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
-use crate::policy::{describe_homes, Domain, Policy};
 use crate::schema_views::SchemaViews;
 use crate::sql_statements::{line_of, statements, Creation, Statement};
 use crate::syntax::{type_name, RustFile};
+use owner_construction_policy::{describe_homes, Domain, Policy};
 
 /// rusqlite's raw handles. Only the database crate holds one.
 pub(crate) const RAW_SQLITE_HANDLES: &[(&str, &str)] = &[

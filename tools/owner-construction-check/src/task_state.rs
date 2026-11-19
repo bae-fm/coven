@@ -22,8 +22,8 @@ use syn::visit::{self, Visit};
 use crate::finding::Finding;
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::{type_name, RustFile};
+use owner_construction_policy::Policy;
 
 const REMEDY: &str = "a task's state lives as long as its operation: keep it in the task, and give what outlives the task a plain value or a handle the task makes";
 

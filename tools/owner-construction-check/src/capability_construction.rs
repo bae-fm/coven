@@ -24,9 +24,9 @@ use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens, MacroBody};
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
 use crate::syntax::{type_name, type_names, RustFile};
 use crate::type_identity::FileTypes;
+use owner_construction_policy::Policy;
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {

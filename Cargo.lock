@@ -2375,10 +2375,19 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 name = "owner-construction-check"
 version = "0.1.0"
 dependencies = [
+ "owner-construction-policy",
  "proc-macro2",
  "quote",
- "serde",
  "syn 3.0.6",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
+name = "owner-construction-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "thiserror 2.0.21",
  "toml",
 ]

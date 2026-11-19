@@ -8,10 +8,10 @@
 
 use crate::finding::Finding;
 use crate::macro_expansion::expand_macros;
-use crate::policy::{home_holds, Policy};
 use crate::sources::{SqlFile, Workspace};
 use crate::syntax::RustFile;
 use crate::test_code::{production_code, test_code};
+use owner_construction_policy::{home_holds, Policy};
 
 pub(crate) struct CrateCode {
     /// The crates' production code as written, macro definitions included.

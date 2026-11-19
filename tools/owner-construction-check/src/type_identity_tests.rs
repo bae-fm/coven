@@ -1,7 +1,7 @@
 use super::*;
 use crate::crate_code::checked;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
+use owner_construction_policy::Policy;
 
 /// A file of `app-core`, which depends on rusqlite.
 fn file(path: &str, source: &str) -> RustFile {

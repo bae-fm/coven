@@ -16,8 +16,8 @@
 use std::collections::BTreeSet;
 
 use crate::finding::Finding;
-use crate::policy::Policy;
 use crate::sources::Workspace;
+use owner_construction_policy::Policy;
 
 const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 

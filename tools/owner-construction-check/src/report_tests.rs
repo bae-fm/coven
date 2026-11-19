@@ -1,6 +1,6 @@
 use super::*;
 use crate::crate_code::CrateCode;
-use crate::policy::CompositionRoot;
+use owner_construction_policy::CompositionRoot;
 
 /// A policy running every rule, with the given rows.
 fn policy(rows: &str) -> Policy {
@@ -52,7 +52,7 @@ fn capability_implementations() -> RustFile {
 
 #[test]
 fn an_empty_workspace_passes() {
-    assert!(check(&workspace(Vec::new()), &Policy::gated_fixture()).is_empty());
+    assert!(check(&workspace(Vec::new()), &crate::gated_policy()).is_empty());
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn test_only_duplicate_capability_names_pass() {
 /// owner holds.
 #[test]
 fn test_code_answers_only_to_the_conventions() {
-    let mut policy = Policy::gated_fixture();
+    let mut policy = crate::gated_policy();
     policy.capability_types.insert("DatabaseConnection".into());
     policy.internal_dependency_types.insert("DatabaseConnection".into());
     let report = check(
@@ -156,7 +156,7 @@ fn test_code_answers_only_to_the_conventions() {
 
 #[test]
 fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
-    let mut policy = Policy::gated_fixture();
+    let mut policy = crate::gated_policy();
     policy.tools.insert("report".into());
     let report = check(
         &workspace(vec![RustFile::fixture(
@@ -184,7 +184,7 @@ fn crates_answer_to_every_rule() {
             "crates/app-merge/src/merge.rs",
             "fn now() { let _ = std::time::SystemTime::now(); }",
         )]),
-        &Policy::gated_fixture(),
+        &crate::gated_policy(),
     );
     assert_eq!(
         report.lines(),
@@ -211,7 +211,7 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
                 capability_implementations(),
                 RustFile::fixture("crates/app/src/runtime.rs", &source),
             ]),
-            &Policy::gated_fixture(),
+            &crate::gated_policy(),
         );
         assert!(!report.is_empty(), "accepted {expression}");
         assert!(report.lines().iter().any(|line| line.contains("outside a composition root")));
@@ -220,7 +220,7 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
 
 #[test]
 fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
-    let mut root_policy = Policy::gated_fixture();
+    let mut root_policy = crate::gated_policy();
     root_policy.composition_roots.push(root("crates/app/src/builder.rs", "Builder", "open"));
     let report = check(
         &workspace(vec![
@@ -262,7 +262,7 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
                 "fn run() { let clock: SuppliedClock = Default::default(); }",
             ),
         ]),
-        &Policy::gated_fixture(),
+        &crate::gated_policy(),
     );
     assert_eq!(report.0, [Finding::new("crates/app-foundation/src/clock.rs", 4,
         "implements Default for capability SuppliedClock, which permits implicit construction through Default::default()",
@@ -274,7 +274,7 @@ fn one_exact_list_entry_allows_construction_and_background_starts() {
     const PATH: &str = "crates/app-sync/src/fixture.rs";
     let mut rooted = policy(r#"capability_types = ["Clock"]"#);
     rooted.composition_roots.push(root(PATH, "Worker", "open"));
-    rooted.background_starts = Policy::gated_fixture().background_starts;
+    rooted.background_starts = crate::gated_policy().background_starts;
     for (path, owner, method, allowed) in [
         (PATH, "Worker", "open", true),
         (PATH, "Worker", "other", false),
@@ -346,7 +346,7 @@ fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
     ]);
     workspace.manifests =
         vec![member("crates/app-foundation", "app-foundation"), member("crates/app", "app")];
-    let selected = check_selected(&workspace, &Policy::gated_fixture(), &["app".into()]).unwrap();
+    let selected = check_selected(&workspace, &crate::gated_policy(), &["app".into()]).unwrap();
     assert!(selected.lines().iter().any(|line| line.contains("outside a composition root")));
     assert!(!selected.lines().iter().any(|line| line.contains("cannot resolve")));
 }
@@ -382,7 +382,7 @@ fn only_the_selected_rules_run() {
             ),
         ])
     };
-    let mut selected = Policy::gated_fixture();
+    let mut selected = crate::gated_policy();
     selected.capability_types.insert("Clock".into());
     let messages = |policy: &Policy| {
         check(&files(), policy).0.into_iter().map(|finding| finding.message).collect::<Vec<_>>()

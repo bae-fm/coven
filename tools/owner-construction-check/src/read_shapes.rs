@@ -21,9 +21,9 @@ use crate::cutoffs::cutoffs;
 use crate::finding::Finding;
 use crate::kept_state::kept_state;
 use crate::keyed_statements::keyed_statements;
-use crate::policy::{Policy, ReadShapes, Shape, FILE_NAME};
 use crate::read_code::ReadCode;
 use crate::row_work::{row_work, Hit};
+use owner_construction_policy::{Policy, ReadShapes, Shape, FILE_NAME};
 
 /// How every remedy ends.
 const ENDING: &str = "Frozen rows only shrink: never add one or raise a count. A use over values that are not a read's rows goes in `allowed` with what they are.";

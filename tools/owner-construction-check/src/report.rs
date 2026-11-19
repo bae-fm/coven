@@ -11,7 +11,6 @@ use crate::domain_owners::find_domain_owner_forwarding;
 use crate::finding::Finding;
 use crate::owner_dependency_boundary::find_owner_dependency_leaks;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::{Policy, Rule};
 use crate::read_shapes::find_read_shape_violations;
 use crate::retained_capability_parameters::find_retained_capability_parameter_violations;
 use crate::sources::Workspace;
@@ -20,6 +19,7 @@ use crate::syntax::RustFile;
 use crate::task_state::find_task_state_leaks;
 use crate::typed_errors::find_string_error_violations;
 use crate::unique_type_names::find_unique_type_name_violations;
+use owner_construction_policy::{Policy, Rule};
 
 pub(crate) struct Report(pub(crate) Vec<Finding>);
 

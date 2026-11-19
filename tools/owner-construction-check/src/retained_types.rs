@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::policy::{Policy, ReadShapes};
 use crate::syntax::{collect_declared_types, RustFile, StructInfo};
 use crate::type_identity::TypeIdentity;
+use owner_construction_policy::{Policy, ReadShapes};
 
 /// The workspace's declared types and what they retain.
 pub(crate) struct Graph<'a> {

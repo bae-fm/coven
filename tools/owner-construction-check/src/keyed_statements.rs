@@ -20,10 +20,10 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
-use crate::policy::Shape;
 use crate::read_code::{Body, ReadCode};
 use crate::read_statements::{RowDepth, Statement, VisitRows};
 use crate::row_work::Hit;
+use owner_construction_policy::Shape;
 
 pub(crate) fn keyed_statements(read: &ReadCode<'_>) -> Vec<Hit> {
     let mut hits = Vec::new();
