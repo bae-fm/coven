@@ -33,6 +33,8 @@ mod limit;
 mod mixed;
 #[path = "narrowing_model/nested_derived.rs"]
 mod nested_derived;
+#[path = "narrowing_model/nonstrict_edge.rs"]
+mod nonstrict_edge;
 #[path = "narrowing_model/one_of.rs"]
 mod one_of;
 #[path = "narrowing_model/or.rs"]
@@ -368,6 +370,25 @@ async fn next_rows(query: &mut LiveQuery<(usize, Rows), QueryError>) -> Rows {
         .1
 }
 
+/// The app's function `nz(e)`, `e` or 0 where `e` is NULL, on every
+/// connection, registered deterministic (`Expr::App`).
+fn register_nz(db: &TestDatabase) {
+    use rusqlite::functions::FunctionFlags;
+    db.with_database(|database| {
+        database.each_connection(|connection| {
+            connection
+                .connection
+                .create_scalar_function(
+                    "nz",
+                    1,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+                    |context| Ok(context.get::<Option<i64>>(0)?.unwrap_or(0)),
+                )
+                .unwrap()
+        })
+    });
+}
+
 /// Each write a statement's live query sees.
 const STEPS: usize = 12;
 
@@ -382,6 +403,7 @@ async fn run_case(
 ) -> usize {
     let sql = statement.sql();
     let db = TestDatabase::open(&schema_sql());
+    register_nz(&db);
     let mut rows = Vec::new();
     for table in TABLES {
         for id in 0..6 {
@@ -493,6 +515,12 @@ async fn edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn row_edge_matches_lean() {
     differential("row edge", row_edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn nonstrict_edge_matches_lean() {
+    differential("nonstrict edge", nonstrict_edge::statement).await;
 }
 
 #[tokio::test]

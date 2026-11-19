@@ -8,9 +8,11 @@ The member is a column sqlive narrows by; the partner is readable alone,
 since a write's lookup reads it alone; a bare partner column has the
 member's affinity, and one written first has an affinity at all, so the
 equality compares by BINARY. An expression partner is strict, NULL where
-the partner's columns are, so a missing partner row gives no value: a
-COALESCE gives none (`OneOf` reads a column equal to one). Both directions of
-`a.x = b.y` are read. -/
+the partner's columns are, so a missing partner row gives no value, or the
+partner is no item a LEFT JOIN adds, so every binding a core keeps holds its
+row: a COALESCE, a CASE or `IS NULL` over a LEFT JOIN's item gives no edge
+(`OneOf` reads a column equal to a COALESCE). Both directions of `a.x = b.y`
+are read. -/
 namespace SqliveNarrowing.Edge
 
 /-- The edge `member = other` gives, written in core `k`, with `other` first
@@ -21,7 +23,8 @@ def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option
   let affinity ← s.affinity m c
   if !other.queries.isEmpty then none
   let p ← other.items.head?
-  if !other.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨ !other.strict then none
+  if !other.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨
+    !(other.strict || s.alwaysBound p) then none
   let value ← match other with
     | .col _ pc =>
       match s.affinity p pc with
@@ -46,11 +49,12 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     (h : edge s k member other first = some e) :
     member = .col e.member e.column ∧ (s.item e.member).core = k ∧ e.nested = false ∧
     other.queries = [] ∧ (∀ j ∈ other.items, j = e.partner) ∧ other.refs ≠ [] ∧
-    other.strict = true ∧ e.partner ≠ e.member ∧ (s.item e.partner).readable ∧
-    ∀ r, e.value.eval r = other.eval (rowBind (some r)) noSubs := by
+    (other.strict = true ∨ s.alwaysBound e.partner = true) ∧ e.partner ≠ e.member ∧
+    (s.item e.partner).readable ∧ (∀ r, e.value.eval r = other.eval (rowBind (some r)) noSubs) ∧
+    e.value.strict = other.strict := by
   unfold edge at h
   cases member
-  case lit | add | greatest | sub | coalesce => simp at h
+  case lit | add | greatest | sub | coalesce | iif | isNull => simp at h
   case col m c =>
     simp only [bind, Option.bind] at h
     split at h
@@ -80,13 +84,16 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
           intro hnil
           simp [Expr.items, hnil] at hp
         have hread : (s.item p).readable = true := by simpa using hbad.2.2.1
-        have hstrict : other.strict = true := by simpa using hbad.2.2.2
+        have hstrict : other.strict = true ∨ s.alwaysBound p = true := by
+          cases hs : other.strict
+          · exact Or.inr (by simpa [hs] using hbad.2.2.2)
+          · exact Or.inl rfl
         split at h
         · rename_i j pc
           split at h
           · split at h
             · cases h
-              refine ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, ?_⟩
+              refine ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, ?_, rfl⟩
               intro r
               have : j = p := hitems j (by simp [Expr.items, Expr.refs])
               subst this
@@ -95,26 +102,51 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
           · split at h
             · cases h
             · cases h
-              exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl⟩
+              exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl,
+                rfl⟩
         · cases h
-          exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl⟩
+          exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
 
 /-- An edge holds of a binding where its member equals its partner's value. -/
 theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs}
     {x : Int} (hm : member.eval b sub = some x) (ho : other.eval b sub = some x) :
     e.HoldsIn s db f b := by
-  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval⟩ := edge_facts h
-  refine Or.inl ⟨x, ?_, ?_⟩
-  · rw [hmem] at hm
-    simpa [Expr.eval] using hm
-  · simp only [hn, Bool.false_eq_true, ↓reduceIte]
-    rw [other.eval_rowBind hitems hq] at ho
-    cases hb : b e.partner with
-    | none =>
-      rw [hb, other.eval_null hrefs hq hst (fun _ _ _ => by simp [rowBind, cellOf])] at ho
+  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := edge_facts h
+  rw [other.eval_rowBind hitems hq] at ho
+  cases hb : b e.partner with
+  | none =>
+    -- A strict value is NULL where the partner has no row; any other value
+    -- has a partner that every binding a core keeps holds a row of.
+    cases hs : other.strict with
+    | true =>
+      rw [hb, other.eval_null hrefs hq hs (fun _ _ _ => by simp [rowBind, cellOf])] at ho
       cases ho
-    | some r => exact ⟨r, rfl, by rw [hval, ← hb, ho]⟩
+    | false =>
+      have hab : s.alwaysBound e.partner = true := by simpa [hs] using hst
+      exact Or.inr (Or.inr ⟨by rw [hvs, hs], hn, hab, hb⟩)
+  | some r =>
+    refine Or.inl ⟨x, ?_, ?_⟩
+    · rw [hmem] at hm
+      simpa [Expr.eval] using hm
+    · simp only [hn, Bool.false_eq_true, ↓reduceIte]
+      exact ⟨r, hb, by rw [hval, ← hb, ho]⟩
+
+/-- Why `edge` reads an expression that isn't strict only over an item no LEFT
+JOIN adds: COALESCE, a CASE and `IS NULL` each give a value where the item
+they name has no row, as a LEFT JOIN's missing row, so an equality with one
+holds of a binding where the partner has no row for a lookup to find. -/
+theorem nonstrict_holds_without_partner {m c p pc : Nat} {r : Row} (hr : r.cell c = some 1)
+    (hpm : p ≠ m) (sub : Subs) :
+    ∀ other ∈ [Expr.coalesce (.col p pc) (.lit (some 1)),
+      .iif (.col p pc) (.lit (some 2)) (.lit (some 1)), .isNull (.col p pc)],
+      other.strict = false ∧ (Bind.empty.set m (some r)) p = none ∧
+      isTrue ((Cond.cmp .eq (.col m c) other).eval (Bind.empty.set m (some r)) sub) := by
+  intro other ho
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
+  rcases ho with rfl | rfl | rfl <;>
+    simp [Expr.strict, Cond.eval, Expr.eval, Bind.set, Bind.empty, cellOf, hr, hpm, Op.apply,
+      Op.compare, isTrue]
 
 /-- Rule 2's theorem: an equality true of a binding makes each edge sqlive
 reads from it hold. -/

@@ -17,7 +17,10 @@ rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
 equality of each column it names with the column of that name of the leftmost
 item before it that has one, as SQLite compares them. A subquery is a query
 number, so an expression names it without nesting. COALESCE of more than two
-arguments nests in its second. A call of `max` with two
+arguments nests in its second. A CASE with one WHEN and an ELSE, which is also
+how the model reads `iif`, and `IS NULL` as a value stand for the expressions
+that can be other than NULL where every column they name is NULL. A call of
+`max` with two
 arguments is SQLite's scalar max, an expression of one row, which the aggregate
 `max` of one argument is not. A SELECT DISTINCT keeps the first of each set of
 its rows that are equal. A value is NULL or an integer, and
@@ -74,7 +77,16 @@ promise of whichever rule reads it.
   judges row by row.
 - **An equality between two items.** `edge_sound` proves that `a.x = b.y`, true
   of a binding, makes `a.x` hold a value that `b`'s row gives, neither NULL,
-  in either direction and for an expression over `b`'s columns.
+  in either direction and for an expression over `b`'s columns. The reader
+  takes an expression over an item a LEFT JOIN adds only when it is strict:
+  each operation in it gives NULL where an operand is NULL. `eval_null`
+  proves that a strict expression is NULL where `b` has no row, so the
+  equality is false there. `nonstrict_holds_without_partner` shows why the
+  reader needs that: with COALESCE, a CASE or `IS NULL`, the equality can hold
+  where `b` has no row, as a LEFT JOIN's missing row, and no lookup finds a
+  row that gives the value. Over any other item, the edge's promise allows a
+  binding with no row of `b`, as an `IS` edge's does: no binding a core keeps
+  lacks one.
 - **A row value equality between two items.** `row_edge_sound` proves the
   same of each pair of `(a.x, a.y) = (b.z, b.w)`, which holds only where
   every pair is equal.
@@ -100,10 +112,11 @@ promise of whichever rule reads it.
   (SELECT ...)` over a compound makes it hold the value one arm returns in a
   binding the arm keeps. Each argument or arm gives one side of a
   disjunction: an edge, a subquery's edge or the column equal to a constant.
-  A COALESCE is the one expression that can be other than NULL where every
-  column it names is NULL, so an equality with any other expression over one
-  gives no edge. The rule gives disjunctions, so it is not one of
-  `conditionRules`: the model reads it before them, as sqlive does.
+  An argument that is an expression over an item a LEFT JOIN adds is strict,
+  as an equality's is, and an equality with any other expression over a
+  COALESCE gives no edge from such an item. The rule gives disjunctions, so
+  it is not one of `conditionRules`: the model reads it before them, as
+  sqlive does.
 - **A column compared with a subquery's value.** `subquery_edge_sound` proves
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's

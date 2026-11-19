@@ -977,11 +977,29 @@ columns: SQLite gives it the truth of their AND, NULL included. An equality
 with COALESCE or IFNULL of such values narrows by each of them, since COALESCE
 returns one of its arguments: a value of one other table, a subquery's
 returned column or a constant. A lookup compares each value with the joined
-column's affinity, as SQLite gives it to COALESCE's value. An equality with
-any other expression that holds a COALESCE takes no values from the table it
-names: the COALESCE can give a value where that table's row is missing, as a
-LEFT JOIN's is, and no lookup finds a missing row. An OR narrows a
-table when each of its sides does, to the rows either side allows: Ben's
+column's affinity, as SQLite gives it to COALESCE's value.
+
+An expression over a table a LEFT JOIN adds gives the joined column values
+only when it is NULL wherever a column it names is NULL. Ben's album page
+shows each track's cover with `LEFT JOIN tags AS g ON g.track_id = t.id JOIN
+covers AS cv ON cv.kind = CASE WHEN g.kind IS NULL THEN 'plain' ELSE g.kind
+END`. A track with no tag shows the `'plain'` cover. A lookup asks the tags
+table, which has no row for that track, so it would never find the `'plain'`
+cover, and a new `'plain'` cover would not rerun the page. So over a LEFT
+JOIN's table, coven narrows by an expression built only of columns,
+constants, parameters, arithmetic, comparisons, `||`, the bit operators,
+`NOT`, the signs, CAST, COLLATE, `LIKE`, `GLOB`, `->`, `->>` and the built-in
+functions that return NULL whenever an argument is NULL, such as `lower`,
+`substr`, `length`, `abs`, `round` and `json_extract`. An expression with any
+other part narrows nothing there: CASE, `iif`, `nullif`, `IS`, `IS NULL`, AND,
+OR, BETWEEN, an IN list, `quote`, `typeof`, `hex`, `concat`, `printf`, a
+COALESCE inside another expression, and every function the app registers,
+whose NULLs coven can't know. The album page reads `covers` whole. The same
+CASE over a table an inner join adds narrows: every row the join keeps has a
+tag, which a lookup finds.
+
+An OR narrows a table when each of its sides does, to the rows either side
+allows: Ben's
 import finds an artist by `a.discogs_id = t.dg OR a.id = t.dg + 100`, and an
 artist neither side names doesn't rerun it. Coven looks up each side's
 equalities in the tables placed before that table, and an OR with a side
@@ -15042,6 +15060,8 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
+| An expression of which each operation gives NULL where an operand is NULL is NULL where every column it names is NULL | `eval_null` | `../crates/sqlive/proofs/SqliveNarrowing/Reader.lean` | §4 |
+| COALESCE, a CASE and `IS NULL` each make an equality with them true where the item they name has no row | `nonstrict_holds_without_partner` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
 | A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
 | A column equal to COALESCE of values, or equal to or IN a compound's rows, true of a binding, holds the value one argument or one arm gives | `one_of_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/OneOf.lean` | §4 |
 | An OR, true of a binding, makes one side of each OR coven reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Or.lean` | §4 |

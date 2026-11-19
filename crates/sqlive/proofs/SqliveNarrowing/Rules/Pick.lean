@@ -468,6 +468,28 @@ theorem Expr.eval_of_not_bare {groupBy : List Expr} {b b' : Bind} {sub sub' : Su
       · exact List.map_inj_left.mp hkey r hgr
       · exact ihr h.2 hgr (by simpa using hgr)
     simp only [Expr.eval, hl, hr]
+  | iif t y n iht ihy ihn =>
+    simp only [Expr.bare, hc, Bool.not_false, Bool.true_and, Bool.or_eq_false_iff] at h
+    have ht : t.eval b sub = t.eval b' sub' := by
+      by_cases hgt : t ∈ groupBy
+      · exact List.map_inj_left.mp hkey t hgt
+      · exact iht h.1.1 hgt (by simpa using hgt)
+    have hy : y.eval b sub = y.eval b' sub' := by
+      by_cases hgy : y ∈ groupBy
+      · exact List.map_inj_left.mp hkey y hgy
+      · exact ihy h.1.2 hgy (by simpa using hgy)
+    have hn : n.eval b sub = n.eval b' sub' := by
+      by_cases hgn : n ∈ groupBy
+      · exact List.map_inj_left.mp hkey n hgn
+      · exact ihn h.2 hgn (by simpa using hgn)
+    simp only [Expr.eval, ht, hy, hn]
+  | isNull e ih =>
+    simp only [Expr.bare, hc, Bool.not_false, Bool.true_and] at h
+    have he : e.eval b sub = e.eval b' sub' := by
+      by_cases hge : e ∈ groupBy
+      · exact List.map_inj_left.mp hkey e hge
+      · exact ih h hge (by simpa using hge)
+    simp only [Expr.eval, he]
 
 /-- The largest value of a list is the same in every order. -/
 theorem maxValue_perm {vs vs' : List Value} (h : vs'.Perm vs) : maxValue vs' = maxValue vs := by

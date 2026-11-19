@@ -22,12 +22,14 @@ def args : Expr → List Expr
   | .coalesce l r => args l ++ args r
   | e => [e]
 
-/-- The edge from `m.c` to the one other item a strict expression with no
-subquery names, compared as an expression. -/
+/-- The edge from `m.c` to the one other item an expression with no subquery
+names, compared as an expression: a strict one, or one over an item that
+every binding holds a row of, as `Edge.edge` reads an equality's. -/
 def valueEdge (s : Statement) (m c : Nat) (affinity : Affinity) (arg : Expr) : Option Edge := do
-  if !arg.queries.isEmpty ∨ !arg.strict then none
+  if !arg.queries.isEmpty then none
   let p ← arg.items.head?
-  if !arg.items.all (· = p) ∨ p = m ∨ !(s.item p).readable then none
+  if !arg.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨
+    !(arg.strict || s.alwaysBound p) then none
   pure { member := m, column := c, affinity, partner := p, value := .expr arg, nested := false }
 
 /-- The side one argument of COALESCE gives `m.c`, written in core `k`. -/
@@ -122,6 +124,8 @@ theorem args_eval {e : Expr} {b : Bind} {sub : Subs} {x : Int} (h : e.eval b sub
   | add l r _ _ => exact ⟨_, by simp [args], h⟩
   | greatest l r _ _ => exact ⟨_, by simp [args], h⟩
   | sub q => exact ⟨_, by simp [args], h⟩
+  | iif t y n _ _ _ => exact ⟨_, by simp [args], h⟩
+  | isNull e _ => exact ⟨_, by simp [args], h⟩
 
 /-- A row of compound `q` whose first column holds `x`: a row an arm gives,
 in a binding the arm's core keeps. -/
@@ -139,14 +143,14 @@ theorem arm_row {s : Statement} {db : Db} {f : Nat} {b : Bind} {q : Nat} {r : Ro
 theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr} {e : Edge}
     (h : valueEdge s m c aff arg = some e) :
     e.member = m ∧ e.column = c ∧ e.nested = false ∧ e.nulls = false ∧ e.partner ≠ m ∧
-    (s.item e.partner).readable ∧ arg.queries = [] ∧ arg.strict = true ∧
+    (s.item e.partner).readable ∧ arg.queries = [] ∧
+    (arg.strict = true ∨ s.alwaysBound e.partner = true) ∧
     (∀ j ∈ arg.items, j = e.partner) ∧ arg.refs ≠ [] ∧ e.value = .expr arg := by
   unfold valueEdge at h
   simp only [bind, Option.bind] at h
   split at h
   · cases h
   rename_i hq
-  simp only [not_or, Bool.not_eq_true] at hq
   cases hp : arg.items.head? with
   | none => simp [hp] at h
   | some p =>
@@ -156,8 +160,12 @@ theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr
     rename_i hbad
     simp only [not_or, Bool.not_eq_true] at hbad
     cases h
-    refine ⟨rfl, rfl, rfl, rfl, hbad.2.1, by simpa using hbad.2.2, by simpa using hq.1,
-      by simpa using hq.2, by simpa using hbad.1, ?_, rfl⟩
+    have hst : arg.strict = true ∨ s.alwaysBound p = true := by
+      cases hs : arg.strict
+      · exact Or.inr (by simpa [hs] using hbad.2.2.2)
+      · exact Or.inl rfl
+    refine ⟨rfl, rfl, rfl, rfl, hbad.2.1, by simpa using hbad.2.2.1, by simpa using hq,
+      hst, by simpa using hbad.1, ?_, rfl⟩
     intro hnil
     simp [Expr.items, hnil] at hp
 
@@ -165,15 +173,21 @@ theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr
 theorem valueEdge_holds {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr} {e : Edge}
     (h : valueEdge s m c aff arg = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs} {x : Int}
     (hm : cellOf (b m) c = some x) (ha : arg.eval b sub = some x) : e.HoldsIn s db f b := by
-  obtain ⟨hmem, hcol, hn, _, _, _, hq, hs, hitems, hrefs, hval⟩ := valueEdge_facts h
-  refine Or.inl ⟨x, by rw [hmem, hcol]; exact hm, ?_⟩
-  simp only [hn, Bool.false_eq_true, ↓reduceIte]
+  obtain ⟨hmem, hcol, hn, _, _, _, hq, hst, hitems, hrefs, hval⟩ := valueEdge_facts h
   rw [arg.eval_rowBind hitems hq] at ha
   cases hb : b e.partner with
   | none =>
-    rw [hb, arg.eval_null hrefs hq hs (fun _ _ _ => by simp [rowBind, cellOf])] at ha
-    cases ha
-  | some r => exact ⟨r, rfl, by rw [hval, PValue.eval, ← hb, ha]⟩
+    cases hs : arg.strict with
+    | true =>
+      rw [hb, arg.eval_null hrefs hq hs (fun _ _ _ => by simp [rowBind, cellOf])] at ha
+      cases ha
+    | false =>
+      have hab : s.alwaysBound e.partner = true := by simpa [hs] using hst
+      exact Or.inr (Or.inr ⟨by simp [hval, PValue.strict, hs], hn, hab, hb⟩)
+  | some r =>
+    refine Or.inl ⟨x, by rw [hmem, hcol]; exact hm, ?_⟩
+    simp only [hn, Bool.false_eq_true, ↓reduceIte]
+    exact ⟨r, hb, by rw [hval, PValue.eval, ← hb, ha]⟩
 
 /-- A subquery edge holds where the member equals the subquery's value. -/
 theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}

@@ -25,7 +25,7 @@ use std::cmp::Ordering;
 /// Whether `name` is a function that returns one of its arguments that isn't
 /// NULL, so a value of it can be other than NULL where every column it names
 /// is NULL.
-pub(crate) fn picks_an_argument(name: &str) -> bool {
+fn picks_an_argument(name: &str) -> bool {
     name.eq_ignore_ascii_case("coalesce") || name.eq_ignore_ascii_case("ifnull")
 }
 

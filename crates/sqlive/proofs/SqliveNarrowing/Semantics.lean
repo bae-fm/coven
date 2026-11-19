@@ -45,6 +45,11 @@ def Expr.eval (b : Bind) (sub : Subs) : Expr → Value
     match l.eval b sub with
     | some x => some x
     | none => r.eval b sub
+  | .iif t y n =>
+    match t.eval b sub with
+    | some x => if x ≠ 0 then y.eval b sub else n.eval b sub
+    | none => n.eval b sub
+  | .isNull e => some (if (e.eval b sub).isNone then 1 else 0)
 
 def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
   | .cmp op l r => op.apply (l.eval b sub) (r.eval b sub)

@@ -86,6 +86,15 @@ pub(crate) struct FromItem {
     pub(crate) ors: Vec<Vec<crate::scope_or::Side>>,
 }
 
+impl FromItem {
+    /// Whether every binding of its core holds a row of it: no LEFT JOIN
+    /// adds it. A lookup finds every row such an item gives a binding, and
+    /// none for the NULLs a LEFT JOIN's missing row gives.
+    pub(crate) fn always_bound(&self) -> bool {
+        !self.left
+    }
+}
+
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
 /// can name `ctes`; `None` when sqlive can't read its rows.
 pub(crate) fn read_item<'a>(

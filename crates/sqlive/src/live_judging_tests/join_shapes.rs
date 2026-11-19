@@ -1,6 +1,8 @@
 //! Joins other than one column equal to another, each narrowing the joined
 //! table as the equality would: `IS` between two tables, an OR whose sides
-//! each narrow the table, and COALESCE of several partners' values.
+//! each narrow the table, and COALESCE of several partners' values; and
+//! joins on an expression that gives a value where its table's row is
+//! missing, which narrow nothing.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -110,6 +112,55 @@ async fn a_coalesce_of_partners_narrows_by_each() {
         ("UPDATE scan SET hash = 'h1' WHERE id = 1", true),
         ("UPDATE covers SET url = 'v1' WHERE id = 1", true),
         ("UPDATE covers SET url = 'w3' WHERE id = 3", false),
+    ])
+    .await;
+    db.close();
+}
+
+/// A cover joined to an expression over the tag a LEFT JOIN adds, which gives
+/// a value where the scan row has no tag: the cover of that value is in the
+/// result, and no lookup of the tags finds it, so each such join reads the
+/// covers whole. A join on `lower`, NULL where the tag is missing, narrows,
+/// and so does the CASE over a tag an inner join adds, which every joined row
+/// has.
+#[tokio::test]
+async fn a_join_on_a_value_of_a_missing_row_reads_the_table_whole() {
+    let db = TestDatabase::open(
+        "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE tag(id INTEGER PRIMARY KEY, scan INTEGER, kind TEXT);
+        CREATE TABLE covers(id INTEGER PRIMARY KEY, kind TEXT, url TEXT);
+        INSERT INTO scan VALUES (1,'/a'),(2,'/b');
+        INSERT INTO tag VALUES (1,2,'front');
+        INSERT INTO covers VALUES (1,'front','u1')",
+    );
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = CASE WHEN t.kind IS NULL THEN 'none' ELSE t.kind END WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (2,'none','u2')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = iif(t.kind IS NULL, 'none', t.kind) WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (3,'none','u3')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = quote(t.kind) WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (4,'NULL','u4')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = concat(t.kind, 'back') WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (5,'back','u5')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = (t.kind IS NULL) || 'x' WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (6,'1x','u6')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c LEFT JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = lower(t.kind) WHERE c.path = '/b' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (7,'none','u7')", false),
+        ("INSERT INTO covers VALUES (8,'front','u8')", true),
+    ])
+    .await;
+    follows(&db, "SELECT cv.url FROM scan c JOIN tag t ON t.scan = c.id JOIN covers cv ON cv.kind = CASE WHEN t.kind IS NULL THEN 'none' ELSE t.kind END WHERE c.path = '/b' ORDER BY cv.id", vec![], &[
+        ("INSERT INTO covers VALUES (9,'none','u9')", false),
+        ("INSERT INTO covers VALUES (10,'front','u10')", true),
     ])
     .await;
     db.close();

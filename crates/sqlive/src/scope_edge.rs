@@ -70,9 +70,11 @@ impl Planner<'_> {
 
     /// The one source other than `member` whose columns `other`, written in
     /// `core`, reads, of this core or one it sits in. `other` holds no
-    /// subquery, no COLLATE, no COALESCE or IFNULL, no clock and no function
-    /// the connection doesn't flag deterministic: a lookup evaluates it
-    /// again, and would get another answer than the query did.
+    /// subquery, no COLLATE, no clock and no function the connection doesn't
+    /// flag deterministic: a lookup evaluates it again, and would get another
+    /// answer than the query did. And every binding holds a row of the
+    /// source, or `other` is NULL wherever a column it names is
+    /// (`select_syntax::strict`).
     pub(crate) fn partner(&self, core: usize, member: usize, other: &Expr<'_>) -> Option<usize> {
         let mut found = Vec::new();
         parts(other, &mut found);
@@ -80,12 +82,6 @@ impl Planner<'_> {
         for part in &found {
             let name = match part {
                 Part::Name(name) => name,
-                // COALESCE can return a value where the partner's columns
-                // are NULL, as for a LEFT JOIN's missing row, which no lookup
-                // finds (`scope_one_of.rs` reads a column equal to one).
-                Part::Function(name, ..) if crate::scope_one_of::picks_an_argument(name) => {
-                    return None
-                }
                 Part::Function(..) | Part::Clock => continue,
                 Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Collation => return None,
             };
@@ -96,7 +92,13 @@ impl Planner<'_> {
             partner = Some(item);
         }
         let partner = partner?;
-        self.functions.repeatable(&found).then_some(partner)
+        // Over a LEFT JOIN's missing row, an expression that can give a
+        // value where the partner's columns are NULL would match member rows
+        // that no lookup finds (`scope_one_of.rs` reads a column equal to
+        // COALESCE).
+        let bound = self.items[partner].always_bound()
+            || crate::select_syntax::strict(other, self.functions);
+        (self.functions.repeatable(&found) && bound).then_some(partner)
     }
 
     /// The edge `member.column = partner.column` gives, with `partner`'s
@@ -153,7 +155,7 @@ impl Planner<'_> {
         first: bool,
     ) -> Option<Edge> {
         let edge = self.edge(core, member_expr, other, first)?;
-        (!self.items[edge.partner].left).then_some(Edge { nulls: true, ..edge })
+        self.items[edge.partner].always_bound().then_some(Edge { nulls: true, ..edge })
     }
 
     /// Carry, across each edge between two items of `core` that compares

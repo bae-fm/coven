@@ -83,6 +83,20 @@ pub(super) enum Expr {
     Sub(Box<Query>),
     /// `coalesce(l, r)`.
     Coalesce(Box<Expr>, Box<Expr>),
+    /// `CASE WHEN test THEN yes ELSE no END`, or `iif(test, yes, no)` when
+    /// `iif`.
+    Iif {
+        test: Box<Expr>,
+        yes: Box<Expr>,
+        no: Box<Expr>,
+        iif: bool,
+    },
+    /// `e IS NULL` as a value.
+    IsNull(Box<Expr>),
+    /// `nz(e)`, the app's function that the differential registers
+    /// deterministic: `e`, or 0 where `e` is NULL, which the model reads as
+    /// `iif(e, e, 0)`.
+    App(Box<Expr>),
 }
 
 #[derive(Clone)]
@@ -387,6 +401,14 @@ impl Expr {
             Self::Greatest(left, right) => format!("max({}, {})", left.sql(), right.sql()),
             Self::Sub(query) => format!("({})", query.sql()),
             Self::Coalesce(left, right) => format!("coalesce({}, {})", left.sql(), right.sql()),
+            Self::Iif { test, yes, no, iif: true } => {
+                format!("iif({}, {}, {})", test.sql(), yes.sql(), no.sql())
+            }
+            Self::Iif { test, yes, no, iif: false } => {
+                format!("(CASE WHEN {} THEN {} ELSE {} END)", test.sql(), yes.sql(), no.sql())
+            }
+            Self::IsNull(e) => format!("({} IS NULL)", e.sql()),
+            Self::App(e) => format!("nz({})", e.sql()),
         }
     }
 
@@ -398,6 +420,9 @@ impl Expr {
             Self::Greatest(left, right) => json!({"greatest": [left.json(), right.json()]}),
             Self::Sub(query) => json!({"query": query.json()}),
             Self::Coalesce(left, right) => json!({"coalesce": [left.json(), right.json()]}),
+            Self::Iif { test, yes, no, .. } => json!({"iif": [test.json(), yes.json(), no.json()]}),
+            Self::IsNull(e) => json!({"is_null": e.json()}),
+            Self::App(e) => json!({"iif": [e.json(), e.json(), {"lit": 0}]}),
         }
     }
 
@@ -407,6 +432,10 @@ impl Expr {
             Self::Add(left, right) | Self::Greatest(left, right) | Self::Coalesce(left, right) => {
                 left.ambiguous() || right.ambiguous()
             }
+            Self::Iif { test, yes, no, .. } => {
+                test.ambiguous() || yes.ambiguous() || no.ambiguous()
+            }
+            Self::IsNull(e) | Self::App(e) => e.ambiguous(),
             Self::Sub(_) => true,
         }
     }

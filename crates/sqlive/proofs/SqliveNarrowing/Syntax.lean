@@ -21,6 +21,12 @@ inductive Expr where
   /-- `COALESCE(first, rest)`: `first`'s value, or `rest`'s when it is NULL.
   A COALESCE of more arguments nests in `rest`. -/
   | coalesce (first rest : Expr)
+  /-- `CASE WHEN test THEN yes ELSE no END`, or `iif(test, yes, no)`: `yes`'s
+  value where `test` holds a value other than 0, else `no`'s, so `no`'s where
+  `test` is NULL. -/
+  | iif (test yes no : Expr)
+  /-- `e IS NULL` as a value: 1 where `e` is NULL, else 0, never NULL. -/
+  | isNull (e : Expr)
   deriving Repr, Inhabited, DecidableEq
 
 /-- A condition, in SQL's three-valued logic. -/
@@ -184,6 +190,10 @@ def Statement.table? (s : Statement) (i : Nat) : Option Nat :=
   | .table t => some t
   | .derived .. => none
 
+/-- Whether every binding of item `i`'s core holds a row of `i`: no LEFT JOIN
+adds it, whose left row no right row joins gives NULLs in its place. -/
+def Statement.alwaysBound (s : Statement) (i : Nat) : Bool := !(s.item i).left
+
 /-- The affinity sqlive narrows column `c` of item `i` by. -/
 def Statement.affinity (s : Statement) (i c : Nat) : Option Affinity :=
   ((s.item i).columns[c]?).join
@@ -193,6 +203,8 @@ def Expr.refs : Expr → List (Nat × Nat)
   | .col i c => [(i, c)]
   | .lit _ => []
   | .add l r | .greatest l r | .coalesce l r => l.refs ++ r.refs
+  | .iif t y n => t.refs ++ y.refs ++ n.refs
+  | .isNull e => e.refs
   | .sub _ => []
 
 /-- The items `e` names, in order, with repeats. -/
@@ -202,15 +214,19 @@ def Expr.items (e : Expr) : List Nat := e.refs.map (·.1)
 def Expr.queries : Expr → List Nat
   | .col .. | .lit _ => []
   | .add l r | .greatest l r | .coalesce l r => l.queries ++ r.queries
+  | .iif t y n => t.queries ++ y.queries ++ n.queries
+  | .isNull e => e.queries
   | .sub q => [q]
 
 /-- Whether `e` is NULL wherever every column it names is NULL and its
-subqueries return NULL: every expression but COALESCE, which returns a later
-argument where an earlier one is NULL. -/
+subqueries return NULL: each operation in it is NULL where an operand is.
+COALESCE returns a later argument where an earlier one is NULL, a CASE the
+ELSE's value where its test is NULL, and `IS NULL` 1 where its operand is
+NULL, so none of them is. -/
 def Expr.strict : Expr → Bool
   | .col .. | .lit _ | .sub _ => true
   | .add l r | .greatest l r => l.strict && r.strict
-  | .coalesce .. => false
+  | .coalesce .. | .iif .. | .isNull _ => false
 
 def Cond.refs : Cond → List (Nat × Nat)
   | .cmp _ l r => l.refs ++ r.refs

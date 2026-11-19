@@ -593,6 +593,7 @@ proofs() {
             connection::live_judging::tests::narrowing_model::term_matches_lean \
             connection::live_judging::tests::narrowing_model::edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_edge_matches_lean \
+            connection::live_judging::tests::narrowing_model::nonstrict_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::is_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::or_matches_lean \
             connection::live_judging::tests::narrowing_model::one_of_matches_lean \

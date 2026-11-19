@@ -15,7 +15,7 @@ first when `first`: the equality's, comparing by `IS`, when the partner is
 no item a LEFT JOIN adds. -/
 def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option Edge := do
   let e ← Edge.edge s k member other first
-  if (s.item e.partner).left then none
+  if !s.alwaysBound e.partner then none
   pure { e with nulls := true }
 
 /-- The reader: `a IS b`, with no subquery, naming more than one item. -/
@@ -33,7 +33,7 @@ value is NULL, in its row or for want of one. -/
 theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) :
     ∃ e', Edge.edge s k member other first = some e' ∧ e = { e' with nulls := true } ∧
-      (s.item e'.partner).left = false := by
+      s.alwaysBound e'.partner = true := by
   unfold edge at h
   simp only [bind, Option.bind] at h
   cases he : Edge.edge s k member other first with
@@ -52,7 +52,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     {v : Value} (hm : member.eval b sub = v) (ho : other.eval b sub = v) :
     e.HoldsIn s db f b := by
   obtain ⟨e', he', rfl, hleft⟩ := edge_facts h
-  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval⟩ := Edge.edge_facts he'
+  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := Edge.edge_facts he'
   have hmv : cellOf (b e'.member) e'.column = v := by
     rw [hmem] at hm
     simpa [Expr.eval] using hm
@@ -62,15 +62,19 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     exact ho
   cases v with
   | some x =>
-    refine Or.inl ⟨x, hmv, ?_⟩
-    simp only [hn, Bool.false_eq_true, ↓reduceIte]
     cases hb : b e'.partner with
     | none =>
-      rw [other.eval_rowBind hitems hq, hb,
-        other.eval_null hrefs hq hst (fun _ _ _ => by simp [rowBind, cellOf])] at ho
-      cases ho
-    | some r => exact ⟨r, rfl, hov r hb⟩
-  | none => exact Or.inr ⟨rfl, hn, hleft, hmv, hov⟩
+      cases hs : other.strict with
+      | true =>
+        rw [other.eval_rowBind hitems hq, hb,
+          other.eval_null hrefs hq hs (fun _ _ _ => by simp [rowBind, cellOf])] at ho
+        cases ho
+      | false => exact Or.inr (Or.inr ⟨by simp [hvs, hs], hn, hleft, hb⟩)
+    | some r =>
+      refine Or.inl ⟨x, hmv, ?_⟩
+      simp only [hn, Bool.false_eq_true, ↓reduceIte]
+      exact ⟨r, hb, hov r hb⟩
+  | none => exact Or.inr (Or.inl ⟨rfl, hn, hleft, hmv, hov⟩)
 
 /-- The theorem: `IS` true of a binding makes each edge sqlive reads from it
 hold, a NULL member matching a partner's NULL. -/

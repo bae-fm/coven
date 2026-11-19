@@ -2,6 +2,8 @@ import SqliveNarrowing
 
 #print axioms SqliveNarrowing.Term.term_sound
 #print axioms SqliveNarrowing.Edge.edge_sound
+#print axioms SqliveNarrowing.Expr.eval_null
+#print axioms SqliveNarrowing.Edge.nonstrict_holds_without_partner
 #print axioms SqliveNarrowing.RowEdge.row_edge_sound
 #print axioms SqliveNarrowing.IsEdge.is_edge_sound
 #print axioms SqliveNarrowing.Or.or_sound

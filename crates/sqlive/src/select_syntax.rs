@@ -5,8 +5,8 @@ use rusqlite::{Connection, Statement};
 use std::collections::BTreeMap;
 
 use sqlite3_parser::ast::{
-    As, Expr, FrameBound, FunctionCallOrder, FunctionTail, Literal, Name, Operator, Over,
-    ResultColumn, Select, SortedColumn, Window,
+    As, Expr, FrameBound, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name, Operator,
+    Over, ResultColumn, Select, SortedColumn, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -293,6 +293,89 @@ impl<'a> PartWalk<'a, '_> {
     }
 }
 
+/// Whether `expr` is NULL wherever a column it names is NULL: every
+/// operation in it gives NULL where one of its operands is NULL. Columns,
+/// constants and parameters are, and so are arithmetic, comparisons, `||`,
+/// the bit operators, `NOT`, the signs, CAST, COLLATE and a call of one of
+/// SQLite's built-in functions that `Functions::strict` names, with
+/// `LIKE`, `GLOB`, `->` and `->>`, which call `like`, `glob`, `->` and `->>`.
+/// The rest can give a value where every column they name is NULL, as a
+/// LEFT JOIN's missing row gives: CASE, `IS`, `IS NOT`, `IS NULL`, `NOT
+/// NULL`, AND, OR (`NULL OR 1` is 1), BETWEEN (`1 BETWEEN c AND 0` is 0), an
+/// IN list (`1 IN (c, 1)` is 1), `REGEXP` and `MATCH`, which call the app's
+/// functions, a subquery, and any other function, as `coalesce`, `iif`,
+/// `nullif`, `quote`, `typeof`, `concat` or an app's own.
+pub(crate) fn strict(expr: &Expr<'_>, functions: &Functions) -> bool {
+    match expr {
+        Expr::Id(_)
+        | Expr::Name(_)
+        | Expr::Qualified(..)
+        | Expr::DoublyQualified(..)
+        | Expr::Literal(_)
+        | Expr::Variable(_) => true,
+        Expr::Binary(left, operator, right) => {
+            let called = match operator {
+                Operator::And | Operator::Or | Operator::Is | Operator::IsNot => false,
+                Operator::ArrowRight => functions.strict("->", 2),
+                Operator::ArrowRightShift => functions.strict("->>", 2),
+                Operator::Add
+                | Operator::Subtract
+                | Operator::Multiply
+                | Operator::Divide
+                | Operator::Modulus
+                | Operator::Concat
+                | Operator::BitwiseAnd
+                | Operator::BitwiseOr
+                | Operator::LeftShift
+                | Operator::RightShift
+                | Operator::Equals
+                | Operator::NotEquals
+                | Operator::Less
+                | Operator::LessEquals
+                | Operator::Greater
+                | Operator::GreaterEquals => true,
+            };
+            called && strict(left, functions) && strict(right, functions)
+        }
+        Expr::Unary(_, expr) | Expr::Cast { expr, .. } | Expr::Collate(expr, _) => {
+            strict(expr, functions)
+        }
+        Expr::Parenthesized(exprs) => matches!(&exprs[..], [expr] if strict(expr, functions)),
+        Expr::Like { lhs, op, rhs, escape, .. } => {
+            let name = match op {
+                LikeOperator::Like => "like",
+                LikeOperator::Glob => "glob",
+                LikeOperator::Match => "match",
+                LikeOperator::Regexp => "regexp",
+            };
+            functions.strict(name, 2 + usize::from(escape.is_some()))
+                && [*lhs, *rhs].into_iter().chain(*escape).all(|expr| strict(expr, functions))
+        }
+        Expr::FunctionCall {
+            name,
+            distinctness: None,
+            args,
+            order_by: None,
+            filter_over: None,
+        } => {
+            let args = args.unwrap_or_default();
+            functions.strict(name.0, args.len()) && args.iter().all(|arg| strict(arg, functions))
+        }
+        Expr::FunctionCall { .. }
+        | Expr::FunctionCallStar { .. }
+        | Expr::Between { .. }
+        | Expr::Case { .. }
+        | Expr::InList { .. }
+        | Expr::InSelect { .. }
+        | Expr::InTable { .. }
+        | Expr::Exists(_)
+        | Expr::Subquery(_)
+        | Expr::IsNull(_)
+        | Expr::NotNull(_)
+        | Expr::Raise(..) => false,
+    }
+}
+
 /// The OVER clause of the window function `expr` calls, when it calls one.
 pub(crate) fn window_call<'a>(expr: &'a Expr<'a>) -> Option<&'a Over<'a>> {
     let (Expr::FunctionCall { filter_over, .. } | Expr::FunctionCallStar { filter_over, .. }) =
@@ -362,6 +445,55 @@ pub(crate) fn text(node: &impl sqlite3_parser::ast::fmt::ToTokens) -> String {
 const CLOCK_FUNCTIONS: [&str; 7] =
     ["date", "time", "datetime", "julianday", "unixepoch", "strftime", "timediff"];
 
+/// SQLite's built-in scalar functions that return NULL whenever one of their
+/// arguments is NULL, as a call of each with a NULL in each place shows. The
+/// date and time functions do too, but read the clock. Every other built-in
+/// one can return a value for a NULL argument: `coalesce(NULL, 1)`,
+/// `ifnull`, `iif` and `if` pick another argument; `nullif(1, NULL)` is 1;
+/// `quote`, `typeof`, `hex`, `char`, `zeroblob`, `subtype`, `soundex` and
+/// `unistr_quote` read NULL as a value; `concat`, `concat_ws`, `printf` and
+/// `format` write it as nothing; `replace(x, '', NULL)` is `x`; and the JSON
+/// functions that build or edit a document write it as `null`.
+const STRICT_FUNCTIONS: [&str; 37] = [
+    "->",
+    "->>",
+    "abs",
+    "glob",
+    "instr",
+    "json",
+    "json_array_length",
+    "json_error_position",
+    "json_extract",
+    "json_patch",
+    "json_remove",
+    "json_type",
+    "json_valid",
+    "jsonb",
+    "jsonb_extract",
+    "jsonb_patch",
+    "jsonb_remove",
+    "length",
+    "like",
+    "likelihood",
+    "likely",
+    "lower",
+    "ltrim",
+    "max",
+    "min",
+    "octet_length",
+    "round",
+    "rtrim",
+    "sign",
+    "substr",
+    "substring",
+    "trim",
+    "unhex",
+    "unicode",
+    "unistr",
+    "unlikely",
+    "upper",
+];
+
 /// SQLITE_DETERMINISTIC, as `pragma_function_list` reports it in `flags`.
 const DETERMINISTIC: i64 = 0x800;
 
@@ -380,6 +512,8 @@ struct Definition {
     aggregate: bool,
     /// A scalar function the connection flags deterministic.
     deterministic: bool,
+    /// One of SQLite's own, not one the app or an extension registered.
+    builtin: bool,
 }
 
 impl Definition {
@@ -402,7 +536,7 @@ pub(crate) struct Functions(BTreeMap<String, Vec<Definition>>);
 impl Functions {
     pub(crate) fn read(connection: &Connection) -> rusqlite::Result<Self> {
         let mut listed = connection
-            .prepare_cached("SELECT name, narg, type, flags FROM pragma_function_list")?;
+            .prepare_cached("SELECT name, narg, type, flags, builtin FROM pragma_function_list")?;
         let mut functions: BTreeMap<String, Vec<Definition>> = BTreeMap::new();
         let rows = listed.query_map([], |row| {
             let kind: String = row.get(2)?;
@@ -413,6 +547,7 @@ impl Functions {
                     arguments: row.get(1)?,
                     aggregate: kind != "s",
                     deterministic: kind == "s" && flags & DETERMINISTIC != 0,
+                    builtin: row.get::<_, i64>(4)? != 0,
                 },
             ))
         })?;
@@ -453,6 +588,17 @@ impl Functions {
         !is_clock_function(&name.to_ascii_lowercase())
             && !called.is_empty()
             && called.iter().all(|definition| definition.deterministic)
+    }
+
+    /// Whether a call of `name` with `arguments` arguments returns NULL
+    /// whenever one of its arguments is NULL: it calls a built-in scalar
+    /// function of `STRICT_FUNCTIONS`, and no function the app registered
+    /// under that name.
+    pub(crate) fn strict(&self, name: &str, arguments: usize) -> bool {
+        let called = self.called(name, arguments);
+        STRICT_FUNCTIONS.contains(&name.to_ascii_lowercase().as_str())
+            && !called.is_empty()
+            && called.iter().all(|definition| definition.builtin && !definition.aggregate)
     }
 
     /// Whether evaluating the expression `found` holds twice gives the same

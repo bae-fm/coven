@@ -75,12 +75,16 @@ def Expr.bare (groupBy : List Expr) (e : Expr) : Bool :=
     | .col .. | .sub _ => true
     | .lit _ => false
     | .add l r | .greatest l r | .coalesce l r => l.bare groupBy || r.bare groupBy
+    | .iif t y n => t.bare groupBy || y.bare groupBy || n.bare groupBy
+    | .isNull e => e.bare groupBy
 
 /-- The GROUP BY terms among `groupBy` whose values `e` shows: `e` itself
 when it is one, or those its operands show. -/
 def Expr.groupTerms (groupBy : List Expr) (e : Expr) : List Expr :=
   if groupBy.contains e then [e] else match e with
     | .add l r | .greatest l r | .coalesce l r => l.groupTerms groupBy ++ r.groupTerms groupBy
+    | .iif t y n => t.groupTerms groupBy ++ y.groupTerms groupBy ++ n.groupTerms groupBy
+    | .isNull e => e.groupTerms groupBy
     | .col .. | .lit _ | .sub _ => []
 
 /-- Whether two values of `e` in bindings of core `k` that compare equal are

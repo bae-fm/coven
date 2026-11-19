@@ -86,6 +86,12 @@ def PValue.eval (r : Row) : PValue → Value
   | .column c => r.cell c
   | .expr e => e.eval (rowBind (some r)) noSubs
 
+/-- Whether the value is NULL where every column of the partner is: a column
+is, and so is a strict expression. -/
+def PValue.strict : PValue → Bool
+  | .column _ => true
+  | .expr e => e.strict
+
 /-- `member.column` equals a value of `partner`'s rows (`Edge`). -/
 structure Edge where
   member : Nat

@@ -302,6 +302,12 @@ partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : List (String
   else if let some (.arr #[l, r]) := field j "coalesce" then
     let l ← readExpr schema l k ctes
     pure (.coalesce l (← readExpr schema r k ctes))
+  else if let some (.arr #[t, y, n]) := field j "iif" then
+    let t ← readExpr schema t k ctes
+    let y ← readExpr schema y k ctes
+    pure (.iif t y (← readExpr schema n k ctes))
+  else if let some e := field j "is_null" then
+    pure (.isNull (← readExpr schema e k ctes))
   else lift (throw s!"unknown expression {j.compress}")
 
 partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : List (String × Json)) :

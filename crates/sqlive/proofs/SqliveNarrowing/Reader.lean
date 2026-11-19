@@ -34,6 +34,18 @@ theorem Expr.eval_congr (e : Expr) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by simp [Expr.queries, h])),
       ihr (fun i c h => hb i c (by simp [Expr.refs, h]))
         (fun q h => hs q (by simp [Expr.queries, h]))]
+  | iif t y n iht ihy ihn =>
+    simp only [Expr.eval]
+    rw [iht (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h])),
+      ihy (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h])),
+      ihn (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h]))]
+  | isNull e ih =>
+    simp only [Expr.eval]
+    rw [ih (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h]))]
 
 theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
     (hb : ∀ i c, (i, c) ∈ cd.refs → cellOf (b i) c = cellOf (b' i) c)
@@ -127,7 +139,7 @@ theorem Expr.eval_null (e : Expr) {b : Bind} {sub : Subs} (hr : e.refs ≠ [])
       split <;> simp_all
     · rw [ihl hl hq.1 hst.1 (fun i c h => hn i c (by simp [Expr.refs, h]))]
   | sub q => simp [Expr.queries] at hq
-  | coalesce l r => simp [Expr.strict] at hst
+  | coalesce l r | iif t y n | isNull e => simp [Expr.strict] at hst
 
 /-- A condition naming one item's cells only, and no subquery, holds of a
 binding as it does of the binding where every item has that item's row. -/
@@ -167,15 +179,19 @@ theorem mem_of_eraseDups_singleton {l : List Nat} {i : Nat} (h : l.eraseDups = [
 binding of the subquery's core under `b`. Or the edge compares by `IS`, the
 member's column is NULL, and the partner's row in `b`, if it has one, gives
 NULL; the partner is no item a LEFT JOIN adds, so a binding a core keeps
-has its row. -/
+has its row. Or the partner's value isn't strict, `b` holds no row of the
+partner, and the partner is no item a LEFT JOIN adds, so `b` is no binding a
+core keeps. -/
 def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Prop :=
   (∃ x, cellOf (b e.member) e.column = some x ∧
     if e.nested then
       ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item e.partner).core,
         ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
     else ∃ r, b e.partner = some r ∧ e.value.eval r = some x) ∨
-  (e.nulls = true ∧ e.nested = false ∧ (s.item e.partner).left = false ∧
-    cellOf (b e.member) e.column = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none)
+  (e.nulls = true ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
+    cellOf (b e.member) e.column = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none) ∨
+  (e.value.strict = false ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
+    b e.partner = none)
 
 /-- An OR that narrows `d.item` holds of a binding: one of its sides does,
 each of its terms true of the item's row and each of its edges holding. -/
