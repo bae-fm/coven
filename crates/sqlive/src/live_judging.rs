@@ -51,9 +51,11 @@ impl<P: Policy> HostSql<P> {
         changes: Vec<crate::RowChange>,
     ) -> Result<crate::Judged, PolicyError<P>> {
         let _reading = self.authorization.reading();
-        handle
-            .judge(changes, crate::committing(), &mut |judging| self.ask_judged(judging))
-            .map_err(Into::into)
+        let judged =
+            handle.judge(changes, crate::committing(), &mut |judging| self.ask_judged(judging))?;
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.judged_queries += judged.judgments());
+        Ok(judged)
     }
 
     /// Answer one question about a changed row, read in this connection's

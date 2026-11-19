@@ -7,10 +7,11 @@
 //! sqlive's own rules. A write transaction captures what it changed, and a
 //! live read records the tables, columns and rows its statements read: sqlive
 //! parses each statement's SQL into the conditions that narrow each table it
-//! reads. sqlive then judges a commit's row changes against each live query's
-//! reads to tell whether the query's result could have changed. A [`Handle`]
-//! holds the subscriptions the judged commits wake, and the failure that ends
-//! every later call.
+//! reads. sqlive then judges a commit's row changes against the reads of each
+//! live query whose scopes the changed rows could pass, to tell whether the
+//! query's result could have changed. A [`Handle`] holds the subscriptions the
+//! judged commits wake, indexed by the values their scopes' equalities hold,
+//! and the failure that ends every later call.
 //!
 //! A [`Database`] also tells its host the main database file's size after
 //! each checkpoint, its checkpointer's or the host's, through a
@@ -41,6 +42,7 @@ mod planner_statistics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod random_scopes;
 mod read_capture;
+mod read_index;
 mod read_set;
 mod row_scope;
 mod schema_objects;

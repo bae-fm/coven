@@ -124,3 +124,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Statement.result_outRow
 #print axioms SqliveNarrowing.narrowing_sound
 #print axioms SqliveNarrowing.narrowing_sound_limited
+#print axioms SqliveNarrowing.RScope.key_passes
+#print axioms SqliveNarrowing.lookup_complete
+#print axioms SqliveNarrowing.index_judges_alike
+#print axioms SqliveNarrowing.indexed_narrowing_sound

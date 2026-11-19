@@ -4,7 +4,7 @@
 use crate::row_scope::{RowImage, RowScope};
 use crate::scope_lookup::{Judging, Lookups, NoAnswer};
 use crate::sql_value::SqlValue;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Past this many row changes to one table, a write records only that the
 /// table changed, not each row, so its memory stays bounded; every live
@@ -80,13 +80,34 @@ pub fn affected(
     answers: &mut Answers,
     lookups: &mut Lookups<'_>,
 ) -> rusqlite::Result<bool> {
+    affected_by(reads, changes, &past_row_limit(changes), answers, lookups)
+}
+
+/// The tables `changes` changes more than `ROWS_PER_TABLE` rows of.
+pub(crate) fn past_row_limit(changes: &[RowChange]) -> HashSet<&str> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for change in changes.iter().filter(|change| change.rows.is_some()) {
         *counts.entry(&change.table).or_default() += 1;
     }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > ROWS_PER_TABLE)
+        .map(|(table, _)| table)
+        .collect()
+}
+
+/// Whether some of `changes`, of a write that changes more than
+/// `ROWS_PER_TABLE` rows of each table `crowded` names, could change what
+/// `reads` returned, as `affected` judges them.
+pub(crate) fn affected_by<'a>(
+    reads: &ReadSet,
+    changes: impl IntoIterator<Item = &'a RowChange>,
+    crowded: &HashSet<&str>,
+    answers: &mut Answers,
+    lookups: &mut Lookups<'_>,
+) -> rusqlite::Result<bool> {
     for change in changes {
-        let bounded =
-            counts.get(change.table.as_str()).is_some_and(|count| *count > ROWS_PER_TABLE);
+        let bounded = crowded.contains(change.table.as_str());
         for read in reads {
             let found = if bounded {
                 read.affected(change, &mut |_| Ok(true))

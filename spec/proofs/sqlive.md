@@ -631,6 +631,25 @@ judge lets pass leaves a well-formed statement's rows unchanged, and
 `narrowing_sound_limited` that the same holds of sqlive's judge, which
 narrows nothing for a write whose question stopped at the step limit.
 
+## Which live queries judge a write
+
+[Index.lean](../../crates/sqlive/proofs/SqliveNarrowing/Index.lean) models
+how a handle finds the live queries that a write could rerun. The handle
+files each table a waiting live query reads under the key of the table's
+scope: a column that the scope's equalities or IN lists test, and the values
+that every row the scope passes holds in it (`RScope.key`). The handle files
+a table whose scope has no key under the table alone. The judge judges each
+change only against the live queries the handle filed under the change's
+table with no key, or with a key whose values include the value the changed
+row holds in the key's column before or after the change.
+`RScope.key_passes` proves that a row the scope passes holds one of its
+key's values. So the index finds each live query for every change that
+reruns it (`lookup_complete`), and the judge through the index reruns each
+live query on exactly the writes that the judge of every change reruns it on
+(`index_judges_alike`). `indexed_narrowing_sound` then proves that a write
+the judge through the index lets pass leaves a well-formed statement's rows
+unchanged.
+
 ## What the proofs don't cover
 
 The theorems prove each rule's step and `narrowing_sound`, which puts the
@@ -651,7 +670,12 @@ differential's tables hold no generated column: sqlive records no value of
 one for a write and counts it as changed by every write to its row, which the
 model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
 reads whole as a join's partner, and the terms that compare a NULL test's truth or
-a column `IS` a parameter.
+a column `IS` a parameter. The model's index holds only integers, so it doesn't
+state that sqlive files an integer and a real that compare equal under one
+value. Every changed row in the model holds a value in each column, so the
+model doesn't state that a row whose value a write didn't record, or a
+change that names no row, reaches every live query sqlive filed under its
+table.
 
 ## The runner and the differential
 

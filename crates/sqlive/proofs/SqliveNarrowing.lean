@@ -29,3 +29,4 @@ import SqliveNarrowing.Partners
 import SqliveNarrowing.Kept
 import SqliveNarrowing.Held
 import SqliveNarrowing.Sound
+import SqliveNarrowing.Index

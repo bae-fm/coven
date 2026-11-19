@@ -26,6 +26,9 @@ pub struct ConnectionWork {
     /// Steps of the lookups judging whether a write changed rows a live
     /// query joins.
     pub lookup_steps: usize,
+    /// Live queries that a write judged its changes against, one for each
+    /// write that judged each: those it could affect.
+    pub judged_queries: usize,
     /// Questions about a changed row that ran past `LOOKUP_STEPS` and
     /// stopped, each of which reran a live query.
     pub stopped_questions: usize,

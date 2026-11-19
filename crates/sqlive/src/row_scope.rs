@@ -140,6 +140,36 @@ impl RowScope {
         }
     }
 
+    /// A column in which every row in this scope holds one of a few values,
+    /// with those values: the first column its equalities and IN lists test
+    /// for which `equal_values` gives them. A handle files the scope's read
+    /// under them, so a change to a row that holds none of them is never
+    /// judged against the read (`read_index.rs`).
+    pub(crate) fn key(&self) -> Option<(&str, Vec<Value>)> {
+        let mut columns = Vec::new();
+        self.equality_columns(&mut columns);
+        columns.into_iter().find_map(|column| Some((column, self.equal_values(column)?)))
+    }
+
+    /// The columns this scope's equalities and IN lists test, in order.
+    fn equality_columns<'a>(&'a self, into: &mut Vec<&'a str>) {
+        match self {
+            Self::In { column, .. }
+            | Self::Compare { column, ordering: Ordering::Equal, inclusive: false, .. } => {
+                into.push(column);
+            }
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.equality_columns(into);
+                right.equality_columns(into);
+            }
+            Self::All
+            | Self::Compare { .. }
+            | Self::Null { .. }
+            | Self::Row(_)
+            | Self::Joined { .. } => {}
+        }
+    }
+
     /// The columns this scope tests, lowercase.
     pub fn columns(&self, into: &mut std::collections::BTreeSet<String>) {
         match self {

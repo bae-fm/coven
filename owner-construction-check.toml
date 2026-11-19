@@ -1428,8 +1428,8 @@ tables = [
 # One per open store, which every connection tells of its commits (§4).
 "crates/sqlive/src/handle.rs" = [
     "Handle::new",
-    # Makes each subscription's state, which its handle reaches by a weak
-    # reference.
+    # Makes each subscription's entry, which it shares with its handle, and
+    # the state its clones share.
     "CommitSubscription::new",
 ]
 # One per open store, which its connections' functions read and the

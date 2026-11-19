@@ -1196,6 +1196,16 @@ album page over 10 releases and then over 1,000, and credits an artist on
 another release's track. The page and the write's lookup should run as many
 steps over both, and the test fails if they grow.
 
+Coven judges a write only against the live queries whose scopes its rows
+could pass. Coven files each waiting live query under each table the query
+reads and, when an equality or an IN list narrows the table, under the
+values that the equality or list compares with. Coven judges a change to a
+row against the queries it filed under a value the row holds before or
+after the change, and against those whose scope on the table has no
+equality. With 200 album pages open, each reading `SELECT title FROM tracks
+WHERE release_id = ?1` for its own release, coven judges a track Ben adds to
+one release against that release's page alone.
+
 A condition SQLite judges costs a write one small SELECT for each row it
 changes and each such condition a live query holds, and rows that agree on the
 columns a condition names share one answer. Ben's import writes 270 rows at a
@@ -15354,6 +15364,7 @@ Write-ups explain each model and state its assumptions:
 | In a binding that matters of a core run before or after the write, each row passes its item's test: its terms hold, its memberships' and kept ORs' partners, which the order places before it, give its values from rows of their lookups in their scopes, the edges passed into it pass, and its LIMIT bound passes; a row of an item a lookup reads alone is a row of the lookup; so such a binding holds no row only of an item the planned state holds an ON narrowing back for | `partner_found`, `pushed_passes`, `plan_kept_rows`, `plan_restricted` | `../crates/sqlive/proofs/SqliveNarrowing/Kept.lean` | §4 |
 | While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Held.lean` | §4 |
 | The planner's scopes keep their promise for every query at every fuel at which two databases return the same rows that matter; a write the judge lets pass, with the scopes the planner gives the run that read the database before it, leaves a well-formed statement's rows unchanged, the statement's own query with a LIMIT bound included, and so does a write sqlive's judge lets pass when a question stopped at the step limit | `plan_kept`, `narrowing_sound`, `narrowing_sound_limited` | `../crates/sqlive/proofs/SqliveNarrowing/Sound.lean` | §4 |
+| A row a scope passes holds one of its key's values in the key's column, so the index of live queries finds each query for every change that reruns it; the judge through the index reruns each query on exactly the writes the judge of every change reruns it on, and so lets pass only writes that leave a well-formed statement's rows unchanged | `key_passes`, `lookup_complete`, `index_judges_alike`, `indexed_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Index.lean` | §4 |
 | When the judge lets a write pass, the tables before and after it hold the same rows that pass each item's test from the planner's scopes and passed edges, and a derived item's test keeps only rows that matter to its query; in a binding of the statement's own core that sorts at or before the last row, the LIMIT bound of each item the ORDER BY sorts passes the item's row when its memberships to other such items hold | `plan_restriction`, `Planned.bound_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Tests.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

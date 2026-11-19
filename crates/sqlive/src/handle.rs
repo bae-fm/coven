@@ -5,15 +5,19 @@
 
 use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
-use crate::{affected, Answers, EngineFailure, Error, Lookups, ReadSet, RowChange, RowScope};
+use crate::read_index::{ReadIndex, SubscriptionId};
+use crate::read_set::{affected_by, past_row_limit};
+use crate::{
+    affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange, RowScope,
+};
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{Bug, BugSinkRef};
 use std::{
     any::Any,
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     marker::PhantomData,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
 
@@ -124,13 +128,97 @@ struct Tracked {
     epoch: u64,
 }
 
-struct SubscriptionState {
-    tracking: Mutex<Tracked>,
+/// What a subscription shares with its handle: its tracking, behind its own
+/// lock, and what it has seen of the handle.
+struct Entry {
+    tracked: Mutex<Tracked>,
     state: watch::Sender<CommitState>,
     /// Commits made within this scope are not observed.
     outside: Option<CommitScope>,
+}
+
+impl Entry {
+    /// Whether commits made within `scope` don't reach this subscription.
+    fn outside_of(&self, scope: Option<CommitScope>) -> bool {
+        scope.is_some() && scope == self.outside
+    }
+
+    /// Whether a commit has marked this subscription to run again.
+    fn marked(&self) -> bool {
+        self.state.borrow().changed
+    }
+
+    /// Tell this subscription of a commit of `changes`: a reading one keeps
+    /// them; a waiting one not marked already is marked to run again when
+    /// they affect its reads. A waiting one still at the epoch the handle filed it at,
+    /// `filed`, takes the write's verdict at that epoch from `verdicts`, or
+    /// judges the changes at the positions the index found it for; any
+    /// other judges every change. Either judges counting every join's value
+    /// as matched: the write's transaction has ended, so no lookup can read
+    /// it.
+    fn tell(
+        &self,
+        id: SubscriptionId,
+        changes: &Arc<Vec<RowChange>>,
+        crowded: &HashSet<&str>,
+        filed: Option<(u64, &[usize])>,
+        verdicts: &HashMap<SubscriptionId, (u64, bool)>,
+    ) {
+        let mut tracked = lock_unpoisoned(&self.tracked);
+        let epoch = tracked.epoch;
+        let reads = match &mut tracked.tracking {
+            Tracking::Reading { commits, .. } => {
+                commits.push(Arc::clone(changes));
+                return;
+            }
+            Tracking::Waiting(_) if self.marked() => return,
+            Tracking::Waiting(reads) => reads,
+        };
+        let mut matched = |_: Judging<'_>| Ok(true);
+        let found = match filed {
+            Some((at, positions)) if at == epoch => match verdicts.get(&id) {
+                Some(&(judged, found)) if judged == epoch => found,
+                _ => affected_by(
+                    reads,
+                    positions.iter().map(|&position| &changes[position]),
+                    crowded,
+                    &mut Answers::default(),
+                    &mut matched,
+                )
+                .expect("judging without lookups can't fail"),
+            },
+            _ => affected_by(reads, changes.iter(), crowded, &mut Answers::default(), &mut matched)
+                .expect("judging without lookups can't fail"),
+        };
+        if found {
+            self.state.send_modify(|state| state.changed = true);
+        }
+    }
+}
+
+/// The subscriptions whose tracking changed since their handle last filed
+/// them, which it files again before it next reads its index, and those
+/// whose last clone dropped, which it forgets.
+#[derive(Default)]
+struct Refiling {
+    changed: BTreeSet<SubscriptionId>,
+    dropped: BTreeSet<SubscriptionId>,
+}
+
+/// What a subscription's clones share: its number in its handle, its entry,
+/// and where it tells the handle to file it again.
+struct SubscriptionState {
+    id: SubscriptionId,
+    entry: Arc<Entry>,
+    refiling: Arc<Mutex<Refiling>>,
     /// The tables whose changes no write records, which a run may not read.
     unrecorded: Arc<UnrecordedTables>,
+}
+
+impl Drop for SubscriptionState {
+    fn drop(&mut self) {
+        lock_unpoisoned(&self.refiling).dropped.insert(self.id);
+    }
 }
 
 /// One waiter on a handle's commits: a live query's, a change watch's, or the
@@ -142,25 +230,43 @@ pub struct CommitSubscription {
 }
 
 impl CommitSubscription {
+    /// A new subscription to the handle whose state is `handle`, which
+    /// commits made within `outside` don't reach, and whose runs may not
+    /// read the tables `unrecorded` names (`Handle::subscribe_outside`).
     fn new(
-        closed: bool,
-        failure: Option<Failure>,
+        handle: &Mutex<ObserverState>,
         outside: Option<CommitScope>,
         unrecorded: Arc<UnrecordedTables>,
     ) -> Self {
-        let (state, receiver) = watch::channel(CommitState { changed: false, closed, failure });
-        Self {
-            shared: Arc::new(SubscriptionState {
-                tracking: Mutex::new(Tracked {
+        let (shared, receiver) = with_locked(handle, |state| {
+            let failure = if state.closed { None } else { state.failure.clone() };
+            let (sender, receiver) =
+                watch::channel(CommitState { changed: false, closed: state.closed, failure });
+            let entry = Arc::new(Entry {
+                tracked: Mutex::new(Tracked {
                     tracking: Tracking::Waiting(Arc::new(Vec::new())),
                     epoch: 0,
                 }),
-                state,
+                state: sender,
                 outside,
-                unrecorded,
-            }),
-            receiver,
-        }
+            });
+            let id = state.next;
+            state.next += 1;
+            state.entries.insert(id, Arc::clone(&entry));
+            let shared =
+                SubscriptionState { id, entry, refiling: Arc::clone(&state.refiling), unrecorded };
+            (shared, receiver)
+        });
+        Self { shared: Arc::new(shared), receiver }
+    }
+
+    /// Change this subscription's tracking with `change`, and have its
+    /// handle file it again before the handle next reads its index.
+    fn track<R>(&self, change: impl FnOnce(&mut Tracked) -> R) -> R {
+        let mut tracked = lock_unpoisoned(&self.shared.entry.tracked);
+        let result = change(&mut tracked);
+        lock_unpoisoned(&self.shared.refiling).changed.insert(self.shared.id);
+        result
     }
 
     /// The state now, without marking it seen.
@@ -183,19 +289,21 @@ impl CommitSubscription {
     /// a write records the values the scopes this subscription went by
     /// until now test.
     pub fn begin(&self) {
-        let mut tracked = lock_unpoisoned(&self.shared.tracking);
-        let previous = Arc::clone(tracked.tracking.scoped());
-        tracked.tracking = Tracking::Reading { commits: Vec::new(), previous };
-        tracked.epoch += 1;
-        self.shared.state.send_modify(|state| state.changed = false);
+        self.track(|tracked| {
+            let previous = Arc::clone(tracked.tracking.scoped());
+            tracked.tracking = Tracking::Reading { commits: Vec::new(), previous };
+            tracked.epoch += 1;
+        });
+        self.shared.entry.state.send_modify(|state| state.changed = false);
     }
 
     /// Wait on nothing, whatever this subscription was doing: its query
     /// ended on a bug, so what its run read is unknown (E15).
     pub fn stop(&self) {
-        let mut tracked = lock_unpoisoned(&self.shared.tracking);
-        tracked.tracking = Tracking::Waiting(Arc::new(Vec::new()));
-        tracked.epoch += 1;
+        self.track(|tracked| {
+            tracked.tracking = Tracking::Waiting(Arc::new(Vec::new()));
+            tracked.epoch += 1;
+        });
     }
 
     /// Wait on `reads`, which join no table: no commit needs a lookup.
@@ -225,18 +333,20 @@ impl CommitSubscription {
         loop {
             // Judge without the lock, so writes go on committing; those that
             // commit meanwhile are judged on the next pass.
-            let commits = {
-                let mut tracked = lock_unpoisoned(&self.shared.tracking);
+            let commits = self.track(|tracked| {
                 let Tracking::Reading { commits, .. } = &mut tracked.tracking else {
                     panic!("read observation was not started")
                 };
-                if commits.is_empty() {
-                    tracked.tracking = Tracking::Waiting(Arc::clone(&reads));
-                    tracked.epoch += 1;
-                    self.shared.state.send_modify(|state| state.changed = changed);
-                    break;
+                if !commits.is_empty() {
+                    return Some(std::mem::take(commits));
                 }
-                std::mem::take(commits)
+                tracked.tracking = Tracking::Waiting(Arc::clone(&reads));
+                tracked.epoch += 1;
+                self.shared.entry.state.send_modify(|state| state.changed = changed);
+                None
+            });
+            let Some(commits) = commits else {
+                break;
             };
             for changes in commits {
                 if changed {
@@ -256,19 +366,28 @@ impl CommitSubscription {
 }
 
 /// A write's changes, and how each live query that waited on known reads
-/// judged them in the write's transaction, before it committed.
+/// and that the changes could affect judged them in the write's
+/// transaction, before it committed.
 pub struct Judged {
     changes: Arc<Vec<RowChange>>,
-    /// Each subscription judged, at its epoch then, and whether the changes
-    /// affect it.
-    verdicts: Vec<(Weak<SubscriptionState>, u64, bool)>,
+    /// Each subscription judged, by its number, with its epoch then and
+    /// whether the changes affect it. The changes affect no other
+    /// subscription that waited on its reads then: the index found it for
+    /// none of them.
+    verdicts: HashMap<SubscriptionId, (u64, bool)>,
 }
 
 impl Judged {
     /// Changes no live query judged, as those that name no row: each
     /// waiting query judges them as they reach it, without lookups.
     fn unjudged(changes: Vec<RowChange>) -> Self {
-        Self { changes: Arc::new(changes), verdicts: Vec::new() }
+        Self { changes: Arc::new(changes), verdicts: HashMap::new() }
+    }
+
+    /// How many live queries judged the changes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn judgments(&self) -> usize {
+        self.verdicts.len()
     }
 }
 
@@ -279,7 +398,15 @@ pub struct AttemptCommits {
 }
 
 struct ObserverState {
-    subscriptions: Vec<Weak<SubscriptionState>>,
+    /// Every subscription's entry, by its number.
+    entries: HashMap<SubscriptionId, Arc<Entry>>,
+    /// The number the next subscription takes.
+    next: SubscriptionId,
+    /// The subscriptions by how they tracked commits when the handle last
+    /// filed them.
+    filed: Filed,
+    /// The subscriptions to file again or forget, which they tell.
+    refiling: Arc<Mutex<Refiling>>,
     closed: bool,
     failure: Option<Failure>,
 }
@@ -310,29 +437,161 @@ fn half_changed(what: &'static str) -> Bug {
     Bug::new(what, "a panic while it was locked may have left it half-changed")
 }
 
+/// How a handle filed a subscription: waiting on reads at an epoch, or
+/// reading.
+enum Filing {
+    Waiting { epoch: u64, reads: Arc<ReadSet> },
+    Reading,
+}
+
+/// A handle's subscriptions by how each tracked commits when the handle last
+/// filed it: those waiting on known reads by their reads, and those whose
+/// runs were reading.
+#[derive(Default)]
+struct Filed {
+    filings: HashMap<SubscriptionId, Filing>,
+    waiting: ReadIndex,
+    reading: BTreeSet<SubscriptionId>,
+}
+
+impl Filed {
+    /// File subscription `id`, which tracks commits as `tracked` says.
+    fn file(&mut self, id: SubscriptionId, tracked: &Tracked) {
+        self.forget(id);
+        let filing = match &tracked.tracking {
+            Tracking::Waiting(reads) => {
+                self.waiting.insert(id, reads);
+                Filing::Waiting { epoch: tracked.epoch, reads: Arc::clone(reads) }
+            }
+            Tracking::Reading { .. } => {
+                self.reading.insert(id);
+                Filing::Reading
+            }
+        };
+        self.filings.insert(id, filing);
+    }
+
+    /// Take subscription `id` out.
+    fn forget(&mut self, id: SubscriptionId) {
+        match self.filings.remove(&id) {
+            Some(Filing::Waiting { reads, .. }) => self.waiting.remove(id, &reads),
+            Some(Filing::Reading) => {
+                self.reading.remove(&id);
+            }
+            None => {}
+        }
+    }
+}
+
+/// Run `change` on a handle's `state`, once it has filed again the
+/// subscriptions whose tracking changed. A panic while it was held may have
+/// left some subscription untold of a commit, so the handle fails with that
+/// bug, which tells every subscription; the failure then stands in for the
+/// poisoning (E15).
+fn with_locked<R>(state: &Mutex<ObserverState>, change: impl FnOnce(&mut ObserverState) -> R) -> R {
+    let mut held = state.lock().unwrap_or_else(|poisoned| {
+        let mut held = poisoned.into_inner();
+        held.fail(Failure::Bug(half_changed("the handle's live queries")));
+        state.clear_poison();
+        held
+    });
+    held.refile();
+    change(&mut held)
+}
+
 impl ObserverState {
     /// Fail every later call and subscription. The handle keeps the first
     /// failure and ignores later ones.
     fn fail(&mut self, failure: Failure) {
         let error = self.failure.get_or_insert(failure).clone();
-        self.subscriptions.retain(|subscription| {
-            let Some(subscription) = subscription.upgrade() else {
-                return false;
-            };
-            subscription.state.send_modify(|state| state.failure = Some(error.clone()));
-            true
-        });
+        for entry in self.entries.values() {
+            entry.state.send_modify(|state| state.failure = Some(error.clone()));
+        }
     }
 
     fn close(&mut self) {
         self.closed = true;
-        self.subscriptions.retain(|subscription| {
-            let Some(subscription) = subscription.upgrade() else {
-                return false;
-            };
-            subscription.state.send_modify(|state| state.closed = true);
-            true
-        });
+        for entry in self.entries.values() {
+            entry.state.send_modify(|state| state.closed = true);
+        }
+    }
+
+    /// File again each subscription whose tracking changed since the last
+    /// filing, and forget each one whose last clone dropped.
+    fn refile(&mut self) {
+        let Refiling { changed, dropped } = std::mem::take(&mut *lock_unpoisoned(&self.refiling));
+        for id in changed.difference(&dropped) {
+            if let Some(entry) = self.entries.get(id) {
+                self.filed.file(*id, &lock_unpoisoned(&entry.tracked));
+            }
+        }
+        for id in dropped {
+            self.entries.remove(&id);
+            self.filed.forget(id);
+        }
+    }
+
+    /// Each subscription filed as waiting that `changes`, made within
+    /// `scope`, could affect, not marked to run again already, with the
+    /// epoch and reads it was filed with and the positions of those changes.
+    fn candidates(
+        &self,
+        changes: &[RowChange],
+        scope: Option<CommitScope>,
+    ) -> Vec<(SubscriptionId, u64, Arc<ReadSet>, Vec<usize>)> {
+        self.filed
+            .waiting
+            .candidates(changes)
+            .into_iter()
+            .filter_map(|(id, positions)| {
+                let entry = &self.entries[&id];
+                if entry.outside_of(scope) || entry.marked() {
+                    return None;
+                }
+                let Some(Filing::Waiting { epoch, reads }) = self.filed.filings.get(&id) else {
+                    unreachable!("the index holds only waiting subscriptions' reads")
+                };
+                Some((id, *epoch, Arc::clone(reads), positions))
+            })
+            .collect()
+    }
+
+    /// Tell each subscription a commit of `changes` made within `scope`
+    /// could reach of it (`Handle::commit`), with the write's `verdicts`:
+    /// those filed as reading, and those filed as waiting that the index
+    /// finds for the changes. One filed as waiting that the index finds
+    /// for none of them is affected by none of them; one whose tracking
+    /// changed since the filing began a run after the commit, or finished
+    /// one it was filed as reading for.
+    fn commit(
+        &self,
+        changes: &Arc<Vec<RowChange>>,
+        verdicts: &HashMap<SubscriptionId, (u64, bool)>,
+        scope: Option<CommitScope>,
+    ) {
+        let crowded = past_row_limit(changes);
+        for id in &self.filed.reading {
+            let entry = &self.entries[id];
+            if !entry.outside_of(scope) {
+                entry.tell(*id, changes, &crowded, None, verdicts);
+            }
+        }
+        for (id, epoch, _, positions) in self.candidates(changes, scope) {
+            self.entries[&id].tell(id, changes, &crowded, Some((epoch, &positions)), verdicts);
+        }
+    }
+
+    /// The columns some subscription's scope tests, by table, all
+    /// lowercase (`Handle::scoped_columns`).
+    fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for entry in self.entries.values() {
+            let reads = Arc::clone(lock_unpoisoned(&entry.tracked).tracking.scoped());
+            for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
+                read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
+            }
+        }
+        tables
     }
 }
 
@@ -366,7 +625,10 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     pub fn new(bugs: BugSinkRef, unrecorded: Vec<String>) -> Self {
         Self {
             state: Arc::new(Mutex::new(ObserverState {
-                subscriptions: Vec::new(),
+                entries: HashMap::new(),
+                next: 0,
+                filed: Filed::default(),
+                refiling: Arc::new(Mutex::new(Refiling::default())),
                 closed: false,
                 failure: None,
             })),
@@ -418,18 +680,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// database has closed, a new subscription reports that it closed, as a
     /// call to the database does, not the failure it may have closed with.
     pub fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
-        self.with_state(|state| {
-            let failure = if state.closed { None } else { state.failure.clone() };
-            let subscription = CommitSubscription::new(
-                state.closed,
-                failure,
-                outside,
-                Arc::clone(&self.unrecorded),
-            );
-            state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
-            state.subscriptions.push(Arc::downgrade(&subscription.shared));
-            subscription
-        })
+        CommitSubscription::new(&self.state, outside, Arc::clone(&self.unrecorded))
     }
 
     /// Watch `reads` from now on; `first` reports the state now as their
@@ -492,37 +743,30 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     }
 
     /// Judge a write's `changes`, made within `scope`, for every live query
-    /// waiting on known reads that isn't already marked to run again, with
-    /// `lookups` reading the write's transaction before it commits (§4).
+    /// waiting on known reads that isn't already marked to run again and
+    /// that the changes could affect, with `lookups` reading the write's
+    /// transaction before it commits (§4).
     pub fn judge(
         &self,
         changes: Vec<RowChange>,
         scope: Option<CommitScope>,
         lookups: &mut Lookups<'_>,
     ) -> rusqlite::Result<Judged> {
-        let waiting: Vec<(Arc<SubscriptionState>, u64, Arc<ReadSet>)> = self.with_state(|state| {
-            state
-                .subscriptions
-                .iter()
-                .filter_map(Weak::upgrade)
-                .filter(|subscription| scope.is_none() || scope != subscription.outside)
-                .filter(|subscription| !subscription.state.borrow().changed)
-                .filter_map(|subscription| {
-                    let tracked = lock_unpoisoned(&subscription.tracking);
-                    let Tracking::Waiting(reads) = &tracked.tracking else {
-                        return None;
-                    };
-                    let found = (Arc::clone(reads), tracked.epoch);
-                    drop(tracked);
-                    Some((subscription, found.1, found.0))
-                })
-                .collect()
-        });
-        let mut answers = Answers::default();
-        let mut verdicts = Vec::with_capacity(waiting.len());
-        for (subscription, epoch, reads) in waiting {
-            let found = affected(&reads, &changes, &mut answers, lookups)?;
-            verdicts.push((Arc::downgrade(&subscription), epoch, found));
+        let candidates = self.with_state(|state| state.candidates(&changes, scope));
+        let mut verdicts = HashMap::with_capacity(candidates.len());
+        {
+            let crowded = past_row_limit(&changes);
+            let mut answers = Answers::default();
+            for (id, epoch, reads, positions) in candidates {
+                let found = affected_by(
+                    &reads,
+                    positions.iter().map(|&position| &changes[position]),
+                    &crowded,
+                    &mut answers,
+                    lookups,
+                )?;
+                verdicts.insert(id, (epoch, found));
+            }
         }
         Ok(Judged { changes: Arc::new(changes), verdicts })
     }
@@ -546,39 +790,11 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// the changes, to judge against its run's snapshot as it finishes. One
     /// that finished another run since, or wasn't judged, judges the
     /// changes counting every join's value as matched: their transaction
-    /// has ended, so no lookup can read it.
+    /// has ended, so no lookup can read it. A waiting query the index finds
+    /// for none of the changes is affected by none of them.
     pub fn commit(&self, judged: Judged, scope: Option<CommitScope>) {
         let Judged { changes, verdicts } = judged;
-        self.with_state(|state| {
-            state.subscriptions.retain(|subscription| {
-                let Some(subscription) = subscription.upgrade() else {
-                    return false;
-                };
-                if scope.is_some() && scope == subscription.outside {
-                    return true;
-                }
-                let mut tracked = lock_unpoisoned(&subscription.tracking);
-                let epoch = tracked.epoch;
-                match &mut tracked.tracking {
-                    Tracking::Reading { commits, .. } => commits.push(Arc::clone(&changes)),
-                    Tracking::Waiting(reads) => {
-                        let verdict = verdicts.iter().find_map(|(judged, at, found)| {
-                            (*at == epoch
-                                && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
-                            .then_some(*found)
-                        });
-                        let found = verdict.unwrap_or_else(|| {
-                            affected(reads, &changes, &mut Answers::default(), &mut |_| Ok(true))
-                                .expect("judging without lookups can't fail")
-                        });
-                        if found {
-                            subscription.state.send_modify(|state| state.changed = true);
-                        }
-                    }
-                }
-                true
-            })
-        });
+        self.with_state(|state| state.commit(&changes, &verdicts, scope));
     }
 
     /// The columns some subscription's scope tests, by table, all
@@ -587,16 +803,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// any other table needs no values to wake the subscriptions that read
     /// it.
     pub fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.with_state(|state| {
-            let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
-                let reads = Arc::clone(lock_unpoisoned(&subscription.tracking).tracking.scoped());
-                for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
-                    read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
-                }
-            }
-            tables
-        })
+        self.with_state(|state| state.scoped_columns())
     }
 
     /// What every call on the handle fails with: its failure, or
@@ -708,18 +915,9 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         });
     }
 
-    /// Run `change` on the handle's state. A panic while it was held may
-    /// have left some subscription untold of a commit, so the handle fails
-    /// with that bug, which tells every subscription; the failure then
-    /// stands in for the poisoning (E15).
+    /// Run `change` on the handle's state (`with_locked`).
     fn with_state<R>(&self, change: impl FnOnce(&mut ObserverState) -> R) -> R {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
-            let mut state = poisoned.into_inner();
-            state.fail(Failure::Bug(half_changed("the handle's live queries")));
-            self.state.clear_poison();
-            state
-        });
-        change(&mut state)
+        with_locked(&self.state, change)
     }
 }
 
