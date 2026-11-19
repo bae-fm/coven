@@ -42,6 +42,7 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{Expr, ExprKind, HirId, ImplItem, Item, ItemKind, find_attr};
 use rustc_lint::{LateContext, LateLintPass, declare_tool_lint, impl_lint_pass};
 use rustc_middle::ty::{self, GenericArgsRef, Instance, InstanceKind, Ty, TyCtxt};
+use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{Span, sym};
 
 use crate::finding::Finding;
@@ -474,6 +475,13 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
         let tcx = cx.tcx;
         let owner = tcx.hir_body_owner_def_id(body);
         let typeck = cx.typeck_results();
+        // A function an attribute macro writes, as uniffi writes one that
+        // exports a function to the app, hands on what a root it calls built.
+        let written_by_attribute = matches!(
+            tcx.def_span(tcx.typeck_root_def_id(owner.to_def_id())).ctxt().outer_expn_data().kind,
+            ExpnKind::Macro(MacroKind::Attr, _)
+        );
+        let calls_root = |callee: DefId| written_by_attribute && is_root(owners, tcx, callee);
         let mut builds = Vec::new();
         match expr.kind {
             ExprKind::Struct(..) => builds.push((typeck.expr_ty(expr), false)),
@@ -486,7 +494,7 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
                     let output = tcx.fn_sig(ctor).instantiate(tcx, args).skip_norm_wip().output();
                     builds.push((output.skip_binder(), false));
                 }
-                Res::Def(DefKind::Fn | DefKind::AssocFn, callee) => {
+                Res::Def(DefKind::Fn | DefKind::AssocFn, callee) if !calls_root(callee) => {
                     let receiver =
                         tcx.opt_associated_item(callee).is_some_and(|item| item.is_method());
                     let args = typeck.node_args(expr.hir_id);
@@ -499,7 +507,9 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
                 _ => {}
             },
             ExprKind::MethodCall(..) => {
-                if let Some(callee) = typeck.type_dependent_def_id(expr.hir_id) {
+                if let Some(callee) = typeck.type_dependent_def_id(expr.hir_id)
+                    && !calls_root(callee)
+                {
                     let args = typeck.node_args(expr.hir_id);
                     builds.extend(
                         Self::call_builds(owners, cx, callee, args)

@@ -14,7 +14,7 @@ task_types = ["owners::Task", "owners::elsewhere::Task"]
 "owners_parameters::Requests" = "owners_parameters::Query"
 
 [composition_roots]
-"src/lib.rs" = ["Builder::open", "REGISTRY"]
+"src/lib.rs" = ["Builder::open", "REGISTRY", "open_service"]
 "parameters.rs" = ["View::assemble"]
 
 [capability_factories."src/lib.rs"]

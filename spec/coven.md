@@ -14496,7 +14496,10 @@ places that start background work.
   construction-only capability or a handle where it writes the type's literal
   or constructor, and where it calls a function whose declared result holds
   one by value: a trait method's call is its impl's, so `Default::default()`
-  builds what its impl builds, and a clone builds nothing. A generic type is
+  builds what its impl builds, and a clone builds nothing. A function that an
+  attribute macro writes, as uniffi writes the function that exports another
+  to an app, builds nothing by calling a root: it hands on what the root
+  built. A generic type is
   an owner by what it holds itself; what it is given was built where that
   value was. A function with no `self` that returns a capability or a handle
   is its factory and may build it; its callers answer for the value. A method

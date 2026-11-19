@@ -137,6 +137,20 @@ pub fn with_test_only_code() {
     let _ = SystemClock;
 }
 
+/// A root an attribute macro exports: the function the macro writes hands on
+/// what the root built.
+#[owners_export::export(Service)]
+pub fn open_service() -> Service {
+    Service { clock: SystemClock }
+}
+
+/// A function that is no root, which calls one, and which the macro exports:
+/// the function the macro writes builds what this one returns.
+#[owners_export::export(Service)] // finding
+pub fn service_elsewhere() -> Service {
+    Builder::open() // finding
+}
+
 /// A test-only owner that a derive builds: the derive's impl is test code.
 #[cfg(feature = "test-utils")]
 #[derive(Default)]
