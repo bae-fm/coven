@@ -68,6 +68,10 @@ pub(crate) struct FromItem {
     /// narrows yet, what its ON says of the other sources, which narrows
     /// them once one does and so makes it an inner join's.
     pub(crate) left_on: Option<crate::scope_plan::Narrowing>,
+    /// Whether a LEFT JOIN adds it, whatever makes the join inner later: a
+    /// left row no right row joins gives NULLs in its place with no row of
+    /// it, which no lookup finds.
+    pub(crate) left: bool,
     /// The SELECT core whose FROM holds it.
     pub(crate) core: usize,
     /// A subquery's, CTE's or view's cores, which conditions on its rows
@@ -99,6 +103,7 @@ pub(crate) fn read_item<'a>(
         source,
         columns,
         left_on: left.then(crate::scope_plan::Narrowing::default),
+        left,
         core,
         derived,
         using: Vec::new(),

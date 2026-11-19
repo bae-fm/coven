@@ -1,7 +1,8 @@
 //! An equality between a column of one of a core's sources and a value of
 //! one other source, read as an edge the first takes values by (§4): from a
-//! condition, or from the ON a USING join stands for. An edge also carries
-//! what the other source's terms say of its column to the first.
+//! condition, or from the ON a USING join stands for. `IS` reads the same
+//! way, with a NULL matching a NULL. An edge also carries what the other
+//! source's terms say of its column to the first.
 
 use crate::from_item::Columns;
 use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
@@ -130,7 +131,22 @@ impl Planner<'_> {
         let affinity = items[member].columns.affinity(&column)?;
         items[partner].source.from.as_ref()?;
         let value = value(affinity)?;
-        Some(Edge { member, column, affinity, partner, value, nested: false })
+        Some(Edge { member, column, affinity, partner, value, nested: false, nulls: false })
+    }
+
+    /// The edge `member_expr IS other` gives: the equality's, matching a NULL
+    /// with a NULL, when no LEFT JOIN adds the partner. A left row no right
+    /// row joins holds NULLs in the right side's place with no row a lookup
+    /// could find.
+    pub(crate) fn is_edge(
+        &self,
+        core: usize,
+        member_expr: &Expr<'_>,
+        other: &Expr<'_>,
+        first: bool,
+    ) -> Option<Edge> {
+        let edge = self.edge(core, member_expr, other, first)?;
+        (!self.items[edge.partner].left).then_some(Edge { nulls: true, ..edge })
     }
 
     /// Carry, across each edge between two items of `core` that compares
@@ -144,7 +160,9 @@ impl Planner<'_> {
     /// nothing further, and leaves the member to take values from the sources
     /// its edges join it to. A LEFT JOIN's right side stays one: the term
     /// holds of each of its rows that joins, and says nothing of its row of
-    /// NULLs. The model states the rule as `Transfer.carry` in
+    /// NULLs. An `IS` edge carries no derived partner's arms' terms: a
+    /// derived row whose column is NULL says nothing of its arm's sources.
+    /// The model states the rule as `Transfer.carry` in
     /// `crates/sqlive/proofs`.
     pub(crate) fn carry_terms(&mut self, core: usize) {
         let mut carried: Vec<(usize, ScopeTerm)> = Vec::new();
@@ -162,7 +180,9 @@ impl Planner<'_> {
                 .term
                 .as_ref()
                 .and_then(|term| term.renamed(&rename));
-            let pulled = crate::derived::pulled(self, edge.partner, compared)
+            let pulled = (!edge.nulls)
+                .then(|| crate::derived::pulled(self, edge.partner, compared))
+                .flatten()
                 .and_then(|term| term.renamed(&rename));
             carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member, term)));
         }

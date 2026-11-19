@@ -448,8 +448,10 @@ pub(crate) fn push_down(
                     })
                 })
                 .filter(|renamed| !(left && renamed.may_hold_on_nulls()));
+            // An `IS` edge is the same.
             let passed: Vec<Edge> = edges
                 .iter()
+                .filter(|edge| !(left && edge.nulls))
                 .filter_map(|edge| {
                     let (passed, column) = through(&edge.column)?;
                     (passed == target).then(|| Edge { member: target, column, ..edge.clone() })

@@ -123,8 +123,8 @@ def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :
       | .column c =>
         match partner.equalValues c with
         | some vs => scope.both (.inVals m.column vs.eraseDups)
-        | none => scope.both (.joined m.column m.partner m.value partner)
-      | v => scope.both (.joined m.column m.partner v partner)) scope
+        | none => scope.both (.joined m.column m.partner m.value partner m.nulls)
+      | v => scope.both (.joined m.column m.partner v partner m.nulls)) scope
     let scope := match p.sorted, last with
       | some sorted, some values =>
         if sorted.item = i then

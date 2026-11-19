@@ -1009,10 +1009,17 @@ affinity, gives the looked-up value the joined column's, so a text `'5'` the
 expression makes equals the 5 an INTEGER column holds. Where coven couldn't
 compare as SQLite does, the join narrows nothing: between columns of different
 affinities, by a collation other than BINARY, as when its first side is a
-NOCASE column, and on anything but an equality. NATURAL, RIGHT and FULL joins
-narrow nothing either. A join with USING narrows as the ON it stands for: `JOIN
-r USING (k)` compares `r.k` with the `k` of the leftmost table before it that
-has one, by that table's collation.
+NOCASE column, and on anything but an equality or `IS`. A join on `IS` matches
+NULL with NULL, and its lookup asks for a NULL the same way. Ben's import joins
+a candidate's failures to it by `f.hash IS v.hash AND f.run IS v.run`, where a
+run can be NULL, so a failure the import writes for another candidate doesn't
+rerun the list of this candidate's failures that Ben has open. A join on `IS`
+takes no values from a table a LEFT JOIN adds, whose missing row gives NULLs
+that no lookup finds, and it can be true of the NULLs a missing right row
+gives, so it never makes a LEFT JOIN an inner join.
+NATURAL, RIGHT and FULL joins narrow nothing either. A join with USING narrows
+as the ON it stands for: `JOIN r USING (k)` compares `r.k` with the `k` of the
+leftmost table before it that has one, by that table's collation.
 
 One of coven's views or a table function in a join narrows the tables beside
 it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
@@ -15000,6 +15007,7 @@ Write-ups explain each model and state its assumptions:
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
 | A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
+| `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/IsEdge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |

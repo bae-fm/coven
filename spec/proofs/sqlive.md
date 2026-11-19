@@ -77,6 +77,14 @@ promise of whichever rule reads it.
 - **A row value equality between two items.** `row_edge_sound` proves the
   same of each pair of `(a.x, a.y) = (b.z, b.w)`, which holds only where
   every pair is equal.
+- **`IS` between two items.** `is_edge_sound` proves that `a.x IS b.y`, true
+  of a binding, makes `a.x` hold a value that `b`'s row gives, or makes both
+  NULL, `b`'s column NULL in its row or for want of one. The partner is never
+  an item a LEFT JOIN adds, so a binding a core keeps holds its row, and a
+  lookup that asks for a NULL finds it. An `IS` edge can hold where its
+  member is NULL, so it never makes a LEFT JOIN an inner join's, and an
+  equality on `IS` carries no term from a derived partner's arms, whose NULL
+  says nothing of their items.
 - **A column compared with a subquery's value.** `subquery_edge_sound` proves
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's

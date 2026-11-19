@@ -25,6 +25,8 @@ mod carry;
 mod distinct;
 #[path = "narrowing_model/edge.rs"]
 mod edge;
+#[path = "narrowing_model/is_edge.rs"]
+mod is_edge;
 #[path = "narrowing_model/limit.rs"]
 mod limit;
 #[path = "narrowing_model/mixed.rs"]
@@ -487,6 +489,12 @@ async fn edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn row_edge_matches_lean() {
     differential("row edge", row_edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn is_edge_matches_lean() {
+    differential("is edge", is_edge::statement).await;
 }
 
 #[tokio::test]

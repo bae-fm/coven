@@ -104,6 +104,7 @@ impl Planner<'_> {
             partner,
             value: PartnerValue::Column(partner_column),
             nested: true,
+            nulls: false,
         })
     }
 }

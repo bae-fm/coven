@@ -1,6 +1,7 @@
 import SqliveNarrowing.Rules.Term
 import SqliveNarrowing.Rules.Edge
 import SqliveNarrowing.Rules.RowEdge
+import SqliveNarrowing.Rules.IsEdge
 import SqliveNarrowing.Rules.SubqueryEdge
 import SqliveNarrowing.Rules.RowSubqueryEdge
 import SqliveNarrowing.Rules.PushDown
@@ -20,7 +21,8 @@ def conditionRules : List { read : ReadCondition // read.Sound } :=
    ⟨RowSubqueryEdge.readCondition, RowSubqueryEdge.row_subquery_edge_sound⟩,
    ⟨Term.readCondition, Term.term_sound⟩,
    ⟨Edge.readCondition, Edge.edge_sound⟩,
-   ⟨RowEdge.readCondition, RowEdge.row_edge_sound⟩]
+   ⟨RowEdge.readCondition, RowEdge.row_edge_sound⟩,
+   ⟨IsEdge.readCondition, IsEdge.is_edge_sound⟩]
 
 /-- The narrowing condition `cd` of core `k` gives. -/
 def readCondition (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=

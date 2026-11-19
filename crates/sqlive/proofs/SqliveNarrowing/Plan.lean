@@ -95,6 +95,8 @@ structure Edge where
   value : PValue
   /-- Whether the partner is the source of a subquery's value. -/
   nested : Bool
+  /-- Whether the edge compares by `IS`, which matches a NULL with a NULL. -/
+  nulls : Bool := false
   deriving Repr, Inhabited
 
 /-- Terms on items and edges between them, which conditions give. -/
@@ -103,8 +105,10 @@ structure Narrowing where
   edges : List Edge := []
   deriving Repr, Inhabited
 
+/-- Whether a row of NULLs in an item's place can pass some of `n`: a term
+that can, or an `IS` edge, whose member's NULL matches a NULL. -/
 def Narrowing.mayHoldOnNulls (n : Narrowing) : Bool :=
-  n.terms.any fun (_, t) => t.mayHoldOnNulls
+  n.terms.any (fun (_, t) => t.mayHoldOnNulls) || n.edges.any (·.nulls)
 
 /-- What of `n` narrows `i`, and the rest. -/
 def Narrowing.split (n : Narrowing) (i : Nat) : Narrowing × Narrowing :=
@@ -120,8 +124,9 @@ inductive RScope where
   | null (column : Nat) (not : Bool)
   | inVals (column : Nat) (values : List Int)
   | row (item : Nat) (cond : Cond)
-  /-- `column` equals `value` over a row of `partner` in `scope`. -/
-  | joined (column : Nat) (partner : Nat) (value : PValue) (scope : RScope)
+  /-- `column` equals `value` over a row of `partner` in `scope`; a NULL
+  matches a NULL when `nulls`, as `IS` compares. -/
+  | joined (column : Nat) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
   | and (left right : RScope)
   | or (left right : RScope)
   deriving Repr, Inhabited
@@ -172,10 +177,8 @@ def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
     | some x => vs.contains x
     | none => false
   | .row _ cd => isTrue (cd.eval (rowBind (some r)) noSubs)
-  | .joined c p v s =>
-    match r.cell c with
-    | some x => (rowsOf p).any fun r' => v.eval r' == some x && s.passes rowsOf r'
-    | none => false
+  | .joined c p v s nulls =>
+    ((r.cell c).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == r.cell c && s.passes rowsOf r'
   | .and l t => l.passes rowsOf r && t.passes rowsOf r
   | .or l t => l.passes rowsOf r || t.passes rowsOf r
 
@@ -238,12 +241,14 @@ def PState.add (st : PState) (n : Narrowing) : PState × List Nat :=
 /-- Narrow by `n`, which conditions on the joined rows give, and make each
 LEFT JOIN item it narrows an inner join's, releasing what its ON said of the
 other items (`Planner::narrow`, `Planner::join_inner`). A term a row of NULLs
-can pass narrows nothing on a right side that is still a LEFT JOIN's. -/
+can pass, and an `IS` edge, narrow nothing on a right side that is still a
+LEFT JOIN's. -/
 def PState.narrow : Nat → PState → Narrowing → PState
   | 0, st, _ => st
   | fuel + 1, st, n =>
     let terms := n.terms.filter fun (i, t) => !(t.mayHoldOnNulls && (st.items i).leftOn.isSome)
-    let (st, narrowed) := st.add { n with terms }
+    let edges := n.edges.filter fun e => !(e.nulls && (st.items e.member).leftOn.isSome)
+    let (st, narrowed) := st.add { terms, edges }
     narrowed.foldl (fun st i =>
       match (st.items i).leftOn with
       | some held => PState.narrow fuel (st.update i fun p => { p with leftOn := none }) held

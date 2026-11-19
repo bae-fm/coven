@@ -101,7 +101,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     {x : Int} (hm : member.eval b sub = some x) (ho : other.eval b sub = some x) :
     e.HoldsIn s db f b := by
   obtain ⟨hmem, _, hn, hq, hitems, hrefs, _, _, hval⟩ := edge_facts h
-  refine ⟨x, ?_, ?_⟩
+  refine Or.inl ⟨x, ?_, ?_⟩
   · rw [hmem] at hm
     simpa [Expr.eval] using hm
   · simp only [hn, Bool.false_eq_true, ↓reduceIte]

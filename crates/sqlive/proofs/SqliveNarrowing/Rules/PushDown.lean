@@ -7,7 +7,8 @@ its query has no LIMIT and no OFFSET: an output column that is a bare column of 
 own item holds that item's value, so a term or an edge on the column holds of
 the item's row (`derived.rs`, `push_down`). The target is then an inner
 join's, as a WHERE condition in the arm would make it, except that a term a
-row of NULLs can pass narrows nothing on a LEFT JOIN's right side. -/
+row of NULLs can pass, and an `IS` edge, narrow nothing on a LEFT JOIN's
+right side. -/
 namespace SqliveNarrowing.PushDown
 
 /-- For a derived item, each arm a condition on its rows passes into: the
@@ -47,7 +48,7 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
           let left := (st.items target).leftOn.isSome
           let renamed := (term.bind (·.renamed rename)).filter
             fun r => !(left && r.mayHoldOnNulls)
-          let passed := edges.filterMap fun e =>
+          let passed := (edges.filter fun e => !(left && e.nulls)).filterMap fun e =>
             (rename e.column).map fun c' => { e with member := target, column := c' }
           let st := match renamed with
             | some r => st.addTerm target r

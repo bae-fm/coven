@@ -63,6 +63,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
                     partner.qualifier.clone(),
                     membership.value.clone(),
                     membership.affinity,
+                    membership.nulls,
                     partner_scope.clone(),
                     &parameters,
                 )),
@@ -101,6 +102,8 @@ pub struct Lookup {
     value: PartnerValue,
     /// The joined column's.
     affinity: Affinity,
+    /// Whether the join is on `IS`, which matches a NULL with a NULL.
+    nulls: bool,
     /// The partner's rows in this run.
     scope: RowScope,
     sql: LookupSql,
@@ -127,11 +130,17 @@ impl Lookup {
         qualifier: String,
         value: PartnerValue,
         affinity: Affinity,
+        nulls: bool,
         scope: RowScope,
         parameters: &[Value],
     ) -> Self {
-        let sql = render(&from, &qualifier, &value, affinity, &scope, parameters);
-        Self { from, qualifier, value, affinity, scope, sql }
+        let sql = render(&from, &qualifier, &value, affinity, nulls, &scope, parameters);
+        Self { from, qualifier, value, affinity, nulls, scope, sql }
+    }
+
+    /// Whether the join is on `IS`, so a NULL looks up a partner's NULL.
+    pub(crate) fn nulls(&self) -> bool {
+        self.nulls
     }
 
     /// The SQL that looks up `value`, and its parameters with `value` last.
@@ -148,21 +157,24 @@ impl Lookup {
     }
 }
 
-/// A lookup's SQL: the partner's rows in `scope` holding the looked-up value.
+/// A lookup's SQL: the partner's rows in `scope` holding the looked-up value,
+/// compared by `IS` when `nulls`.
 fn render(
     from: &str,
     qualifier: &str,
     partner: &PartnerValue,
     affinity: Affinity,
+    nulls: bool,
     scope: &RowScope,
     parameters: &[Value],
 ) -> LookupSql {
     let mut parameters = parameters.to_vec();
     let condition = condition(scope, qualifier, &mut parameters);
     let value = format!("?{}", parameters.len() + 1);
+    let operator = if nulls { "IS" } else { "=" };
     let found = |compared: &str| {
         format!(
-            "SELECT 1 FROM {from} WHERE {} = {compared} COLLATE BINARY AND {condition} LIMIT 1",
+            "SELECT 1 FROM {from} WHERE {} {operator} {compared} COLLATE BINARY AND {condition} LIMIT 1",
             partner_value(qualifier, partner)
         )
     };
@@ -194,7 +206,8 @@ fn partner_value(qualifier: &str, value: &PartnerValue) -> String {
 /// `scope` as an SQL condition on the rows `qualifier` names, its values
 /// appended to `bound` as parameters. A join inside it lists its partner's
 /// values in a subquery that names only the partner's rows, so no name in
-/// it can mean a row around it.
+/// it can mean a row around it; a join on `IS` also passes a NULL when some
+/// partner row in its scope gives NULL.
 fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> String {
     let parameter = |value: &Value, bound: &mut Vec<Value>| {
         bound.push(value.clone());
@@ -229,13 +242,24 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
         // Its parameters are numbered as the statement's, which the lookup
         // binds first.
         RowScope::Row(row) => format!("({})", row.term.condition),
-        RowScope::Joined { column, lookup } => format!(
-            "{qualifier}.{} IN (SELECT {} FROM {} WHERE {})",
-            crate::sql::identifier(column),
-            partner_value(&lookup.qualifier, &lookup.value),
-            lookup.from,
-            condition(&lookup.scope, &lookup.qualifier, bound)
-        ),
+        RowScope::Joined { column, lookup } => {
+            let column = format!("{qualifier}.{}", crate::sql::identifier(column));
+            let value = partner_value(&lookup.qualifier, &lookup.value);
+            let listed = format!(
+                "{column} IN (SELECT {value} FROM {} WHERE {})",
+                lookup.from,
+                condition(&lookup.scope, &lookup.qualifier, bound)
+            );
+            if lookup.nulls {
+                format!(
+                    "({listed} OR {column} IS NULL AND EXISTS (SELECT 1 FROM {} WHERE {value} IS NULL AND {}))",
+                    lookup.from,
+                    condition(&lookup.scope, &lookup.qualifier, bound)
+                )
+            } else {
+                listed
+            }
+        }
         RowScope::And(left, right) => format!(
             "({} AND {})",
             condition(left, qualifier, bound),

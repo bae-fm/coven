@@ -149,12 +149,14 @@ pub(crate) struct Source {
     pub(crate) memberships: Vec<Membership>,
 }
 
-/// `column` equals `value` over some row of `partner` in its scope.
+/// `column` equals `value` over some row of `partner` in its scope, a NULL
+/// matching a NULL when `nulls`.
 pub(crate) struct Membership {
     pub(crate) column: String,
     pub(crate) affinity: Affinity,
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
+    pub(crate) nulls: bool,
 }
 
 /// What a membership compares with.
@@ -326,6 +328,7 @@ impl Planner<'_> {
                     affinity: edge.affinity,
                     partner: edge.partner,
                     value: edge.value.clone(),
+                    nulls: edge.nulls,
                 });
             }
             // A subquery's, CTE's or view's cores come later, and take
@@ -477,11 +480,13 @@ impl Planner<'_> {
     /// pass, as a NULL test, narrows nothing on a right side that is still a
     /// LEFT JOIN's and doesn't make it inner: the NULLs of a left row no
     /// right row joins pass it, and a right row added for that left row takes
-    /// it out.
+    /// it out. An `IS` edge is the same: a NULL in its member's place matches
+    /// a NULL.
     pub(crate) fn narrow(&mut self, mut found: Narrowing) {
         found.terms.retain(|(item, term)| {
             !(term.may_hold_on_nulls() && self.items[*item].left_on.is_some())
         });
+        found.edges.retain(|edge| !(edge.nulls && self.items[edge.member].left_on.is_some()));
         for item in self.add(found) {
             self.join_inner(item);
         }
@@ -825,6 +830,11 @@ fn read_condition<'a>(
             None => row_term(planner, core, item, condition, &read),
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
+    } else if let Expr::Binary(left, Operator::Is, right) = condition {
+        // `IS` is `=` that matches a NULL with a NULL.
+        for (member, other, first) in [(left, right, false), (right, left, true)] {
+            found.edges.extend(planner.is_edge(core, member, other, first));
+        }
     } else if let Expr::Binary(left, Operator::Equals, right) = condition {
         // A row value equality has the truth of its pairs' equalities joined
         // by AND, NULLs included, so it narrows as they do.
@@ -849,7 +859,7 @@ fn read_condition<'a>(
 /// What conditions narrow: terms on one source's rows each, and edges.
 /// Each is false where the column it tests is NULL, so it rejects a row
 /// with NULLs in its source's place, except a term a NULL test can make
-/// true (`ScopeTerm::may_hold_on_nulls`).
+/// true (`ScopeTerm::may_hold_on_nulls`) and an `IS` edge.
 #[derive(Default)]
 pub(crate) struct Narrowing {
     terms: Vec<(usize, ScopeTerm)>,
@@ -857,9 +867,10 @@ pub(crate) struct Narrowing {
 }
 
 impl Narrowing {
-    /// Whether a term of it can pass a row of NULLs.
+    /// Whether a term or an edge of it can pass a row of NULLs.
     fn may_hold_on_nulls(&self) -> bool {
         self.terms.iter().any(|(_, term)| term.may_hold_on_nulls())
+            || self.edges.iter().any(|edge| edge.nulls)
     }
 
     /// What of this narrows `item`, and the rest.
@@ -887,6 +898,8 @@ pub(crate) struct Edge {
     /// member's column is compared with, which sits in a core inside the
     /// member's: the member waits for it.
     pub(crate) nested: bool,
+    /// Whether the condition is `IS`, which matches a NULL with a NULL.
+    pub(crate) nulls: bool,
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {

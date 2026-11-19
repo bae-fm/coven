@@ -194,7 +194,7 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       · obtain ⟨x, _, hx⟩ := rowEqTruth_at heq hvs hnull
         cases hx
       · obtain ⟨x, hx, hy⟩ := rowEqTruth_at heq hvs hcell
-        refine ⟨x, hx, ?_⟩
+        refine Or.inl ⟨x, hx, ?_⟩
         simp only [hnest, ↓reduceIte]
         refine ⟨f', rfl, ?_⟩
         cases hp : b' e.partner with

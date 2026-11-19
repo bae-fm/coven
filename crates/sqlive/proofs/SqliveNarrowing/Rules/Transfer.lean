@@ -48,15 +48,18 @@ def pulled (s : Statement) (st : PState) (i y : Nat) : Option STerm :=
 /-- The terms the edges between items of core `k` carry, each to its
 member: the partner's own term on the compared column, then what a derived
 partner's arms' own terms say of it, renamed to the member's column. An edge
-that compares with an expression carries none. -/
+that compares with an expression carries none, and an `IS` edge carries no
+arm's term: a derived row whose column is NULL says nothing of its arm's
+items. -/
 def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
   st.edges.flatMap fun e =>
     if (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false then
       match e.value with
       | .column y =>
         let rename (c : Nat) : Option Nat := if c = y then some e.column else none
+        let pulledTerm := if e.nulls then none else pulled s st e.partner y
         ((st.items e.partner).term.bind (·.renamed rename)).toList.map (e.member, ·) ++
-          ((pulled s st e.partner y).bind (·.renamed rename)).toList.map (e.member, ·)
+          (pulledTerm.bind (·.renamed rename)).toList.map (e.member, ·)
       | .expr _ => []
     else []
 
@@ -76,6 +79,46 @@ def carry (s : Statement) (st : PState) (k : Nat) : PState :=
 
 /-! The proof. -/
 
+/-- A term over a missing row, whose columns `rename` passes on to another
+row that is NULL in each of them, holds of that row as renamed. -/
+theorem renamed_none {t t' : STerm} {rename : Nat → Option Nat} (h : t.renamed rename = some t')
+    {row : Option Row} (hcols : ∀ c c', rename c = some c' → none = cellOf row c')
+    (ht : t.holds none) : t'.holds row := by
+  induction t generalizing t' with
+  | compare c op v => simp [STerm.holds, cellOf] at ht
+  | inList c vs => simp [STerm.holds, cellOf] at ht
+  | null c n =>
+    simp only [STerm.renamed, Option.map_eq_some_iff] at h
+    obtain ⟨c', hc', rfl⟩ := h
+    simp only [STerm.holds] at ht ⊢
+    rw [← hcols c c' hc']
+    exact ht
+  | row i cd => simp [STerm.renamed] at h
+  | and l r ihl ihr =>
+    simp only [STerm.holds, Bool.and_eq_true] at ht
+    simp only [STerm.renamed] at h
+    split at h
+    · rename_i lt rt hl hr
+      cases h
+      simp [STerm.holds, ihl hl ht.1, ihr hr ht.2]
+    · rename_i t'' hl _
+      cases h
+      exact ihl hl ht.1
+    · rename_i t'' _ hr
+      cases h
+      exact ihr hr ht.2
+    · cases h
+  | or l r ihl ihr =>
+    simp only [STerm.renamed] at h
+    split at h
+    · rename_i lt rt hl hr
+      cases h
+      simp only [STerm.holds, Bool.or_eq_true] at ht ⊢
+      rcases ht with ht | ht
+      · exact Or.inl (ihl hl ht)
+      · exact Or.inr (ihr hr ht)
+    · cases h
+
 /-- Rule 8's theorem: when an edge that compares with the partner's column
 `y` holds of a binding, a term true of the partner's row is true, renamed
 from `y` to the member's column, of the member's row. -/
@@ -84,18 +127,44 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     (hh : e.HoldsIn s db f b) (ht : t.holds (b e.partner))
     (hr : t.renamed (fun c => if c = y then some e.column else none) = some t') :
     t'.holds (b e.member) := by
-  obtain ⟨x, hx, hp⟩ := hh
-  simp only [hn, Bool.false_eq_true, ite_false] at hp
-  obtain ⟨r, hb, hval⟩ := hp
-  rw [hb] at ht
-  refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
-  by_cases hcy : c = y
-  · subst hcy
-    simp only [ite_true, Option.some.injEq] at hc
-    subst hc
-    rw [hx]
-    simpa [hv, PValue.eval] using hval
-  · simp [hcy] at hc
+  rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩
+  · simp only [hn, Bool.false_eq_true, ite_false] at hp
+    obtain ⟨r, hb, hval⟩ := hp
+    rw [hb] at ht
+    refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
+    by_cases hcy : c = y
+    · subst hcy
+      simp only [ite_true, Option.some.injEq] at hc
+      subst hc
+      rw [hx]
+      simpa [hv, PValue.eval] using hval
+    · simp [hcy] at hc
+  · -- An `IS` edge whose member is NULL: the partner's column is NULL too,
+    -- in its row or for want of one.
+    have hcell : cellOf (b e.partner) y = none := by
+      cases hb : b e.partner with
+      | none => rfl
+      | some r => simpa [hv, PValue.eval, cellOf] using hnull r hb
+    cases hb : b e.partner with
+    | none =>
+      rw [hb] at ht
+      refine renamed_none hr (fun c c' hc => ?_) ht
+      by_cases hcy : c = y
+      · subst hcy
+        simp only [ite_true, Option.some.injEq] at hc
+        subst hc
+        exact hx.symm
+      · simp [hcy] at hc
+    | some r =>
+      rw [hb] at ht
+      refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
+      by_cases hcy : c = y
+      · subst hcy
+        simp only [ite_true, Option.some.injEq] at hc
+        subst hc
+        rw [hx]
+        simpa [hb, cellOf] using hcell
+      · simp [hcy] at hc
 
 theorem orAll_isSome {l : List (Option STerm)} {t : STerm} (h : orAll l = some t) :
     ∀ o ∈ l, o.isSome := by

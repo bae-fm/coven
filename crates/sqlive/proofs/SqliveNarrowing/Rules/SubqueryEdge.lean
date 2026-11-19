@@ -168,7 +168,7 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     have hrow : ∃ x row, member.eval b (evalQuery s db f b) = some x ∧
         row ∈ evalQuery s db f b q ∧ row.cell 0 = some x := compared_sound hcmp hc
     obtain ⟨x, row, hmx, hrowq, hcell⟩ := hrow
-    refine ⟨x, ?_, ?_⟩
+    refine Or.inl ⟨x, ?_, ?_⟩
     · rw [hmem] at hmx
       simpa [Expr.eval] using hmx
     · simp only [hnest, ↓reduceIte]

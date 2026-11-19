@@ -155,13 +155,18 @@ theorem mem_of_eraseDups_singleton {l : List Nat} {i : Nat} (h : l.eraseDups = [
 /-- An edge holds of a binding `b` whose conditions read subqueries with fuel
 `f`: the member's column holds a value `x`, and a row of the partner gives
 `x`: the partner's row in `b`, or, for a subquery's source, its row in a
-binding of the subquery's core under `b`. -/
+binding of the subquery's core under `b`. Or the edge compares by `IS`, the
+member's column is NULL, and the partner's row in `b`, if it has one, gives
+NULL; the partner is no item a LEFT JOIN adds, so a binding a core keeps
+has its row. -/
 def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Prop :=
-  ∃ x, cellOf (b e.member) e.column = some x ∧
+  (∃ x, cellOf (b e.member) e.column = some x ∧
     if e.nested then
       ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item e.partner).core,
         ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
-    else ∃ r, b e.partner = some r ∧ e.value.eval r = some x
+    else ∃ r, b e.partner = some r ∧ e.value.eval r = some x) ∨
+  (e.nulls = true ∧ e.nested = false ∧ (s.item e.partner).left = false ∧
+    cellOf (b e.member) e.column = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none)
 
 /-- What a reader promises of the narrowing it reads from a condition of
 core `k`: when the condition holds of a binding, with its subqueries read at

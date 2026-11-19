@@ -91,8 +91,9 @@ impl RowScope {
             }),
             Self::Joined { column, lookup } => match row.get(column) {
                 None => true,
-                // NULL equals nothing, so no join matches it.
-                Some(Value::Null) => false,
+                // NULL equals nothing, so no join matches it, except one on
+                // `IS`.
+                Some(Value::Null) if !lookup.nulls() => false,
                 Some(value) => lookups(Judging::Partner(lookup, value))?,
             },
             // A value the question can't give its column's type, or one the
