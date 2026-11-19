@@ -11,7 +11,7 @@
 //! source (`Planner::ordered`).
 
 use crate::scope_edge::Member;
-use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
+use crate::scope_plan::{is_name, Edge, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
 
@@ -85,9 +85,9 @@ impl Planner<'_> {
 
     /// The edge from `member` to the source of the core `arm` whose column
     /// `returned` names, when `returned` is a bare column of one of the
-    /// arm's own sources, which sqlive can read alone, and of the member
-    /// column's affinity: the two columns then compare by BINARY with no
-    /// conversion, as a join's do.
+    /// arm's own sources, which sqlive can read alone, of the member
+    /// column's affinity or of none (`Planner::partner_column`): the two
+    /// columns then compare by BINARY as a join's do.
     pub(crate) fn arm_edge(&self, arm: usize, member: Member, returned: &Expr<'_>) -> Option<Edge> {
         if !is_name(returned) {
             return None;
@@ -97,12 +97,9 @@ impl Planner<'_> {
         if item.core != arm || item.source.from.is_none() {
             return None;
         }
-        (item.columns.affinity(&partner_column)? == member.affinity).then_some(Edge {
-            member,
-            partner,
-            value: PartnerValue::Column(partner_column),
-            nested: true,
-            nulls: false,
-        })
+        let partner_affinity = item.columns.affinity(&partner_column)?;
+        let value =
+            self.partner_column(member.affinity, partner, partner_column, partner_affinity)?;
+        Some(Edge { member, partner, value, nested: true, nulls: false })
     }
 }

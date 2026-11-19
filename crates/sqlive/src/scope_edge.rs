@@ -155,9 +155,9 @@ impl Planner<'_> {
             return None;
         }
         let value = match (partner_affinity, &member.value) {
-            (Some(partner_affinity), MemberValue::Column(_)) => (partner_affinity
-                == member.affinity)
-                .then_some(PartnerValue::Column(partner_column))?,
+            (Some(partner_affinity), MemberValue::Column(_)) => {
+                self.partner_column(member.affinity, partner, partner_column, partner_affinity)?
+            }
             // SQLite gives an expression's value the column's affinity, and
             // so does the question that judges a changed row (`scope_row.rs`).
             (Some(_), MemberValue::Expression(_)) => PartnerValue::Column(partner_column),
@@ -171,6 +171,34 @@ impl Planner<'_> {
             )),
         };
         self.edge_to(member, partner, value)
+    }
+
+    /// What `partner`'s column `column`, of affinity `partner_affinity`,
+    /// gives a member column of `affinity` to compare with: the column, when
+    /// the two share an affinity, and the column as an expression when the
+    /// partner's has none (BLOB), as a column declared with no type: SQLite
+    /// gives its values the member's affinity, as a lookup gives an
+    /// expression's. Columns of two other affinities give nothing: SQLite
+    /// converts their values in ways sqlive doesn't follow. The model states
+    /// the rule as `columnValue` in `crates/sqlive/proofs`.
+    pub(crate) fn partner_column(
+        &self,
+        affinity: Affinity,
+        partner: usize,
+        column: String,
+        partner_affinity: Affinity,
+    ) -> Option<PartnerValue> {
+        if partner_affinity == affinity {
+            Some(PartnerValue::Column(column))
+        } else if partner_affinity == Affinity::Blob {
+            Some(PartnerValue::Expression(format!(
+                "{}.{}",
+                self.items[partner].source.qualifier,
+                crate::sql::identifier(&column)
+            )))
+        } else {
+            None
+        }
     }
 
     /// The edge from `member` to `partner`, whose rows give `value`, when

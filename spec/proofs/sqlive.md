@@ -471,7 +471,11 @@ generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
-refusals. The model has no generated columns: sqlive sorts by a generated
+refusals. A partner column of no affinity gives a member column of another
+affinity its values: SQLite compares a TEXT member with it as they are, and
+gives its values an INTEGER member's affinity, which leaves an integer as it
+is. The differential's column of no affinity holds integers, so it checks the
+INTEGER case, and a unit test checks the TEXT case against SQLite. The model has no generated columns: sqlive sorts by a generated
 column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
 one for a write and counts it as changed by every write to its row, which the

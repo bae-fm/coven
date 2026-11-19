@@ -95,6 +95,26 @@ def PValue.on (r : Option Row) : PValue → Value
 theorem PValue.on_some (r : Row) (v : PValue) : v.on (some r) = v.eval r := by
   cases v <;> rfl
 
+/-- What column `pc` of a partner item `p`, of affinity `pa`, gives a member
+column of affinity `affinity` to compare with: the column, when the two
+share an affinity, and the column as an expression when the partner's has
+none (BLOB), as a column declared with no type: SQLite gives its values the
+member's affinity, as a lookup gives an expression's
+(`Planner::partner_column`). Columns of two other affinities give nothing:
+SQLite converts their values in ways sqlive doesn't follow. -/
+def columnValue (affinity pa : Affinity) (p pc : Nat) : Option PValue :=
+  if pa = affinity then some (.column pc) else if pa = .blob then some (.expr (.col p pc)) else none
+
+/-- A partner's column read either way gives a row the value it holds. -/
+theorem columnValue_eval {affinity pa : Affinity} {p pc : Nat} {v : PValue}
+    (h : columnValue affinity pa p pc = some v) (r : Row) : v.eval r = r.cell pc := by
+  unfold columnValue at h
+  split at h
+  · cases h; rfl
+  · split at h
+    · cases h; simp [PValue.eval, Expr.eval, rowBind, cellOf]
+    · cases h
+
 /-- Whether the value is NULL where every column of its item is: a column
 is, and so is a strict expression. -/
 def PValue.strict : PValue → Bool

@@ -7,8 +7,9 @@ of the other gives, in its own scope (`Planner::edge`).
 The member is a column sqlive narrows by, or an expression over one table
 item's own columns (`RowMember`); the partner is readable alone, since a
 write's lookup reads it alone; a bare partner column has a member column's
-affinity, and one written first has an affinity at all, so the equality
-compares by BINARY. SQLite gives an expression member's value the partner
+affinity, or none (BLOB), whose values SQLite gives the member's affinity, and
+one written first has an affinity at all, so the equality compares by
+BINARY. SQLite gives an expression member's value the partner
 column's affinity, so a partner column of any affinity gives it values. An expression partner is strict, NULL where
 the partner's columns are, so a missing partner row gives no value, or the
 partner is no item a LEFT JOIN adds, so every binding a core keeps holds its
@@ -28,7 +29,11 @@ def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option
   let value ← match other with
     | .col _ pc =>
       match s.affinity p pc, memberValue with
-      | some pa, .column _ => if pa = affinity then some (PValue.column pc) else none
+      | some pa, .column _ =>
+        -- A partner column of no affinity (BLOB) takes the member's
+        -- (`columnValue`).
+        if pa = affinity then some (PValue.column pc)
+        else if pa = .blob then some (PValue.expr other) else none
       -- SQLite gives an expression's value the column's affinity.
       | some _, .expr _ => some (PValue.column pc)
       | none, _ => if first then none else some (PValue.expr other)
@@ -99,7 +104,10 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
         · split at h
           · cases h
             exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, hcol j pc rfl, rfl⟩
-          · cases h
+          · split at h
+            · cases h
+              exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
+            · cases h
         · cases h
           exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, hcol j pc rfl, rfl⟩
         · split at h

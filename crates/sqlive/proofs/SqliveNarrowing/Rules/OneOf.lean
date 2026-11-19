@@ -14,7 +14,8 @@ as an expression with the member column's affinity, as SQLite applies it to
 COALESCE's value; as a subquery's returned column, which gives the edge a
 column compared with the subquery gives; or as a constant, which gives the
 term the member column equal to it. An arm narrows as a bare column of one
-of its own items, of the member column's affinity, or as a constant. Any
+of its own items, of the member column's affinity or of none
+(`columnValue`), or as a constant. Any
 other argument or arm makes the comparison narrow nothing. -/
 namespace SqliveNarrowing.OneOf
 
@@ -44,9 +45,12 @@ def armSide (s : Statement) (m c : Nat) (affinity : Affinity) (arm : Nat) : Opti
   match (s.core arm).output with
   | [.expr (.lit (some v))] => some { terms := [.compare c .eq v] }
   | [.expr (.col p pc)] =>
-    if (s.item p).core = arm ∧ (s.item p).readable ∧ s.affinity p pc = some affinity then
-      some { edges := [{ member := m, memberValue := .column c, affinity, partner := p, value := .column pc,
-                         nested := true }] }
+    if (s.item p).core = arm ∧ (s.item p).readable then
+      match s.affinity p pc with
+      | some pa => (columnValue affinity pa p pc).map fun value =>
+        { edges := [{ member := m, memberValue := .column c, affinity, partner := p, value,
+                      nested := true }] }
+      | none => none
     else none
   | _ => none
 
@@ -222,7 +226,8 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
           rw [hpcore]
           refine ⟨b', hb', r, hp, ?_⟩
           simp only [hp, cellOf] at hs
-          simp [hval, PValue.eval, hs]
+          rw [hval]
+          exact hs
 
 /-- What a side's edges say statically: each is from `m`, outside a
 subquery its partner isn't `m` and is among the items `named`, and inside
@@ -279,7 +284,9 @@ theorem armSide_narrows {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat}
   split at h
   · cases h; rfl
   · split at h
-    · cases h; rfl
+    · split at h
+      · obtain ⟨_, _, rfl⟩ := Option.map_eq_some_iff.mp h; rfl
+      · cases h
     · cases h
   · cases h
 
@@ -347,11 +354,14 @@ theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
   · cases h; simp at he
   · split at h
     · rename_i hp
-      cases h
-      simp only [List.mem_singleton] at he
-      subst he
-      exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2.1, Or.inl rfl,
-        fun _ => by rw [hp.1]; exact harm⟩
+      split at h
+      · simp only [Option.map_eq_some_iff] at h
+        obtain ⟨_, _, rfl⟩ := h
+        simp only [List.mem_singleton] at he
+        subst he
+        exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2, Or.inl rfl,
+          fun _ => by rw [hp.1]; exact harm⟩
+      · cases h
     · cases h
   · cases h
 
@@ -378,7 +388,11 @@ theorem armSide_holds {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
   · rename_i p pc hout
     split at h
     · rename_i hp
-      cases h
+      split at h
+      case h_2 => cases h
+      rename_i pa _
+      simp only [Option.map_eq_some_iff] at h
+      obtain ⟨value, hvalue, rfl⟩ := h
       refine ⟨fun t ht => by simp at ht, fun e he => ?_⟩
       simp only [List.mem_singleton] at he
       subst he
@@ -394,7 +408,8 @@ theorem armSide_holds {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
           simp only [hp.1]
           refine ⟨b', hb', r', hb, ?_⟩
           simp only [hb, cellOf] at hx
-          simp [PValue.eval, hx]
+          rw [columnValue_eval hvalue]
+          exact hx
     · cases h
   · cases h
 

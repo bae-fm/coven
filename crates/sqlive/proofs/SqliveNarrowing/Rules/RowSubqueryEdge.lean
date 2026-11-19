@@ -9,7 +9,7 @@ pair is equal and neither side NULL, so each pair's edge holds of every
 binding the comparison keeps. A pair gives an edge when its row side is a
 bare column of one of the core's items and the subquery, one SELECT,
 returns in its place a bare column of one of its own items, readable alone,
-of the same affinity; any other pair gives none. -/
+of the same affinity or of none (`columnValue`); any other pair gives none. -/
 namespace SqliveNarrowing.RowSubqueryEdge
 
 /-- The edge from `member`, written in core `k`, to the item whose column
@@ -22,8 +22,8 @@ def edge (s : Statement) (k : Nat) (member : Expr) (q position : Nat) : Option E
   let .col m c := member | none
   if (s.item m).core ≠ k then none
   let affinity ← s.affinity m c
-  if affinity ≠ pa then none
-  pure { member := m, memberValue := .column c, affinity, partner := p, value := .column pc, nested := true }
+  let value ← columnValue affinity pa p pc
+  pure { member := m, memberValue := .column c, affinity, partner := p, value, nested := true }
 
 /-- The reader: `(m1, ..., mn) = (SELECT ...)` or `IN (SELECT ...)`, each
 pair's edge. -/
@@ -40,7 +40,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q position : Nat} 
     (h : edge s k member q position = some e) :
     ∃ sub pc c, (s.query q).arms = [sub] ∧
       (s.core sub).output[position]? = some (.expr (.col e.partner pc)) ∧
-      e.value = .column pc ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
+      (∀ r, e.value.eval r = r.cell pc) ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
       member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
       e.nested = true := by
   unfold edge at h
@@ -68,11 +68,13 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q position : Nat} 
           | none => simp [hma] at h
           | some ma =>
             simp only [hma] at h
-            split at h
-            · cases h
-            · cases h
-              exact ⟨sub, pc, _, harms, hout, rfl, by simpa using hbad.1, by simpa using hbad.2,
-                rfl, rfl, by simpa using hk, rfl⟩
+            cases hv : columnValue ma pa p pc with
+            | none => simp [hv] at h
+            | some v =>
+              simp only [hv] at h
+              cases h
+              exact ⟨sub, pc, _, harms, hout, columnValue_eval hv, by simpa using hbad.1,
+                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl⟩
     · cases h
   · cases h
 
@@ -207,7 +209,7 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
           rw [hpcore]
           refine ⟨b', hb', r, hp, ?_⟩
           simp only [Expr.eval, hp, cellOf] at hy
-          simp [hval, PValue.eval, hy]
+          simp [hval, hy]
     · cases h
 
 end SqliveNarrowing.RowSubqueryEdge

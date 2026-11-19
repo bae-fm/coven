@@ -1117,7 +1117,10 @@ affinity, gives the looked-up value the joined column's, so a text `'5'` the
 expression makes equals the 5 an INTEGER column holds. Where coven couldn't
 compare as SQLite does, the join narrows nothing: between columns of different
 affinities, by a collation other than BINARY, as when its first side is a
-NOCASE column, and on anything but an equality or `IS`. A join on `IS` matches
+NOCASE column, and on anything but an equality or `IS`. A column declared with
+no type still gives its values to a column of another affinity: SQLite
+compares a TEXT column with it as they are and gives its values an INTEGER
+column's affinity, and the lookup does the same. A join on `IS` matches
 NULL with NULL, and its lookup asks for a NULL the same way. Ben's import joins
 a candidate's failures to it by `f.hash IS v.hash AND f.run IS v.run`, where a
 run can be NULL, so a failure the import writes for another candidate doesn't
@@ -1208,9 +1211,10 @@ the cover, not the pick: running the pick once for each album the window shows
 would cost more as the window grows, and past 1,000 steps a lookup counts as a
 match. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
 `col IN (SELECT x.c ...)`, where the subquery's single column is a bare column
-`x.c` of one of its own sources, and where both columns have the same affinity
-and compare by BINARY, as a join's do. A subquery that combines SELECTs by
-UNION, INTERSECT or EXCEPT returns rows its SELECTs return, so it narrows by
+`x.c` of one of its own sources, and where both columns have the same affinity,
+or `x.c` is declared with no type, and compare by BINARY, as a join's do. A
+subquery that combines SELECTs by UNION, INTERSECT or EXCEPT returns rows its
+SELECTs return, so it narrows by
 each of them when each returns such a column or a constant: `hash IN (SELECT
 hash FROM scan WHERE path = ?1 UNION ALL SELECT hash FROM scan WHERE path =
 ?2)` narrows `hash` to the hashes of either path. One with VALUES narrows
@@ -15205,6 +15209,7 @@ Write-ups explain each model and state its assumptions:
 | An OR, true of a binding, makes one side of each OR coven reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Or.lean` | §4 |
 | `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/IsEdge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
+| A partner column of no affinity, which a lookup reads as an expression for a member column of another affinity, gives each row the value it holds | `columnValue_eval` | `../crates/sqlive/proofs/SqliveNarrowing/Plan.lean` | §4 |
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
 | A term, an edge that compares by `=` or an OR that a row of NULLs fails, true of a binding with no row of its item, has an item no LEFT JOIN adds, or an edge's partner outside a subquery that no LEFT JOIN adds and the binding has no row of | `holds_none`, `HoldsIn.bound` | `../crates/sqlive/proofs/SqliveNarrowing/Reader.lean` | §4 |

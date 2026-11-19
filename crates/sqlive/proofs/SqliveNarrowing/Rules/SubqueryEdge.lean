@@ -5,7 +5,7 @@ import SqliveNarrowing.Reader
 ...)`, narrows the column's item to the rows whose column holds a value some
 row of `x` in its scope holds (`scope_subquery.rs`). The subquery is one
 SELECT whose one result column is a bare column of one of its own items,
-readable alone, of the member column's affinity. -/
+readable alone, of the member column's affinity or of none (`columnValue`). -/
 namespace SqliveNarrowing.SubqueryEdge
 
 /-- The column a condition compares and the subquery it compares with. -/
@@ -30,8 +30,8 @@ def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
   let .col m c := member | none
   if (s.item m).core ≠ k then none
   let affinity ← s.affinity m c
-  if affinity ≠ pa then none
-  pure { member := m, memberValue := .column c, affinity, partner := p, value := .column pc, nested := true }
+  let value ← columnValue affinity pa p pc
+  pure { member := m, memberValue := .column c, affinity, partner := p, value, nested := true }
 
 def readCondition : ReadCondition := fun s k cd => do
   let (member, q) ← compared cd
@@ -45,7 +45,7 @@ column's value. -/
 theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
     (h : edge s k member q = some e) :
     ∃ sub pc c, (s.query q).arms = [sub] ∧ (s.core sub).output = [.expr (.col e.partner pc)] ∧
-      e.value = .column pc ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
+      (∀ r, e.value.eval r = r.cell pc) ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
       member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
       e.nested = true := by
   unfold edge at h
@@ -73,11 +73,13 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
           | none => simp [hma] at h
           | some ma =>
             simp only [hma] at h
-            split at h
-            · cases h
-            · cases h
-              exact ⟨sub, pc, _, harms, hout, rfl, by simpa using hbad.1, by simpa using hbad.2,
-                rfl, rfl, by simpa using hk, rfl⟩
+            cases hv : columnValue ma pa p pc with
+            | none => simp [hv] at h
+            | some v =>
+              simp only [hv] at h
+              cases h
+              exact ⟨sub, pc, _, harms, hout, columnValue_eval hv, by simpa using hbad.1,
+                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl⟩
     · cases h
   · cases h
 
@@ -207,6 +209,6 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
             rw [hpcore]
             refine ⟨b', hb', r, hp, ?_⟩
             simp only [hp, cellOf] at hcell
-            simp [hval, PValue.eval, hcell]
+            simp [hval, hcell]
 
 end SqliveNarrowing.SubqueryEdge

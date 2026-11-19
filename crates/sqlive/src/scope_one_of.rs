@@ -10,7 +10,7 @@
 //! column's affinity to COALESCE's value; as a subquery's returned column,
 //! as a column compared with a subquery's value does (`scope_subquery.rs`);
 //! or as a constant. An arm narrows as a bare column of one of its own
-//! sources, of the member column's affinity, or as a constant. Any other
+//! sources, of the member column's affinity or of none, or as a constant. Any other
 //! argument or arm makes the comparison narrow nothing. The model states the
 //! rule as `OneOf.readCondition` in `crates/sqlive/proofs`.
 

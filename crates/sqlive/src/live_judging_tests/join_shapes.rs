@@ -249,3 +249,60 @@ async fn a_parenthesized_join_sqlite_reads_otherwise_keeps_its_tables_whole() {
     }
     db.close();
 }
+
+/// A column declared with no type has no affinity. SQLite compares it with
+/// a TEXT column as it is, so the text '5' in `tags.k` joins `notes.k` and
+/// the integer 6 doesn't, and gives it an INTEGER column's affinity, so the
+/// text '7' joins `nums.k`'s 7. The lookup compares the same way.
+#[tokio::test]
+async fn a_column_of_no_affinity_gives_values_as_sqlite_compares_them() {
+    let db = TestDatabase::open(
+        "CREATE TABLE tags(id INTEGER PRIMARY KEY, k);
+        CREATE TABLE notes(id INTEGER PRIMARY KEY, k TEXT, body TEXT);
+        CREATE TABLE nums(id INTEGER PRIMARY KEY, k INTEGER, body TEXT);
+        INSERT INTO tags VALUES (1, '5'), (2, 6), (3, '7');
+        INSERT INTO notes VALUES (1, '5', 'a'), (2, '6', 'b');
+        INSERT INTO nums VALUES (1, 7, 'a'), (2, 8, 'b')",
+    );
+    let text = [
+        "SELECT n.body FROM tags t JOIN notes n ON n.k = t.k WHERE t.id = ?1",
+        "SELECT n.body FROM tags t JOIN notes n ON t.k = n.k WHERE t.id = ?1",
+        "SELECT body FROM notes WHERE k IN (SELECT k FROM tags WHERE id = ?1)",
+        "SELECT body FROM notes WHERE k = (SELECT k FROM tags WHERE id = ?1)",
+    ];
+    for sql in text {
+        follows(
+            &db,
+            sql,
+            vec![crate::SqlValue::Integer(1)],
+            &[
+                ("UPDATE notes SET body = body || '.' WHERE id = 2", false),
+                ("UPDATE notes SET body = body || '.' WHERE id = 1", true),
+            ],
+        )
+        .await;
+        follows(
+            &db,
+            sql,
+            vec![crate::SqlValue::Integer(2)],
+            &[("UPDATE notes SET body = body || '.' WHERE id = 2", false)],
+        )
+        .await;
+    }
+    for sql in [
+        "SELECT m.body FROM tags t JOIN nums m ON m.k = t.k WHERE t.id = ?1",
+        "SELECT body FROM nums WHERE k IN (SELECT k FROM tags WHERE id = ?1)",
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![crate::SqlValue::Integer(3)],
+            &[
+                ("UPDATE nums SET body = body || '.' WHERE id = 2", false),
+                ("UPDATE nums SET body = body || '.' WHERE id = 1", true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}

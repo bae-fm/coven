@@ -3,6 +3,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Term.term_sound
 #print axioms SqliveNarrowing.RowMember.row_member_sound
 #print axioms SqliveNarrowing.Edge.edge_sound
+#print axioms SqliveNarrowing.columnValue_eval
 #print axioms SqliveNarrowing.Expr.eval_null
 #print axioms SqliveNarrowing.Edge.nonstrict_holds_without_partner
 #print axioms SqliveNarrowing.RowEdge.row_edge_sound
