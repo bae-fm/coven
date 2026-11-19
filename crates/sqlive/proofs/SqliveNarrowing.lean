@@ -10,3 +10,4 @@ import SqliveNarrowing.Planner
 import SqliveNarrowing.Judge
 import SqliveNarrowing.Json
 import SqliveNarrowing.Rules.Pick
+import SqliveNarrowing.WellFormed

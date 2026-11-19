@@ -1,4 +1,5 @@
 import SqliveNarrowing.Json
+import SqliveNarrowing.WellFormed
 
 /-! The model's runner: one case per process on stdin, the answer on stdout;
 a case it can't read fails on stderr with a nonzero exit.
@@ -6,8 +7,9 @@ a case it can't read fails on stderr with a nonzero exit.
 Input: `schema` (`tables`, `views`), `statement` (a query tree whose FROM
 items name the shapes sqlive reads whole), the database `before` and `after`
 a write, and the write's row `changes` in order. Output: whether the write
-reruns the statement, whether the model reads it whole, each table's scope,
-and the statement's rows before and after. -/
+reruns the statement, whether the statement is well formed
+(`Statement.wellFormed`), whether the model reads it whole, each table's
+scope, and the statement's rows before and after. -/
 open Lean SqliveNarrowing
 
 def rowsJson (rows : List Row) : Json :=
@@ -25,6 +27,7 @@ def run (input : Json) : Except String Json := do
       ((schema.tables.getD t default).1, Lean.Json.str (toString (repr scope)))
   pure <| Json.mkObj [
     ("reruns", toJson (s.reruns db changes db')),
+    ("wellFormed", toJson s.wellFormed),
     ("whole", toJson scopes.isNone),
     ("scopes", Json.mkObj shown),
     ("before", rowsJson (s.result db)),

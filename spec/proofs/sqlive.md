@@ -56,6 +56,20 @@ takes the columns a statement reads to be the columns its clauses name, and
 every column of each table that a query whose rows SQLite picks reads; the
 differential checks that sqlive reads the same ones from SQLite.
 
+[WellFormed.lean](../../crates/sqlive/proofs/SqliveNarrowing/WellFormed.lean)
+states what the runner's JSON reader guarantees of every statement it reads
+(`Statement.wellFormed`). The root is a query, and each query's arms are
+cores. A query has a higher number than every query its arms read, as FROM
+items or subqueries, because the reader numbers a query after everything it
+holds. Each item a core lists belongs to that core. A derived item that the
+planner reads alone has a query that a lookup can read alone: its arms sit in
+no other core, or its query names nothing outside it. A LEFT JOIN's ON names
+only the item the join adds, items before it in the FROM, and items of the
+cores around its own. Every column a core's clauses name belongs to an item of
+the core or of a core around it. The proof that puts the rules together
+assumes these facts, and the differential checks that every statement it
+generates has them.
+
 ## Each rule's theorem
 
 Each rule is one file under
@@ -241,7 +255,7 @@ that names its sources by alias, the database before and after the write, and
 the write's row changes. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
 statement. The runner writes whether the write reruns the statement,
-whether the model reads the statement whole, each table's scope, and the
+whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
 statement's rows before and after.
 
 The differential in sqlive (`narrowing_model` among the live judging tests)
@@ -249,8 +263,8 @@ has one test per rule, `<rule>_matches_lean`, and `mixed_shapes_match_lean`
 for statements that hold several rules. Each rule's generator writes
 statements of its rule's shape. The CTEs' generator also writes, beside the
 CTEs a statement reads, one that no query reads, with a LIMIT or a USING
-join. For each statement the test opens a live query and makes random writes. After each write it fails when sqlive and the model
-disagree on whether the write reruns the query, when a write that either lets
+join. For each statement the test opens a live query and makes random writes. After each write it fails when the model finds the
+statement not well formed, when sqlive and the model disagree on whether the write reruns the query, when a write that either lets
 pass changed SQLite's rows, or when the model's rows differ from SQLite's.
 Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model
 among rows that sort the same, and an aggregate's column outside every GROUP BY

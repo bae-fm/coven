@@ -2,9 +2,10 @@
 //! through its `narrowingRunner`) and SQLite. Each rule's generator writes
 //! statements of its rule's shape, as SQL and as the runner's JSON tree. For
 //! each statement the test opens a live query and makes random writes; after
-//! each it fails when sqlive and the model disagree on whether the write
-//! reruns the query, when a write either lets pass changed the statement's
-//! rows, or when the model's rows differ from SQLite's.
+//! each it fails when the model finds the statement not well formed, when
+//! sqlive and the model disagree on whether the write reruns the query, when
+//! a write either lets pass changed the statement's rows, or when the model's
+//! rows differ from SQLite's.
 //! `SQLIVE_NARROWING_LEAN` names the runner; `SQLIVE_NARROWING_SEEDS` sets how
 //! many statements each test runs (default 60). A failure names the seed.
 
@@ -326,6 +327,9 @@ impl Mirror {
 /// The model's answer for one write.
 struct Answer {
     reruns: bool,
+    /// Whether the statement is well formed (`Statement.wellFormed`), as the
+    /// composed proof assumes of every statement the JSON reader builds.
+    well_formed: bool,
     before: Rows,
     after: Rows,
     scopes: Json,
@@ -349,6 +353,7 @@ fn ask(runner: &std::ffi::OsStr, input: &Json) -> Answer {
     let rows = |key: &str| -> Rows { serde_json::from_value(answer[key].clone()).unwrap() };
     Answer {
         reruns: answer["reruns"].as_bool().unwrap(),
+        well_formed: answer["wellFormed"].as_bool().unwrap(),
         before: rows("before"),
         after: rows("after"),
         scopes: answer["scopes"].clone(),
@@ -451,6 +456,7 @@ async fn run_case(
                 model.reruns, model.scopes
             )
         };
+        assert!(model.well_formed, "the model's statement is not well formed: {}", case());
         assert_eq!(marked, model.reruns, "sqlive and the model disagree: {}", case());
         if differ(&fresh, &last) {
             assert!(marked, "a write sqlive and the model let pass changed the rows: {}", case());
