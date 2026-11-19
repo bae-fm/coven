@@ -25,9 +25,9 @@ inputs. A timestamp choosing a cell is distinct from the slot order choosing
 an owner or unique claimant.
 
 The sqlive package proves each rule by which a live query narrows its
-dependence on a table, against a port of sqlive's planner. The package doesn't
-yet prove that the planner composes the rules soundly; its differential checks
-that against SQLite.
+dependence on a table, against a port of sqlive's planner, and that the
+planner composes the rules soundly. Its differential checks sqlive's planner
+and judge against the model, and the model against SQLite.
 
 The queue package preserves original queued records while deriving received
 interpretations and schema losses. Its read and coverage sets are expanded
