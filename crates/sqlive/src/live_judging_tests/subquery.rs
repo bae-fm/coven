@@ -316,3 +316,21 @@ async fn a_cover_write_for_another_album_runs_as_many_lookup_steps_over_any_numb
     assert!(lookups[0] > 0, "the write asks a lookup");
     assert_eq!(lookups[0], lookups[1]);
 }
+
+/// A column compared with the column of a subquery in FROM that names a row
+/// around it gives no edge: sqlive can't read that subquery's rows alone, so
+/// the column's table stays whole.
+#[tokio::test]
+async fn a_column_compared_with_a_correlated_subquerys_column_keeps_its_table_whole() {
+    let db = TestDatabase::open(
+        "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT, title TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track INTEGER, release TEXT);
+INSERT INTO tracks VALUES (1,'r1','one'),(2,'r2','two');
+INSERT INTO credits VALUES (1,1,'r1')",
+    );
+    follows(&db, "SELECT t.title FROM tracks t WHERE t.id IN (SELECT s.track FROM (SELECT track FROM credits c WHERE c.release = t.release) AS s) ORDER BY t.id", vec![], &[
+        ("UPDATE tracks SET title = 'deux' WHERE id = 2", true),
+    ])
+    .await;
+    db.close();
+}
