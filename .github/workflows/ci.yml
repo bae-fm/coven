@@ -154,7 +154,11 @@ jobs:
 
   proofs:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # With the build cache missed after a manifest change, the job took 45
+    # minutes: 8 for the Lean proofs, 23 for the test build and 14 for the
+    # differential tests. Warm runs took 35 to 44. The limit has the margin
+    # of the Linux check's.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
       # The differential tests run from the workspace's test binaries, the
