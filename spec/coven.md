@@ -771,7 +771,7 @@ The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. Coven
 reads the last row's values from the result, so the statement must also return
 each ORDER BY term as a result column, listed before any `*` and written as the
-term writes it. Every term reads the same table, with no COLLATE and no NULLS
+term writes it. Each term reads one table, with no COLLATE and no NULLS
 FIRST or LAST, and is one of these:
 
 - a stored column whose collation is BINARY, which coven compares itself;
@@ -796,16 +796,37 @@ list sorts by `storage_order`, a generated column that ranks how each release
 is stored, and a release Ben adds with a later rank doesn't rerun a full
 window.
 
-That table isn't the right side of a LEFT JOIN. There, when a write adds a row
-that matches a left row that had no match, SQLite no longer returns the row of
-NULLs it returned for that left row, and that row of NULLs can sort before the
-last row. The statement is one SELECT with no OFFSET, no GROUP BY, and no
-aggregate or window function in its result columns, since there one result
-row's values depend on many table rows. A join that narrows another table by
-the sorted table's rows takes only the rows up to the bound. Any other ORDER
-BY, such as one by a result column's position, by a NOCASE column or by an
-expression over two tables, and any OFFSET leave the scope as the WHERE gives
-it.
+The terms can read more than one table. Ben's album grid grouped by artist
+joins `artists` to `albums` with `JOIN albums AS al ON al.artist_id = ar.id`
+and orders by `ar.sort_key, ar.id, al.title, al.id`, returning each term. The
+ORDER BY's terms fall into runs of consecutive terms over one table: here the
+two terms over `artists`, then the two over `albums`. A row sorts at or before
+the last row when its first run's values sort before the last row's, or equal
+them and its other values sort at or before the last row's. So coven narrows
+the first run's table, `artists`, to the artists whose own terms sort at or
+before the last row's artist. It narrows a later run's table, `albums`, to the
+albums whose own terms sort at or before the last row's album, and to the
+albums that join an artist that sorts before the last row's artist. A write
+that changes an album asks for that artist as it asks for a joined row
+(below), within the artists the run's scope allows. An album Ben adds to an
+artist after the window, or to the window's last artist after its last album,
+doesn't rerun the window; one added to an earlier artist does, wherever its
+title sorts. A later run's table gets this bound only when coven reads it
+after the table of each earlier run and an equality with a column of that
+table narrows it. When a condition on `albums` alone makes coven read
+`albums` first, only the artists' bound narrows the window, and an album
+that meets that condition reruns it wherever it sorts.
+
+No table a term reads is the right side of a LEFT JOIN. There, when a write
+adds a row that matches a left row that had no match, SQLite no longer returns
+the row of NULLs it returned for that left row, and that row of NULLs can sort
+before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
+and no aggregate or window function in its result columns, since there one
+result row's values depend on many table rows. A join that narrows another
+table by a sorted table's rows takes only the rows within that table's bound.
+Any other ORDER BY, such as one by a result column's position, by a NOCASE
+column or by an expression over two tables, and any OFFSET leave the scope as
+the WHERE gives it.
 
 Which rows a LIMIT keeps can depend on columns the statement never names.
 SQLite keeps the first rows it reads, and it reads them in the order of the

@@ -34,8 +34,8 @@ pub const LOOKUP_STEPS: i32 = 1_000;
 
 /// The scope of each table among `sources`, for a run bound to
 /// `parameters` that returned `last`, the ORDER BY's values of its last row,
-/// when it returned as many rows as its LIMIT. The sources placed after the
-/// sorted one look its rows up within that bound too.
+/// when it returned as many rows as its LIMIT. The sources placed after a
+/// sorted one look its rows up within its bound too.
 pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
     let parameters: Arc<[Value]> = parameters.into();
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
@@ -45,10 +45,13 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
             term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All)
         };
         let mut scope = bind(&source.term).and(bind(&source.carried));
-        let joined = |membership: &Membership| {
+        let partner_scope = |membership: &Membership| {
+            bound[membership.partner].as_ref().expect("a membership's partner comes first")
+        };
+        // The rows whose membership finds a row of its partner in
+        // `partner_scope`.
+        let joined = |membership: &Membership, partner_scope: RowScope| {
             let partner = &sources.sources[membership.partner];
-            let partner_scope =
-                bound[membership.partner].as_ref().expect("a membership's partner comes first");
             RowScope::Joined {
                 column: membership.column.clone(),
                 lookup: Arc::new(Lookup::new(
@@ -57,41 +60,44 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
                     membership.value.clone(),
                     membership.affinity,
                     membership.nulls,
-                    partner_scope.clone(),
+                    partner_scope,
                     &parameters,
                 )),
             }
         };
         for membership in &source.memberships {
-            let partner_scope =
-                bound[membership.partner].as_ref().expect("a membership's partner comes first");
             // Rows that must hold given values in the column hold no others.
             if let PartnerValue::Column(column) = &membership.value {
-                if let Some(found) = partner_scope.equal_values(column) {
+                if let Some(found) = partner_scope(membership).equal_values(column) {
                     scope = scope.and(RowScope::equal(membership.column.clone(), found));
                     continue;
                 }
             }
-            scope = scope.and(joined(membership));
+            scope = scope.and(joined(membership, partner_scope(membership).clone()));
         }
         // An OR's scope passes the rows any of its sides' scopes do.
         for sides in &source.either {
             let either = sides.iter().map(|side| {
-                side.memberships
-                    .iter()
-                    .fold(bind(&side.term), |scope, membership| scope.and(joined(membership)))
+                side.memberships.iter().fold(bind(&side.term), |scope, membership| {
+                    scope.and(joined(membership, partner_scope(membership).clone()))
+                })
             });
             if let Some(either) = either.reduce(RowScope::or) {
                 scope = scope.and(either);
             }
         }
         if let (Some(sorted), Some(last)) = (&sources.sorted, last) {
-            if sorted.source == position {
-                scope = scope.and(crate::scope_order::sorted_at_or_before(
-                    &sorted.terms,
-                    last,
-                    &parameters,
-                ));
+            let found = sorted.bound(
+                position,
+                last,
+                &parameters,
+                &source.memberships,
+                |membership, before| {
+                    joined(membership, partner_scope(membership).clone().and(before))
+                },
+            );
+            if let Some(found) = found {
+                scope = scope.and(found);
             }
         }
         bound[position] = Some(scope);

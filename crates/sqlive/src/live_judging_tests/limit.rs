@@ -1,4 +1,4 @@
-//! A statement that orders by columns of one table and returns as many rows
+//! A statement that orders by columns of its tables and returns as many rows
 //! as its LIMIT depends only on the rows that sort at or before its last
 //! row, as a list window read as one live query does (§4). A LIMIT whose
 //! ORDER BY doesn't tell its rows apart depends on every column of its
@@ -251,6 +251,63 @@ INSERT INTO tracks VALUES (1,'r1','one'),(2,'r2','two'),(3,'r3','three')",
             // a's two tracks.
             ("INSERT INTO tracks VALUES (5,'r1','five')", true),
             ("UPDATE tracks SET title = 'two' WHERE id = 2", false),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+const ARTISTS: &str = "CREATE TABLE artists(id INTEGER PRIMARY KEY, sort_key TEXT);
+CREATE TABLE albums(id INTEGER PRIMARY KEY, artist INTEGER, title TEXT, note TEXT);
+INSERT INTO artists VALUES (1,'b'),(2,'d'),(3,'f');
+INSERT INTO albums VALUES (1,1,'x',''),(2,1,'y',''),(3,2,'m',''),(4,2,'n',''),(5,3,'a','')";
+
+/// A window ordered by its artists' sort keys, then by its albums' titles,
+/// holds b's x and y and d's m. An artist after d, an album of an artist
+/// after d, and an album of d after m rerun nothing. An album of an artist
+/// before d reruns the window, wherever its title sorts.
+#[tokio::test]
+async fn a_window_ordered_across_a_join_ends_at_its_last_rows_values() {
+    let db = TestDatabase::open(ARTISTS);
+    follows(
+        &db,
+        "SELECT ar.sort_key, al.title, al.id FROM artists ar JOIN albums al ON al.artist = ar.id \
+         ORDER BY ar.sort_key, al.title, al.id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO artists VALUES (4,'z')", false),
+            ("INSERT INTO albums VALUES (6,3,'a','')", false),
+            ("INSERT INTO albums VALUES (7,2,'z','')", false),
+            ("UPDATE albums SET note = 'x' WHERE id = 4", false),
+            ("UPDATE albums SET note = 'x' WHERE id = 3", true),
+            // The window now ends at d's c.
+            ("INSERT INTO albums VALUES (8,2,'c','')", true),
+            ("UPDATE artists SET sort_key = 'e' WHERE id = 3", false),
+            // f's albums, now a's, come first: a's two albums, then b's x.
+            ("UPDATE artists SET sort_key = 'a' WHERE id = 3", true),
+            ("INSERT INTO albums VALUES (9,2,'a','')", false),
+            ("INSERT INTO albums VALUES (10,1,'w','')", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// When the planner reads the albums before the artists, as a condition on
+/// the albums alone makes it, the albums take no values from the artists, so
+/// only the artists' sort keys bound the window: an artist after the last
+/// row's reruns nothing, and an album of that artist reruns it.
+#[tokio::test]
+async fn a_later_runs_table_that_takes_no_values_from_an_earlier_ones_has_no_bound() {
+    let db = TestDatabase::open(ARTISTS);
+    follows(
+        &db,
+        "SELECT ar.sort_key, al.title, al.id FROM artists ar JOIN albums al ON al.artist = ar.id \
+         WHERE al.title >= 'a' ORDER BY ar.sort_key, al.title, al.id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO artists VALUES (4,'z')", false),
+            ("INSERT INTO albums VALUES (6,4,'b','')", true),
         ],
     )
     .await;

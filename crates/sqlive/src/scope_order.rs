@@ -1,14 +1,24 @@
-//! A statement that orders by columns of one table, or expressions over
-//! them, and has a LIMIT with no OFFSET, whose full run depends only on that
-//! table's rows up to its last row (§4).
+//! A statement that orders by columns of its tables, or expressions over one
+//! table's columns, and has a LIMIT with no OFFSET, whose full run depends
+//! only on the rows that sort at or before its last row (§4).
 //!
 //! When a run returns as many rows as its LIMIT, a row that sorts after its
 //! last row can't appear in the result: every result row it would give sorts
-//! after the rows already there. So the run's scope for the table also requires
-//! a row to sort at or before the last row, in the ORDER BY's directions, and
-//! the next run sets that bound again from its own last row. A row equal to the
-//! last one could sort before it, so it passes. A run that returned fewer rows
-//! than its LIMIT holds every row its WHERE allows, and keeps its scope.
+//! after the rows already there. So the run's scopes also require a row to
+//! sort at or before the last row, in the ORDER BY's directions, and the next
+//! run sets that bound again from its own last row. A row equal to the last
+//! one could sort before it, so it passes. A run that returned fewer rows
+//! than its LIMIT holds every row its WHERE allows, and keeps its scopes.
+//!
+//! The ORDER BY's terms fall into runs, each of consecutive terms over one
+//! table. A result row sorts at or before the last row when its values of
+//! the first run sort before the last row's, or equal them and the rest sort
+//! at or before. So the first run's table takes the rows whose own terms sort
+//! at or before the last row's values of that run. A later run's table takes
+//! those rows too, and the rows that join, for some earlier run, a row of
+//! that run's table that sorts before the last row's values of that run,
+//! which a write looks up as it looks up a join (`scope_lookup.rs`). A table
+//! that takes no value from each earlier run's table has no bound.
 //!
 //! sqlive takes the last row's values from the result columns that return
 //! them, so each ORDER BY term is a result column of the statement's only
@@ -18,7 +28,7 @@
 //! expression over such columns that SQLite can evaluate row by row, or a
 //! generated column whose expression names only such columns, whose value in
 //! a changed row a write asks SQLite to compare with the last row's
-//! (`scope_row.rs`). The table isn't the right side of a LEFT JOIN. There,
+//! (`scope_row.rs`). No such table is the right side of a LEFT JOIN. There,
 //! when a write adds a row that matches a left row that had no match, SQLite
 //! no longer returns the row of NULLs it returned for that left row, and that
 //! row of NULLs can sort before the last row. The SELECT has no GROUP BY and
@@ -30,7 +40,7 @@ use std::sync::Arc;
 
 use crate::from_item::ColumnValue;
 use crate::row_scope::RowScope;
-use crate::scope_plan::{is_name, Planner};
+use crate::scope_plan::{is_name, Membership, Planner};
 use crate::scope_row::{item_row_term, RowCondition, RowExpression, RowTerm, RowTest};
 use crate::scope_term::{operand, Affinity, Operand};
 use crate::select_syntax::{order_term, parts, OrderTerm, Part};
@@ -41,26 +51,31 @@ use sqlite3_parser::ast::{Expr, OneSelect, ResultColumn, Select, SortOrder};
 
 /// A statement's order and LIMIT, which a full run's last row bounds.
 pub(crate) struct SortedLimit {
-    /// The source whose rows the order sorts.
-    pub(crate) source: usize,
-    /// The ORDER BY's terms, in order.
-    pub(crate) terms: Vec<SortTerm>,
+    /// The ORDER BY's terms, in runs of consecutive terms over one source.
+    runs: Vec<SortRun>,
     /// The LIMIT's value.
     limit: Operand,
 }
 
-/// One ORDER BY term of the sorted source.
-pub(crate) struct SortTerm {
+/// Consecutive ORDER BY terms over one source.
+struct SortRun {
+    /// The source whose rows the terms sort.
+    source: usize,
+    terms: Vec<SortTerm>,
+}
+
+/// One ORDER BY term of a sorted source.
+struct SortTerm {
     /// What it sorts the source's rows by.
-    pub(crate) key: SortKey,
+    key: SortKey,
     /// Whether it sorts in descending order.
-    pub(crate) descending: bool,
+    descending: bool,
     /// The result column, from zero, that returns its value.
     position: usize,
 }
 
-/// What an ORDER BY term sorts the sorted source's rows by.
-pub(crate) enum SortKey {
+/// What an ORDER BY term sorts its source's rows by.
+enum SortKey {
     /// A stored column, lowercase, whose values sqlive compares itself.
     Column(String),
     /// An expression over the source's stored columns, whose value in a
@@ -135,8 +150,51 @@ impl SortedLimit {
         };
         Some(LastRow {
             limit: usize::try_from(*limit).ok().filter(|limit| *limit > 0)?,
-            positions: self.terms.iter().map(|term| term.position).collect(),
+            positions: self
+                .runs
+                .iter()
+                .flat_map(|run| &run.terms)
+                .map(|term| term.position)
+                .collect(),
         })
+    }
+
+    /// The bound of `source`'s rows for a run bound to `parameters` whose
+    /// last row's ORDER BY values are `last`, when the order sorts it: its
+    /// first run's terms at or before their values, or, for each earlier
+    /// run, a row it joins of that run's source that sorts before that run's
+    /// values. `memberships` are its own, and `looked_up` gives the rows
+    /// whose membership finds a row of its partner that passes the given
+    /// scope too. `None` when it takes no value from an earlier run's source.
+    pub(crate) fn bound(
+        &self,
+        source: usize,
+        last: &[Value],
+        parameters: &[Value],
+        memberships: &[Membership],
+        looked_up: impl Fn(&Membership, RowScope) -> RowScope,
+    ) -> Option<RowScope> {
+        let mut earlier = Vec::new();
+        let mut values = last;
+        for run in &self.runs {
+            let (own, rest) = values.split_at(run.terms.len());
+            values = rest;
+            if run.source == source {
+                let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
+                    .expect("a tied row passes, so some row does");
+                return Some(
+                    earlier
+                        .into_iter()
+                        .rev()
+                        .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
+                );
+            }
+            let membership = memberships.iter().find(|found| found.partner == run.source)?;
+            if let Some(before) = sorted_before(&run.terms, own, parameters, None) {
+                earlier.push(looked_up(membership, before));
+            }
+        }
+        None
     }
 }
 
@@ -171,8 +229,7 @@ pub(crate) fn sorted_limit(
     let Some(limit) = operand(connection, &limit.expr, Affinity::Blob)? else {
         return Ok(None);
     };
-    let mut source = None;
-    let mut terms = Vec::new();
+    let mut runs: Vec<SortRun> = Vec::new();
     for term in order_by.iter() {
         if term.nulls.is_some() {
             return Ok(None);
@@ -180,18 +237,17 @@ pub(crate) fn sorted_limit(
         let Some((position, item, key)) = sort_term(planner, core, columns, &term.expr) else {
             return Ok(None);
         };
-        if source.is_some_and(|source| source != item) {
+        let from = &planner.items[item];
+        if from.core != core || from.source.table.is_none() || from.left_on.is_some() {
             return Ok(None);
         }
-        source = Some(item);
-        terms.push(SortTerm { key, descending: term.order == Some(SortOrder::Desc), position });
+        let term = SortTerm { key, descending: term.order == Some(SortOrder::Desc), position };
+        match runs.last_mut() {
+            Some(run) if run.source == item => run.terms.push(term),
+            _ => runs.push(SortRun { source: item, terms: vec![term] }),
+        }
     }
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    let from = &planner.items[source];
-    let sorted = from.core == core && from.source.table.is_some() && from.left_on.is_none();
-    Ok(sorted.then_some(SortedLimit { source, terms, limit }))
+    Ok((!runs.is_empty()).then_some(SortedLimit { runs, limit }))
 }
 
 /// The result column that returns the ORDER BY term `expr`, the source whose
@@ -257,16 +313,18 @@ fn sort_term(
     Some((position, item, SortKey::Expression(RowExpression { term, affinity: Affinity::Blob })))
 }
 
-/// The rows that sort at or before `last`, the values of a run's last row in
-/// the order `terms`, for a run bound to `parameters`: lexicographically,
-/// each term in its direction, NULL first in ascending order and last in
-/// descending, as SQLite sorts. A row equal to `last` passes.
-pub(crate) fn sorted_at_or_before(
+/// The rows that sort before `last`, the last row's values of the terms
+/// `terms`, or equal it and pass `tied`, for a run bound to `parameters`:
+/// lexicographically, each term in its direction, NULL first in ascending
+/// order and last in descending, as SQLite sorts. `None`, for `tied` too,
+/// passes no row.
+fn sorted_before(
     terms: &[SortTerm],
     last: &[Value],
     parameters: &[Value],
-) -> RowScope {
-    let mut scope = RowScope::All;
+    tied: Option<RowScope>,
+) -> Option<RowScope> {
+    let mut scope = tied;
     for (term, value) in terms.iter().zip(last).rev() {
         let key = &term.key;
         let equal = match value {
@@ -282,10 +340,11 @@ pub(crate) fn sorted_at_or_before(
             (true, Value::Null) => Some(key.null(true, parameters)),
             (true, _) => Some(key.compare(value, Ordering::Greater, parameters)),
         };
-        let tied = equal.and(scope);
-        scope = match before {
-            Some(before) => before.or(tied),
-            None => tied,
+        let tied = scope.map(|scope| equal.and(scope));
+        scope = match (before, tied) {
+            (Some(before), Some(tied)) => Some(before.or(tied)),
+            (before, None) => before,
+            (None, tied) => tied,
         };
     }
     scope
