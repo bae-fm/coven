@@ -69,8 +69,8 @@ pub use retry_waits::{
 pub use sync_often::{HeldIntervals, SyncOften, SyncOftenGuard};
 
 pub use codes::{
-    decode_code_info, read_invite_code, read_pairing_code, read_restore_code, CodeError, CodeInfo,
-    CodeKind, CodeMetadata, InviteInfo, PairingInfo,
+    decode_code_info, read_invite_code, read_pairing_code, read_restore_code, restore_sign_in,
+    CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, PairingInfo,
 };
 pub use coven_database::WriteCutoff;
 pub use coven_database::{

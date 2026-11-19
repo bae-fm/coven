@@ -204,6 +204,53 @@ fn a_restore_code_carrying_the_s3_key_says_so_and_gives_it_back() {
 }
 
 #[test]
+fn a_restore_in_place_reads_its_sign_in_and_refuses_another_store_or_kind_of_code() {
+    let store = StoreId(uuid::Uuid::from_u128(1));
+    let dropbox = StorageConfig::Dropbox {
+        account_label: Some("ana@example.com".into()),
+        location: coven_storage::DropboxLocation::AppFolder,
+        folder_label: None,
+    };
+    let restore = |store, location| {
+        RestoreCode {
+            store,
+            member: MemberId(uuid::Uuid::from_u128(1)),
+            member_keys: coven_crypto::MemberKeys::generate().unwrap(),
+            storage: RestoreStorage::location_only(location).encode().unwrap(),
+        }
+        .to_text()
+        .unwrap()
+    };
+    assert_eq!(
+        restore_sign_in(store, &restore(store, dropbox)).unwrap(),
+        Some(OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder))
+    );
+    assert_eq!(restore_sign_in(store, &restore(store, location())).unwrap(), None);
+    let other = StoreId(uuid::Uuid::from_u128(9));
+    let Err(CodeError::WrongStore { expected, actual }) =
+        restore_sign_in(store, &restore(other, location()))
+    else {
+        panic!("another store's restore code read as this store's")
+    };
+    assert_eq!((expected, actual), (store, other));
+    let invite = invite(InviteStorage::S3 {
+        invitation: StorageInvitation::for_account(location()).unwrap(),
+        credentials: credentials(),
+    });
+    assert!(matches!(
+        restore_sign_in(store, &invite.to_text().unwrap()),
+        Err(CodeError::WrongKind { expected: CodeKind::Restore, actual: CodeKind::Invite })
+    ));
+    let pairing = pairing(RestoreStorage::location_only(location())).to_text().unwrap();
+    assert!(matches!(
+        restore_sign_in(store, &pairing),
+        Err(CodeError::WrongKind { expected: CodeKind::Restore, actual: CodeKind::Pairing })
+    ));
+    let text = restore(store, location());
+    assert!(matches!(restore_sign_in(store, &text[..text.len() - 1]), Err(CodeError::Invalid)));
+}
+
+#[test]
 fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore = RestoreCode {
         store: StoreId(uuid::Uuid::from_u128(1)),

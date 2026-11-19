@@ -175,10 +175,27 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
 /// Decode a restore code for bootstrap, preserving a
 /// valid wrong-kind distinction. Its storage part has already been validated.
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {
-    match decode(code)?.0 {
-        DecodedCode::Restore(code) => Ok(code),
-        DecodedCode::Invite(_) => wrong_kind(CodeKind::Restore, CodeKind::Invite),
-        DecodedCode::Pairing(_) => wrong_kind(CodeKind::Restore, CodeKind::Pairing),
+    decode_restore(code).map(|(code, _)| code)
+}
+
+/// The sign-in a restore of `store` in place from `code` needs, `None` on S3
+/// and CloudKit, read before any sign-in: the app signs in with it, then
+/// calls `CovenBuilder::restore_device`. Refuses the code as that call
+/// would: `WrongKind` for an invite or pairing code, `WrongStore` for
+/// another store's restore code, `Invalid` for one that doesn't decode.
+pub fn restore_sign_in(store: StoreId, code: &str) -> Result<Option<OAuthAccess>, CodeError> {
+    let (code, location) = decode_restore(code)?;
+    CodeError::require_store(store, code.store)?;
+    Ok(location.oauth_access())
+}
+
+/// A restore code and the storage location it names, or `WrongKind` for
+/// another kind of code.
+fn decode_restore(code: &str) -> Result<(RestoreCode, StorageConfig), CodeError> {
+    match decode(code)? {
+        (DecodedCode::Restore(code), location, ..) => Ok((code, location)),
+        (DecodedCode::Invite(_), ..) => wrong_kind(CodeKind::Restore, CodeKind::Invite),
+        (DecodedCode::Pairing(_), ..) => wrong_kind(CodeKind::Restore, CodeKind::Pairing),
     }
 }
 

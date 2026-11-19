@@ -8448,7 +8448,10 @@ pub enum ProviderSignOut {
 - A device that still holds the store under member keys another device
   replaced restores in place with `CovenBuilder::restore_device`
   ([§13.1](coven.md#131-a-persons-new-device-pairing-and-the-restore-code)). The code must
-  name that store, or the call fails with `CodeError::WrongStore`. The new
+  name that store, or the call fails with `CodeError::WrongStore`.
+  `restore_sign_in` gives the sign-in the call needs, or the same refusal,
+  before the app signs in, so the app asks for no sign-in the restore would
+  refuse. The new
   device loads beside the old copy, which stays openable until the restore
   records itself, just before the new device registers; a failure before
   the record leaves the old copy as it was. From the record on it only goes
@@ -9348,6 +9351,13 @@ pub struct AddDeviceRequest {
 /// invite returns a store name, captured when the invite was made.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
+/// The sign-in that restoring `store` in place from `code` needs, `None` on
+/// S3 and CloudKit, for the app to read before any sign-in and sign in with
+/// before `CovenBuilder::restore_device`. Refuses the code as that call does:
+/// WrongKind for an invite or pairing code, WrongStore for another store's
+/// restore code, Invalid for one that doesn't decode (§13.1).
+pub fn restore_sign_in(store: StoreId, code: &str) -> Result<Option<OAuthAccess>, CodeError>;
+
 /// Bootstrap progress, using the same records before an open handle exists.
 pub enum BootstrapStatus {
     /// Opening a database, with the open's steps as `CovenBuilder::open`
@@ -9994,9 +10004,16 @@ code her phone shows, keeping its copy until the new one is ready. Her theme,
 read from the old copy before the call, goes into the new one in the same swap:
 
 ```rust
-let handle = coven.builder()
+// Refuses an invite or another store's code before asking for a sign-in.
+let access = restore_sign_in(store, &scanned)?;
+let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
+    .oauth_clients(oauth_clients.clone());
+if let Some(access) = access {
+    builder.authenticate(access).await?;
+}
+let handle = builder
     .restore_device(
         store,
         &scanned,

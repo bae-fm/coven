@@ -5215,7 +5215,10 @@ from scratch would leave the laptop with no copy at all if the restore then
 failed. Instead the app passes Carol's current code to
 `CovenBuilder::restore_device` (api.md [E10](api.md#e10-joining-and-restore)).
 
-- The code must name this store. Loading checks its pair against history before
+- The code must name this store. Before Carol signs in to her provider, the app
+  asks coven for the sign-in the code needs (`restore_sign_in`), and coven
+  refuses an invite, a pairing code or another store's restore code then, as
+  the restore would. Loading checks its pair against history before
   the store or keychain changes: an old code fails with `MemberKeysReplaced`, and
   the laptop's store and keychain stay as they were.
 - The new device loads beside the old copy, which stays in place until loading
