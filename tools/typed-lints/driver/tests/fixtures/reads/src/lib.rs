@@ -246,3 +246,33 @@ pub fn rerun(query: &mut LiveRequest<Request>, mut request: Request) {
     let next = Request { generation: request.generation + 1, name: request.name }; // read_request_bump
     query.ask(next);
 }
+
+/// A screen's object, which holds a live query and converts each value it
+/// pulls to its bridge type: by a function path or by a closure, as a
+/// bridge macro's `converted by` line names either.
+pub struct Pulled {
+    query: LiveQuery<Vec<Album>>,
+}
+
+/// A bridge type, converted from what a read returned.
+pub struct Shown(Vec<Album>);
+
+impl Shown {
+    fn from_core(mut albums: Vec<Album>) -> Self {
+        albums.sort_by_key(|album| album.year); // read_sort
+        Shown(albums)
+    }
+}
+
+impl Pulled {
+    pub fn next_by_path(&self) -> Shown {
+        (Shown::from_core)(self.query.latest().clone())
+    }
+
+    pub fn next_by_closure(&self) -> Shown {
+        (|mut albums: Vec<Album>| {
+            albums.sort_by_key(|album| album.id); // read_sort
+            Shown(albums)
+        })(self.query.latest().clone())
+    }
+}
