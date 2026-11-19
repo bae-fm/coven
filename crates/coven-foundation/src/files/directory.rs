@@ -275,6 +275,22 @@ impl StoreDir {
         crate::files::copy_tree(&self.path, to);
     }
 
+    /// Make the store's settings file unreadable, as a disk that wrote half
+    /// of it leaves it: listing the store then reports its settings as
+    /// unreadable. Panics on failure.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn damage_settings(&self) {
+        std::fs::write(self.path.join(settings::SETTINGS_FILE), b"{").unwrap();
+    }
+
+    /// Make the store's storage settings file unreadable, as `damage_settings`
+    /// does the store's settings. Panics on failure.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn damage_storage_settings(&self) {
+        std::fs::write(self.path.join(StoreFile::StorageSettings.name()), b"{not settings")
+            .unwrap();
+    }
+
     /// Replace the closed store's directory with the copy at `from`, as
     /// restoring a backup does: the files the store has now are removed first.
     /// Panics on failure.

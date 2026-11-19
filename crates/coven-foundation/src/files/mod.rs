@@ -83,4 +83,4 @@ pub use relative_path::{RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};
 #[cfg(any(test, feature = "test-utils"))]
-pub use tree_copy::{copy_tree, copy_tree_keeping};
+pub use tree_copy::{copy_tree, copy_tree_keeping, files_under};

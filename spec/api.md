@@ -2077,6 +2077,11 @@ pub fn copy_tree(from: &Path, to: &Path);
 #[cfg(feature = "test-utils")]
 pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool);
 
+/// Every file in the tree at `dir`, at any depth, sorted by path. Folders
+/// are not listed. Panics on failure.
+#[cfg(feature = "test-utils")]
+pub fn files_under(dir: &Path) -> Vec<PathBuf>;
+
 /// Told once file work reaches `path`: about to open it, or finding its
 /// lock held and about to wait for it. An open that finds another instance
 /// of its store closing is told at the lock file that instance holds, the
@@ -2433,6 +2438,15 @@ impl StoreDir {
     /// failure.
     #[cfg(feature = "test-utils")]
     pub fn copy_files(&self, to: &Path);
+    /// Make the store's settings file unreadable, as a disk that wrote half
+    /// of it leaves it: listing the store then reports its settings as
+    /// unreadable. Panics on failure.
+    #[cfg(feature = "test-utils")]
+    pub fn damage_settings(&self);
+    /// Make the store's storage settings file unreadable, as `damage_settings`
+    /// does the store's settings. Panics on failure.
+    #[cfg(feature = "test-utils")]
+    pub fn damage_storage_settings(&self);
     /// Replace the closed store's directory with the copy at `from`, as
     /// restoring a backup does. Panics on failure.
     #[cfg(feature = "test-utils")]

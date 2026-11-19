@@ -701,3 +701,30 @@ async fn a_closed_stores_files_copy_out_and_restore() {
     app.discard_store(&directory).await.unwrap();
     assert!(!app.store_dir(&id).files_exist());
 }
+
+/// Damaged settings files make the store list as unreadable, and `files_under`
+/// lists the files of a store's folder at any depth, sorted.
+#[tokio::test]
+async fn damaged_settings_files_list_the_store_as_unreadable() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let good = app.create_closed_store("Good", Arc::new(UuidIds)).await.unwrap();
+    let bad = app.create_closed_store("Bad", Arc::new(UuidIds)).await.unwrap();
+    let storage = app.create_closed_store("Storage", Arc::new(UuidIds)).await.unwrap();
+    bad.damage_settings();
+    storage.damage_storage_settings();
+
+    let listed = app.stores().await.unwrap();
+    let readable = |id: StoreId| {
+        listed.iter().any(|store| matches!(store, ListedStore::Readable(info) if info.id == id))
+    };
+    assert!(readable(good.id()));
+    assert!(!readable(bad.id()));
+    assert!(Coven::storage_config(&storage).await.is_err());
+    assert!(Coven::storage_config(&good).await.is_ok());
+
+    let files = files_under(root.path());
+    assert!(files.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(files.iter().any(|file| file.ends_with("store.db")));
+    assert!(files.iter().all(|file| file.is_file()));
+}

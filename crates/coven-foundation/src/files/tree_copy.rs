@@ -1,5 +1,5 @@
 //! Tests' copies of an installation's directory tree, as a backup or a
-//! crash leaves it.
+//! crash leaves it, and the list of the files in one.
 
 use std::path::Path;
 
@@ -23,4 +23,23 @@ pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool) {
             std::fs::copy(entry.path(), target).unwrap();
         }
     }
+}
+
+/// Every file in the tree at `dir`, at any depth, sorted by path. Folders are
+/// not listed.
+pub fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                folders.push(entry.path());
+            } else {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    files
 }

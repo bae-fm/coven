@@ -81,7 +81,9 @@ pub use coven_foundation::files::FileProtection;
 #[cfg(all(target_vendor = "apple", any(test, feature = "test-utils")))]
 pub use coven_foundation::files::ProtectionSupport;
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_foundation::files::{assert_no_open_files_under, copy_tree, open_files_under};
+pub use coven_foundation::files::{
+    assert_no_open_files_under, copy_tree, files_under, open_files_under,
+};
 pub use coven_foundation::files::{
     path_bytes, path_from_bytes, path_text, write_atomic, BootstrapDirectoryError, CopyPathError,
     DeviceReset, DirectoryCreationError, FileBudget, FileError, FileLease, FileLock, FileName,
