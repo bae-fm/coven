@@ -40,6 +40,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Parenthesized.left_group_flat
 #print axioms SqliveNarrowing.Parenthesized.inner_group_flat
 #print axioms SqliveNarrowing.Whole.whole_sound
+#print axioms SqliveNarrowing.Virtual.rewrite_reruns
 #print axioms SqliveNarrowing.readCondition_sound
 #print axioms SqliveNarrowing.STerm.holds_none
 #print axioms SqliveNarrowing.Edge.HoldsIn.bound

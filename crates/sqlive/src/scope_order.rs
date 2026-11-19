@@ -290,7 +290,7 @@ fn sort_term(
         let key = match from.columns.value(&column)? {
             ColumnValue::Compared(_) => SortKey::Column(column),
             ColumnValue::Generated(generated) => SortKey::Expression(generated.clone()),
-            ColumnValue::Unknown => return None,
+            ColumnValue::Unknown | ColumnValue::Hidden => return None,
         };
         return Some((position, item, key));
     }

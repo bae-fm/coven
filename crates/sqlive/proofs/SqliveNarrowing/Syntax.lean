@@ -80,6 +80,10 @@ structure Item where
   item of its FROM, holds it: SQLite reads such a join through a `SELECT *`
   of its own, which reads every column of its tables. -/
   grouped : Bool := false
+  /-- Whether sqlive knows its first column holds its table's rowid, as an
+  INTEGER PRIMARY KEY does: a contentful FTS5 table's first column is a
+  column of its own, whatever values it holds (`Virtual`). -/
+  rowidFirst : Bool := true
   deriving Repr, Inhabited
 
 /-- Where a condition is written: the WHERE or an inner join's ON, or the ON
@@ -171,7 +175,10 @@ USING join is none: the JSON reader reads it as the equalities it stands for
 FROM item that names a CTE as the CTE SQLite resolves the name to
 (`CteNames.resolve`). Nor is a parenthesized join: the JSON reader reads its
 tables as items of the core, joined one after another, where that gives
-SQLite's rows (`Parenthesized`), and refuses one where it doesn't. -/
+SQLite's rows (`Parenthesized`), and refuses one where it doesn't. Nor is a
+contentful FTS5 table: the schema lists it as a table, every column of no
+affinity (`Virtual`); `virtual` is any other virtual table, and a hidden
+column of an FTS5 table. -/
 inductive WholeShape where
   | natural | right | recursive | inTable | virtual
   deriving DecidableEq, Repr, Inhabited

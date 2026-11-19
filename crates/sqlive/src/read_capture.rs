@@ -118,8 +118,9 @@ impl ReadCapture {
         self.completed.clone()
     }
 
-    /// Record `frame`'s tables, each read through the scope `scopes` gives
-    /// it, or whole, with the columns its rows depend on that the authorizer
+    /// Record `frame`'s tables but the FTS5 shadow tables `scopes` names,
+    /// each read through the scope `scopes` gives it, or whole, with the
+    /// columns its rows depend on that the authorizer
     /// didn't report (`unreported_columns.rs`): SQLite reports no read at all
     /// of a table that a subquery reads only through a USING join. A table
     /// read through a view or CTE that the
@@ -128,8 +129,11 @@ impl ReadCapture {
     /// as read in every row.
     fn finish(&mut self, frame: ReadFrame, scopes: &Scopes) {
         let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (table, column) in
-            frame.columns.into_iter().chain(scopes.unreported.columns().iter().cloned())
+        for (table, column) in frame
+            .columns
+            .into_iter()
+            .chain(scopes.unreported.columns().iter().cloned())
+            .filter(|(table, _)| !scopes.fts5_shadows.contains(table))
         {
             tables.entry(table).or_default().insert(column);
         }

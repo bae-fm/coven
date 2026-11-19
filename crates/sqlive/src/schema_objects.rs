@@ -20,15 +20,31 @@ pub(crate) const MAIN_TABLES: &str = "SELECT name,type FROM pragma_table_list
 /// The names SQLite gives a rowid table's rowid where no column has them.
 pub(crate) const ROWID_NAMES: [&str; 3] = ["rowid", "oid", "_rowid_"];
 
-/// The stored name and type, `table` or `view`, of the main schema's table
-/// or view `name` names. Anything else, as a virtual table, is `None`.
+/// Each contentful FTS5 table of the main schema, with the shadow table that
+/// holds its rows: `<name>_content`, which keeps each row's rowid in `id` and
+/// its columns in order in `c0`, `c1` and on, one column after `id` for each
+/// of the table's own. A contentless table and one whose content is another
+/// table have no such shadow table; one that keeps a locale for its values
+/// has more columns in it.
+pub(crate) const FTS5_CONTENT: &str = "SELECT v.name,c.name FROM pragma_table_list AS v
+     JOIN pragma_table_list AS c ON c.schema='main' AND c.type='shadow'
+       AND c.name=v.name||'_content'
+     JOIN main.sqlite_schema AS s ON s.type='table' AND s.name=v.name
+     WHERE v.schema='main' AND v.type='virtual' AND s.sql LIKE '% USING fts5%'
+       AND c.ncol=(SELECT count(*) FROM pragma_table_xinfo(v.name,'main') WHERE hidden=0)+1";
+
+/// The stored name and type of the main schema's object `name` names: `table`
+/// or `view`, or `virtual` for a contentful FTS5 table (`FTS5_CONTENT`),
+/// whose rows its content table holds. Anything else, as another virtual
+/// table, is `None`.
 pub(crate) fn main_object(
     connection: &Connection,
     name: &Name<'_>,
 ) -> rusqlite::Result<Option<(String, String)>> {
-    let mut objects = connection.prepare_cached(
-        "SELECT name,type FROM pragma_table_list WHERE schema='main' AND type IN ('table','view')",
-    )?;
+    let mut objects = connection.prepare_cached(&format!(
+        "SELECT name,type FROM pragma_table_list WHERE schema='main' AND type IN ('table','view')
+         UNION ALL SELECT name,'virtual' FROM ({FTS5_CONTENT})"
+    ))?;
     let found = objects
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?

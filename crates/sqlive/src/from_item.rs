@@ -1,7 +1,7 @@
 //! A FROM item of a statement's core, as the scope planner reads it: a
-//! table, a table function, a view read whole, or a subquery, CTE or app
-//! view read as cores of its own (§4); and a core's FROM, whose
-//! parenthesized joins' tables are items of the core too.
+//! table, a contentful FTS5 table, a table function, a view read whole, or a
+//! subquery, CTE or app view read as cores of its own (§4); and a core's
+//! FROM, whose parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
 use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
@@ -37,6 +37,10 @@ pub(crate) enum ColumnValue {
     /// BINARY, a generated column sqlive can't evaluate, or a column of a
     /// view read whole.
     Unknown,
+    /// A contentful FTS5 table's hidden column, the one that bears the
+    /// table's name or `rank`, whose values depend on rows besides its own:
+    /// a statement that names one narrows nothing (`Planner::names_hidden`).
+    Hidden,
 }
 
 /// A FROM item's columns.
@@ -75,7 +79,7 @@ impl Columns {
     pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
         match self.value(column)? {
             ColumnValue::Compared(affinity) => Some(*affinity),
-            ColumnValue::Generated(_) | ColumnValue::Unknown => None,
+            ColumnValue::Generated(_) | ColumnValue::Unknown | ColumnValue::Hidden => None,
         }
     }
 
@@ -177,7 +181,8 @@ pub(crate) fn read_item<'a>(
                 return Ok(None);
             };
             let ordinary = kind == "table";
-            if !ordinary && !planner.whole.contains(&stored) {
+            let contentful = kind == "virtual";
+            if kind == "view" && !planner.whole.contains(&stored) {
                 let read = (
                     planner.items.len(),
                     planner.cores.len(),
@@ -206,18 +211,34 @@ pub(crate) fn read_item<'a>(
             // A read SQLite reports inside a view read whole names the view
             // or a CTE or view inside it, which the statement's own CTEs and
             // views may share.
-            if !ordinary {
+            if kind == "view" {
                 let found = crate::whole_view_names::whole_view_names(connection, &stored)?;
                 planner.note_whole_view(found);
             }
-            // An ordinary table, or a view read only for its values: a view
-            // read whole can show what the host's memory holds as well as
-            // its tables.
-            let columns = columns(connection, planner.functions, &qualifier, &stored, ordinary)?;
+            // An ordinary table, a contentful FTS5 table, whose rows sqlive
+            // sees change as its content table's do, or a view read only for
+            // its values: a view read whole can show what the host's memory
+            // holds as well as its tables.
+            let stored_from = format!("main.{} AS {qualifier}", crate::sql::identifier(&stored));
+            let (columns, from) = if contentful {
+                let name = stored.to_ascii_lowercase();
+                planner.fts5_shadows.extend(
+                    ["content", "data", "idx", "docsize", "config"]
+                        .map(|suffix| format!("{name}_{suffix}")),
+                );
+                let columns = fts5_columns(connection, &stored)?;
+                let from = fts5_content_from(&stored, &qualifier, &columns);
+                (Columns::Listed(columns), from)
+            } else {
+                (
+                    columns(connection, planner.functions, &qualifier, &stored, ordinary)?,
+                    stored_from,
+                )
+            };
             Ok(Some(item(
                 Source {
-                    table: ordinary.then(|| stored.to_ascii_lowercase()),
-                    from: Some(format!("main.{} AS {qualifier}", crate::sql::identifier(&stored))),
+                    table: (ordinary || contentful).then(|| stored.to_ascii_lowercase()),
+                    from: Some(from),
                     qualifier,
                     term: None,
                     carried: None,
@@ -389,6 +410,37 @@ pub(crate) fn read_from<'a>(
 }
 
 impl Planner<'_> {
+    /// Whether a name among `found`, written in `core`, can name a
+    /// contentful FTS5 table's hidden column (`ColumnValue::Hidden`): one
+    /// that resolves to it, or one sqlive can't resolve that such a column
+    /// of any item read so far bears. `rank` and the functions that take the
+    /// column bearing the table's name, as `bm25`, give a row values that
+    /// depend on the table's other rows, and `MATCH` on that column is no
+    /// test sqlive can ask of one row.
+    pub(crate) fn names_hidden(&self, core: usize, found: &[Part<'_>]) -> bool {
+        found.iter().any(|part| {
+            let Part::Name(name) = part else { return false };
+            if let Some((item, column)) = self.resolve(core, name) {
+                return matches!(
+                    self.items[item].columns.value(&column),
+                    Some(ColumnValue::Hidden)
+                );
+            }
+            let column = match unparenthesized(name) {
+                Expr::Id(name) => Name(name.0),
+                Expr::Name(name) | Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => {
+                    name.clone()
+                }
+                _ => return false,
+            };
+            self.items.iter().any(|item| {
+                item.columns.named(&column).is_some_and(|named| {
+                    matches!(item.columns.value(&named), Some(ColumnValue::Hidden))
+                })
+            })
+        })
+    }
+
     /// Whether `JOIN (...) ON on`, or a LEFT JOIN when `left`, of the items
     /// from `first` on, whose own joins' conditions are `inner`, gives the
     /// rows its tables give joined one after another, the first by `on`.
@@ -463,6 +515,41 @@ impl Planner<'_> {
 
 fn in_main(name: &QualifiedName<'_>) -> bool {
     name.db_name.as_ref().is_none_or(|name| *name == "main")
+}
+
+/// A contentful FTS5 table's columns, in order: its own hold the values its
+/// content table holds, of no affinity, which compare by BINARY; its hidden
+/// ones, the one that bears the table's name and `rank`, give values that
+/// depend on rows besides their own.
+fn fts5_columns(connection: &Connection, table: &str) -> rusqlite::Result<Vec<Column>> {
+    let columns = declared_columns(connection, table)?
+        .into_iter()
+        .map(|DeclaredColumn { name, hidden, .. }| Column {
+            name: Some(name.to_ascii_lowercase()),
+            value: if hidden { ColumnValue::Hidden } else { ColumnValue::Compared(Affinity::Blob) },
+        })
+        .collect();
+    Ok(columns)
+}
+
+/// The FROM item a lookup reads a contentful FTS5 table's rows by, which
+/// the statement names by `qualifier`: its content table, each of the
+/// table's own `columns` under its name. The content table holds the same
+/// rows, and an ordinary table's scan costs a lookup fewer of SQLite's steps
+/// than FTS5's, which reads its index and its content table for each row.
+fn fts5_content_from(table: &str, qualifier: &str, columns: &[Column]) -> String {
+    let own: Vec<String> = columns
+        .iter()
+        .filter(|column| !matches!(column.value, ColumnValue::Hidden))
+        .filter_map(|column| column.name.as_deref())
+        .enumerate()
+        .map(|(position, name)| format!("c{position} AS {}", crate::sql::identifier(name)))
+        .collect();
+    format!(
+        "(SELECT {} FROM main.{}) AS {qualifier}",
+        own.join(","),
+        crate::sql::identifier(&format!("{table}_content"))
+    )
 }
 
 /// A table's or a view's columns, in order, `ordinary` for a table, which the
@@ -551,7 +638,7 @@ fn evaluated(
             .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
         match column.value {
             ColumnValue::Compared(compared) => Some((column.name.clone()?, compared)),
-            ColumnValue::Generated(_) | ColumnValue::Unknown => None,
+            ColumnValue::Generated(_) | ColumnValue::Unknown | ColumnValue::Hidden => None,
         }
     })?;
     Some(RowExpression { term, affinity })

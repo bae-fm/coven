@@ -113,10 +113,11 @@ impl<'a, P: Policy> ChangeCapture<'a, P> {
             self.database.handle.as_ref().map(crate::Handle::scoped_columns).unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
         for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {
-            let shape = self.supplemental.shapes.shape(position);
-            if let Some(parent) = &shape.parent {
+            let shapes = &self.supplemental.shapes;
+            let shape = shapes.shape(position);
+            if let Some(parent) = shape.parent(shapes) {
                 changes.push(RowChange {
-                    table: parent.clone(),
+                    table: parent.to_owned(),
                     column: String::new(),
                     rows: None,
                 });

@@ -296,7 +296,7 @@ theorem sortsByRowids_separates {s : Statement} {db : Db} (hdb : db.Keyed) {k : 
     {sa sb : Subs} (hkey : ∀ e ∈ sorted, e.eval ba sa = e.eval bb sb) : ba = bb := by
   unfold Statement.sortsByRowids at hsorts
   simp only [List.all_eq_true, Bool.and_eq_true, List.contains_iff_mem] at hsorts
-  apply bindings_eq_of_rowids hdb (fun i hi => (hsorts i hi).1) hba hbb
+  apply bindings_eq_of_rowids hdb (fun i hi => (hsorts i hi).1.1) hba hbb
   intro i hi
   simpa [Expr.eval] using hkey (.col i 0) (hsorts i hi).2
 

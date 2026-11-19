@@ -148,8 +148,8 @@ impl Scope<'_> {
             .map(|(stored, _)| stored))
     }
 
-    /// The stored name and the type, `table` or `view`, of the main schema's
-    /// object that `name` names. A name of another schema reads no table of
+    /// The stored name and the type, `table`, `view` or `virtual`
+    /// (`main_object`), of the main schema's object that `name` names. A name of another schema reads no table of
     /// the app's, and a CTE's name none of the schema's objects.
     fn main(&self, name: &QualifiedName<'_>) -> rusqlite::Result<Option<(String, String)>> {
         if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
@@ -360,7 +360,7 @@ impl<'c, V: Visit> Walk<'c, V> {
             return Ok(Reads { ctes: BTreeSet::from([place]), ..Reads::default() });
         }
         match self.scope.main(name)? {
-            Some((table, kind)) if kind == "table" => {
+            Some((table, kind)) if kind == "table" || kind == "virtual" => {
                 Ok(Reads { tables: BTreeSet::from([table]), ..Reads::default() })
             }
             Some((view, _)) => self.view(&view),

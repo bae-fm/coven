@@ -1165,6 +1165,24 @@ function lists, so a write to the selection rows of `p.key` that the window
 checks with `EXISTS (SELECT 1 FROM selection AS chosen WHERE chosen.key =
 p.key)` reruns only the window listing that key.
 
+An FTS5 table that keeps its own content narrows as a table does. FTS5 keeps
+its rows in a content table of its own, and coven reads each change to that
+table as the same change to the FTS5 table's row, so conditions on the FTS5
+table narrow its rows and its joins narrow the tables beside it. A lookup
+reads the content table, which costs fewer of SQLite's steps than the FTS5
+table. Ben's library search reads `a.id IN (SELECT album_id FROM
+album_search WHERE title GLOB ?1)`: an edit to an album the search doesn't
+find doesn't rerun it, and neither does a search row whose title the pattern
+doesn't match. FTS5 deletes a row of its content table and inserts it again
+when an UPDATE names it. Where coven notes each row operation of a write, as
+it does for a device-local search index, it judges both, so a write to any
+column of a row the search finds reruns the search. A statement that names
+a column FTS5 adds narrows nothing, since coven can't judge one on a single
+row: `rank`, whose value depends on the table's other rows, and the column
+that bears the table's name, which `MATCH` and `bm25` name. An FTS5 table
+without a content table of its own, and any other virtual table, narrows
+nothing either.
+
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole
 table. A lookup stops after 1,000 of SQLite's steps instead, and counts as a
@@ -3621,9 +3639,12 @@ doesn't, when the database opens and after migrating.
 - **A full-text index.** A local trigger can keep an FTS5 table as the search
   index, for this device's writes and applied ones alike. FTS5 reads the
   database's data version as it writes its index, which coven allows, though
-  the app's own SQL still can't run a PRAGMA. A change to the index's shadow
-  tables reruns each live query that read the FTS5 table. Only FTS5 writes
-  them: a trigger or write that names a shadow table directly fails (§4).
+  the app's own SQL still can't run a PRAGMA. A change to the rows of the
+  index's content table reruns the live queries that read those rows of the
+  FTS5 table (§4); a change to its configuration reruns each live query that
+  read the table, and one to the rest of the index reruns none. Only FTS5
+  writes these tables: a trigger or write that names a shadow table directly
+  fails (§4).
 - **The before-commit function writes only local tables.** It runs after a
   write's record is made, or in a transaction that makes none, so a change it
   made to a synced table would reach no record and never sync. As SQLite
@@ -15223,6 +15244,7 @@ Write-ups explain each model and state its assumptions:
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
+| A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Virtual.lean` | §4 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
 | A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |

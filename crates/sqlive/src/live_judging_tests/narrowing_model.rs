@@ -78,12 +78,15 @@ pub(super) fn pick(rng: &mut Rng, names: &[&'static str]) -> &'static str {
 
 /// The tables every statement reads: an INTEGER key, numeric columns, an
 /// untyped one (BLOB affinity) and one whose collation sqlive doesn't narrow
-/// by. Every value is an integer or NULL, which SQLite compares as the model
-/// does.
-pub(super) const TABLES: [&str; 3] = ["t", "u", "w"];
+/// by; and `SEARCH`, a contentful FTS5 table of the same columns, each
+/// untyped and BINARY, whose `id` the writes keep equal to its rowid. Every
+/// value is an integer or NULL, which SQLite compares as the model does.
+pub(super) const TABLES: [&str; 4] = ["t", "u", "w", SEARCH];
 pub(super) const COLUMNS: [&str; 5] = ["id", "a", "b", "c", "n"];
 const TABLE_SQL: &str =
     "(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE)";
+/// The contentful FTS5 table, whose content table holds its rows.
+const SEARCH: &str = "s";
 
 /// The app's views, which the view rule's statements read: each with the
 /// columns its statements can name.
@@ -185,8 +188,13 @@ fn views() -> Vec<(&'static str, Query, Vec<&'static str>)> {
 }
 
 fn schema_sql() -> String {
-    let mut sql: Vec<String> =
-        TABLES.iter().map(|name| format!("CREATE TABLE {name}{TABLE_SQL}")).collect();
+    let mut sql: Vec<String> = TABLES
+        .iter()
+        .map(|name| match *name {
+            SEARCH => format!("CREATE VIRTUAL TABLE {name} USING fts5(id UNINDEXED, a, b, c, n)"),
+            _ => format!("CREATE TABLE {name}{TABLE_SQL}"),
+        })
+        .collect();
     sql.push("CREATE INDEX u_a ON u(a)".to_owned());
     sql.push("CREATE INDEX w_c ON w(c)".to_owned());
     for (name, query, _) in views() {
@@ -196,19 +204,22 @@ fn schema_sql() -> String {
 }
 
 fn schema_json() -> Json {
-    let columns: Vec<Json> = COLUMNS
-        .iter()
-        .map(|name| {
-            let affinity = match *name {
-                "b" => json!("blob"),
-                "n" => Json::Null,
-                _ => json!("numeric"),
-            };
-            json!({"name": name, "affinity": affinity})
-        })
-        .collect();
+    let columns = |table: &str| -> Vec<Json> {
+        COLUMNS
+            .iter()
+            .map(|name| {
+                let affinity = match (table, *name) {
+                    (SEARCH, _) | (_, "b") => json!("blob"),
+                    (_, "n") => Json::Null,
+                    _ => json!("numeric"),
+                };
+                json!({"name": name, "affinity": affinity})
+            })
+            .collect()
+    };
     json!({
-        "tables": TABLES.iter().map(|name| json!({"name": name, "columns": columns})).collect::<Vec<_>>(),
+        // sqlive doesn't know `SEARCH`'s first column to hold its rowid.
+        "tables": TABLES.iter().map(|name| json!({"name": name, "columns": columns(name), "rowid": *name != SEARCH})).collect::<Vec<_>>(),
         "views": views().into_iter().map(|(name, query, _)| json!({"name": name, "query": query.json()})).collect::<Vec<_>>(),
     })
 }
@@ -226,6 +237,20 @@ fn sql_value(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_owned(), |value| value.to_string())
 }
 
+/// An insert of a row of `id` into `table`, as `verb`: into `SEARCH` with its
+/// rowid `id` too.
+fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> String {
+    let (rowid, key) =
+        if table == SEARCH { ("rowid, ", format!("{id}, ")) } else { ("", String::new()) };
+    format!(
+        "{verb} INTO {table}({rowid}id, a, b, c, n) VALUES ({key}{id}, {}, {}, {}, {})",
+        sql_value(value(rng)),
+        sql_value(value(rng)),
+        rng.below(6),
+        sql_value(value(rng))
+    )
+}
+
 /// A write of one to three statements, each to one table.
 fn write(rng: &mut Rng) -> String {
     let mut statements = Vec::new();
@@ -233,20 +258,18 @@ fn write(rng: &mut Rng) -> String {
         let table = pick(rng, &TABLES);
         let id = rng.below(8);
         statements.push(match rng.below(9) {
-            0 | 1 => format!(
-                "INSERT OR IGNORE INTO {table}(id, a, b, c, n) VALUES ({id}, {}, {}, {}, {})",
-                sql_value(value(rng)),
-                sql_value(value(rng)),
-                rng.below(6),
-                sql_value(value(rng))
-            ),
+            0 | 1 => insert("INSERT OR IGNORE", table, id, rng),
             2 | 3 => {
                 let column = pick(rng, &["a", "b", "n"]);
                 format!("UPDATE {table} SET {column} = {} WHERE id = {id}", sql_value(value(rng)))
             }
             4 => format!("UPDATE {table} SET c = {} WHERE id = {id}", rng.below(6)),
             5 => format!("UPDATE {table} SET c = {} WHERE a = {}", rng.below(6), rng.below(4)),
-            6 => format!("UPDATE OR IGNORE {table} SET id = {} WHERE id = {id}", rng.below(8)),
+            6 => {
+                let to = rng.below(8);
+                let rowid = if table == SEARCH { format!("rowid = {to}, ") } else { String::new() };
+                format!("UPDATE OR IGNORE {table} SET {rowid}id = {to} WHERE id = {id}")
+            }
             _ => format!("DELETE FROM {table} WHERE id = {id}"),
         });
     }
@@ -290,18 +313,63 @@ fn snapshot(db: &TestDatabase) -> Json {
 
 /// A copy of the database on a plain connection, which applies each write
 /// one statement at a time to find the rows each statement changes, as
-/// sqlive's pre-update hook reports them.
-struct Mirror(rusqlite::Connection);
+/// sqlive's capture reports them. `SEARCH`'s changes are those SQLite makes
+/// to its content table, which a hook on the copy records as sqlive's
+/// pre-update hook records the test's writes: FTS5 deletes and inserts again
+/// each row an UPDATE names, changed or not.
+struct Mirror {
+    connection: rusqlite::Connection,
+    /// The operations on `SEARCH`'s content table since the last statement,
+    /// as changes of `SEARCH`'s rows.
+    search: Arc<std::sync::Mutex<Vec<Json>>>,
+}
 
 impl Mirror {
     fn open() -> Self {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        use rusqlite::hooks::{Action, PreUpdateCase};
+        use rusqlite::types::ValueRef;
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(&schema_sql()).unwrap();
-        Self(connection)
+        let search = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&search);
+        let content = format!("{SEARCH}_content");
+        connection
+            .preupdate_hook(Some(move |_: Action, _: &str, table: &str, case: &PreUpdateCase| {
+                if table != content {
+                    return;
+                }
+                // The content table's `id` is the rowid; `c0` to `c4` hold
+                // the table's columns.
+                let cell = |value: rusqlite::Result<ValueRef<'_>>| match value.unwrap() {
+                    ValueRef::Null => None,
+                    ValueRef::Integer(value) => Some(value),
+                    other => panic!("a value the model doesn't hold: {other:?}"),
+                };
+                let row = |value: &dyn Fn(i32) -> Option<i64>| -> Json {
+                    json!((1..=COLUMNS.len() as i32).map(value).collect::<Vec<_>>())
+                };
+                let (old, new) = match case {
+                    PreUpdateCase::Insert(new) => {
+                        (Json::Null, row(&|index| cell(new.get_new_column_value(index))))
+                    }
+                    PreUpdateCase::Delete(old) => {
+                        (row(&|index| cell(old.get_old_column_value(index))), Json::Null)
+                    }
+                    PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => (
+                        row(&|index| cell(old.get_old_column_value(index))),
+                        row(&|index| cell(new.get_new_column_value(index))),
+                    ),
+                    PreUpdateCase::Unknown => return,
+                };
+                seen.lock().unwrap().push(json!({"table": SEARCH, "old": old, "new": new}));
+            }))
+            .unwrap();
+        Self { connection, search }
     }
 
     fn rows(&self, table: &str) -> std::collections::BTreeMap<i64, Vec<Option<i64>>> {
-        let mut statement = self.0.prepare(&format!("SELECT id, a, b, c, n FROM {table}")).unwrap();
+        let mut statement =
+            self.connection.prepare(&format!("SELECT id, a, b, c, n FROM {table}")).unwrap();
         let rows = statement.query_map([], integers).unwrap();
         rows.map(|row| {
             let row = row.unwrap();
@@ -313,10 +381,11 @@ impl Mirror {
     /// Apply `write`, and the row changes of each of its statements in turn.
     fn apply(&self, write: &str) -> Vec<Json> {
         let mut changes = Vec::new();
+        let tables = TABLES.iter().filter(|table| **table != SEARCH);
         for statement in write.split("; ") {
-            let before: Vec<_> = TABLES.iter().map(|table| self.rows(table)).collect();
-            self.0.execute_batch(statement).unwrap();
-            for (table, old) in TABLES.iter().zip(before) {
+            let before: Vec<_> = tables.clone().map(|table| self.rows(table)).collect();
+            self.connection.execute_batch(statement).unwrap();
+            for (table, old) in tables.clone().zip(before) {
                 let new = self.rows(table);
                 let ids: std::collections::BTreeSet<i64> =
                     old.keys().chain(new.keys()).copied().collect();
@@ -327,6 +396,7 @@ impl Mirror {
                     }
                 }
             }
+            changes.append(&mut self.search.lock().unwrap());
         }
         changes
     }
@@ -420,13 +490,7 @@ async fn run_case(
     let mut rows = Vec::new();
     for table in TABLES {
         for id in 0..6 {
-            rows.push(format!(
-                "INSERT INTO {table}(id, a, b, c, n) VALUES ({id}, {}, {}, {}, {})",
-                sql_value(value(rng)),
-                sql_value(value(rng)),
-                rng.below(6),
-                sql_value(value(rng))
-            ));
+            rows.push(insert("INSERT", table, id, rng));
         }
     }
     let mirror = Mirror::open();

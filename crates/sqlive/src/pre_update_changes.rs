@@ -5,7 +5,7 @@
 //! columns changed, and the changed rows' keys and the values a live query's
 //! scope tests, only where a waiting live query narrows that table.
 
-use super::table_shapes::{TableShape, TableShapes};
+use super::table_shapes::{Shadow, TableShape, TableShapes};
 use crate::authorization::HostError;
 use crate::{RowChange, RowImage, SqlValue, ROWS_PER_TABLE};
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
@@ -117,8 +117,8 @@ pub(crate) struct PreUpdateChanges {
     columns: BTreeSet<(usize, usize)>,
     /// Changes with their rows' images, for the tables in `scoped`.
     rows: Vec<RowChange>,
-    /// Shadow tables changed: each change is its virtual table's too, in
-    /// every column.
+    /// Shadow tables changed whose every change is their virtual table's
+    /// too, in every column (`Shadow::Whole`).
     shadows: BTreeSet<usize>,
     /// Tables the transaction's shapes don't hold, lowercase. These tables
     /// appeared after the transaction read its shapes, and only a migration
@@ -167,8 +167,14 @@ impl PreUpdateChanges {
             self.rows.retain(|change| change.table != shape.name);
             self.columns.insert((position, ROW));
         }
-        if shape.parent.is_some() {
-            self.shadows.insert(position);
+        match shape.shadow {
+            Some(Shadow::Whole(_)) => {
+                self.shadows.insert(position);
+            }
+            // The same operation on the virtual table's row, whose columns
+            // sit where the content table's do.
+            Some(Shadow::Rows(rows)) => self.record(shapes, rows, case)?,
+            Some(Shadow::Index) | None => {}
         }
         Ok(())
     }
@@ -247,10 +253,11 @@ impl PreUpdateChanges {
     /// The live-query changes the operations recorded made.
     pub(crate) fn finish(self, shapes: &TableShapes) -> Vec<RowChange> {
         let mut changes = self.rows;
-        let parents: BTreeSet<&String> = self
+        let parents: BTreeSet<String> = self
             .shadows
             .iter()
-            .filter_map(|position| shapes.shape(*position).parent.as_ref())
+            .filter_map(|position| shapes.shape(*position).parent(shapes))
+            .map(str::to_owned)
             .collect();
         for (position, column) in self.columns {
             let shape = shapes.shape(position);
@@ -266,7 +273,7 @@ impl PreUpdateChanges {
             let unknown = RowImage::new(Arc::from([]), Vec::new());
             whole(shapes.shape(position), None, Some(unknown))
         }));
-        changes.extend(parents.into_iter().cloned().chain(self.unshaped).map(|table| RowChange {
+        changes.extend(parents.into_iter().chain(self.unshaped).map(|table| RowChange {
             table,
             column: String::new(),
             rows: None,

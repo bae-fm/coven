@@ -14,6 +14,9 @@ structure Schema where
   /-- Each table's name and its columns' names and affinities. -/
   tables : List (String × List (String × Option Affinity))
   views : List (String × Json)
+  /-- The tables whose first column sqlive doesn't know to hold their rowid,
+  as a contentful FTS5 table's (`Item.rowidFirst`). -/
+  unkeyed : List String := []
 
 /-- What resolves a name to an item: its alias and its columns' names. -/
 structure Named where
@@ -240,6 +243,9 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
     (ctes : CteNames.Visible Json) : M Nat := do
   let alias ← lift (str j "alias")
   let left := (field j "left").bind (·.getBool?.toOption) |>.getD false
+  let rowidFirst := match field j "table" with
+    | some (.str name) => !schema.unkeyed.contains name
+    | _ => true
   let (kind, columns, names, readable) ← match field j "table", field j "view", field j "cte", field j "query" with
     | some (.str name), _, _, _ =>
       match schema.tables.findIdx? (·.1 == name) with
@@ -270,7 +276,7 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
     | _, _, _, _ => lift (throw "a FROM item names no source")
   let b ← get
   set { b with
-    items := b.items.push { core := k, kind, left, columns, readable }
+    items := b.items.push { core := k, kind, left, columns, readable, rowidFirst }
     named := b.named.push { alias, columns := names } }
   pure b.items.size
 
@@ -409,8 +415,12 @@ def readSchema (j : Json) : Except String Schema := do
     let columns ← (list t "columns").mapM fun c => do
       pure ((← str c "name"), (← affinity ((c.getObjVal? "affinity").toOption.getD .null)))
     pure ((← str t "name"), columns)
+  let unkeyed ← (list j "tables").filterMapM fun t => do
+    match (t.getObjVal? "rowid").toOption with
+    | some (.bool false) => pure (some (← str t "name"))
+    | _ => pure none
   let views ← (list j "views").mapM fun v => do pure ((← str v "name"), (← v.getObjVal? "query"))
-  pure { tables, views }
+  pure { tables, views, unkeyed }
 
 /-- The statement the tree `j` holds. -/
 def readStatement (schema : Schema) (j : Json) : Except String Statement := do

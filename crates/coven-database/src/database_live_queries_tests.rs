@@ -593,7 +593,7 @@ async fn replacement_before_first_run_supersedes_the_initial_request() {
 }
 
 #[tokio::test]
-async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents() {
+async fn an_fts5_query_reruns_for_a_column_it_reads_and_not_for_another() {
     let store = TestStore::new();
     let db=store.schema(vec![],"CREATE VIRTUAL TABLE search USING fts5(title,body); INSERT INTO search(rowid,title,body) VALUES(1,'title','before')").await.unwrap();
     let runs = AtomicUsize::new(0);
@@ -603,18 +603,18 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
         Ok((runs.fetch_add(1, Ordering::SeqCst), titles))
     });
     assert_eq!(next_result(&mut query).await.unwrap(), (0, vec!["title".into()]));
-    for run in 1..=3 {
-        // FTS5 writes the new body to its shadow tables; defensive mode
-        // refuses writing them directly (§4).
-        db.commit_writer(|writer, _| {
-            writer
-                .execute("UPDATE search SET body=?1 WHERE rowid=1", [format!("body {run}")])
-                .unwrap();
-        });
-        // The unchanged title still reruns when another shadow column changes;
-        // the result's run count makes that observable without timed polling.
-        assert_eq!(next_result(&mut query).await.unwrap(), (run, vec!["title".into()]));
-    }
+    // FTS5 writes the new values to its shadow tables; defensive mode
+    // refuses writing them directly (§4). coven reads the change of the
+    // content table's row as the FTS5 table's, so the new body doesn't
+    // rerun the query, and the new title does: its first rerun shows the
+    // new title.
+    db.commit_writer(|writer, _| {
+        writer.execute("UPDATE search SET body='after' WHERE rowid=1", []).unwrap();
+    });
+    db.commit_writer(|writer, _| {
+        writer.execute("UPDATE search SET title='renamed' WHERE rowid=1", []).unwrap();
+    });
+    assert_eq!(next_result(&mut query).await.unwrap(), (1, vec!["renamed".into()]));
     db.close().await.unwrap();
 }
 

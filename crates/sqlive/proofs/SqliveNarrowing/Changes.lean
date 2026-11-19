@@ -50,7 +50,8 @@ rowid of each of its items, each a table, its first column (`Json.readDb`):
 two bindings of such a core differ in some item's row, and so in its rowid
 (`Pick.bindings_eq_of_rowids`). -/
 def Statement.sortsByRowids (s : Statement) (k : Nat) (sorted : List Expr) : Bool :=
-  (s.core k).items.all fun i => (s.table? i).isSome && sorted.contains (.col i 0)
+  (s.core k).items.all fun i =>
+    (s.table? i).isSome && (s.item i).rowidFirst && sorted.contains (.col i 0)
 
 /-- The result columns' expressions that query `q`'s ORDER BY sorts by. -/
 def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=

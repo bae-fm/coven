@@ -241,6 +241,23 @@ JOIN adds, so where such a part holds, its item has a row.
   join in parentheses of two tables or more that follows another item of its
   FROM through a `SELECT *` of its own, and its authorizer reports every
   column of those tables, so the model counts every column of them as read.
+- **An FTS5 table.** A contentful FTS5 table's rows are the rows of its
+  content table, an ordinary table, which holds each row's rowid and its
+  columns. sqlive records each of the content table's row changes as the
+  same change of the FTS5 table, so the model reads the FTS5 table as a
+  table whose columns have no affinity and compare by BINARY. FTS5 deletes a
+  row of its content table and inserts it again when an UPDATE names it,
+  changed or not. A session, and sqlive's capture of a write's operations,
+  read the two as one update of the columns that changed; sqlive's
+  pre-update hook judges both. `rewrite_reruns` proves
+  that the two changes rerun a statement wherever the update as one change
+  would. A lookup reads the FTS5 table's rows from its content table, which
+  costs fewer of SQLite's steps. sqlive doesn't know the FTS5 table's first
+  column to hold its rowid, so the model's sort by each table's rowid counts
+  only a table whose first column is its INTEGER PRIMARY KEY
+  (`Item.rowidFirst`). A statement that names `rank` or the column
+  that bears the table's name, whose values depend on the table's other
+  rows, and one that reads any other virtual table, is read whole.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. Each ORDER BY term sorts one item's rows by a key: one of
@@ -496,7 +513,11 @@ statement's rows before and after.
 
 The differential in sqlive (`narrowing_model` among the live judging tests)
 has one test per rule, `<rule>_matches_lean`, and `mixed_shapes_match_lean`
-for statements that hold several rules. Each rule's generator writes
+for statements that hold several rules. One of its tables is a contentful
+FTS5 table, whose `id` its writes keep equal to its rowid. Its changes are
+the operations SQLite makes on its content table, which a pre-update hook on
+the test's copy of the database records, as sqlive's own pre-update hook
+records the test's writes. Each rule's generator writes
 statements of its rule's shape. The CTEs' generator also writes, beside the
 CTEs a statement reads, one that no query reads, with a LIMIT or a USING
 join. For each statement the test opens a live query and makes random writes. After each write it fails when the model finds the

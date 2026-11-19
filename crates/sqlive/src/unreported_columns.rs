@@ -246,7 +246,7 @@ impl Found<'_> {
         item: &SelectTable<'_>,
     ) -> rusqlite::Result<Option<(String, Vec<String>)>> {
         let SelectTable::Table(name, ..) = item else { return Ok(None) };
-        let Some(table) = scope.object(name, &["table"])? else { return Ok(None) };
+        let Some(table) = scope.object(name, &["table", "virtual"])? else { return Ok(None) };
         let columns = self.columns(&table)?;
         Ok(Some((table, columns)))
     }
@@ -278,7 +278,7 @@ impl Found<'_> {
     ) -> rusqlite::Result<Option<bool>> {
         let names = match item {
             SelectTable::Table(name, ..) => {
-                let Some(object) = scope.object(name, &["table", "view"])? else {
+                let Some(object) = scope.object(name, &["table", "view", "virtual"])? else {
                     return Ok(None);
                 };
                 self.columns(&object)?
@@ -417,7 +417,7 @@ impl Found<'_> {
         for item in listed {
             let SelectTable::Table(name, alias, _) = item else { return Ok(None) };
             // A CTE's name names no table (`main`).
-            let Some(table) = scope.object(name, &["table"])? else { return Ok(None) };
+            let Some(table) = scope.object(name, &["table", "virtual"])? else { return Ok(None) };
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0,
                 None => name.name.0,

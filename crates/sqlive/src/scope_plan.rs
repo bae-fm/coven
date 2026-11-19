@@ -120,6 +120,13 @@ pub(crate) struct Sources {
     /// SQLite can also report a read through inside a view read whole: such
     /// a read could be the view's, whose tables no source narrows.
     pub(crate) inlined: BTreeSet<String>,
+    /// The shadow tables of the contentful FTS5 tables it reads, lowercase.
+    /// FTS5 reads them for the statement as it runs, and SQLite reports
+    /// those reads, but they read what the FTS5 table's rows show: sqlive
+    /// records a change of the content table's rows as the FTS5 table's,
+    /// and a change of its configuration as a change of every row of it,
+    /// and the rest of its index changes no row the table gives.
+    pub(crate) fts5_shadows: BTreeSet<String>,
     /// The order and LIMIT a full run's last row bounds its source by.
     pub(crate) sorted: Option<SortedLimit>,
 }
@@ -222,6 +229,7 @@ impl Sources {
             edges: Vec::new(),
             functions,
             inlined: Vec::new(),
+            fts5_shadows: Vec::new(),
             whole,
             declared_ctes: 0,
             whole_names: Some(BTreeSet::new()),
@@ -252,6 +260,9 @@ pub(crate) struct Planner<'a> {
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by.
     pub(crate) inlined: Vec<String>,
+    /// The shadow tables of the contentful FTS5 tables it reads, lowercase
+    /// (`Sources::fts5_shadows`).
+    pub(crate) fts5_shadows: Vec<String>,
     /// The views and tables the live query reads whole.
     pub(crate) whole: &'a WholeViews,
     /// How many CTEs the WITHs read so far declare, which numbers each.
@@ -364,6 +375,7 @@ impl Planner<'_> {
                 .into_iter()
                 .filter(|name| whole_names.as_ref().is_some_and(|whole| !whole.contains(name)))
                 .collect(),
+            fts5_shadows: self.fts5_shadows.into_iter().collect(),
             sorted,
         }
     }
@@ -615,6 +627,9 @@ pub(crate) fn read_select<'a>(
     // they are.
     let order = match cores[..] {
         [core] => {
+            if planner.names_hidden(core, &found) {
+                return Ok(None);
+            }
             planner.note_names(core, &found);
             Some(core)
         }
@@ -686,6 +701,9 @@ fn read_core<'a>(
             for expr in rows.iter().flat_map(|row| row.iter()) {
                 parts(expr, &mut found);
             }
+            if planner.names_hidden(core, &found) {
+                return Ok(None);
+            }
             planner.note_names(core, &found);
             return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|_| core));
         }
@@ -730,6 +748,9 @@ fn read_core<'a>(
     }
     for definition in window_clause.iter().flat_map(|windows| windows.iter()) {
         window_parts(&definition.window, &mut found);
+    }
+    if planner.names_hidden(core, &found) {
+        return Ok(None);
     }
     planner.note_names(core, &found);
     let Some(subqueries) = read_nested(connection, planner, &found, Some(core), ctes)? else {

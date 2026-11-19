@@ -125,7 +125,12 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         };
         scopes.insert(table.clone(), scope);
     }
-    Scopes { tables: scopes, inlined: sources.inlined.clone(), ..Scopes::default() }
+    Scopes {
+        tables: scopes,
+        inlined: sources.inlined.clone(),
+        fts5_shadows: sources.fts5_shadows.clone(),
+        ..Scopes::default()
+    }
 }
 
 /// A join's lookup: whether a row of the partner FROM item, in the scope the

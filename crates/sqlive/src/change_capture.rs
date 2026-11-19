@@ -3,7 +3,7 @@
 use crate::authorization::HostError;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
-use crate::connection::table_shapes::{TableShape, TableShapes};
+use crate::connection::table_shapes::{Shadow, TableShape, TableShapes};
 use crate::connection::HostSql;
 use crate::{RowChange, RowImage, SqlValue};
 use rusqlite::{
@@ -32,21 +32,29 @@ fn image_columns(
     (columns, positions)
 }
 
-/// The shape of `table`, as SQLite names it in one of the transaction's
-/// changes, noting the change of the virtual table a shadow table belongs to.
-fn changed_table<'a, F: HostError, R: HostError>(
+/// The shapes a change to `table`, as SQLite names it in one of the
+/// transaction's changes, is a change under: the table's own, and for a
+/// contentful FTS5 table's content table the FTS5 table's
+/// (`Shadow::Rows`). Notes the change of the virtual table that each change
+/// of a shadow table changes whole (`Shadow::Whole`).
+fn changed_shapes<'a, F: HostError, R: HostError>(
     shapes: &'a TableShapes,
     table: &str,
     changes: &mut Vec<RowChange>,
-) -> Result<&'a TableShape, crate::Error<F, R>> {
+) -> Result<Vec<&'a TableShape>, crate::Error<F, R>> {
     let shape = shapes
         .position(table)
         .map(|position| shapes.shape(position))
         .ok_or(crate::Error::Invariant { what: "every table a transaction changes has a shape" })?;
-    if let Some(parent) = &shape.parent {
-        changes.push(RowChange { table: parent.clone(), column: String::new(), rows: None });
+    let mut found = vec![shape];
+    match &shape.shadow {
+        Some(Shadow::Whole(parent)) => {
+            changes.push(RowChange { table: parent.clone(), column: String::new(), rows: None });
+        }
+        Some(Shadow::Rows(position)) => found.push(shapes.shape(*position)),
+        Some(Shadow::Index) | None => {}
     }
-    Ok(shape)
+    Ok(found)
 }
 
 /// A whole-table change to each of `tables`, as a transaction that records
@@ -81,106 +89,109 @@ pub(crate) fn changes<P: Policy>(
     let mut changes = Vec::new();
     while let Some(item) = items.next()? {
         let operation = item.op()?;
-        let columns = changed_table(&shapes, operation.table_name(), &mut changes)?;
-        let table = columns.name.clone();
-        let first = !images.contains_key(&table);
-        // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first. Session
-        // positions otherwise omit generated columns; event positions don't.
-        let names: Vec<&str> = columns
-            .whole
-            .then_some("rowid")
-            .into_iter()
-            .chain(
-                columns
-                    .columns
-                    .iter()
-                    .filter(|(_, _, hidden)| !hidden)
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .collect();
-        if first {
-            assert_eq!(
-                names.len(),
-                operation.number_of_columns() as usize,
-                "session columns match table metadata"
-            );
-        }
-        let pk = item.pk()?;
-        let (image, positions) = images
-            .entry(table.clone())
-            .or_insert_with(|| image_columns(&names, |index| pk[index] != 0, scoped.get(&table)))
-            .clone();
-        let mut before = Vec::with_capacity(names.len());
-        let mut after = Vec::with_capacity(names.len());
-        let mut changed = Vec::new();
-        for (index, name) in names.iter().enumerate() {
-            let old = if operation.code() == Action::SQLITE_INSERT {
-                None
-            } else {
-                value(item.old_value(index), index)?
-            };
-            let new = if operation.code() == Action::SQLITE_DELETE {
-                None
-            } else {
-                value(item.new_value(index), index)?
-            };
-            if pk[index] != 0 {
-                // An UPDATE includes the old key and omits unchanged new keys.
-                let new = match (operation.code(), new) {
-                    (Action::SQLITE_UPDATE, None) => old.clone(),
-                    (_, new) => new,
+        for columns in changed_shapes(&shapes, operation.table_name(), &mut changes)? {
+            let table = columns.name.clone();
+            let first = !images.contains_key(&table);
+            // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first. Session
+            // positions otherwise omit generated columns; event positions don't.
+            let names: Vec<&str> = columns
+                .whole
+                .then_some("rowid")
+                .into_iter()
+                .chain(
+                    columns
+                        .columns
+                        .iter()
+                        .filter(|(_, _, hidden)| !hidden)
+                        .map(|(name, _, _)| name.as_str()),
+                )
+                .collect();
+            if first {
+                assert_eq!(
+                    names.len(),
+                    operation.number_of_columns() as usize,
+                    "session columns match table metadata"
+                );
+            }
+            let pk = item.pk()?;
+            let (image, positions) = images
+                .entry(table.clone())
+                .or_insert_with(|| {
+                    image_columns(&names, |index| pk[index] != 0, scoped.get(&table))
+                })
+                .clone();
+            let mut before = Vec::with_capacity(names.len());
+            let mut after = Vec::with_capacity(names.len());
+            let mut changed = Vec::new();
+            for (index, name) in names.iter().enumerate() {
+                let old = if operation.code() == Action::SQLITE_INSERT {
+                    None
+                } else {
+                    value(item.old_value(index), index)?
                 };
-                before.push(Some(old.unwrap_or(SqlValue::Null)));
-                after.push(Some(new.unwrap_or(SqlValue::Null)));
-            } else {
-                if old.is_some() || new.is_some() {
-                    changed.push((*name).to_owned());
-                }
-                before.push(old);
-                after.push(new);
-            }
-        }
-        let row = |values: &[Option<SqlValue>]| {
-            RowImage::new(
-                Arc::clone(&image),
-                positions.iter().map(|index| values[*index].clone()).collect(),
-            )
-        };
-        let rows = match operation.code() {
-            Action::SQLITE_INSERT => (None, Some(row(&after))),
-            Action::SQLITE_DELETE => (Some(row(&before)), None),
-            _ => {
-                // A column an UPDATE leaves alone is absent from its changes:
-                // its value is the row's still, so read it there.
-                let unchanged: Vec<usize> = positions
-                    .iter()
-                    .copied()
-                    .filter(|index| pk[*index] == 0 && before[*index].is_none())
-                    .collect();
-                if !unchanged.is_empty() {
-                    let found = current(database, &table, &names, pk, &before, &unchanged)?;
-                    for (index, value) in unchanged.into_iter().zip(found) {
-                        before[index] = value.clone();
-                        after[index] = value;
+                let new = if operation.code() == Action::SQLITE_DELETE {
+                    None
+                } else {
+                    value(item.new_value(index), index)?
+                };
+                if pk[index] != 0 {
+                    // An UPDATE includes the old key and omits unchanged new keys.
+                    let new = match (operation.code(), new) {
+                        (Action::SQLITE_UPDATE, None) => old.clone(),
+                        (_, new) => new,
+                    };
+                    before.push(Some(old.unwrap_or(SqlValue::Null)));
+                    after.push(Some(new.unwrap_or(SqlValue::Null)));
+                } else {
+                    if old.is_some() || new.is_some() {
+                        changed.push((*name).to_owned());
                     }
+                    before.push(old);
+                    after.push(new);
                 }
-                (Some(row(&before)), Some(row(&after)))
             }
-        };
-        if operation.code() == Action::SQLITE_UPDATE {
-            // Sessions omit generated columns; they can change with their inputs.
-            changed.extend(
-                columns
-                    .columns
-                    .iter()
-                    .filter(|(_, _, hidden)| *hidden)
-                    .map(|(name, _, _)| name.clone()),
-            );
-        } else {
-            changed = vec![String::new()];
-        }
-        for column in changed {
-            changes.push(RowChange { table: table.clone(), column, rows: Some(rows.clone()) });
+            let row = |values: &[Option<SqlValue>]| {
+                RowImage::new(
+                    Arc::clone(&image),
+                    positions.iter().map(|index| values[*index].clone()).collect(),
+                )
+            };
+            let rows = match operation.code() {
+                Action::SQLITE_INSERT => (None, Some(row(&after))),
+                Action::SQLITE_DELETE => (Some(row(&before)), None),
+                _ => {
+                    // A column an UPDATE leaves alone is absent from its changes:
+                    // its value is the row's still, so read it there.
+                    let unchanged: Vec<usize> = positions
+                        .iter()
+                        .copied()
+                        .filter(|index| pk[*index] == 0 && before[*index].is_none())
+                        .collect();
+                    if !unchanged.is_empty() {
+                        let found = current(database, &table, &names, pk, &before, &unchanged)?;
+                        for (index, value) in unchanged.into_iter().zip(found) {
+                            before[index] = value.clone();
+                            after[index] = value;
+                        }
+                    }
+                    (Some(row(&before)), Some(row(&after)))
+                }
+            };
+            if operation.code() == Action::SQLITE_UPDATE {
+                // Sessions omit generated columns; they can change with their inputs.
+                changed.extend(
+                    columns
+                        .columns
+                        .iter()
+                        .filter(|(_, _, hidden)| *hidden)
+                        .map(|(name, _, _)| name.clone()),
+                );
+            } else {
+                changed = vec![String::new()];
+            }
+            for column in changed {
+                changes.push(RowChange { table: table.clone(), column, rows: Some(rows.clone()) });
+            }
         }
     }
     Ok(changes)
@@ -248,56 +259,57 @@ pub(crate) fn event_changes<P: Policy>(
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
     let mut changes = Vec::new();
     for event in events {
-        let fields = changed_table(&shapes, &event.table, &mut changes)?;
-        let table = fields.name.clone();
-        if fields.whole {
-            changes.push(RowChange { table, column: String::new(), rows: None });
-            continue;
-        }
-        let (image, positions) = images
-            .entry(table.clone())
-            .or_insert_with(|| {
-                let names: Vec<&str> =
-                    fields.columns.iter().map(|(name, _, _)| name.as_str()).collect();
-                image_columns(&names, |index| fields.columns[index].1, scoped.get(&table))
-            })
-            .clone();
-        let key = |values: &[Option<SqlValue>]| {
-            fields
-                .columns
-                .iter()
-                .zip(values.iter().map(Some).chain(std::iter::repeat(None)))
-                .filter(|((_, pk, _), _)| *pk)
-                .map(|(_, value)| value.and_then(Option::clone).unwrap_or(SqlValue::Null))
-                .collect::<Vec<_>>()
-        };
-        let row = |values: &[Option<SqlValue>]| {
-            RowImage::new(
-                Arc::clone(&image),
-                positions.iter().map(|index| values.get(*index).cloned().flatten()).collect(),
-            )
-        };
-        let whole =
-            |rows| RowChange { table: table.clone(), column: String::new(), rows: Some(rows) };
-        match event.action {
-            Action::SQLITE_INSERT => changes.push(whole((None, Some(row(&event.new))))),
-            Action::SQLITE_DELETE => changes.push(whole((Some(row(&event.old)), None))),
-            _ if key(&event.old) != key(&event.new) => {
-                changes.push(whole((Some(row(&event.old)), None)));
-                changes.push(whole((None, Some(row(&event.new)))));
+        for fields in changed_shapes(&shapes, &event.table, &mut changes)? {
+            let table = fields.name.clone();
+            if fields.whole {
+                changes.push(RowChange { table, column: String::new(), rows: None });
+                continue;
             }
-            _ => {
-                let rows = (Some(row(&event.old)), Some(row(&event.new)));
-                for (index, (name, pk, hidden)) in fields.columns.iter().enumerate() {
-                    // Sessions omit generated columns; they can change with their inputs.
-                    if *pk || (!*hidden && event.old.get(index) == event.new.get(index)) {
-                        continue;
+            let (image, positions) = images
+                .entry(table.clone())
+                .or_insert_with(|| {
+                    let names: Vec<&str> =
+                        fields.columns.iter().map(|(name, _, _)| name.as_str()).collect();
+                    image_columns(&names, |index| fields.columns[index].1, scoped.get(&table))
+                })
+                .clone();
+            let key = |values: &[Option<SqlValue>]| {
+                fields
+                    .columns
+                    .iter()
+                    .zip(values.iter().map(Some).chain(std::iter::repeat(None)))
+                    .filter(|((_, pk, _), _)| *pk)
+                    .map(|(_, value)| value.and_then(Option::clone).unwrap_or(SqlValue::Null))
+                    .collect::<Vec<_>>()
+            };
+            let row = |values: &[Option<SqlValue>]| {
+                RowImage::new(
+                    Arc::clone(&image),
+                    positions.iter().map(|index| values.get(*index).cloned().flatten()).collect(),
+                )
+            };
+            let whole =
+                |rows| RowChange { table: table.clone(), column: String::new(), rows: Some(rows) };
+            match event.action {
+                Action::SQLITE_INSERT => changes.push(whole((None, Some(row(&event.new))))),
+                Action::SQLITE_DELETE => changes.push(whole((Some(row(&event.old)), None))),
+                _ if key(&event.old) != key(&event.new) => {
+                    changes.push(whole((Some(row(&event.old)), None)));
+                    changes.push(whole((None, Some(row(&event.new)))));
+                }
+                _ => {
+                    let rows = (Some(row(&event.old)), Some(row(&event.new)));
+                    for (index, (name, pk, hidden)) in fields.columns.iter().enumerate() {
+                        // Sessions omit generated columns; they can change with their inputs.
+                        if *pk || (!*hidden && event.old.get(index) == event.new.get(index)) {
+                            continue;
+                        }
+                        changes.push(RowChange {
+                            table: table.clone(),
+                            column: name.clone(),
+                            rows: Some(rows.clone()),
+                        });
                     }
-                    changes.push(RowChange {
-                        table: table.clone(),
-                        column: name.clone(),
-                        rows: Some(rows.clone()),
-                    });
                 }
             }
         }
