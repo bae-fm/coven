@@ -8,7 +8,6 @@
 //! failing it makes only output rows that fail it.
 
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
-use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Member, MemberValue};
 use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
@@ -45,28 +44,17 @@ pub(crate) struct Declared<'a> {
 
 impl<'a> Ctes<'a> {
     /// These CTEs and `with`'s, which sits in no other core when `alone`,
-    /// numbered from `numbered` on, which counts them; `None` when a CTE has
-    /// the name of a view read whole, as sqlive couldn't tell reads through
-    /// the CTE from reads of the view. A CTE of an outer CTE's name stands
-    /// for the inner one where the inner WITH's SQL names it, as SQLite
-    /// resolves a name to the innermost CTE of that name.
-    pub(crate) fn with(
-        &self,
-        with: &'a With<'a>,
-        whole: &WholeViews,
-        alone: bool,
-        numbered: &mut usize,
-    ) -> Option<Self> {
+    /// numbered from `numbered` on, which counts them. A CTE of an outer
+    /// CTE's name stands for the inner one where the inner WITH's SQL names
+    /// it, as SQLite resolves a name to the innermost CTE of that name.
+    pub(crate) fn with(&self, with: &'a With<'a>, alone: bool, numbered: &mut usize) -> Self {
         let mut visible = self.visible.clone();
         let scope = visible.len() + with.ctes.len();
         for cte in with.ctes.iter() {
-            if whole.contains(&crate::sql::name(cte.tbl_name.0)) {
-                return None;
-            }
             visible.push(Declared { cte, number: *numbered, alone, scope });
             *numbered += 1;
         }
-        Some(Self { visible, reading: self.reading.clone() })
+        Self { visible, reading: self.reading.clone() }
     }
 
     /// The CTE `name` names, the innermost of that name.

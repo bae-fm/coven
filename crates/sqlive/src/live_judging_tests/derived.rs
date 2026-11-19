@@ -340,3 +340,35 @@ CREATE VIEW all_tracks AS SELECT title FROM release_tracks"
     }
     db.close();
 }
+
+/// A CTE may have the name of a view the app marks as read whole: the
+/// statement reads the CTE under that name, not the view, so the CTE
+/// narrows its tables, and another view the statement reads whole, whose
+/// SQL uses no name the statement's CTEs have, keeps its own tables whole.
+#[tokio::test]
+async fn a_cte_of_a_whole_views_name_narrows_its_tables_beside_a_view_read_whole() {
+    let schema = format!(
+        "{MUSIC};
+CREATE VIEW albums AS SELECT id, album FROM releases;
+CREATE VIEW release_years AS SELECT id, year FROM releases"
+    );
+    let db = TestDatabase::open_with(
+        &schema,
+        crate::tests::TestOptions {
+            whole_views: vec!["albums", "release_years"],
+            ..Default::default()
+        },
+    );
+    follows(
+        &db,
+        "WITH albums AS (SELECT id, title FROM tracks WHERE id = 1) SELECT a.title || ':' || (SELECT group_concat(year, ',') FROM release_years) FROM albums a",
+        vec![],
+        &[
+            ("UPDATE tracks SET title = '.' WHERE id = 4", false),
+            ("UPDATE releases SET year = 2000 WHERE id = 'r3'", true),
+            ("UPDATE tracks SET title = 'uno' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}

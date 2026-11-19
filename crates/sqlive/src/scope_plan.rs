@@ -595,12 +595,7 @@ pub(crate) fn read_select<'a>(
     let inner;
     let ctes = match &select.with {
         Some(with) => {
-            let Some(with) =
-                ctes.with(with, planner.whole, parent.is_none(), &mut planner.declared_ctes)
-            else {
-                return Ok(None);
-            };
-            inner = with;
+            inner = ctes.with(with, parent.is_none(), &mut planner.declared_ctes);
             &inner
         }
         None => ctes,
