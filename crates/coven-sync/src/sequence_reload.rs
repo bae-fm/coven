@@ -622,7 +622,7 @@ impl SequenceSync {
             let incoming = if number.get() > store_covers {
                 let incoming = at_target.consume(received, member.member());
                 at_target.acquire(ring, member)?;
-                removed = OwnRemoval::at(&at_target, self.device, &incoming);
+                removed = OwnRemoval::of(&at_target, self.device, &incoming);
                 incoming
             } else {
                 retained_slot(received)
@@ -750,31 +750,41 @@ impl SequenceSync {
 /// This device's own removal, or its member's, that a reload to a target
 /// past it finds in history. The reload stops there, and the device keeps
 /// its copy, with the state reading the removal's slot leaves it (§14.1).
-struct OwnRemoval {
-    removal: coven_database::Removal,
+pub(crate) struct OwnRemoval {
+    pub(crate) removal: coven_database::Removal,
     /// What the device keeps at the removal: history's state, with every
     /// circle as it was before the slot when the removal is its member's
-    /// (`History::consume`).
-    state: coven_database::StoreState,
+    /// (`History::take_admin`).
+    pub(crate) state: coven_database::StoreState,
 }
 
 impl OwnRemoval {
-    /// The removal of `device`, or of its member, that `incoming` is, once
-    /// `history` has consumed it, when history stopped the device at no
-    /// earlier slot.
-    fn at(
+    /// The removal of `device`, or of its member, that the slot `incoming`
+    /// is, once `history` has consumed it, when history removed neither at
+    /// an earlier slot.
+    fn of(
         history: &History,
         device: coven_foundation::id_source::DeviceId,
         incoming: &IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>>,
     ) -> Option<Self> {
-        let (slot, coven_database::DeviceStop::Removed(removal)) = history.gone_for_good(device)?
-        else {
-            return None;
-        };
         let SlotContent::Admin { effect: Some(effect), .. } = &incoming.content else {
             return None;
         };
-        (slot == incoming.slot).then(|| Self { removal, state: effect.state.clone() })
+        Self::at(history, device, incoming.slot, effect)
+    }
+
+    /// The removal of `device`, or of its member, that the admin `effect` at
+    /// `slot` is, once `history` has taken it, when history removed neither
+    /// at an earlier slot. A replacement of the member's keys before it
+    /// doesn't count: the reload stops at the removal.
+    pub(crate) fn at(
+        history: &History,
+        device: coven_foundation::id_source::DeviceId,
+        slot: Slot,
+        effect: &coven_database::AdminEffect,
+    ) -> Option<Self> {
+        let (removed, removal) = history.removal(device)?;
+        (removed == slot).then(|| Self { removal, state: effect.state.clone() })
     }
 }
 
@@ -790,7 +800,7 @@ impl SequenceSync {
         let mut removed = None;
         let history =
             History::restore_while(originals, self.store(), ring, member, |history, incoming| {
-                removed = OwnRemoval::at(history, self.device, incoming);
+                removed = OwnRemoval::of(history, self.device, incoming);
                 removed.is_none()
             })?;
         Ok((history, removed))

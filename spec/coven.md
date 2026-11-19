@@ -6584,7 +6584,8 @@ state keeps his circles as they were
 ([`own_reload`, `reload_keeps_circles_at_removal`](proofs/sequence/CovenSequence/RemovedReload.lean)).
 Once Ana's device has replaced every key Ben held (§12.2), his devices can't
 open a floor written after it: each installs nothing, keeps its copy as it
-is, and fails each pass for the key it lacks. Without this, the laptop would
+is, and fails each pass, for the key it lacks or for the storage access it
+lost (§14.2). Without this, the laptop would
 take in what others wrote after its removal, and a removed member's device
 would delete the circle the member alone was in. Once a device has stopped at
 its removal, by its slot or by a reload, it reads no slot and loads no floor

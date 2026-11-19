@@ -208,11 +208,11 @@ impl History {
         self.stops(device).next()
     }
 
-    /// How `device` was removed, if a counted entry removed it or its member:
-    /// the first such entry.
-    pub(crate) fn removal(&self, device: DeviceId) -> Option<Removal> {
-        self.stops(device).find_map(|(_, stop)| match stop {
-            DeviceStop::Removed(removal) => Some(removal),
+    /// The first counted entry that removed `device` or its member, if one
+    /// did: its slot, and how it removed the device.
+    pub(crate) fn removal(&self, device: DeviceId) -> Option<(Slot, Removal)> {
+        self.stops(device).find_map(|(slot, stop)| match stop {
+            DeviceStop::Removed(removal) => Some((slot, removal)),
             DeviceStop::Replaced | DeviceStop::Copied | DeviceStop::MemberKeysReplaced => None,
         })
     }

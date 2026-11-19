@@ -482,7 +482,7 @@ impl SequenceSync {
         if let Some(device) = session.history.state.devices.get(&self.device) {
             match device.state {
                 coven_database::DeviceState::Removed => {
-                    let removal = session.history.removal(self.device).ok_or_else(|| {
+                    let (_, removal) = session.history.removal(self.device).ok_or_else(|| {
                         SyncError::Bug(coven_foundation::task::Bug::new(
                             "check the device's binding",
                             "a removed device is removed by a counted entry",
@@ -767,6 +767,25 @@ impl History {
         }
     }
 
+    /// Take `effect`, admitted at `slot`, into history, and leave in it the
+    /// state a device of `member` installs: history takes the effect's own
+    /// state, and a device of the member a store's removal removes installs
+    /// it keeping their circles (§14.1).
+    pub(crate) fn take_admin(
+        &mut self,
+        slot: Slot,
+        header: &coven_format::sequence::SlotHeader,
+        effect: &mut coven_database::AdminEffect,
+        member: &coven_foundation::id_source::MemberId,
+    ) {
+        effect.reload = self.reload_of(effect, member);
+        let kept = crate::circle_effects::KeptCircles::through(member, &effect.change, &self.state);
+        self.accept_admin(slot, header, effect);
+        if let Some(kept) = kept {
+            kept.install(&mut effect.state);
+        }
+    }
+
     pub(crate) fn consume(
         &mut self,
         received: ReceivedSlot,
@@ -793,19 +812,7 @@ impl History {
                 let effect = match validated {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
-                            effect.reload = self.reload_of(effect, &member);
-                            // History takes the removal's own state; a device
-                            // of the member it removes installs it keeping
-                            // their circles (§14.1).
-                            let kept = crate::circle_effects::KeptCircles::through(
-                                &member,
-                                &effect.change,
-                                &self.state,
-                            );
-                            self.accept_admin(slot, &received.header, effect);
-                            if let Some(kept) = kept {
-                                kept.install(&mut effect.state);
-                            }
+                            self.take_admin(slot, &received.header, effect, &member);
                         }
                         effect
                     }

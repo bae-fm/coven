@@ -274,29 +274,56 @@ fn own_device(
     next
 }
 
-/// What a device of `own` installs when it reloads to the slot that takes
-/// history from `before` to `after` through `change`, given what a reload
-/// to the slot before installs: history's state, until the slot that
-/// removes `own`. A reload stops there and installs the removal as the slot
-/// installs it, with every circle kept, and installs nothing after it
-/// (`OwnRemoval`, Lean `RemovedReload.reload`).
-fn reloaded(
+/// A reload on a device of `own`, reading history slot by slot as a reload
+/// reads the floor's history: `History::take_admin` takes each admin
+/// effect, and the reload stops at the first slot `OwnRemoval::at` finds
+/// removing the device's member, keeping what it gives there.
+struct Reload {
     own: u128,
-    reloaded: &StoreState,
-    before: &StoreState,
-    after: &StoreState,
-    change: &StoreChange,
-) -> StoreState {
-    if crate::effects::left(before, &id(own)) {
-        return reloaded.clone();
+    history: crate::history::History,
+    stopped: Option<StoreState>,
+}
+
+impl Reload {
+    /// A reload whose history holds `start`, as a slot before the histories'
+    /// first made it.
+    fn from(own: u128, start: &StoreState) -> Self {
+        let mut history = crate::history::History::default();
+        let effect = AdminEffect {
+            change: StoreChange::RenameStore { name: "household".into() },
+            state: start.clone(),
+            boundary: None,
+            reload: None,
+            provider_access: Vec::new(),
+        };
+        history.accept_admin(slot(BEFORE), &header(1, 1, BEFORE - 1), &effect);
+        Self { own, history, stopped: None }
     }
-    let mut installed = after.clone();
-    if let Some(kept) = crate::circle_effects::KeptCircles::through(&id(own), change, before) {
-        if crate::effects::left(after, &id(own)) {
-            kept.install(&mut installed);
+
+    /// What the reload installs once it has read `change` by `author` at
+    /// slot `at`: history's state, until it stops at the removal.
+    fn read(&mut self, author: u128, at: u64, change: &StoreChange) -> StoreState {
+        if let Some(kept) = &self.stopped {
+            return kept.clone();
         }
+        let header = header(author as u64, author, at - 1);
+        let checked =
+            checked_change(&self.history.state, &header, slot(at), change, &BTreeMap::new(), &[]);
+        if let Ok(Some(mut effect)) = checked {
+            self.history.take_admin(slot(at), &header, &mut effect, &id(self.own));
+            let device = DeviceId(self.own as u64);
+            if let Some(removed) = crate::sequence_sync::sequence_reload::OwnRemoval::at(
+                &self.history,
+                device,
+                slot(at),
+                &effect,
+            ) {
+                self.stopped = Some(removed.state.clone());
+                return removed.state;
+            }
+        }
+        self.history.state.clone()
     }
-    installed
 }
 
 fn observe(
@@ -393,6 +420,7 @@ fn circle_lifecycle_matches_lean() {
         assert_eq!(expected.as_array().unwrap().len(), history.len(), "{}", json!(case));
         let mut state = start.clone();
         let mut devices = DEVICES.map(|_| start.clone());
+        let mut reloading = DEVICES.map(|own| Reload::from(own, &start));
         let mut reloads = DEVICES.map(|_| start.clone());
         for (i, entry) in history.iter().enumerate() {
             let slot = slot(BEFORE + i as u64 + 1);
@@ -413,12 +441,11 @@ fn circle_lifecycle_matches_lean() {
             }
             let outcome = outcome(&checked);
             *seen.entry(outcome).or_default() += 1;
-            let before = state.clone();
             if let Ok(Some(effect)) = checked {
                 state = effect.state;
             }
-            for (reload, own) in reloads.iter_mut().zip(DEVICES) {
-                *reload = reloaded(own, reload, &before, &state, &change);
+            for (installed, reload) in reloads.iter_mut().zip(&mut reloading) {
+                *installed = reload.read(author, slot.get(), &change);
             }
             assert_eq!(
                 observe(&state, outcome, &devices, &reloads),
