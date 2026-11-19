@@ -26,7 +26,10 @@ if [ ! -e "$shared" ]; then
     fetched=$(mktemp -d "$clippy_home/fetch.XXXXXX")
     trap 'rm -rf "$fetched"' EXIT
     git -C "$fetched" init --quiet rust
-    git -C "$fetched/rust" sparse-checkout set --no-cone /src/tools/clippy/
+    # A pattern with a slash before its end is anchored at the top already.
+    # A leading slash would be one too many on Windows, where Git Bash turns
+    # an argument starting with / into a path under Git's own install folder.
+    git -C "$fetched/rust" sparse-checkout set --no-cone src/tools/clippy/
     git -C "$fetched/rust" fetch --quiet --depth 1 --filter=blob:none \
         https://github.com/rust-lang/rust "$commit"
     git -C "$fetched/rust" checkout --quiet FETCH_HEAD
