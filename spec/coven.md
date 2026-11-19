@@ -14512,10 +14512,11 @@ from the last, not holders that share it; nothing outlives the operation, and
 no other task or owner holds it. Work that needs the state again runs inside
 the same operation or makes it afresh. A bootstrap's lock is the bootstrap's:
 the directories it gives out name the lock's instance, a plain value, and
-open the unpublished store only while the registry shows it held. The checker
-finds a task built with a new `Arc`, `Rc` or `Weak` of one of coven's types
-that is state, an owner or a type holding shared state, and refuses any type
-but a task, or a handle that task makes, holding that type through one.
+open the unpublished store only while the registry shows it held. The typed
+lint `clippy::task_state_outside_task` (Appendix F.6, check 11) finds a task
+built with a new `Arc`, `Rc` or `Weak` of one of coven's types that is state,
+an owner or a type holding shared state, and refuses any type but a task, or
+a handle that task makes, holding that type through one.
 
 **Owners don't hand out what they hold,** by returning it, through a public
 field, or as an argument a caller's callback can keep; callers ask the owner to
@@ -14804,6 +14805,19 @@ the same on any platform.
     or a task, which a method may take. A callback's arguments are its
     caller's to give, so a callback that takes a capability gives the method
     none, and one that returns a capability gives it one.
+    A lint that reads function bodies reads those of the workspace's earlier
+    crates too, from their metadata. `tools/typed-lints/clippy.sh` runs the
+    driver through a wrapper that has rustc write every function's MIR into
+    each workspace crate's metadata (`-Zalways-encode-mir`), in the lints'
+    compile and never in another build, and such a lint stops a compile
+    without it. `clippy::task_state_outside_task` holds F.3's rule that one
+    operation owns its state: it finds where a task is built with a new
+    shared pointer in a field, in every body of the workspace the compile
+    sees, and refuses any type but a task, or a handle the task makes, that
+    holds the same state through a shared pointer. It reports a holder in
+    the holder's crate, and a holder in an earlier crate where the task is
+    built; a holder whose crate and the task's never depend on each other, as
+    coven-database's and coven-storage's never do, is reported in neither.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

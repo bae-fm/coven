@@ -1,7 +1,8 @@
 //! The owner rules of Appendix F.3 the workspace's policy selects, on the
 //! compiler's types (`owners.rs`), in one pass that shares their model:
-//! `clippy::built_outside_composition_root`, here, and
-//! `clippy::method_takes_capability` (`method_takes_capability.rs`).
+//! `clippy::built_outside_composition_root`, here,
+//! `clippy::method_takes_capability` (`method_takes_capability.rs`) and
+//! `clippy::task_state_outside_task` (`task_state.rs`).
 //!
 //! `clippy::built_outside_composition_root` (the policy's
 //! `capability-construction`): owners, construction-only capabilities and
@@ -45,6 +46,7 @@ use rustc_span::{Span, sym};
 use crate::finding::Finding;
 use crate::method_takes_capability::{self, METHOD_TAKES_CAPABILITY};
 use crate::owners::{Held, Owners, Part};
+use crate::task_state::{self, TASK_STATE_OUTSIDE_TASK};
 use crate::workspace_policy::WorkspacePolicy;
 
 declare_tool_lint! {
@@ -63,10 +65,15 @@ pub(crate) struct OwnerRules<'tcx> {
     owners: Option<Owners<'tcx>>,
     construction: bool,
     parameters: bool,
+    tasks: bool,
     scopes: FxHashMap<LocalDefId, Scope>,
 }
 
-impl_lint_pass!(OwnerRules<'_> => [BUILT_OUTSIDE_COMPOSITION_ROOT, METHOD_TAKES_CAPABILITY]);
+impl_lint_pass!(OwnerRules<'_> => [
+    BUILT_OUTSIDE_COMPOSITION_ROOT,
+    METHOD_TAKES_CAPABILITY,
+    TASK_STATE_OUTSIDE_TASK
+]);
 
 /// What a callable may build.
 #[derive(Clone)]
@@ -87,10 +94,11 @@ impl<'tcx> OwnerRules<'tcx> {
         let selects = |rule| workspace.is_some_and(|workspace| workspace.policy.selects(rule));
         let construction = selects(Rule::CapabilityConstruction);
         let parameters = selects(Rule::RetainedCapabilityParameters);
+        let tasks = selects(Rule::OwnerDependencies);
         let owners = workspace
-            .filter(|_| construction || parameters)
+            .filter(|_| construction || parameters || tasks)
             .map(|workspace| Owners::new(tcx, workspace));
-        Self { owners, construction, parameters, scopes: FxHashMap::default() }
+        Self { owners, construction, parameters, tasks, scopes: FxHashMap::default() }
     }
 
     /// The model, when the policy selects the composition roots' rule.
@@ -433,6 +441,9 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
         if let Some(owners) = self.construction() {
             check_factory_rows(owners, cx.tcx);
+        }
+        if let Some(owners) = self.owners.as_ref().filter(|_| self.tasks) {
+            task_state::check(owners, cx);
         }
     }
 

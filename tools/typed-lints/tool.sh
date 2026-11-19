@@ -25,7 +25,8 @@ sources() {
     (cd ../.. && find Cargo.toml tools/owner-construction-policy/Cargo.toml \
         tools/owner-construction-policy/src tools/typed-lints/Cargo.toml \
         tools/typed-lints/Cargo.lock tools/typed-lints/lints \
-        tools/typed-lints/driver/Cargo.toml tools/typed-lints/driver/build.rs -type f) |
+        tools/typed-lints/driver/Cargo.toml tools/typed-lints/driver/build.rs \
+        tools/typed-lints/driver/src -type f) |
         LC_ALL=C sort
 }
 
@@ -62,7 +63,8 @@ build:2)
         --manifest-path "$src/tools/typed-lints/Cargo.toml" \
         --config "build.target-dir=\"$work/target\"")
     mkdir -p "$out"
-    cp "$work/target/release/typed-lints-driver$exe" "$out/"
+    cp "$work/target/release/typed-lints-driver$exe" "$work/target/release/typed-lints-rustc$exe" \
+        "$out/"
     printf '%s\n' "$toolchain" > "$out/toolchain"
     cat > "$out/check" <<'CHECK'
 #!/bin/sh

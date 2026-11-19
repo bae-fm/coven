@@ -1,0 +1,9 @@
+# The task state rule of the fixtures in this folder, each type by its path.
+rules = ["owner-dependencies"]
+test_support_features = ["test-utils"]
+private_state_types = ["std::sync::Mutex"]
+shared_pointer_types = ["std::sync::Arc"]
+task_types = ["tasks_base::Load", "tasks_base::Copying", "tasks::Step", "tasks::Opening"]
+
+[handles]
+"tasks::LoadHandle" = "tasks_base::Load"

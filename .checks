@@ -19,7 +19,7 @@ check deny Cargo.toml,Cargo.lock,deny.toml cargo deny check advisories bans lice
 # The `every:` paths are what the typed lints' driver builds from
 # (tools/typed-lints/tool.sh) and the scripts that build and run it: a change
 # to them changes the lints of every crate, so it lints every crate.
-check clippy *.rs,Cargo.toml,Cargo.lock,clippy.toml,rust-toolchain.toml,.cargo/**,every:tools/typed-lints/Cargo.toml,every:tools/typed-lints/Cargo.lock,every:tools/typed-lints/lints/**,every:tools/typed-lints/driver/Cargo.toml,every:tools/typed-lints/driver/build.rs,every:tools/typed-lints/*.sh,every:tools/owner-construction-policy/** tools/typed-lints/clippy.sh {crates} --all-targets --all-features -- -D warnings
+check clippy *.rs,Cargo.toml,Cargo.lock,clippy.toml,rust-toolchain.toml,.cargo/**,every:tools/typed-lints/Cargo.toml,every:tools/typed-lints/Cargo.lock,every:tools/typed-lints/lints/**,every:tools/typed-lints/driver/Cargo.toml,every:tools/typed-lints/driver/build.rs,every:tools/typed-lints/driver/src/**,every:tools/typed-lints/*.sh,every:tools/owner-construction-policy/** tools/typed-lints/clippy.sh {crates} --all-targets --all-features -- -D warnings
 check build-without-test-code *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/cargo.sh check {crates}
 # The flags of scripts/check.sh's doc step: -Dwarnings also denies a public
 # doc's link to a private item (rustdoc::private_intra_doc_links).

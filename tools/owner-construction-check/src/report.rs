@@ -14,7 +14,6 @@ use crate::read_shapes::find_read_shape_violations;
 use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
-use crate::task_state::find_task_state_leaks;
 use crate::typed_errors::find_string_error_violations;
 use crate::unique_type_names::find_unique_type_name_violations;
 use owner_construction_policy::{Policy, Rule};
@@ -81,7 +80,6 @@ fn check_paths(
     }
     if policy.selects(Rule::OwnerDependencies) {
         findings.extend(find_owner_dependency_leaks(files, policy, graph));
-        findings.extend(find_task_state_leaks(files, policy, graph));
     }
     if policy.selects(Rule::ComponentBundles) {
         findings.extend(find_component_bundle_violations(files, &graph.identity));

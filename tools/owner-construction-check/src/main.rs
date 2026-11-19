@@ -44,7 +44,6 @@ mod schema_views;
 mod sources;
 mod sql_statements;
 mod syntax;
-mod task_state;
 mod test_code;
 mod test_layout;
 mod type_identity;

@@ -26,6 +26,8 @@ mod owner_rules;
 mod owners;
 mod reqwest_error_display;
 mod sqlite_outside_its_homes;
+mod task_state;
+mod workspace_bodies;
 mod workspace_policy;
 
 use clippy_config::Conf;
@@ -47,6 +49,7 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         sqlite_outside_its_homes::SQLITE_OUTSIDE_ITS_HOMES,
         owner_rules::BUILT_OUTSIDE_COMPOSITION_ROOT,
         method_takes_capability::METHOD_TAKES_CAPABILITY,
+        task_state::TASK_STATE_OUTSIDE_TASK,
     ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))

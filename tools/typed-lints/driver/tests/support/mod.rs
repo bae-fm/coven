@@ -7,7 +7,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const DRIVER: &str = env!("CARGO_BIN_EXE_typed-lints-driver");
+/// The driver as cargo runs it on the workspace's crates: through its
+/// wrapper, which has rustc write each function's MIR into the metadata.
+const DRIVER: &str = env!("CARGO_BIN_EXE_typed-lints-rustc");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 /// A fixture crate: its source, under `tests/fixtures`, and the folder the

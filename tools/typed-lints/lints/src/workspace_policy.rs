@@ -18,6 +18,7 @@ use clippy_utils::is_in_test_function;
 use clippy_utils::paths::{PathNS, lookup_path_str};
 use owner_construction_policy::{FILE_NAME, Policy};
 use rustc_attr_ir::CfgEntry;
+use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::{HirId, find_attr};
 use rustc_middle::ty::TyCtxt;
@@ -190,6 +191,41 @@ impl WorkspacePolicy {
                 .is_some_and(|cfgs| cfgs.iter().any(|(cfg, _)| requires_test(cfg, features)))
         });
         in_test_folder || test_only || is_in_test_function(tcx, id)
+    }
+
+    /// Whether the definition `id` is test code, as `is_test_code` counts
+    /// it: for another crate's, code that compiles only under one of the
+    /// policy's `test_support_features`, by the `cfg` traces its crate's
+    /// metadata keeps of it and of what holds it. Another crate's build
+    /// holds no `cfg(test)` code and no test folder.
+    pub(crate) fn is_test_definition(&self, tcx: TyCtxt<'_>, id: DefId) -> bool {
+        if let Some(local) = id.as_local() {
+            return self.is_test_code(tcx, tcx.local_def_id_to_hir_id(local));
+        }
+        let features = &self.policy.test_support_features;
+        // Only items carry attributes: a closure or an anonymous constant has
+        // none of its own, and its crate's metadata keeps none for it.
+        std::iter::successors(Some(id), |&item| tcx.opt_parent(item))
+            .filter(|&item| {
+                matches!(
+                    tcx.def_kind(item),
+                    DefKind::Mod
+                        | DefKind::Fn
+                        | DefKind::AssocFn
+                        | DefKind::Impl { .. }
+                        | DefKind::Trait
+                        | DefKind::Struct
+                        | DefKind::Enum
+                        | DefKind::Union
+                        | DefKind::Const
+                        | DefKind::AssocConst
+                        | DefKind::Static { .. }
+                )
+            })
+            .any(|item| {
+                find_attr!(tcx, item, CfgTrace(cfgs) => cfgs)
+                    .is_some_and(|cfgs| cfgs.iter().any(|(cfg, _)| requires_test(cfg, features)))
+            })
     }
 }
 
