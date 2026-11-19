@@ -1,12 +1,13 @@
 #!/bin/bash
 # Compile check that land.sh runs on a cherry-picked result before pushing it
 # (the `whole` lines of .checks are the static ones). Builds what the pre-commit hook's
-# `.checks` lines build, over the whole workspace: clippy with every target and
-# feature, warnings denied, then each crate with no features. The hook builds
+# `.checks` lines build, over the whole workspace: clippy, with the typed lints,
+# with every target and feature, warnings denied, then each crate with no
+# features. The hook builds
 # only the crates holding a staged file, so a commit's dependents are first
 # checked here. Two commits that each pass the
 # hook can break each other's tests; this is where that shows.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-scripts/cargo.sh clippy --workspace --all-targets --all-features -- -D warnings
+tools/typed-lints/clippy.sh --workspace --all-targets --all-features -- -D warnings
 scripts/cargo.sh check --workspace
