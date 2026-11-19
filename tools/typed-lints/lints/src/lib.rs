@@ -21,6 +21,7 @@ extern crate rustc_span;
 
 mod async_export_off_runtime;
 mod finding;
+mod method_takes_capability;
 mod owner_rules;
 mod owners;
 mod reqwest_error_display;
@@ -45,6 +46,7 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         async_export_off_runtime::ASYNC_EXPORT_OFF_RUNTIME,
         sqlite_outside_its_homes::SQLITE_OUTSIDE_ITS_HOMES,
         owner_rules::BUILT_OUTSIDE_COMPOSITION_ROOT,
+        method_takes_capability::METHOD_TAKES_CAPABILITY,
     ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))

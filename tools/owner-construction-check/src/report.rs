@@ -11,7 +11,6 @@ use crate::finding::Finding;
 use crate::owner_dependency_boundary::find_owner_dependency_leaks;
 use crate::owner_graph::OwnerGraph;
 use crate::read_shapes::find_read_shape_violations;
-use crate::retained_capability_parameters::find_retained_capability_parameter_violations;
 use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
@@ -84,9 +83,6 @@ fn check_paths(
         findings.extend(find_owner_dependency_leaks(files, policy, graph));
         findings.extend(find_task_state_leaks(files, policy, graph));
     }
-    if policy.selects(Rule::RetainedCapabilityParameters) {
-        findings.extend(find_retained_capability_parameter_violations(files, graph, policy));
-    }
     if policy.selects(Rule::ComponentBundles) {
         findings.extend(find_component_bundle_violations(files, &graph.identity));
     }
@@ -110,7 +106,7 @@ fn check_paths(
     // Ambiguous names invalidate the workspace graph, even when the first
     // declaration (where the diagnostic points) is outside selected packages.
     if policy.rules.iter().any(|rule| rule.reads_owner_graph()) {
-        findings.extend(find_unique_type_name_violations(files, policy, graph));
+        findings.extend(find_unique_type_name_violations(policy, graph));
     }
     findings.sort();
     findings.dedup();

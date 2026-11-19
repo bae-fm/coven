@@ -1,5 +1,7 @@
 //! The owner rules of Appendix F.3 the workspace's policy selects, on the
-//! compiler's types (`owners.rs`), in one pass that shares their model.
+//! compiler's types (`owners.rs`), in one pass that shares their model:
+//! `clippy::built_outside_composition_root`, here, and
+//! `clippy::method_takes_capability` (`method_takes_capability.rs`).
 //!
 //! `clippy::built_outside_composition_root` (the policy's
 //! `capability-construction`): owners, construction-only capabilities and
@@ -35,12 +37,13 @@ use owner_construction_policy::{FILE_NAME, Rule};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::{Expr, ExprKind, HirId, Item, ItemKind, find_attr};
+use rustc_hir::{Expr, ExprKind, HirId, ImplItem, Item, ItemKind, find_attr};
 use rustc_lint::{LateContext, LateLintPass, declare_tool_lint, impl_lint_pass};
 use rustc_middle::ty::{self, GenericArgsRef, Instance, InstanceKind, Ty, TyCtxt};
 use rustc_span::{Span, sym};
 
 use crate::finding::Finding;
+use crate::method_takes_capability::{self, METHOD_TAKES_CAPABILITY};
 use crate::owners::{Held, Owners, Part};
 use crate::workspace_policy::WorkspacePolicy;
 
@@ -54,13 +57,16 @@ declare_tool_lint! {
     report_in_external_macro: true
 }
 
-/// The pass: the model, and what it knows of each body's callable.
+/// The pass: the model, which owner rules the policy selects, and what it
+/// knows of each body's callable.
 pub(crate) struct OwnerRules<'tcx> {
     owners: Option<Owners<'tcx>>,
+    construction: bool,
+    parameters: bool,
     scopes: FxHashMap<LocalDefId, Scope>,
 }
 
-impl_lint_pass!(OwnerRules<'_> => [BUILT_OUTSIDE_COMPOSITION_ROOT]);
+impl_lint_pass!(OwnerRules<'_> => [BUILT_OUTSIDE_COMPOSITION_ROOT, METHOD_TAKES_CAPABILITY]);
 
 /// What a callable may build.
 #[derive(Clone)]
@@ -77,18 +83,24 @@ enum Scope {
 
 impl<'tcx> OwnerRules<'tcx> {
     pub(crate) fn new(tcx: TyCtxt<'tcx>, workspace: Option<&'static WorkspacePolicy>) -> Self {
+        let workspace = workspace.filter(|workspace| !workspace.compiles_a_tool());
+        let selects = |rule| workspace.is_some_and(|workspace| workspace.policy.selects(rule));
+        let construction = selects(Rule::CapabilityConstruction);
+        let parameters = selects(Rule::RetainedCapabilityParameters);
         let owners = workspace
-            .filter(|workspace| {
-                workspace.policy.selects(Rule::CapabilityConstruction)
-                    && !workspace.compiles_a_tool()
-            })
+            .filter(|_| construction || parameters)
             .map(|workspace| Owners::new(tcx, workspace));
-        Self { owners, scopes: FxHashMap::default() }
+        Self { owners, construction, parameters, scopes: FxHashMap::default() }
+    }
+
+    /// The model, when the policy selects the composition roots' rule.
+    fn construction(&self) -> Option<&Owners<'tcx>> {
+        self.owners.as_ref().filter(|_| self.construction)
     }
 }
 
 /// The type an impl is for, when it is an ADT.
-fn impl_type(tcx: TyCtxt<'_>, callable: DefId) -> Option<DefId> {
+pub(crate) fn impl_type(tcx: TyCtxt<'_>, callable: DefId) -> Option<DefId> {
     let implementation = tcx.impl_of_assoc(callable)?;
     tcx.type_of(implementation)
         .instantiate_identity()
@@ -109,16 +121,16 @@ fn type_name(tcx: TyCtxt<'_>, callable: DefId) -> String {
     }
 }
 
-impl<'tcx> OwnerRules<'tcx> {
-    /// Whether the policy lists `callable` as a composition root.
-    fn is_root(owners: &Owners<'tcx>, tcx: TyCtxt<'tcx>, callable: DefId) -> bool {
-        let Some(path) = owners.workspace.relative_path(tcx, tcx.def_span(callable)) else {
-            return false;
-        };
-        let name = tcx.item_name(callable);
-        owners.workspace.policy.is_composition_root(&path, &type_name(tcx, callable), name.as_str())
-    }
+/// Whether the policy lists `callable` as a composition root.
+pub(crate) fn is_root<'tcx>(owners: &Owners<'tcx>, tcx: TyCtxt<'tcx>, callable: DefId) -> bool {
+    let Some(path) = owners.workspace.relative_path(tcx, tcx.def_span(callable)) else {
+        return false;
+    };
+    let name = tcx.item_name(callable);
+    owners.workspace.policy.is_composition_root(&path, &type_name(tcx, callable), name.as_str())
+}
 
+impl<'tcx> OwnerRules<'tcx> {
     /// The scope of the code in the body `owner` holds: its callable's, a
     /// closure's being the function it is written in; a const's or static's
     /// inside a root, the root's.
@@ -131,7 +143,7 @@ impl<'tcx> OwnerRules<'tcx> {
         let callable = tcx.typeck_root_def_id(owner.to_def_id());
         let scope = if owners.workspace.is_test_code(tcx, tcx.local_def_id_to_hir_id(owner)) {
             Scope::Test
-        } else if Self::is_root(owners, tcx, callable)
+        } else if is_root(owners, tcx, callable)
             || (matches!(tcx.def_kind(callable), DefKind::Const | DefKind::Static { .. })
                 && tcx
                     .opt_local_parent(callable.expect_local())
@@ -141,7 +153,7 @@ impl<'tcx> OwnerRules<'tcx> {
                                 matches!(tcx.def_kind(*item), DefKind::Fn | DefKind::AssocFn)
                             })
                     })
-                    .is_some_and(|function| Self::is_root(owners, tcx, function.to_def_id())))
+                    .is_some_and(|function| is_root(owners, tcx, function.to_def_id())))
         {
             Scope::Root
         } else {
@@ -419,13 +431,19 @@ fn check_factory_rows<'tcx>(owners: &Owners<'tcx>, tcx: TyCtxt<'tcx>) {
 
 impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
-        if let Some(owners) = &self.owners {
+        if let Some(owners) = self.construction() {
             check_factory_rows(owners, cx.tcx);
         }
     }
 
+    fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx ImplItem<'tcx>) {
+        if let Some(owners) = self.owners.as_ref().filter(|_| self.parameters) {
+            method_takes_capability::check(owners, cx, item);
+        }
+    }
+
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        let Some(owners) = self.owners.as_ref() else {
+        let Some(owners) = self.construction() else {
             return;
         };
         let Some(body) = cx.enclosing_body else {
@@ -476,7 +494,7 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
     }
 
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-        let Some(owners) = self.owners.as_ref() else {
+        let Some(owners) = self.construction() else {
             return;
         };
         let ItemKind::Static(_, ident, ..) = item.kind else {
@@ -484,7 +502,7 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
         };
         let tcx = cx.tcx;
         let id = item.owner_id.to_def_id();
-        if owners.workspace.is_test_code(tcx, item.hir_id()) || Self::is_root(owners, tcx, id) {
+        if owners.workspace.is_test_code(tcx, item.hir_id()) || is_root(owners, tcx, id) {
             return;
         }
         let rows = &owners.rows;

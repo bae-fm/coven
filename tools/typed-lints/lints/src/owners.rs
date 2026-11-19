@@ -270,7 +270,19 @@ impl<'tcx> Owners<'tcx> {
         found: &mut dyn FnMut(Held<'tcx>),
     ) {
         let mut seen = FxHashSet::default();
-        self.walk_inner(ty, shared, borrowed, found, &mut seen);
+        self.walk_inner(ty, shared, borrowed, &|_| true, found, &mut seen);
+    }
+
+    /// What `walk` finds in `ty`, except inside the type arguments of each
+    /// ADT that `inside` refuses.
+    pub(crate) fn walk_outside(
+        &self,
+        ty: Ty<'tcx>,
+        inside: &dyn Fn(DefId) -> bool,
+        found: &mut dyn FnMut(Held<'tcx>),
+    ) {
+        let mut seen = FxHashSet::default();
+        self.walk_inner(ty, false, false, inside, found, &mut seen);
     }
 
     fn walk_inner(
@@ -278,6 +290,7 @@ impl<'tcx> Owners<'tcx> {
         ty: Ty<'tcx>,
         shared: bool,
         borrowed: bool,
+        inside: &dyn Fn(DefId) -> bool,
         found: &mut dyn FnMut(Held<'tcx>),
         seen: &mut FxHashSet<(Ty<'tcx>, bool, bool)>,
     ) {
@@ -288,6 +301,9 @@ impl<'tcx> Owners<'tcx> {
         match *ty.kind() {
             ty::Adt(adt, args) => {
                 found(Held::Part(Part { id: adt.did(), args: Some(args), shared, borrowed }));
+                if !inside(adt.did()) {
+                    return;
+                }
                 let pointer = self.rows.pointers.has(tcx, adt.did(), Some(args));
                 let held = self.held_parameters(adt.did());
                 for (index, arg) in args.iter().enumerate() {
@@ -295,24 +311,24 @@ impl<'tcx> Owners<'tcx> {
                         continue;
                     };
                     if pointer {
-                        self.walk_inner(arg, true, borrowed, found, seen);
+                        self.walk_inner(arg, true, borrowed, inside, found, seen);
                     } else if held.get(index).copied().unwrap_or(true) {
-                        self.walk_inner(arg, shared, borrowed, found, seen);
+                        self.walk_inner(arg, shared, borrowed, inside, found, seen);
                     }
                 }
             }
-            ty::Ref(_, inner, _) => self.walk_inner(inner, true, true, found, seen),
+            ty::Ref(_, inner, _) => self.walk_inner(inner, true, true, inside, found, seen),
             ty::RawPtr(inner, _) | ty::Array(inner, _) | ty::Slice(inner) | ty::Pat(inner, _) => {
-                self.walk_inner(inner, shared, borrowed, found, seen);
+                self.walk_inner(inner, shared, borrowed, inside, found, seen);
             }
             ty::Tuple(parts) => {
                 for part in parts {
-                    self.walk_inner(part, shared, borrowed, found, seen);
+                    self.walk_inner(part, shared, borrowed, inside, found, seen);
                 }
             }
             ty::FnPtr(signature, _) => {
                 let output = signature.output().skip_binder();
-                self.walk_inner(output, shared, borrowed, found, seen);
+                self.walk_inner(output, shared, borrowed, inside, found, seen);
             }
             ty::Dynamic(bounds, _) => {
                 if let Some(principal) = bounds.principal_def_id() {
@@ -320,7 +336,7 @@ impl<'tcx> Owners<'tcx> {
                 }
                 for projection in bounds.projection_bounds() {
                     if let Some(term) = projection.skip_binder().term.as_type() {
-                        self.walk_inner(term, shared, borrowed, found, seen);
+                        self.walk_inner(term, shared, borrowed, inside, found, seen);
                     }
                 }
             }
@@ -339,7 +355,7 @@ impl<'tcx> Owners<'tcx> {
                         })),
                         ty::ClauseKind::Projection(projection) => {
                             if let Some(term) = projection.term.as_type() {
-                                self.walk_inner(term, shared, borrowed, found, seen);
+                                self.walk_inner(term, shared, borrowed, inside, found, seen);
                             }
                         }
                         _ => {}
@@ -349,7 +365,7 @@ impl<'tcx> Owners<'tcx> {
             ty::Alias(_, alias) if let Some(projection) = alias.try_to_projection() => {
                 let normalized = self.normalize(Unnormalized::new_wip(ty));
                 if normalized != ty {
-                    self.walk_inner(normalized, shared, borrowed, found, seen);
+                    self.walk_inner(normalized, shared, borrowed, inside, found, seen);
                     return;
                 }
                 let item = projection.kind;
@@ -361,7 +377,7 @@ impl<'tcx> Owners<'tcx> {
                         // parameters, which mean nothing here.
                         let given = tcx.type_of(given).instantiate_identity().skip_norm_wip();
                         if !given.has_param() {
-                            self.walk_inner(given, shared, borrowed, found, seen);
+                            self.walk_inner(given, shared, borrowed, inside, found, seen);
                         }
                     }
                 }

@@ -14795,6 +14795,15 @@ the same on any platform.
     or a lock. The lint reads the policy's type rows by path. It knows
     the crates the compile loads, so a type that only a later crate holds
     through an `Arc` is no owner in an earlier one.
+    `clippy::method_takes_capability` holds F.2's rule that a method takes no
+    raw capability, and F.3's that a handle reaches only what is being built:
+    outside the roots the policy lists, a function of an impl takes no
+    construction-only capability or handle unless its result holds the impl's
+    own type, as a constructor's does. A parameter takes what its type holds,
+    up to coven's own types: one of those that holds a capability is an owner
+    or a task, which a method may take. A callback's arguments are its
+    caller's to give, so a callback that takes a capability gives the method
+    none, and one that returns a capability gives it one.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

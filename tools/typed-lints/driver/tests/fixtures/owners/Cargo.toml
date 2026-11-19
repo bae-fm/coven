@@ -1,4 +1,4 @@
 # The root of the workspace of the owner rules' fixtures, where the lints
-# find its policy file: base.rs, a crate of the workspace the checked crate
-# depends on, and src/lib.rs, the checked crate.
+# find its policy file: base.rs, a crate of the workspace the checked crates
+# depend on, and the checked crates, src/lib.rs and parameters.rs.
 [workspace]

@@ -1,15 +1,20 @@
 use super::*;
 use crate::crate_code::checked;
+use crate::syntax::RustFile;
 
 /// The rule as the checker runs it: on the files' production code.
 fn find_unique_type_name_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
     let files = checked(files, policy);
-    super::find_unique_type_name_violations(&files, policy, &OwnerGraph::collect(&files, policy))
+    super::find_unique_type_name_violations(policy, &OwnerGraph::collect(&files, policy))
 }
 
 fn duplicate_at(name: &str, paths: &[&str]) -> Vec<Finding> {
-    vec![Finding::new(paths[0], 1, format!("type {name} is declared more than once: {}", paths.join(", ")),
-        "type names used by the policy, construction-only capabilities and inferred owners must be unique across the workspace's crates")]
+    vec![Finding::new(
+        paths[0],
+        1,
+        format!("type {name} is declared more than once: {}", paths.join(", ")),
+        "type names used by the policy and inferred owners must be unique across the workspace's crates",
+    )]
 }
 
 const FIRST: &str = "crates/first/src/lib.rs";
@@ -73,22 +78,6 @@ fn all_declaration_kinds_count_including_nested_modules() {
             );
         }
     }
-}
-
-#[test]
-fn capability_trait_implementations_need_no_explicit_type_row() {
-    let policy = Policy::fixture(r#"capability_traits = ["Clock"]"#);
-    let source = r#"
-        trait Clock {}
-        #[cfg(feature = "test-utils")]
-        mod fakes {
-            struct SuppliedClock<T>(T);
-            impl<T> foundation::Clock for SuppliedClock<T> {}
-        }
-    "#;
-    let mut expected = duplicate("SuppliedClock");
-    expected[0].line = 5;
-    assert_eq!(violations(source, "struct SuppliedClock;", &policy), expected);
 }
 
 #[test]

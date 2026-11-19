@@ -63,7 +63,7 @@ fn duplicate_capability_and_owner_names_report_every_declaration() {
             report.lines(),
             [
                 format!("crates/first/src/lib.rs:1: type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
-                "type names used by the policy, construction-only capabilities and inferred owners must be unique across the workspace's crates".to_string(),
+                "type names used by the policy and inferred owners must be unique across the workspace's crates".to_string(),
             ],
         );
     }
@@ -196,7 +196,9 @@ fn one_exact_list_entry_allows_background_starts() {
         (PATH, "Other", "open", false),
         ("crates/app-sync/src/elsewhere.rs", "Worker", "open", false),
     ] {
-        let source = format!("extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
+        let source = format!(
+            "extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}"
+        );
         let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &rooted);
         let expected = if allowed { Vec::new() } else { unrooted_spawn(path) };
         assert_eq!(report.0, expected);
@@ -296,7 +298,9 @@ fn only_the_selected_rules_run() {
     selected.rules = [Rule::OwnerDependencies].into();
     assert_eq!(
         messages(&selected),
-        ["type Clock is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"]
+        [
+            "type Clock is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"
+        ]
     );
 }
 

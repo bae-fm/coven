@@ -1,5 +1,5 @@
 # The owner rules of the fixtures in this folder, each type by its path.
-rules = ["capability-construction"]
+rules = ["capability-construction", "retained-capability-parameters"]
 test_support_features = ["test-utils"]
 capability_types = ["owners_base::time::Clock", "owners_base::time::SystemClock"]
 capability_traits = ["owners_base::time::Clock"]
@@ -11,9 +11,11 @@ task_types = ["owners::Task"]
 
 [handles]
 "owners::Requests" = "owners::Query"
+"owners_parameters::Requests" = "owners_parameters::Query"
 
 [composition_roots]
 "src/lib.rs" = ["Builder::open", "REGISTRY"]
+"parameters.rs" = ["View::assemble"]
 
 [capability_factories."src/lib.rs"]
 "Directory::file" = "owners_base::files::StoreDir"

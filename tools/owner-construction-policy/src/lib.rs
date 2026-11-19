@@ -60,9 +60,10 @@ pub enum Rule {
     /// task makes shared for its operation stays with tasks
     /// (`task_state.rs`).
     OwnerDependencies,
-    /// Appendix F.2 and F.3: an owner's method never takes a
-    /// construction-only capability, and no method but a constructor takes
-    /// a handle (`retained_capability_parameters.rs`).
+    /// Appendix F.2 and F.3: no method but a constructor takes a
+    /// construction-only capability or a handle. The typed lint
+    /// `clippy::method_takes_capability` checks it (`tools/typed-lints`),
+    /// not the checker.
     RetainedCapabilityParameters,
     /// Appendix F.3: no struct built only to be destructured
     /// (`component_bundles.rs`).
@@ -87,13 +88,19 @@ impl Rule {
     /// (`crate_code.rs`): every rule it runs but the crate dependencies, which
     /// read manifests, and the conventions, which read every file as written.
     pub fn reads_crate_code(self) -> bool {
-        !matches!(self, Rule::CrateDependencies | Rule::Conventions | Rule::CapabilityConstruction)
+        !matches!(
+            self,
+            Rule::CrateDependencies
+                | Rule::Conventions
+                | Rule::CapabilityConstruction
+                | Rule::RetainedCapabilityParameters
+        )
     }
 
     /// Whether the rule infers owners and matches types by name, so it needs
     /// every name it reasons about declared once (`unique_type_names.rs`).
     pub fn reads_owner_graph(self) -> bool {
-        matches!(self, Rule::OwnerDependencies | Rule::RetainedCapabilityParameters)
+        matches!(self, Rule::OwnerDependencies)
     }
 }
 
