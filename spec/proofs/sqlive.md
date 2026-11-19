@@ -561,6 +561,21 @@ planned state's facts for those tests.
 planned state: the planner takes them from the state's edges as it places
 the item, and no step drops an edge, so what the invariant says of the
 state's edges it says of each membership.
+[Partners.lean](../../crates/sqlive/proofs/SqliveNarrowing/Partners.lean)
+proves where the planned state's edges take their values from
+(`plan_lookups`). A condition's reader gives only edges whose partner a
+lookup reads alone, and the planner moves an edge's member only, so every
+edge of the planned state, every edge of a side of each OR and every
+narrowing an ON holds back has such a partner. Each OR an item keeps is one
+of its ORs, and each edge the planner passes into a derived item's arm has a
+member its core lists. The planner places only items a core lists
+(`plan_order_listed`). A query readable alone names no item outside its
+cores (`Statement.outerNames_readsAlone`), so a derived item a lookup reads
+alone runs its query under any binding as under the binding of no row
+(`evalQuery_readable`, `outer_readable`). Every binding of an arm matters to
+a query whose every row matters (`relevant_of_all`), and no derived item
+reads the statement's own query, so its test keeps every row
+(`queryTest_root`).
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the planned state's facts at a binding that matters, with the order the

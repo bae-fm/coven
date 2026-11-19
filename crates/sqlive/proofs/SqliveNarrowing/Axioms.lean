@@ -96,3 +96,10 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.queryTest_good
 #print axioms SqliveNarrowing.plan_semTests
 #print axioms SqliveNarrowing.plan_membersEdges
+#print axioms SqliveNarrowing.plan_lookups
+#print axioms SqliveNarrowing.plan_order_listed
+#print axioms SqliveNarrowing.Statement.outerNames_readsAlone
+#print axioms SqliveNarrowing.evalQuery_readable
+#print axioms SqliveNarrowing.outer_readable
+#print axioms SqliveNarrowing.relevant_of_all
+#print axioms SqliveNarrowing.queryTest_root
