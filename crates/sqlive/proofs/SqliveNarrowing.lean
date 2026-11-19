@@ -22,3 +22,4 @@ import SqliveNarrowing.PlannerState
 import SqliveNarrowing.Tests
 import SqliveNarrowing.ReadOrder
 import SqliveNarrowing.Congr
+import SqliveNarrowing.Facts

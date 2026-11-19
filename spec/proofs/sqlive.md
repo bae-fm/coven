@@ -497,11 +497,24 @@ such membership takes a subquery's value (`plan_nestedOK`), and
 BY's terms keep the terms in order, so a binding's values run by run are its
 ORDER BY values.
 
+[Facts.lean](../../crates/sqlive/proofs/SqliveNarrowing/Facts.lean) states
+what the planner's state says of the bindings a core keeps (`PState.Sem`):
+an item the state holds no ON narrowing back for has a row, each item's terms
+hold of its row, each edge and OR of an item with a row holds, and what the
+state holds back for a LEFT JOIN's item holds where that item has a row.
+`PState.Sem.initial` proves that the state before the planner reads any
+condition keeps it, and `PState.Sem.readConds` that reading a core's
+conditions keeps it. A WHERE condition holds of every binding the core keeps,
+and an ON condition of each binding that holds a row of the join's item, so
+the reader's promise gives each term, edge and OR at the binding itself. An
+item the planner makes an inner join's holds a fact that a row of NULLs fails
+(`holds_none`, `HoldsIn.bound`, `Disjunction.HoldsIn.bound`), so every such
+binding holds its row, and what its ON held back holds there too.
+
 Whether these tests keep the promise `Kept` is the step that remains: whether
-the planner's state gives each item terms, edges and ORs that hold of the
-bindings that matter, through the conditions it reads, the ON conditions it
-holds back, the terms it carries and passes into derived items, and the order
-it places items in.
+the terms the planner carries and passes into derived items, the
+memberships and ORs it takes as it places items, and the order it places
+them in keep the state's facts true of the bindings that matter.
 
 ## What the proofs don't cover
 
