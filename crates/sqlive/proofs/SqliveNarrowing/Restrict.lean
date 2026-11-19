@@ -8,7 +8,9 @@ the rows a query returns holds only rows that pass their items' tests.
 Each item `i` has a test `G i` on its rows, which the planner's scopes give,
 and each query `q` a test `rel q` on its rows: the rows of `q` that matter
 to the core reading it. A binding of an arm of `q` matters when its row
-passes `rel q`, or always when the arm aggregates or calls a window function
+passes `rel q`; in an arm that aggregates, when its group can make a row that
+passes `rel q`, as its GROUP BY values say (`keyMatters`), which all its
+group's bindings share; and always in an arm that calls a window function
 (`relevant`). The promise the planner's scopes make (`Kept`) is that a
 binding a core keeps that matters holds only rows that pass their items'
 tests, and holds no row of an item only where `Left` allows, and that a
@@ -445,12 +447,126 @@ def Core.outRow (c : Core) (E : Bind → Nat → List Row) (b : Bind) : Row :=
     | .expr e => e.eval b (E b)
     | _ => none
 
+/-- Whether a group of arm `k` of query `q` whose GROUP BY values are `key`
+can make a row that `rel q` keeps: some row `rel q` keeps holds, in each
+result column that is a bare column the GROUP BY lists, that column's value
+in `key`. -/
+noncomputable def keyMatters (s : Statement) (rel : Nat → Row → Bool) (q k : Nat)
+    (key : List Value) : Bool :=
+  decide (∃ r, rel q r = true ∧ ∀ (c n j c' : Nat), (s.core k).output[c]? = some (.expr (.col j c')) →
+    (s.core k).groupBy[n]? = some (Expr.col j c') → key[n]? = some (r.cell c))
+
+/-- A binding's values of the GROUP BY of arm `k`. -/
+def Statement.groupKey (s : Statement) (k : Nat) (E : Bind → Nat → List Row) (b : Bind) :
+    List Value :=
+  (s.core k).groupBy.map fun e => e.eval b (E b)
+
 /-- Whether a binding of arm `k` of query `q` matters to the rows of `q` that
-`rel q` keeps: its row passes `rel q`, or the arm aggregates or calls a
-window function, which makes a row of many bindings. -/
-def relevant (s : Statement) (rel : Nat → Row → Bool) (q k : Nat) (E : Bind → Nat → List Row)
-    (b : Bind) : Bool :=
-  (s.core k).aggregated || (s.core k).windowed || rel q ((s.core k).outRow E b)
+`rel q` keeps: its row passes `rel q`; in an arm that aggregates, its group
+can make a row `rel q` keeps, as its GROUP BY values say; and in an arm that
+calls a window function, whose row depends on the arm's other rows, always. -/
+noncomputable def relevant (s : Statement) (rel : Nat → Row → Bool) (q k : Nat)
+    (E : Bind → Nat → List Row) (b : Bind) : Bool :=
+  (s.core k).windowed ||
+    if (s.core k).aggregated then keyMatters s rel q k (s.groupKey k E b)
+    else rel q ((s.core k).outRow E b)
+
+/-- A group of bindings that share their GROUP BY values `key`, of an arm
+that aggregates, makes a row that `rel q` keeps only when `key` matters:
+the row holds, in each result column that is a bare column the GROUP BY
+lists, that column's value in the group's last binding. -/
+theorem keyMatters_of_group {s : Statement} {rel : Nat → Row → Bool} {q k : Nat}
+    {E : Bind → Nat → List Row} {g : List Bind} {key : List Value}
+    (hkey : ∀ b ∈ g, s.groupKey k E b = key) (hne : g ≠ [] ∨ (s.core k).groupBy = [])
+    (hrel : rel q ((s.core k).output.map (OutCol.aggregate E g)) = true) :
+    keyMatters s rel q k key = true := by
+  unfold keyMatters
+  refine decide_eq_true ⟨_, hrel, fun c n j c' hc hn => ?_⟩
+  have hgne : g ≠ [] := by
+    rcases hne with hne | hne
+    · exact hne
+    · rw [hne] at hn; cases hn
+  obtain ⟨bl, hbl⟩ := Option.ne_none_iff_exists'.mp (mt List.getLast?_eq_none_iff.mp hgne)
+  have hmem := List.mem_of_getLast? hbl
+  rw [← hkey bl hmem]
+  simp [Statement.groupKey, List.getElem?_map, hn, Row.cell, hc, OutCol.aggregate, hbl, Expr.eval]
+
+/-- An arm that aggregates makes the same rows that `rel q` keeps from the
+bindings whose groups matter as from all its bindings. -/
+theorem Core.result_filter_key {s : Statement} {rel : Nat → Row → Bool} {q k : Nat}
+    (hagg : (s.core k).aggregated = true) (E : Bind → Nat → List Row) (kept : List Bind) :
+    ((s.core k).result E kept).filter (rel q) =
+      ((s.core k).result E (kept.filter fun b => keyMatters s rel q k (s.groupKey k E b))).filter
+        (rel q) := by
+  let c := s.core k
+  let key := s.groupKey k E
+  let C := keyMatters s rel q k
+  let row (g : List Bind) : Row := c.output.map (OutCol.aggregate E g)
+  suffices hrows : (c.rows E kept).filter (rel q) = (c.rows E (kept.filter (C ∘ key))).filter (rel q) by
+    show (c.result E kept).filter (rel q) = (c.result E (kept.filter (C ∘ key))).filter (rel q)
+    unfold Core.result
+    split
+    · rw [filter_eraseDups, filter_eraseDups, hrows]
+    · exact hrows
+  unfold Core.rows
+  simp only [show c.aggregated = true from hagg, ↓reduceIte]
+  cases hgb : c.groupBy.isEmpty with
+  | true =>
+    have hnil : c.groupBy = [] := List.isEmpty_iff.mp hgb
+    have hkey : ∀ b, key b = [] := fun b => by simp [key, Statement.groupKey, c, hnil]
+    simp only [↓reduceIte, List.map_cons, List.map_nil]
+    cases hC : C [] with
+    | true =>
+      rw [show kept.filter (C ∘ key) = kept from
+        List.filter_eq_self.mpr fun b _ => by simp only [Function.comp, hkey b, hC]]
+    | false =>
+      have hfail : ∀ g : List Bind, rel q (row g) = false := by
+        intro g
+        cases hr : rel q (row g) with
+        | false => rfl
+        | true =>
+          have := keyMatters_of_group (g := g) (fun b _ => hkey b) (Or.inr hnil) hr
+          exact absurd (show C [] = true from this) (by rw [hC]; simp)
+      simp only [List.filter_cons, List.filter_nil]
+      rw [show rel q (c.output.map (OutCol.aggregate E kept)) = false from hfail kept,
+        show rel q (c.output.map (OutCol.aggregate E (kept.filter (C ∘ key)))) = false from hfail _]
+      rfl
+  | false =>
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    have hgroups : ∀ l : List Bind, groupsOf (fun b => c.groupBy.map (Expr.eval b (E b))) l =
+        ((l.map key).eraseDups).map fun kv => l.filter fun b => key b == kv := fun _ => rfl
+    rw [hgroups, hgroups]
+    -- The filtered bindings' keys are the keys that matter, each with the same group.
+    have hkeys : ((kept.filter (C ∘ key)).map key).eraseDups = ((kept.map key).eraseDups).filter C := by
+      rw [← List.filter_map, filter_eraseDups]
+    have hsame : ∀ kv ∈ ((kept.map key).eraseDups).filter C,
+        (kept.filter (C ∘ key)).filter (fun b => key b == kv) = kept.filter fun b => key b == kv := by
+      intro kv hkv
+      have hC : C kv = true := (List.mem_filter.mp hkv).2
+      rw [List.filter_filter]
+      apply List.filter_congr
+      intro b _
+      cases hb : key b == kv with
+      | false => simp
+      | true =>
+        simp only [beq_iff_eq] at hb
+        simp [Function.comp, hb, hC]
+    rw [hkeys, List.map_congr_left hsame, List.map_map, List.map_map, List.filter_map,
+      List.filter_map, List.filter_filter]
+    congr 1
+    apply List.filter_congr
+    intro kv hkv
+    simp only [Function.comp]
+    cases hr : rel q (c.output.map (OutCol.aggregate E (kept.filter fun b => key b == kv))) with
+    | false => simp
+    | true =>
+      have hm : kv ∈ kept.map key := List.mem_eraseDups.mp hkv
+      obtain ⟨b0, hb0, hkb0⟩ := List.mem_map.mp hm
+      have hgne : kept.filter (fun b => key b == kv) ≠ [] :=
+        List.ne_nil_of_mem (List.mem_filter.mpr ⟨hb0, by simp [hkb0]⟩)
+      have := keyMatters_of_group (rel := rel) (q := q) (g := kept.filter fun b => key b == kv)
+        (fun b hb => by simpa using (List.mem_filter.mp hb).2) (Or.inl hgne) hr
+      simp [show C kv = true from this]
 
 theorem Core.rows_plain {c : Core} (hagg : c.aggregated = false) (hwin : c.windowed = false)
     (E : Bind → Nat → List Row) (kept : List Bind) : c.rows E kept = kept.map (c.outRow E) := by
@@ -499,21 +615,32 @@ theorem arm_restricted {s : Statement} {rel : Nat → Row → Bool} {q k : Nat}
         exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
           (List.mem_flatMap.mpr ⟨_, ho, List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
     | _ => rfl
-  cases hmany : c.aggregated || c.windowed with
-  | true =>
-    have htrue : ∀ E b, relevant s rel q k E b = true := by
+  have hcases : c.windowed = true ∨ (c.windowed = false ∧ c.aggregated = true) ∨
+      (c.aggregated = false ∧ c.windowed = false) := by
+    cases c.windowed <;> cases c.aggregated <;> simp
+  rcases hcases with hwin | ⟨hwin, hagg⟩ | hmany
+  · have htrue : ∀ E b, relevant s rel q k E b = true := by
       intro E b
       unfold relevant
-      rw [show ((s.core k).aggregated || (s.core k).windowed) = true from hmany, Bool.true_or]
+      rw [show (s.core k).windowed = true from hwin, Bool.true_or]
     have hX : keptX.filter (relevant s rel q k EX) = keptX := List.filter_eq_self.mpr fun b _ => htrue _ b
     have hY : keptY.filter (relevant s rel q k EY) = keptY := List.filter_eq_self.mpr fun b _ => htrue _ b
     rw [hX, hY] at hkept
     rw [hX] at hE
     subst hkept
     rw [Core.result_congr hE]
-  | false =>
-    simp only [Bool.or_eq_false_iff] at hmany
-    have hres : ∀ E (kept : List Bind), (c.result E kept).filter (rel q) =
+  · have hrel : ∀ E (kept : List Bind), kept.filter (relevant s rel q k E) =
+        kept.filter fun b => keyMatters s rel q k (s.groupKey k E b) := by
+      intro E kept
+      apply List.filter_congr
+      intro b _
+      simp [relevant, c, hwin, hagg]
+    rw [hrel, hrel] at hkept
+    rw [hrel] at hE
+    show (c.result EX keptX).filter (rel q) = (c.result EY keptY).filter (rel q)
+    rw [Core.result_filter_key hagg, Core.result_filter_key (E := EY) hagg, Core.result_congr hE,
+      hkept]
+  · have hres : ∀ E (kept : List Bind), (c.result E kept).filter (rel q) =
         (if c.distinct then List.eraseDups else id)
           ((kept.filter (relevant s rel q k E)).map (c.outRow E)) := by
       intro E kept
@@ -663,19 +790,31 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
     (RX := relevant s rel' q k (evalQuery s X f)) (RY := relevant s rel' q k (evalQuery s Y f))
     (fun b hb hw hbd => by
       unfold relevant
-      congr 2
-      apply List.map_congr_left
-      intro o' ho'
-      cases o' with
-      | expr e =>
+      congr 1
+      split
+      · congr 1
+        unfold Statement.groupKey
+        apply List.map_congr_left
+        intro e he
         apply e.eval_congr
         · intro _ _ _; rfl
         · intro q' hq'
           apply hsubs b hb hw hbd q'
           unfold Core.subqueries
-          exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
-            (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
-      | _ => rfl)
+          exact List.mem_eraseDups.mpr (List.mem_append_right _ (List.mem_flatMap.mpr ⟨e, he, hq'⟩))
+      · congr 1
+        apply List.map_congr_left
+        intro o' ho'
+        cases o' with
+        | expr e =>
+          apply e.eval_congr
+          · intro _ _ _; rfl
+          · intro q' hq'
+            apply hsubs b hb hw hbd q'
+            unfold Core.subqueries
+            exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
+              (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
+        | _ => rfl)
     ((hX k hk).1) ((hY k hk).1)
   have hres : ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter
       (relevant s rel' q k (evalQuery s X f)), Restricted G Left (s.core k).items b := by

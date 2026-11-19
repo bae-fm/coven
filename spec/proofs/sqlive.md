@@ -381,8 +381,15 @@ each binding a core keeps that decides the rows its query returns holds rows
 that pass their items' tests, and holds no row of a LEFT JOIN item only when
 that item's ON can't hold for a row that fails its test. A binding of a
 derived item's arm decides the derived item's rows when its row passes the
-derived item's test; a binding of an arm that aggregates or calls a window
-function always decides them. `joinItems_restricted` and
+derived item's test. A binding of an arm that aggregates decides them when
+its group can make a row that passes the test: some row that passes it holds
+the binding's GROUP BY values in the result columns that are bare columns
+the GROUP BY lists (`keyMatters`). Its group's bindings all share those
+values, so `Core.result_filter_key` proves that the arm makes the same rows
+that pass the test from those bindings as from all of them, and a term the
+planner passes into the arm through such a column holds of every one of
+them. A binding of an arm that calls a window function always decides them.
+`joinItems_restricted` and
 `coreBindings_restricted` prove that a core then keeps the same such bindings
 from both databases: a join reads the same rows that pass each item's test,
 and the ON and WHERE conditions read the same subquery rows under a binding

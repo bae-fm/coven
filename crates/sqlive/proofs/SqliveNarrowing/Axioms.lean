@@ -59,6 +59,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Statement.outer_subOn
 #print axioms SqliveNarrowing.joinItems_restricted
 #print axioms SqliveNarrowing.coreBindings_restricted
+#print axioms SqliveNarrowing.Core.result_filter_key
 #print axioms SqliveNarrowing.queryRows_restricted
 #print axioms SqliveNarrowing.agree_of_kept
 #print axioms SqliveNarrowing.result_restricted
