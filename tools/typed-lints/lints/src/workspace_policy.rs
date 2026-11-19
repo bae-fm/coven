@@ -125,6 +125,28 @@ impl WorkspacePolicy {
         Some(canonical)
     }
 
+    /// Whether the source file `span` is written in is inside the workspace.
+    pub(crate) fn holds_file(&self, tcx: TyCtxt<'_>, span: Span) -> bool {
+        let name = tcx.sess.source_map().span_to_filename(span.source_callsite());
+        let Some(local) = name.into_local_path() else {
+            return false;
+        };
+        let absolute = if local.is_absolute() { local } else { self.working_folder.join(local) };
+        absolute.canonicalize().is_ok_and(|file| file.starts_with(&self.root))
+    }
+
+    /// Whether the policy's `path`, a source file relative to the
+    /// workspace's root, is in the package of the crate being compiled.
+    pub(crate) fn package_holds(&self, path: &str) -> bool {
+        self.root.join(path).starts_with(&self.package)
+    }
+
+    /// Whether the crate being compiled is one of the policy's tools, which
+    /// answer to no rule of the policy but the conventions.
+    pub(crate) fn compiles_a_tool(&self) -> bool {
+        std::env::var("CARGO_PKG_NAME").is_ok_and(|package| self.policy.is_tool(&package))
+    }
+
     /// Whether the code at `id` is test code, as the structural checker
     /// counts it: code under the package's `tests/` or `examples/` folder,
     /// code that compiles only under `test` or one of the policy's

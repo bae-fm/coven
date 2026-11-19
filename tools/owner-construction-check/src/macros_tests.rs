@@ -72,20 +72,19 @@ fn a_macro_rules_body_is_read_as_tokens() {
     assert!(parse_macro_body(&rules).is_none());
     let paths = token_paths(rules.tokens);
     assert!(paths.iter().any(|path| path.segments == ["uuid", "Uuid", "new_v4"]
-        && path.followed_by == Some(Delimiter::Parenthesis)
         && path.leading_colon
         && !path.after_dot));
 }
 
 #[test]
-fn token_paths_name_method_calls_and_their_receiver() {
+fn token_paths_name_method_calls() {
     let paths = token_paths(mac("m!(self.build(x), handle.spawn(y))").tokens);
     let methods = paths
         .iter()
         .filter(|path| path.after_dot)
-        .map(|path| (path.receiver.as_deref(), path.segments[0].as_str()))
+        .map(|path| path.segments[0].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(methods, [(Some("self"), "build"), (Some("handle"), "spawn")]);
+    assert_eq!(methods, ["build", "spawn"]);
 }
 
 #[test]

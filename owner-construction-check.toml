@@ -187,7 +187,7 @@ task_types = [
     "coven_sync::parks::LoopRunning",
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
-    "coven_storage::providers::s3_detect_headers::HeaderCapture",
+    "coven_storage::providers::s3::detect::headers::HeaderCapture",
     # Whether one planned upload's start went out, shared with the HTTP
     # client each of its attempts goes through, and that start as the
     # in-memory provider lets it out (Appendix E.10).
@@ -391,7 +391,7 @@ task_types = [
     # detection's probes and one connection attempt (§13.2, §20.7).
     "coven::builder::bootstrap::join::InviteJoin",
     "coven_storage::providers::oauth_folders::OAuthFolders",
-    "coven_storage::providers::s3_detect::Probes",
+    "coven_storage::providers::s3::detect::Probes",
     "coven::storage::ConnectionAttempt",
     # A database being built for one open or create, which it ends.
     "coven_database::database::builder::DatabaseBuilder",
@@ -1200,6 +1200,13 @@ tables = [
 # its caller keeps and stops, whose panic goes to the app's bug sink; and
 # work its caller may stop waiting for, as a task or on the blocking pool,
 # whose panic then goes there.
+# A rebuild opens its scratch store's database at each version it loads, and
+# migrates it to the next (§18.3).
+"crates/coven-database/src/circle_rebuild.rs" = ["StoreDatabase::open_rebuild"]
+"crates/coven-database/src/circle_rebuild_migration.rs" = [
+    "RebuildDatabase::migrate",
+    "RebuildDatabase::migrate_store_to",
+]
 "crates/coven-foundation/src/task.rs" = [
     "blocking",
     "spawn_owned",
@@ -1608,7 +1615,11 @@ tables = [
 "crates/coven/src/restore_credentials.rs" = ["restore_connection"]
 # A join keeps its sign-in in the device custody it composes for the store,
 # beside its saved code (§13.2).
-"crates/coven/src/bootstrap_authentication.rs" = ["join_sign_in"]
+"crates/coven/src/bootstrap_authentication.rs" = [
+    "join_sign_in",
+    # A bootstrap's sign-in connects its storage through the connector.
+    "connect_storage",
+]
 "crates/coven/src/bootstrap_replace.rs" = [
     "replace_installation",
     "open_swapped",
@@ -1617,7 +1628,11 @@ tables = [
     # Resuming a recorded replacement composes its request from what the
     # device kept (§19.3).
     "resume_replacement",
+    # A replacement keeps the sign-in it recorded in the custody it composes.
+    "record_replacement",
 ]
+# Opening an installed store opens its database owner.
+"crates/coven/src/bootstrap_status.rs" = ["open_installation"]
 "crates/coven/src/bootstrap_reset.rs" = ["reset_device"]
 "crates/coven/src/builder.rs" = [
     "CovenBuilder::authenticate",
@@ -1706,7 +1721,12 @@ tables = [
     "StorageConnections::sequence",
     "StorageConnections::activate",
     "StorageConnections::forget_store_keys",
+    # A connection's storage, built through its connector.
+    "StorageConnections::connect_with",
 ]
+# An access key's check connects its storage, and a connected store's
+# sequence owner reconnects through it.
+"crates/coven/src/storage_operations.rs" = ["StorageConnections::use_access_key"]
 # Setup connects and composes the candidate's sequence owner; a setup a crash
 # cut past its point of no return connects with the credentials it kept, in a
 # sign-in of this session's (§11.6).

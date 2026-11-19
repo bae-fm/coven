@@ -21,6 +21,8 @@ extern crate rustc_span;
 
 mod async_export_off_runtime;
 mod finding;
+mod owner_rules;
+mod owners;
 mod reqwest_error_display;
 mod sqlite_outside_its_homes;
 mod workspace_policy;
@@ -42,6 +44,7 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         reqwest_error_display::REQWEST_ERROR_DISPLAY,
         async_export_off_runtime::ASYNC_EXPORT_OFF_RUNTIME,
         sqlite_outside_its_homes::SQLITE_OUTSIDE_ITS_HOMES,
+        owner_rules::BUILT_OUTSIDE_COMPOSITION_ROOT,
     ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
@@ -57,5 +60,8 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
             tcx,
             workspace_policy::for_compile(policy, tcx),
         ))
+    }));
+    store.register_late_lint_pass(Box::new(move |tcx| {
+        Box::new(owner_rules::OwnerRules::new(tcx, workspace_policy::for_compile(policy, tcx)))
     }));
 }

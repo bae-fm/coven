@@ -671,19 +671,6 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         {
             return (call(), None);
         }
-        /// Restores the call this one runs inside, if any, as it ends.
-        struct CallScope<'a, F: Clone + Send + Sync + 'static> {
-            outer: Option<Call>,
-            observer: &'a Handle<F>,
-        }
-        impl<F: Clone + Send + Sync + 'static> Drop for CallScope<'_, F> {
-            fn drop(&mut self) {
-                let ended = CALL.with(|call| call.replace(self.outer.take()));
-                if let Some(bug) = ended.and_then(|ended| ended.bug) {
-                    self.observer.report(&bug);
-                }
-            }
-        }
         let outer = CALL.with(|running| running.replace(Some(Call { handle, bug: None })));
         let scope = CallScope { outer, observer: self };
         let result = call();
@@ -733,6 +720,22 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
             state
         });
         change(&mut state)
+    }
+}
+
+/// One of a handle's calls running on a thread (`Handle::calling`), which
+/// restores the call it runs inside, if any, as it ends.
+struct CallScope<'a, F: Clone + Send + Sync + 'static> {
+    outer: Option<Call>,
+    observer: &'a Handle<F>,
+}
+
+impl<F: Clone + Send + Sync + 'static> Drop for CallScope<'_, F> {
+    fn drop(&mut self) {
+        let ended = CALL.with(|call| call.replace(self.outer.take()));
+        if let Some(bug) = ended.and_then(|ended| ended.bug) {
+            self.observer.report(&bug);
+        }
     }
 }
 

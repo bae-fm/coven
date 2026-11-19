@@ -217,13 +217,8 @@ impl MacroBody {
 pub(crate) struct TokenPath {
     pub(crate) segments: Vec<String>,
     pub(crate) span: Span,
-    /// The delimiter of the group right after the path: `(` for a call, `{`
-    /// for a struct literal.
-    pub(crate) followed_by: Option<Delimiter>,
     /// Whether the path is a method name after `.`.
     pub(crate) after_dot: bool,
-    /// The identifier before the `.` when the path is a method name.
-    pub(crate) receiver: Option<String>,
     /// An absolute path uses the external-crate namespace even if a local
     /// module has the same name.
     pub(crate) leading_colon: bool,
@@ -396,11 +391,6 @@ fn collect_token_paths(tokens: TokenStream, context: Context, paths: &mut Vec<To
                 }
                 let after_dot = index >= 1
                     && matches!(&trees[index - 1], TokenTree::Punct(punct) if punct.as_char() == '.');
-                let receiver = match (after_dot, index.checked_sub(2).map(|before| &trees[before]))
-                {
-                    (true, Some(TokenTree::Ident(receiver))) => Some(receiver.to_string()),
-                    _ => None,
-                };
                 let followed_by = match trees.get(cursor) {
                     Some(TokenTree::Group(group)) => Some(group.delimiter()),
                     _ => None,
@@ -440,9 +430,7 @@ fn collect_token_paths(tokens: TokenStream, context: Context, paths: &mut Vec<To
                 paths.push(TokenPath {
                     segments,
                     span: ident.span(),
-                    followed_by,
                     after_dot,
-                    receiver,
                     leading_colon,
                     type_position,
                     assigned,

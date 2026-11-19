@@ -1,7 +1,6 @@
 //! Every rule, run over the workspace, and its findings.
 
 use crate::capability_boundaries::find_capability_boundary_violations;
-use crate::capability_construction::find_capability_construction_violations;
 use crate::component_bundles::find_component_bundle_violations;
 use crate::conventions::find_convention_violations;
 use crate::crate_code::CrateCode;
@@ -93,9 +92,6 @@ fn check_paths(
     }
     if policy.selects(Rule::CapabilityBoundaries) {
         findings.extend(find_capability_boundary_violations(code, policy));
-    }
-    if policy.selects(Rule::CapabilityConstruction) {
-        findings.extend(find_capability_construction_violations(files, policy, graph));
     }
     if policy.selects(Rule::ReadShapes) {
         findings.extend(find_read_shape_violations(code, policy));

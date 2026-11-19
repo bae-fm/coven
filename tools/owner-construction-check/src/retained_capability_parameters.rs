@@ -12,12 +12,54 @@
 use std::collections::BTreeSet;
 
 use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 
-use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
+use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
 use crate::syntax::{output_contains_owner, supplied_type_names, type_name, RustFile};
 use owner_construction_policy::Policy;
+
+/// The construction-only capabilities: the policy's rows, and every type
+/// that implements one of its capability traits, read across the crates'
+/// production code without evaluating cfg predicates other than `test`.
+pub(crate) fn construction_only_types(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
+    let mut types = policy.construction_only_capability_types.clone();
+    for file in files {
+        ImplementationCollector { traits: &policy.capability_traits, types: &mut types }
+            .visit_file(&file.syntax);
+    }
+    types
+}
+
+struct ImplementationCollector<'a> {
+    traits: &'a BTreeSet<String>,
+    types: &'a mut BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ImplementationCollector<'_> {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if let Some((path, _)) = &node.trait_ {
+            if node.modifiers.polarity.is_none()
+                && path
+                    .segments
+                    .last()
+                    .is_some_and(|trait_name| self.traits.contains(&trait_name.ident.to_string()))
+            {
+                if let Some(name) = type_name(&node.self_ty) {
+                    self.types.insert(name);
+                }
+            }
+        }
+        visit::visit_item_impl(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if let Some(body) = parse_macro_body(node) {
+            body.visit(self);
+        }
+    }
+}
 
 pub(crate) fn find_retained_capability_parameter_violations(
     files: &[RustFile],

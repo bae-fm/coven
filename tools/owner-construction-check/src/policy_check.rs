@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::capability_boundaries::declared_items;
-use crate::capability_construction::construction_only_types;
 use crate::counters::increment_sites;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
@@ -59,7 +58,6 @@ pub(crate) fn stale_rows(
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(invalid_capability_rows(code, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
-    stale.extend(invalid_capability_factories(crate_files, identity, policy));
     stale.extend(invalid_handles(crate_files, identity, policy));
     stale.extend(overlapping_state_rows(policy));
     stale.extend(undeclared_types(code, graph, policy, rows));
@@ -368,46 +366,6 @@ fn missing_composition_roots(files: &[RustFile], policy: &Policy) -> Vec<String>
             format!(
                 "composition_roots: {}: {}::{} names no function or static there",
                 root.path, root.owner, root.method
-            )
-        })
-        .collect()
-}
-
-/// A factory names a receiver method of a capability type, declared in its
-/// file, returning a construction-only capability.
-fn invalid_capability_factories(
-    files: &[RustFile],
-    identity: &TypeIdentity,
-    policy: &Policy,
-) -> Vec<String> {
-    let methods = declared_methods(files);
-    let capabilities = construction_only_types(files, policy);
-    policy
-        .capability_factories
-        .iter()
-        .filter(|factory| {
-            let signature = methods.get(&(
-                factory.path.clone(),
-                factory.owner.clone(),
-                factory.method.clone(),
-            ));
-            !policy.capability_types.contains(&factory.owner)
-                || !capabilities.contains(&factory.product)
-                || !signature.is_some_and(|signature| {
-                    signature.receiver().is_some()
-                        && match &signature.output {
-                            syn::ReturnType::Type(_, output) => {
-                                type_names(output, identity.in_file(&factory.path))
-                                    .contains(&factory.product)
-                            }
-                            syn::ReturnType::Default => false,
-                        }
-                })
-        })
-        .map(|factory| {
-            format!(
-                "capability_factories: {}: {}::{} -> {} is not a receiver method of a capability type returning that construction-only capability",
-                factory.path, factory.owner, factory.method, factory.product
             )
         })
         .collect()

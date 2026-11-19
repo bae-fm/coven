@@ -204,33 +204,6 @@ impl NameResolver {
         resolver
     }
 
-    /// A trait can be brought into scope under an alias, through a glob, or
-    /// anonymously. Failed lookups of other names do not make it visible.
-    pub(crate) fn path_in_scope(&self, file: &str, span: Span, path: &ItemPath) -> bool {
-        let start = self.scope_at(file, span);
-        let mut scope = Some(start);
-        let mut names = BTreeSet::from([path.last().expect("trait name").clone()]);
-        let mut visited = BTreeSet::new();
-        while let Some(current) = scope {
-            self.scope_names(current, &mut names, &mut visited);
-            if self.scopes[current].names.get("_").into_iter().flatten().any(
-                |binding| match binding {
-                    Binding::Import(import, _) => self
-                        .resolve_in(current, import, Namespace::Type, &mut BTreeSet::new())
-                        .is_ok_and(|resolved| resolved == *path),
-                    Binding::Definition(..) => false,
-                },
-            ) {
-                return true;
-            }
-            scope = self.scopes[current].parent;
-        }
-        self.scope_names(self.prelude, &mut names, &mut visited);
-        names.iter().filter(|name| name.as_str() != "_").any(|name| {
-            self.name_in_scope(start, name, Namespace::Type).as_ref().ok() == Some(path)
-        })
-    }
-
     /// What the resolver resolves a name to in a scope and namespace. The
     /// resolver looks up each name once per scope and namespace. In a block
     /// that neither binds the name nor imports a glob, it resolves the name
@@ -309,28 +282,6 @@ impl NameResolver {
                 Some(module) => self.outside_globs(*module, Some(glob_viewer), visited, outside),
                 None => {
                     outside.insert(target);
-                }
-            }
-        }
-    }
-
-    fn scope_names(
-        &self,
-        scope: usize,
-        names: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<usize>,
-    ) {
-        if !visited.insert(scope) {
-            return;
-        }
-        names.extend(self.scopes[scope].names.keys().cloned());
-        for glob in &self.scopes[scope].globs {
-            // Only indexed modules can contribute additional alias names.
-            // Whether any collected name resolves is checked at the caller.
-            let target = self.resolve_in(scope, &glob.path, Namespace::Type, &mut BTreeSet::new());
-            if let Ok(path) = target {
-                if let Some(module) = self.modules.get(&path) {
-                    self.scope_names(*module, names, visited);
                 }
             }
         }

@@ -157,63 +157,6 @@ fn composition_roots_resolve_methods_trait_methods_free_functions_and_statics_ou
 }
 
 #[test]
-fn capability_factories_name_a_receiver_and_its_capability_product() {
-    let factories = r#"
-        capability_types = ["StoreDir"]
-        construction_only_capability_types = ["AtomicFile"]
-        [capability_factories."crates/app-foundation/src/directory.rs"]
-        "StoreDir::file" = "AtomicFile"
-    "#;
-    let types = "struct StoreDir; struct AtomicFile; struct Other;";
-    for (path, declaration, valid) in [
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl StoreDir { fn file(&self) -> AtomicFile {} }",
-            true,
-        ),
-        (
-            "crates/app-foundation/src/renamed.rs",
-            "impl StoreDir { fn file(&self) -> AtomicFile {} }",
-            false,
-        ),
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl Other { fn file(&self) -> AtomicFile {} }",
-            false,
-        ),
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl StoreDir { fn renamed(&self) -> AtomicFile {} }",
-            false,
-        ),
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl StoreDir { fn file() -> AtomicFile {} }",
-            false,
-        ),
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl StoreDir { fn file(&self) -> Other {} }",
-            false,
-        ),
-        (
-            "crates/app-foundation/src/directory.rs",
-            "impl StoreDir { #[cfg(test)] fn file(&self) -> AtomicFile {} }",
-            false,
-        ),
-    ] {
-        let rows =
-            stale(vec![RustFile::fixture(path, &format!("{types} {declaration}"))], factories);
-        let expected: &[&str] = if valid {
-            &[]
-        } else {
-            &["capability_factories: crates/app-foundation/src/directory.rs: StoreDir::file -> AtomicFile is not a receiver method of a capability type returning that construction-only capability"]
-        };
-        assert_eq!(rows, expected, "{path}: {declaration}");
-    }
-}
-
-#[test]
 fn every_type_the_policy_names_is_declared_by_a_crate() {
     let members = [("crates/app", "app"), ("tools/checker", "checker")];
     let files = vec![

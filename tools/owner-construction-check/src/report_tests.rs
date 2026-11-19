@@ -39,17 +39,6 @@ fn workspace(files: Vec<RustFile>) -> Workspace {
     }
 }
 
-fn capability_implementations() -> RustFile {
-    RustFile::fixture(
-        "crates/app-foundation/src/implementations.rs",
-        r#"
-        pub trait Clock {} pub trait IdSource {} pub struct SystemClock; pub struct UuidIds;
-        impl Clock for SystemClock {}
-        impl IdSource for UuidIds {}
-    "#,
-    )
-}
-
 #[test]
 fn an_empty_workspace_passes() {
     assert!(check(&workspace(Vec::new()), &crate::gated_policy()).is_empty());
@@ -196,81 +185,7 @@ fn crates_answer_to_every_rule() {
 }
 
 #[test]
-fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
-    for expression in [
-        "SystemClock.now()",
-        "UuidIds.new_id()",
-        "std::sync::Arc::new(SystemClock)",
-        "std::sync::Arc::new(UuidIds)",
-    ] {
-        let source = format!(
-            "use app_foundation::implementations::*; fn acquire() {{ let _ = {expression}; }}"
-        );
-        let report = check(
-            &workspace(vec![
-                capability_implementations(),
-                RustFile::fixture("crates/app/src/runtime.rs", &source),
-            ]),
-            &crate::gated_policy(),
-        );
-        assert!(!report.is_empty(), "accepted {expression}");
-        assert!(report.lines().iter().any(|line| line.contains("outside a composition root")));
-    }
-}
-
-#[test]
-fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
-    let mut root_policy = crate::gated_policy();
-    root_policy.composition_roots.push(root("crates/app/src/builder.rs", "Builder", "open"));
-    let report = check(
-        &workspace(vec![
-            capability_implementations(),
-            RustFile::fixture(
-                "crates/app/src/builder.rs",
-                r#"
-            use app_foundation::implementations::*; struct Builder;
-            impl Builder {
-                fn open() {
-                    let clock = std::sync::Arc::new(SystemClock);
-                    let ids = std::sync::Arc::new(UuidIds);
-                    let _ = SystemClock.now();
-                    let _ = UuidIds.new_id();
-                }
-            }
-            "#,
-            ),
-        ]),
-        &root_policy,
-    );
-    assert!(report.is_empty(), "{:?}", report.lines());
-}
-
-#[test]
-fn inferred_default_construction_is_prevented_at_its_implementation() {
-    let report = check(
-        &workspace(vec![
-            RustFile::fixture(
-                "crates/app-foundation/src/clock.rs",
-                r#"
-                trait Clock {} struct SuppliedClock(u64);
-                #[cfg(feature = "test-utils")] impl Clock for SuppliedClock {}
-                impl Default for SuppliedClock { fn default() -> Self { Self(17) } }
-            "#,
-            ),
-            RustFile::fixture(
-                "crates/app/src/runtime.rs",
-                "fn run() { let clock: SuppliedClock = Default::default(); }",
-            ),
-        ]),
-        &crate::gated_policy(),
-    );
-    assert_eq!(report.0, [Finding::new("crates/app-foundation/src/clock.rs", 4,
-        "implements Default for capability SuppliedClock, which permits implicit construction through Default::default()",
-        "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default")]);
-}
-
-#[test]
-fn one_exact_list_entry_allows_construction_and_background_starts() {
+fn one_exact_list_entry_allows_background_starts() {
     const PATH: &str = "crates/app-sync/src/fixture.rs";
     let mut rooted = policy(r#"capability_types = ["Clock"]"#);
     rooted.composition_roots.push(root(PATH, "Worker", "open"));
@@ -283,24 +198,23 @@ fn one_exact_list_entry_allows_construction_and_background_starts() {
     ] {
         let source = format!("extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
         let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &rooted);
-        let expected =
-            if allowed { Vec::new() } else { unrooted_worker(path, &format!("{owner}::{method}")) };
+        let expected = if allowed { Vec::new() } else { unrooted_spawn(path) };
         assert_eq!(report.0, expected);
     }
     let source = "extern crate tokio; struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
     assert_eq!(
         check(&workspace(vec![RustFile::fixture(PATH, source)]), &rooted).0,
-        unrooted_worker(PATH, "<free>::hidden")
+        unrooted_spawn(PATH)
     );
 }
 
-fn unrooted_worker(path: &str, caller: &str) -> Vec<Finding> {
-    vec![
-        Finding::new(path, 1, format!("{caller} constructs owner Worker outside a composition root"),
-            "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default"),
-        Finding::new(path, 1, "thread or future spawn outside a composition root",
-            "start background work only at a listed root, which must keep and stop it"),
-    ]
+fn unrooted_spawn(path: &str) -> Vec<Finding> {
+    vec![Finding::new(
+        path,
+        1,
+        "thread or future spawn outside a composition root",
+        "start background work only at a listed root, which must keep and stop it",
+    )]
 }
 
 fn member(directory: &str, name: &str) -> crate::sources::Manifest {
@@ -333,22 +247,6 @@ fn package_selection_uses_manifest_names_and_directory_boundaries() {
         check_selected(&workspace, &policy, &["selected-package".into(), "other-package".into()])
             .unwrap();
     assert_eq!(both.0, all.0);
-}
-
-#[test]
-fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
-    let mut workspace = workspace(vec![
-        capability_implementations(),
-        RustFile::fixture(
-            "crates/app/src/runtime.rs",
-            "use app_foundation::implementations::*; fn acquire() { let _ = SystemClock; }",
-        ),
-    ]);
-    workspace.manifests =
-        vec![member("crates/app-foundation", "app-foundation"), member("crates/app", "app")];
-    let selected = check_selected(&workspace, &crate::gated_policy(), &["app".into()]).unwrap();
-    assert!(selected.lines().iter().any(|line| line.contains("outside a composition root")));
-    assert!(!selected.lines().iter().any(|line| line.contains("cannot resolve")));
 }
 
 #[test]

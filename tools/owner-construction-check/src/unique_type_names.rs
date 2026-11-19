@@ -6,9 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
+use crate::retained_capability_parameters::construction_only_types;
 use crate::syntax::RustFile;
 use owner_construction_policy::Policy;
 

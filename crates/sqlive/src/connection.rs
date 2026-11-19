@@ -269,15 +269,6 @@ impl<P: Policy> HostSql<P> {
     /// Run `run` with this connection's policy in `scope`, leaving the scope
     /// on every path out of `run`, a panic's included.
     pub fn within<T>(&self, scope: P::Scope, run: impl FnOnce() -> T) -> T {
-        struct EnteredScope<'a, P: Policy> {
-            policy: &'a P,
-            scope: P::Scope,
-        }
-        impl<P: Policy> Drop for EnteredScope<'_, P> {
-            fn drop(&mut self) {
-                self.policy.leave(&self.scope);
-            }
-        }
         self.policy.enter(&scope);
         let _entered = EnteredScope { policy: &*self.policy, scope };
         run()
@@ -819,6 +810,19 @@ enum Observing {
     Stream(stream_capture::StreamCapture),
     Session(transaction_capture::SupplementalChanges),
     Nothing,
+}
+
+/// A connection's policy inside one scope (`Connection::within`), which it
+/// leaves when dropped.
+struct EnteredScope<'a, P: Policy> {
+    policy: &'a P,
+    scope: P::Scope,
+}
+
+impl<P: Policy> Drop for EnteredScope<'_, P> {
+    fn drop(&mut self) {
+        self.policy.leave(&self.scope);
+    }
 }
 
 #[cfg(test)]

@@ -98,7 +98,3 @@ fn infer_owners(structs: &BTreeMap<String, StructInfo>, policy: &Policy) -> BTre
         }
     }
 }
-
-#[cfg(test)]
-#[path = "owner_graph_tests.rs"]
-mod tests;

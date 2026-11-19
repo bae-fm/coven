@@ -116,8 +116,5 @@ fn only_owner_graph_rules_need_unique_type_names() {
     .into_iter()
     .filter(|rule| rule.reads_owner_graph())
     .collect::<Vec<_>>();
-    assert_eq!(
-        graph_rules,
-        [Rule::OwnerDependencies, Rule::RetainedCapabilityParameters, Rule::CapabilityConstruction]
-    );
+    assert_eq!(graph_rules, [Rule::OwnerDependencies, Rule::RetainedCapabilityParameters]);
 }

@@ -11,7 +11,6 @@
 //! invalid inputs, a policy row naming something the workspace lacks among them.
 
 mod capability_boundaries;
-mod capability_construction;
 mod component_bundles;
 mod conventions;
 mod counters;
@@ -20,7 +19,6 @@ mod crate_dependencies;
 mod cutoffs;
 mod database_boundary;
 mod domain_owners;
-mod factories;
 mod finding;
 mod kept_capture;
 mod kept_state;

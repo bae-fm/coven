@@ -67,8 +67,10 @@ pub enum Rule {
     /// Appendix F.3: no struct built only to be destructured
     /// (`component_bundles.rs`).
     ComponentBundles,
-    /// Appendix F.3: owners and capabilities are constructed only at
-    /// composition roots (`capability_construction.rs`).
+    /// Appendix F.3: owners, construction-only capabilities and handles are
+    /// built only at composition roots. The typed lint
+    /// `clippy::built_outside_composition_root` checks it
+    /// (`tools/typed-lints`), not the checker.
     CapabilityConstruction,
     /// Appendix F.2: errors are typed, never strings (`typed_errors.rs`).
     TypedErrors,
@@ -81,22 +83,17 @@ pub enum Rule {
 }
 
 impl Rule {
-    /// Whether the rule reads the crates' code (`crate_code.rs`): every rule
-    /// but the crate dependencies, which read manifests, and the conventions,
-    /// which read every file as written.
+    /// Whether the checker reads the crates' code for the rule
+    /// (`crate_code.rs`): every rule it runs but the crate dependencies, which
+    /// read manifests, and the conventions, which read every file as written.
     pub fn reads_crate_code(self) -> bool {
-        !matches!(self, Rule::CrateDependencies | Rule::Conventions)
+        !matches!(self, Rule::CrateDependencies | Rule::Conventions | Rule::CapabilityConstruction)
     }
 
     /// Whether the rule infers owners and matches types by name, so it needs
     /// every name it reasons about declared once (`unique_type_names.rs`).
     pub fn reads_owner_graph(self) -> bool {
-        matches!(
-            self,
-            Rule::OwnerDependencies
-                | Rule::RetainedCapabilityParameters
-                | Rule::CapabilityConstruction
-        )
+        matches!(self, Rule::OwnerDependencies | Rule::RetainedCapabilityParameters)
     }
 }
 

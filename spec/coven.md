@@ -14474,14 +14474,26 @@ makes each connection, in every connector. The roots include opening and
 bootstrap, provider connection construction, owner constructors and the
 places that start background work.
 
-- The checker infers owners from retained capabilities and other owners.
+- A type is an owner when what its fields hold, with its type arguments
+  substituted, includes a capability, shared state, a handle or another owner
+  (F.2). The typed lint `clippy::built_outside_composition_root` (Appendix
+  F.6, check 11) reads that from the compiler's types.
 - Any owner construction outside a listed root fails the check, including
-  construction of an owner's private representation. A pattern that names an
-  owner's unit variant, in a `match`, an `if let` or `matches!`, matches a value
-  and constructs none. A `Clone` impl whose `clone` clones each field of its
-  own, as `derive(Clone)` writes it, shares what the value holds and
-  constructs none either; it is written out where the derive would ask a
-  type parameter, or one of its associated types, to be `Clone`.
+  construction of an owner's private representation. Code builds an owner, a
+  construction-only capability or a handle where it writes the type's literal
+  or constructor, and where it calls a function whose declared result holds
+  one by value: a trait method's call is its impl's, so `Default::default()`
+  builds what its impl builds, and a clone builds nothing. A generic type is
+  an owner by what it holds itself; what it is given was built where that
+  value was. A function with no `self` that returns a capability or a handle
+  is its factory and may build it; its callers answer for the value. A method
+  taking `self` derives what it returns from its owner, so its call builds
+  only the owners its result holds, and one that takes its value whole and
+  gives back its own type, as a builder's step does, builds none. A pattern
+  that names an owner's unit variant, in a `match`, an `if let` or
+  `matches!`, matches a value and constructs none. A `Clone` impl whose
+  `clone` clones each field of its own, as `derive(Clone)` writes it, shares
+  what the value holds and constructs none either.
 - Building or reaching a runtime, and spawning a thread or a future, use the
   same list.
 - A legitimate new place must be added deliberately; returning an owner grants no
@@ -14668,7 +14680,8 @@ the same on any platform.
 2. The dependency rules of F.1, with `cargo deny check advisories bans
    licenses`: known security advisories, the crates `deny.toml` refuses, and
    the licenses it allows.
-3. The rules of F.2 and F.3, including typed errors, by a checker that reads the
+3. The rules of F.2 and F.3, including typed errors, except those the typed
+   lints of check 11 hold, by a checker that reads the
    syntax tree of every crate, including inside macro calls, and the crates'
    `.sql` files, against the policy file,
    `owner-construction-check.toml` at the workspace root. The policy holds
@@ -14776,6 +14789,12 @@ the same on any platform.
     and it holds none, even in a value whose type the compiler infers, such as
     a closure's parameter. A home may hand on what its work needs, such as a
     query's row, which code anywhere names through the home's crate.
+    `clippy::built_outside_composition_root` holds F.3's composition roots:
+    outside the roots the policy lists, production code builds no owner,
+    construction-only capability or handle, and no static holds shared state
+    or a lock. The lint reads the policy's type rows by path. It knows
+    the crates the compile loads, so a type that only a later crate holds
+    through an `Arc` is no owner in an earlier one.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.
