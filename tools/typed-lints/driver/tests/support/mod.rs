@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 /// The driver as cargo runs it on the workspace's crates: through its
 /// wrapper, which has rustc write each function's MIR into the metadata.
 const DRIVER: &str = env!("CARGO_BIN_EXE_typed-lints-rustc");
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+pub const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 /// A fixture crate: its source, under `tests/fixtures`, and the folder the
 /// driver takes for the crate's own (`CARGO_MANIFEST_DIR`), where the lints

@@ -7,13 +7,15 @@
 //! an earlier crate that no read code of its own crate reaches gets its
 //! findings where a later crate's read code calls it, through a crate
 //! between them too, and a compile stops when the earlier crate's record is
-//! missing.
+//! missing. The compile names the fixture's policy file, which states the
+//! read rule's shapes, among its inputs in the dep-info cargo reads, so cargo
+//! lints the crate again when the policy changes.
 
 mod support;
 
 use std::path::Path;
 
-use support::{Fixture, extern_library, out_dir};
+use support::{FIXTURES, Fixture, extern_library, out_dir};
 
 /// The read rule's lints, each named as the fixture's comments name it.
 const LINTS: [&str; 13] = [
@@ -97,5 +99,20 @@ fn stops_a_compile_whose_earlier_crate_has_no_record() {
     assert!(
         diagnostics.contains("the read rule's record of the crate reads_helpers"),
         "the compile stopped for another reason:\n{diagnostics}"
+    );
+}
+
+#[test]
+fn names_the_workspaces_policy_file_among_the_compiles_inputs() {
+    let out_dir = out_dir("read_rule_policy_input");
+    let base = Fixture { source: "reads/base.rs", crate_name: "reads_base", manifest_dir: "reads" };
+    base.compile(&out_dir, ["--emit=dep-info,metadata"]);
+    let dep_info = std::fs::read_to_string(out_dir.join("reads_base.d"))
+        .expect("the compile wrote its dep-info");
+    let policy = Path::new(FIXTURES).join("reads/owner-construction-check.toml");
+    assert!(
+        dep_info.lines().any(|line| line == format!("{}:", policy.display())),
+        "the dep-info names no {}:\n{dep_info}",
+        policy.display()
     );
 }

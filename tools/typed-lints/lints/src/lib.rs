@@ -63,6 +63,9 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         owner_dependencies::SHARED_STATE_OUTSIDE_HANDLE,
     ]);
     store.register_lints(read_rule::READ_RULE_LINTS);
+    store.register_pre_expansion_lint_pass(Box::new(move || {
+        Box::new(workspace_policy::PolicyInput::new(policy))
+    }));
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
     }));

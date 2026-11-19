@@ -9,8 +9,10 @@
 //! that read one nothing to check.
 //!
 //! The driver reads the file once, when it registers the lints, and hands
-//! what it read to each lint's pass. Each pass names the file among the
-//! compile's inputs, so cargo lints the crate again when the file changes.
+//! what it read to each lint's pass. A pass that runs before macro expansion
+//! names the file among the compile's inputs (`PolicyInput`), so cargo lints
+//! the crate again when the file changes: rustc writes the compile's dep-info
+//! once it has expanded the crate's macros, before any other lint pass runs.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -18,11 +20,13 @@ use std::path::{Path, PathBuf};
 use clippy_utils::is_in_test_function;
 use clippy_utils::paths::{PathNS, lookup_path_str};
 use owner_construction_policy::{FILE_NAME, Policy, RAW_SQLITE_HANDLES};
+use rustc_ast as ast;
 use rustc_attr_ir::CfgEntry;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CRATE_DEF_ID, CrateNum, DefId, LOCAL_CRATE};
 use rustc_hir::{HirId, ItemKind, Node, find_attr};
+use rustc_lint::{EarlyContext, EarlyLintPass, LintContext, impl_lint_pass};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{FileName, Span, Symbol, sym};
 
@@ -101,19 +105,39 @@ pub(crate) fn read() -> PolicyRead {
 }
 
 /// The policy a lint's pass checks the crate against, if the workspace has
-/// one, named among the compile's inputs. A policy file that could not be
-/// read stops the compile.
+/// one. A policy file that could not be read stops the compile.
 pub(crate) fn for_compile<'a>(
     read: &'a PolicyRead,
     tcx: TyCtxt<'_>,
 ) -> Option<&'a WorkspacePolicy> {
-    let workspace = read
-        .as_ref()
-        .unwrap_or_else(|error| tcx.dcx().fatal(format!("typed lints: {error}")))
-        .as_ref()?;
-    let file = Symbol::intern(&workspace.file.to_string_lossy());
-    tcx.sess.file_depinfo.borrow_mut().insert(file);
-    Some(workspace)
+    read.as_ref().unwrap_or_else(|error| tcx.dcx().fatal(format!("typed lints: {error}"))).as_ref()
+}
+
+/// The pass, run before macro expansion, that names the workspace's policy
+/// file, when the driver found one, among the compile's inputs, which rustc
+/// writes into the dep-info that cargo reads.
+pub(crate) struct PolicyInput {
+    file: Option<Symbol>,
+}
+
+impl_lint_pass!(PolicyInput => []);
+
+impl PolicyInput {
+    pub(crate) fn new(read: &PolicyRead) -> Self {
+        let file = match read {
+            Ok(Some(workspace)) => Some(Symbol::intern(&workspace.file.to_string_lossy())),
+            Ok(None) | Err(_) => None,
+        };
+        Self { file }
+    }
+}
+
+impl EarlyLintPass for PolicyInput {
+    fn check_crate(&mut self, cx: &EarlyContext<'_>, _: &ast::Crate) {
+        if let Some(file) = self.file {
+            cx.sess().file_depinfo.borrow_mut().insert(file);
+        }
+    }
 }
 
 /// Whether the `Cargo.toml` in `folder` has the table `table`.

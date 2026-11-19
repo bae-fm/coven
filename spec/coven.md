@@ -14892,7 +14892,9 @@ the same on any platform.
     with `Display` or `Debug`: the error's text leaves out the cause below it,
     and its URL can hold a path or a query.
     A lint that needs to know a workspace's own functions or types reads them
-    from the policy file of check 3, which the checker and the lints share. The
+    from the policy file of check 3, which the checker and the lints share.
+    Each compile names that file among its inputs in the dep-info that rustc
+    writes, so cargo lints a crate again when the policy changes. The
     lint resolves each row's path in the crate the path names, and a row that
     names nothing there stops the compile, unless a `cfg` leaves what the row
     names out of that compile, as a module that only another platform builds.
