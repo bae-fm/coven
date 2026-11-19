@@ -1,8 +1,9 @@
 //! The owner rules of Appendix F.3 the workspace's policy selects, on the
 //! compiler's types (`owners.rs`), in one pass that shares their model:
 //! `clippy::built_outside_composition_root`, here,
-//! `clippy::method_takes_capability` (`method_takes_capability.rs`) and
-//! `clippy::task_state_outside_task` (`task_state.rs`).
+//! `clippy::method_takes_capability` (`method_takes_capability.rs`),
+//! `clippy::task_state_outside_task` (`task_state.rs`) and the hand-out rules
+//! (`owner_dependencies.rs`).
 //!
 //! `clippy::built_outside_composition_root` (the policy's
 //! `capability-construction`): owners, construction-only capabilities and
@@ -45,6 +46,9 @@ use rustc_span::{Span, sym};
 
 use crate::finding::Finding;
 use crate::method_takes_capability::{self, METHOD_TAKES_CAPABILITY};
+use crate::owner_dependencies::{
+    self, HANDLE_NOT_FROM_ITS_OWNER, OWNER_HANDS_OUT_DEPENDENCY, SHARED_STATE_OUTSIDE_HANDLE,
+};
 use crate::owners::{Held, Owners, Part};
 use crate::task_state::{self, TASK_STATE_OUTSIDE_TASK};
 use crate::workspace_policy::WorkspacePolicy;
@@ -65,14 +69,17 @@ pub(crate) struct OwnerRules<'tcx> {
     owners: Option<Owners<'tcx>>,
     construction: bool,
     parameters: bool,
-    tasks: bool,
+    dependencies: bool,
     scopes: FxHashMap<LocalDefId, Scope>,
 }
 
 impl_lint_pass!(OwnerRules<'_> => [
     BUILT_OUTSIDE_COMPOSITION_ROOT,
     METHOD_TAKES_CAPABILITY,
-    TASK_STATE_OUTSIDE_TASK
+    TASK_STATE_OUTSIDE_TASK,
+    OWNER_HANDS_OUT_DEPENDENCY,
+    HANDLE_NOT_FROM_ITS_OWNER,
+    SHARED_STATE_OUTSIDE_HANDLE
 ]);
 
 /// What a callable may build.
@@ -94,11 +101,11 @@ impl<'tcx> OwnerRules<'tcx> {
         let selects = |rule| workspace.is_some_and(|workspace| workspace.policy.selects(rule));
         let construction = selects(Rule::CapabilityConstruction);
         let parameters = selects(Rule::RetainedCapabilityParameters);
-        let tasks = selects(Rule::OwnerDependencies);
+        let dependencies = selects(Rule::OwnerDependencies);
         let owners = workspace
-            .filter(|_| construction || parameters || tasks)
+            .filter(|_| construction || parameters || dependencies)
             .map(|workspace| Owners::new(tcx, workspace));
-        Self { owners, construction, parameters, tasks, scopes: FxHashMap::default() }
+        Self { owners, construction, parameters, dependencies, scopes: FxHashMap::default() }
     }
 
     /// The model, when the policy selects the composition roots' rule.
@@ -119,7 +126,7 @@ pub(crate) fn impl_type(tcx: TyCtxt<'_>, callable: DefId) -> Option<DefId> {
 
 /// How the policy names a callable's type: its impl's type, or its trait for
 /// a trait's own method, or `<free>`.
-fn type_name(tcx: TyCtxt<'_>, callable: DefId) -> String {
+pub(crate) fn type_name(tcx: TyCtxt<'_>, callable: DefId) -> String {
     if let Some(implemented) = impl_type(tcx, callable) {
         return tcx.item_name(implemented).to_string();
     }
@@ -442,8 +449,9 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
         if let Some(owners) = self.construction() {
             check_factory_rows(owners, cx.tcx);
         }
-        if let Some(owners) = self.owners.as_ref().filter(|_| self.tasks) {
+        if let Some(owners) = self.owners.as_ref().filter(|_| self.dependencies) {
             task_state::check(owners, cx);
+            owner_dependencies::check(owners, cx);
         }
     }
 

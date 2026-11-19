@@ -58,7 +58,7 @@ struct Made {
 pub(crate) fn check<'tcx>(owners: &Owners<'tcx>, cx: &LateContext<'tcx>) {
     let tcx = cx.tcx;
     let mut made = FxHashMap::<DefId, Vec<Made>>::default();
-    for body in workspace_bodies(owners, tcx) {
+    for body in workspace_bodies(owners, tcx, "clippy::task_state_outside_task") {
         tasks_made_shared(owners, tcx, body, &mut |state, found| {
             made.entry(state).or_default().push(found);
         });

@@ -1,27 +1,39 @@
-//! The bodies of the workspace's functions and closures that a compile sees:
-//! the crate's own, and those of the workspace's crates it depends on, from
-//! their metadata. rustc writes every function's MIR there only under
+//! The definitions and bodies of the workspace's functions and closures that
+//! a compile sees: the crate's own, and those of the workspace's crates it
+//! depends on, from their metadata. rustc writes every function's MIR there only under
 //! `-Zalways-encode-mir`, which the driver's wrapper adds to each compile of a
 //! workspace crate (`driver/src/rustc.rs`), so a lint that reads the bodies
 //! stops a compile that lacks it rather than see only some of them.
 
 use rustc_hir::Constness;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId, DefIndex};
+use rustc_hir::def_id::{DefId, DefIndex};
 use rustc_middle::ty::TyCtxt;
 
 use crate::owners::Owners;
 
+/// Each definition of the workspace the compile sees: the crate's own, and
+/// those of the workspace's crates it depends on. `lint` reads their bodies,
+/// so the compile stops when it lacks them.
+pub(crate) fn workspace_definitions<'tcx>(
+    owners: &Owners<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    lint: &str,
+) -> Vec<DefId> {
+    let mut definitions =
+        tcx.hir_crate_items(()).definitions().map(|id| id.to_def_id()).collect::<Vec<_>>();
+    definitions.extend(earlier_definitions(owners, tcx, lint));
+    definitions
+}
+
 /// Each function and closure of the workspace the compile sees whose body
-/// is production code, with MIR to read (`TyCtxt::optimized_mir`).
-pub(crate) fn workspace_bodies(owners: &Owners<'_>, tcx: TyCtxt<'_>) -> Vec<DefId> {
-    if !tcx.sess.opts.unstable_opts.always_encode_mir {
-        tcx.dcx().fatal(
-            "typed lints: clippy::task_state_outside_task reads the bodies of the workspace's \
-             earlier crates, which rustc writes only under -Zalways-encode-mir: run the driver \
-             through typed-lints-rustc, as tools/typed-lints/clippy.sh does",
-        );
-    }
+/// is production code, with MIR to read (`TyCtxt::optimized_mir`), for
+/// `lint`.
+pub(crate) fn workspace_bodies<'tcx>(
+    owners: &Owners<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    lint: &str,
+) -> Vec<DefId> {
     let has_body = |id: DefId| {
         let callable = match tcx.def_kind(id) {
             DefKind::Fn | DefKind::AssocFn => {
@@ -37,16 +49,32 @@ pub(crate) fn workspace_bodies(owners: &Owners<'_>, tcx: TyCtxt<'_>) -> Vec<DefI
         .map(|id| id.to_def_id())
         .filter(|&id| has_body(id))
         .collect::<Vec<_>>();
-    for &krate in tcx.crates(()) {
-        if owners.is_workspace_item(krate.as_def_id()) {
-            bodies.extend(crate_definitions(tcx, krate).filter(|&id| has_body(id)));
-        }
-    }
+    bodies.extend(earlier_definitions(owners, tcx, lint).filter(|&id| has_body(id)));
     bodies
 }
 
-/// Every definition of the crate `krate`, another crate's.
-fn crate_definitions(tcx: TyCtxt<'_>, krate: CrateNum) -> impl Iterator<Item = DefId> + '_ {
-    (0..tcx.num_extern_def_ids(krate))
-        .map(move |index| DefId { krate, index: DefIndex::from_usize(index) })
+/// Every definition of the workspace's crates the crate depends on. `lint`
+/// reads their bodies, so the compile stops when it lacks them.
+fn earlier_definitions<'tcx>(
+    owners: &Owners<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    lint: &str,
+) -> impl Iterator<Item = DefId> + use<'tcx> {
+    if !tcx.sess.opts.unstable_opts.always_encode_mir {
+        tcx.dcx().fatal(format!(
+            "typed lints: {lint} reads the bodies of the workspace's earlier crates, which rustc \
+             writes only under -Zalways-encode-mir: run the driver through typed-lints-rustc, as \
+             tools/typed-lints/clippy.sh does"
+        ));
+    }
+    let crates = tcx
+        .crates(())
+        .iter()
+        .copied()
+        .filter(|krate| owners.is_workspace_item(krate.as_def_id()))
+        .collect::<Vec<_>>();
+    crates.into_iter().flat_map(move |krate| {
+        (0..tcx.num_extern_def_ids(krate))
+            .map(move |index| DefId { krate, index: DefIndex::from_usize(index) })
+    })
 }

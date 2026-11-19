@@ -30,14 +30,14 @@ fn finds_what_holds_a_tasks_state_and_nothing_else() {
 fn finds_a_holder_and_task_of_crates_apart_in_the_first_crate_that_sees_both() {
     const LINT: &str = "clippy::task_state_outside_task";
     let out_dir = out_dir("task_state_outside_task_apart");
-    // Each package of the fixture, its dependencies and the source the
-    // compile of it finds marked, if any.
-    let packages: [(&str, &[&str], Option<&str>); 5] = [
-        ("state", &[], None),
-        ("holder", &["state"], None),
-        ("task", &["state"], None),
-        ("joined", &["holder", "task"], Some("tasks_apart/holder/src/lib.rs")),
-        ("user", &["joined"], None),
+    // Each package of the fixture, its dependencies and the sources whose
+    // marks the compile of it finds.
+    let packages: [(&str, &[&str], &[&str]); 5] = [
+        ("state", &[], &[]),
+        ("holder", &["state"], &[]),
+        ("task", &["state"], &[]),
+        ("joined", &["holder", "task"], &["tasks_apart/holder/src/lib.rs"]),
+        ("user", &["joined"], &[]),
     ];
     for (package, dependencies, marked) in packages {
         let source = format!("tasks_apart/{package}/src/lib.rs");

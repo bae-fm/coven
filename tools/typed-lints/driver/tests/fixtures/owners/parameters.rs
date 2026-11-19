@@ -43,6 +43,10 @@ impl View {
 }
 
 impl Query {
+    pub fn requests(&self) -> Requests {
+        Requests
+    }
+
     pub fn accept(&self, requests: Requests) {} // finding
 }
 

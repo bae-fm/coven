@@ -1,0 +1,40 @@
+# The hand-out rules of the fixture in this folder, each type by its path.
+rules = ["owner-dependencies"]
+test_support_features = ["test-utils"]
+capability_types = [
+    "dependencies::Clock",
+    "dependencies::Database",
+    "dependencies::Permit",
+    "dependencies::Connector",
+    "dependencies::Dialer",
+]
+internal_dependency_types = ["dependencies::Database"]
+non_owner_types = ["dependencies::Transfer"]
+task_types = ["dependencies::Plan", "dependencies::Permit"]
+closed_session_types = ["dependencies::Batch", "dependencies::database::Batch"]
+shared_state_types = ["dependencies::shared::Sender", "dependencies::shared::Receiver"]
+private_state_types = ["std::sync::Mutex"]
+shared_pointer_types = ["std::sync::Arc"]
+
+[handles]
+"dependencies::handles::Requests" = "dependencies::handles::Query"
+"dependencies::shared::Watch" = "dependencies::shared::Status"
+
+[composition_roots]
+"src/lib.rs" = ["Owner::open", "Connector::connect"]
+"src/shared.rs" = ["Broadcast::open"]
+
+[database]
+capability = "SQLite"
+
+[[database.raw_handle_parameters]]
+path = "src/database.rs"
+callable = "Store::open"
+
+[[database.raw_handle_parameters]]
+path = "src/database.rs"
+callable = "Store::open_returning"
+
+[[capabilities]]
+name = "SQLite"
+homes = ["src/database.rs"]

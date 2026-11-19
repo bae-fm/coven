@@ -24,8 +24,8 @@
 
 use std::cell::RefCell;
 
-use clippy_utils::paths::PathNS;
-use owner_construction_policy::FILE_NAME;
+use clippy_utils::paths::{PathNS, lookup_path_str};
+use owner_construction_policy::{FILE_NAME, RAW_SQLITE_HANDLES};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId};
@@ -99,6 +99,10 @@ pub(crate) struct OwnerRows<'tcx> {
     pub(crate) non_owners: TypeSet<'tcx>,
     pub(crate) facades: TypeSet<'tcx>,
     pub(crate) tasks: TypeSet<'tcx>,
+    pub(crate) internal: TypeSet<'tcx>,
+    pub(crate) sessions: TypeSet<'tcx>,
+    /// rusqlite's raw handles, none in a compile that can't reach rusqlite.
+    pub(crate) raw_handles: TypeSet<'tcx>,
     /// Each handle, with the types that make it: none in a compile that
     /// can't reach its maker.
     pub(crate) handles: FxHashMap<DefId, Vec<DefId>>,
@@ -168,6 +172,11 @@ impl<'tcx> OwnerRows<'tcx> {
         }
         let mut handles = FxHashMap::default();
         for (handle, maker) in &policy.handles {
+            if handle == maker {
+                tcx.dcx().fatal(format!(
+                    "typed lints: {FILE_NAME}'s handles names {handle} as its own owner"
+                ));
+            }
             let makers = resolve_type_ids(tcx, "handles", maker);
             for handle in resolve_type_ids(tcx, "handles", handle) {
                 handles.entry(handle).or_insert_with(Vec::new).extend(makers.iter().copied());
@@ -178,7 +187,13 @@ impl<'tcx> OwnerRows<'tcx> {
             .iter()
             .map(|factory| resolve_type_ids(tcx, "capability_factories", &factory.product))
             .collect();
-        Self {
+        let mut raw_handles = TypeSet::default();
+        for (path, _) in RAW_SQLITE_HANDLES {
+            for id in lookup_path_str(tcx, PathNS::Type, path) {
+                raw_handles.insert(Row::Id(id));
+            }
+        }
+        let rows = Self {
             capabilities: set("capability_types", &policy.capability_types),
             shared_state: set("shared_state_types", &policy.shared_state_types),
             private_state: set("private_state_types", &policy.private_state_types),
@@ -187,8 +202,86 @@ impl<'tcx> OwnerRows<'tcx> {
             non_owners: set("non_owner_types", &policy.non_owner_types),
             facades: set("borrowed_facade_types", &policy.borrowed_facade_types),
             tasks: set("task_types", &policy.task_types),
+            internal: set("internal_dependency_types", &policy.internal_dependency_types),
+            sessions: set("closed_session_types", &policy.closed_session_types),
+            raw_handles,
             handles,
             factory_products,
+        };
+        rows.check_overlaps(tcx);
+        rows.check_handle_makers(tcx);
+        rows
+    }
+
+    /// Stops the compile at a type the rows hold two ways: shared state is no
+    /// capability, and private state neither of the two nor a handle; a
+    /// handle is no capability or shared state of its own.
+    fn check_overlaps(&self, tcx: TyCtxt<'tcx>) {
+        let overlaps = |first: &TypeSet<'tcx>, second: &TypeSet<'tcx>| {
+            let mut both = first.ids.intersection(&second.ids).copied().collect::<Vec<_>>();
+            both.sort_by_key(|&id| tcx.def_path_str(id));
+            both.into_iter()
+                .map(|id| tcx.def_path_str(id))
+                .chain(first.exact.intersection(&second.exact).map(|ty| ty.to_string()))
+                .collect::<Vec<_>>()
+        };
+        let handles =
+            TypeSet { ids: self.handles.keys().copied().collect(), exact: FxHashSet::default() };
+        for (first, first_row, second, second_row) in [
+            (&self.shared_state, "shared_state_types", &self.capabilities, "capability_types"),
+            (&self.private_state, "private_state_types", &self.capabilities, "capability_types"),
+            (&self.private_state, "private_state_types", &self.shared_state, "shared_state_types"),
+            (&self.private_state, "private_state_types", &handles, "handles"),
+            (&handles, "handles", &self.capabilities, "capability_types"),
+            (&handles, "handles", &self.shared_state, "shared_state_types"),
+        ] {
+            if let Some(both) = overlaps(first, second).first() {
+                tcx.dcx().fatal(format!(
+                    "typed lints: {FILE_NAME}'s {first_row} names {both}, which {second_row} \
+                     names too"
+                ));
+            }
+        }
+    }
+
+    /// Stops the compile at a handle whose owner, a type of the crate being
+    /// compiled, has no method whose result holds the handle: a row whose
+    /// owner makes none covers nothing.
+    fn check_handle_makers(&self, tcx: TyCtxt<'tcx>) {
+        let returns = |method: DefId, handle: DefId| {
+            let output =
+                tcx.fn_sig(method).instantiate_identity().skip_norm_wip().output().skip_binder();
+            mentions(tcx, output).contains(&handle)
+        };
+        for (&handle, makers) in &self.handles {
+            for &maker in makers.iter().filter(|maker| maker.is_local()) {
+                let trait_impls =
+                    tcx.hir_crate_items(()).definitions().map(|id| id.to_def_id()).filter(|&id| {
+                        matches!(tcx.def_kind(id), DefKind::Impl { of_trait: true })
+                            && tcx
+                                .type_of(id)
+                                .instantiate_identity()
+                                .skip_norm_wip()
+                                .ty_adt_def()
+                                .map(|adt| adt.did())
+                                == Some(maker)
+                    });
+                let makes = tcx.inherent_impls(maker).iter().copied().chain(trait_impls).any(
+                    |implementation| {
+                        tcx.associated_item_def_ids(implementation).iter().any(|&item| {
+                            tcx.def_kind(item) == DefKind::AssocFn && returns(item, handle)
+                        })
+                    },
+                );
+                if !makes {
+                    tcx.dcx().fatal(format!(
+                        "typed lints: {FILE_NAME}'s handles names {} as {}'s owner, which has no \
+                         method that returns it",
+                        tcx.def_path_str(maker),
+                        tcx.def_path_str(handle)
+                    ));
+                }
+            }
         }
     }
 
@@ -559,4 +652,42 @@ impl<'tcx> Owners<'tcx> {
 pub(crate) enum Held<'tcx> {
     Part(Part<'tcx>),
     Parameter(usize),
+}
+
+/// Every ADT, and every trait object's trait, that `ty` names anywhere in it,
+/// with what an opaque type in it names through its bounds, as an async
+/// function's result names the value its future gives.
+pub(crate) fn mentions<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Vec<DefId> {
+    let mut names = Vec::new();
+    let mut pending = vec![ty];
+    let mut seen = FxHashSet::default();
+    while let Some(ty) = pending.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        for arg in ty.walk() {
+            let Some(part) = arg.as_type() else {
+                continue;
+            };
+            match *part.kind() {
+                ty::Adt(adt, _) => names.push(adt.did()),
+                ty::Dynamic(bounds, _) => names.extend(bounds.principal_def_id()),
+                ty::Alias(_, AliasTy { kind: ty::Opaque { def_id }, args, .. }) => {
+                    for (clause, _) in tcx
+                        .explicit_item_bounds(def_id)
+                        .iter_instantiated_copied(tcx, args)
+                        .map(Unnormalized::skip_norm_wip)
+                    {
+                        if let ty::ClauseKind::Projection(projection) = clause.kind().skip_binder()
+                            && let Some(term) = projection.term.as_type()
+                        {
+                            pending.push(term);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names
 }

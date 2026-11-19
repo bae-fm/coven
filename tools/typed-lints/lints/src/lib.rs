@@ -22,7 +22,10 @@ extern crate rustc_span;
 mod async_export_off_runtime;
 mod crate_graph;
 mod finding;
+mod kept_arguments;
+mod made_here;
 mod method_takes_capability;
+mod owner_dependencies;
 mod owner_rules;
 mod owners;
 mod reqwest_error_display;
@@ -51,6 +54,9 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         owner_rules::BUILT_OUTSIDE_COMPOSITION_ROOT,
         method_takes_capability::METHOD_TAKES_CAPABILITY,
         task_state::TASK_STATE_OUTSIDE_TASK,
+        owner_dependencies::OWNER_HANDS_OUT_DEPENDENCY,
+        owner_dependencies::HANDLE_NOT_FROM_ITS_OWNER,
+        owner_dependencies::SHARED_STATE_OUTSIDE_HANDLE,
     ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))

@@ -17,8 +17,7 @@ use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
-use crate::syntax::{type_name, type_names, RustFile, TypeNames};
-use crate::type_identity::TypeIdentity;
+use crate::syntax::{type_name, RustFile, TypeNames};
 use owner_construction_policy::{
     home_holds, is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy,
     Shape,
@@ -48,7 +47,6 @@ pub(crate) fn stale_rows(
     rows: &NamedTypes,
 ) -> Vec<String> {
     let crate_files = &code.expanded;
-    let identity = &graph.identity;
     let mut stale = Vec::new();
     if policy.rules.is_empty() {
         stale.push("rules: the policy selects no rules".to_string());
@@ -58,8 +56,6 @@ pub(crate) fn stale_rows(
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(invalid_capability_rows(code, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
-    stale.extend(invalid_handles(crate_files, identity, policy));
-    stale.extend(overlapping_state_rows(policy));
     stale.extend(undeclared_types(code, graph, policy, rows));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, graph, policy));
@@ -369,59 +365,6 @@ fn missing_composition_roots(files: &[RustFile], policy: &Policy) -> Vec<String>
             )
         })
         .collect()
-}
-
-/// A handle is no capability or shared state row of its own, and its owner,
-/// another type, has a method returning it: a row whose owner makes none
-/// covers nothing.
-fn invalid_handles(files: &[RustFile], identity: &TypeIdentity, policy: &Policy) -> Vec<String> {
-    let methods = declared_methods(files);
-    let mut stale = Vec::new();
-    for (handle, owner) in &policy.handles {
-        if handle == owner {
-            stale.push(format!("handles: {handle} names itself as its owner"));
-        } else if !methods.iter().any(|((path, maker, _), signature)| {
-            maker == owner
-                && match &signature.output {
-                    syn::ReturnType::Type(_, output) => {
-                        type_names(output, identity.in_file(path)).contains(handle)
-                    }
-                    syn::ReturnType::Default => false,
-                }
-        }) {
-            stale.push(format!("handles: {owner} has no method returning {handle}"));
-        }
-        if policy.capability_types.contains(handle) {
-            stale.push(format!("handles: {handle} is also in capability_types"));
-        }
-        if policy.shared_state_types.contains(handle) {
-            stale.push(format!("handles: {handle} is also in shared_state_types"));
-        }
-    }
-    stale
-}
-
-/// Shared state is no capability row, and private state neither of the two
-/// nor a handle: a type is held one way.
-fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
-    let mut stale = Vec::new();
-    for name in policy.shared_state_types.intersection(&policy.capability_types) {
-        stale.push(format!("shared_state_types: {name} is also in capability_types"));
-    }
-    for name in &policy.private_state_types {
-        for (row, names) in [
-            ("capability_types", &policy.capability_types),
-            ("shared_state_types", &policy.shared_state_types),
-        ] {
-            if names.contains(name) {
-                stale.push(format!("private_state_types: {name} is also in {row}"));
-            }
-        }
-        if policy.handles.contains_key(name) {
-            stale.push(format!("private_state_types: {name} is also a handle"));
-        }
-    }
-    stale
 }
 
 /// Each type the policy names must be one a crate declares, or a

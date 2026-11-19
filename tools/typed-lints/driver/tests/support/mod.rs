@@ -60,16 +60,16 @@ impl Fixture<'_> {
     /// `// finding` or holds `/* finding */` holds, and nothing else, and that
     /// no mark of the fixture went unfulfilled.
     pub fn assert_findings(&self, lint: &str, diagnostics: &str) {
-        assert_findings_marked(lint, diagnostics, Some(self.source));
+        assert_findings_marked(lint, diagnostics, &[self.source]);
     }
 }
 
 /// Checks that `lint` finds, in the compile that wrote `diagnostics`, what
-/// each line of the fixture source `marked` that ends in `// finding` or
-/// holds `/* finding */` holds, and nothing else, or nothing at all when no
-/// source is marked; and that no mark went unfulfilled.
-pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: Option<&str>) {
-    let mut found: Vec<u64> = Vec::new();
+/// each line of the fixture sources `marked` that ends in `// finding` or
+/// holds `/* finding */` holds, once for each `/* finding */` it holds, and
+/// nothing else; and that no mark went unfulfilled.
+pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
+    let mut found: Vec<(String, u64)> = Vec::new();
     for line in diagnostics.lines() {
         let diagnostic: serde_json::Value = serde_json::from_str(line).expect("a JSON diagnostic");
         let code = diagnostic["code"]["code"].as_str();
@@ -83,23 +83,27 @@ pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: Option<&str
                 .as_array()
                 .and_then(|spans| spans.iter().find(|span| span["is_primary"] == true))
                 .expect("a finding has a primary span");
-            found.push(primary["line_start"].as_u64().expect("a line number"));
+            let file = primary["file_name"].as_str().expect("a file name");
+            let source = marked
+                .iter()
+                .find(|source| file.ends_with(*source))
+                .map_or_else(|| file.to_string(), |source| source.to_string());
+            found.push((source, primary["line_start"].as_u64().expect("a line number")));
         }
     }
     found.sort_unstable();
 
-    let fixture = marked
-        .map(|source| {
-            std::fs::read_to_string(Path::new(FIXTURES).join(source)).expect("the fixture reads")
-        })
-        .unwrap_or_default();
-    let expected: Vec<u64> = (1..)
-        .zip(fixture.lines())
-        .filter(|(_, text)| {
-            text.trim_end().ends_with("// finding") || text.contains("/* finding */")
-        })
-        .map(|(number, _)| number)
-        .collect();
+    let mut expected: Vec<(String, u64)> = Vec::new();
+    for source in marked {
+        let fixture =
+            std::fs::read_to_string(Path::new(FIXTURES).join(source)).expect("the fixture reads");
+        for (number, text) in (1..).zip(fixture.lines()) {
+            let count = text.matches("/* finding */").count()
+                + usize::from(text.trim_end().ends_with("// finding"));
+            expected.extend(std::iter::repeat_n((source.to_string(), number), count));
+        }
+    }
+    expected.sort_unstable();
     assert_eq!(found, expected, "the lines that hold findings, then the fixture's:\n{diagnostics}");
 }
 

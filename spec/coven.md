@@ -14538,15 +14538,14 @@ do the work. A callback lent what it holds for one call, as one taking
 and keep none of it; one taking the connection for the lifetime its holder
 borrows it for has been given it. A value the method makes, such as a new
 cancellation token, is no part of what it holds, even when the owner holds one
-of the same type. The checker tells the two apart in the method's body: a value
-is made there when what hands it out reads nothing of `self`, by itself or
-through a local bound from what does; a macro's value, a closure's argument and
-a callback passed on to other code could be anything, so they count as the
-owner's. A macro passes a callback on where its arguments name it as a value,
-not where they name a field after it, as `error!(operation = name)` does. A
-task taken whole, or mutably, may hand on by value a task it holds,
-as one step of an operation hands its product to the next, or a run of slot
-reads hands each slot it read to its reader: it no longer has it. Nothing
+of the same type. The typed lints (Appendix F.6, check 11) tell the two apart
+in the method's compiled body, with what its macros write: a value is made
+there when nothing it is computed from reads `self`. A callback the method
+passes on to other code, or captures in a closure, could be given anything,
+so what the method gives it counts as the owner's. A task taken whole, or
+mutably, may hand on by value a task it holds, as one step of an operation
+hands its product to the next, or a run of slot reads hands each slot it read
+to its reader: it no longer has it. Nothing
 outside `coven-database` and `sqlive` gets the SQLite connection; it asks the
 database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
@@ -14834,6 +14833,22 @@ the same on any platform.
     depends on both reports the holder. rustc keeps what an earlier crate
     depends on to itself, so the lint reads that from the packages'
     `Cargo.toml` files, counting only the dependencies every build has.
+    The rest of F.3's hand-out rules are three lints that read every method
+    of the workspace the compile sees, with the bodies of the earlier
+    crates' methods, so a value of an earlier crate's type hands out what
+    that type's methods hand out. `clippy::owner_hands_out_dependency` finds
+    a method that returns, or gives a callback it may keep, a dependency its
+    owner holds and the method did not make; a public field that hands out
+    an owner or a capability; a raw SQLite handle that a method returns, or
+    that a public callable of the database's homes or a method taking its
+    owner whole or mutably takes; and a closed session declared at its
+    crate's root. `clippy::handle_not_from_its_owner` finds a handle handed
+    out by a type other than its owner, the handle itself or what holds the
+    owner. `clippy::shared_state_outside_handle` finds a method reachable
+    outside its module that hands out shared state. These lints stop the
+    compile at a handle whose owner, in the crate being compiled, has no
+    method that returns it, and at a type that two of the policy's
+    capability, shared state, private state and handle rows name.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

@@ -534,63 +534,6 @@ fn a_row_naming_its_type_by_path_tells_a_dependency_s_type_by_its_crate() {
     );
 }
 
-/// A handle's owner is another declared type with a method returning it, and
-/// the handle is no capability or shared state row besides; nor is shared
-/// state a capability row.
-#[test]
-fn a_handle_names_an_owner_that_returns_it() {
-    let files = vec![RustFile::fixture(
-        "crates/app/src/query.rs",
-        "struct Requests; struct Query; struct Other; struct Watch; struct Lock; \
-        impl Query { fn requests(&self) -> Option<Requests> { todo!() } fn watch(&self) -> Watch { todo!() } } \
-        impl Other { fn other(&self) {} }",
-    )];
-    let rows = r#"
-        capability_types = ["Requests", "Lock"]
-        shared_state_types = ["Watch", "Lock"]
-        handles = { Requests = "Query", Other = "Other", Query = "Other", Missing = "Query", Watch = "Query" }
-    "#;
-    assert_eq!(
-        stale(files, rows),
-        [
-            "handles: Query has no method returning Missing",
-            "handles: Other names itself as its owner",
-            "handles: Other has no method returning Query",
-            "handles: Requests is also in capability_types",
-            "handles: Watch is also in shared_state_types",
-            "shared_state_types: Lock is also in capability_types",
-            "handles: no crate declares Missing",
-        ]
-    );
-}
-
-/// Private state is held one way: no capability, shared state or handle row
-/// names it too.
-#[test]
-fn private_state_is_no_other_row() {
-    let files = vec![RustFile::fixture(
-        "crates/app/src/lib.rs",
-        "struct Worker { lock: Mutex<()>, ready: Condvar, gate: Gate, shared: Arc<()> } \
-        struct Gate; struct Query; impl Query { fn gate(&self) -> Gate { todo!() } }",
-    )];
-    let rows = r#"
-        capability_types = ["Mutex"]
-        shared_state_types = ["Condvar"]
-        private_state_types = ["Mutex", "Condvar", "Gate"]
-        shared_pointer_types = ["Arc"]
-        handles = { Gate = "Query" }
-        external_types = ["Mutex", "Condvar", "Arc"]
-    "#;
-    assert_eq!(
-        stale(files, rows),
-        [
-            "private_state_types: Condvar is also in shared_state_types",
-            "private_state_types: Gate is also a handle",
-            "private_state_types: Mutex is also in capability_types",
-        ]
-    );
-}
-
 fn read_shapes_rows(rows: &str) -> String {
     format!(
         r#"
