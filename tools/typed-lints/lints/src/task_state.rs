@@ -10,19 +10,25 @@
 //! owner, or one that holds shared or private state by itself or inside what
 //! it holds. A value no one changes, such as a write's list of changes, may
 //! outlive the write. It reads where tasks are built in every body of the
-//! workspace the compile sees (`workspace_bodies.rs`), and reports each pair
-//! of holder and task once: in the holder's crate when the holder is this
-//! crate's, and at the place the task is built when only that is. A pair
-//! whose crates never depend on each other is reported in neither.
+//! workspace the compile sees (`workspace_bodies.rs`). A holder and a body
+//! that builds the task are reported in one compile: the holder's crate's,
+//! at the holder's field, when that crate sees the body; the body's crate's,
+//! where the body builds the task, when that one sees the holder; and when
+//! neither crate depends on the other, the compile of each first crate that
+//! sees both, one that depends on no other crate that does
+//! (`crate_graph.rs`), at the holder's field. A mark for that last finding
+//! goes on that crate's root. Each compile reports a field and a task once.
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_hir::CRATE_HIR_ID;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::def_id::DefId;
 use rustc_lint::{LateContext, declare_tool_lint};
 use rustc_middle::mir::{AggregateKind, Body, Operand, Rvalue, StatementKind, TerminatorKind};
 use rustc_middle::ty::{self, GenericArgKind, Ty, TyCtxt};
 use rustc_span::{Span, sym};
 
+use crate::crate_graph::CrateGraph;
 use crate::finding::Finding;
 use crate::owners::Owners;
 use crate::workspace_bodies::workspace_bodies;
@@ -40,11 +46,12 @@ const HELP: &str = "a task's state lives as long as its operation: keep it in th
                     give what outlives the task a plain value or a handle the task makes";
 
 /// Where a task is built with a new shared pointer in a field: the task,
-/// and the place when it is this crate's.
+/// the body that builds it and the place in the body.
 #[derive(Clone, Copy)]
 struct Made {
     task: DefId,
-    here: Option<(LocalDefId, Span)>,
+    body: DefId,
+    span: Span,
 }
 
 /// Reports each holder of the state a task makes for its operation.
@@ -60,6 +67,7 @@ pub(crate) fn check<'tcx>(owners: &Owners<'tcx>, cx: &LateContext<'tcx>) {
     if made.is_empty() {
         return;
     }
+    let mut graph = None;
     let mut reported = FxHashSet::default();
     for holder in owners.workspace_types() {
         if owners.rows.tasks.has(tcx, holder, None)
@@ -73,27 +81,30 @@ pub(crate) fn check<'tcx>(owners: &Owners<'tcx>, cx: &LateContext<'tcx>) {
         for field in adt.all_fields() {
             for state in pointees(owners, tcx, field.ty(tcx, identity).skip_norm_wip()) {
                 for found in made.get(&state).into_iter().flatten() {
-                    if makers.is_some_and(|makers| makers.contains(&found.task))
-                        || !reported.insert((field.did, found.task))
-                    {
+                    if makers.is_some_and(|makers| makers.contains(&found.task)) {
                         continue;
                     }
-                    let message = format!(
-                        "`{}` holds `{}`, which task `{}` makes for its operation",
-                        tcx.def_path_str(holder),
-                        tcx.def_path_str(state),
-                        tcx.def_path_str(found.task)
-                    );
-                    let place = match (field.did.as_local(), found.here) {
-                        (Some(local), _) => {
-                            Some((tcx.local_def_id_to_hir_id(local), tcx.def_span(field.did)))
-                        }
-                        (None, Some((body, span))) => {
-                            Some((tcx.local_def_id_to_hir_id(body), span))
-                        }
-                        (None, None) => None,
+                    let place = if let Some(local) = field.did.as_local() {
+                        Some((tcx.local_def_id_to_hir_id(local), tcx.def_span(field.did)))
+                    } else if let Some(body) = found.body.as_local() {
+                        let callable = tcx.typeck_root_def_id(body.to_def_id()).expect_local();
+                        Some((tcx.local_def_id_to_hir_id(callable), found.span))
+                    } else {
+                        let graph = graph.get_or_insert_with(|| {
+                            CrateGraph::read(tcx, owners.workspace, tcx.crates(()).iter().copied())
+                        });
+                        first_to_see_both(owners, tcx, graph, holder, found.body)
+                            .then(|| (CRATE_HIR_ID, tcx.def_span(field.did)))
                     };
-                    if let Some((id, span)) = place {
+                    if let Some((id, span)) = place
+                        && reported.insert((field.did, found.task))
+                    {
+                        let message = format!(
+                            "`{}` holds `{}`, which task `{}` makes for its operation",
+                            tcx.def_path_str(holder),
+                            tcx.def_path_str(state),
+                            tcx.def_path_str(found.task)
+                        );
                         tcx.emit_node_span_lint(
                             TASK_STATE_OUTSIDE_TASK,
                             id,
@@ -105,6 +116,28 @@ pub(crate) fn check<'tcx>(owners: &Owners<'tcx>, cx: &LateContext<'tcx>) {
             }
         }
     }
+}
+
+/// Whether the compile is the first to see both the holder `holder` and the
+/// body `body`, two other crates' definitions: neither crate sees the other,
+/// so neither one's compile reports the pair, and no workspace crate the
+/// compile depends on sees both.
+fn first_to_see_both(
+    owners: &Owners<'_>,
+    tcx: TyCtxt<'_>,
+    graph: &CrateGraph,
+    holder: DefId,
+    body: DefId,
+) -> bool {
+    let (holder, body) = (holder.krate, body.krate);
+    if graph.sees(holder, body) || graph.sees(body, holder) {
+        return false;
+    }
+    !tcx.crates(()).iter().any(|&earlier| {
+        owners.is_workspace_item(earlier.as_def_id())
+            && graph.sees(earlier, holder)
+            && graph.sees(earlier, body)
+    })
 }
 
 /// Whether the workspace type `id` is state: an owner, or a type that holds
@@ -239,14 +272,9 @@ fn tasks_made_shared<'tcx>(
                 if !is_fresh(&fresh, operand) {
                     continue;
                 }
-                let here = id.as_local().map(|local| {
-                    (
-                        tcx.typeck_root_def_id(local.to_def_id()).expect_local(),
-                        statement.source_info.span,
-                    )
-                });
+                let made = Made { task, body: id, span: statement.source_info.span };
                 for state in pointees(owners, tcx, field.ty(tcx, args).skip_norm_wip()) {
-                    found(state, Made { task, here });
+                    found(state, made);
                 }
             }
         }

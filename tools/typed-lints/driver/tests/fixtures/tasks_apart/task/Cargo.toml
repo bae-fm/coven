@@ -1,0 +1,11 @@
+# The holder is an optional dependency, which a build may leave off, and one
+# for a platform no target is: the task's compile may not see the holder.
+[package]
+name = "apart-task"
+
+[dependencies]
+apart-state = { path = "../state" }
+apart-holder = { path = "../holder", optional = true }
+
+[target.'cfg(any())'.dependencies]
+apart-holder = { path = "../holder" }

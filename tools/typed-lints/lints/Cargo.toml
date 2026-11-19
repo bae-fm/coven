@@ -13,6 +13,9 @@ test = false
 doctest = false
 
 [dependencies]
+# The `[target.<platform>]` tables of the workspace's manifests
+# (`src/crate_graph.rs`), at the version clippy's own dependencies lock.
+cargo-platform = "0.3.3"
 clippy_config = { path = "../clippy/clippy_config" }
 clippy_lints = { path = "../clippy/clippy_lints" }
 clippy_utils = { path = "../clippy/clippy_utils" }

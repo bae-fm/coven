@@ -1,0 +1,5 @@
+[package]
+name = "apart-user"
+
+[dependencies]
+apart-joined = { path = "../joined" }

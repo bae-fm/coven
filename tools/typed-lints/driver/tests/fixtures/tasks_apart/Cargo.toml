@@ -1,0 +1,9 @@
+# The root of the workspace of the fixture of tasks and holders in crates
+# that never depend on each other, where the lints find its policy file and
+# read each package's manifest: state, which holder and task depend on;
+# joined, which depends on both; and user, which depends on joined.
+[workspace]
+members = ["state", "holder", "task", "joined", "user"]
+
+[workspace.dependencies]
+apart-state = { path = "state" }

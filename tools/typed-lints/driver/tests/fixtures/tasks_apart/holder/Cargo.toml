@@ -1,0 +1,5 @@
+[package]
+name = "apart-holder"
+
+[dependencies]
+apart-state = { workspace = true }

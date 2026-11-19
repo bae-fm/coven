@@ -52,7 +52,7 @@ pub(crate) fn read() -> PolicyRead {
     let Some(package) = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
         return Ok(None);
     };
-    let Some(root) = package.ancestors().find(|folder| declares_workspace(folder)) else {
+    let Some(root) = package.ancestors().find(|folder| declares(folder, "workspace")) else {
         return Ok(None);
     };
     let file = root.join(FILE_NAME);
@@ -91,12 +91,12 @@ pub(crate) fn for_compile<'a>(
     Some(workspace)
 }
 
-/// Whether the `Cargo.toml` in `folder` has a `[workspace]` table.
-fn declares_workspace(folder: &Path) -> bool {
+/// Whether the `Cargo.toml` in `folder` has the table `table`.
+fn declares(folder: &Path, table: &str) -> bool {
     std::fs::read_to_string(folder.join("Cargo.toml"))
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .is_some_and(|manifest| manifest.contains_key("workspace"))
+        .is_some_and(|manifest| manifest.contains_key(table))
 }
 
 impl WorkspacePolicy {
@@ -162,6 +162,24 @@ impl WorkspacePolicy {
     /// stops the compile (`source_file`).
     pub(crate) fn holds_file(&self, tcx: TyCtxt<'_>, span: Span) -> bool {
         self.source_file(tcx, span).is_some_and(|file| file.starts_with(&self.root))
+    }
+
+    /// The workspace's root, with every link followed.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The folder of the package that holds the source file `span` is
+    /// written in, with every link followed: the nearest folder above the
+    /// file, inside the workspace, whose `Cargo.toml` has a `[package]`
+    /// table.
+    pub(crate) fn package_folder(&self, tcx: TyCtxt<'_>, span: Span) -> Option<PathBuf> {
+        let file = self.source_file(tcx, span)?;
+        file.ancestors()
+            .skip(1)
+            .take_while(|folder| folder.starts_with(&self.root))
+            .find(|folder| declares(folder, "package"))
+            .map(Path::to_path_buf)
     }
 
     /// Whether the policy's `path`, a source file relative to the

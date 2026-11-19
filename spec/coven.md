@@ -14829,8 +14829,11 @@ the same on any platform.
     sees, and refuses any type but a task, or a handle the task makes, that
     holds the same state through a shared pointer. It reports a holder in
     the holder's crate, and a holder in an earlier crate where the task is
-    built; a holder whose crate and the task's never depend on each other, as
-    coven-database's and coven-storage's never do, is reported in neither.
+    built. When the holder's crate and the task's never depend on each other,
+    as coven-database's and coven-storage's never do, the first crate that
+    depends on both reports the holder. rustc keeps what an earlier crate
+    depends on to itself, so the lint reads that from the packages'
+    `Cargo.toml` files, counting only the dependencies every build has.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

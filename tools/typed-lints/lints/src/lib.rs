@@ -20,6 +20,7 @@ extern crate rustc_middle;
 extern crate rustc_span;
 
 mod async_export_off_runtime;
+mod crate_graph;
 mod finding;
 mod method_takes_capability;
 mod owner_rules;

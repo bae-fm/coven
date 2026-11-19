@@ -60,39 +60,47 @@ impl Fixture<'_> {
     /// `// finding` or holds `/* finding */` holds, and nothing else, and that
     /// no mark of the fixture went unfulfilled.
     pub fn assert_findings(&self, lint: &str, diagnostics: &str) {
-        let mut found: Vec<u64> = Vec::new();
-        for line in diagnostics.lines() {
-            let diagnostic: serde_json::Value =
-                serde_json::from_str(line).expect("a JSON diagnostic");
-            let code = diagnostic["code"]["code"].as_str();
-            assert_ne!(
-                code,
-                Some("unfulfilled_lint_expectations"),
-                "the fixture's mark found nothing:\n{line}"
-            );
-            if code == Some(lint) {
-                let primary = diagnostic["spans"]
-                    .as_array()
-                    .and_then(|spans| spans.iter().find(|span| span["is_primary"] == true))
-                    .expect("a finding has a primary span");
-                found.push(primary["line_start"].as_u64().expect("a line number"));
-            }
-        }
-        found.sort_unstable();
-
-        let fixture = std::fs::read_to_string(self.source_path()).expect("the fixture reads");
-        let expected: Vec<u64> = (1..)
-            .zip(fixture.lines())
-            .filter(|(_, text)| {
-                text.trim_end().ends_with("// finding") || text.contains("/* finding */")
-            })
-            .map(|(number, _)| number)
-            .collect();
-        assert_eq!(
-            found, expected,
-            "the lines that hold findings, then the fixture's:\n{diagnostics}"
-        );
+        assert_findings_marked(lint, diagnostics, Some(self.source));
     }
+}
+
+/// Checks that `lint` finds, in the compile that wrote `diagnostics`, what
+/// each line of the fixture source `marked` that ends in `// finding` or
+/// holds `/* finding */` holds, and nothing else, or nothing at all when no
+/// source is marked; and that no mark went unfulfilled.
+pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: Option<&str>) {
+    let mut found: Vec<u64> = Vec::new();
+    for line in diagnostics.lines() {
+        let diagnostic: serde_json::Value = serde_json::from_str(line).expect("a JSON diagnostic");
+        let code = diagnostic["code"]["code"].as_str();
+        assert_ne!(
+            code,
+            Some("unfulfilled_lint_expectations"),
+            "the fixture's mark found nothing:\n{line}"
+        );
+        if code == Some(lint) {
+            let primary = diagnostic["spans"]
+                .as_array()
+                .and_then(|spans| spans.iter().find(|span| span["is_primary"] == true))
+                .expect("a finding has a primary span");
+            found.push(primary["line_start"].as_u64().expect("a line number"));
+        }
+    }
+    found.sort_unstable();
+
+    let fixture = marked
+        .map(|source| {
+            std::fs::read_to_string(Path::new(FIXTURES).join(source)).expect("the fixture reads")
+        })
+        .unwrap_or_default();
+    let expected: Vec<u64> = (1..)
+        .zip(fixture.lines())
+        .filter(|(_, text)| {
+            text.trim_end().ends_with("// finding") || text.contains("/* finding */")
+        })
+        .map(|(number, _)| number)
+        .collect();
+    assert_eq!(found, expected, "the lines that hold findings, then the fixture's:\n{diagnostics}");
 }
 
 /// A folder of the test's own for the compiled fixtures.

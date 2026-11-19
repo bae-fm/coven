@@ -1,0 +1,5 @@
+# The task state rule of the fixture in this folder, each type by its path.
+rules = ["owner-dependencies"]
+private_state_types = ["std::sync::Mutex"]
+shared_pointer_types = ["std::sync::Arc"]
+task_types = ["apart_task::Load"]

@@ -4,11 +4,13 @@
 //! this crate or, in a function no other crate can call, in the earlier
 //! crate, and each place this crate's task makes state the earlier crate's
 //! holder holds; it finds nothing in test code, in a handle the task makes,
-//! or for a plain value.
+//! or for a plain value. Over `fixtures/tasks_apart/`, a holder and a task
+//! in crates that never depend on each other, it finds the holder in the
+//! first crate that depends on both, and nowhere else.
 
 mod support;
 
-use support::{Fixture, extern_library, out_dir};
+use support::{Fixture, assert_findings_marked, extern_library, out_dir};
 
 #[test]
 fn finds_what_holds_a_tasks_state_and_nothing_else() {
@@ -22,4 +24,31 @@ fn finds_what_holds_a_tasks_state_and_nothing_else() {
     let arguments = extern_library("tasks_base", &out_dir).into_iter().chain(test_builds);
     let diagnostics = fixture.compile(&out_dir, arguments);
     fixture.assert_findings("clippy::task_state_outside_task", &diagnostics);
+}
+
+#[test]
+fn finds_a_holder_and_task_of_crates_apart_in_the_first_crate_that_sees_both() {
+    const LINT: &str = "clippy::task_state_outside_task";
+    let out_dir = out_dir("task_state_outside_task_apart");
+    // Each package of the fixture, its dependencies and the source the
+    // compile of it finds marked, if any.
+    let packages: [(&str, &[&str], Option<&str>); 5] = [
+        ("state", &[], None),
+        ("holder", &["state"], None),
+        ("task", &["state"], None),
+        ("joined", &["holder", "task"], Some("tasks_apart/holder/src/lib.rs")),
+        ("user", &["joined"], None),
+    ];
+    for (package, dependencies, marked) in packages {
+        let source = format!("tasks_apart/{package}/src/lib.rs");
+        let crate_name = format!("apart_{package}");
+        let manifest_dir = format!("tasks_apart/{package}");
+        let fixture =
+            Fixture { source: &source, crate_name: &crate_name, manifest_dir: &manifest_dir };
+        let arguments = dependencies
+            .iter()
+            .flat_map(|dependency| extern_library(&format!("apart_{dependency}"), &out_dir));
+        let diagnostics = fixture.compile(&out_dir, arguments);
+        assert_findings_marked(LINT, &diagnostics, marked);
+    }
 }

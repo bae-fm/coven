@@ -1,0 +1,9 @@
+# The holder is a dependency for every platform.
+[package]
+name = "apart-joined"
+
+[dependencies]
+apart-task = { path = "../task" }
+
+[target.'cfg(all())'.dependencies]
+apart-holder = { path = "../holder" }
