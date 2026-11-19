@@ -24,13 +24,17 @@ http.workspace = true
 http-body.workspace = true
 bytes.workspace = true
 oauth2.workspace = true
-open.workspace = true
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio"] }
 aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
 aws-smithy-runtime-api = { workspace = true, features = ["client", "http-1x"] }
 hex.workspace = true
 base64.workspace = true
+
+# Desktop sign-in opens the system browser; iOS and Android apps present
+# the sign-in themselves.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+open.workspace = true
 
 # Android's certificate verifier asks the JVM, through the context the app
 # gives ndk-context (api.md E1).
