@@ -17,3 +17,4 @@ import SqliveNarrowing.Fuel
 import SqliveNarrowing.Filter
 import SqliveNarrowing.Restrict
 import SqliveNarrowing.Scopes
+import SqliveNarrowing.PlannerState

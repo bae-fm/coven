@@ -349,6 +349,15 @@ a side of each OR it keeps passes, and that its LIMIT bound passes.
 value a row of the partner in the partner's scope gives, NULL only for an `IS`
 edge, through `equalValues_passes` when the partner's scope lists its values;
 `sideScope_passes` and `bind_passes` do the same for an OR's side and a term.
+[PlannerState.lean](../../crates/sqlive/proofs/SqliveNarrowing/PlannerState.lean)
+states what the planner's state keeps however it reads the conditions.
+`plan_leftOn` proves that the planned state holds an ON narrowing back only
+for an item a LEFT JOIN adds: the planner starts by holding one back for
+each such item, and each step that makes an item an inner join's releases
+it for good. The restriction lets a binding hold no row only of such an
+item. `plan_order` proves that the planner places each item once, and every
+item of every core: each step places one item that is not placed yet, and
+the planner takes a step for each item. `Planned.scopes_eq` takes both.
 Whether the planner's state gives each item terms, edges and ORs that hold of
 the bindings that matter, through the conditions it reads, the ON conditions it
 holds back, the terms it carries and passes into derived items, and the order
