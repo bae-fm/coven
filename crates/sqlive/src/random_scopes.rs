@@ -91,7 +91,13 @@ pub struct Generated {
     pub parameters: Vec<SqlValue>,
     /// Whether its WHERE holds a condition sqlive narrows by.
     pub narrows: bool,
+    /// What it reads from: one of [`SHAPES`].
+    pub shape: &'static str,
 }
+
+/// The kinds of source a generated query reads from, which a test holds a
+/// precision bound for each of.
+pub const SHAPES: [&str; 7] = ["compound", "no from", "table", "view", "derived", "cte", "join"];
 
 /// A bound value of any type, among them ones a column would convert.
 fn any_value(rng: &mut Rng) -> SqlValue {
@@ -384,6 +390,7 @@ pub fn query(rng: &mut Rng) -> Generated {
                 sql: format!("{} {operator} {} ORDER BY 1, 2", arms[0], arms[1]),
                 parameters,
                 narrows,
+                shape: "compound",
             };
         }
         1 => {
@@ -394,22 +401,27 @@ pub fn query(rng: &mut Rng) -> Generated {
                 sql: format!("SELECT EXISTS ({exists}), ({count})"),
                 parameters,
                 narrows,
+                shape: "no from",
             };
         }
         _ => {}
     }
     let mut with = String::new();
+    let mut shape = "join";
     let (from, sources) = match rng.below(10) {
         0..=3 => {
+            shape = "table";
             let table = *rng.pick(&TABLES);
             (table.to_owned(), vec![(table, table)])
         }
         4 | 5 => {
+            shape = "view";
             let (view, table) = *rng.pick(&VIEWS);
             (view.to_owned(), vec![(table, view)])
         }
         6 => {
             // A subquery in FROM, with a condition of its own.
+            shape = "derived";
             let table = *rng.pick(&TABLES);
             let (condition, _) = condition(rng, table, "x", &mut parameters, 1);
             (
@@ -419,6 +431,7 @@ pub fn query(rng: &mut Rng) -> Generated {
         }
         7 => {
             // A CTE, sometimes kept apart as SQLite reads it.
+            shape = "cte";
             let table = *rng.pick(&TABLES);
             let materialized = *rng.pick(&["", "MATERIALIZED "]);
             with = format!("WITH d AS {materialized}(SELECT * FROM {table}) ");
@@ -466,7 +479,7 @@ pub fn query(rng: &mut Rng) -> Generated {
             "SELECT {first}.id, {first}.a, {last}.id, {last}.b, {last}.c FROM {from}{filter} ORDER BY 1, 2, 3, 4, 5"
         ),
     };
-    Generated { sql: format!("{with}{sql}"), parameters, narrows }
+    Generated { sql: format!("{with}{sql}"), parameters, narrows, shape }
 }
 
 /// One generated write.

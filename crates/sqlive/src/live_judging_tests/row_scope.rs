@@ -10,9 +10,10 @@
 //! `SQLIVE_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
-use crate::random_scopes::{CAPTURED, SCHEMA, TABLES};
+use crate::random_scopes::{CAPTURED, SCHEMA, SHAPES, TABLES};
 use crate::tests::{next, QueryError, TestDatabase, TestOptions, TestRead, HANG_GUARD};
 use crate::{LiveQuery, SqlValue};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -140,9 +141,43 @@ async fn next_rows(query: &mut LiveQuery<(usize, Rows), QueryError>) -> (usize, 
         .unwrap()
 }
 
+/// For one kind of live query, over every write: how often a write marked a
+/// query to run again, and how often it changed the query's result.
+#[derive(Default, Clone, Copy)]
+struct Precision {
+    /// Writes that reached a query not already marked.
+    writes: usize,
+    /// Of those, the writes that marked it.
+    reruns: usize,
+    /// Of those, the writes that changed its result.
+    changes: usize,
+    /// Of the reruns, the ones whose result didn't change.
+    wasted: usize,
+}
+
+/// A kind of live query: what it reads from, and whether its WHERE holds a
+/// condition sqlive narrows by.
+type Kind = (&'static str, bool);
+
+/// The most reruns, in percent of the writes that reached a narrowing query
+/// of each shape, whose result the rerun left unchanged. A rerun that finds
+/// the same rows is not always avoidable: a write may change a column the
+/// query doesn't select. The bounds sit a few points above what sqlive
+/// measures over the default seeds, so a weaker narrowing, which reruns more
+/// queries for the same writes, fails here.
+const WASTED_PERCENT: [(&str, usize); 7] = [
+    ("compound", 6),
+    ("no from", 16),
+    ("table", 11),
+    ("view", 23),
+    ("derived", 14),
+    ("cte", 18),
+    ("join", 20),
+];
+
 /// What one seed found: commits that left a narrowing query's result alone
-/// without marking it.
-async fn run_seed(seed: u64) -> usize {
+/// without marking it, and each kind of query's precision.
+async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> usize {
     let mut rng = Rng::seeded(seed);
     let db = TestDatabase::open_with(
         SCHEMA,
@@ -174,11 +209,13 @@ async fn run_seed(seed: u64) -> usize {
             Ok((run, read(&context, &sql, &parameters)?))
         });
         let (_, rows) = next_rows(&mut subscription).await;
-        live.push((subscription, rows));
+        live.push((subscription, rows.clone(), rows));
     }
     let mut spared = 0;
     for step in 0..24 {
         let sql = write(&mut rng).sql;
+        let waiting: Vec<bool> =
+            live.iter().map(|(query, ..)| query.is_marked_for_rerun()).collect();
         // Some steps commit through the host's own transaction instead of
         // the app's write.
         if rng.chance(40) {
@@ -186,9 +223,20 @@ async fn run_seed(seed: u64) -> usize {
         } else {
             db.write(&sql).unwrap();
         }
-        for (query, (subscription, last)) in queries.iter().zip(live.iter_mut()) {
+        for ((query, (subscription, last, before)), waiting) in
+            queries.iter().zip(live.iter_mut()).zip(waiting)
+        {
             let fresh = one_shot(&db, query).await;
             let marked = subscription.is_marked_for_rerun();
+            // A query already marked before this write skipped its judging.
+            if !waiting {
+                let count = precision.entry((query.shape, query.narrows)).or_default();
+                count.writes += 1;
+                count.reruns += usize::from(marked);
+                count.changes += usize::from(fresh != *before);
+                count.wasted += usize::from(marked && fresh == *before);
+            }
+            *before = fresh.clone();
             let case = || {
                 format!(
                     "seed {seed}, step {step}: {} {:?} after `{sql}`",
@@ -219,10 +267,29 @@ async fn live_queries_rerun_whenever_their_results_change() {
         .ok()
         .map_or(40, |seeds| seeds.parse().expect("SQLIVE_SCOPE_SEEDS is a count"));
     let mut spared = 0;
+    let mut precision = BTreeMap::new();
     for seed in 0..seeds {
-        spared += run_seed(seed).await;
+        spared += run_seed(seed, &mut precision).await;
     }
     eprintln!("{seeds} seeds, {spared} reruns spared");
+    for ((shape, narrows), count) in &precision {
+        eprintln!(
+            "precision {shape} narrows={narrows}: {} writes, {} reruns, {} changes, {} wasted",
+            count.writes, count.reruns, count.changes, count.wasted
+        );
+    }
+    // A write that reruns a query whose result stays the same counts against
+    // the shape's bound.
+    for (shape, percent) in WASTED_PERCENT {
+        let count = precision.get(&(shape, true)).copied().unwrap_or_default();
+        assert!(
+            count.wasted * 100 <= count.writes * percent,
+            "{shape} queries reran with no change in {} of {} writes, over {percent}%",
+            count.wasted,
+            count.writes
+        );
+    }
+    assert_eq!(WASTED_PERCENT.map(|(shape, _)| shape), SHAPES, "every shape has a bound");
     // The test would also pass if sqlive reran every query that reads a
     // table a write changed; the narrowing must also skip the reruns it can.
     assert!(spared > 0, "no query skipped a rerun through narrowing");
