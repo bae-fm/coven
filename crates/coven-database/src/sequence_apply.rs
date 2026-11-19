@@ -115,6 +115,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     crate::download::source_wait(crate::local_write::stream_registering(
         db,
         call,
+        files,
         registering,
         |db| {
             let outcome = apply_in::<P>(

@@ -42,15 +42,30 @@ where
 /// did. When it did, `registering`'s write follows in the same
 /// transaction, as a local write made right after `run` (§13.2): both
 /// commit, or neither. Without one, or when `run` registered nothing,
-/// `stream_registering` runs `run` as `stream_transaction` does.
+/// `stream_registering` runs `run` as `stream_transaction` does. Either
+/// way the app's before-commit function runs last (§9.4).
 pub(crate) fn stream_registering<T>(
     sql: &mut StoreSql,
     call: &StoreCall<'_>,
+    files: &crate::file_write::WriteFiles<'_>,
     registering: Option<crate::joining_write::Registering<'_>>,
     run: impl FnOnce(&StoreSql) -> Result<(T, bool), DbError>,
 ) -> Result<T, DbError> {
     let Some(registering) = registering else {
-        return sql.stream_transaction(|db| run(db).map(|(result, _)| result));
+        return sql.stream_transaction(|db| {
+            let (result, _) = run(db)?;
+            crate::file_write::FileWrite::new(db, call, files).app_before_commit()?;
+            Ok(result)
+        });
+    };
+    // The joining write's host phase runs the function when the write
+    // follows; otherwise the stream is the transaction's last step.
+    let run = |db: &StoreSql| {
+        let (result, registered) = run(db)?;
+        if !registered {
+            crate::file_write::FileWrite::new(db, call, files).app_before_commit()?;
+        }
+        Ok((result, registered))
     };
     registering.make(|schema, device, now, files, app| {
         sql.stream_then_write(
@@ -194,6 +209,7 @@ fn host_phase<R, E: crate::WriteFailure>(
     }
     files.queue_uploads(now, record.map(|record| record.header.position.number))?;
     files.before_commit()?;
+    files.app_before_commit()?;
     Ok(result)
 }
 

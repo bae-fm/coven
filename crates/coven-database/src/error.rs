@@ -213,6 +213,14 @@ pub enum DbError {
         /// The synced table.
         table: String,
     },
+    /// A statement of the app's before-commit function, or a trigger or
+    /// foreign-key action it would run, writes a synced table (§9.4, E1).
+    /// Nothing committed.
+    #[error("the app's before-commit function cannot write synced table {table}")]
+    SyncedTableBeforeCommit {
+        /// The synced table.
+        table: String,
+    },
     /// SQLite rolled the owned transaction back itself, so it can't go on (E3, E13).
     #[error("SQLite ended the owned transaction")]
     TransactionEnded,

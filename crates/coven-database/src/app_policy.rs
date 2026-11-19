@@ -497,16 +497,24 @@ impl PolicyState {
                 });
             }
         }
-        // A bulk write records no row change, so nothing it does can reach a
+        // A bulk write records no row change, and the app's before-commit
+        // function runs after the write's record is made, or in a
+        // transaction that makes none, so nothing either does can reach a
         // write record: the app's own statement, a trigger it fires, or a
         // foreign-key action.
-        if let (true, Insert { table_name } | Update { table_name, .. } | Delete { table_name }) =
-            (action.scope.bulk, action.action)
+        if let Insert { table_name } | Update { table_name, .. } | Delete { table_name } =
+            action.action
         {
             if action.database == Some("main")
                 && self.synced.contains(&table_name.to_ascii_lowercase())
             {
-                return Some(DbError::SyncedTableInBulkWrite { table: table_name.into() });
+                let table = table_name.into();
+                if action.scope.local {
+                    return Some(DbError::SyncedTableBeforeCommit { table });
+                }
+                if action.scope.bulk {
+                    return Some(DbError::SyncedTableInBulkWrite { table });
+                }
             }
         }
         None

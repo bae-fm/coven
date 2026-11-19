@@ -3390,6 +3390,28 @@ It runs on the laptop in the write completing the upload, and on the phone in
 the transaction applying that write. Triggers on INSERT and DELETE run as a
 record is made and deleted, in this device's write and in an applied one alike.
 
+Some values a local table keeps come from a rule the app states in Rust, which
+no trigger's SQL can run. For those the app registers one **before-commit
+function** ([api.md E1](api.md#e1-opening)), and coven runs it last in each
+transaction that changes the app's rows: this device's write, a bulk write
+(§4), a slot it applies, a snapshot it loads and a migration as the store
+opens. Like a local trigger, it runs for this device's writes and applied ones
+alike, and writes only local tables. Ana's notes app counts each note's words
+with its own Rust tokenizer and keeps the counts in a local table,
+`note_words`. A local trigger on `notes` adds a note's id to a local table,
+`words_due`, as the note's body changes. The function counts the words of each
+due note, writes the count to `note_words` and empties `words_due`. When Ben's
+phone applies Ana's write 6 (§8.1), the trigger marks note 42 and the function
+stores its new count in the same transaction. No reader on Ben's phone sees the
+new body beside the old count, and no later pass has to correct it.
+
+Coven runs the function once in a transaction, after every other change in it:
+after it puts each row into its merged state, after the joining write (§13.2)
+when the transaction holds one, and after the local triggers the transaction
+fires. The function reads any table app SQL reads, with the transaction's
+changes. Its own changes reach live queries as any change of the transaction
+does.
+
 A **shared** trigger runs only on the device making the write, writes only synced
 tables, and its changes become part of that write and sync with it. Setting
 `edited_at` when a body changes is a shared trigger:
@@ -3437,6 +3459,28 @@ doesn't, when the database opens and after migrating.
   the app's own SQL still can't run a PRAGMA. A change to the index's shadow
   tables reruns each live query that read the FTS5 table. Only FTS5 writes
   them: a trigger or write that names a shadow table directly fails (§4).
+- **The before-commit function writes only local tables.** It runs after a
+  write's record is made, or in a transaction that makes none, so a change it
+  made to a synced table would reach no record and never sync. As SQLite
+  prepares each of its statements, coven refuses one that would write a synced
+  table, itself or through a trigger or foreign-key action, with
+  `SyncedTableBeforeCommit`, and one that writes coven's tables with
+  `InternalTable`. Coven prepares each of its statements afresh, so a
+  statement a write ran a moment before is judged again.
+- **The before-commit function's error fails its transaction.** An error it
+  returns, or a statement of it that failed while it went on, rolls the whole
+  transaction back. A write or a bulk write returns the error to the app. A
+  slot or a load doesn't commit: the pass reports the error and the next pass
+  tries again, as for a failed joining write (§13.2). A migration fails the
+  open (E13). So a local table the function keeps never falls behind the rows
+  it follows.
+- **Coven's own transactions don't run the before-commit function.** A
+  transaction in which coven pins a file, completes a download or an upload,
+  or records a pending record or the sync facts changes only coven's tables
+  and what the local triggers following them write. The function runs where
+  the app's rows change, so it computes from the app's rows; a value that
+  follows `coven_files`, `coven_pins` or another of coven's eight tables is a
+  local trigger's.
 - **A trigger writing the wrong kind of table fails.** SQLite's authorizer
   callback reports, when a statement is prepared, each table it would write and
   the trigger doing the write. Coven refuses the statement when a local trigger

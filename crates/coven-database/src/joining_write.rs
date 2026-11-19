@@ -147,4 +147,4 @@ pub(crate) fn owed<'a>(
 
 #[cfg(test)]
 #[path = "joining_write_tests.rs"]
-mod tests;
+pub(crate) mod tests;

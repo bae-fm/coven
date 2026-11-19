@@ -23,10 +23,12 @@ impl CovenHandle {
     /// takes one step and filling one runs at SQLite's own speed (§4). A
     /// statement that would write a synced table, itself or through a
     /// trigger or foreign-key action, fails the write with
-    /// `SyncedTableInBulkWrite`. Triggers still run. After commit, every live
-    /// query that read a table the write's statements may change runs again,
-    /// whatever rows it read; a small change that should rerun only the live
-    /// queries reading its rows belongs in `write`.
+    /// `SyncedTableInBulkWrite`. Triggers still run, and so does the app's
+    /// before-commit function, after the closure (§9.4). After commit, every
+    /// live query that read a table the write's statements or the function's
+    /// may change runs again, whatever rows it read; a small change that
+    /// should rerun only the live queries reading its rows belongs in
+    /// `write`.
     pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
     where
         F: FnOnce(BulkSqlContext<'_>) -> Result<R, E> + Send + 'static,

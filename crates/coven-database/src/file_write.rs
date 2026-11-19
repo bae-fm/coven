@@ -218,6 +218,9 @@ pub(crate) struct WriteFiles<'a> {
     /// What runs once this write has committed, in the order its steps
     /// asked; nothing runs for a write that rolls back.
     committed: RefCell<Vec<Box<dyn FnOnce()>>>,
+    /// The app's before-commit function, which the transaction runs last
+    /// (§9.4).
+    app_before_commit: Option<&'a crate::before_commit::BeforeCommit>,
 }
 
 /// Which part of a write failed: one of the app's statements or one of
@@ -242,6 +245,7 @@ impl<'a> WriteFiles<'a> {
         ids: &'a dyn IdSource,
         reservations: &'a crate::reserved_names::ReservedNames,
         copying: &'a std::sync::Mutex<BTreeSet<String>>,
+        app_before_commit: Option<&'a crate::before_commit::BeforeCommit>,
     ) -> Self {
         Self {
             schema,
@@ -266,6 +270,7 @@ impl<'a> WriteFiles<'a> {
             dismissing: RefCell::new(Vec::new()),
             failed: Cell::new(None),
             committed: RefCell::new(Vec::new()),
+            app_before_commit,
         }
     }
 
@@ -797,6 +802,12 @@ impl<'a> FileWrite<'a> {
     /// The state of the call this transaction runs in.
     pub(crate) fn call(&self) -> &StoreCall<'_> {
         self.call
+    }
+
+    /// Run the app's before-commit function as the transaction's last step,
+    /// once every other change of the transaction is made (§9.4).
+    pub(crate) fn app_before_commit(&self) -> Result<(), DbError> {
+        crate::before_commit::run(self.database, self.files.app_before_commit)
     }
 
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {

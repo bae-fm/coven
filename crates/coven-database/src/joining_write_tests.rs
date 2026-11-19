@@ -47,7 +47,7 @@ async fn open(
 
 /// The state after an admission that registered `store`'s device for a
 /// member whose admission recorded `joined`.
-fn registered(store: &TestStore, joined: Joined) -> StoreState {
+pub(crate) fn registered(store: &TestStore, joined: Joined) -> StoreState {
     let mut state = StoreState::default();
     state.members.insert(
         member(7),
@@ -66,11 +66,11 @@ fn registered(store: &TestStore, joined: Joined) -> StoreState {
     state
 }
 
-fn dan() -> Joined {
+pub(crate) fn dan() -> Joined {
     Joined { person: Some("Dan".into()), circle: CIRCLE }
 }
 
-fn registration() -> StoreChange {
+pub(crate) fn registration() -> StoreChange {
     StoreChange::AddDevice { name: "Phone".into(), replaces: None }
 }
 

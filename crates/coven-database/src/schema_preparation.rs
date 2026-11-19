@@ -56,6 +56,7 @@ pub(crate) fn prepare_schema(
     author: Option<crate::migration_run::MigrationOrigin>,
     operation: Option<&crate::migration::MigrationOperation>,
     audiences: Option<&crate::audience_database::Stage<'_>>,
+    before_commit: Option<&crate::before_commit::BeforeCommit>,
     progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
 ) -> Result<Vec<MigrationOutcome>, OpenError> {
     let read_only = author.is_none();
@@ -180,6 +181,8 @@ pub(crate) fn prepare_schema(
                 tables,
             )?;
             db.refresh_policy(sqlive::Refresh::Whole)?;
+            // The migrations changed the app's rows (§9.4).
+            crate::before_commit::run(db, before_commit)?;
             Ok(outcomes)
         })
     });

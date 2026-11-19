@@ -660,6 +660,14 @@ impl<P: Policy> HostSql<P> {
         self.authorization.write()
     }
 
+    /// The scope in which app SQL the host runs inside a transaction of its
+    /// own writes: the policy judges each statement as in the local scope
+    /// (`StatementScope::local`), and SQLite prepares each afresh. Inside a
+    /// bulk write, the tables it changes count among the bulk write's.
+    pub fn local_scope(&self) -> crate::authorization::LocalSql<'_, P> {
+        self.authorization.local()
+    }
+
     /// Refuse with `TransactionEnded` unless a transaction is open: a
     /// statement may have committed or rolled back the one its caller began.
     pub fn require_transaction(&self) -> Result<(), PolicyError<P>> {

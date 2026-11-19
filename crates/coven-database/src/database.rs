@@ -182,6 +182,9 @@ pub struct DatabaseInner {
     /// the transaction that first applies this device's registration runs it
     /// (§13.2).
     joining_write: Option<Box<crate::joining_write::JoiningHook>>,
+    /// The app's before-commit function, which each transaction that changes
+    /// the app's rows runs last (§9.4).
+    before_commit: Option<Box<crate::before_commit::BeforeCommit>>,
     /// What a rebuild opens its database with (§18.3).
     open_inputs: builder::OpenInputs,
     clock: ClockRef,
@@ -407,6 +410,7 @@ impl DatabaseInner {
                 self.ids.as_ref(),
                 &self.staging,
                 &self.copying,
+                self.before_commit.as_deref(),
             );
             let result =
                 coven_foundation::task::caught_sync(operation, || run(writer, call, &files))
@@ -726,10 +730,11 @@ impl StoreDatabase {
     /// changes, so SQLite empties a table in one step and fills one at its
     /// own speed (§4). A statement that would write a synced table, itself or
     /// through a trigger or foreign-key action, fails the write with
-    /// `SyncedTableInBulkWrite`, and everything rolls back. After commit,
-    /// every live query that read a table the write's statements may change
-    /// runs again, whatever rows it read. The closure's result is returned
-    /// after commit.
+    /// `SyncedTableInBulkWrite`, and everything rolls back. The app's
+    /// before-commit function runs after the closure, in the same
+    /// transaction (§9.4). After commit, every live query that read a table
+    /// the write's statements or the function's may change runs again,
+    /// whatever rows it read. The closure's result is returned after commit.
     pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
     where
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E> + Send + 'static,
@@ -739,7 +744,12 @@ impl StoreDatabase {
         self.call(move |inner| {
             inner.access.with_writer(|writer, _| {
                 writer
-                    .bulk_write(|bulk| sql(crate::BulkSqlContext::new(bulk)).map_err(Hosted))
+                    .bulk_write(|bulk| {
+                        let result = sql(crate::BulkSqlContext::new(bulk)).map_err(Hosted)?;
+                        crate::before_commit::run(bulk, inner.before_commit.as_deref())
+                            .map_err(|error| Hosted(E::from(error)))?;
+                        Ok(result)
+                    })
                     .map_err(Hosted::into_inner)
             })
         })

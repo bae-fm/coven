@@ -67,8 +67,8 @@ mod upkeep;
 mod wal_checkpoints;
 
 pub use authorization::{
-    FunctionCall, HostError, Owner, Policy, PolicyAction, PolicyError, Refresh, StatementReads,
-    StatementScope, WriteSql,
+    FunctionCall, HostError, LocalSql, Owner, Policy, PolicyAction, PolicyError, Refresh,
+    StatementReads, StatementScope, WriteSql,
 };
 pub use checkpointed_size::CheckpointedSize;
 pub use commit_scope::{committing, enter, CommitScope};

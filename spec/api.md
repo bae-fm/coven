@@ -1606,6 +1606,10 @@ pub enum DbError {
     /// A bulk write's statement, or a trigger or foreign-key action it would
     /// run, writes a synced table (§4, E3). Nothing committed.
     SyncedTableInBulkWrite { table: String },
+    /// A statement of the app's before-commit function, or a trigger or
+    /// foreign-key action it would run, writes a synced table (§9.4, E1).
+    /// Nothing committed.
+    SyncedTableBeforeCommit { table: String },
     /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§15.9).
@@ -2520,6 +2524,27 @@ impl CovenBuilder {
     where
         F: Fn(&JoiningWrite<'_>, &Joining) -> Result<(), DbError> + Send + Sync + 'static;
 
+    /// The app's before-commit function (§9.4). Coven runs it last in each
+    /// transaction that changes the app's rows, once, after every other
+    /// change of that transaction: a local write (the joining write
+    /// included), a bulk write, an applied slot, a snapshot load and a
+    /// migration as the store opens. Coven's own transactions, such as one
+    /// that pins a file or records the sync facts, don't run it, even when a
+    /// local trigger on one of coven's tables writes an app table there. It
+    /// reads any table app SQL reads,
+    /// with the transaction's changes, and writes device-local tables only,
+    /// as a local trigger does: a statement that would write a synced table
+    /// fails with `SyncedTableBeforeCommit`. So the app keeps what its own
+    /// Rust rules compute from synced rows in a local table, right at every
+    /// commit, whether this device wrote the rows or another device did. An
+    /// error, or a statement of it that failed, fails the transaction: a
+    /// write returns the error, an applied slot or a load doesn't commit,
+    /// the pass reports the error and the next pass tries again, and a
+    /// migration fails the open (E13). Without one, nothing runs.
+    pub fn before_commit<F>(self, function: F) -> Self
+    where
+        F: Fn(&CommitSql<'_>) -> Result<(), DbError> + Send + Sync + 'static;
+
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
@@ -3355,10 +3380,12 @@ impl CovenHandle {
     /// step (§4). A statement that would write a synced table, itself or
     /// through a trigger or foreign-key action, fails the write with
     /// `SyncedTableInBulkWrite`; one that would write coven's tables with
-    /// `InternalTable`. Triggers still run. After commit, every live query
-    /// that read a table the write's statements may change runs again once,
-    /// whatever rows it read: a small change that should rerun only the live
-    /// queries reading its rows belongs in `write`. Failures, the write lock,
+    /// `InternalTable`. Triggers still run, and so does the app's
+    /// before-commit function, after the closure (§9.4, E1). After commit,
+    /// every live query that read a table the write's statements or the
+    /// function's may change runs again once, whatever rows it read: a small
+    /// change that should rerun only the live queries reading its rows
+    /// belongs in `write`. Failures, the write lock,
     /// a closed store and a failed handle are as for `write`.
     pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
     where
@@ -3537,6 +3564,26 @@ pub struct Joining {
 pub struct JoiningWrite<'write> { /* private fields */ }
 
 impl JoiningWrite<'_> {
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+}
+
+/// App SQL inside the app's before-commit function (§9.4, E1): it reads any
+/// table app SQL reads, with the transaction's changes, and writes
+/// device-local tables only. Returning an error rolls back the transaction
+/// the function runs in, and so does a statement that failed, even when the
+/// function goes on.
+pub struct CommitSql<'a> { /* private fields */ }
+
+impl CommitSql<'_> {
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
@@ -4207,9 +4254,10 @@ impl SqlReadContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
-/// The reads `SqlReadContext`, `CovenWrite` and `BulkSqlContext` offer, so
-/// code that reads the same way inside a write and outside one is written
-/// once. Inside a write it sees the write's own changes.
+/// The reads `SqlReadContext`, `CovenWrite`, `BulkSqlContext` and
+/// `CommitSql` offer, so code that reads the same way inside a write and
+/// outside one is written once. Inside a write it sees the write's own
+/// changes.
 pub trait SqlRead {
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
     where
@@ -4223,6 +4271,7 @@ pub trait SqlRead {
 impl SqlRead for SqlReadContext<'_> {}
 impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
+impl SqlRead for CommitSql<'_> {}
 
 impl<'a, F, R, E, M: Mode> Read<'a, F, M>
 where

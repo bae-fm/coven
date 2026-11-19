@@ -10,6 +10,7 @@ mod app_policy;
 mod audience_database;
 mod author_judgement;
 mod authorship;
+mod before_commit;
 mod coven_functions;
 mod sql_functions;
 mod sql_versions;
@@ -262,6 +263,7 @@ mod store_failure;
 mod store_state;
 mod store_state_tables;
 mod write_metadata;
+pub use before_commit::CommitSql;
 pub use claim::{
     Claim, ClaimAttempt, ClaimBytes, ClaimRead, ClaimSettlement, ClaimUpload, ClaimWork,
 };

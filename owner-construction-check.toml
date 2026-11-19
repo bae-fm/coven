@@ -199,8 +199,8 @@ task_types = [
     # its own requests (§20.8).
     "SetupWaits",
     # How the authorizer judges the SQL of one scope: coven's own, a
-    # write's, a bulk write's, one step's or one read's, and the reads one
-    # statement makes while it is prepared.
+    # write's, a bulk write's, the local scope's, one step's or one read's,
+    # and the reads one statement makes while it is prepared.
     "InternalSql",
     # A scope of coven's own work its policy judges differently, and the
     # connection's hold on it while that work runs.
@@ -208,6 +208,7 @@ task_types = [
     "EnteredScope",
     "WriteSql",
     "BulkSql",
+    "LocalSql",
     "StepSql",
     "ReadingSql",
     "ObservedReads",
@@ -428,6 +429,9 @@ task_types = [
     # transaction, with what the transaction owes it.
     "JoiningWrite",
     "Registering",
+    # The app's before-commit function borrows the transaction's connection
+    # for that one transaction.
+    "CommitSql",
     # An app's write borrows the store's operation steps and files for that
     # one transaction.
     "CovenWrite",
@@ -482,6 +486,7 @@ internal_dependency_types = ["HostSql"]
 closed_session_types = [
     "FileWrite",
     "JoiningWrite",
+    "CommitSql",
     "Registering",
     "SqlReadContext",
     "MigrationContext",

@@ -32,6 +32,7 @@ pub struct DatabaseBuilder {
     migrations: Option<Vec<Migration>>,
     migration_operation: Option<Box<MigrationOperation>>,
     joining_write: Option<Box<crate::joining_write::JoiningHook>>,
+    before_commit: Option<Box<crate::before_commit::BeforeCommit>>,
     installation: crate::migration_run::Installation,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
@@ -55,6 +56,7 @@ impl DatabaseBuilder {
             migrations: None,
             migration_operation: None,
             joining_write: None,
+            before_commit: None,
             installation: crate::migration_run::Installation::Own,
             clock: None,
             ids: None,
@@ -148,6 +150,20 @@ impl DatabaseBuilder {
             + 'static,
     {
         self.joining_write = Some(Box::new(write));
+        self
+    }
+
+    /// The app's before-commit function (§9.4): coven runs it last in each
+    /// transaction that changes the app's rows, a local write, a bulk write,
+    /// an applied slot, a snapshot load or a migration as the store opens, so
+    /// the app stores what its own rules compute from them in the same
+    /// transaction. It writes device-local tables only, and its error fails
+    /// the transaction. Without one, nothing runs.
+    pub fn before_commit<F>(mut self, function: F) -> Self
+    where
+        F: Fn(&crate::CommitSql<'_>) -> Result<(), DbError> + Send + Sync + 'static,
+    {
+        self.before_commit = Some(Box::new(function));
         self
     }
 
@@ -335,6 +351,7 @@ impl DatabaseBuilder {
                             call,
                         )
                     }),
+                    self.before_commit.as_deref(),
                     &mut progress,
                 )?;
                 coven_foundation::task::operation_step("reading the store's state after migrating");
@@ -445,6 +462,7 @@ impl DatabaseBuilder {
                 migrations: outcomes,
                 raise_operation: self.migration_operation,
                 joining_write: self.joining_write,
+                before_commit: self.before_commit,
                 open_inputs,
                 clock,
                 ids,
@@ -516,6 +534,7 @@ impl DatabaseBuilder {
                         &tables,
                         &migrations,
                         &self.functions.versions(),
+                        None,
                         None,
                         None,
                         None,

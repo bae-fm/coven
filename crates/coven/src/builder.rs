@@ -21,6 +21,10 @@ use std::sync::Arc;
 mod joining;
 use joining::JoiningHook;
 
+#[path = "builder_before_commit.rs"]
+mod before_commit;
+use before_commit::BeforeCommit;
+
 /// The choices for creating or opening a store (E1).
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
@@ -48,6 +52,8 @@ pub struct CovenBuilder {
     sql_functions: coven_database::SqlFunctions,
     /// The app's write for a member's device as its registration applies.
     joining_write: Option<Arc<JoiningHook>>,
+    /// The app's function that each transaction changing its rows runs last.
+    before_commit: Option<Arc<BeforeCommit>>,
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
@@ -126,6 +132,7 @@ impl CovenBuilder {
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
             joining_write: None,
+            before_commit: None,
             #[cfg(test)]
             interrupt_after_swap: false,
             #[cfg(test)]
@@ -546,6 +553,13 @@ impl CovenBuilder {
             Some(write) => {
                 let write = Arc::clone(write);
                 database.joining_write(move |sql, joining| write(sql, joining))
+            }
+            None => database,
+        };
+        let database = match &self.before_commit {
+            Some(function) => {
+                let function = Arc::clone(function);
+                database.before_commit(move |sql| function(sql))
             }
             None => database,
         };

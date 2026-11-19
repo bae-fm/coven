@@ -42,7 +42,7 @@ pub(crate) fn load<P: crate::PendingValue>(
     // joining write in the same transaction (§13.2).
     let registering =
         crate::joining_write::owed(database, call, joining, &reload.state, schema, now, files)?;
-    crate::local_write::stream_registering(database, call, registering, |database| {
+    crate::local_write::stream_registering(database, call, files, registering, |database| {
         let files = &crate::file_write::FileWrite::new(database, call, files);
         let crate::SnapshotReload {
             snapshots,

@@ -27,6 +27,8 @@ pub enum Owner {
 pub struct StatementScope {
     /// Whether it is prepared in a bulk write.
     pub bulk: bool,
+    /// Whether it is prepared in the host's local scope (`HostSql::local_scope`).
+    pub local: bool,
 }
 
 /// One action SQLite reports, as the authorizer asks the policy about it.
@@ -161,6 +163,9 @@ struct AuthorizationState<P: Policy> {
     /// foreign-key actions SQLite compiles into them, may change, lowercase;
     /// `None` outside a bulk write.
     bulk: Option<BTreeSet<String>>,
+    /// Whether app SQL runs in the host's local scope, which the policy
+    /// judges as it chooses.
+    local: bool,
     /// Whether app SQL runs in a read, which may only read.
     reading: bool,
     /// What a live query's statements read, while one of its runs reads.
@@ -190,6 +195,7 @@ impl<P: Policy> SqlAuthorization<P> {
                 stepping: false,
                 observed: None,
                 bulk: None,
+                local: false,
                 reading: false,
                 reads: None,
                 altering: false,
@@ -298,6 +304,17 @@ impl<P: Policy> SqlAuthorization<P> {
         BulkSql(&self.state)
     }
 
+    /// App SQL the host runs in a scope of its own, inside a transaction
+    /// it holds: a write's, judged by the policy in the local scope. In a
+    /// bulk write, the tables it changes count among the bulk write's.
+    pub(crate) fn local(&self) -> LocalSql<'_, P> {
+        let mut state = lock_unpoisoned(&self.state);
+        assert!(!state.local, "local SQL scope cannot nest");
+        state.local = true;
+        let writing = std::mem::replace(&mut state.writing, true);
+        LocalSql { state: &self.state, writing }
+    }
+
     pub(crate) fn step(&self) -> StepSql<'_, P> {
         let mut state = lock_unpoisoned(&self.state);
         assert!(!state.stepping, "SQL step scope cannot nest");
@@ -345,14 +362,22 @@ impl<P: Policy> SqlAuthorization<P> {
 
     /// What decides how the authorizer judges an app statement it prepares,
     /// or `None` while preparing has effects beyond judging and recording
-    /// reads, as in the host's own SQL, a migration's or a bulk write's: then
-    /// each statement is prepared afresh. A bulk write's statement is also
-    /// compiled for a connection with no pre-update hook, so SQLite may empty
-    /// a table in one step there; kept, it would empty one so under a write's
-    /// hook too, unseen.
+    /// reads, as in the host's own SQL, a migration's, a bulk write's or the
+    /// local scope's: then each statement is prepared afresh. A bulk write's
+    /// statement is also compiled for a connection with no pre-update hook,
+    /// so SQLite may empty a table in one step there; kept, it would empty
+    /// one so under a write's hook too, unseen. The policy judges a statement
+    /// of the local scope by rules of its own, so a statement a write kept
+    /// would run in the local scope without them, and one the local scope
+    /// kept would run in a write under them.
     pub(crate) fn app_context(&self) -> Option<AppContext> {
         let state = lock_unpoisoned(&self.state);
-        if state.internal || state.observed.is_some() || state.bulk.is_some() || state.altering {
+        if state.internal
+            || state.observed.is_some()
+            || state.bulk.is_some()
+            || state.local
+            || state.altering
+        {
             return None;
         }
         Some(AppContext {
@@ -549,6 +574,21 @@ impl<P: Policy> Drop for BulkSql<'_, P> {
     }
 }
 
+/// The host's local SQL scope; it ends as it drops.
+pub struct LocalSql<'a, P: Policy> {
+    state: &'a Mutex<AuthorizationState<P>>,
+    /// Whether app SQL was writing as the scope began.
+    writing: bool,
+}
+
+impl<P: Policy> Drop for LocalSql<'_, P> {
+    fn drop(&mut self) {
+        let mut state = lock_unpoisoned(self.state);
+        state.local = false;
+        state.writing = self.writing;
+    }
+}
+
 pub(crate) struct StepSql<'a, P: Policy>(&'a Mutex<AuthorizationState<P>>);
 
 impl<P: Policy> Drop for StepSql<'_, P> {
@@ -626,7 +666,7 @@ impl<P: Policy> AuthorizationState<P> {
                     database: context.database_name,
                     accessor: context.accessor,
                     owner,
-                    scope: StatementScope { bulk: self.bulk.is_some() },
+                    scope: StatementScope { bulk: self.bulk.is_some(), local: self.local },
                 })
                 .map_err(crate::Error::Refused)
         });
