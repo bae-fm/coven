@@ -14,13 +14,13 @@ use crate::owners::Owners;
 
 /// Each function and closure of the workspace the compile sees whose body
 /// is production code, with MIR to read (`TyCtxt::optimized_mir`).
-pub(crate) fn workspace_bodies(owners: &Owners<'_>, tcx: TyCtxt<'_>, lint: &str) -> Vec<DefId> {
+pub(crate) fn workspace_bodies(owners: &Owners<'_>, tcx: TyCtxt<'_>) -> Vec<DefId> {
     if !tcx.sess.opts.unstable_opts.always_encode_mir {
-        tcx.dcx().fatal(format!(
-            "typed lints: {lint} reads the bodies of the workspace's earlier crates, which rustc \
-             writes only under -Zalways-encode-mir: run the driver through typed-lints-rustc, as \
-             tools/typed-lints/clippy.sh does"
-        ));
+        tcx.dcx().fatal(
+            "typed lints: clippy::task_state_outside_task reads the bodies of the workspace's \
+             earlier crates, which rustc writes only under -Zalways-encode-mir: run the driver \
+             through typed-lints-rustc, as tools/typed-lints/clippy.sh does",
+        );
     }
     let has_body = |id: DefId| {
         let callable = match tcx.def_kind(id) {
