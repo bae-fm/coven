@@ -2549,8 +2549,8 @@ impl CovenBuilder {
     pub fn clock(self, clock: ClockRef) -> Self;
 
     /// The source of new ids: store, circle, member, key, invite, file and
-    /// stored object ids, and this install's device id (Appendix F.2).
-    /// Defaults to `UuidIds`.
+    /// stored object ids, the ids of S3 detection runs and upload sessions, and
+    /// this install's device id (Appendix F.2). Defaults to `UuidIds`.
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
     /// Replace the platform's network with one the test drives (E5).
