@@ -567,32 +567,43 @@ def Agree (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel : Nat → R
   ∀ q, q < f → q ≠ s.root → ∀ o, Outer q o → Passes G o →
     (evalQuery s X f o q).filter (rel q) = (evalQuery s Y f o q).filter (rel q)
 
-/-- What the planner's scopes promise of a run on `Z` at fuel `f`, for each
-query `q` up to `f` and each of its outer bindings whose rows pass their
-tests: every binding of an arm of `q` that its core keeps, and that matters,
-holds rows that pass their tests, and no row only of an item `Left` allows;
-and an item `Left` allows has no row its ON holds for, in a binding of the
-core whose rows pass their tests, that fails its test. -/
+/-- What the planner's scopes promise of a run on `Z` of query `q` under the
+outer binding `o`, with `E` running the queries its arms read: every binding
+of an arm that its core keeps, and that matters by `R`, holds rows that pass
+their tests, and no row only of an item `Left` allows; and an item `Left`
+allows has no row its ON holds for, in a binding of the core whose rows pass
+their tests, that fails its test. -/
+def ArmsKept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat → Prop)
+    (R : Nat → (Bind → Nat → List Row) → Bind → Bool) (q : Nat) (o : Bind)
+    (E : Bind → Nat → List Row) : Prop :=
+  ∀ k ∈ (s.query q).arms,
+    (∀ b ∈ coreBindings s Z E o k, R k E b = true → Restricted G Left (s.core k).items b) ∧
+    ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
+      ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
+        onHolds (s.core k) E i (b.set i (some r)) = true → G i r = true
+
+/-- The promise for every query up to `f` but the statement's own, run on `Z`
+at fuel `f` under any of its outer bindings whose rows pass their tests,
+where a binding matters when its row passes `rel`. -/
 def Kept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat → Prop)
     (rel : Nat → Row → Bool) (Outer : Nat → Bind → Prop) (f : Nat) : Prop :=
-  ∀ q, q ≤ f → ∀ k ∈ (s.query q).arms, ∀ o, Outer q o → Passes G o →
-    (∀ b ∈ coreBindings s Z (evalQuery s Z f) o k, relevant s rel q k (evalQuery s Z f) b = true →
-      Restricted G Left (s.core k).items b) ∧
-    ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
-      ∀ r ∈ s.itemRows Z (evalQuery s Z f) (s.outerOf k o) i,
-        onHolds (s.core k) (evalQuery s Z f) i (b.set i (some r)) = true → G i r = true
+  ∀ q, q ≤ f → q ≠ s.root → ∀ o, Outer q o → Passes G o →
+    ArmsKept s Z G Left (relevant s rel q) q (o) (evalQuery s Z f)
 
-/-- What two runs share at fuel `f` for a query up to `f` whose arms the
-planner's scopes keep their promise for: its rows that `rel` keeps. -/
-theorem queryRows_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
-    {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
+/-- Two runs at fuel `f` whose arms of query `q` keep the promise, with any
+test `rel'` of the bindings that matter, keep the same bindings that matter
+and read the same subquery rows under them. -/
+theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
+    {rel rel' : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
     {f q : Nat} (hq : q ≤ f) {o : Bind} (hout : Outer q o) (ho : Passes G o)
-    (hpost : ((s.query q).limit.isSome || (s.query q).offset.isSome) = true → ∀ r, rel q r = true)
-    (hagree : Agree s X Y G rel Outer f) (hX : Kept s X G Left rel Outer f)
-    (hY : Kept s Y G Left rel Outer f) :
-    (queryRows s X (evalQuery s X f) o q).filter (rel q) =
-      (queryRows s Y (evalQuery s Y f) o q).filter (rel q) := by
-  apply queryRows_restricted hpost
+    (hagree : Agree s X Y G rel Outer f)
+    (hX : ArmsKept s X G Left (relevant s rel' q) q o (evalQuery s X f))
+    (hY : ArmsKept s Y G Left (relevant s rel' q) q o (evalQuery s Y f)) :
+    ∀ k ∈ (s.query q).arms,
+      (coreBindings s X (evalQuery s X f) o k).filter (relevant s rel' q k (evalQuery s X f)) =
+        (coreBindings s Y (evalQuery s Y f) o k).filter (relevant s rel' q k (evalQuery s Y f)) ∧
+      ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter (relevant s rel' q k (evalQuery s X f)),
+        ∀ q' ∈ (s.core k).subqueries, evalQuery s X f b q' = evalQuery s Y f b q' := by
   intro k hk
   have hsubs : ∀ b, Passes G b → s.Within k o b → ∀ q' ∈ (s.core k).subqueries,
       evalQuery s X f b q' = evalQuery s Y f b q' := by
@@ -618,8 +629,8 @@ theorem queryRows_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {L
         (h.nested q k hk q' hmem) hq) hne _ (h.derivedOuter q k hk o hout i hi q' v hkind) hb0)
       rwa [filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr),
         filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr)] at this)
-    hsubs ((hX q hq k hk o hout ho).2) ((hY q hq k hk o hout ho).2)
-    (RX := relevant s rel q k (evalQuery s X f)) (RY := relevant s rel q k (evalQuery s Y f))
+    hsubs ((hX k hk).2) ((hY k hk).2)
+    (RX := relevant s rel' q k (evalQuery s X f)) (RY := relevant s rel' q k (evalQuery s Y f))
     (fun b hb hw => by
       unfold relevant
       congr 2
@@ -635,10 +646,10 @@ theorem queryRows_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {L
           exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
             (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
       | _ => rfl)
-    ((hX q hq k hk o hout ho).1) ((hY q hq k hk o hout ho).1)
+    ((hX k hk).1) ((hY k hk).1)
   refine ⟨hkeep, fun b hb q' hq' => hsubs b ?_ ?_ q' hq'⟩
   · have hb' := List.mem_filter.mp hb
-    exact ((hX q hq k hk o hout ho).1 b hb'.1 hb'.2).1
+    exact ((hX k hk).1 b hb'.1 hb'.2).1
   · intro j hj
     exact joinItems_preserves (P := s.Within k o) (s.core k).items [s.outerOf k o]
       (fun b hb => by simp only [List.mem_singleton] at hb; subst hb; exact fun _ _ => rfl)
@@ -671,27 +682,77 @@ theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Lef
       · subst heq
         obtain ⟨hX, hY⟩ := hkept f ih
         intro q hq hne o hout ho
-        exact queryRows_agree h (Nat.le_of_lt_succ hq) hout ho (h.post q hne)
-          (ih f (Nat.le_refl _)) hX hY
+        have hq' := Nat.le_of_lt_succ hq
+        exact queryRows_restricted (h.post q hne) (arms_agree h hq' hout ho (ih f (Nat.le_refl _))
+          (hX q hq' hne o hout ho) (hY q hq' hne o hout ho))
   exact fun f => key f f (Nat.le_refl _)
 
 /-- The statement's rows from two databases, when every row of its own
-query matters and the planner's scopes keep their promise: with no LIMIT
-bound, every binding of the statement's own core matters. -/
+query matters and the planner's scopes keep their promise for it and for
+every other query: with no LIMIT bound, every binding of the statement's own
+core matters. -/
 theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
     (hroot : s.root < s.queries.length) (hrootOuter : Outer s.root Bind.empty)
     (hall : ∀ r, rel s.root r = true)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel Outer f') →
-      Kept s X G Left rel Outer f ∧ Kept s Y G Left rel Outer f) :
+      Kept s X G Left rel Outer f ∧ Kept s Y G Left rel Outer f)
+    (hrootX : ArmsKept s X G Left (relevant s rel s.root) s.root Bind.empty
+      (evalQuery s X s.queries.length))
+    (hrootY : ArmsKept s Y G Left (relevant s rel s.root) s.root Bind.empty
+      (evalQuery s Y s.queries.length)) :
     s.result X = s.result Y := by
   have hagree := agree_of_kept h hkept
   unfold Statement.result
   simp only [evalQuery]
-  have := queryRows_agree h (q := s.root) (f := s.queries.length) (Nat.le_of_lt hroot) hrootOuter
-    (Passes.empty G) (fun _ => hall) (hagree _) (hkept _ fun f' _ => hagree f').1
-    (hkept _ fun f' _ => hagree f').2
+  have := queryRows_restricted (fun _ => hall) (arms_agree h (Nat.le_of_lt hroot) hrootOuter
+    (Passes.empty G) (hagree _) hrootX hrootY)
   rwa [List.filter_eq_self.mpr (fun r _ => hall r), List.filter_eq_self.mpr (fun r _ => hall r)] at this
+
+/-- The sixth step's theorem: a statement whose own query is one SELECT
+with an ORDER BY, a LIMIT and no OFFSET, whose run on `X` returned as many
+rows as its LIMIT, the last with ORDER BY values `last`, returns the same
+rows from `Y`, when the planner's scopes keep their promise for every other
+query and for the bindings of its own core whose rows sort at or before
+`last`. -/
+theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
+    {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
+    (hroot : s.root < s.queries.length) (hrootOuter : Outer s.root Bind.empty)
+    {n : Nat} (hlimit : (s.query s.root).limit = some n) (hoffset : (s.query s.root).offset = none)
+    (horder : (s.query s.root).orderBy ≠ []) {last : List Value}
+    (hlen : (s.result X).length = n)
+    (hlast : (s.result X).getLast?.map (Limit.orderKey (s.query s.root)) = some last)
+    (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel Outer f') →
+      Kept s X G Left rel Outer f ∧ Kept s Y G Left rel Outer f)
+    (hrootX : ArmsKept s X G Left (relevant s (fun _ r => keyLe ((s.query s.root).orderBy.map (·.2))
+      (Limit.orderKey (s.query s.root) r) last) s.root) s.root Bind.empty
+      (evalQuery s X s.queries.length))
+    (hrootY : ArmsKept s Y G Left (relevant s (fun _ r => keyLe ((s.query s.root).orderBy.map (·.2))
+      (Limit.orderKey (s.query s.root) r) last) s.root) s.root Bind.empty
+      (evalQuery s Y s.queries.length)) :
+    s.result Y = s.result X := by
+  let P : Row → Bool := fun r =>
+    keyLe ((s.query s.root).orderBy.map (·.2)) (Limit.orderKey (s.query s.root) r) last
+  have hagree := agree_of_kept h hkept
+  have harms := arms_agree (rel' := fun _ => P) h (Nat.le_of_lt hroot) hrootOuter (Passes.empty G)
+    (hagree _) hrootX hrootY
+  have hcombine : ∀ (Z : Db), (combineAll (s.query s.root).ops ((s.query s.root).arms.map fun k =>
+      (s.core k).result (evalQuery s Z s.queries.length)
+        (coreBindings s Z (evalQuery s Z s.queries.length) Bind.empty k))).filter P =
+      combineAll (s.query s.root).ops ((s.query s.root).arms.map fun k =>
+        ((s.core k).result (evalQuery s Z s.queries.length)
+          (coreBindings s Z (evalQuery s Z s.queries.length) Bind.empty k)).filter P) := by
+    intro Z
+    rw [combineAll_filter, List.map_map]
+    rfl
+  unfold Statement.result at hlen hlast ⊢
+  simp only [evalQuery, queryRows] at hlen hlast ⊢
+  apply Limit.limit_sound hlimit hoffset horder hlen hlast
+  rw [hcombine X, hcombine Y]
+  congr 1
+  apply List.map_congr_left
+  intro k hk
+  exact arm_restricted (harms k hk).1 (harms k hk).2
 
 /-! The tests the planner's scopes give. -/
 

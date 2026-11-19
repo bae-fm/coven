@@ -49,3 +49,4 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.agree_of_kept
 #print axioms SqliveNarrowing.result_restricted
 #print axioms SqliveNarrowing.scoped_rows
+#print axioms SqliveNarrowing.limit_restricted

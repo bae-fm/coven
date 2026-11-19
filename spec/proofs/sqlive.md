@@ -308,8 +308,17 @@ DISTINCT, UNION, EXCEPT, INTERSECT and the ORDER BY of a query with no LIMIT,
 `result_restricted` to the statement's rows when every row of its own query
 matters. `scoped_rows` gives the restriction its tables: when the judge lets
 a write pass, each masked table holds the same rows that pass the scope of
-an item reading it, before and after the write. Whether the planner's scopes
-keep the promise is the step that remains.
+an item reading it, before and after the write.
+
+A statement with a LIMIT bound needs only the bindings of its own core whose
+rows sort at or before the last row the run before the write returned.
+`limit_restricted` proves that when the statement's own query is one SELECT
+with an ORDER BY, a LIMIT and no OFFSET, and its run returned as many rows as
+the LIMIT, the statement returns the same rows from both databases, as long as
+those bindings, and the bindings of every other query, keep the promise: the
+two runs return the same rows that sort at or before the last row, and
+`limit_sound` gives the same first rows. Whether the planner's scopes keep the
+promise, its LIMIT bound included, is the step that remains.
 
 ## What the proofs don't cover
 
@@ -318,9 +327,9 @@ that the section above names. For a statement sqlive doesn't read whole, no
 theorem yet proves that a write the judge lets pass leaves the statement's
 rows unchanged: that the order in which the planner places items, the ON
 conditions it holds back, the terms it carries across equalities, the terms
-it passes into derived items and the lookups of each join's partner give
-scopes that keep the promise `agree_of_kept` takes, and that the LIMIT bound
-leaves the rows that sort at or before the last row unchanged. The
+it passes into derived items, the lookups of each join's partner and the
+LIMIT bound give scopes that keep the promise `agree_of_kept` and
+`limit_restricted` take. The
 differential checks that composition against SQLite on every statement it
 generates.
 
