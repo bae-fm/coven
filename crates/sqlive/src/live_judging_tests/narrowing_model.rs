@@ -22,6 +22,8 @@ use std::sync::Arc;
 mod aggregate;
 #[path = "narrowing_model/carry.rs"]
 mod carry;
+#[path = "narrowing_model/cte_names.rs"]
+mod cte_names;
 #[path = "narrowing_model/distinct.rs"]
 mod distinct;
 #[path = "narrowing_model/edge.rs"]
@@ -575,6 +577,12 @@ async fn view_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn nested_derived_matches_lean() {
     differential("nested derived", nested_derived::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn cte_names_match_lean() {
+    differential("cte names", cte_names::statement).await;
 }
 
 #[tokio::test]

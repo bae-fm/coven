@@ -169,6 +169,16 @@ promise of whichever rule reads it.
   `closed_sound` that a FROM subquery or CTE of such queries, inside an
   expression subquery, returns under a binding of none of its items the rows
   a lookup reads alone.
+- **Two CTEs of one name.** A WITH inside a subquery, a CTE or a view can
+  declare a CTE under the name of one around it. `resolve_inner` proves
+  that the runner reads a FROM item naming a CTE as the innermost CTE of
+  that name visible where the item is, whose query names the CTEs of its
+  own WITH and of the WITHs around it. `resolve_outer` proves that a WITH
+  that doesn't declare a name changes nothing of what the name names inside
+  it, so an outer CTE's query reads the outer CTEs even where an inner WITH
+  declares one of their names. The model's statement numbers each query, so
+  its rules read the CTE each FROM item names, and the differential checks
+  that its rows are SQLite's.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. Each ORDER BY term sorts one item's rows by a key: one of
@@ -296,7 +306,7 @@ columns and their affinities, and each view's query), the statement as a tree
 that names its sources by alias, the database before and after the write, and
 the write's row changes. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
-statement. The runner writes whether the write reruns the statement,
+statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether the write reruns the statement,
 whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
 statement's rows before and after.
 

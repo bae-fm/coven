@@ -271,3 +271,36 @@ async fn a_correlated_cte_gives_no_values() {
     .await;
     db.close();
 }
+
+/// A CTE declared inside a subquery under an outer CTE's name stands for
+/// the inner one there, as SQLite resolves it, and an outer CTE that names
+/// the shadowed name reads the outer one: each narrows its tables by the
+/// CTE it reads, and a lookup that needs both prepares.
+#[tokio::test]
+async fn an_inner_cte_of_an_outer_cte_s_name_narrows_by_the_inner_one() {
+    let db = TestDatabase::open(MUSIC);
+    for (sql, outer_read) in [
+        (
+            "WITH placed AS (SELECT id FROM releases WHERE id = 'r1') SELECT title FROM (WITH placed AS (SELECT id FROM releases WHERE id = 'r2') SELECT t.title FROM tracks t JOIN placed ON t.release = placed.id) ORDER BY title",
+            false,
+        ),
+        (
+            "WITH placed AS (SELECT id FROM releases WHERE id = 'r1') SELECT (WITH placed AS (SELECT id FROM releases WHERE id = 'r2') SELECT group_concat(t.title) FROM tracks t JOIN placed ON t.release = placed.id) FROM placed",
+            false,
+        ),
+        (
+            "WITH placed AS (SELECT id FROM releases WHERE id = 'r1'), owned AS (SELECT id FROM placed) SELECT title FROM (WITH placed AS (SELECT id FROM releases WHERE id = 'r2'), held AS (SELECT id FROM owned UNION ALL SELECT id FROM placed) SELECT t.title FROM tracks t JOIN held ON t.release = held.id) ORDER BY title",
+            true,
+        ),
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE tracks SET title = title || '.' WHERE id = 4", false),
+            ("UPDATE releases SET album = 'z' WHERE id = 'r3'", false),
+            ("UPDATE tracks SET title = title || '.' WHERE id = 1", outer_read),
+            ("UPDATE tracks SET title = title || '.' WHERE id = 3", true),
+        ])
+        .await;
+        write(&db, "UPDATE releases SET album = 'y' WHERE id = 'r3'; UPDATE tracks SET title = 'one' WHERE id = 1; UPDATE tracks SET title = 'three' WHERE id = 3; UPDATE tracks SET title = 'four' WHERE id = 4");
+    }
+    db.close();
+}

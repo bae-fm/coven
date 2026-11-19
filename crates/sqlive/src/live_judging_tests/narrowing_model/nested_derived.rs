@@ -28,7 +28,7 @@ fn inner(rng: &mut Rng, outer: &str) -> Query {
 
 /// The subquery that reads the derived item `d` beside a table it gives
 /// values to, or that takes values from it.
-fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
+pub(super) fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
     let table_ = pick(rng, &TABLES);
     let on = vec![if rng.chance(50) {
         eq(col("y", "a"), col("d", "c"))

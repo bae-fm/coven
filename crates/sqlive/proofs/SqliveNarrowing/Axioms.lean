@@ -32,6 +32,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Pick.rowNumber_follows_order
 #print axioms SqliveNarrowing.Pick.orderFree_rows_perm
 #print axioms SqliveNarrowing.Pick.picked_column_reruns
+#print axioms SqliveNarrowing.CteNames.resolve_inner
+#print axioms SqliveNarrowing.CteNames.resolve_outer
 #print axioms SqliveNarrowing.Whole.whole_sound
 #print axioms SqliveNarrowing.readCondition_sound
 #print axioms SqliveNarrowing.result_mask

@@ -103,8 +103,8 @@ pub(crate) struct FromItem {
     /// The columns, lowercase, a USING join compares with an item to its
     /// left, which a bare name and a `*` take from that item instead.
     pub(crate) using: Vec<String>,
-    /// The CTE it reads, by its name, lowercase.
-    pub(crate) cte: Option<String>,
+    /// The CTE it reads, by its number (`derived::Declared`).
+    pub(crate) cte: Option<usize>,
     /// The sides of each OR that narrows it (`scope_or.rs`).
     pub(crate) ors: Vec<Vec<crate::scope_or::Side>>,
 }
@@ -148,18 +148,18 @@ pub(crate) fn read_item<'a>(
         SelectTable::Table(name, alias, _) => {
             let qualifier = qualifier(alias, &name.name);
             if name.db_name.is_none() {
-                if let Some(cte) = ctes.named(&name.name) {
+                if let Some(declared) = ctes.named(&name.name) {
                     return read_derived_item(
                         connection,
                         planner,
-                        crate::derived::Named::Cte(cte),
+                        crate::derived::Named::Cte(declared),
                         qualifier,
                         parent,
                         ctes,
                     )
                     .map(|found| {
                         found.map(|(source, columns, derived)| FromItem {
-                            cte: Some(crate::sql::name(cte.tbl_name.0).to_ascii_lowercase()),
+                            cte: Some(declared.number),
                             ..item(source, columns, Some(derived))
                         })
                     });

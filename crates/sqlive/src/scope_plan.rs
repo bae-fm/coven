@@ -223,6 +223,7 @@ impl Sources {
             functions,
             inlined: Vec::new(),
             whole,
+            declared_ctes: 0,
         };
         let Some(cores) = read_select(connection, &mut planner, select, None, &Ctes::default())?
         else {
@@ -252,6 +253,8 @@ pub(crate) struct Planner<'a> {
     pub(crate) inlined: Vec<String>,
     /// The views and tables the live query reads whole.
     pub(crate) whole: &'a WholeViews,
+    /// How many CTEs the WITHs read so far declare, which numbers each.
+    pub(crate) declared_ctes: usize,
 }
 
 impl Planner<'_> {
@@ -484,9 +487,9 @@ impl Planner<'_> {
                 .all(|core| core.names.iter().all(|item| item.is_some_and(|item| item >= items)))
     }
 
-    /// The CTEs, lowercase, that the items from `items` on read.
-    pub(crate) fn ctes_read(&self, items: usize) -> Vec<String> {
-        self.items[items..].iter().filter_map(|item| item.cte.clone()).collect()
+    /// The numbers of the CTEs that the items from `items` on read.
+    pub(crate) fn ctes_read(&self, items: usize) -> Vec<usize> {
+        self.items[items..].iter().filter_map(|item| item.cte).collect()
     }
 
     /// Narrow the sources by `found`, which conditions on the joined rows
@@ -562,7 +565,9 @@ pub(crate) fn read_select<'a>(
     let inner;
     let ctes = match &select.with {
         Some(with) => {
-            let Some(with) = ctes.with(with, planner.whole, parent.is_none()) else {
+            let Some(with) =
+                ctes.with(with, planner.whole, parent.is_none(), &mut planner.declared_ctes)
+            else {
                 return Ok(None);
             };
             inner = with;

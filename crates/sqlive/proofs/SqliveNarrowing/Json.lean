@@ -64,7 +64,7 @@ def combineOp : String → Except String Combine
 def wholeShape : String → Except String WholeShape
   | "natural" => pure .natural | "right" => pure .right
   | "recursive" => pure .recursive | "in_table" => pure .inTable | "virtual" => pure .virtual
-  | "parenthesized" => pure .parenthesized | "repeated_cte" => pure .repeatedCte
+  | "parenthesized" => pure .parenthesized
   | other => throw s!"unknown whole shape {other}"
 
 def lift {α : Type} (e : Except String α) : M α := StateT.lift e
@@ -118,15 +118,13 @@ partial def conjuncts (j : Json) : List Json :=
 mutual
 
 /-- Read a query's tree sitting in `parent`, where its FROM items can name
-`ctes`: its arms' cores, then the query. -/
+`ctes` and those of its own WITH: its arms' cores, then the query. -/
 partial def readSelect (schema : Schema) (j : Json) (parent : Option Nat)
-    (ctes : List (String × Json)) : M Nat := do
-  let mut ctes := ctes
+    (ctes : CteNames.Visible Json) : M Nat := do
+  let mut declared := []
   for cte in list j "with" do
-    let name ← lift (str cte "name")
-    if ctes.any (·.1 == name) then
-      modify fun b => { b with whole := b.whole ++ [.repeatedCte] }
-    ctes := ctes ++ [(name, ← lift (cte.getObjVal? "query"))]
+    declared := declared ++ [((← lift (str cte "name")), (← lift (cte.getObjVal? "query")))]
+  let ctes := ctes ++ [declared]
   let mut arms := []
   for arm in list j "arms" do
     arms := arms ++ [← readCore schema arm parent ctes]
@@ -143,7 +141,7 @@ partial def readSelect (schema : Schema) (j : Json) (parent : Option Nat)
 /-- Read one core's tree: its items, then its result columns, conditions,
 GROUP BY and DISTINCT, reading each subquery where it appears. -/
 partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
-    (ctes : List (String × Json)) : M Nat := do
+    (ctes : CteNames.Visible Json) : M Nat := do
   let k := (← get).cores.size
   modify fun b => { b with
     cores := b.cores.push { parent, items := [], conds := [], output := [], groupBy := [] }
@@ -190,7 +188,7 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
 
 /-- Read a FROM item of core `k`, which sits in `parent`. -/
 partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat)
-    (ctes : List (String × Json)) : M Nat := do
+    (ctes : CteNames.Visible Json) : M Nat := do
   let alias ← lift (str j "alias")
   let left := (field j "left").bind (·.getBool?.toOption) |>.getD false
   let (kind, columns, names, readable) ← match field j "table", field j "view", field j "cte", field j "query" with
@@ -208,10 +206,10 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
         pure (ItemKind.derived q true, columns, names, View.readable true parent false)
       | none => lift (throw s!"no view {name}")
     | _, _, some (.str name), _ =>
-      match ctes.reverse.find? (·.1 == name) with
-      | some (_, query) => do
+      match CteNames.resolve ctes name with
+      | some (query, scope) => do
         let first := (← get).queries.size
-        let q ← readSelect schema query parent ctes
+        let q ← readSelect schema query parent scope
         let (names, columns) ← derivedColumns q
         pure (ItemKind.derived q false, columns, names, View.readable false parent (← closedSince first q))
       | none => lift (throw s!"no CTE {name}")
@@ -248,7 +246,7 @@ partial def derivedColumns (q : Nat) : M (List (Option String) × List (Option A
     | _ => none
   pure (names, affinities)
 
-partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : List (String × Json))
+partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json)
     (items : List Nat) : M (OutCol × Option String) := do
   let alias := (field j "as").bind (·.getStr?.toOption)
   if let some e := field j "expr" then
@@ -284,7 +282,7 @@ partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : List (String 
     pure (.count, alias)
   else lift (throw "unknown result column")
 
-partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : List (String × Json)) :
+partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json) :
     M Expr := do
   if let some (.arr #[.str alias, .str column]) := field j "col" then
     let (i, c) ← resolve k alias column
@@ -310,7 +308,7 @@ partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : List (String
     pure (.isNull (← readExpr schema e k ctes))
   else lift (throw s!"unknown expression {j.compress}")
 
-partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : List (String × Json)) :
+partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visible Json) :
     M Cond := do
   let not := (field j "not").bind (·.getBool?.toOption) |>.getD false
   if let some (.arr #[.str o, l, r]) := field j "cmp" then

@@ -163,9 +163,11 @@ structure Query where
 
 /-- A shape that makes sqlive read every table of the statement whole. A
 USING join is none: the JSON reader reads it as the equalities it stands for
-(`Json.readCore`). -/
+(`Json.readCore`). Nor are two CTEs of one name: the JSON reader reads each
+FROM item that names a CTE as the CTE SQLite resolves the name to
+(`CteNames.resolve`). -/
 inductive WholeShape where
-  | natural | right | recursive | inTable | virtual | parenthesized | repeatedCte
+  | natural | right | recursive | inTable | virtual | parenthesized
   deriving DecidableEq, Repr, Inhabited
 
 structure Statement where

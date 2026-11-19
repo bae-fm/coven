@@ -20,60 +20,97 @@ use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select
 /// being read now, which naming again would recurse.
 #[derive(Clone, Default)]
 pub(crate) struct Ctes<'a> {
-    /// Each CTE, and whether its WITH sits in no other core, where its SQL
-    /// can name no row around it.
-    visible: Vec<(&'a CommonTableExpr<'a>, bool)>,
-    reading: Vec<String>,
+    /// Each CTE visible here, each WITH's after those of the WITHs around
+    /// it, so the innermost of a name is the last.
+    visible: Vec<Declared<'a>>,
+    /// The numbers of the CTEs whose SQL is being read.
+    reading: Vec<usize>,
+}
+
+/// A CTE as one WITH declares it.
+#[derive(Clone, Copy)]
+pub(crate) struct Declared<'a> {
+    cte: &'a CommonTableExpr<'a>,
+    /// Its number among the statement's CTEs, which the FROM items that read
+    /// it hold.
+    pub(crate) number: usize,
+    /// Whether its WITH sits in no other core, where its SQL can name no row
+    /// around it.
+    alone: bool,
+    /// How many of the CTEs visible where it is declared its own SQL can
+    /// name: those of its WITH, and those of the WITHs around it.
+    scope: usize,
 }
 
 impl<'a> Ctes<'a> {
     /// These CTEs and `with`'s, which sits in no other core when `alone`,
-    /// or `None` in two cases. When a name repeats, SQLite resolves it by
-    /// where each CTE is, which sqlive doesn't follow. When a CTE has the
-    /// name of a view read whole, sqlive couldn't tell reads through the CTE
-    /// from reads of the view.
-    pub(crate) fn with(&self, with: &'a With<'a>, whole: &WholeViews, alone: bool) -> Option<Self> {
+    /// numbered from `numbered` on, which counts them; `None` when a CTE has
+    /// the name of a view read whole, as sqlive couldn't tell reads through
+    /// the CTE from reads of the view. A CTE of an outer CTE's name stands
+    /// for the inner one where the inner WITH's SQL names it, as SQLite
+    /// resolves a name to the innermost CTE of that name.
+    pub(crate) fn with(
+        &self,
+        with: &'a With<'a>,
+        whole: &WholeViews,
+        alone: bool,
+        numbered: &mut usize,
+    ) -> Option<Self> {
         let mut visible = self.visible.clone();
+        let scope = visible.len() + with.ctes.len();
         for cte in with.ctes.iter() {
-            if visible.iter().any(|(seen, _)| seen.tbl_name == cte.tbl_name)
-                || whole.contains(&crate::sql::name(cte.tbl_name.0))
-            {
+            if whole.contains(&crate::sql::name(cte.tbl_name.0)) {
                 return None;
             }
-            visible.push((cte, alone));
+            visible.push(Declared { cte, number: *numbered, alone, scope });
+            *numbered += 1;
         }
         Some(Self { visible, reading: self.reading.clone() })
     }
 
-    /// The CTE `name` names.
-    pub(crate) fn named(&self, name: &Name<'_>) -> Option<&'a CommonTableExpr<'a>> {
-        self.visible.iter().map(|(cte, _)| *cte).find(|cte| cte.tbl_name == *name)
+    /// The CTE `name` names, the innermost of that name.
+    pub(crate) fn named(&self, name: &Name<'_>) -> Option<Declared<'a>> {
+        self.visible.iter().rev().find(|declared| declared.cte.tbl_name == *name).copied()
     }
 
-    /// Whether `cte`'s WITH sits in no other core.
-    fn alone(&self, cte: &CommonTableExpr<'_>) -> bool {
-        self.visible.iter().any(|(seen, alone)| *alone && std::ptr::eq(*seen, cte))
+    /// The CTEs `declared`'s own SQL can name, as SQLite resolves names
+    /// where a CTE is declared, reading it; `None` when it is being read
+    /// already, as a CTE that names itself, or one naming it, is.
+    fn reading(&self, declared: &Declared<'a>) -> Option<Self> {
+        if self.reading.contains(&declared.number) {
+            return None;
+        }
+        let mut reading = self.reading.clone();
+        reading.push(declared.number);
+        Some(Self { visible: self.visible[..declared.scope].to_vec(), reading })
     }
 
-    /// The CTEs `names` names, lowercase, as a WITH clause, or `None` for
-    /// none.
-    fn clause(&self, names: &[String]) -> Option<String> {
-        let ctes: Vec<String> = self
-            .visible
-            .iter()
-            .filter(|(cte, _)| {
-                names.contains(&crate::sql::name(cte.tbl_name.0).to_ascii_lowercase())
-            })
-            .map(|(cte, _)| text(*cte))
-            .collect();
-        (!ctes.is_empty()).then(|| format!("WITH {}", ctes.join(",")))
+    /// `select`, a SELECT that reads the CTEs numbered `numbers`, after a
+    /// WITH of those visible here: one WITH for each WITH they are declared
+    /// in, each around the next, so each CTE's SQL names what it names where
+    /// it is declared, and a lookup's WITH holds no two CTEs of one name.
+    /// `None` when none of them is visible here.
+    fn around(&self, numbers: &[usize], select: &str) -> Option<String> {
+        let mut withs: Vec<(usize, Vec<String>)> = Vec::new();
+        for declared in self.visible.iter().filter(|declared| numbers.contains(&declared.number)) {
+            match withs.last_mut() {
+                Some((scope, ctes)) if *scope == declared.scope => ctes.push(text(declared.cte)),
+                _ => withs.push((declared.scope, vec![text(declared.cte)])),
+            }
+        }
+        let (_, innermost) = withs.pop()?;
+        let mut sql = format!("WITH {} {select}", innermost.join(","));
+        while let Some((_, ctes)) = withs.pop() {
+            sql = format!("WITH {} SELECT * FROM ({sql})", ctes.join(","));
+        }
+        Some(sql)
     }
 }
 
 /// What a FROM item reads rows from, as SQL of its own.
 pub(crate) enum Named<'a, 'v> {
     Subquery(&'a Select<'a>),
-    Cte(&'a CommonTableExpr<'a>),
+    Cte(Declared<'a>),
     /// One of the app's views, by its stored name.
     View(&'v str),
 }
@@ -111,10 +148,9 @@ pub(crate) fn read_derived_item<'a>(
             read_derived(connection, planner, select, None, parent, ctes)?.map(
                 |(columns, derived)| {
                     let from = planner.alone(parent, items, cores).then(|| {
-                        match ctes.clause(&planner.ctes_read(items)) {
-                            Some(with) => {
-                                format!("({with} SELECT * FROM ({})) AS {qualifier}", text(select))
-                            }
+                        let wrapped = format!("SELECT * FROM ({})", text(select));
+                        match ctes.around(&planner.ctes_read(items), &wrapped) {
+                            Some(with) => format!("({with}) AS {qualifier}"),
                             None => format!("({}) AS {qualifier}", text(select)),
                         }
                     });
@@ -122,14 +158,13 @@ pub(crate) fn read_derived_item<'a>(
                 },
             )
         }
-        Named::Cte(cte) => {
+        Named::Cte(declared) => {
+            let cte = declared.cte;
             let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
             // A CTE naming itself, or one naming it, recurses.
-            if ctes.reading.contains(&name) {
+            let Some(inner) = ctes.reading(&declared) else {
                 return Ok(None);
-            }
-            let mut inner = ctes.clone();
-            inner.reading.push(name.clone());
+            };
             planner.inlined.push(name.clone());
             let names = cte.columns.map(|columns| {
                 columns
@@ -141,15 +176,14 @@ pub(crate) fn read_derived_item<'a>(
                 |(columns, derived)| {
                     // A CTE of a WITH in no other core names no row around
                     // it, wherever the statement reads it.
-                    let alone = ctes.alone(cte) || planner.alone(parent, items, cores);
+                    let alone = declared.alone || planner.alone(parent, items, cores);
                     let from = alone.then(|| {
-                        let mut named = planner.ctes_read(items);
-                        named.push(name.clone());
-                        let with = ctes.clause(&named).expect("a CTE is visible where it is read");
-                        format!(
-                            "({with} SELECT * FROM {}) AS {qualifier}",
-                            crate::sql::identifier(&name)
-                        )
+                        let mut read = planner.ctes_read(items);
+                        read.push(declared.number);
+                        let select = format!("SELECT * FROM {}", crate::sql::identifier(&name));
+                        let with =
+                            ctes.around(&read, &select).expect("a CTE is visible where it is read");
+                        format!("({with}) AS {qualifier}")
                     });
                     (from, columns, derived)
                 },
