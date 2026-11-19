@@ -129,10 +129,9 @@ theorem Db.mask_slot (reads : List (Nat × List Nat)) (db : Db) (t n : Nat) :
     simp only [Db.mask, Db.slot, hf, List.getElem?_map]
     cases (db t)[n]? <;> rfl
 
-/-- The second step's theorem: when the judge lets a write pass, what sqlive
-keeps of each table holds, before and after the write, the same rows that
-pass the table's scope, with lookups in what it keeps of the database after
-the write. -/
+/-- When the judge lets a write pass, what sqlive keeps of each table holds,
+before and after the write, the same rows that pass the table's scope, with
+lookups in what it keeps of the database after the write. -/
 theorem unjudged_rows {s : Statement} {db db' : Db} {changes : List Change}
     (hw : Writes db changes db') (hr : s.reruns db changes db' = false) (t : Nat) :
     let scopeOf := (s.tableScopes db).getD fun _ => none

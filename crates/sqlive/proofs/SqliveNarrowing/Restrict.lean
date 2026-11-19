@@ -1,10 +1,9 @@
 import SqliveNarrowing.Filter
 import SqliveNarrowing.Outer
 
-/-! The restriction lemma (the third step of `narrowing_sound`): two
-databases that hold the same rows passing each item's test give a statement
-the same rows, when every binding that matters to the rows a query returns
-holds only rows that pass their items' tests.
+/-! The restriction lemma: two databases that hold the same rows passing each
+item's test give a statement the same rows, when every binding that matters to
+the rows a query returns holds only rows that pass their items' tests.
 
 Each item `i` has a test `G i` on its rows, which the planner's scopes give,
 and each query `q` a test `rel q` on its rows: the rows of `q` that matter
@@ -315,17 +314,16 @@ def Statement.itemRows (s : Statement) (Z : Db) (E : Bind → Nat → List Row) 
   | .table t => Z.rows t
   | .derived q _ => E b0 q
 
-/-- The third step's core lemma: a core keeps, under an outer binding whose
-rows pass their tests, the same bindings that matter from two databases
-whose tables hold the same rows that pass each item's test, whose derived
-items' queries return the same rows that pass the item's test, and whose
-subqueries return the same rows under a binding whose rows pass their tests
-(an ON's under one that holds a row of each item up to its own that no LEFT
-JOIN adds, any other's under one that holds a row of each such item), when
-every binding that matters holds rows that pass their tests (and no row only
-of an item `Left` allows, which allows none that no LEFT JOIN adds), and a
-LEFT JOIN item `Left` allows has no row its ON holds for that fails its
-test. -/
+/-- A core keeps, under an outer binding whose rows pass their tests, the same
+bindings that matter from two databases whose tables hold the same rows that
+pass each item's test, whose derived items' queries return the same rows that
+pass the item's test, and whose subqueries return the same rows under a binding
+whose rows pass their tests (an ON's under one that holds a row of each item up
+to its own that no LEFT JOIN adds, any other's under one that holds a row of
+each such item), when every binding that matters holds rows that pass their
+tests (and no row only of an item `Left` allows, which allows none that no LEFT
+JOIN adds), and a LEFT JOIN item `Left` allows has no row its ON holds for that
+fails its test. -/
 theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat → List Row}
     {G : Nat → Row → Bool} {Left : Nat → Prop} {o : Bind} {k : Nat}
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
@@ -694,10 +692,10 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
         exact hb j'' hj'')
       b (List.mem_filter.mp (List.mem_filter.mp hb).1).1 j hj
 
-/-- The third step's theorem: when the planner's scopes keep their promise
-at each fuel, given that two runs return the same rows that matter at every
-lower fuel, the runs return the same rows that matter of every query but the
-statement's own, at every fuel past the query's number. -/
+/-- When the planner's scopes keep their promise at each fuel, given that two
+runs return the same rows that matter at every lower fuel, the runs return the
+same rows that matter of every query but the statement's own, at every fuel
+past the query's number. -/
 theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} (h : Restriction s X Y G rel)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
@@ -745,12 +743,11 @@ theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} 
     (Passes.empty G) (hagree _) hrootX hrootY)
   rwa [List.filter_eq_self.mpr (fun r _ => hall r), List.filter_eq_self.mpr (fun r _ => hall r)] at this
 
-/-- The sixth step's theorem: a statement whose own query is one SELECT
-with an ORDER BY, a LIMIT and no OFFSET, whose run on `X` returned as many
-rows as its LIMIT, the last with ORDER BY values `last`, returns the same
-rows from `Y`, when the planner's scopes keep their promise for every other
-query and for the bindings of its own core whose rows sort at or before
-`last`. -/
+/-- A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no
+OFFSET, whose run on `X` returned as many rows as its LIMIT, the last with
+ORDER BY values `last`, returns the same rows from `Y`, when the planner's
+scopes keep their promise for every other query and for the bindings of its own
+core whose rows sort at or before `last`. -/
 theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} (h : Restriction s X Y G rel)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
