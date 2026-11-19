@@ -14933,7 +14933,11 @@ the same on any platform.
     driver through a wrapper that has rustc write every function's MIR into
     each workspace crate's metadata (`-Zalways-encode-mir`), in the lints'
     compile and never in another build, and such a lint stops a compile
-    without it. `clippy::task_state_outside_task` holds F.3's rule that one
+    without it. The wrapper finds the crate it compiles in the arguments
+    cargo passes, whether on the command line or in the argfile
+    (`rustc @<file>`) that cargo writes when the command line is too long
+    for the system, as a crate's often is on Windows.
+    `clippy::task_state_outside_task` holds F.3's rule that one
     operation owns its state: it finds where a task is built with a new
     shared pointer in a field, in every body of the workspace the compile
     sees, and refuses any type but a task, or a handle the task makes, that

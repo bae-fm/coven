@@ -5,7 +5,7 @@
 //! names the lints instead, without `clippy::`, in the comment that ends the
 //! line: `// read_filter read_aggregate`.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -28,22 +28,42 @@ impl Fixture<'_> {
         Path::new(FIXTURES).join(self.source)
     }
 
-    /// Runs the driver on the crate as a library, as cargo runs a workspace
-    /// wrapper (`<driver> rustc <args>`), with `extra` arguments.
+    /// The arguments of a compile of the crate as a library, with `extra`
+    /// arguments, as cargo hands them to rustc.
+    pub fn arguments(
+        &self,
+        out_dir: &Path,
+        extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    ) -> Vec<OsString> {
+        let mut arguments = ["--edition=2021", "--crate-type=lib", "--error-format=json"]
+            .into_iter()
+            .chain(["--crate-name", self.crate_name, "--out-dir"])
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        arguments.push(out_dir.into());
+        arguments.push(self.source_path().into());
+        arguments.extend(extra.into_iter().map(|argument| argument.as_ref().to_owned()));
+        arguments
+    }
+
+    /// Runs the driver with `arguments` after `rustc`, as cargo runs a
+    /// workspace wrapper (`<driver> rustc <args>`).
+    pub fn run_with(&self, arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Output {
+        Command::new(DRIVER)
+            .arg("rustc")
+            .args(arguments)
+            .env("CARGO_MANIFEST_DIR", Path::new(FIXTURES).join(self.manifest_dir))
+            .output()
+            .expect("the driver runs")
+    }
+
+    /// Runs the driver on the crate as a library, with `extra` arguments.
     pub fn run(
         &self,
         out_dir: &Path,
         extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
     ) -> Output {
-        Command::new(DRIVER)
-            .args(["rustc", "--edition=2021", "--crate-type=lib", "--error-format=json"])
-            .args(["--crate-name", self.crate_name, "--out-dir"])
-            .arg(out_dir)
-            .arg(self.source_path())
-            .args(extra)
-            .env("CARGO_MANIFEST_DIR", Path::new(FIXTURES).join(self.manifest_dir))
-            .output()
-            .expect("the driver runs")
+        self.run_with(self.arguments(out_dir, extra))
     }
 
     /// The diagnostics of a compile that succeeds, one JSON object per line.
