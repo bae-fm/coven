@@ -7,7 +7,9 @@ publish = false
 
 # The lints' tests run them in the driver, as cargo runs it (../driver/tests).
 # This crate has no tests of its own, and a test binary of it would not find
-# the compiler's libLLVM, which the driver's build script locates.
+# the compiler's libLLVM, which the driver's build script locates. Cargo builds
+# one anyway for `cargo test` over the whole workspace, so the tests run with
+# `-p typed-lints-driver`.
 [lib]
 test = false
 doctest = false

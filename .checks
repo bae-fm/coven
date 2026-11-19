@@ -38,4 +38,4 @@ whole spec-readability spec/*.md,scripts/check-spec.py python3 scripts/check-spe
 # Checker tests, run in CI when a push touches a checker or its test
 test check-spec-test scripts/check-spec.py,scripts/check_spec_tests.py python3 scripts/check_spec_tests.py
 test perf-test scripts/perf.py,scripts/perf.sh,scripts/perf_tests.py python3 scripts/perf_tests.py
-test typed-lints-test tools/typed-lints/**,tools/owner-construction-policy/**,rust-toolchain.toml tools/typed-lints/cargo.sh test --release
+test typed-lints-test tools/typed-lints/**,tools/owner-construction-policy/**,rust-toolchain.toml tools/typed-lints/cargo.sh test --release -p typed-lints-driver

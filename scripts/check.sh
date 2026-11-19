@@ -168,7 +168,7 @@ code_checks() {
     step "the typed lints (tools/typed-lints): clippy and their tests"
     tools/typed-lints/prepare-build.sh
     tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
-    tools/typed-lints/cargo.sh test --release
+    tools/typed-lints/cargo.sh test --release -p typed-lints-driver
 
     if [ ${#crates[@]} = 0 ]; then
         return
