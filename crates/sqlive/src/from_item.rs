@@ -82,6 +82,8 @@ pub(crate) struct FromItem {
     pub(crate) using: Vec<String>,
     /// The CTE it reads, by its name, lowercase.
     pub(crate) cte: Option<String>,
+    /// The sides of each OR that narrows it (`scope_or.rs`).
+    pub(crate) ors: Vec<Vec<crate::scope_or::Side>>,
 }
 
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
@@ -108,6 +110,7 @@ pub(crate) fn read_item<'a>(
         derived,
         using: Vec::new(),
         cte: None,
+        ors: Vec::new(),
     };
     match table {
         SelectTable::Table(name, alias, _) => {
@@ -173,6 +176,7 @@ pub(crate) fn read_item<'a>(
                     qualifier,
                     term: None,
                     carried: None,
+                    either: Vec::new(),
                     memberships: Vec::new(),
                 },
                 columns(connection, &stored, ordinary)?,
@@ -200,6 +204,7 @@ pub(crate) fn read_item<'a>(
                     qualifier,
                     term: None,
                     carried: None,
+                    either: Vec::new(),
                     memberships: Vec::new(),
                 },
                 Columns::Unknown,

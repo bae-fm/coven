@@ -33,6 +33,8 @@ mod limit;
 mod mixed;
 #[path = "narrowing_model/nested_derived.rs"]
 mod nested_derived;
+#[path = "narrowing_model/or.rs"]
+mod or;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
 #[path = "narrowing_model/row_edge.rs"]
@@ -495,6 +497,12 @@ async fn row_edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn is_edge_matches_lean() {
     differential("is edge", is_edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn or_matches_lean() {
+    differential("or", or::statement).await;
 }
 
 #[tokio::test]

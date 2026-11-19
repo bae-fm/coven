@@ -2,6 +2,7 @@ import SqliveNarrowing.Rules.Term
 import SqliveNarrowing.Rules.Edge
 import SqliveNarrowing.Rules.RowEdge
 import SqliveNarrowing.Rules.IsEdge
+import SqliveNarrowing.Rules.Or
 import SqliveNarrowing.Rules.SubqueryEdge
 import SqliveNarrowing.Rules.RowSubqueryEdge
 import SqliveNarrowing.Rules.PushDown
@@ -13,7 +14,9 @@ import SqliveNarrowing.Rules.Whole
 /-! The rules that read a condition, in the order sqlive tries them
 (`read_condition`): the first that reads a condition gives its narrowing, and
 a condition none reads narrows nothing. A rule that reads a new condition
-shape adds itself here, with the theorem that it keeps a reader's promise. -/
+shape adds itself here, with the theorem that it keeps a reader's promise.
+An OR that none of them reads is read last, its sides by these rules
+(`Or.readCondition`). -/
 namespace SqliveNarrowing
 
 def conditionRules : List { read : ReadCondition // read.Sound } :=
@@ -24,9 +27,26 @@ def conditionRules : List { read : ReadCondition // read.Sound } :=
    ⟨RowEdge.readCondition, RowEdge.row_edge_sound⟩,
    ⟨IsEdge.readCondition, IsEdge.is_edge_sound⟩]
 
+/-- The narrowing the first of `conditionRules` that reads `cd` gives. -/
+def readRules : ReadCondition := fun s k cd =>
+  conditionRules.findSome? fun read => read.val s k cd
+
+/-- The rules together keep a reader's promise. -/
+theorem readRules_sound : ReadCondition.Sound readRules where
+  terms := by
+    intro s k cd n h i t ht
+    obtain ⟨read, _, hread⟩ := List.exists_of_findSome?_eq_some h
+    exact read.property.terms hread i t ht
+  edges := by
+    intro s k cd n h e he
+    obtain ⟨read, _, hread⟩ := List.exists_of_findSome?_eq_some h
+    exact read.property.edges hread e he
+
 /-- The narrowing condition `cd` of core `k` gives. -/
 def readCondition (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=
-  (conditionRules.findSome? fun read => read.val s k cd).getD {}
+  match readRules s k cd with
+  | some n => { n with ors := [] }
+  | none => (Or.readCondition readRules s k cd).getD {}
 
 /-- The narrowing a condition gives keeps every rule's promise. -/
 theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
@@ -34,13 +54,23 @@ theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)) ∧
     (∀ e ∈ (readCondition s k cd).edges, (s.item e.member).core = k ∧
       (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable ∧
-      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) := by
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) ∧
+    (∀ d ∈ (readCondition s k cd).ors, (s.item d.item).core = k ∧
+      (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b) := by
   unfold readCondition
-  cases h : conditionRules.findSome? (fun read => read.val s k cd) with
-  | none => simp
+  cases h : readRules s k cd with
   | some n =>
-    obtain ⟨read, _, hread⟩ := List.exists_of_findSome?_eq_some h
-    exact ⟨fun i t ht => read.property.terms hread i t ht,
-      fun e he => read.property.edges hread e he⟩
+    exact ⟨fun i t ht => readRules_sound.terms h i t ht,
+      fun e he => readRules_sound.edges h e he, fun d hd => by simp at hd⟩
+  | none =>
+    cases ho : Or.readCondition readRules s k cd with
+    | none => simp
+    | some n =>
+      obtain ⟨hterms, hedges, hors⟩ := Or.or_sound readRules_sound ho
+      simp only [Option.getD_some, hterms, hedges, List.not_mem_nil, false_implies,
+        implies_true, true_and]
+      exact hors
 
 end SqliveNarrowing

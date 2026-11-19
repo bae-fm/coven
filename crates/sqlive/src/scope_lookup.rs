@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
-use crate::scope_plan::{PartnerValue, Sources};
+use crate::scope_plan::{Membership, PartnerValue, Sources};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
 
@@ -45,18 +45,11 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
             term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All)
         };
         let mut scope = bind(&source.term).and(bind(&source.carried));
-        for membership in &source.memberships {
+        let joined = |membership: &Membership| {
             let partner = &sources.sources[membership.partner];
             let partner_scope =
                 bound[membership.partner].as_ref().expect("a membership's partner comes first");
-            // Rows that must hold given values in the column hold no others.
-            if let PartnerValue::Column(column) = &membership.value {
-                if let Some(found) = partner_scope.equal_values(column) {
-                    scope = scope.and(RowScope::equal(membership.column.clone(), found));
-                    continue;
-                }
-            }
-            scope = scope.and(RowScope::Joined {
+            RowScope::Joined {
                 column: membership.column.clone(),
                 lookup: Arc::new(Lookup::new(
                     partner.from.clone().expect("an edge's partner reads alone"),
@@ -67,7 +60,30 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
                     partner_scope.clone(),
                     &parameters,
                 )),
+            }
+        };
+        for membership in &source.memberships {
+            let partner_scope =
+                bound[membership.partner].as_ref().expect("a membership's partner comes first");
+            // Rows that must hold given values in the column hold no others.
+            if let PartnerValue::Column(column) = &membership.value {
+                if let Some(found) = partner_scope.equal_values(column) {
+                    scope = scope.and(RowScope::equal(membership.column.clone(), found));
+                    continue;
+                }
+            }
+            scope = scope.and(joined(membership));
+        }
+        // An OR's scope passes the rows any of its sides' scopes do.
+        for sides in &source.either {
+            let either = sides.iter().map(|side| {
+                side.memberships
+                    .iter()
+                    .fold(bind(&side.term), |scope, membership| scope.and(joined(membership)))
             });
+            if let Some(either) = either.reduce(RowScope::or) {
+                scope = scope.and(either);
+            }
         }
         if let (Some(sorted), Some(last)) = (&sources.sorted, last) {
             if sorted.source == position {

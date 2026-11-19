@@ -85,6 +85,14 @@ promise of whichever rule reads it.
   member is NULL, so it never makes a LEFT JOIN an inner join's, and an
   equality on `IS` carries no term from a derived partner's arms, whose NULL
   says nothing of their items.
+- **An OR whose sides narrow one item.** `or_sound` proves that an OR, true
+  of a binding, makes one of its sides true, and with it every term and edge
+  that the other rules read from that side's conjuncts. An item gets a
+  disjunction when every side narrows it, so its scope can be the OR of the
+  sides' scopes. The OR reads its sides with the other rules, so it is read
+  after them, and not as one of `conditionRules`. The planner keeps a
+  disjunction for an item only when every partner of its sides' edges is
+  placed before the item.
 - **A column compared with a subquery's value.** `subquery_edge_sound` proves
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's

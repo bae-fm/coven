@@ -184,6 +184,7 @@ pub(crate) fn read_derived_item<'a>(
                 qualifier,
                 term: None,
                 carried: None,
+                either: Vec::new(),
                 memberships: Vec::new(),
             },
             columns,

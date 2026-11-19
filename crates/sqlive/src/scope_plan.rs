@@ -147,6 +147,9 @@ pub(crate) struct Source {
     pub(crate) carried: Option<ScopeTerm>,
     /// Columns that must equal a value an earlier source holds.
     pub(crate) memberships: Vec<Membership>,
+    /// The ORs that narrow it, each a list of sides whose memberships take
+    /// values from sources placed before it (`scope_or.rs`).
+    pub(crate) either: Vec<Vec<crate::scope_or::EitherSide>>,
 }
 
 /// `column` equals `value` over some row of `partner` in its scope, a NULL
@@ -157,6 +160,19 @@ pub(crate) struct Membership {
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
     pub(crate) nulls: bool,
+}
+
+impl Membership {
+    /// The membership `edge` gives its member.
+    pub(crate) fn of(edge: &Edge) -> Self {
+        Self {
+            column: edge.column.clone(),
+            affinity: edge.affinity,
+            partner: edge.partner,
+            value: edge.value.clone(),
+            nulls: edge.nulls,
+        }
+    }
 }
 
 /// What a membership compares with.
@@ -323,14 +339,9 @@ impl Planner<'_> {
                 .cloned()
                 .collect();
             for edge in &taken {
-                self.items[next].source.memberships.push(Membership {
-                    column: edge.column.clone(),
-                    affinity: edge.affinity,
-                    partner: edge.partner,
-                    value: edge.value.clone(),
-                    nulls: edge.nulls,
-                });
+                self.items[next].source.memberships.push(Membership::of(edge));
             }
+            self.items[next].source.either = self.placed_ors(next, &order);
             // A subquery's, CTE's or view's cores come later, and take
             // the same values.
             crate::derived::push_down(&mut self, next, None, taken);
@@ -346,9 +357,9 @@ impl Planner<'_> {
 
     /// The items of `remaining` that wait: those whose value comes from a
     /// subquery's source not placed yet, which a column compared with a
-    /// subquery's value takes (`scope_subquery.rs`), and those whose every
-    /// partner waits, which couldn't take their values from a partner that
-    /// is placed after them.
+    /// subquery's value takes (`scope_subquery.rs`), alone or in a side of
+    /// an OR, and those whose every partner waits, which couldn't take their
+    /// values from a partner that is placed after them.
     fn waiting(&self, order: &[usize], remaining: &[usize]) -> BTreeSet<usize> {
         let mut waiting: BTreeSet<usize> = remaining
             .iter()
@@ -356,7 +367,7 @@ impl Planner<'_> {
             .filter(|item| {
                 self.edges.iter().any(|edge| {
                     edge.nested && edge.member == *item && !order.contains(&edge.partner)
-                })
+                }) || self.waits_for_or(*item, order)
             })
             .collect();
         loop {
@@ -383,7 +394,7 @@ impl Planner<'_> {
             self.column_edge(left.clone(), right.clone(), false),
             self.column_edge(right, left, true),
         ];
-        Narrowing { terms: Vec::new(), edges: edges.into_iter().flatten().collect() }
+        Narrowing { edges: edges.into_iter().flatten().collect(), ..Narrowing::default() }
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -487,6 +498,7 @@ impl Planner<'_> {
             !(term.may_hold_on_nulls() && self.items[*item].left_on.is_some())
         });
         found.edges.retain(|edge| !(edge.nulls && self.items[edge.member].left_on.is_some()));
+        found.ors.retain(|or| !(or.may_hold_on_nulls() && self.items[or.item].left_on.is_some()));
         for item in self.add(found) {
             self.join_inner(item);
         }
@@ -513,8 +525,8 @@ impl Planner<'_> {
         }
     }
 
-    /// Add `found` to the sources' terms and the edges, and say which
-    /// sources it narrows.
+    /// Add `found` to the sources' terms, the edges and the sources' ORs,
+    /// and say which sources it narrows.
     fn add(&mut self, found: Narrowing) -> Vec<usize> {
         let mut narrowed = Vec::new();
         for (item, term) in found.terms {
@@ -524,6 +536,10 @@ impl Planner<'_> {
         for edge in found.edges {
             narrowed.push(edge.member);
             self.edges.push(edge);
+        }
+        for or in found.ors {
+            narrowed.push(or.item);
+            self.items[or.item].ors.push(or.sides);
         }
         narrowed
     }
@@ -593,7 +609,7 @@ pub(crate) fn read_select<'a>(
 }
 
 /// The SELECTs read in one core's clauses, each with its arms' cores.
-type Subqueries<'a> = Vec<(&'a Select<'a>, Vec<usize>)>;
+pub(crate) type Subqueries<'a> = Vec<(&'a Select<'a>, Vec<usize>)>;
 
 /// Read the SELECTs among `found`, each sitting in `parent`.
 fn read_nested<'a>(
@@ -770,8 +786,9 @@ enum Written<'a> {
 /// Read one condition of `core` into the terms and edges of the items
 /// it narrows: only the core's own. A condition holding a SELECT doesn't
 /// narrow, except a column compared with the value a subquery returns,
-/// `subqueries` being the SELECTs the core's clauses hold.
-fn read_condition<'a>(
+/// `subqueries` being the SELECTs the core's clauses hold, and an OR whose
+/// sides narrow one source (`scope_or.rs`).
+pub(crate) fn read_condition<'a>(
     connection: &Connection,
     planner: &mut Planner,
     core: usize,
@@ -789,11 +806,17 @@ fn read_condition<'a>(
                     planner.subquery_edge(core, value, (position, width), select, cores)
                 })
                 .collect();
-            return Ok(Narrowing { terms: Vec::new(), edges });
+            return Ok(Narrowing { edges, ..Narrowing::default() });
         }
     }
     let mut read = Vec::new();
     parts(condition, &mut read);
+    // An OR of one source's columns alone is a term on that source; any
+    // other narrows by its sides.
+    let or = crate::scope_or::is_or(condition);
+    if or && read.iter().any(|part| matches!(part, Part::Select(_) | Part::Subquery(_))) {
+        return crate::scope_or::read_or(connection, planner, core, condition, subqueries);
+    }
     let mut referenced = Vec::new();
     for part in &read {
         let name = match part {
@@ -830,6 +853,8 @@ fn read_condition<'a>(
             None => row_term(planner, core, item, condition, &read),
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
+    } else if or {
+        return crate::scope_or::read_or(connection, planner, core, condition, subqueries);
     } else if let Expr::Binary(left, Operator::Is, right) = condition {
         // `IS` is `=` that matches a NULL with a NULL.
         for (member, other, first) in [(left, right, false), (right, left, true)] {
@@ -862,27 +887,32 @@ fn read_condition<'a>(
 /// true (`ScopeTerm::may_hold_on_nulls`) and an `IS` edge.
 #[derive(Default)]
 pub(crate) struct Narrowing {
-    terms: Vec<(usize, ScopeTerm)>,
-    edges: Vec<Edge>,
+    pub(crate) terms: Vec<(usize, ScopeTerm)>,
+    pub(crate) edges: Vec<Edge>,
+    /// ORs whose sides each narrow one source (`scope_or.rs`).
+    pub(crate) ors: Vec<crate::scope_or::Disjunction>,
 }
 
 impl Narrowing {
-    /// Whether a term or an edge of it can pass a row of NULLs.
+    /// Whether a term, an edge or an OR of it can pass a row of NULLs.
     fn may_hold_on_nulls(&self) -> bool {
         self.terms.iter().any(|(_, term)| term.may_hold_on_nulls())
             || self.edges.iter().any(|edge| edge.nulls)
+            || self.ors.iter().any(crate::scope_or::Disjunction::may_hold_on_nulls)
     }
 
     /// What of this narrows `item`, and the rest.
     fn split(self, item: usize) -> (Self, Self) {
         let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
         let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member == item);
-        (Self { terms: own, edges: own_edges }, Self { terms, edges })
+        let (own_ors, ors) = self.ors.into_iter().partition(|or| or.item == item);
+        (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
     }
 
-    fn extend(&mut self, other: Self) {
+    pub(crate) fn extend(&mut self, other: Self) {
         self.terms.extend(other.terms);
         self.edges.extend(other.edges);
+        self.ors.extend(other.ors);
     }
 }
 

@@ -1,5 +1,6 @@
 //! Joins other than one column equal to another, each narrowing the joined
-//! table as the equality would: `IS` between two tables.
+//! table as the equality would: `IS` between two tables, and an OR whose
+//! sides each narrow the table.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -32,6 +33,62 @@ async fn an_is_join_narrows_and_matches_nulls() {
     follows(&db, "SELECT f.message FROM failure f LEFT JOIN verdict v ON v.id = 9 WHERE f.run IS v.run AND f.hash = 'h1' ORDER BY f.id", vec![], &[
         ("UPDATE failure SET message = 'bbb' WHERE id = 2", false),
         ("UPDATE failure SET run = 5 WHERE id = 1", true),
+    ])
+    .await;
+    db.close();
+}
+
+/// An artist the wanted row names by either of two equalities: an artist
+/// neither side names wakes nothing, and one either side names does.
+#[tokio::test]
+async fn an_or_of_two_joins_narrows_by_either() {
+    const ARTISTS: &str = "CREATE TABLE wanted(id INTEGER PRIMARY KEY, dg INTEGER, key TEXT);
+        CREATE TABLE artists(id INTEGER PRIMARY KEY, discogs_id INTEGER, name TEXT, name_key TEXT);
+        CREATE TABLE shown(id INTEGER PRIMARY KEY, artist INTEGER, key TEXT);
+        INSERT INTO wanted VALUES (1,5,'k1'),(2,6,'k2');
+        INSERT INTO artists VALUES (1,5,'one','k1'),(105,NULL,'two','k9'),(3,6,'three','k2'),(106,NULL,'four','k8');
+        INSERT INTO shown VALUES (1,105,'k1'),(2,106,'k2')";
+    let db = TestDatabase::open(ARTISTS);
+    follows(&db, "SELECT a.name FROM wanted t JOIN artists a ON a.discogs_id = t.dg OR a.id = t.dg + 100 WHERE t.id = 1 ORDER BY a.id", vec![], &[
+        ("UPDATE artists SET name = 'x' WHERE id = 3", false),
+        ("UPDATE artists SET name = 'y' WHERE id = 106", false),
+        ("UPDATE artists SET name = 'uno' WHERE id = 1", true),
+        ("UPDATE artists SET name = 'dos' WHERE id = 105", true),
+        ("UPDATE artists SET discogs_id = 5 WHERE id = 3", true),
+        ("UPDATE wanted SET dg = 6 WHERE id = 1", true),
+    ])
+    .await;
+    db.close();
+    // A side that compares with a subquery's value takes it once the
+    // subquery's source is placed.
+    let db = TestDatabase::open(ARTISTS);
+    follows(&db, "SELECT a.name FROM wanted z JOIN artists a ON a.name_key = z.key OR a.id IN (SELECT s.artist FROM shown s WHERE s.key = z.key) WHERE z.id = 1 ORDER BY a.id", vec![], &[
+        ("UPDATE artists SET name = 'x' WHERE id = 3", false),
+        ("UPDATE artists SET name = 'y' WHERE id = 106", false),
+        ("UPDATE artists SET name = 'un' WHERE id = 1", true),
+        ("UPDATE artists SET name = 'deux' WHERE id = 105", true),
+        ("UPDATE shown SET artist = 3 WHERE id = 1", true),
+        ("UPDATE artists SET name = 'trois' WHERE id = 3", true),
+    ])
+    .await;
+    db.close();
+}
+
+/// An OR one of whose sides says nothing of a table narrows that table by
+/// nothing: the admins narrow by their join to the operations alone.
+#[tokio::test]
+async fn an_or_with_a_side_naming_another_table_narrows_nothing_there() {
+    let db = TestDatabase::open(
+        "CREATE TABLE ops(id INTEGER PRIMARY KEY, kind TEXT, admin INTEGER, v TEXT);
+        CREATE TABLE admins(id INTEGER PRIMARY KEY, member INTEGER);
+        INSERT INTO ops VALUES (1,'set',1,'a'),(2,'x',2,'b');
+        INSERT INTO admins VALUES (1,1),(2,2),(3,3)",
+    );
+    follows(&db, "SELECT o.v FROM ops o JOIN admins a ON a.id = o.admin WHERE o.kind <> 'x' OR (o.kind = 'set' AND a.member = 1) ORDER BY o.id", vec![], &[
+        ("UPDATE admins SET member = 5 WHERE id = 3", false),
+        ("UPDATE admins SET member = 1 WHERE id = 2", false),
+        ("UPDATE admins SET member = 7 WHERE id = 1", true),
+        ("UPDATE ops SET kind = 'y' WHERE id = 2", true),
     ])
     .await;
     db.close();

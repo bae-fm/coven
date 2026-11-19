@@ -46,6 +46,7 @@ mod row_scope;
 mod schema_objects;
 mod scope_edge;
 mod scope_lookup;
+mod scope_or;
 mod scope_order;
 mod scope_plan;
 mod scope_row;

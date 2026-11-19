@@ -956,7 +956,14 @@ no function SQLite doesn't flag deterministic, as `random()` or an app function
 registered nondeterministic: a write's lookup evaluates it again and could get
 another answer than the query did, so such a join narrows nothing. A row value
 equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
-columns: SQLite gives it the truth of their AND, NULL included. The ON of a
+columns: SQLite gives it the truth of their AND, NULL included. An OR narrows a
+table when each of its sides does, to the rows either side allows: Ben's
+import finds an artist by `a.discogs_id = t.dg OR a.id = t.dg + 100`, and an
+artist neither side names doesn't rerun it. Coven looks up each side's
+equalities in the tables placed before that table, and an OR with a side
+whose table comes later narrows nothing there; a side that compares with a
+subquery's value waits for the subquery's table, as a column compared with
+one does. The ON of a
 LEFT JOIN narrows only its right side: it decides which right rows join each
 left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
@@ -15007,6 +15014,7 @@ Write-ups explain each model and state its assumptions:
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
 | A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
+| An OR, true of a binding, makes one side of each OR coven reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Or.lean` | §4 |
 | `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/IsEdge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |

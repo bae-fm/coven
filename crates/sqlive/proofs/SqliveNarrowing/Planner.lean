@@ -46,7 +46,9 @@ an item not placed yet, and those whose every partner waits
 (`Planner::waiting`). -/
 def waiting (st : PState) (order remaining : List Nat) : List Nat :=
   let first := remaining.filter fun i =>
-    st.edges.any fun e => e.nested && e.member == i && !order.contains e.partner
+    st.edges.any (fun e => e.nested && e.member == i && !order.contains e.partner) ||
+      (st.items i).ors.any fun sides => sides.any fun side =>
+        side.edges.any fun e => e.nested && !order.contains e.partner
   go remaining.length first
 where
   go : Nat → List Nat → List Nat
@@ -93,7 +95,9 @@ where
               |>.getD first
           | none, [] => r
         let taken := st.edges.filter fun e => e.member == next && order.contains e.partner
-        let st := st.update next fun p => { p with memberships := p.memberships ++ taken }
+        let either := (st.items next).ors.filter fun sides =>
+          sides.all fun side => side.edges.all fun e => order.contains e.partner
+        let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
         let st := PushDown.pushDown s s.fuel s.fuel st next none taken
         go f all st (order ++ [next]) waited
 
@@ -125,6 +129,13 @@ def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :
         | some vs => scope.both (.inVals m.column vs.eraseDups)
         | none => scope.both (.joined m.column m.partner m.value partner m.nulls)
       | v => scope.both (.joined m.column m.partner v partner m.nulls)) scope
+    let sideScope (side : Side) : RScope :=
+      side.edges.foldl (fun acc m => acc.both (.joined m.column m.partner m.value (bound m.partner) m.nulls))
+        (side.terms.foldl (fun acc t => acc.both t.bind) .all)
+    let scope := item.either.foldl (fun scope sides =>
+      match sides.map sideScope with
+      | [] => scope
+      | first :: rest => scope.both (rest.foldl RScope.either first)) scope
     let scope := match p.sorted, last with
       | some sorted, some values =>
         if sorted.item = i then

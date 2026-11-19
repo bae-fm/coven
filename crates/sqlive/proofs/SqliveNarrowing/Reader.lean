@@ -168,6 +168,11 @@ def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Pro
   (e.nulls = true ∧ e.nested = false ∧ (s.item e.partner).left = false ∧
     cellOf (b e.member) e.column = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none)
 
+/-- An OR that narrows `d.item` holds of a binding: one of its sides does,
+each of its terms true of the item's row and each of its edges holding. -/
+def Disjunction.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (d : Disjunction) : Prop :=
+  ∃ side ∈ d.sides, (∀ t ∈ side.terms, t.holds (b d.item)) ∧ ∀ e ∈ side.edges, e.HoldsIn s db f b
+
 /-- What a reader promises of the narrowing it reads from a condition of
 core `k`: when the condition holds of a binding, with its subqueries read at
 fuel `f`, each term holds of its item's row and each edge holds. Each term

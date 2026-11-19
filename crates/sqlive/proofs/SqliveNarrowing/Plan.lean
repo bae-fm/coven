@@ -99,23 +99,48 @@ structure Edge where
   nulls : Bool := false
   deriving Repr, Inhabited
 
-/-- Terms on items and edges between them, which conditions give. -/
-structure Narrowing where
-  terms : List (Nat × STerm) := []
+/-- One side of an OR as it narrows one item: terms on the item's row and
+edges from it, which all hold where the side does (`Side`). -/
+structure Side where
+  terms : List STerm := []
   edges : List Edge := []
   deriving Repr, Inhabited
 
+/-- Whether a row of NULLs in the item's place can pass the side. -/
+def Side.mayHoldOnNulls (side : Side) : Bool :=
+  side.terms.any (·.mayHoldOnNulls) || side.edges.any (·.nulls)
+
+/-- An OR that narrows `item`: wherever the OR holds, one of its sides does
+(`Disjunction`). -/
+structure Disjunction where
+  item : Nat
+  sides : List Side
+  deriving Repr, Inhabited
+
+def Disjunction.mayHoldOnNulls (d : Disjunction) : Bool := d.sides.any Side.mayHoldOnNulls
+
+/-- Terms on items, edges between them and ORs over both, which conditions
+give. -/
+structure Narrowing where
+  terms : List (Nat × STerm) := []
+  edges : List Edge := []
+  ors : List Disjunction := []
+  deriving Repr, Inhabited
+
 /-- Whether a row of NULLs in an item's place can pass some of `n`: a term
-that can, or an `IS` edge, whose member's NULL matches a NULL. -/
+that can, an `IS` edge, whose member's NULL matches a NULL, or an OR with a
+side that can. -/
 def Narrowing.mayHoldOnNulls (n : Narrowing) : Bool :=
-  n.terms.any (fun (_, t) => t.mayHoldOnNulls) || n.edges.any (·.nulls)
+  n.terms.any (fun (_, t) => t.mayHoldOnNulls) || n.edges.any (·.nulls) ||
+    n.ors.any (·.mayHoldOnNulls)
 
 /-- What of `n` narrows `i`, and the rest. -/
 def Narrowing.split (n : Narrowing) (i : Nat) : Narrowing × Narrowing :=
-  (⟨n.terms.filter (·.1 == i), n.edges.filter (·.member == i)⟩,
-   ⟨n.terms.filter (·.1 != i), n.edges.filter (·.member != i)⟩)
+  (⟨n.terms.filter (·.1 == i), n.edges.filter (·.member == i), n.ors.filter (·.item == i)⟩,
+   ⟨n.terms.filter (·.1 != i), n.edges.filter (·.member != i), n.ors.filter (·.item != i)⟩)
 
-def Narrowing.append (a b : Narrowing) : Narrowing := ⟨a.terms ++ b.terms, a.edges ++ b.edges⟩
+def Narrowing.append (a b : Narrowing) : Narrowing :=
+  ⟨a.terms ++ b.terms, a.edges ++ b.edges, a.ors ++ b.ors⟩
 
 /-- A run's scope of an item's rows (`RowScope`). -/
 inductive RScope where
@@ -212,6 +237,11 @@ structure PItem where
   carried : Option STerm := none
   /-- The edges the item took as memberships, in order. -/
   memberships : List Edge := []
+  /-- The sides of each OR that narrows the item. -/
+  ors : List (List Side) := []
+  /-- The ORs among `ors` whose sides' edges all take values from items
+  placed before it, which narrow its scope. -/
+  either : List (List Side) := []
   /-- For a LEFT JOIN's right side no condition outside its ON has made an
   inner join's yet, what its ON says of the other items. -/
   leftOn : Option Narrowing := none
@@ -233,22 +263,26 @@ def PState.initial (s : Statement) : PState :=
 def PState.addTerm (st : PState) (i : Nat) (t : STerm) : PState :=
   st.update i fun p => { p with term := some (match p.term with | some e => .and e t | none => t) }
 
-/-- Add `n`'s terms and edges, and the items it narrows (`Planner::add`). -/
+/-- Add `n`'s terms, edges and ORs, and the items it narrows
+(`Planner::add`). -/
 def PState.add (st : PState) (n : Narrowing) : PState × List Nat :=
   let st := n.terms.foldl (fun st (i, t) => st.addTerm i t) st
-  ({ st with edges := st.edges ++ n.edges }, n.terms.map (·.1) ++ n.edges.map (·.member))
+  let st := n.ors.foldl (fun st d => st.update d.item fun p => { p with ors := p.ors ++ [d.sides] }) st
+  ({ st with edges := st.edges ++ n.edges },
+   n.terms.map (·.1) ++ n.edges.map (·.member) ++ n.ors.map (·.item))
 
 /-- Narrow by `n`, which conditions on the joined rows give, and make each
 LEFT JOIN item it narrows an inner join's, releasing what its ON said of the
 other items (`Planner::narrow`, `Planner::join_inner`). A term a row of NULLs
-can pass, and an `IS` edge, narrow nothing on a right side that is still a
-LEFT JOIN's. -/
+can pass, an `IS` edge and an OR with a side that can, narrow nothing on a
+right side that is still a LEFT JOIN's. -/
 def PState.narrow : Nat → PState → Narrowing → PState
   | 0, st, _ => st
   | fuel + 1, st, n =>
     let terms := n.terms.filter fun (i, t) => !(t.mayHoldOnNulls && (st.items i).leftOn.isSome)
     let edges := n.edges.filter fun e => !(e.nulls && (st.items e.member).leftOn.isSome)
-    let (st, narrowed) := st.add { terms, edges }
+    let ors := n.ors.filter fun d => !(d.mayHoldOnNulls && (st.items d.item).leftOn.isSome)
+    let (st, narrowed) := st.add { terms, edges, ors }
     narrowed.foldl (fun st i =>
       match (st.items i).leftOn with
       | some held => PState.narrow fuel (st.update i fun p => { p with leftOn := none }) held
