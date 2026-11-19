@@ -14410,8 +14410,9 @@ One script runs every check. CI runs the code checks on every platform, clippy
 for Android on Linux, and the Lean proofs once, on Linux, since a proof checks
 the same on any platform.
 
-1. Formatting, and clippy with warnings denied: on the host, and for Android,
-   which compiles code no host does and hosts no runner.
+1. Formatting, and clippy with the typed lints of check 11 and warnings denied:
+   on the host, and for Android, which compiles code no host does and hosts no
+   runner.
 2. The dependency rules of F.1, with `cargo deny check advisories bans
    licenses`: known security advisories, the crates `deny.toml` refuses, and
    the licenses it allows.
@@ -14486,8 +14487,8 @@ the same on any platform.
 11. The typed lints' own clippy and tests. A typed lint asks the compiler for
     each expression's type, so it matches what a check means, such as a value
     whose type is `reqwest::Error`, where a check of the syntax tree can only
-    match a name. The lints run in the same compile as clippy's own lints, from
-    a build of clippy's own driver that adds them. So they build
+    match a name. The lints run in the same compile as clippy's own lints in
+    check 1, from a build of clippy's own driver that adds them. So they build
     against the toolchain's compiler crates and the source of the toolchain's
     clippy, and live in `tools/typed-lints`, a workspace of their own that no
     crate of coven's builds against. A machine's setup installs those compiler
