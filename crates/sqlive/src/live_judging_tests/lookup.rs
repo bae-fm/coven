@@ -531,11 +531,11 @@ async fn a_lookup_follows_a_chain_of_joins_with_old_and_new_values() {
 }
 
 /// A lookup that runs past `LOOKUP_STEPS`, as one no index serves over a
-/// large partner, stops and counts as a match: the query runs again, and
-/// the write commits. Over a small partner the same lookup finishes, and
-/// a value no partner row holds wakes nothing.
+/// large partner, stops: the query runs again, and the write commits. Over
+/// a small partner the same lookup finishes, and a value no partner row
+/// holds wakes nothing.
 #[tokio::test]
-async fn a_lookup_past_its_steps_counts_as_a_match() {
+async fn a_lookup_past_its_steps_reruns_the_query() {
     let db = TestDatabase::open("CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, label TEXT, note TEXT); INSERT INTO children VALUES (1, 'none', '')");
     const SQL: &str =
         "SELECT c.note FROM parents p JOIN children c ON c.label = p.label WHERE p.kind = 'one'";
@@ -549,6 +549,22 @@ async fn a_lookup_past_its_steps_counts_as_a_match() {
         })
         .unwrap();
     assert_eq!(note, "..");
+    db.close();
+}
+
+/// A lookup that stops leaves sqlive unable to tell whether the changed row
+/// passes its scope, so the query runs again even when another of the row's
+/// lookups, over a small partner, finds no row.
+#[tokio::test]
+async fn a_stopped_lookup_reruns_whatever_the_other_lookups_find() {
+    let db = TestDatabase::open("CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE tags(id INTEGER PRIMARY KEY, tag TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, label TEXT, tag TEXT, note TEXT); INSERT INTO tags VALUES (1, 'red', 'one'); INSERT INTO children VALUES (1, 'none', 'blue', '')");
+    write(&db, "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5000) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
+    let counter = crate::ConnectionWorkCounter::new();
+    db.track_work(&counter);
+    follows(&db, "SELECT c.note FROM parents p JOIN tags g ON g.kind = p.kind JOIN children c ON c.label = p.label AND c.tag = g.tag WHERE p.kind = 'one'", vec![], &[
+        ("UPDATE children SET note = '.' WHERE id = 1", true),
+    ]).await;
+    assert_eq!(counter.take().stopped_questions, 1);
     db.close();
 }
 

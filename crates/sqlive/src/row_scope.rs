@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::scope_lookup::{Judging, Lookup, Lookups};
+use crate::scope_lookup::{Judging, Lookup, Lookups, NoAnswer};
 use crate::scope_row::RowCondition;
 use crate::sql_value::SqlValue as Value;
 
@@ -64,12 +64,13 @@ pub enum RowScope {
 impl RowScope {
     /// Whether `row` passes, running `lookups` for a join's values. A
     /// column the image doesn't hold passes: the write that made it didn't
-    /// know this scope would test it.
+    /// know this scope would test it. A question that stops ends the test
+    /// with no answer.
     pub(crate) fn matches(
         &self,
         row: &RowImage,
         lookups: &mut Lookups<'_>,
-    ) -> rusqlite::Result<bool> {
+    ) -> Result<bool, NoAnswer> {
         Ok(match self {
             Self::All => true,
             Self::Compare { column, value, ordering, inclusive } => {

@@ -2,7 +2,7 @@
 //! change what it returned.
 
 use crate::row_scope::{RowImage, RowScope};
-use crate::scope_lookup::{Judging, Lookups};
+use crate::scope_lookup::{Judging, Lookups, NoAnswer};
 use crate::sql_value::SqlValue;
 use std::collections::{BTreeSet, HashMap};
 
@@ -44,7 +44,7 @@ pub struct RowChange {
 impl TableRead {
     /// Whether `change` could change what this read returned, running
     /// `lookups` for a join's values.
-    fn affected(&self, change: &RowChange, lookups: &mut Lookups<'_>) -> rusqlite::Result<bool> {
+    fn affected(&self, change: &RowChange, lookups: &mut Lookups<'_>) -> Result<bool, NoAnswer> {
         if self.table != change.table
             || !(change.column.is_empty() || self.columns.contains(&change.column))
             || (self.inserted_only && !inserted(change))
@@ -71,7 +71,9 @@ fn inserted(change: &RowChange) -> bool {
 /// Whether `changes` could change what `reads` returned. Past
 /// `ROWS_PER_TABLE` row changes to one table, a join's values in that table
 /// count as matched without a lookup, as a table changed whole would, so a
-/// write's lookups stay bounded.
+/// write's lookups stay bounded. A question that runs past `LOOKUP_STEPS`
+/// and stops leaves sqlive unable to tell, so `reads` count as changed
+/// whatever the other questions answer (§4).
 pub fn affected(
     reads: &ReadSet,
     changes: &[RowChange],
@@ -87,12 +89,14 @@ pub fn affected(
             counts.get(change.table.as_str()).is_some_and(|count| *count > ROWS_PER_TABLE);
         for read in reads {
             let found = if bounded {
-                read.affected(change, &mut |_| Ok(true))?
+                read.affected(change, &mut |_| Ok(true))
             } else {
-                read.affected(change, &mut |judging| answers.answer(judging, lookups))?
+                read.affected(change, &mut |judging| answers.answer(judging, lookups))
             };
-            if found {
-                return Ok(true);
+            match found {
+                Ok(false) => {}
+                Ok(true) | Err(NoAnswer::Stopped) => return Ok(true),
+                Err(NoAnswer::Failed(error)) => return Err(error),
             }
         }
     }
@@ -114,7 +118,7 @@ impl Answers {
         &mut self,
         judging: Judging<'_>,
         lookups: &mut Lookups<'_>,
-    ) -> rusqlite::Result<bool> {
+    ) -> Result<bool, NoAnswer> {
         match judging {
             Judging::Partner(lookup, value) => {
                 let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));

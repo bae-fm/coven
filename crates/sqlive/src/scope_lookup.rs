@@ -23,14 +23,28 @@ pub enum Judging<'a> {
     Row(&'a str, &'a [Value]),
 }
 
-/// Runs one question about a changed row. The closure also returns
-/// `Ok(true)` when the lookup reaches its step limit and stops, which sqlive
-/// counts as a match.
-pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> rusqlite::Result<bool> + 'a;
+/// Runs one question about a changed row: whether SQLite found a row.
+pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> Result<bool, NoAnswer> + 'a;
 
-/// The most SQLite steps one lookup runs. A lookup no index serves reads its
-/// partner row by row; past this it stops and counts as a match, so the
-/// query runs again and a write's cost stays bounded whatever the app's
+/// Why a question about a changed row has no answer.
+#[derive(Debug)]
+pub enum NoAnswer {
+    /// The question ran past `LOOKUP_STEPS` and stopped. sqlive can't tell
+    /// whether the row passes, so the live query runs again (§4).
+    Stopped,
+    /// SQLite failed.
+    Failed(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for NoAnswer {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// The most SQLite steps one question about a changed row runs. A lookup no
+/// index serves reads its partner row by row; past this it stops and the
+/// query runs again, so a write's cost stays bounded whatever the app's
 /// indexes.
 pub const LOOKUP_STEPS: i32 = 1_000;
 

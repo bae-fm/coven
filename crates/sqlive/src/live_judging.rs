@@ -6,7 +6,7 @@
 use super::HostSql;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
-use crate::{Judging, Lookups, ReadSet};
+use crate::{Judging, Lookups, NoAnswer, ReadSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -29,9 +29,7 @@ impl<P: Policy> HostSql<P> {
             let result = read(self);
             let reads = self.authorization.reads();
             finished = true;
-            let judged = judge(reads, &mut |judging| {
-                self.authorization.judged_unrecorded(|| self.ask(judging))
-            });
+            let judged = judge(reads, &mut |judging| self.ask_judged(judging));
             let value = result?;
             judged.map_err(crate::Error::from)?;
             Ok(value)
@@ -54,16 +52,20 @@ impl<P: Policy> HostSql<P> {
     ) -> Result<crate::Judged, PolicyError<P>> {
         let _reading = self.authorization.reading();
         handle
-            .judge(changes, crate::committing(), &mut |judging| {
-                self.authorization.judged_unrecorded(|| self.ask(judging))
-            })
+            .judge(changes, crate::committing(), &mut |judging| self.ask_judged(judging))
             .map_err(Into::into)
+    }
+
+    /// Answer one question about a changed row, read in this connection's
+    /// transaction, judged as app SQL is without recording its reads.
+    fn ask_judged(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
+        self.authorization.judged_unrecorded(|| Ok(self.ask(judging)))?
     }
 
     /// Answer one question about a changed row, read in this connection's
     /// transaction: a write's own, or a live query's run. The caller sets
     /// how the authorizer judges it.
-    fn ask(&self, judging: Judging<'_>) -> rusqlite::Result<bool> {
+    fn ask(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
         match judging {
             Judging::Partner(lookup, value) => {
                 let (sql, parameters) = lookup.sql(value);
@@ -73,17 +75,17 @@ impl<P: Policy> HostSql<P> {
             // a condition reads or an overflow, says nothing of whether the
             // row passes: it counts as a match.
             Judging::Row(sql, parameters) => match self.run_limited(sql, parameters) {
-                Err(rusqlite::Error::SqliteFailure(..) | rusqlite::Error::SqlInputError { .. }) => {
-                    Ok(true)
-                }
+                Err(NoAnswer::Failed(
+                    rusqlite::Error::SqliteFailure(..) | rusqlite::Error::SqlInputError { .. },
+                )) => Ok(true),
                 found => found,
             },
         }
     }
 
     /// Whether `sql` finds a row. A question that runs past `LOOKUP_STEPS`
-    /// stops and counts as a match (§4).
-    fn run_limited(&self, sql: &str, parameters: &[crate::SqlValue]) -> rusqlite::Result<bool> {
+    /// stops with no answer (§4).
+    fn run_limited(&self, sql: &str, parameters: &[crate::SqlValue]) -> Result<bool, NoAnswer> {
         let mut statement = self.connection.prepare_cached(sql)?;
         for (index, value) in parameters.iter().enumerate() {
             statement.raw_bind_parameter(index + 1, value)?;
@@ -100,9 +102,11 @@ impl<P: Policy> HostSql<P> {
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == rusqlite::ErrorCode::OperationInterrupted && stopped =>
             {
-                Ok(true)
+                #[cfg(any(test, feature = "test-utils"))]
+                self.record_work(|work| work.stopped_questions += 1);
+                Err(NoAnswer::Stopped)
             }
-            found => found,
+            found => found.map_err(NoAnswer::Failed),
         }
     }
 }

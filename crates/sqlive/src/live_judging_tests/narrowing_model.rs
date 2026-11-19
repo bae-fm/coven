@@ -3,9 +3,10 @@
 //! statements of its rule's shape, as SQL and as the runner's JSON tree. For
 //! each statement the test opens a live query and makes random writes; after
 //! each it fails when the model finds the statement not well formed, when
-//! sqlive and the model disagree on whether the write reruns the query, when
-//! a write either lets pass changed the statement's rows, or when the model's
-//! rows differ from SQLite's.
+//! sqlive and the model disagree on whether the write reruns the query, given
+//! whether one of sqlive's questions about the write stopped at its step
+//! limit, when a write either lets pass changed the statement's rows, or when
+//! the model's rows differ from SQLite's.
 //! `SQLIVE_NARROWING_LEAN` names the runner; `SQLIVE_NARROWING_SEEDS` sets how
 //! many statements each test runs (default 60). A failure names the seed.
 
@@ -496,6 +497,8 @@ async fn run_case(
     let mirror = Mirror::open();
     mirror.apply(&rows.join("; "));
     db.write(&rows.join("; ")).unwrap();
+    let work = crate::ConnectionWorkCounter::new();
+    db.track_work(&work);
     let runs = Arc::new(AtomicUsize::new(0));
     let text = sql.clone();
     let mut live = db.subscribe(move |context| {
@@ -510,7 +513,9 @@ async fn run_case(
         let before = snapshot(&db);
         let change = write(rng);
         let changes = mirror.apply(&change);
+        work.take();
         db.write(&change).unwrap();
+        let stopped = work.take().stopped_questions > 0;
         let after = snapshot(&db);
         let fresh = one_shot(&db, &sql);
         let marked = live.is_marked_for_rerun();
@@ -520,11 +525,12 @@ async fn run_case(
             "before": before,
             "changes": changes,
             "after": after,
+            "stopped": stopped,
         });
         let model = ask(runner, &input);
         let case = || {
             format!(
-                "{rule}, seed {seed}, step {step}: `{sql}` after `{change}`\nsqlive reruns: {marked}, the model reruns: {}\nscopes: {}\nrows before: {last:?}\nrows after: {fresh:?}\nbefore: {before}\nafter: {after}\ninput: {input}",
+                "{rule}, seed {seed}, step {step}: `{sql}` after `{change}`\nsqlive reruns: {marked}, the model reruns: {}, a question stopped: {stopped}\nscopes: {}\nrows before: {last:?}\nrows after: {fresh:?}\nbefore: {before}\nafter: {after}\ninput: {input}",
                 model.reruns, model.scopes
             )
         };

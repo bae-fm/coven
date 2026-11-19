@@ -60,6 +60,15 @@ a statement reads to be the columns its clauses name, and every column of
 each table that a query whose rows SQLite picks reads; the differential checks
 that sqlive reads the same ones from SQLite.
 
+sqlive stops each question it asks SQLite about a changed row, a lookup or a
+condition SQLite judges, after 1,000 of SQLite's steps, so that a lookup no
+index serves bounds a write's cost. sqlive can't tell then whether the row
+passes its scope, so the statement narrows nothing for that write: every
+change of a column it reads reruns it (`Statement.rerunsLimited`). Which
+questions stop depends on the plan SQLite picks for them, which the model
+doesn't state, so the runner takes from sqlive whether one of the write's
+questions stopped.
+
 [WellFormed.lean](../../crates/sqlive/proofs/SqliveNarrowing/WellFormed.lean)
 states what the runner's JSON reader guarantees of every statement it reads
 (`Statement.wellFormed`). The root is a query, and each query's arms are
@@ -348,6 +357,13 @@ sqlive reads whole, the scope passes every row, so the masked tables are the
 same before and after, and `whole_narrowing_sound` proves that the write
 leaves the statement's rows unchanged.
 
+The step limit keeps the judge sound. `reruns_whole` proves that a statement
+read whole reruns on every write that any scopes rerun it on, so
+`Statement.rerunsLimited_sound` proves that a write sqlive lets pass, whether
+or not one of its questions stopped, is a write the judge without the limit
+lets pass. Every theorem here that takes a write the judge lets pass holds of
+sqlive's judge too.
+
 A lookup of a derived item reads it alone, with more fuel than the statement
 has left where the item sits.
 [Fuel.lean](../../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean) proves that the
@@ -497,15 +513,16 @@ column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
 one for a write and counts it as changed by every write to its row, which the
 model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
-reads whole as a join's partner, the terms that compare a NULL test's truth or
-a column `IS` a parameter, and the step limit on a lookup.
+reads whole as a join's partner, and the terms that compare a NULL test's truth or
+a column `IS` a parameter.
 
 ## The runner and the differential
 
 `narrowingRunner` reads one case as JSON on stdin: the schema (each table's
 columns and their affinities, and each view's query), the statement as a tree
-that names its sources by alias, the database before and after the write, and
-the write's row changes. The runner reads a CTE where a query names it, so a
+that names its sources by alias, the database before and after the write, the
+write's row changes, and whether one of sqlive's questions about the write
+stopped at the step limit. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
 statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether the write reruns the statement,
 whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
@@ -520,7 +537,9 @@ the test's copy of the database records, as sqlive's own pre-update hook
 records the test's writes. Each rule's generator writes
 statements of its rule's shape. The CTEs' generator also writes, beside the
 CTEs a statement reads, one that no query reads, with a LIMIT or a USING
-join. For each statement the test opens a live query and makes random writes. After each write it fails when the model finds the
+join. For each statement the test opens a live query and makes random writes,
+and counts the questions sqlive stops at the step limit as it judges each
+write. After each write it fails when the model finds the
 statement not well formed, when sqlive and the model disagree on whether the write reruns the query, when a write that either lets
 pass changed SQLite's rows, or when the model's rows differ from SQLite's.
 Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model

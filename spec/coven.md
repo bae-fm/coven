@@ -959,8 +959,9 @@ unixepoch('now')` or `t.a + u.a = 3`, narrows nothing, and a statement with no
 condition that narrows depends on every row of each table it read. When coven
 can't tell, it counts the row as a match, so the query runs again: a value
 with no cast that keeps it, such as a blob in a TEXT column, a value the write
-didn't record, an error, and a question that runs past the lookups' step limit
-(below). A condition judged this way is never read from a view's or subquery's
+didn't record, and an error. When a question runs past the lookups' step
+limit (below), coven runs the query again whatever the write's other questions
+answer. A condition judged this way is never read from a view's or subquery's
 rows: it narrows the tables the statement reads directly, and the tables
 behind a view keep the conditions they have.
 
@@ -1185,9 +1186,9 @@ nothing either.
 
 A lookup's cost depends on the app's indexes. One no index serves reads its
 partner row by row, so it could cost a write as much as reading the whole
-table. A lookup stops after 1,000 of SQLite's steps instead, and counts as a
-match: the query runs again, which is always right, and the write's cost stays
-bounded. Over a partner of a few rows the lookup finishes and still narrows.
+table. A lookup stops after 1,000 of SQLite's steps instead, and the query
+runs again whatever the write's other lookups find, which is always right, and
+the write's cost stays bounded. Over a partner of a few rows the lookup finishes and still narrows.
 An app's tests can count the work: with coven's test-utils feature,
 `test_track_work` counts the SQLite steps of the app's statements and of
 coven's lookups apart ([api.md E4](api.md#e4-reading)). Ben's test runs his
@@ -1226,8 +1227,8 @@ would narrow it, and a cover written for another album's release doesn't rerun
 the window. A cover written for a release of an album the window shows does,
 even when that release isn't the album's first. Coven looks up the release of
 the cover, not the pick: running the pick once for each album the window shows
-would cost more as the window grows, and past 1,000 steps a lookup counts as a
-match. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
+would cost more as the window grows, and past 1,000 steps a lookup stops and
+the window runs again. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
 `col IN (SELECT x.c ...)`, where the subquery's single column is a bare column
 `x.c` of one of its own sources, and where both columns have the same affinity,
 or `x.c` is declared with no type, and compare by BINARY, as a join's do. A
@@ -15245,6 +15246,7 @@ Write-ups explain each model and state its assumptions:
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Virtual.lean` | §4 |
+| A statement read whole reruns on every write that any scopes rerun it on, so sqlive's judge, which narrows nothing for a write whose question stopped at the step limit, lets a write pass only when the judge without the limit does | `reruns_whole`, `Statement.rerunsLimited_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Judge.lean` | §4 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
 | A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
