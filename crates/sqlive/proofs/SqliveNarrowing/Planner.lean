@@ -115,7 +115,8 @@ when it returned as many rows as its LIMIT (`scope_lookup::scopes`). -/
 def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :=
   p.order.foldl (fun bound i =>
     let item := p.state.items i
-    let scope := (item.term.map STerm.bind).getD .all
+    let scope := ((item.term.map STerm.bind).getD .all).both
+      ((item.carried.map STerm.bind).getD .all)
     let scope := item.memberships.foldl (fun scope m =>
       let partner := bound m.partner
       match m.value with

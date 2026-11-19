@@ -92,10 +92,12 @@ promise of whichever rule reads it.
   proves that a term true of the derived row is then true of the item's row.
 - **A condition carried across an equality.** `transfer_sound` proves that
   when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
-  true of `a`'s row on `x`. The planner adds such a term to `a`'s own,
+  true of `a`'s row on `x`. The planner adds such a term to `a`'s scope,
   whichever of the two items it places first, so `JOIN b ON a.x = b.y WHERE
   b.y = 5 AND a.z = 1` narrows `a` by `a.x = 5` too, though `a.z = 1` makes
-  `a` the item the planner places first. A derived item's own terms on a
+  `a` the item the planner places first. The carried term decides nothing
+  of that order, so an item that only carried terms narrow still takes
+  values from the items it is joined to. A derived item's own terms on a
   column include what its arms say of it: `pulled_sound` proves that a row
   of a derived item's query whose column isn't NULL passes, joined with OR
   across the arms, the term of the item each arm passes the column on from,

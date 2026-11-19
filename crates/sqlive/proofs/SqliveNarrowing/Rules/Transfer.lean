@@ -47,8 +47,8 @@ def pulled (s : Statement) (st : PState) (i y : Nat) : Option STerm :=
 
 /-- The terms the edges between items of core `k` carry, each to its
 member: the partner's own term on the compared column, then what a derived
-partner's arms say of it, renamed to the member's column. An edge that
-compares with an expression carries none. -/
+partner's arms' own terms say of it, renamed to the member's column. An edge
+that compares with an expression carries none. -/
 def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
   st.edges.flatMap fun e =>
     if (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false then
@@ -60,11 +60,19 @@ def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
       | .expr _ => []
     else []
 
-/-- Add the terms the edges of core `k` carry, each to its member's term with
-AND. A LEFT JOIN item stays one: a carried term holds of each of its rows
-that joins, and says nothing of the row of NULLs. -/
+/-- Add `t` to what the edges carry to item `i`, with AND. -/
+def addCarried (st : PState) (i : Nat) (t : STerm) : PState :=
+  st.update i fun p =>
+    { p with carried := some (match p.carried with | some e => .and e t | none => t) }
+
+/-- Add the terms the edges of core `k` carry, each to what its member's
+edges carry, with AND. A carried term narrows the member's scope only: it
+passes into no derived item, carries nothing further and decides nothing of
+the order, so an item a carried term alone narrows still takes values from
+the items its edges join it to. A LEFT JOIN item stays one: a carried term
+holds of each of its rows that joins, and says nothing of the row of NULLs. -/
 def carry (s : Statement) (st : PState) (k : Nat) : PState :=
-  (carried s st k).foldl (fun st (i, t) => st.addTerm i t) st
+  (carried s st k).foldl (fun st (i, t) => addCarried st i t) st
 
 /-! The proof. -/
 

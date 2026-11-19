@@ -200,7 +200,13 @@ where
 /-! The state sqlive narrows a statement's items in (`Planner`). -/
 
 structure PItem where
+  /-- What the core's conditions, and those passed into a derived item, say
+  of the item's own row. -/
   term : Option STerm := none
+  /-- What the edges between the item and the other items of its core carry
+  to it from their own terms (`Transfer.carry`): it narrows the item's
+  scope, and decides nothing of the order the planner places items in. -/
+  carried : Option STerm := none
   /-- The edges the item took as memberships, in order. -/
   memberships : List Edge := []
   /-- For a LEFT JOIN's right side no condition outside its ON has made an
