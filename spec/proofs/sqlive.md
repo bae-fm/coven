@@ -412,6 +412,13 @@ under a binding that holds a row of each of the core's items that no LEFT
 JOIN adds, and a subquery of an ON under a binding that holds a row of each
 such item up to the ON's own. The restriction compares each query's runs
 under these bindings.
+[Congr.lean](../../crates/sqlive/proofs/SqliveNarrowing/Congr.lean) proves
+that a query's rows depend, of the binding a run reads around it, only on the
+rows of the outer items the query names (`evalQuery_outer_congr`): a run
+binds a core's own items as it joins them. So each ON condition of a LEFT
+JOIN holds of each binding its core keeps that holds a row of the join's item
+(`Statement.on_kept`), as it held when the join added the item, because the
+ON names only that item, items before it and items outside the core.
 
 A statement with a LIMIT bound needs only the bindings of its own core whose
 rows sort at or before the last row the run before the write returned.
