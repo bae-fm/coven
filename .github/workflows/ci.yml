@@ -102,14 +102,15 @@ jobs:
       - name: Drop the workspace's own outputs and report what the build holds
         if: ${{ !cancelled() }}
         run: |
-          for name in $(cargo metadata --format-version 1 --no-deps |
+          # Cargo keeps each unit's outputs in build/<package>/<unit hash>/out.
+          cargo metadata --format-version 1 --no-deps |
               "$(command -v python3 || command -v python)" -c '
           import json, sys
           for package in json.load(sys.stdin)["packages"]:
               for target in package["targets"]:
-                  print(target["name"].replace("-", "_"))
-          ' | tr -d '\r' | sort -u); do
-              rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
+                  print(package["name"], target["name"].replace("-", "_"))
+          ' | tr -d '\r' | sort -u | while read -r package name; do
+              rm -f target/debug/build/"$package"/*/out/"$name"-* target/debug/build/"$package"/*/out/lib"$name"-*
           done
           rm -rf target/doc
           # du counts a file once, under the first argument holding it.

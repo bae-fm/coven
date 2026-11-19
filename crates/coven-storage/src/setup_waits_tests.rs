@@ -43,7 +43,7 @@ async fn one_minute_bounds_every_step_of_a_setup_call() {
     let waits = SetupWaits::default();
     let refusals = std::sync::atomic::AtomicUsize::new(2);
     let answer = || async {
-        match refusals.fetch_update(
+        match refusals.try_update(
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
             |left| left.checked_sub(1),

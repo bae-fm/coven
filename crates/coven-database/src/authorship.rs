@@ -58,11 +58,11 @@ fn hash_bytes(hashes: &[[u8; 32]]) -> Vec<u8> {
 /// The hashes a stored list holds. One whose length isn't whole hashes is
 /// `DamagedDatabase` (§19.3).
 fn hash_list(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DbError> {
-    let hashes = bytes.chunks_exact(32);
-    if !hashes.remainder().is_empty() {
+    let (hashes, rest) = bytes.as_chunks::<32>();
+    if !rest.is_empty() {
         return Err(DbError::DamagedDatabase);
     }
-    Ok(hashes.map(|hash| hash.try_into().expect("a 32-byte chunk")).collect())
+    Ok(hashes.to_vec())
 }
 
 pub(crate) fn retain_header(

@@ -91,7 +91,7 @@ impl WriteObjectPrefix {
         exact_length(bytes.len(), Self::tail_length(self.part_keys.len()))?;
         let (roots, signature) = bytes.split_at(32 * self.part_keys.len());
         Ok(HeaderTail {
-            roots: roots.chunks_exact(32).map(|root| root.try_into().expect("32 bytes")).collect(),
+            roots: roots.as_chunks::<32>().0.to_vec(),
             signature: sealed::signature(signature)?,
         })
     }

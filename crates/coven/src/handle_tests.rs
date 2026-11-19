@@ -982,15 +982,15 @@ async fn a_circle_reset_keeps_only_the_snapshot_and_writes_that_read_it() {
     ben.write(note("00000000-0000-7000-8000-000000000100")).await.unwrap();
     ana.circles().reset(gifts).await.unwrap();
     quiet(&network).await;
-    for index in 0..2 {
-        let (notes, parents) = held(&network.devices[index].handle).await;
+    for (index, device) in network.devices.iter().enumerate() {
+        let (notes, parents) = held(&device.handle).await;
         assert!(notes.is_empty(), "device {index} dropped the queued write");
         assert_eq!(parents, 1, "the store's row stays");
     }
     ben.write(note("00000000-0000-7000-8000-000000000101")).await.unwrap();
     quiet(&network).await;
-    for index in 0..2 {
-        let (notes, parents) = held(&network.devices[index].handle).await;
+    for (index, device) in network.devices.iter().enumerate() {
+        let (notes, parents) = held(&device.handle).await;
         assert_eq!(notes, ["00000000-0000-7000-8000-000000000101"], "device {index}");
         assert_eq!(parents, 1);
     }

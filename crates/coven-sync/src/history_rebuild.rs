@@ -80,7 +80,7 @@ impl History {
                 _ => None,
             })
             .min()
-            .map_or(u64::MAX, |before| before);
+            .unwrap_or(u64::MAX);
         let store_through = store_limit.min(input);
         let newest = |audience: &Audience, through: u64| {
             self.announcements

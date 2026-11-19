@@ -734,7 +734,7 @@ impl StoreDatabase {
             #[cfg(any(test, feature = "test-utils"))]
             if inner
                 .applied_slot_failures
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
                     |left| left.checked_sub(1),

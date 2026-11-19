@@ -782,7 +782,7 @@ pub(crate) async fn received(receipt: &mut impl Receipt) {
     let devices = Devices::seeded().await;
     sql(&devices.mallory, "UPDATE tracks SET title='kept' WHERE id='s'").await.unwrap();
     let mut forged = records(&devices.mallory).pop().unwrap();
-    let track = forged.parts[0].rows.iter_mut().next().unwrap();
+    let track = forged.parts[0].rows.first_mut().unwrap();
     set_net(track, "title", Value::Text("elsewhere".into()));
     receipt.receive(&devices, &devices.ana, &forged).await;
     assert_eq!(verdict(&devices.ana, &forged, &store_row("tracks", "s")), ChangeVerdict::Applied);

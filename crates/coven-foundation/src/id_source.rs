@@ -205,7 +205,7 @@ impl IdSource for SequentialIds {
         use std::sync::atomic::Ordering;
         let n = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .expect("sequential id source exhausted");
         // Preserve all 64 sequence bits in the payload positions used above.
         Uuid::from_u64_pair(0x7000 | (n >> 62), 0x8000_0000_0000_0000 | (n & 0x3fff_ffff_ffff_ffff))
