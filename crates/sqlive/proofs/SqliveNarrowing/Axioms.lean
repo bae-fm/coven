@@ -91,3 +91,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.PState.Sem.pushEdges
 #print axioms SqliveNarrowing.PState.Sem.placed
 #print axioms SqliveNarrowing.plan_sem
+#print axioms SqliveNarrowing.scopeAt_parts
+#print axioms SqliveNarrowing.membershipScope_value
+#print axioms SqliveNarrowing.queryTest_good
+#print axioms SqliveNarrowing.plan_semTests

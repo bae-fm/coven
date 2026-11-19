@@ -9,7 +9,11 @@ join's where a row of NULLs fails it: a binding of the arm that matters holds,
 in the column the arm passes on, the value of a row the derived item's test
 keeps, which the test keeps only where the edge's member column holds a
 value, so the target has a row there. So the planned state says only what
-holds of each binding a core keeps that matters (`plan_sem`). -/
+holds of each binding a core keeps that matters (`plan_sem`), and a row
+a derived item's query's test keeps passes the derived item's term and
+holds a value in each member column its memberships and passed edges
+compare by `=`, so the tests the planner's scopes give are such tests
+(`plan_semTests`). -/
 namespace SqliveNarrowing
 
 attribute [local instance] Classical.propDecidable
@@ -355,5 +359,143 @@ theorem plan_sem {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row �
   obtain ⟨k, hk, hik⟩ := List.mem_flatMap.mp hi
   rw [((s.wellFormed_parts h).items k (List.mem_range.mp hk) i hik).2]
   exact hik
+
+/-! A row the planner's tests keep. -/
+
+theorem foldl_both_passes_acc {α : Type} {rowsOf : Nat → List Row} {r : Row} (g : α → RScope) :
+    ∀ (l : List α) (acc : RScope), (l.foldl (fun acc a => acc.both (g a)) acc).passes rowsOf r = true →
+      acc.passes rowsOf r = true
+  | [], _, h => h
+  | a :: l, acc, h => by
+    have := foldl_both_passes_acc g l _ h
+    rw [Limit.passes_both, Bool.and_eq_true] at this
+    exact this.1
+
+theorem foldl_both_passes_each {α : Type} {rowsOf : Nat → List Row} {r : Row} (g : α → RScope) :
+    ∀ (l : List α) (acc : RScope), (l.foldl (fun acc a => acc.both (g a)) acc).passes rowsOf r = true →
+      ∀ a ∈ l, (g a).passes rowsOf r = true
+  | [], _, _, a, ha => by cases ha
+  | b :: l, acc, h, a, ha => by
+    rcases List.mem_cons.mp ha with rfl | ha
+    · have := foldl_both_passes_acc g l _ h
+      rw [Limit.passes_both, Bool.and_eq_true] at this
+      exact this.2
+    · exact foldl_both_passes_each g l _ h a ha
+
+/-- A row an item's scope passes passes what the item's terms and carried
+terms say of it, and each of its memberships' scopes. -/
+theorem scopeAt_parts {p : Planned} {last : Option (List (List Value))} {bound : Nat → RScope}
+    {rowsOf : Nat → List Row} {i : Nat} {r : Row}
+    (h : (p.scopeAt last bound i).passes rowsOf r = true) :
+    (∀ t, (p.state.items i).term = some t → t.holds (some r) = true) ∧
+      (∀ t, (p.state.items i).carried = some t → t.holds (some r) = true) ∧
+      ∀ m ∈ (p.state.items i).memberships, (Planned.membershipScope bound m).passes rowsOf r = true := by
+  have heither : ∀ (l : List (List Side)) (acc : RScope),
+      (l.foldl (fun scope sides =>
+        match sides.map (Planned.sideScope bound) with
+        | [] => scope
+        | first :: rest => scope.both (rest.foldl RScope.either first)) acc).passes rowsOf r = true →
+      acc.passes rowsOf r = true := by
+    intro l
+    induction l with
+    | nil => exact fun _ h => h
+    | cons sides l ih =>
+      intro acc h
+      have := ih _ h
+      simp only at this
+      split at this
+      · exact this
+      · rw [Limit.passes_both, Bool.and_eq_true] at this
+        exact this.1
+  unfold Planned.scopeAt at h
+  simp only at h
+  have hall : ∀ found : RScope, ∀ sc : RScope, (sc.both found).passes rowsOf r = true →
+      sc.passes rowsOf r = true := by
+    intro found sc h
+    rw [Limit.passes_both, Bool.and_eq_true] at h
+    exact h.1
+  have hm := heither _ _ (by
+    split at h
+    · split at h
+      · exact hall _ _ h
+      · exact h
+    · exact h)
+  have hbase := foldl_both_passes_acc _ _ _ hm
+  rw [Limit.passes_both, Bool.and_eq_true] at hbase
+  refine ⟨fun t ht => ?_, fun t ht => ?_, foldl_both_passes_each _ _ _ hm⟩
+  · have := hbase.1
+    rw [ht] at this
+    simpa [STerm.bind_passes] using this
+  · have := hbase.2
+    rw [ht] at this
+    simpa [STerm.bind_passes] using this
+
+/-- A row a membership's scope passes holds a value in the member's value,
+unless the membership compares by `IS`. -/
+theorem membershipScope_value {bound : Nat → RScope} {rowsOf : Nat → List Row} {m : Edge} {r : Row}
+    (h : (Planned.membershipScope bound m).passes rowsOf r = true) (hn : m.nulls = false) :
+    (m.memberValue.eval r).isSome = true := by
+  unfold Planned.membershipScope at h
+  simp only at h
+  split at h
+  · rename_i mc c hmv _
+    split at h
+    · simp only [RScope.passes] at h
+      rw [hmv]
+      simp only [PValue.eval]
+      cases hx : r.cell mc with
+      | none => rw [hx] at h; cases h
+      | some _ => rfl
+    · simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, hn] at h
+      rcases h.1 with h1 | h1
+      · exact h1
+      · cases h1
+  · simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, hn] at h
+    rcases h.1 with h1 | h1
+    · exact h1
+    · cases h1
+
+/-- A row of a derived item's query, with no LIMIT and no OFFSET, that the
+query's test keeps is one that matters to the derived item in the planned
+state: the derived item's scope and pushed edges pass it. -/
+theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
+    (rowsOf : Nat → List Row) {d q : Nat} {v : Bool} (hd : d ∈ (s.core (s.item d).core).items)
+    (hkind : (s.item d).kind = .derived q v) (hlim : (s.query q).limit = none)
+    (hoff : (s.query q).offset = none) {r : Row}
+    (hr : (plan s).queryTest s ((plan s).scopes last) rowsOf q r = true) :
+    Planned.Good (plan s).state d r := by
+  have hdk : (s.item d).core < s.cores.length := s.core_lt hd
+  have htest : (plan s).scopeTest ((plan s).scopes last) rowsOf d r = true := by
+    simp only [Planned.queryTest, hlim, hoff, Option.isSome_none, Bool.or_false, Bool.false_or,
+      List.all_eq_true, List.mem_range] at hr
+    have := hr _ hdk d hd
+    simp only [hkind, bne_self_eq_false, Bool.false_or] at this
+    exact this
+  simp only [Planned.scopeTest, Bool.and_eq_true, List.all_eq_true, Bool.or_eq_true, bne_iff_ne,
+    ne_eq] at htest
+  obtain ⟨hsc, hpushed⟩ := htest
+  obtain ⟨hnd, hall⟩ := plan_order s
+  obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
+  rw [hbound] at hsc
+  obtain ⟨hterm, _, hmem⟩ := scopeAt_parts hsc
+  refine ⟨hterm, fun e he hn c hc => ?_⟩
+  rcases he with he | ⟨he, hm⟩
+  · have := membershipScope_value (hmem e he) hn
+    rw [hc] at this
+    simp only [PValue.eval] at this
+    exact Option.isSome_iff_ne_none.mp this
+  · rcases hpushed e he with hne | hp
+    · exact absurd hm hne
+    · have := membershipScope_value hp hn
+      rw [hc] at this
+      simp only [PValue.eval] at this
+      exact Option.isSome_iff_ne_none.mp this
+
+/-- The planned state says only what holds of each binding a core keeps that
+matters to its query's test, the test the planner's scopes give. -/
+theorem plan_semTests {s : Statement} (h : s.wellFormed = true) (last : Option (List (List Value)))
+    (rowsOf : Nat → List Row) :
+    (plan s).state.Sem s (endCls s ((plan s).queryTest s ((plan s).scopes last) rowsOf)) :=
+  plan_sem h fun _ _ _ hd hkind hlim hoff _ hr => queryTest_good last rowsOf hd hkind hlim hoff hr
 
 end SqliveNarrowing

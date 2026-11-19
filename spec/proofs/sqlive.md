@@ -550,7 +550,13 @@ edge's member column holds a value, so the target has a row there.
 `PState.Sem.pushEdges` proves that passing edges into an arm keeps the
 invariant, `PState.Sem.placed` that placing an item does, and `plan_sem`
 that the planned state says only what holds of each binding a core keeps
-that matters to its query's test.
+that matters to its query's test. `queryTest_good` proves that the tests the
+planner's scopes give are such tests: a row the test of a derived item's
+query keeps passes the derived item's scope and passed edges, so the
+derived item's term holds of it (`scopeAt_parts`), and it holds a value in
+the member column of each of the derived item's memberships and passed edges
+that compares by `=` (`membershipScope_value`). `plan_semTests` gives the
+planned state's facts for those tests.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the planned state's facts at a binding that matters, with the order the
