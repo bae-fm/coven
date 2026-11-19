@@ -32,7 +32,7 @@ let handle = Coven::builder(layout.clone())
     .await?;
 ```
 
-Opening migrates coven's own tables, then runs the app's pending migrations
+Opening creates coven's own tables when the database holds none, then runs the app's pending migrations
 ([Schema evolution](/docs/schema-evolution)), then checks the schema against
 the declared tables. A large migration, or rebuilding the indexes after a new
 version of SQLite or of the app's own orders and functions, takes a while, so

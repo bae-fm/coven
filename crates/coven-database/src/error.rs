@@ -871,9 +871,9 @@ pub enum OpenError {
     /// An app migration failed or cannot run on this schema.
     #[error(transparent)]
     Migration(#[from] MigrationError),
-    /// Coven's internal schema is unsupported or its migration cannot run.
+    /// Coven's internal schema is unsupported or its tables cannot be created.
     #[error(transparent)]
-    CovenMigration(#[from] CovenMigrationError),
+    CovenSchema(#[from] CovenSchemaError),
     /// The directory's settings could not be read.
     #[error(transparent)]
     Settings(SettingsError),
@@ -900,12 +900,12 @@ impl CarriesBug for OpenError {
             Self::Lock(error) => error.bug(),
             Self::Settings(error) => error.bug(),
             Self::Migration(MigrationError::Failed { source, .. })
-            | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
+            | Self::CovenSchema(CovenSchemaError::Failed { source }) => source.bug(),
             Self::Migration(
                 MigrationError::NotContiguous { .. } | MigrationError::SchemaTooNew { .. },
             )
-            | Self::CovenMigration(
-                CovenMigrationError::ReadOnly | CovenMigrationError::SchemaTooNew { .. },
+            | Self::CovenSchema(
+                CovenSchemaError::ReadOnly | CovenSchemaError::SchemaTooNew { .. },
             )
             | Self::MissingConfiguration { .. } => None,
         }
@@ -938,9 +938,9 @@ impl From<sqlive::rusqlite::Error> for OpenError {
 
 /// Coven's local tables cannot be used at this version (Appendix C.1, E1).
 #[derive(Debug, thiserror::Error)]
-pub enum CovenMigrationError {
-    /// The read-only connection cannot migrate coven's tables.
-    #[error("read-only open cannot migrate coven's schema")]
+pub enum CovenSchemaError {
+    /// The database holds no coven tables, and the read-only connection cannot create them.
+    #[error("read-only open cannot create coven's schema")]
     ReadOnly,
     /// The internal schema requires a newer coven.
     #[error("coven schema version {current} is newer than supported version {supported}")]
@@ -950,8 +950,8 @@ pub enum CovenMigrationError {
         /// The internal schema version this coven supports.
         supported: u32,
     },
-    /// A migration failed and its transaction rolled back.
-    #[error("coven migration failed: {source}")]
+    /// Creating the tables failed and its transaction rolled back.
+    #[error("creating coven's schema failed: {source}")]
     Failed {
         /// The failure, including any rollback error.
         #[source]

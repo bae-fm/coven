@@ -34,7 +34,7 @@ nothing changes. A database newer than the app's migrations fails with
 `MigrationError::SchemaTooNew`; numbering that isn't 1 to N fails with
 `MigrationError::NotContiguous`.
 
-Coven's own tables migrate first, automatically, every time a device opens for
+Coven creates its own tables first, when the database holds none, as a device opens for
 writing ([below](#coven-s-own-schema-and-format)).
 
 ## Additions and breaking changes
@@ -166,11 +166,11 @@ dismiss it.
 
 ## Coven's own schema and format
 
-Coven changes too. Its own tables in the app's database migrate in place each
-time a device opens for writing, before the app's migrations; each internal
-migration is atomic. A read-only open refuses tables that need migrating, and
-any open refuses an internal schema newer than this coven supports
-(`CovenMigrationError::SchemaTooNew`).
+Coven changes too. Its own tables in the app's database have one version. A
+device that opens for writing creates them when the database holds none, before
+the app's migrations, in one transaction. Coven has no migration for them. A
+read-only open refuses a database that holds no coven tables, and any open refuses an internal schema newer than this coven supports
+(`CovenSchemaError::SchemaTooNew`).
 
 Everything coven writes to storage records the format version it was written in,
 outside its encryption. An older coven that meets a newer object asks for an

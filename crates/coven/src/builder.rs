@@ -338,7 +338,7 @@ impl CovenBuilder {
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening always migrates coven's tables before the app's schema, then
+    /// Opening creates coven's tables, when the database holds none, before the app's schema, then
     /// unlocks both custody sessions before resuming unfinished operations and
     /// committed file work. Empty custody is allowed; an unlock failure prevents
     /// opening. No sync loop starts, and local database calls need no key material.

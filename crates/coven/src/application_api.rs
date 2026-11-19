@@ -45,7 +45,7 @@ pub use coven_database::test_utils::{record_user_file, StatementLog, WorkCounter
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
     named_params, params, prepare_user_file, sqlite_error_is_disk, types, unix_seconds_and_nanos,
-    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql, CovenMigrationError,
+    Binding, BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CommitSql, CovenSchemaError,
     DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
     FunctionArguments, Joining, JoiningWrite, LiveQuery, LiveQueryCause, LiveQueryClosed,
     LiveQueryRequests, LiveQueryRevision, LoadStep, Lost, LostCell, LostValue, Migration,

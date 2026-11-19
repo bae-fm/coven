@@ -10806,8 +10806,10 @@ slot, with §16.3's coverage rules.
 
 #### 18.9 Coven's own schema and format
 
-Coven changes too. Its own tables in the app's database migrate in place each time
-a device opens for writing, before the app's migrations run. Everything coven
+Coven changes too. Its own tables in the app's database have one version, which
+`application_id` records. A device that opens for writing creates the tables when the
+database holds none, before the app's migrations run. Coven has no migration for them: a
+change to their shape ships in one release that reads only the new shape. Everything coven
 writes to storage records the *format* version it was written in, so an older
 coven can tell a newer object from a damaged one and ask for an update instead of
 reporting damage. A format change needs no admin entry, snapshot or reload.
@@ -12635,7 +12637,7 @@ What they don't cover:
   canonical spelling of an audience (§15.1), how a CHECK is judged on a merged
   row (§9.3), or which tables a trigger may write. Nor do
   they cover how a migration write is found from the tables before and after
-  the migration, renames included (§18.4), how coven's own tables migrate, or
+  the migration, renames included (§18.4), how coven creates its own tables, or
   the format version each stored object records (§18.9). Tests check these;
   the merge model takes the recorded writes, their references and CHECK
   results as given, and the sequence model a migration's effect on rows and
@@ -12975,9 +12977,10 @@ device consistent with the database.
   would write all of it again. A write's plaintext, its changes' kept records
   and its row are each written once. A received write's whole records are held
   only in the transaction that judges and applies it.
-- Opening for writing always migrates coven's tables in place before running the
-  app's migrations. Each internal migration is atomic.
-- A read-only open refuses tables that need migrating. Any open refuses an
+- Opening for writing creates coven's tables, in one transaction, on a database
+  that holds none, before running the app's migrations. Coven has no migration for
+  them and never rewrites a table it created.
+- A read-only open refuses a database that holds no coven tables. Any open refuses an
   internal schema newer than this coven supports.
 
 Coven's other tables, besides the merge records Appendix B.1 lists:

@@ -7,8 +7,7 @@ use crate::schema::Schema;
 use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::{
-    CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
-    SyncedTable,
+    CovenSchemaError, DbError, Migration, MigrationError, MigrationOutcome, OpenError, SyncedTable,
 };
 
 /// Create coven's internal tables on a database that has none, before the
@@ -18,7 +17,7 @@ pub(crate) fn prepare_internal_schema(sql: &mut StoreSql) -> Result<(), OpenErro
     let internal: i32 = sql.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let internal = internal as u32;
     if internal > internal_schema::VERSION {
-        return Err(CovenMigrationError::SchemaTooNew {
+        return Err(CovenSchemaError::SchemaTooNew {
             current: internal,
             supported: internal_schema::VERSION,
         }
@@ -26,7 +25,7 @@ pub(crate) fn prepare_internal_schema(sql: &mut StoreSql) -> Result<(), OpenErro
     }
     if internal < internal_schema::VERSION {
         if sql.read_only()? {
-            return Err(CovenMigrationError::ReadOnly.into());
+            return Err(CovenSchemaError::ReadOnly.into());
         }
         // Coven creates its current internal schema on a database that holds
         // none, which reads as version zero, and has no upgrade from an older
@@ -37,7 +36,7 @@ pub(crate) fn prepare_internal_schema(sql: &mut StoreSql) -> Result<(), OpenErro
             crate::sql_versions::record_library(db)?;
             Ok(db.batch(&format!("PRAGMA application_id = {}", internal_schema::VERSION))?)
         })
-        .map_err(|source| CovenMigrationError::Failed { source: Box::new(source) })?;
+        .map_err(|source| CovenSchemaError::Failed { source: Box::new(source) })?;
     }
     Ok(())
 }

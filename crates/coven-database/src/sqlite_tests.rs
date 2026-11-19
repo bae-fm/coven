@@ -2,7 +2,7 @@ use super::*;
 use crate::read::tests::AppError;
 use crate::tests::next;
 use crate::write::tests::{count, records, sql};
-use crate::{internal_schema, CovenMigrationError, DbError, Migration, RowIdentity, SyncedTable};
+use crate::{internal_schema, CovenSchemaError, DbError, Migration, RowIdentity, SyncedTable};
 use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
@@ -78,7 +78,7 @@ async fn internal_schema_migrations_roll_back_on_failure() {
     .unwrap();
     drop(raw);
     let error = store.builder(vec![], vec![]).open().await.err().unwrap();
-    assert!(matches!(error, crate::OpenError::CovenMigration(CovenMigrationError::Failed { .. })));
+    assert!(matches!(error, crate::OpenError::CovenSchema(CovenSchemaError::Failed { .. })));
     let raw = Connection::open(store.database_path()).unwrap();
     assert_eq!(raw.query_row("PRAGMA application_id", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
     assert_eq!(
@@ -100,7 +100,7 @@ async fn read_only_refuses_internal_migration_without_changing_database() {
     let before = std::fs::read(store.database_path()).unwrap();
     assert!(matches!(
         store.builder(vec![], vec![]).open_read_only().await.err().unwrap(),
-        crate::OpenError::CovenMigration(CovenMigrationError::ReadOnly)
+        crate::OpenError::CovenSchema(CovenSchemaError::ReadOnly)
     ));
     assert_eq!(std::fs::read(store.database_path()).unwrap(), before);
 }
@@ -124,7 +124,7 @@ async fn newer_internal_schema_is_refused_without_changes() {
             };
             assert!(matches!(
                 result,
-                Err(crate::OpenError::CovenMigration(CovenMigrationError::SchemaTooNew {
+                Err(crate::OpenError::CovenSchema(CovenSchemaError::SchemaTooNew {
                     current,
                     supported,
                 })) if current == version && supported == internal_schema::VERSION

@@ -6,7 +6,7 @@ impl CovenBuilder {
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer,
-    /// whose coven tables need migrating, or whose indexes were built with
+    /// that holds no coven tables, or whose indexes were built with
     /// other versions of the app's collations and functions.
     /// File reads connect using saved settings and custody credentials when present.
     pub async fn open_read_only(

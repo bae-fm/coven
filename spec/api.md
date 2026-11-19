@@ -250,7 +250,7 @@ pub enum Audience {
   too, it says `DeviceKeyMissing`.
 - The read uses a read-only connection to coven's own tables and writes
   nothing to the database. It needs none of the app's declarations, and
-  refuses coven tables that need migrating, as a read-only open does.
+  refuses a database that holds no coven tables, as a read-only open does.
 - Store lock files live beside each store directory: the writer, reader and
   bootstrap locks. Deletion holds all three. It first renames the directory to
   its deletion name, which hides the store and records the deletion, then
@@ -334,9 +334,9 @@ pub enum Audience {
   open. Without a class, a store opens on any volume.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
-- Writable opens always migrate coven's own local tables in place ([Appendix
-  C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that need
-  migrating; any open refuses an internal schema newer than it supports.
+- Writable opens create coven's own local tables on a database that holds none ([Appendix
+  C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse a database that
+  holds none; any open refuses an internal schema newer than it supports.
 - *Progress*: a long operation reports how far it has come, so the app can draw
   a bar instead of a bare spinner ([§4](coven.md#4-writing-locally)). Each
   report is a `Progress`: the step the operation is on, and how many of the
@@ -1392,8 +1392,8 @@ pub enum CovenError {
     Sync(SyncError),
     /// An app migration failed or cannot run on this schema.
     Migration(MigrationError),
-    /// Coven's internal schema is unsupported or its migration cannot run.
-    CovenMigration(CovenMigrationError),
+    /// Coven's internal schema is unsupported or its tables cannot be created.
+    CovenSchema(CovenSchemaError),
     /// The directory's settings could not be read.
     Settings(SettingsError),
     /// A file operation in the store's directory failed, such as removing
@@ -1984,12 +1984,12 @@ pub enum SchemaError {
 }
 
 /// Coven's local tables cannot be used at this version (Appendix C.1, E1).
-pub enum CovenMigrationError {
-    /// The read-only connection cannot migrate coven's tables.
+pub enum CovenSchemaError {
+    /// The database holds no coven tables, and the read-only connection cannot create them.
     ReadOnly,
     /// The internal schema requires a newer coven.
     SchemaTooNew { current: u32, supported: u32 },
-    /// A migration failed and its transaction rolled back.
+    /// Creating the tables failed and its transaction rolled back.
     Failed { source: Box<DbError> },
 }
 
@@ -2661,7 +2661,7 @@ impl CovenBuilder {
         F: FnOnce(&MemberWrite<'_>, &[CircleId]) -> CovenResult<()> + Send + 'static;
 
     /// Opens the store for reading and writing, taking the store's lock.
-    /// Opening always migrates coven's tables before the app's schema, then
+    /// Opening creates coven's tables, when the database holds none, before the app's schema, then
     /// unlocks each configured key custody once for this handle's session,
     /// then resumes unfinished operations and committed file work. Empty
     /// custody is allowed; malformed or inaccessible custody fails opening.
@@ -2715,8 +2715,7 @@ impl CovenBuilder {
     /// for example from another process. Its shared lock prevents deletion
     /// while its read connections and local cache connection remain open.
     /// It runs no migration and refuses a database whose schema is newer than
-    /// its migrations, whose coven tables need migrating, or whose indexes
-    /// were built with other versions of the app's collations and functions.
+    /// its migrations, that holds no coven tables, or whose indexes were built with other versions of the app's collations and functions.
     /// File reads use saved storage settings and custody credentials when present.
     /// A store whose replacement or deletion is unfinished is refused, as
     /// `open` refuses it.
@@ -8662,8 +8661,9 @@ pub enum ProviderSignOut {
     custody lives with the returned handle. A restore's OAuth sign-in tokens
     move from session custody into the device keychain on successful
     publication; a join's move there as soon as it has saved its code.
-  - Every call migrates coven's own local tables in place before applying the app's migrations, as a
-    writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
+  - Every call creates coven's own local tables, when the database holds none, before
+    applying the app's migrations, as a writable open does
+    ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
   - The status callback is called on the task awaiting the call, with each
     phase as it starts: `Opening`, the new installation's open steps;
     `Connecting`; a join's or a pairing's `WaitingForApproval` or `Pending`;

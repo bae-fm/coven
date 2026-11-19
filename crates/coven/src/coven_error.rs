@@ -3,7 +3,7 @@
 
 use crate::task::{Bug, CarriesBug, Shutdown, TaskFailed};
 use crate::{
-    CovenMigrationError, DbError, FileError, KeyError, MigrationError, NetworkWatchError,
+    CovenSchemaError, DbError, FileError, KeyError, MigrationError, NetworkWatchError,
     SettingsError, SqliteError, StoreId, StoreLockError, SyncError, WriteFailure,
 };
 use coven_database::OpenError;
@@ -45,9 +45,9 @@ pub enum CovenError {
     /// An app migration failed or cannot run on this schema.
     #[error(transparent)]
     Migration(#[from] MigrationError),
-    /// Coven's internal schema is unsupported or its migration cannot run.
+    /// Coven's internal schema is unsupported or its tables cannot be created.
     #[error(transparent)]
-    CovenMigration(#[from] CovenMigrationError),
+    CovenSchema(#[from] CovenSchemaError),
     /// The directory's settings could not be read.
     #[error(transparent)]
     Settings(SettingsError),
@@ -119,7 +119,7 @@ impl CarriesBug for CovenError {
                 write.bug().or_else(|| failures.iter().find_map(DbError::bug))
             }
             Self::Migration(MigrationError::Failed { source, .. })
-            | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
+            | Self::CovenSchema(CovenSchemaError::Failed { source }) => source.bug(),
             _ => None,
         }
     }
@@ -180,7 +180,7 @@ impl From<OpenError> for CovenError {
         match error {
             OpenError::Database(error) => Self::Database(error),
             OpenError::Migration(error) => Self::Migration(error),
-            OpenError::CovenMigration(error) => Self::CovenMigration(error),
+            OpenError::CovenSchema(error) => Self::CovenSchema(error),
             OpenError::Settings(error) => Self::from(error),
             OpenError::Lock(error) => Self::Lock(error),
             OpenError::MissingConfiguration { field } => Self::MissingConfiguration { field },
