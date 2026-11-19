@@ -3,17 +3,18 @@
 //! them as it files each subscription's reads again, so a write learns them
 //! without reading every live query.
 
+use crate::change_capture::ScopedColumns;
 use crate::read_set::ReadSet;
 use crate::row_scope::RowScope;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How many reads' scopes test each column, by table, all lowercase.
 #[derive(Default)]
-pub(crate) struct ScopedColumns {
+pub(crate) struct ScopedCounts {
     tables: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
-impl ScopedColumns {
+impl ScopedCounts {
     /// Count the columns the scopes of `reads` test.
     pub(crate) fn add(&mut self, reads: &ReadSet) {
         for (table, columns) in tested(reads) {
@@ -27,15 +28,12 @@ impl ScopedColumns {
     /// Take back the columns `add` counted for `reads`.
     pub(crate) fn remove(&mut self, reads: &ReadSet) {
         for (table, columns) in tested(reads) {
-            let Some(counts) = self.tables.get_mut(&table) else {
-                continue;
-            };
+            let counts = self.tables.get_mut(&table).expect("`add` counted the read's table");
             for column in columns {
-                if let Some(count) = counts.get_mut(&column) {
-                    *count -= 1;
-                    if *count == 0 {
-                        counts.remove(&column);
-                    }
+                let count = counts.get_mut(&column).expect("`add` counted the read's column");
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&column);
                 }
             }
             if counts.is_empty() {
@@ -45,7 +43,7 @@ impl ScopedColumns {
     }
 
     /// The columns some read's scope tests, by table.
-    pub(crate) fn columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+    pub(crate) fn columns(&self) -> ScopedColumns {
         self.tables
             .iter()
             .map(|(table, counts)| (table.clone(), counts.keys().cloned().collect()))
@@ -53,12 +51,16 @@ impl ScopedColumns {
     }
 }
 
-/// Each read of `reads` that narrows its table, with its table, lowercase,
-/// and the columns its scope tests.
+/// Each read of `reads` whose scope tests some column, with its table,
+/// lowercase, and those columns.
 fn tested(reads: &ReadSet) -> impl Iterator<Item = (String, BTreeSet<String>)> + '_ {
-    reads.iter().filter(|read| !matches!(read.scope, RowScope::All)).map(|read| {
-        let mut columns = BTreeSet::new();
-        read.scope.columns(&mut columns);
-        (read.table.to_ascii_lowercase(), columns)
-    })
+    reads
+        .iter()
+        .filter(|read| !matches!(read.scope, RowScope::All))
+        .map(|read| {
+            let mut columns = BTreeSet::new();
+            read.scope.columns(&mut columns);
+            (read.table.to_ascii_lowercase(), columns)
+        })
+        .filter(|(_, columns)| !columns.is_empty())
 }

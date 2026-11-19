@@ -7,7 +7,7 @@ use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
 use crate::read_index::{ReadIndex, SubscriptionId};
 use crate::read_set::{affected_by, past_row_limit};
-use crate::scoped_columns::ScopedColumns;
+use crate::scoped_counts::ScopedCounts;
 use crate::{affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange};
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{Bug, BugSinkRef};
@@ -468,7 +468,7 @@ struct Filed {
     filings: HashMap<SubscriptionId, Filing>,
     waiting: ReadIndex,
     reading: BTreeSet<SubscriptionId>,
-    scoped: ScopedColumns,
+    scoped: ScopedCounts,
 }
 
 impl Filed {
