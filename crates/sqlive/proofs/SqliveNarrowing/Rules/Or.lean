@@ -93,6 +93,36 @@ theorem conjuncts_true {cd : Cond} {b : Bind} {sub : Subs} (h : isTrue (cd.eval 
     subst hc
     exact h
 
+/-- The items a side of an OR names are items the OR names. -/
+theorem sides_items {cd c : Cond} (h : c ∈ sides cd) : ∀ j ∈ c.items, j ∈ cd.items := by
+  induction cd with
+  | or l r ihl ihr =>
+    intro j hj
+    simp only [sides, List.mem_append] at h
+    simp only [Cond.items, Cond.refs, List.map_append, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (ihl h j hj)
+    · exact Or.inr (ihr h j hj)
+  | _ =>
+    simp only [sides, List.mem_singleton] at h
+    subst h
+    exact fun j hj => hj
+
+/-- The items a conjunct names are items its condition names. -/
+theorem conjuncts_items {cd c : Cond} (h : c ∈ conjuncts cd) : ∀ j ∈ c.items, j ∈ cd.items := by
+  induction cd with
+  | and l r ihl ihr =>
+    intro j hj
+    simp only [conjuncts, List.mem_append] at h
+    simp only [Cond.items, Cond.refs, List.map_append, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (ihl h j hj)
+    · exact Or.inr (ihr h j hj)
+  | _ =>
+    simp only [conjuncts, List.mem_singleton] at h
+    subst h
+    exact fun j hj => hj
+
 theorem mem_side_terms {read : ReadCondition} {s : Statement} {k : Nat} {side : Cond}
     {i : Nat} {t : STerm} (h : (i, t) ∈ (sideNarrowing read s k side).terms) :
     ∃ c ∈ conjuncts side, ∃ n, read s k c = some n ∧ (i, t) ∈ n.terms := by
@@ -144,10 +174,10 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
         obtain ⟨found, hfound, rfl⟩ := List.mem_map.mp hside
         simp only [sideFor, List.mem_filter, decide_eq_true_eq] at he
         obtain ⟨he, hmem⟩ := he
-        obtain ⟨side', _, rfl⟩ := List.mem_map.mp hfound
-        obtain ⟨c, _, n', hr, he'⟩ := mem_side_edges he
-        obtain ⟨_, hne, hread, _⟩ := h.edges hr e he'
-        exact ⟨hmem, hne, hread⟩
+        obtain ⟨side', hside', rfl⟩ := List.mem_map.mp hfound
+        obtain ⟨c, hc, n', hr, he'⟩ := mem_side_edges he
+        obtain ⟨_, hne, hnamed, hread, _⟩ := h.edges hr e he'
+        exact ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread⟩
       · intro db f b hc
         obtain ⟨side, hside, htrue⟩ := sides_true hc
         refine ⟨sideFor (sideNarrowing read s k side) i,
@@ -163,7 +193,7 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
           simp only [sideFor, List.mem_filter, decide_eq_true_eq] at he
           obtain ⟨he, _⟩ := he
           obtain ⟨c, hc', n', hr, he'⟩ := mem_side_edges he
-          exact (h.edges hr e he').2.2.2 db f b (conjuncts_true htrue c hc')
+          exact (h.edges hr e he').2.2.2.2 db f b (conjuncts_true htrue c hc')
     · cases hd
   all_goals simp [readCondition] at hn
 

@@ -61,21 +61,25 @@ theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
     (∀ i t, (i, t) ∈ (readCondition s k cd).terms → (s.item i).core = k ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)) ∧
     (∀ e ∈ (readCondition s k cd).edges, (s.item e.member).core = k ∧
-      (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable ∧
+      (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+      (s.item e.partner).readable ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) ∧
     (∀ d ∈ (readCondition s k cd).ors, (s.item d.item).core = k ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
-        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+        (s.item e.partner).readable) ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b) := by
   have disjoins : ∀ {read : ReadCondition}, read.Disjoins → ∀ {n}, read s k cd = some n →
       (∀ i t, (i, t) ∈ n.terms → (s.item i).core = k ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)) ∧
       (∀ e ∈ n.edges, (s.item e.member).core = k ∧
-        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+        (s.item e.partner).readable ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) ∧
       (∀ d ∈ n.ors, (s.item d.item).core = k ∧
         (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
-          (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
+          (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+          (s.item e.partner).readable) ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b) := by
     intro read hread n hn
     obtain ⟨hterms, hedges, hors⟩ := hread hn

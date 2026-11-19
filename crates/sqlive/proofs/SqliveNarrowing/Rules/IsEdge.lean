@@ -104,11 +104,13 @@ theorem is_edge_sound : ReadCondition.Sound readCondition where
       rcases he with he | he
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
         obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => Edge.items_right _ (show e'.partner ∈ r.items from Edge.edge_partner_mem he'), hread,
+          fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc).symm
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
         obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => Edge.items_left _ (show e'.partner ∈ l.items from Edge.edge_partner_mem he'), hread,
+          fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc)
     · cases h
 

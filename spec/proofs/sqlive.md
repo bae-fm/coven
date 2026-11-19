@@ -85,6 +85,9 @@ condition holds of a binding, whatever its subqueries return, each term it
 reads holds of its item's row, and each edge's member column holds a value
 that its partner's row in the binding gives. For a subquery's source, the
 partner's row is in a binding of the subquery's core under the same binding.
+Any other partner is an item the condition names, so a binding that holds a
+row of each item a condition names, as each binding a core keeps does of its
+items that no LEFT JOIN adds, holds a row of the partner.
 `readCondition_sound` proves that the narrowing a condition gives keeps the
 promise of whichever rule reads it.
 

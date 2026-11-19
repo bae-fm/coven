@@ -173,7 +173,8 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       | some member =>
       simp only [hm, bind, Option.bind] at hpos
       obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hpos
-      refine ⟨hk, fun h => by simp [hnest] at h, hread, fun db f b hc => ?_⟩
+      refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
+      fun db f b hc => ?_⟩
       -- The comparison gives a row of the subquery equal to the row value.
       have hrow : ∃ row ∈ evalQuery s db f b q, rowEqTruth
           (vs.map (Expr.eval b (evalQuery s db f b))) row = some true := by

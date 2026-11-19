@@ -201,26 +201,30 @@ def Disjunction.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (d : Disj
 /-- What a reader that reads a condition as ORs promises: it gives no term
 and no edge, and of each OR it gives, the item is one of core `k`'s, each
 side's edges are from that item to a partner readable alone that, outside a
-subquery, isn't the item, and wherever the condition holds, one side does. -/
+subquery, isn't the item and is an item the condition names, and wherever
+the condition holds, one side does. -/
 def ReadCondition.Disjoins (read : ReadCondition) : Prop :=
   ∀ {s k cd n}, read s k cd = some n → n.terms = [] ∧ n.edges = [] ∧
     ∀ d ∈ n.ors, (s.item d.item).core = k ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
-        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+        (s.item e.partner).readable) ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b
 
 /-- What a reader promises of the narrowing it reads from a condition of
 core `k`: when the condition holds of a binding, with its subqueries read at
 fuel `f`, each term holds of its item's row and each edge holds. Each term
 and edge is on an item of core `k`, and an edge's partner is readable alone
-and, outside a subquery, isn't its member. -/
+and, outside a subquery, isn't its member and is an item the condition
+names, so a binding that holds a row of each item the condition names holds
+one of the partner. -/
 structure ReadCondition.Sound (read : ReadCondition) : Prop where
   terms : ∀ {s k cd n}, read s k cd = some n → ∀ i t, (i, t) ∈ n.terms →
     (s.item i).core = k ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)
   edges : ∀ {s k cd n}, read s k cd = some n → ∀ e ∈ n.edges,
     (s.item e.member).core = k ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (s.item e.partner).readable ∧
+    (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b
 
 end SqliveNarrowing

@@ -109,6 +109,32 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
       · cases h
         exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
 
+/-- An edge's partner is an item its other side names. -/
+theorem edge_partner_mem {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
+    (h : edge s k member other first = some e) : e.partner ∈ other.items := by
+  obtain ⟨_, _, _, _, hitems, hrefs, _⟩ := edge_facts h
+  cases hr : other.refs with
+  | nil => exact absurd hr hrefs
+  | cons p ps =>
+    have hp : p.1 ∈ other.items := by simp [Expr.items, hr]
+    rw [← hitems p.1 hp]
+    exact hp
+
+/-- The items each side of a comparison names are items it names. -/
+theorem items_left {op : Op} {l r : Expr} : ∀ j ∈ l.items, j ∈ (Cond.cmp op l r).items := by
+  intro j hj
+  simp only [Expr.items, List.mem_map] at hj
+  obtain ⟨p, hp, rfl⟩ := hj
+  simp only [Cond.items, Cond.refs, List.mem_map, List.mem_append]
+  exact ⟨p, Or.inl hp, rfl⟩
+
+theorem items_right {op : Op} {l r : Expr} : ∀ j ∈ r.items, j ∈ (Cond.cmp op l r).items := by
+  intro j hj
+  simp only [Expr.items, List.mem_map] at hj
+  obtain ⟨p, hp, rfl⟩ := hj
+  simp only [Cond.items, Cond.refs, List.mem_map, List.mem_append]
+  exact ⟨p, Or.inr hp, rfl⟩
+
 /-- An edge holds of a binding where its member equals its partner's value. -/
 theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs}
@@ -177,11 +203,13 @@ theorem edge_sound : ReadCondition.Sound readCondition where
       simp only [List.mem_append, Option.mem_toList] at he
       rcases he with he | he
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => items_right _ (edge_partner_mem he), hread,
+          fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hl hr
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => items_left _ (edge_partner_mem he), hread,
+          fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hr hl
     · cases h

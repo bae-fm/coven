@@ -61,13 +61,25 @@ theorem row_edge_sound : ReadCondition.Sound readCondition where
         intro db f b hc
         simp only [Cond.eval, isTrue, beq_iff_eq] at hc
         exact rowEqTruth_zip hc hpair
+      have hnamed : ∀ x : Expr, (x = l ∨ x = r) → ∀ j ∈ x.items, j ∈ (Cond.rowEq ls rs).items := by
+        intro x hx j hj
+        have hl : l ∈ ls := (List.of_mem_zip hpair).1
+        have hr : r ∈ rs := (List.of_mem_zip hpair).2
+        simp only [Expr.items, List.mem_map] at hj
+        obtain ⟨p, hp, rfl⟩ := hj
+        simp only [Cond.items, Cond.refs, List.mem_map, List.mem_append, List.mem_flatMap]
+        rcases hx with rfl | rfl
+        · exact ⟨p, Or.inl ⟨x, hl, hp⟩, rfl⟩
+        · exact ⟨p, Or.inr ⟨x, hr, hp⟩, rfl⟩
       rcases he with he | he
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => hnamed r (Or.inr rfl) _ (Edge.edge_partner_mem he), hread,
+          fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hl hr
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
-        refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
+        refine ⟨hk, fun _ => hne, fun _ => hnamed l (Or.inl rfl) _ (Edge.edge_partner_mem he), hread,
+          fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hr hl
     · cases h

@@ -164,7 +164,8 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     simp only [List.mem_singleton] at he
     subst he
     obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hedge
-    refine ⟨hk, fun h => by simp [hnest] at h, hread, fun db f b hc => ?_⟩
+    refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
+      fun db f b hc => ?_⟩
     -- The condition gives the member's value and a row of the subquery with it.
     have hrow : ∃ x row, member.eval b (evalQuery s db f b) = some x ∧
         row ∈ evalQuery s db f b q ∧ row.cell 0 = some x := compared_sound hcmp hc
