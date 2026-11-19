@@ -14792,7 +14792,9 @@ the same on any platform.
     A lint that needs to know a workspace's own functions or types reads them
     from the policy file of check 3, which the checker and the lints share. The
     lint resolves each row's path in the crate the path names, and a row that
-    names nothing there stops the compile. `clippy::async_export_off_runtime`
+    names nothing there stops the compile, unless a `cfg` leaves what the row
+    names out of that compile, as a module that only another platform builds.
+    `clippy::async_export_off_runtime`
     finds an async function that uniffi exports and whose body calls none of
     the functions the policy's `async_exports.runs` lists: uniffi polls the
     function's future on the executor of the language that called it, which

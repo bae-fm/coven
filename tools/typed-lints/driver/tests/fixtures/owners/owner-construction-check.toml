@@ -7,7 +7,7 @@ construction_only_capability_types = ["owners_base::files::StoreDir"]
 shared_state_types = ["std::sync::atomic::AtomicU64"]
 private_state_types = ["std::sync::Mutex"]
 shared_pointer_types = ["std::sync::Arc"]
-task_types = ["owners::Task"]
+task_types = ["owners::Task", "owners::elsewhere::Task"]
 
 [handles]
 "owners::Requests" = "owners::Query"

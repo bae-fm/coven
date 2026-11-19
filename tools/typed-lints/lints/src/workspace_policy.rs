@@ -19,7 +19,7 @@ use clippy_utils::paths::{PathNS, lookup_path_str};
 use owner_construction_policy::{FILE_NAME, Policy, RAW_SQLITE_HANDLES};
 use rustc_attr_ir::CfgEntry;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LOCAL_CRATE};
 use rustc_hir::{HirId, find_attr};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{FileName, Span, Symbol, sym};
@@ -276,16 +276,51 @@ pub(crate) fn raw_sqlite_handles(tcx: TyCtxt<'_>) -> Vec<(DefId, &'static str)> 
 
 /// What a policy row's path, such as `app_bridge::runtime::Runtime::run`,
 /// defines in the crate being compiled: nothing when the crate can't reach
-/// the crate the path names. A path whose crate is the one being compiled
-/// and that defines nothing there is a row the workspace no longer holds,
-/// which stops the compile, as the structural checker refuses such a row.
+/// the crate the path names, or when a `cfg` leaves what it names out of
+/// this compile, as a module only another platform builds. A path whose
+/// crate is the one being compiled and that defines nothing there otherwise
+/// is a row the workspace no longer holds, which stops the compile, as the
+/// structural checker refuses such a row.
 pub(crate) fn resolve_row(tcx: TyCtxt<'_>, row: &str, path: &str, ns: PathNS) -> Vec<DefId> {
     let found = lookup_path_str(tcx, ns, path);
     let names_this_crate =
         path.split("::").next().is_some_and(|root| root == tcx.crate_name(LOCAL_CRATE).as_str());
-    if found.is_empty() && names_this_crate {
+    if found.is_empty() && names_this_crate && !configured_out(tcx, path) {
         tcx.dcx()
             .fatal(format!("typed lints: {FILE_NAME}'s {row} names {path}, which defines nothing"));
     }
     found
+}
+
+/// Whether a `cfg` left out of this compile the item a path of this crate
+/// names, or the module or type that holds it: the first part of the path
+/// that names nothing is an item rustc stripped from the part before it,
+/// which names a module or, for an associated item, a type with an impl.
+fn configured_out(tcx: TyCtxt<'_>, path: &str) -> bool {
+    let segments = path.split("::").collect::<Vec<_>>();
+    let stripped = tcx.stripped_cfg_items(LOCAL_CRATE);
+    for end in (1..segments.len()).rev() {
+        let scopes = if end == 1 {
+            vec![CRATE_DEF_ID.to_def_id()]
+        } else {
+            lookup_path_str(tcx, PathNS::Type, &segments[..end].join("::"))
+        };
+        if scopes.is_empty() {
+            continue;
+        }
+        let holds = |scope: DefId| {
+            scopes.contains(&scope)
+                || matches!(tcx.def_kind(scope), DefKind::Impl { .. })
+                    && tcx
+                        .type_of(scope)
+                        .instantiate_identity()
+                        .skip_norm_wip()
+                        .ty_adt_def()
+                        .is_some_and(|adt| scopes.contains(&adt.did()))
+        };
+        return stripped
+            .iter()
+            .any(|item| item.ident.name.as_str() == segments[end] && holds(item.parent_scope));
+    }
+    false
 }

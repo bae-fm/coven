@@ -137,6 +137,12 @@ pub fn with_test_only_code() {
     let _ = SystemClock;
 }
 
+/// What another platform builds: the policy's row names a type in it.
+#[cfg(feature = "another-platform")]
+mod elsewhere {
+    pub struct Task;
+}
+
 #[cfg(feature = "test-utils")]
 pub fn fixture() -> Service {
     Service { clock: SystemClock }
