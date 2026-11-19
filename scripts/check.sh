@@ -374,26 +374,21 @@ lean_proof() {
     fi
 }
 
-# The path of a proof package's runner. A package this run did not select is
-# brought up to date first, so a differential never runs a stale runner.
+# The BUILDS_CARGO_LEAN value that names a proof package's runner for the
+# differential that reads it from the variable: the machine that runs the
+# tests builds the runner, up to date, and sets the variable to its path there
+# (scripts/cargo.sh).
 runner() {
-    local package=$1 exe=$2
-    if ! proof_selected "$package"; then
-        (cd "$(proof_dir "$package")" && lake build "$exe" > /dev/null)
-    fi
-    local path
-    path="$(cd "$(proof_dir "$package")" && pwd)/.lake/build/bin/$exe"
-    if [ -f "$path.exe" ]; then
-        path="$path.exe"
-    fi
-    echo "$path"
+    local variable=$1 package=$2 exe=$3
+    echo "$variable=$(proof_dir "$package"):$exe"
 }
 
 # Run exactly the named ignored tests of one package: cargo flags, `--`, then
 # full test paths, and `--nocapture` to show each one's output. They are built
 # with the whole workspace, as the code checks build it, so a run that checks
 # both, or restores CI's saved build, compiles them once. A test the package
-# lacks would run nothing, so each one must be listed.
+# lacks would run nothing, so each one must be listed. BUILDS_CARGO_LEAN names
+# the runner the tests run; only the run builds it, not the listing.
 exact_ignored() {
     local package=$1 flags=() tests=() output=() filter listed test
     shift
@@ -414,7 +409,7 @@ exact_ignored() {
     done
     filter="package($package) & ($(printf 'test(=%s) | ' "${tests[@]}"))"
     filter="${filter% | )})"
-    listed=$(scripts/cargo.sh nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
+    listed=$(env -u BUILDS_CARGO_LEAN scripts/cargo.sh nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
         -E "$filter" --message-format oneline | tr -d '\r')
     for test in "${tests[@]}"; do
         if ! printf '%s\n' "$listed" | grep -qE " ${test//./\\.}\$"; then
@@ -438,24 +433,20 @@ proofs() {
     lean_proof "file IO, retries and wakes" io CovenIO covenIO
     lean_proof "sqlive's narrowing and its JSON runner" sqlive SqliveNarrowing sqliveNarrowing
 
-    local runner
     if proof_selected sequence || crate_selected coven-merge; then
-        runner=$(runner sequence sequenceRunner)
         step "Rust / Lean sequence causality"
-        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-merge --all-features -- --nocapture \
+        BUILDS_CARGO_LEAN="$(runner COVEN_SEQUENCE_LEAN sequence sequenceRunner)" exact_ignored coven-merge --all-features -- --nocapture \
             sequence::tests::differential::sequence_past_matches_lean
     fi
     if proof_selected sequence || crate_selected coven-database; then
-        runner=$(runner sequence sequenceRunner)
         step "Rust / Lean sequence settlement, first-slot claims and cut-off"
-        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-database --all-features -- --nocapture \
+        BUILDS_CARGO_LEAN="$(runner COVEN_SEQUENCE_LEAN sequence sequenceRunner)" exact_ignored coven-database --all-features -- --nocapture \
             claim::tests::sequence_settlement_matches_lean \
             sequence_apply::tests::sequence_rows_match_lean
     fi
     if proof_selected sequence || crate_selected coven-sync; then
-        runner=$(runner sequence sequenceRunner)
         step "Rust / Lean sequence floor checks, authenticated settlement, administration, circles, keys and invites"
-        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-sync --all-features -- --nocapture \
+        BUILDS_CARGO_LEAN="$(runner COVEN_SEQUENCE_LEAN sequence sequenceRunner)" exact_ignored coven-sync --all-features -- --nocapture \
             sequence_sync::tests::differential::sequence_floor_matches_lean \
             sequence_sync::sequence_read::tests::sequence_read_pass_matches_lean \
             sequence_sync::sequence_read::tests::sequence_end_search_matches_lean \
@@ -481,22 +472,19 @@ proofs() {
     fi
 
     if proof_selected merge || crate_selected coven-merge; then
-        runner=$(runner merge mergeRunner)
         step "Rust / Lean merge and circle-entry differentials"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_MERGE_LEAN merge mergeRunner)" exact_ignored coven-merge --all-features -- \
             tests::differential::lean_differential \
             tests::differential::entry_differential_histories \
             tests::differential::entry_differential_agreement
-        runner=$(runner merge receiveRunner)
         step "Rust / Lean data dependency"
-        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_RECEIVE_LEAN merge receiveRunner)" exact_ignored coven-merge --all-features -- \
             dependency::tests::mg_differential_data_dependency
     fi
 
     if proof_selected merge || crate_selected coven-database; then
-        runner=$(runner merge mergeRunner)
         step "Rust / Lean composite references, frozen losses and owner permissions"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_MERGE_LEAN merge mergeRunner)" exact_ignored coven-database --all-features -- \
             download::tests::streams::composite_reference_differential \
             migration_hidden::tests::freeze_differential_histories \
             migration_hidden::tests::freeze_differential_agreement \
@@ -509,32 +497,27 @@ proofs() {
     fi
 
     if proof_selected storage || crate_selected coven-database; then
-        runner=$(runner storage authorshipRunner)
         step "Rust / Lean authorship multiproofs"
-        COVEN_AUTHORSHIP_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_AUTHORSHIP_LEAN storage authorshipRunner)" exact_ignored coven-database --all-features -- \
             authorship::tests::multiproofs_match_the_storage_model \
             authorship::tests::retained_openings_match_the_cell_proof_model
-        runner=$(runner storage clockRunner)
         step "Rust / Lean hybrid timestamps"
-        COVEN_CLOCK_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_CLOCK_LEAN storage clockRunner)" exact_ignored coven-database --all-features -- \
             write_encoding::tests::lean_differential_clocks
     fi
 
     if proof_selected queue || crate_selected coven-database; then
-        runner=$(runner queue authoredRunner)
         step "Rust / Lean authored source evidence and data validity"
-        COVEN_AUTHORED_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_AUTHORED_LEAN queue authoredRunner)" exact_ignored coven-database --all-features -- \
             write_sources::tests::authored_sources_differential
-        runner=$(runner queue conversionRunner)
         step "Rust / Lean conversion across breaking changes and additions"
-        COVEN_CONVERSION_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_CONVERSION_LEAN queue conversionRunner)" exact_ignored coven-database --all-features -- \
             migration_receive::tests::conversion_chain_matches_lean
     fi
 
     if proof_selected io || crate_selected coven-sync; then
-        runner=$(runner io ioRunner)
         step "Rust / Lean downloads, what a read settles, kept pins, retained ranges, retry evidence, network reports, the answer to a retry, removed-device file listings, the sync state and each upload's phase"
-        COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_IO_LEAN io ioRunner)" exact_ignored coven-sync --all-features -- \
             files::tests::cache::retries::io_differential_download \
             files::tests::cache::retries::io_differential_read_settles \
             files::tests::keep::io_differential_keep \
@@ -549,36 +532,30 @@ proofs() {
     fi
 
     if proof_selected io || crate_selected coven-database; then
-        runner=$(runner io ioRunner)
         step "Rust / Lean write-queue wakes"
-        COVEN_IO_LEAN="$runner" exact_ignored coven-database --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_IO_LEAN io ioRunner)" exact_ignored coven-database --all-features -- \
             database::changes::tests::io_differential_wakes
     fi
 
     if proof_selected storage || crate_selected coven-sync; then
-        runner=$(runner storage filesRunner)
         step "Rust / Lean file attachment, upload completion and status"
-        COVEN_FILES_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_FILES_LEAN storage filesRunner)" exact_ignored coven-sync --all-features -- \
             files::tests::uploads::differential::st_differential_files \
             files::tests::status::st_differential_file_status
-        runner=$(runner storage uploadSessionRunner)
         step "Rust / Lean upload sessions"
-        COVEN_UPLOAD_SESSION_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_UPLOAD_SESSION_LEAN storage uploadSessionRunner)" exact_ignored coven-sync --all-features -- \
             files::tests::abandoned_tests::sessions::upload_sessions_match_the_storage_model
     fi
 
     if proof_selected storage || crate_selected coven-storage; then
-        runner=$(runner storage floorUploadRunner)
         step "Rust / Lean conditional floor pointer replacement"
-        COVEN_FLOOR_UPLOAD_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_FLOOR_UPLOAD_LEAN storage floorUploadRunner)" exact_ignored coven-storage --all-features -- \
             connection::test_utils::memory_upload::tests::conditional_floor_upload_matches_lean
-        runner=$(runner storage floorPointerRunner)
         step "Rust / Lean floor pointer and bodies"
-        COVEN_FLOOR_POINTER_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_FLOOR_POINTER_LEAN storage floorPointerRunner)" exact_ignored coven-storage --all-features -- \
             connection::test_utils::memory_upload::tests::floor_pointer_matches_lean
-        runner=$(runner storage createRunner)
         step "Rust / Lean provider create-once tests"
-        COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+        BUILDS_CARGO_LEAN="$(runner COVEN_CREATE_LEAN storage createRunner)" exact_ignored coven-storage --all-features -- \
             providers::s3::tests::location_marker_tests::location_claims_match_lean \
             providers::dropbox::tests::location_tests::location_claims_match_lean \
             providers::onedrive::tests::location_tests::location_claims_match_lean \
@@ -587,9 +564,8 @@ proofs() {
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_records_before_initiation
     fi
     if proof_selected sqlive || crate_selected sqlive; then
-        runner=$(runner sqlive narrowingRunner)
         step "Rust / Lean / SQLite live query narrowing"
-        SQLIVE_NARROWING_LEAN="$runner" exact_ignored sqlive --all-features -- --nocapture \
+        BUILDS_CARGO_LEAN="$(runner SQLIVE_NARROWING_LEAN sqlive narrowingRunner)" exact_ignored sqlive --all-features -- --nocapture \
             connection::live_judging::tests::narrowing_model::term_matches_lean \
             connection::live_judging::tests::narrowing_model::edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_edge_matches_lean \
