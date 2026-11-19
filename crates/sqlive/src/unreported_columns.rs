@@ -43,6 +43,10 @@
 //! equal values are the same. The model states the rule as
 //! `Statement.distinctFollowsOrder` and `Statement.compoundFollowsOrder`.
 //!
+//! Only what the statement runs counts: SQLite never runs a CTE that no query
+//! of the statement reads, so its joins and the rows it would pick add no
+//! column.
+//!
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
 
@@ -115,24 +119,44 @@ pub(crate) fn unreported_columns(
         views: BTreeMap::new(),
         ctes: Vec::new(),
         defined: Vec::new(),
+        within: None,
         picked: Vec::new(),
-        found: ColumnSet::new(),
+        found: Vec::new(),
         unread: None,
     };
-    walk.select(select, false)?;
+    let reads = walk.select(select, false)?;
     if let Some(why) = walk.unread {
         return UnreportedColumns::unknown(connection, why);
     }
+    let run = walk.run(&reads);
+    let counts =
+        |within: &Option<Within>| within.as_ref().is_none_or(|within| run.contains(within));
+    let mut found: ColumnSet = walk
+        .found
+        .iter()
+        .filter(|(within, _)| counts(within))
+        .map(|(_, column)| column.clone())
+        .collect();
     let mut picked = BTreeSet::new();
-    for reads in &walk.picked {
+    for (_, reads) in walk.picked.iter().filter(|(within, _)| counts(within)) {
         picked.extend(walk.tables(reads));
     }
     for table in picked {
         for column in walk.columns(&table)? {
-            walk.found.insert((table.to_ascii_lowercase(), column));
+            found.insert((table.to_ascii_lowercase(), column));
         }
     }
-    Ok(UnreportedColumns::Known(walk.found))
+    Ok(UnreportedColumns::Known(found))
+}
+
+/// The CTE or view whose SQL the walk is reading, the innermost one: what
+/// the walk finds there counts only when the statement runs it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Within {
+    /// A CTE, by its place in `Walk::defined`.
+    Cte(usize),
+    /// A view, by its name, lowercase.
+    View(String),
 }
 
 /// The tables a query reads, in its FROM, in the views it reads and in the
@@ -143,12 +167,15 @@ struct Reads {
     tables: BTreeSet<String>,
     /// CTEs, by their places in `Walk::defined`.
     ctes: BTreeSet<usize>,
+    /// Views, by their names, lowercase, whose tables `tables` holds.
+    views: BTreeSet<String>,
 }
 
 impl Reads {
     fn extend(&mut self, other: Self) {
         self.tables.extend(other.tables);
         self.ctes.extend(other.ctes);
+        self.views.extend(other.views);
     }
 }
 
@@ -168,9 +195,12 @@ struct Walk<'c> {
     /// after it in the same WITH, so the walk reads every CTE's SELECT before
     /// it follows the CTEs a query names.
     defined: Vec<Reads>,
-    /// What each query whose rows SQLite picks reads.
-    picked: Vec<Reads>,
-    found: ColumnSet,
+    /// The CTE or view whose SQL the walk is reading now.
+    within: Option<Within>,
+    /// What each query whose rows SQLite picks reads, and where it is.
+    picked: Vec<(Option<Within>, Reads)>,
+    /// The columns USING and NATURAL joins compare, and where each join is.
+    found: Vec<(Option<Within>, (String, String))>,
     /// Why the parser couldn't read a view the statement reads.
     unread: Option<String>,
 }
@@ -187,9 +217,11 @@ impl Walk<'_> {
             self.defined.push(Reads::default());
         }
         for (position, cte) in ctes.enumerate() {
-            let reads = self.select(cte.select, false)?;
             let place = self.ctes[outer + position].1;
-            self.defined[place] = reads;
+            let around = self.within.replace(Within::Cte(place));
+            let reads = self.select(cte.select, false);
+            self.within = around;
+            self.defined[place] = reads?;
         }
         let mut reads = Reads::default();
         // A compound's ORDER BY sorts by its result columns; a single
@@ -215,7 +247,7 @@ impl Walk<'_> {
         if (select.limit.is_some() || first_row) && !self.fully_orders(select)?
             || self.compound_follows_order(select)?
         {
-            self.picked.push(reads.clone());
+            self.picked.push((self.within.clone(), reads.clone()));
         }
         self.ctes.truncate(outer);
         Ok(reads)
@@ -264,7 +296,7 @@ impl Walk<'_> {
                 }
                 reads.extend(self.selects(&found)?);
                 if self.follows_order(core, order_by)? || self.distinct_follows_order(core)? {
-                    self.picked.push(reads.clone());
+                    self.picked.push((self.within.clone(), reads.clone()));
                 }
             }
         }
@@ -299,7 +331,8 @@ impl Walk<'_> {
                 for item in before.iter().chain([&joined]) {
                     if let Some((table, columns)) = self.table(item)? {
                         for column in columns {
-                            self.found.insert((table.to_ascii_lowercase(), column));
+                            self.found
+                                .push((self.within.clone(), (table.to_ascii_lowercase(), column)));
                         }
                     }
                 }
@@ -341,7 +374,8 @@ impl Walk<'_> {
     fn table_column(&mut self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<()> {
         if let Some((table, columns)) = self.table(item)? {
             if columns.iter().any(|found| found == column) {
-                self.found.insert((table.to_ascii_lowercase(), column.to_owned()));
+                let column = (table.to_ascii_lowercase(), column.to_owned());
+                self.found.push((self.within.clone(), column));
             }
         }
         Ok(())
@@ -380,17 +414,21 @@ impl Walk<'_> {
                     Some((view, _)) => view,
                     None => return Ok(Reads::default()),
                 };
-                if let Some(reads) = self.views.get(&view.to_ascii_lowercase()) {
+                let name = view.to_ascii_lowercase();
+                if let Some(reads) = self.views.get(&name) {
                     return Ok(reads.clone());
                 }
                 let connection = self.connection;
                 // A view's SELECT names no CTE of the statement.
                 let ctes = std::mem::take(&mut self.ctes);
+                let around = self.within.replace(Within::View(name.clone()));
                 let read = read_view(connection, &view, |_, select| self.select(select, false));
+                self.within = around;
                 self.ctes = ctes;
                 match read? {
-                    Ok(reads) => {
-                        self.views.insert(view.to_ascii_lowercase(), reads.clone());
+                    Ok(mut reads) => {
+                        reads.views.insert(name.clone());
+                        self.views.insert(name, reads.clone());
                         Ok(reads)
                     }
                     Err(why) => {
@@ -436,6 +474,31 @@ impl Walk<'_> {
             return None;
         }
         self.ctes.iter().rev().find(|(cte, _)| name.name == cte.as_str()).map(|(_, place)| *place)
+    }
+
+    /// The CTEs and views a query that reads `reads` runs: those it reads,
+    /// and those each of them reads.
+    fn run(&self, reads: &Reads) -> BTreeSet<Within> {
+        let mut run = BTreeSet::new();
+        let mut waiting: Vec<Within> = reads
+            .ctes
+            .iter()
+            .map(|place| Within::Cte(*place))
+            .chain(reads.views.iter().map(|view| Within::View(view.clone())))
+            .collect();
+        while let Some(within) = waiting.pop() {
+            if run.contains(&within) {
+                continue;
+            }
+            let read = match &within {
+                Within::Cte(place) => &self.defined[*place],
+                Within::View(view) => &self.views[view],
+            };
+            waiting.extend(read.ctes.iter().map(|place| Within::Cte(*place)));
+            waiting.extend(read.views.iter().map(|view| Within::View(view.clone())));
+            run.insert(within);
+        }
+        run
     }
 
     /// The tables `reads` reads, with those of the CTEs it reads and of the

@@ -439,3 +439,44 @@ async fn an_aggregate_in_a_fixed_order_depends_only_on_the_named_columns() {
         db.close();
     }
 }
+
+/// SQLite never runs a CTE that no query of the statement reads, so its
+/// LIMIT, its USING join and the views it reads add no column, nor does a
+/// CTE that only such a CTE reads: a write to `u` reruns nothing. Read by
+/// the statement, the same CTE depends on every column of `u`.
+#[tokio::test]
+async fn a_cte_no_query_reads_adds_no_column() {
+    let unread = [
+        "WITH k AS (SELECT q.id FROM u AS q LIMIT 1) SELECT x.id FROM w AS x WHERE x.id = 1",
+        "WITH k AS (SELECT q.id FROM u AS q JOIN w AS r USING (c)) \
+         SELECT x.id FROM w AS x WHERE x.id = 1",
+        "WITH k AS (SELECT q.id FROM u AS q LIMIT 1), m AS (SELECT k.id FROM k) \
+         SELECT x.id FROM w AS x WHERE x.id = 1",
+        "WITH k AS (SELECT f.id FROM first_u AS f) SELECT x.id FROM w AS x WHERE x.id = 1",
+    ];
+    let schema = format!("{PICKED}; CREATE VIEW first_u AS SELECT q.id FROM u AS q LIMIT 1");
+    for sql in unread {
+        let db = TestDatabase::open(&schema);
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[
+                ("UPDATE u SET a = 0, c = 0 WHERE id = 5", false),
+                ("DELETE FROM w WHERE id = 1", true),
+            ],
+        )
+        .await;
+        db.close();
+    }
+    let db = TestDatabase::open(&schema);
+    follows(
+        &db,
+        "WITH k AS (SELECT q.id FROM u AS q LIMIT 1) SELECT x.id FROM w AS x \
+         WHERE x.id IN (SELECT k.id FROM k)",
+        vec![],
+        &[("UPDATE u SET a = 0 WHERE id = 5", true)],
+    )
+    .await;
+    db.close();
+}

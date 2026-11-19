@@ -701,7 +701,12 @@ query that joins `tracks` to `releases` with `USING (release_id)`. SQLite also
 leaves out the columns that decide which rows a LIMIT keeps, which row an
 aggregate takes a value from, and which of the rows that compare equal a
 DISTINCT or a compound keeps, and coven adds them too, as the rules on LIMIT,
-aggregates, DISTINCT and compounds below say. When coven
+aggregates, DISTINCT and compounds below say. Coven adds no column for a CTE
+that no query of the statement reads: SQLite never runs it, so its joins and
+its LIMIT change no row. Ben's import screens share one WITH, whose
+`candidate` CTE picks one row of `scan_folders` with `LIMIT 1`. A screen's
+statement that reads only `scan_files` doesn't rerun when a write changes
+another row of `scan_folders`. When coven
 can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.

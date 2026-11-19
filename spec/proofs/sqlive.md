@@ -164,15 +164,18 @@ a column `IS` a parameter, and the step limit on a lookup.
 `narrowingRunner` reads one case as JSON on stdin: the schema (each table's
 columns and their affinities, and each view's query), the statement as a tree
 that names its sources by alias, the database before and after the write, and
-the write's row changes. The runner writes whether the write reruns the statement,
+the write's row changes. The runner reads a CTE where a query names it, so a
+CTE that no query reads, which SQLite never runs, adds nothing to the model's
+statement. The runner writes whether the write reruns the statement,
 whether the model reads the statement whole, each table's scope, and the
 statement's rows before and after.
 
 The differential in sqlive (`narrowing_model` among the live judging tests)
 has one test per rule, `<rule>_matches_lean`, and `mixed_shapes_match_lean`
 for statements that hold several rules. Each rule's generator writes
-statements of its rule's shape. For each statement the test opens a live query
-and makes random writes. After each write it fails when sqlive and the model
+statements of its rule's shape. The CTEs' generator also writes, beside the
+CTEs a statement reads, one that no query reads, with a LIMIT or a USING
+join. For each statement the test opens a live query and makes random writes. After each write it fails when sqlive and the model
 disagree on whether the write reruns the query, when a write that either lets
 pass changed SQLite's rows, or when the model's rows differ from SQLite's.
 Under a LIMIT or a scalar subquery, SQLite may pick other rows than the model

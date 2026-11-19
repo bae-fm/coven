@@ -3,7 +3,9 @@
 //! statement's own WITH, one in a WITH inside the subquery, one in FROM
 //! there, and one joined inside another CTE that the statement reads only
 //! in a subquery; and the same correlated with the row around them, which
-//! narrow by their own conditions only.
+//! narrow by their own conditions only. Beside them sometimes stands a CTE
+//! that no query reads, whose rows SQLite would pick or whose USING join
+//! would compare columns: SQLite never runs it, and the model reads none.
 
 use super::push_down::{condition, derived, DERIVED};
 use super::{
@@ -56,6 +58,36 @@ fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
+    let mut query = reading_statement(rng);
+    if rng.chance(30) {
+        query.with.push(("z".to_owned(), unread(rng)));
+    }
+    query
+}
+
+/// The query of a CTE no query reads: a LIMIT with no ORDER BY, which keeps
+/// the rows SQLite reads first, or a USING join.
+fn unread(rng: &mut Rng) -> Query {
+    let first = table("p", pick(rng, &TABLES));
+    let from = if rng.chance(50) {
+        vec![first]
+    } else {
+        let using = Join::Using { left: false, columns: &["c"] };
+        vec![first, item("r", Source::Table(pick(rng, &TABLES)), using, Vec::new())]
+    };
+    Query {
+        limit: rng.chance(70).then_some(super::Limit { count: 1, offset: None }),
+        ..select(Core {
+            from,
+            conditions: Vec::new(),
+            select: vec![out(col("p", "id"))],
+            group: Vec::new(),
+            distinct: false,
+        })
+    }
+}
+
+fn reading_statement(rng: &mut Rng) -> Query {
     let first = pick(rng, &TABLES);
     let mut where_ = Vec::new();
     if rng.chance(50) {
