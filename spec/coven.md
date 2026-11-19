@@ -6513,7 +6513,8 @@ removes his old laptop at slot 60. The laptop still reads every row it holds,
 and its app still commits writes, such as the songs Ben plays there, under the
 same local checks as on any device (§2.1). Each write waits in the send queue,
 which the laptop never sends, so it stays on the laptop, and the laptop's state
-counts it unsent (§19.1). Without this, removing a device would also take from
+counts it unsent (§19.1). A write still queued when the removal applied stays
+the same way. Without this, removing a device would also take from
 its person the data they still hold on it. The device's own removal leaves Ben
 in his circles, so the laptop still writes into them. A removal of Ben himself
 takes him out of every circle and deletes each circle he alone was in (§15.8),

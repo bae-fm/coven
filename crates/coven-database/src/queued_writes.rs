@@ -78,14 +78,20 @@ pub(crate) fn stage(
 }
 
 /// Whether the overlay folds the queued write `header` heads: one that
-/// landed is counted already, and a removed device's never applies.
+/// landed is counted already, and a replaced device's never applies (§19.3).
+/// A device that its own removal, or its member's, stopped keeps its queued
+/// writes, which it never sends, as it keeps every write it commits after
+/// (§14.1), so the app's rows still hold each of them (§6.3).
 fn folded(db: &StoreSql, header: &WriteHeader) -> Result<bool, DbError> {
     if crate::write_metadata::landed(db, header.position)? {
         return Ok(false);
     }
-    let removed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_members m ON m.member=d.member WHERE d.device=?1 AND (d.state<>'active' OR m.removed=1))",
-        [header.position.device],|r|r.get(0))?;
-    Ok(!removed)
+    let replaced: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_devices WHERE device=?1 AND state='replaced')",
+        [header.position.device],
+        |r| r.get(0),
+    )?;
+    Ok(!replaced)
 }
 
 /// The rows one write changes, by whether the current schema has their table.
