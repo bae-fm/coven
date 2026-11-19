@@ -20,12 +20,12 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{Expr, ExprKind};
 use rustc_middle::hir::nested_filter::OnlyBodies;
-use rustc_middle::ty::{TyCtxt, TypeckResults, TypingEnv};
+use rustc_middle::ty::{ParamEnv, TyCtxt, TypeckResults, TypingEnv};
 use rustc_span::sym;
 
 use super::flow::{Flow, Spread};
 use super::rows::Mappers;
-use super::{READ_KEYED_STATEMENT, READ_QUERY_PER_ROW, Search, callback, is_library};
+use super::{READ_KEYED_STATEMENT, READ_QUERY_PER_ROW, Search, callback, library_method};
 use crate::finding::Finding;
 
 /// Reports the statements of the read code `unit` that run once for each
@@ -42,7 +42,7 @@ pub(super) fn check<'tcx>(
     let typeck = tcx.typeck(unit);
     let root = tcx.typeck_root_def_id(unit.to_def_id());
     let body = tcx.hir_body_owned_by(unit).value;
-    let kinds = Kinds { search, typeck };
+    let kinds = Kinds { search, typeck, bounds: tcx.param_env(root) };
     let is_statement = |expr: &Expr<'tcx>| kinds.statement(expr).is_some();
     let returned = Flow::of(tcx, typeck, body, Spread::Mention, &is_statement);
     let mut statements = Statements {
@@ -63,6 +63,8 @@ pub(super) fn check<'tcx>(
 struct Kinds<'a, 's, 'tcx> {
     search: &'a Search<'s, 'tcx>,
     typeck: &'tcx TypeckResults<'tcx>,
+    /// The bounds of the generics the body sees.
+    bounds: ParamEnv<'tcx>,
 }
 
 impl<'tcx> Kinds<'_, '_, 'tcx> {
@@ -94,9 +96,7 @@ impl<'tcx> Kinds<'_, '_, 'tcx> {
 
     /// Whether a value of the type is or holds a read value or a live query.
     fn names_read(&self, ty: rustc_middle::ty::Ty<'tcx>) -> bool {
-        let tcx = self.search.tcx;
-        let (read, live) = self.search.names_read(ty, tcx.param_env(self.typeck.hir_owner));
-        read || live
+        self.search.names_read_value(ty, self.bounds)
     }
 }
 
@@ -154,10 +154,7 @@ impl<'tcx> Statements<'_, '_, 'tcx> {
         }
         let ExprKind::MethodCall(_, receiver, ..) = expr.kind else { return false };
         let tcx = self.tcx;
-        self.kinds
-            .typeck
-            .type_dependent_def_id(expr.hir_id)
-            .is_some_and(|callee| is_library(tcx, callee))
+        library_method(tcx, self.kinds.typeck, expr).is_some()
             && tcx.get_diagnostic_item(sym::Iterator).is_some_and(|iterator| {
                 let ty =
                     tcx.erase_and_anonymize_regions(self.kinds.typeck.expr_ty_adjusted(receiver));

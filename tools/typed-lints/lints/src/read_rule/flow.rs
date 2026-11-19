@@ -12,7 +12,7 @@ use rustc_hir::{Expr, ExprKind, HirId, LetStmt, Pat, QPath};
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{TyCtxt, TypeckResults};
 
-use super::is_library;
+use super::{is_library, library_method};
 
 /// How a value carries what flows from a source.
 #[derive(Clone, Copy)]
@@ -111,14 +111,6 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
         }
     }
 
-    /// Whether the method call `expr` runs a method of the standard library or
-    /// itertools.
-    fn library_call(&self, expr: &Expr<'tcx>) -> bool {
-        self.typeck
-            .type_dependent_def_id(expr.hir_id)
-            .is_some_and(|callee| is_library(self.tcx, callee))
-    }
-
     fn bind(&mut self, pat: &Pat<'_>) {
         pat.each_binding(|_, local, _, _| {
             self.locals.insert(local);
@@ -177,7 +169,8 @@ impl<'tcx> Visitor<'tcx> for Binder<'_, '_, 'tcx> {
                 }
             }
             ExprKind::MethodCall(_, receiver, arguments, _)
-                if self.flow.library_call(expr) && self.flow.carries(receiver) =>
+                if library_method(self.flow.tcx, self.flow.typeck, expr).is_some()
+                    && self.flow.carries(receiver) =>
             {
                 for argument in arguments {
                     if let ExprKind::Closure(closure) = argument.kind {

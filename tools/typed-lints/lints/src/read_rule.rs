@@ -59,6 +59,16 @@ fn is_library(tcx: TyCtxt<'_>, id: DefId) -> bool {
     LIBRARIES.contains(&tcx.crate_name(id.krate).as_str())
 }
 
+/// The method of the standard library, itertools or indexmap that the
+/// method call `expr` runs.
+fn library_method(
+    tcx: TyCtxt<'_>,
+    typeck: &ty::TypeckResults<'_>,
+    expr: &Expr<'_>,
+) -> Option<DefId> {
+    typeck.type_dependent_def_id(expr.hir_id).filter(|&callee| is_library(tcx, callee))
+}
+
 /// Whether `ty` is, or holds through its type arguments, references,
 /// pointers, slices, arrays or tuples, a struct, enum or union that `test`
 /// picks: no callback, which holds none of what it is given.
@@ -372,6 +382,12 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
         }
     }
 
+    /// Whether `ty` names a read type or a live query, under `bounds`.
+    fn names_read_value(&self, ty: Ty<'tcx>, bounds: ty::ParamEnv<'tcx>) -> bool {
+        let (read, live) = self.names_read(ty, bounds);
+        read || live
+    }
+
     /// Whether a function is a method taking `self` of a type that holds a
     /// live query.
     fn is_holder_method(&self, body: LocalDefId) -> bool {
@@ -564,7 +580,6 @@ impl<'tcx> Walker<'_, '_, 'tcx> {
     /// Whether a value of `ty` is a read value or a live query, which a
     /// callback passed beside it runs on.
     fn names_read_value(&self, ty: Ty<'tcx>) -> bool {
-        let (read, live) = self.search.names_read(ty, self.bounds);
-        read || live
+        self.search.names_read_value(ty, self.bounds)
     }
 }

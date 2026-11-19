@@ -40,7 +40,7 @@ use super::flow::{Flow, Spread};
 use super::rows::{Made, Mappers, RowTypes, is_collection, peel_result};
 use super::{
     READ_AGGREGATE, READ_DROP_ROW, READ_FILTER, READ_GROUP, READ_JOIN, READ_LENGTH_BRANCH,
-    READ_PICK, READ_SORT, callback, is_library,
+    READ_PICK, READ_SORT, callback, is_library, library_method,
 };
 use crate::finding::Finding;
 
@@ -167,8 +167,7 @@ impl<'tcx> RowWork<'_, 'tcx> {
 
     /// The library method a method call resolves to, by name.
     fn library_method(&self, expr: &Expr<'tcx>) -> Option<Symbol> {
-        let callee = self.typeck.type_dependent_def_id(expr.hir_id)?;
-        is_library(self.tcx, callee).then(|| self.tcx.item_name(callee))
+        library_method(self.tcx, self.typeck, expr).map(|callee| self.tcx.item_name(callee))
     }
 
     /// Whether the expression's value holds rows: its type holds a row
