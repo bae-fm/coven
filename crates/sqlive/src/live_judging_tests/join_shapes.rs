@@ -97,6 +97,66 @@ async fn an_or_with_a_side_naming_another_table_narrows_nothing_there() {
     db.close();
 }
 
+/// An OR whose sides each join a LEFT JOIN's right side by an equality fails
+/// the NULLs a missing right row gives, so it makes the join inner and
+/// narrows the right side: a payment of the invoice whose amount neither of
+/// its expected amounts names wakes nothing.
+#[tokio::test]
+async fn an_or_of_equalities_narrows_a_left_joins_right_side() {
+    let db = TestDatabase::open(
+        "CREATE TABLE invoice(id INTEGER PRIMARY KEY, due INTEGER, late INTEGER);
+        CREATE TABLE payment(id INTEGER PRIMARY KEY, invoice INTEGER, amount INTEGER, note TEXT);
+        INSERT INTO invoice VALUES (1,10,20),(2,30,40);
+        INSERT INTO payment VALUES (1,1,10,''),(2,1,99,''),(3,2,30,'')",
+    );
+    follows(&db, "SELECT p.note FROM invoice i LEFT JOIN payment p ON p.invoice = i.id WHERE i.id = 1 AND (p.amount = i.due OR p.amount = i.late) ORDER BY p.id", vec![], &[
+        ("UPDATE payment SET note = 'b' WHERE id = 2", false),
+        ("UPDATE payment SET note = 'c' WHERE id = 3", false),
+        ("UPDATE payment SET note = 'a' WHERE id = 1", true),
+    ]).await;
+    db.close();
+}
+
+/// An OR with an `IS` side holds of the NULLs a missing right row gives when
+/// the left row's column is NULL, so it narrows nothing on a LEFT JOIN's
+/// right side: deleting the one payment that fails the OR brings the invoice
+/// with no due amount back with NULLs.
+#[tokio::test]
+async fn an_or_with_an_is_side_keeps_a_left_joins_right_side_whole() {
+    let db = TestDatabase::open(
+        "CREATE TABLE invoice(id INTEGER PRIMARY KEY, due INTEGER, late INTEGER);
+        CREATE TABLE payment(id INTEGER PRIMARY KEY, invoice INTEGER, amount INTEGER, fee INTEGER);
+        INSERT INTO invoice VALUES (1,NULL,5);
+        INSERT INTO payment VALUES (1,1,7,0)",
+    );
+    follows(&db, "SELECT i.id FROM invoice i LEFT JOIN payment p ON p.invoice = i.id WHERE p.amount IS i.due OR p.fee = i.late ORDER BY i.id", vec![], &[
+        ("DELETE FROM payment WHERE id = 1", true),
+    ]).await;
+    db.close();
+}
+
+/// A source with an OR that joins another source waits for it only when a
+/// side compares with a subquery's value: otherwise it goes first by its own
+/// condition, and the source it joins by an equality takes its values. Here
+/// the invoice goes first, and its payments narrow to its customer's, so a
+/// payment of another customer through the same account wakes nothing.
+#[tokio::test]
+async fn an_or_that_joins_a_source_waits_only_for_a_subquerys_value() {
+    let db = TestDatabase::open(
+        "CREATE TABLE invoice(id INTEGER PRIMARY KEY, customer INTEGER, amount INTEGER, waived INTEGER);
+        CREATE TABLE payment(id INTEGER PRIMARY KEY, customer INTEGER, account INTEGER, amount INTEGER, note TEXT);
+        CREATE TABLE account(id INTEGER PRIMARY KEY, number INTEGER);
+        INSERT INTO invoice VALUES (1,1,0,5),(2,2,0,0);
+        INSERT INTO account VALUES (3,7),(4,8);
+        INSERT INTO payment VALUES (1,1,7,0,''),(2,2,7,0,'')",
+    );
+    follows(&db, "SELECT p.note FROM invoice i JOIN payment p ON p.customer = i.customer JOIN account a ON a.number = p.account WHERE i.id = 1 AND a.id = 3 AND (p.amount = i.amount OR i.waived = 5) ORDER BY p.id", vec![], &[
+        ("UPDATE payment SET note = 'b' WHERE id = 2", false),
+        ("UPDATE payment SET note = 'a' WHERE id = 1", true),
+    ]).await;
+    db.close();
+}
+
 /// A cover joined to COALESCE of the scan row's hash and a subquery's: a
 /// cover of a third hash wakes nothing, and one of either hash does.
 #[tokio::test]
