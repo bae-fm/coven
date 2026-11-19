@@ -14483,16 +14483,19 @@ the same on any platform.
     `Axioms.lean`, so check 9 audits it by name. spec/WRITING.md is the standard
     they help keep. It includes the tests of the check scripts themselves
     (`scripts/check_spec_tests.py`, `scripts/perf_tests.py`).
-11. The typed lints' clippy and tests. A typed lint asks the compiler for each
-    expression's type, so it matches what a check means, such as a value whose
-    type is `reqwest::Error`, where a check of the syntax tree can only match a
-    name. The lints run in the same compile as clippy's own lints, from a build
-    of clippy's own driver that adds them. So they build against the toolchain's
-    compiler crates and the source of the toolchain's clippy, and live in
-    `tools/typed-lints`, a workspace of their own that no crate of coven's
-    builds against. The first lint, `clippy::reqwest_error_display`, finds code
-    that prints a `reqwest::Error` with `Display` or `Debug`: the error's text
-    leaves out the cause below it, and its URL can hold a path or a query.
+11. The typed lints' own clippy and tests. A typed lint asks the compiler for
+    each expression's type, so it matches what a check means, such as a value
+    whose type is `reqwest::Error`, where a check of the syntax tree can only
+    match a name. The lints run in the same compile as clippy's own lints, from
+    a build of clippy's own driver that adds them. So they build
+    against the toolchain's compiler crates and the source of the toolchain's
+    clippy, and live in `tools/typed-lints`, a workspace of their own that no
+    crate of coven's builds against. A machine's setup installs those compiler
+    crates and fetches clippy's source (`tools/typed-lints/prepare-build.sh`);
+    the hook only checks that both are in place. The first lint,
+    `clippy::reqwest_error_display`, finds code that prints a `reqwest::Error`
+    with `Display` or `Debug`: the error's text leaves out the cause below it,
+    and its URL can hold a path or a query.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

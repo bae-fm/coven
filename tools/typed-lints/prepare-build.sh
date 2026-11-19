@@ -4,28 +4,18 @@
 # source at the commit the toolchain's rustc was built from, in clippy/. Only
 # that source compiles against the toolchain's compiler crates, and only it
 # holds the lints the toolchain's own clippy runs. rust-lang/rust keeps it in
-# src/tools/clippy; this fetches that folder alone.
+# src/tools/clippy; this fetches that folder alone. clippy/.rust-commit records
+# the commit clippy/ came from, and a folder from another commit is fetched
+# again.
 #
-# The toolchain is the one rustup picks here: coven's pin, or RUSTUP_TOOLCHAIN.
-# clippy/.rust-commit records the commit clippy/ came from, and a folder from
-# another commit is fetched again.
+# It installs and downloads, so a machine's setup runs it, and CI before its
+# checks; the commit hook runs check-prepared.sh instead.
 set -eu
 cd "$(dirname "$0")"
+. ./toolchain.sh
 
-version=$(rustc -vV)
-commit=$(printf '%s\n' "$version" | sed -n 's/^commit-hash: //p')
-host=$(printf '%s\n' "$version" | sed -n 's/^host: //p')
-if [ -z "$commit" ] || [ -z "$host" ]; then
-    echo "prepare-build.sh: rustc -vV names no commit or host" >&2
-    exit 1
-fi
-
-toolchain=$(rustup show active-toolchain | cut -d' ' -f1)
-if ! rustup component list --installed --toolchain "$toolchain" | grep -qx "rustc-dev-$host"; then
-    rustup component add --toolchain "$toolchain" rustc-dev
-fi
-
-[ "$(cat clippy/.rust-commit 2>/dev/null)" = "$commit" ] && exit 0
+has_rustc_dev || rustup component add --toolchain "$toolchain" rustc-dev
+[ "$clippy_commit" = "$commit" ] && exit 0
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/typed-lints-clippy.XXXXXX")
 trap 'rm -rf "$work"' EXIT

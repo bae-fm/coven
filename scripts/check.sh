@@ -163,8 +163,9 @@ code_checks() {
     cargo fmt --all --check
 
     # A workspace of its own, which builds against the toolchain's compiler
-    # crates and clippy's source; its cargo.sh fetches both.
+    # crates and clippy's source; prepare-build.sh fetches both.
     step "the typed lints (tools/typed-lints): clippy and their tests"
+    tools/typed-lints/prepare-build.sh
     tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
     tools/typed-lints/cargo.sh test
 
