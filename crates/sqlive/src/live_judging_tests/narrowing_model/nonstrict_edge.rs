@@ -11,10 +11,10 @@ use super::{col, eq, item, lit, out, pick, select, table, Cond, Core, Expr, Join
 use super::{COLUMNS, TABLES};
 use crate::random_scopes::Rng;
 
-/// A value of `partner` that can be other than NULL where its columns are
-/// NULL, or at times one that can't.
-fn value(rng: &mut Rng, partner: &str) -> Expr {
-    let column = |rng: &mut Rng| col(partner, pick(rng, &COLUMNS));
+/// A value of `partner`, whose columns are `columns`, that can be other than
+/// NULL where its columns are NULL, or at times one that can't.
+fn value(rng: &mut Rng, partner: &str, columns: &[&'static str]) -> Expr {
+    let column = |rng: &mut Rng| col(partner, pick(rng, columns));
     let constant = |rng: &mut Rng| lit(rng.below(4) as i64);
     let choice = |rng: &mut Rng, test: Expr| {
         let yes = if rng.chance(30) { column(rng) } else { constant(rng) };
@@ -43,20 +43,13 @@ fn value(rng: &mut Rng, partner: &str) -> Expr {
         6 => Expr::Coalesce(Box::new(column(rng)), Box::new(constant(rng))),
         7 => Expr::App(Box::new(column(rng))),
         8 => Expr::Add(Box::new(Expr::App(Box::new(column(rng)))), Box::new(constant(rng))),
-        _ => super::edge::value(rng, partner, &COLUMNS),
+        _ => super::edge::value(rng, partner, columns),
     }
 }
 
-/// An equality between a column of `member` and a value of `partner`,
-/// either side first.
+/// An equality between a column of `member` and a value of `partner`.
 fn equality(rng: &mut Rng, member: &str, partner: &str) -> Cond {
-    let column = col(member, pick(rng, &COLUMNS));
-    let other = value(rng, partner);
-    if rng.chance(50) {
-        eq(column, other)
-    } else {
-        eq(other, column)
-    }
+    super::edge::equality_of(rng, (member, &COLUMNS), (partner, &COLUMNS), value)
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {

@@ -20,12 +20,13 @@ pub(super) fn value(rng: &mut Rng, alias: &str, columns: &[&'static str]) -> Exp
     }
 }
 
-/// An equality between a column of `member` and a value of `partner`,
-/// either side first, each an alias with its columns.
+/// An equality between a column of `member` and a value `value` writes of
+/// `partner`, either side first, each an alias with its columns.
 pub(super) fn equality_of(
     rng: &mut Rng,
     member: (&str, &[&'static str]),
     partner: (&str, &[&'static str]),
+    value: fn(&mut Rng, &str, &[&'static str]) -> Expr,
 ) -> Cond {
     let column = col(member.0, pick(rng, member.1));
     let other = value(rng, partner.0, partner.1);
@@ -39,7 +40,7 @@ pub(super) fn equality_of(
 /// An equality between a column of the table item `member` and a value of
 /// the table item `partner`.
 pub(super) fn equality(rng: &mut Rng, member: &str, partner: &str) -> Cond {
-    equality_of(rng, (member, &COLUMNS), (partner, &COLUMNS))
+    equality_of(rng, (member, &COLUMNS), (partner, &COLUMNS), value)
 }
 
 fn maybe_terms(rng: &mut Rng, alias: &str) -> Vec<Cond> {

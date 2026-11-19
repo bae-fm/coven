@@ -13,11 +13,16 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         "d",
         Source::Query(Box::new(derived)),
         Join::Inner,
-        vec![super::edge::equality_of(rng, ("d", &super::push_down::DERIVED), ("x", &COLUMNS))],
+        vec![super::edge::equality_of(
+            rng,
+            ("d", &super::push_down::DERIVED),
+            ("x", &COLUMNS),
+            super::edge::value,
+        )],
     ));
     let partner: (&str, &[&'static str]) =
         if rng.chance(50) { ("x", &COLUMNS) } else { ("d", &super::push_down::DERIVED) };
-    let on = vec![super::edge::equality_of(rng, ("y", &COLUMNS), partner)];
+    let on = vec![super::edge::equality_of(rng, ("y", &COLUMNS), partner, super::edge::value)];
     let join = if rng.chance(50) { Join::Left } else { Join::Inner };
     from.push(item("y", Source::Table(second), join, on));
     let mut conditions = Vec::new();
