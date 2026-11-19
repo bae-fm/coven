@@ -178,7 +178,8 @@ pub(crate) enum SendError {
 }
 
 /// reqwest's failure prints as a cause chain prints it: reqwest's own
-/// `Debug` can hold a full URL.
+/// `Debug` can hold a full URL. Only the tests' `unwrap` prints one.
+#[cfg(test)]
 impl fmt::Debug for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
