@@ -23,17 +23,17 @@
 
 use std::cell::RefCell;
 
-use clippy_utils::paths::{PathNS, lookup_path_str};
+use clippy_utils::paths::PathNS;
 use owner_construction_policy::FILE_NAME;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_middle::ty::{
     self, AliasTy, GenericArgKind, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt, TypingEnv,
     Unnormalized,
 };
 
-use crate::workspace_policy::WorkspacePolicy;
+use crate::workspace_policy::{WorkspacePolicy, resolve_row};
 
 /// The types one of the policy's type rows names: ADTs, whatever their type
 /// arguments, and the types aliases stand for, as `Arc<dyn Clock>`, with
@@ -127,14 +127,7 @@ fn resolve_type_ids(tcx: TyCtxt<'_>, row: &str, path: &str) -> Vec<DefId> {
             "typed lints: {FILE_NAME}'s {row} names {path}, which is no path to a type"
         ));
     }
-    let found = lookup_path_str(tcx, PathNS::Type, path);
-    let names_this_crate =
-        path.split("::").next().is_some_and(|root| root == tcx.crate_name(LOCAL_CRATE).as_str());
-    if found.is_empty() && names_this_crate {
-        tcx.dcx()
-            .fatal(format!("typed lints: {FILE_NAME}'s {row} names {path}, which defines nothing"));
-    }
-    found
+    resolve_row(tcx, row, path, PathNS::Type)
 }
 
 impl<'tcx> OwnerRows<'tcx> {

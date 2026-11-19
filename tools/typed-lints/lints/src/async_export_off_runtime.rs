@@ -57,7 +57,7 @@ impl AsyncExportOffRuntime {
                 exports
                     .runs
                     .iter()
-                    .flat_map(|run| resolve_row(tcx, "async_exports.runs", run))
+                    .flat_map(|run| resolve_row(tcx, "async_exports.runs", run, PathNS::Value))
                     .collect()
             })
             .unwrap_or_default();

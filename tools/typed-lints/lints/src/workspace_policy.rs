@@ -36,6 +36,8 @@ pub(crate) struct WorkspacePolicy {
     /// The folder the compile runs in, which a relative source file's name
     /// starts from.
     working_folder: PathBuf,
+    /// The name of the package of the crate being compiled, as cargo names it.
+    package_name: Option<String>,
 }
 
 /// What the driver found when it looked for the workspace's policy: none
@@ -68,6 +70,7 @@ pub(crate) fn read() -> PolicyRead {
         package: canonical(&package)?,
         working_folder,
         file,
+        package_name: std::env::var("CARGO_PKG_NAME").ok(),
     }))
 }
 
@@ -125,14 +128,12 @@ impl WorkspacePolicy {
         Some(canonical)
     }
 
-    /// Whether the source file `span` is written in is inside the workspace.
+    /// Whether the source file `span` is written in is inside the workspace:
+    /// never for code no file holds, such as the standard library's under its
+    /// remapped paths. A file the compile read that can't be found again
+    /// stops the compile (`source_file`).
     pub(crate) fn holds_file(&self, tcx: TyCtxt<'_>, span: Span) -> bool {
-        let name = tcx.sess.source_map().span_to_filename(span.source_callsite());
-        let Some(local) = name.into_local_path() else {
-            return false;
-        };
-        let absolute = if local.is_absolute() { local } else { self.working_folder.join(local) };
-        absolute.canonicalize().is_ok_and(|file| file.starts_with(&self.root))
+        self.source_file(tcx, span).is_some_and(|file| file.starts_with(&self.root))
     }
 
     /// Whether the policy's `path`, a source file relative to the
@@ -144,7 +145,7 @@ impl WorkspacePolicy {
     /// Whether the crate being compiled is one of the policy's tools, which
     /// answer to no rule of the policy but the conventions.
     pub(crate) fn compiles_a_tool(&self) -> bool {
-        std::env::var("CARGO_PKG_NAME").is_ok_and(|package| self.policy.is_tool(&package))
+        self.package_name.as_deref().is_some_and(|package| self.policy.is_tool(package))
     }
 
     /// Whether the code at `id` is test code, as the structural checker
@@ -186,8 +187,8 @@ fn requires_test(cfg: &CfgEntry, features: &[String]) -> bool {
 /// the crate the path names. A path whose crate is the one being compiled
 /// and that defines nothing there is a row the workspace no longer holds,
 /// which stops the compile, as the structural checker refuses such a row.
-pub(crate) fn resolve_row(tcx: TyCtxt<'_>, row: &str, path: &str) -> Vec<DefId> {
-    let found = lookup_path_str(tcx, PathNS::Value, path);
+pub(crate) fn resolve_row(tcx: TyCtxt<'_>, row: &str, path: &str, ns: PathNS) -> Vec<DefId> {
+    let found = lookup_path_str(tcx, ns, path);
     let names_this_crate =
         path.split("::").next().is_some_and(|root| root == tcx.crate_name(LOCAL_CRATE).as_str());
     if found.is_empty() && names_this_crate {
