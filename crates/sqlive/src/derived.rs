@@ -82,8 +82,16 @@ pub(crate) enum Named<'a, 'v> {
 /// narrows: for each such arm, the source and column each output column
 /// passes on unchanged, if it does.
 pub(crate) struct Derived {
-    arms: Vec<Vec<Option<(usize, String)>>>,
+    arms: Vec<Passed>,
+    /// The same for every arm, whose rows each row of the query is one of,
+    /// a LIMIT or not; `None` when an arm groups or aggregates, whose rows
+    /// pass on no row's own value.
+    rows: Option<Vec<Passed>>,
 }
+
+/// For each output column of an arm, the source of the arm's own and its
+/// column the output passes on unchanged, if it does.
+type Passed = Vec<Option<(usize, String)>>;
 
 /// Read `named` as a FROM item of a core that sits in `parent`: its source,
 /// its columns and its cores, or `None` when sqlive can't read its rows.
@@ -170,7 +178,14 @@ pub(crate) fn read_derived_item<'a>(
     };
     Ok(found.map(|(from, columns, derived)| {
         (
-            Source { table: None, from, qualifier, term: None, memberships: Vec::new() },
+            Source {
+                table: None,
+                from,
+                qualifier,
+                term: None,
+                carried: None,
+                memberships: Vec::new(),
+            },
             columns,
             derived,
         )
@@ -196,7 +211,7 @@ fn read_derived<'a>(
     for (core, body) in cores.iter().copied().zip(bodies) {
         let Some(columns) = arm_columns(planner, core, body) else {
             // A `*` over a table function's columns: no column is known.
-            return Ok(Some((Columns::Unknown, Derived { arms: Vec::new() })));
+            return Ok(Some((Columns::Unknown, Derived { arms: Vec::new(), rows: None })));
         };
         let grouped = match body {
             OneSelect::Select { group_by, having, window_clause, .. } => {
@@ -227,6 +242,11 @@ fn read_derived<'a>(
         let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));
         columns.push(Column { name, affinity });
     }
+    let rows = (!arms.iter().any(|(_, _, grouped)| *grouped)).then(|| {
+        arms.iter()
+            .map(|(_, columns, _)| columns.iter().map(|output| output.passed.clone()).collect())
+            .collect()
+    });
     // A LIMIT keeps rows by the others around them, and grouping makes one
     // row of many: a condition on such a row says nothing of its sources.
     let arms = if select.limit.is_some() {
@@ -237,7 +257,7 @@ fn read_derived<'a>(
             .map(|(_, columns, _)| columns.into_iter().map(|output| output.passed).collect())
             .collect()
     };
-    Ok(Some((Columns::Listed(columns), Derived { arms })))
+    Ok(Some((Columns::Listed(columns), Derived { arms, rows })))
 }
 
 /// Whether `body` calls an aggregate or window function, which makes its
@@ -338,6 +358,34 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
         ),
         Columns::Unknown => None,
     }
+}
+
+/// What the arms of the subquery, CTE or view `item` say of its column
+/// `column`: in each arm, the term of the source the column passes on, as a
+/// term on `column`, joined with OR. Each row of its query is a row of an
+/// arm, which holds that source's value in the column, so the term holds of
+/// the row when the column isn't NULL. `None` when an arm groups, says
+/// nothing of the column, or passes on no column of its own source.
+pub(crate) fn pulled(planner: &Planner, item: usize, column: &str) -> Option<ScopeTerm> {
+    let rows = planner.items[item].derived.as_ref()?.rows.as_ref()?;
+    let Columns::Listed(columns) = &planner.items[item].columns else {
+        return None;
+    };
+    let position = columns.iter().position(|listed| listed.name.as_deref() == Some(column))?;
+    let mut terms = rows.iter().map(|arm| {
+        let (source, passed) = arm.get(position)?.as_ref()?;
+        let term = planner.items[*source].source.term.as_ref()?;
+        term.renamed(&|tested| (tested == passed).then(|| column.to_owned()))
+    });
+    let first = terms.next()??;
+    let rest: Option<Vec<ScopeTerm>> = terms.collect();
+    // Joined from the last, as the model's `orAll` joins them.
+    let mut joined: Vec<ScopeTerm> = std::iter::once(first).chain(rest?).collect();
+    let mut term = joined.pop().expect("one term at least");
+    while let Some(before) = joined.pop() {
+        term = ScopeTerm::Or(Box::new(before), Box::new(term));
+    }
+    Some(term)
 }
 
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and

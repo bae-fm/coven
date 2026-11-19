@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 #[path = "narrowing_model/aggregate.rs"]
 mod aggregate;
+#[path = "narrowing_model/carry.rs"]
+mod carry;
 #[path = "narrowing_model/distinct.rs"]
 mod distinct;
 #[path = "narrowing_model/edge.rs"]
@@ -551,6 +553,12 @@ async fn distinct_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn window_matches_lean() {
     differential("window", window::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn carry_matches_lean() {
+    differential("carry", carry::statement).await;
 }
 
 #[tokio::test]

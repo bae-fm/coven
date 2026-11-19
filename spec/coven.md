@@ -985,6 +985,25 @@ such as `AND c.role = 'producer'`, lets the NULL test narrow `track_artists`
 too. In the LEFT JOIN's own ON, as `ON c.track_id = t.id AND c.role IS NULL`, a
 NULL test narrows the right side as any condition there does.
 
+Coven looks the tables of a join up one after another. Each takes values from
+the tables before it, and the first one, a table that a condition of its own
+narrows, takes values from none. An equality between two columns also carries
+a condition on one of them to the other, so that first table still narrows by
+what the other side's conditions say of the column the join compares. Ben's
+album page can list only the numbered tracks of a release, with `SELECT
+t.title FROM tracks AS t JOIN releases AS r ON t.release_id = r.id WHERE r.id
+= ?1 AND t.position > 0`. Coven looks `tracks` up first, for `t.position > 0`,
+and `r.id = ?1` with the equality gives `tracks` the condition `t.release_id =
+?1` too. A numbered track added to another release doesn't rerun the page,
+and a numbered track added to this release does. A CTE, a subquery in FROM or a view
+carries its own tables' conditions the same way, through a column that passes
+a table's column on: `tracks` joined to `WITH r AS (SELECT id FROM releases
+WHERE id = ?1 LIMIT 1)` by `t.release_id = r.id` narrows by `t.release_id =
+?1`. One of its SELECTs that groups its rows or calls an aggregate or window
+function passes on no row's own value, so it carries nothing. A carried
+condition narrows only the table it is carried to: it doesn't change which
+table comes first, and an equality with an expression carries none.
+
 A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the
 expression makes equals the 5 an INTEGER column holds. Where coven couldn't

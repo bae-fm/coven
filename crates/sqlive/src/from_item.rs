@@ -167,6 +167,7 @@ pub(crate) fn read_item<'a>(
                     from: Some(format!("main.{} AS {qualifier}", crate::sql::identifier(&stored))),
                     qualifier,
                     term: None,
+                    carried: None,
                     memberships: Vec::new(),
                 },
                 columns(connection, &stored, ordinary)?,
@@ -188,7 +189,14 @@ pub(crate) fn read_item<'a>(
                 None => format!("{} AS {qualifier}", text(table)),
             });
             Ok(Some(item(
-                Source { table: None, from, qualifier, term: None, memberships: Vec::new() },
+                Source {
+                    table: None,
+                    from,
+                    qualifier,
+                    term: None,
+                    carried: None,
+                    memberships: Vec::new(),
+                },
                 Columns::Unknown,
                 None,
             )))

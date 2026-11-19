@@ -1,10 +1,11 @@
 //! An equality between a column of one of a core's sources and a value of
 //! one other source, read as an edge the first takes values by (§4): from a
-//! condition, or from the ON a USING join stands for.
+//! condition, or from the ON a USING join stands for. An edge also carries
+//! what the other source's terms say of its column to the first.
 
 use crate::from_item::Columns;
 use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
-use crate::scope_term::Affinity;
+use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
@@ -130,6 +131,48 @@ impl Planner<'_> {
         items[partner].source.from.as_ref()?;
         let value = value(affinity)?;
         Some(Edge { member, column, affinity, partner, value, nested: false })
+    }
+
+    /// Carry, across each edge between two items of `core` that compares
+    /// with a column of the partner, the partner's own term on that column,
+    /// and what a derived partner's arms' own terms say of it, to the
+    /// member's column. In each row the core keeps, the member's column holds
+    /// the partner's column's value, so a term true of one is true of the
+    /// other: `f JOIN c ON f.p = c.p WHERE c.p = ?1` narrows `f` as
+    /// `f.p = ?1` would, whichever of them goes first. A carried term only
+    /// narrows the member's scope: it passes into no subquery, carries
+    /// nothing further, and leaves the member to take values from the sources
+    /// its edges join it to. A LEFT JOIN's right side stays one: the term
+    /// holds of each of its rows that joins, and says nothing of its row of
+    /// NULLs. The model states the rule as `Transfer.carry` in
+    /// `crates/sqlive/proofs`.
+    pub(crate) fn carry_terms(&mut self, core: usize) {
+        let mut carried: Vec<(usize, ScopeTerm)> = Vec::new();
+        for edge in &self.edges {
+            if edge.nested
+                || self.items[edge.member].core != core
+                || self.items[edge.partner].core != core
+            {
+                continue;
+            }
+            let PartnerValue::Column(compared) = &edge.value else { continue };
+            let rename = |tested: &str| (tested == compared).then(|| edge.column.clone());
+            let own = self.items[edge.partner]
+                .source
+                .term
+                .as_ref()
+                .and_then(|term| term.renamed(&rename));
+            let pulled = crate::derived::pulled(self, edge.partner, compared)
+                .and_then(|term| term.renamed(&rename));
+            carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member, term)));
+        }
+        for (item, term) in carried {
+            let source = &mut self.items[item].source;
+            source.carried = Some(match source.carried.take() {
+                Some(existing) => existing.and(term),
+                None => term,
+            });
+        }
     }
 
     /// The leftmost item of `core` before `right` that has a column named

@@ -5,6 +5,8 @@
 
 #[path = "live_judging_tests/burst.rs"]
 mod burst;
+#[path = "live_judging_tests/carried_terms.rs"]
+mod carried_terms;
 #[path = "live_judging_tests/derived.rs"]
 mod derived;
 #[path = "live_judging_tests/limit.rs"]

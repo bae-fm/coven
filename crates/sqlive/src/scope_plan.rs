@@ -9,7 +9,8 @@
 //! forces on the rows that can reach the result: constants compared with its
 //! columns, and equalities with earlier sources of the core or of a core it
 //! sits in (`scope_edge.rs`), which a write that changes the table looks up
-//! (`scope_lookup.rs`). Values pass
+//! (`scope_lookup.rs`). An equality also carries what one side's conditions
+//! say of its compared column to the other side's column. Values pass
 //! into a subquery: whether a subquery finds a row doesn't narrow the core
 //! around it, and only the column a subquery returns as it is does come out
 //! of one, as an equality with a column around it (`scope_subquery.rs`). A
@@ -136,8 +137,14 @@ pub(crate) struct Source {
     pub(crate) from: Option<String>,
     /// How the statement names this source's columns.
     pub(crate) qualifier: String,
-    /// Conditions on its rows' columns alone.
+    /// Conditions on its rows' columns alone: those its core's conditions
+    /// put on it, and those passed into a subquery, CTE or view.
     pub(crate) term: Option<ScopeTerm>,
+    /// What the equalities between it and the other sources of its core
+    /// carry to it from their terms (`Planner::carry_terms`). It narrows
+    /// the source's scope, and decides nothing of the order the sources take
+    /// values in.
+    pub(crate) carried: Option<ScopeTerm>,
     /// Columns that must equal a value an earlier source holds.
     pub(crate) memberships: Vec<Membership>,
 }
@@ -737,6 +744,7 @@ fn read_core<'a>(
             Place::LeftOn(item) => planner.narrow_on(item, found),
         }
     }
+    planner.carry_terms(core);
     // What its conditions say of a subquery's, CTE's or view's rows alone
     // narrows that one's own cores. Its equalities with other sources do
     // once the order says which it takes values from.

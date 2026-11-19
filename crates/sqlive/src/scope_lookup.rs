@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
 use crate::scope_plan::{PartnerValue, Sources};
-use crate::scope_term::Affinity;
+use crate::scope_term::{Affinity, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
 
 /// What a write asks of SQLite about a changed row.
@@ -41,8 +41,10 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
     for &position in &sources.order {
         let source = &sources.sources[position];
-        let mut scope =
-            source.term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All);
+        let bind = |term: &Option<ScopeTerm>| {
+            term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All)
+        };
+        let mut scope = bind(&source.term).and(bind(&source.carried));
         for membership in &source.memberships {
             let partner = &sources.sources[membership.partner];
             let partner_scope =
