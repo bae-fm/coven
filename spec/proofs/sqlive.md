@@ -390,6 +390,11 @@ passed into it, through the result column that an arm passes the target's
 column on to unchanged, and that the target is an inner join's. The planner
 keeps the edges it passes in a list of their own (`PState.pushed`), apart
 from the edges conditions give, and no step of the planner reads that list.
+`plan_nestedOK` proves that each edge of the planned state whose partner is
+a subquery's source has its partner in an arm of some core's subquery, as
+each condition's reader promises, because the planner changes only an
+edge's member when it passes the edge into a derived item's arm, and that
+each item's memberships are edges from it.
 
 [Tests.lean](../../crates/sqlive/proofs/SqliveNarrowing/Tests.lean) states the
 tests the restriction takes from the planner's scopes. An item's row passes
@@ -403,6 +408,16 @@ query with a LIMIT or an OFFSET, or that no derived item reads, matters.
 before and after the write hold the same rows that pass each item's test,
 and that each derived item's test keeps only rows that matter to its query,
 since one place reads each query.
+`Planned.bound_passes` proves the LIMIT bound's part of the promise: in a
+binding of the statement's own core whose ORDER BY values sort at or before
+the last row's, the bound of each item the ORDER BY sorts passes the item's
+row, when the binding holds a row of each such item that passes its scope
+and each membership between two such items holds of the binding. The ORDER
+BY sorts items of the statement's own core, which sits in no core, so no
+such membership takes a subquery's value (`plan_nestedOK`), and
+`joined_passes` gives each lookup the bound makes. The runs of the ORDER
+BY's terms keep the terms in order, so a binding's values run by run are its
+ORDER BY values.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the planner's state gives each item terms, edges and ORs that hold of the

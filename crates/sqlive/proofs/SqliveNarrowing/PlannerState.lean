@@ -12,7 +12,8 @@ derived item that passes the derived item's edge makes the target's row in
 the arm's binding pass the pushed edge. Each step keeps the memberships and
 pushed edges it found (`PState.Keeps`). The planner places each item once,
 and every item of every core (`plan_order`), which `Planned.scopes_eq`
-takes. -/
+takes. An edge to a subquery's source has its partner in an arm of some
+core's subquery (`plan_nestedOK`). -/
 namespace SqliveNarrowing
 
 /-- Where a pushed edge comes from, in the state `st`: its member is an
@@ -512,5 +513,228 @@ theorem plan_order (s : Statement) : (plan s).order.Nodup ∧
     (s.core k).items) (s.readOrder.foldl (readCore s) (PState.initial s)) [] [] List.nodup_nil
   refine ⟨hnd, fun k hk i hi => hall (List.length_filter_le _ _) i ?_⟩
   exact List.mem_flatMap.mpr ⟨k, List.mem_range.mpr hk, hi⟩
+
+
+/-! Edges to a subquery's source. A condition's reader promises that such an
+edge's partner sits in an arm of one of the condition's subqueries
+(`Edge.NestedIn`), and the planner moves an edge's member only, so every
+edge of the planned state to a subquery's source has a partner in an arm of
+some core's subquery (`plan_nestedOK`): never an item of the statement's own
+core, which sits in no core. -/
+
+/-- Whether an edge to a subquery's source has its partner in an arm of a
+subquery of some core. -/
+def Edge.NestedOK (s : Statement) (e : Edge) : Prop :=
+  e.nested = true → ∃ k, ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms
+
+/-- Whether every edge of the narrowing keeps `Edge.NestedOK`. -/
+def Narrowing.NestedOK (s : Statement) (n : Narrowing) : Prop := ∀ e ∈ n.edges, e.NestedOK s
+
+/-- Whether every edge, membership and held edge of the state keeps
+`Edge.NestedOK`, and each item's memberships are edges from it. -/
+def PState.NestedOK (s : Statement) (st : PState) : Prop :=
+  (∀ e ∈ st.edges, e.NestedOK s) ∧ (∀ i, ∀ m ∈ (st.items i).memberships, m.member = i ∧ m.NestedOK s) ∧
+    ∀ i n, (st.items i).leftOn = some n → n.NestedOK s
+
+/-- A fold each of whose steps keeps a property keeps it. -/
+theorem foldl_invariant {α β : Type} {P : β → Prop} {g : β → α → β} :
+    ∀ (l : List α), (∀ b x, x ∈ l → P b → P (g b x)) → ∀ b, P b → P (l.foldl g b)
+  | [], _, _, h => h
+  | x :: l, hg, b, h =>
+    foldl_invariant l (fun b' y hy => hg b' y (List.mem_cons_of_mem x hy)) _ (hg b x (by simp) h)
+
+theorem PState.NestedOK.update {s : Statement} {st : PState} (h : st.NestedOK s) {i : Nat}
+    {f : PItem → PItem} (hm : ∀ m ∈ (f (st.items i)).memberships, m.member = i ∧ m.NestedOK s)
+    (hl : ∀ n, (f (st.items i)).leftOn = some n → n.NestedOK s) : (st.update i f).NestedOK s := by
+  refine ⟨h.1, fun j m hmj => ?_, fun j n hn => ?_⟩
+  · simp only [PState.update] at hmj
+    split at hmj
+    · rename_i hji; subst hji; exact hm m hmj
+    · exact h.2.1 j m hmj
+  · simp only [PState.update] at hn
+    split at hn
+    · rename_i hji; subst hji; exact hl n hn
+    · exact h.2.2 j n hn
+
+/-- An update that keeps an item's memberships and keeps or drops its held
+narrowing keeps the edges. -/
+theorem PState.NestedOK.update_same {s : Statement} {st : PState} (h : st.NestedOK s) {i : Nat}
+    {f : PItem → PItem} (hm : (f (st.items i)).memberships = (st.items i).memberships)
+    (hl : ∀ n, (f (st.items i)).leftOn = some n → (st.items i).leftOn = some n) :
+    (st.update i f).NestedOK s :=
+  h.update (fun m hmem => h.2.1 i m (hm ▸ hmem)) (fun n hn => h.2.2 i n (hl n hn))
+
+theorem PState.NestedOK.addTerm {s : Statement} {st : PState} (h : st.NestedOK s) (i : Nat) (t : STerm) :
+    (st.addTerm i t).NestedOK s :=
+  h.update_same rfl (fun _ hn => hn)
+
+theorem PState.NestedOK.add {s : Statement} {st : PState} (h : st.NestedOK s) {n : Narrowing}
+    (hn : n.NestedOK s) : (st.add n).1.NestedOK s := by
+  simp only [PState.add]
+  have hterms := foldl_invariant (P := PState.NestedOK s) (g := fun st (x : Nat × STerm) => st.addTerm x.1 x.2)
+    n.terms (fun st x _ hst => hst.addTerm x.1 x.2) st h
+  have hors := foldl_invariant (P := PState.NestedOK s) (g := fun st (d : Disjunction) =>
+    st.update d.item fun p => { p with ors := p.ors ++ [d.sides] })
+    n.ors (fun st d _ hst => hst.update_same rfl (fun _ hl => hl)) _ hterms
+  refine ⟨fun e he => ?_, hors.2.1, hors.2.2⟩
+  rcases List.mem_append.mp he with he | he
+  · exact hors.1 e he
+  · exact hn e he
+
+theorem PState.NestedOK.narrow {s : Statement} :
+    ∀ (fuel : Nat) {st : PState} {n : Narrowing}, st.NestedOK s → n.NestedOK s →
+      (PState.narrow fuel st n).NestedOK s
+  | 0, _, _, h, _ => h
+  | fuel + 1, st, n, h, hn => by
+    simp only [PState.narrow]
+    refine foldl_invariant _ (fun st' i _ hst' => ?_) _ (h.add (fun e he => hn e (List.mem_filter.mp he).1))
+    split
+    · rename_i held hheld
+      exact PState.NestedOK.narrow fuel (hst'.update_same rfl (by simp))
+        (hst'.2.2 i held hheld)
+    · exact hst'
+
+theorem PState.NestedOK.joinInner {s : Statement} {st : PState} (h : st.NestedOK s) (fuel i : Nat) :
+    (st.joinInner fuel i).NestedOK s := by
+  unfold PState.joinInner
+  split
+  · rename_i held hheld
+    exact PState.NestedOK.narrow fuel (h.update_same rfl (by simp)) (h.2.2 i held hheld)
+  · exact h
+
+theorem PState.NestedOK.narrowOn {s : Statement} {st : PState} (h : st.NestedOK s) (fuel i : Nat)
+    {n : Narrowing} (hn : n.NestedOK s) : (st.narrowOn fuel i n).NestedOK s := by
+  unfold PState.narrowOn
+  simp only [Narrowing.split]
+  have hown := h.add (n := ⟨n.terms.filter (·.1 == i), n.edges.filter (·.member == i),
+    n.ors.filter (·.item == i)⟩) (fun e he => hn e (List.mem_filter.mp he).1)
+  have hothers : Narrowing.NestedOK s ⟨n.terms.filter (·.1 != i), n.edges.filter (·.member != i),
+      n.ors.filter (·.item != i)⟩ := fun e he => hn e (List.mem_filter.mp he).1
+  split
+  · rename_i held hheld
+    refine hown.update (fun m hm => hown.2.1 i m hm) ?_
+    intro n' hn'
+    simp only [Option.some.injEq] at hn'
+    subst hn'
+    intro e he
+    rcases List.mem_append.mp he with he | he
+    · exact hown.2.2 i held hheld e he
+    · exact hothers e he
+  · exact PState.NestedOK.narrow fuel hown hothers
+
+theorem PState.NestedOK.carry {s : Statement} {st : PState} (h : st.NestedOK s) (k : Nat) :
+    (Transfer.carry s st k).NestedOK s :=
+  foldl_invariant _ (fun st x _ hst => by
+    unfold Transfer.addCarried
+    exact hst.update_same rfl (fun _ hl => hl)) _ h
+
+/-- An edge `pushDown` passes into an arm keeps its partner, partner value,
+NULL matching and whether the partner is a subquery's source. -/
+theorem Edge.NestedOK.moved {s : Statement} {e : Edge} (h : e.NestedOK s) (m c : Nat) :
+    Edge.NestedOK s { e with member := m, memberValue := .column c } := h
+
+theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
+    ∀ (fuel : Nat) {st : PState} (item : Nat) (term : Option STerm) {edges : List Edge},
+      st.NestedOK s → (∀ e ∈ edges, e.NestedOK s) →
+      (PushDown.pushDown s narrowFuel fuel st item term edges).NestedOK s
+  | 0, _, _, _, _, h, _ => h
+  | fuel + 1, st, item, term, edges, h, hedges => by
+    simp only [PushDown.pushDown]
+    split
+    · exact h
+    · split
+      · exact h
+      · refine foldl_invariant _ (fun st0 arm _ hst0 => ?_) _ h
+        refine foldl_invariant _ (fun st1 target _ hst1 => ?_) _ hst0
+        apply PState.NestedOK.pushDown narrowFuel fuel
+        · have hpassed : ∀ e ∈ (edges.filter fun e => !((st1.items target).leftOn.isSome && e.nulls)).filterMap
+              (fun e => match e.memberValue with
+                | .column c => ((match arm[c]?.join with
+                    | some (t, c') => if t = target then some c' else none
+                    | none => none).map fun c' => { e with member := target, memberValue := .column c' })
+                | .expr _ => none), e.NestedOK s := by
+            intro e he
+            obtain ⟨e0, he0, _, c', _, _, rfl⟩ := PushDown.mem_passed he
+            exact (hedges e0 he0).moved target c'
+          have hst2 : ∀ (renamed : Option STerm), (match renamed with
+              | some r => st1.addTerm target r
+              | none => st1).NestedOK s := by
+            intro renamed
+            cases renamed
+            · exact hst1
+            · exact hst1.addTerm target _
+          split
+          · apply PState.NestedOK.joinInner
+            exact ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (hpassed e),
+              (hst2 _).2.1, (hst2 _).2.2⟩
+          · exact ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (hpassed e),
+              (hst2 _).2.1, (hst2 _).2.2⟩
+        · intro e he
+          obtain ⟨e0, he0, _, c', _, _, rfl⟩ := PushDown.mem_passed he
+          exact (hedges e0 he0).moved target c'
+
+/-- The subqueries of a core's conditions are the core's subqueries. -/
+theorem Core.cond_queries {c : Core} {cd : Cond} {p : Place} (hcd : (cd, p) ∈ c.conds) {q : Nat}
+    (hq : q ∈ cd.queries) : q ∈ c.subqueries := by
+  unfold Core.subqueries
+  exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_right _
+    (List.mem_flatMap.mpr ⟨(cd, p), hcd, hq⟩)))
+
+theorem PState.NestedOK.readCore {s : Statement} {st : PState} (h : st.NestedOK s) (k : Nat) :
+    (SqliveNarrowing.readCore s st k).NestedOK s := by
+  unfold SqliveNarrowing.readCore
+  simp only
+  refine foldl_invariant _ (fun st i _ hst => PState.NestedOK.pushDown _ _ i _ hst (by simp)) _ ?_
+  refine PState.NestedOK.carry ?_ k
+  refine foldl_invariant _ (fun st x hx hst => ?_) _ h
+  obtain ⟨n, p⟩ := x
+  have hread : ∀ x ∈ (s.core k).conds.map fun (cd, p) => (readCondition s k cd, p),
+      x.1.NestedOK s := by
+    intro x hx e he
+    obtain ⟨⟨cd, p'⟩, hcd, rfl⟩ := List.mem_map.mp hx
+    intro hnest
+    obtain ⟨q, hq, harm⟩ := (readCondition_sound s k cd).2.1 e he |>.2.2.2.2.2.1 hnest
+    exact ⟨k, q, Core.cond_queries hcd hq, harm⟩
+  have hn : n.NestedOK s := by
+    rcases List.mem_append.mp hx with hx | hx
+    · exact hread _ (List.mem_filter.mp hx).1
+    · exact hread _ (List.mem_filter.mp hx).1
+  cases p
+  · exact PState.NestedOK.narrow _ hst hn
+  · exact hst.narrowOn _ _ hn
+
+theorem PState.NestedOK.ordered {s : Statement} :
+    ∀ (fuel : Nat) (all : List Nat) {st : PState} (order waited : List Nat), st.NestedOK s →
+      (SqliveNarrowing.ordered.go s fuel all st order waited).1.NestedOK s
+  | 0, _, _, _, _, h => h
+  | fuel + 1, all, st, order, waited, h => by
+    simp only [SqliveNarrowing.ordered.go]
+    split
+    · exact h
+    · apply PState.NestedOK.ordered fuel
+      refine PState.NestedOK.pushDown _ _ _ _ (h.update ?_ ?_) ?_
+      · intro m hm
+        rcases List.mem_append.mp hm with hm | hm
+        · exact h.2.1 _ m hm
+        · have := List.mem_filter.mp hm
+          simp only [Bool.and_eq_true, beq_iff_eq] at this
+          exact ⟨this.2.1, h.1 m this.1⟩
+      · exact h.2.2 _
+      · exact fun e he => h.1 e (List.mem_filter.mp he).1
+
+/-- Every edge, membership and held edge of the planned state to a
+subquery's source has its partner in an arm of a subquery of some core, and
+each item's memberships are edges from it. -/
+theorem plan_nestedOK (s : Statement) : (plan s).state.NestedOK s := by
+  unfold plan ordered
+  simp only
+  refine PState.NestedOK.ordered _ _ _ _ ?_
+  refine foldl_invariant _ (fun st k _ hst => hst.readCore k) _ ?_
+  refine ⟨fun e he => by simp [PState.initial] at he, fun i m hm => by simp [PState.initial] at hm,
+    fun i n hn => ?_⟩
+  simp only [PState.initial] at hn
+  split at hn
+  · cases hn; intro e he; cases he
+  · cases hn
 
 end SqliveNarrowing

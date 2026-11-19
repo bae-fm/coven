@@ -698,14 +698,15 @@ theorem runKey_cons (row : Nat → Row) (run : SortRun) (runs : List SortRun) :
   simp [runKey]
 
 /-- An item's bound passes its row in a binding whose ORDER BY values sort at
-or before the last row's, when each lookup the bound makes passes the item's
-row wherever the partner's row passes the lookup's scope (`joined_passes`
-gives that of a membership). -/
+or before the last row's, when each lookup the bound makes of a run's item
+passes the item's row wherever the partner's row passes the lookup's scope
+(`joined_passes` gives that of a membership). -/
 theorem runBound_passes (rowsOf : Nat → List Row) (row : Nat → Row) (i : Nat)
     (lookup : Nat → Option (RScope → RScope))
-    (hlookup : ∀ j look, lookup j = some look → ∀ scope : RScope,
-      scope.passes rowsOf (row j) → (look scope).passes rowsOf (row i))
-    (runs : List (SortRun × List Value)) (hlen : ∀ p ∈ runs, p.2.length = p.1.terms.length)
+    (runs : List (SortRun × List Value))
+    (hlookup : ∀ p ∈ runs, ∀ look, lookup p.1.item = some look → ∀ scope : RScope,
+      scope.passes rowsOf (row p.1.item) → (look scope).passes rowsOf (row i))
+    (hlen : ∀ p ∈ runs, p.2.length = p.1.terms.length)
     (hle : keyLe (runDirections (runs.map (·.1))) (runKey row (runs.map (·.1)))
       (runs.flatMap (·.2)))
     {bound : RScope} (h : runBound i lookup runs = some bound) : bound.passes rowsOf (row i) := by
@@ -745,8 +746,9 @@ theorem runBound_passes (rowsOf : Nat → List Row) (row : Nat → Row) (i : Nat
               simp only at h
               subst h
               simp only [passesSome, Option.map_some, Option.getD_some] at hb
-              rw [passes_either, hlookup run.item look hlook before hb, Bool.true_or]
-          · have hpass := ih hrest (by unfold keyLe; exact bne_iff_ne.mpr hge) hlater
+              rw [passes_either, hlookup (run, last) (by simp) look hlook before hb, Bool.true_or]
+          · have hpass := ih (fun p hp => hlookup p (by simp [hp])) hrest
+              (by unfold keyLe; exact bne_iff_ne.mpr hge) hlater
             cases hs : sortedBefore run.item run.keys last none <;> rw [hs] at h <;>
               simp only at h <;> subst h <;> simp [passes_either, hpass]
 
