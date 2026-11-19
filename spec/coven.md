@@ -12681,12 +12681,11 @@ What the models cover:
   cancelling the new device before its restore records itself binds nothing
   (§13.2, §13.4). The sealing and opening are taken as given.
 - **Narrowing a live query** to the rows its statements can depend on (§4):
-  each rule's step, against a port of sqlive's planner, and the first steps of
-  putting them together: a write the judge lets pass leaves the rows that pass
-  each table's scope unchanged, and the rows of a statement read whole; and two
-  databases that hold the same rows passing each item's scope give a statement
-  the same rows when its bindings keep the scopes' promise. A differential test
-  checks how the planner composes the rules against SQLite.
+  each rule's step, against a port of sqlive's planner, and the rules put
+  together: for a well-formed statement, a write the judge lets pass, with
+  the scopes the planner gives, leaves the statement's rows unchanged. A
+  differential test checks sqlive's planner and judge against the model, and
+  the model against SQLite.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:
@@ -15268,6 +15267,7 @@ Write-ups explain each model and state its assumptions:
 | Every edge of the planned state, every edge of a side of each OR and every narrowing an ON holds back takes values from an item a lookup reads alone; each OR an item keeps is one of its ORs, each edge passed into a derived item's arm has a member its core lists, and the planner places only items a core lists; a derived item a lookup reads alone runs its query under any binding as under the binding of no row; every binding of an arm matters to a query whose every row matters, and the test of the statement's own query keeps every row | `plan_lookups`, `plan_order_listed`, `outerNames_readsAlone`, `evalQuery_readable`, `outer_readable`, `relevant_of_all`, `queryTest_root` | `../crates/sqlive/proofs/SqliveNarrowing/Partners.lean` | §4 |
 | In a binding that matters of a core run before or after the write, each row passes its item's test: its terms hold, its memberships' and kept ORs' partners, which the order places before it, give its values from rows of their lookups in their scopes, the edges passed into it pass, and its LIMIT bound passes; a row of an item a lookup reads alone is a row of the lookup; so such a binding holds no row only of an item the planned state holds an ON narrowing back for | `partner_found`, `pushed_passes`, `plan_kept_rows`, `plan_restricted` | `../crates/sqlive/proofs/SqliveNarrowing/Kept.lean` | §4 |
 | While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Held.lean` | §4 |
+| The planner's scopes keep their promise for every query at every fuel at which two databases return the same rows that matter; a write the judge lets pass, with the scopes the planner gives the run that read the database before it, leaves a well-formed statement's rows unchanged, the statement's own query with a LIMIT bound included, and so does a write sqlive's judge lets pass when a question stopped at the step limit | `plan_kept`, `narrowing_sound`, `narrowing_sound_limited` | `../crates/sqlive/proofs/SqliveNarrowing/Sound.lean` | §4 |
 | When the judge lets a write pass, the tables before and after it hold the same rows that pass each item's test from the planner's scopes and passed edges, and a derived item's test keeps only rows that matter to its query; in a binding of the statement's own core that sorts at or before the last row, the LIMIT bound of each item the ORDER BY sorts passes the item's row when its memberships to other such items hold | `plan_restriction`, `Planned.bound_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Tests.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

@@ -117,3 +117,10 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.PState.Sem.pull_lookup
 #print axioms SqliveNarrowing.plan_held
 #print axioms SqliveNarrowing.plan_left_passes
+#print axioms SqliveNarrowing.plan_armsKept
+#print axioms SqliveNarrowing.plan_kept
+#print axioms SqliveNarrowing.Limit.sortedLimit_query
+#print axioms SqliveNarrowing.Limit.lastValues_some
+#print axioms SqliveNarrowing.Statement.result_outRow
+#print axioms SqliveNarrowing.narrowing_sound
+#print axioms SqliveNarrowing.narrowing_sound_limited

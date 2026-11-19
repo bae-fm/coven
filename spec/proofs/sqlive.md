@@ -5,7 +5,9 @@ how sqlive narrows a live query to the rows its statements can depend on (§4),
 and which writes therefore run the query again. The package states a statement
 as sqlive's planner reads it, ports the planner, and proves each rule's step:
 the rows a rule leaves out of a table's scope are rows the statement's result
-doesn't depend on. A differential test runs sqlive, the model and SQLite on
+doesn't depend on. `narrowing_sound` puts the steps together: for a
+well-formed statement, a write the judge lets pass leaves the statement's rows
+unchanged. A differential test runs sqlive, the model and SQLite on
 random statements and writes and compares all three.
 
 ## The model
@@ -331,8 +333,8 @@ JOIN adds, so where such a part holds, its item has a row.
 
 ## Putting the rules together
 
-Some steps of putting the rules together are proved, each with its own
-theorem.
+`narrowing_sound` proves that the rules together are sound, through the
+steps below, each with its own theorem.
 
 A statement's rows depend only on the columns it reads.
 [Mask.lean](../../crates/sqlive/proofs/SqliveNarrowing/Mask.lean)
@@ -615,15 +617,27 @@ before the item in the order, so its row in the binding, or in a binding of
 the ON's subquery under it, passes its test, and no edge passes into the
 item.
 
+[Sound.lean](../../crates/sqlive/proofs/SqliveNarrowing/Sound.lean) puts the
+steps together. `plan_kept` proves that the planner's scopes keep the promise
+`Kept` at every fuel at which the databases before and after the write return
+the same rows that matter, so `agree_of_kept` gives every query but the
+statement's own the same rows that matter. No derived item reads the
+statement's own query, so all its rows matter. When the run that read the
+database before the write returned as many rows as its LIMIT, the LIMIT bound
+narrows the statement's own core to the bindings that sort at or before the
+run's last row (`Limit.lastValues_some`, `Statement.result_outRow`), and
+`limit_restricted` takes those. `narrowing_sound` proves that a write the
+judge lets pass leaves a well-formed statement's rows unchanged, and
+`narrowing_sound_limited` that the same holds of sqlive's judge, which
+narrows nothing for a write whose question stopped at the step limit.
+
 ## What the proofs don't cover
 
-The theorems prove each rule's step and the steps of putting them together
-that the section above names. For a statement sqlive doesn't read whole, no
-theorem proves that a write the judge lets pass leaves the statement's rows
-unchanged. The proofs give each part of the promise `agree_of_kept` and
-`limit_restricted` take, and no theorem composes them into that statement.
-The differential checks that composition
-against SQLite on every statement it generates.
+The theorems prove each rule's step and `narrowing_sound`, which puts the
+rules together for every well-formed statement the model states. They prove
+nothing of sqlive's own code: the differential checks sqlive's planner and
+judge against the model, and the model against SQLite, on every statement it
+generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
