@@ -102,31 +102,30 @@ fn a_projection_names_every_type_impls_give_it() {
     );
 }
 
-/// Two example roots that each declare `mod shared;` for one file both reach
-/// its types through the module.
+/// Two binary roots that each declare `mod shared;` for one file both resolve
+/// paths through the module as it names them: there `Connection` is
+/// rusqlite's, so neither holder holds the workspace's `Connection`.
 #[test]
 fn a_module_file_two_roots_declare_resolves_from_each() {
     let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
     let files = checked(
         &[
-            file("crates/app-core/src/lib.rs", ""),
+            file("crates/app-core/src/lib.rs", "mod connection;"),
             file(
-                "crates/app-core/examples/first.rs",
+                "crates/app-core/src/connection.rs",
+                "pub(crate) struct Connection { socket: Socket }",
+            ),
+            file(
+                "crates/app-core/src/bin/first.rs",
                 "mod shared; struct First { c: shared::Connection }",
             ),
             file(
-                "crates/app-core/examples/second.rs",
+                "crates/app-core/src/bin/second.rs",
                 "mod shared; struct Second { c: shared::Connection }",
             ),
-            file(
-                "crates/app-core/examples/shared/mod.rs",
-                "pub(crate) struct Connection { socket: Socket }",
-            ),
+            file("crates/app-core/src/bin/shared/mod.rs", "pub(crate) use rusqlite::Connection;"),
         ],
         &policy,
     );
-    assert_eq!(
-        OwnerGraph::collect(&files, &policy).owners,
-        BTreeSet::from(["Connection".into(), "First".into(), "Second".into()])
-    );
+    assert_eq!(OwnerGraph::collect(&files, &policy).owners, BTreeSet::from(["Connection".into()]));
 }
