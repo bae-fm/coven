@@ -19,7 +19,16 @@ use std::{
 use tokio::sync::oneshot;
 
 pub(super) const QUERY_PAGE_SIZE: usize = 100;
-pub(super) type CloudKitReply<T> = oneshot::Receiver<Result<T, StorageError>>;
+
+/// Where an operation's request hears the answer its completion sends.
+pub(super) struct CloudKitReply<T>(oneshot::Receiver<Result<T, StorageError>>);
+
+impl<T> CloudKitReply<T> {
+    /// The operation's answer, once its completion sends it.
+    async fn answer(&mut self) -> Result<T, StorageError> {
+        (&mut self.0).await.map_err(|error| StorageFailure::Protocol.with_source(error))?
+    }
+}
 
 /// An enqueued operation is only cancelled through NSOperation's thread-safe API.
 /// Its CloudKit configuration and callbacks are never changed after enqueueing.
@@ -34,7 +43,7 @@ impl<T> CloudKitRequest<T> {
     }
 
     pub(super) async fn wait(mut self) -> Result<T, StorageError> {
-        (&mut self.result).await.map_err(|error| StorageFailure::Protocol.with_source(error))?
+        self.result.answer().await
     }
 }
 impl<T> Drop for CloudKitRequest<T> {
@@ -101,7 +110,8 @@ impl<T> CloudKitCompletion<T> {
     /// An operation's answer, and where its request hears it.
     pub(super) fn new() -> (Arc<Self>, CloudKitReply<T>) {
         let (reply, result) = oneshot::channel();
-        (Arc::new(Self { unanswered: Mutex::new(Some(Unanswered { reply, bug: None })) }), result)
+        let completion = Self { unanswered: Mutex::new(Some(Unanswered { reply, bug: None })) };
+        (Arc::new(completion), CloudKitReply(result))
     }
 
     /// Run `callback`, one the operation calls before its last, such as a
