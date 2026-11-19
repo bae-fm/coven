@@ -22,6 +22,21 @@ pub enum FileError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Moving or deleting a directory failed on Windows, which refuses to
+    /// move or delete a directory while a file in it is open, and these files
+    /// in it refused an exclusive open.
+    #[error("{operation} {}: {source}; open files: {}", path.display(), held_paths(held))]
+    HeldOpen {
+        /// The operation that failed.
+        operation: &'static str,
+        /// The directory that could not be moved or deleted.
+        path: PathBuf,
+        /// The files in the directory that are open, which keep it in place.
+        held: Vec<PathBuf>,
+        /// The operating system's error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// The new bytes are visible, but syncing the directory failed.
     #[error("sync directory after replacing {}: {source}", path.display())]
     AfterReplace {
@@ -82,6 +97,10 @@ impl From<crate::task::TaskFailed> for FileError {
     fn from(failed: crate::task::TaskFailed) -> Self {
         failed.into_error()
     }
+}
+
+fn held_paths(paths: &[PathBuf]) -> String {
+    paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
 impl FileError {

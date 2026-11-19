@@ -7,6 +7,7 @@ use crate::files::file_lock::{FileLock, LockMode};
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
 use crate::id_source::StoreId;
 
+use super::held_open;
 use super::lock_registry as registry;
 use registry::LockKind;
 pub use registry::StoreClosingGuard;
@@ -165,7 +166,9 @@ impl StoreDeletionLock {
         let destination = deletion_path(&self.store.directory, self.store.id);
         if self.store.directory != destination && inspect_directory(&self.store.directory)? {
             crate::files::atomic_file::rename_new(&self.store.directory, &destination).map_err(
-                |source| FileError::at("unpublish store", &self.store.directory, source),
+                |source| {
+                    held_open::directory_failure("unpublish store", &self.store.directory, source)
+                },
             )?;
             self.store.directory = destination;
             #[cfg(unix)]
@@ -189,7 +192,11 @@ impl StoreDeletionLock {
         self.unpublish_locked()?;
         if inspect_directory(&self.store.directory)? {
             std::fs::remove_dir_all(&self.store.directory).map_err(|source| {
-                FileError::at("remove store directory", &self.store.directory, source)
+                held_open::directory_failure(
+                    "remove store directory",
+                    &self.store.directory,
+                    source,
+                )
             })?;
         }
         #[cfg(unix)]

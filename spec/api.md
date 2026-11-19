@@ -1997,6 +1997,15 @@ pub enum CovenSchemaError {
 pub enum FileError {
     /// The operation failed without replacing its target.
     Io { operation: &'static str, path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
+    /// Moving or deleting a directory failed on Windows, which refuses either
+    /// while a file in the directory is open. `held` lists the files in it
+    /// that refused an exclusive open, and no other platform returns this.
+    HeldOpen {
+        operation: &'static str,
+        path: PathBuf,
+        held: Vec<PathBuf>,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// Replacement is visible, but syncing its directory failed.
     AfterReplace { path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
     /// Removal is visible, but syncing its directory failed.
@@ -2272,7 +2281,8 @@ pub enum StoreDeletionError {
     NoUnfinishedDeletion(StoreId),
     /// Removing a keychain entry failed.
     Key(KeyError),
-    /// Removing the store directory failed.
+    /// Moving or removing the store directory failed. On Windows, when files
+    /// in it are open, the error is `FileError::HeldOpen`, which names them.
     File(FileError),
     /// The deletion's runtime is shutting down and dropped it unstarted;
     /// nothing was deleted (E15).

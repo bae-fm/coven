@@ -16,6 +16,7 @@ mod file_lock;
 mod file_reader;
 mod flush_batch;
 mod folder_copy;
+mod held_open;
 mod layout;
 mod lock;
 mod lock_registry;
