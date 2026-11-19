@@ -69,7 +69,7 @@ async fn internal_schema_migrates_on_open_and_preserves_app_data() {
 }
 
 #[tokio::test]
-async fn internal_schema_migrations_roll_back_on_failure() {
+async fn creating_the_internal_schema_rolls_back_on_failure() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
     raw.execute_batch(
@@ -92,7 +92,7 @@ async fn internal_schema_migrations_roll_back_on_failure() {
 }
 
 #[tokio::test]
-async fn read_only_refuses_internal_migration_without_changing_database() {
+async fn read_only_refuses_a_database_without_coven_tables_and_changes_nothing() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
     raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')").unwrap();
