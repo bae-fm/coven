@@ -351,3 +351,59 @@ async fn an_invite_carries_the_s3_key_this_device_holds() {
     );
     network.close().await;
 }
+
+/// Ana removes Ben's phone from the store. The phone keeps its copy and keeps
+/// writing to it, as any device does: a write of a row the store reads and a
+/// note in his circle commits after the removal applies, beside the row and
+/// note it sent before. The new write never leaves the phone: its sync has
+/// stopped, its state counts the write unsent, and Ana's device reads only
+/// what it sent before (§14.1, §19.1).
+#[tokio::test]
+async fn a_removed_device_keeps_writing_to_its_own_copy() {
+    let network = Network::new(2).await;
+    let (ana, ben) = (&network.devices[0].handle, &network.devices[1].handle);
+    let circle = ben
+        .circles()
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|circle| circle.name == crate::tests::CIRCLE)
+        .unwrap()
+        .id;
+    let write = |id: &'static str| {
+        let audience = circle.to_string();
+        move |sql: CovenWrite<'_>| {
+            sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [id])?;
+            sql.execute(
+                "INSERT INTO circle_notes(id,value,audience) VALUES(?1,1,?2)",
+                [format!("00000000-0000-7000-8000-00000000{id:0>4}"), audience],
+            )?;
+            Ok::<_, CovenError>(())
+        }
+    };
+    ben.write(write("1")).await.unwrap();
+    network.sync(1).await;
+    let (removal, _) = ana.remove_device(ben.device_id()).await.unwrap();
+    crate::tests::landed(ana, removal).await;
+    let mut status = ben.test_sync_status();
+    ben.sync_now();
+    status.wait_for(|status| matches!(status.state, SyncState::Removed { .. })).await;
+
+    ben.write(write("2")).await.unwrap();
+    let ids =
+        |rows: Vec<(String, String, i64)>| rows.into_iter().map(|row| row.0).collect::<Vec<_>>();
+    let (parents, _, notes) = network.rows(1).await;
+    assert_eq!(ids(parents), ["1", "2"]);
+    assert_eq!(
+        notes.into_iter().map(|note| note.0).collect::<Vec<_>>(),
+        ["00000000-0000-7000-8000-000000000001", "00000000-0000-7000-8000-000000000002"]
+    );
+    assert_eq!(
+        ben.sync_status().await.unwrap().state,
+        SyncState::Removed { removal: Removal::Device, unsent: UnsentWork { writes: 1, files: 0 } }
+    );
+    network.sync(0).await;
+    assert_eq!(ids(network.rows(0).await.0), ["1"]);
+    network.close().await;
+}

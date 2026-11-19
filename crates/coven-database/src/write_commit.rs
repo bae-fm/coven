@@ -413,6 +413,10 @@ pub(crate) fn queue(
 /// deletion, before any question of who is in it (§15.9). This is the
 /// deletion check for a local write's rows and file records; a migration
 /// write's rows, which never reach it, are checked in `migration_run`.
+/// Membership is the device's member's: a device its own removal stopped
+/// keeps writing into its member's circles, and never sends those writes
+/// (§14.1). A member's removal takes them out of every circle, so it needs
+/// no check of its own here.
 /// The caller must keep its write transaction open until the authorized work commits.
 pub(crate) fn check_membership(
     database: &StoreSql,
@@ -433,9 +437,7 @@ pub(crate) fn check_membership(
                 SELECT 1 FROM _coven_circle_members cm
                 JOIN _coven_circles c ON c.circle=cm.circle
                 JOIN _coven_devices d ON d.member=cm.member
-                JOIN _coven_members m ON m.member=d.member
                 WHERE cm.circle=?1 AND d.device=?2
-                  AND d.state<>'removed' AND m.removed=0
             )",
             params![circle, device],
             |row| row.get(0),

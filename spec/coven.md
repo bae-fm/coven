@@ -6451,6 +6451,17 @@ tell a replacement of its member's keys from its own, a device records each
 pair it holds, and the candidate its own replacement keeps before custody keeps
 it (§12.3).
 
+A removed device keeps its copy of the store, and its app keeps using it. Ben
+removes his old laptop at slot 60. The laptop still reads every row it holds,
+and its app still commits writes, such as the songs Ben plays there, under the
+same local checks as on any device (§2.1). Each write waits in the send queue,
+which the laptop never sends, so it stays on the laptop, and the laptop's state
+counts it unsent (§19.1). Without this, removing a device would also take from
+its person the data they still hold on it. The device's own removal leaves Ben
+in his circles, so the laptop still writes into them. A removal of Ben himself
+takes him out of every circle and deletes each circle he alone was in (§15.8),
+so his devices then write to the store's audience only.
+
 A joined store whose admission its history refused stops the same way, for
 good, reporting `Removed(NeverAdmitted)` (§13.2): its device was never a member. No slot
 applies that stop. It comes in a pass, or the joined store's first load, that
