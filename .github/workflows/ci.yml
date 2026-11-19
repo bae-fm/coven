@@ -113,7 +113,9 @@ jobs:
               rm -f target/debug/build/"$package"/*/out/"$name"-* target/debug/build/"$package"/*/out/lib"$name"-*
           done
           rm -rf target/doc
-          # du counts a file once, under the first argument holding it.
+          # du counts a file once, under the first argument holding it. An
+          # empty folder's pattern names nothing, rather than a path du fails on.
+          shopt -s nullglob
           du -sh target/debug/incremental/* target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -30
       - name: Save the build
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
