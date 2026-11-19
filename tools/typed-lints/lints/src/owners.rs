@@ -24,8 +24,8 @@
 
 use std::cell::RefCell;
 
-use clippy_utils::paths::{PathNS, lookup_path_str};
-use owner_construction_policy::{FILE_NAME, RAW_SQLITE_HANDLES};
+use clippy_utils::paths::PathNS;
+use owner_construction_policy::FILE_NAME;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId};
@@ -34,7 +34,7 @@ use rustc_middle::ty::{
     Unnormalized,
 };
 
-use crate::workspace_policy::{WorkspacePolicy, resolve_row};
+use crate::workspace_policy::{WorkspacePolicy, raw_sqlite_handles, resolve_row};
 
 /// The types one of the policy's type rows names: ADTs, whatever their type
 /// arguments, and the types aliases stand for, as `Arc<dyn Clock>`, with
@@ -103,9 +103,8 @@ pub(crate) struct OwnerRows<'tcx> {
     pub(crate) sessions: TypeSet<'tcx>,
     /// rusqlite's raw handles, none in a compile that can't reach rusqlite.
     pub(crate) raw_handles: TypeSet<'tcx>,
-    /// Each handle, with the types that make it: none in a compile that
-    /// can't reach its maker.
-    pub(crate) handles: FxHashMap<DefId, Vec<DefId>>,
+    /// Each handle, with its owner.
+    pub(crate) handles: FxHashMap<DefId, HandleOwner>,
     /// Each capability factory's product, by the factory's row.
     pub(crate) factory_products: Vec<Vec<DefId>>,
 }
@@ -170,16 +169,20 @@ impl<'tcx> OwnerRows<'tcx> {
                 }
             }
         }
-        let mut handles = FxHashMap::default();
+        let mut handles = FxHashMap::<DefId, HandleOwner>::default();
         for (handle, maker) in &policy.handles {
             if handle == maker {
                 tcx.dcx().fatal(format!(
                     "typed lints: {FILE_NAME}'s handles names {handle} as its own owner"
                 ));
             }
-            let makers = resolve_type_ids(tcx, "handles", maker);
+            let types = resolve_type_ids(tcx, "handles", maker);
             for handle in resolve_type_ids(tcx, "handles", handle) {
-                handles.entry(handle).or_insert_with(Vec::new).extend(makers.iter().copied());
+                handles
+                    .entry(handle)
+                    .or_insert_with(|| HandleOwner { path: maker.clone(), types: Vec::new() })
+                    .types
+                    .extend(types.iter().copied());
             }
         }
         let factory_products = policy
@@ -188,10 +191,8 @@ impl<'tcx> OwnerRows<'tcx> {
             .map(|factory| resolve_type_ids(tcx, "capability_factories", &factory.product))
             .collect();
         let mut raw_handles = TypeSet::default();
-        for (path, _) in RAW_SQLITE_HANDLES {
-            for id in lookup_path_str(tcx, PathNS::Type, path) {
-                raw_handles.insert(Row::Id(id));
-            }
+        for (id, _) in raw_sqlite_handles(tcx) {
+            raw_handles.insert(Row::Id(id));
         }
         let rows = Self {
             capabilities: set("capability_types", &policy.capability_types),
@@ -253,8 +254,8 @@ impl<'tcx> OwnerRows<'tcx> {
                 tcx.fn_sig(method).instantiate_identity().skip_norm_wip().output().skip_binder();
             mentions(tcx, output).contains(&handle)
         };
-        for (&handle, makers) in &self.handles {
-            for &maker in makers.iter().filter(|maker| maker.is_local()) {
+        for (&handle, owner) in &self.handles {
+            for &maker in owner.types.iter().filter(|maker| maker.is_local()) {
                 let trait_impls =
                     tcx.hir_crate_items(()).definitions().map(|id| id.to_def_id()).filter(|&id| {
                         matches!(tcx.def_kind(id), DefKind::Impl { of_trait: true })
@@ -292,6 +293,13 @@ impl<'tcx> OwnerRows<'tcx> {
             || self.shared_state.holds(tcx, part)
             || self.handles.contains_key(&part.id)
     }
+}
+
+/// A handle's owner: the path the policy names it by, and the types that path
+/// names in the compile, none in a compile that can't reach it.
+pub(crate) struct HandleOwner {
+    pub(crate) path: String,
+    pub(crate) types: Vec<DefId>,
 }
 
 /// One type a value holds: an ADT with its type arguments, or a trait, and

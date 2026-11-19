@@ -75,7 +75,7 @@ pub(crate) fn check<'tcx>(owners: &Owners<'tcx>, cx: &LateContext<'tcx>) {
         {
             continue;
         }
-        let makers = owners.rows.handles.get(&holder);
+        let makers = owners.rows.handles.get(&holder).map(|owner| &owner.types);
         let adt = tcx.adt_def(holder);
         let identity = ty::GenericArgs::identity_for_item(tcx, holder);
         for field in adt.all_fields() {

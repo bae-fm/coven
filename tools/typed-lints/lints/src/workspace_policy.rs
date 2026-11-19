@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use clippy_utils::is_in_test_function;
 use clippy_utils::paths::{PathNS, lookup_path_str};
-use owner_construction_policy::{FILE_NAME, Policy};
+use owner_construction_policy::{FILE_NAME, Policy, RAW_SQLITE_HANDLES};
 use rustc_attr_ir::CfgEntry;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
@@ -261,6 +261,17 @@ fn requires_test(cfg: &CfgEntry, features: &[String]) -> bool {
         }
         CfgEntry::Not(..) | CfgEntry::Bool(..) | CfgEntry::Version(..) => false,
     }
+}
+
+/// rusqlite's raw handles the compile can reach, each with how findings
+/// name it: none in a compile that can't reach rusqlite.
+pub(crate) fn raw_sqlite_handles(tcx: TyCtxt<'_>) -> Vec<(DefId, &'static str)> {
+    RAW_SQLITE_HANDLES
+        .iter()
+        .flat_map(|&(path, kind)| {
+            lookup_path_str(tcx, PathNS::Type, path).into_iter().map(move |id| (id, kind))
+        })
+        .collect()
 }
 
 /// What a policy row's path, such as `app_bridge::runtime::Runtime::run`,

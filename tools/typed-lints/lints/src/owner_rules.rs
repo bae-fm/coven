@@ -224,10 +224,9 @@ impl<'tcx> OwnerRules<'tcx> {
         if !is_owner && !capability {
             return;
         }
-        let made_by_maker = rows
-            .handles
-            .get(&what)
-            .is_some_and(|makers| impl_type.is_some_and(|ty| makers.contains(&ty) || ty == what));
+        let made_by_maker = rows.handles.get(&what).is_some_and(|owner| {
+            impl_type.is_some_and(|ty| owner.types.contains(&ty) || ty == what)
+        });
         let cloned = clone && impl_type == Some(what);
         if made_by_maker || cloned || (!is_owner && (receiver || products.contains(&what))) {
             return;

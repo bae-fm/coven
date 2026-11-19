@@ -3,8 +3,6 @@
 // `clippy::owner_hands_out_dependency` holds a `finding` comment, and
 // handles.rs and shared.rs mark the other two rules' findings.
 
-#![allow(dead_code)]
-
 pub mod database;
 pub mod handles;
 pub mod shared;

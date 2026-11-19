@@ -816,12 +816,6 @@ impl Policy {
             .collect()
     }
 
-    /// Whether `handle` is a handle and `maker` may make and return it: its
-    /// owner, or the handle itself, as a clone does.
-    pub fn makes_handle(&self, maker: &str, handle: &str) -> bool {
-        self.handles.get(handle).is_some_and(|owner| owner == maker || handle == maker)
-    }
-
     /// Every type the owner rules' rows name, by path, with the row it came
     /// from.
     pub fn owner_type_rows(&self) -> Vec<(&'static str, &str)> {

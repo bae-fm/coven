@@ -45,7 +45,7 @@ use rustc_span::Span;
 use crate::finding::Finding;
 use crate::kept_arguments::kept_arguments;
 use crate::made_here::MadeHere;
-use crate::owner_rules::{is_root, type_name};
+use crate::owner_rules::{impl_type, is_root, type_name};
 use crate::owners::{Held, Owners, Part, mentions};
 use crate::workspace_bodies::workspace_definitions;
 
@@ -221,12 +221,7 @@ impl<'tcx> Rules<'_, 'tcx> {
         let tcx = self.tcx;
         let parent = tcx.parent(id);
         let owner = match tcx.def_kind(parent) {
-            DefKind::Impl { .. } => tcx
-                .type_of(parent)
-                .instantiate_identity()
-                .skip_norm_wip()
-                .ty_adt_def()
-                .map(|adt| adt.did())?,
+            DefKind::Impl { .. } => impl_type(tcx, id)?,
             DefKind::Trait => parent,
             _ => return None,
         };
@@ -385,9 +380,8 @@ impl<'tcx> Rules<'_, 'tcx> {
                 for (part, route) in method.handed_out() {
                     let output = part.id;
                     let what = tcx.def_path_str(output);
-                    if let Some(makers) = rows.handles.get(&output) {
-                        let maker = makers.first().map(|&maker| tcx.def_path_str(maker));
-                        let maker = maker.unwrap_or_default();
+                    if let Some(owner) = rows.handles.get(&output) {
+                        let (maker, makers) = (&owner.path, &owner.types);
                         let makes = method.rooted
                             || makers.contains(&method.owner)
                             || method.owner == output;
@@ -500,18 +494,26 @@ impl<'tcx> Rules<'_, 'tcx> {
         let tcx = self.tcx;
         let signature = tcx.fn_sig(callable).instantiate_identity().skip_norm_wip().skip_binder();
         let method = tcx.opt_associated_item(callable).is_some_and(|item| item.is_method());
-        let mut raw = Vec::new();
-        for (index, &input) in signature.inputs().iter().enumerate() {
-            if method && index == 0 {
-                continue;
-            }
-            for named in mentions(tcx, input) {
-                if self.is_raw(named) && !raw.contains(&named) {
-                    raw.push(named);
+        let inputs = signature.inputs().iter().skip(usize::from(method)).copied();
+        self.named_where(inputs, |named| self.is_raw(named))
+    }
+
+    /// Each type that one of `types` names anywhere in it and `keep` keeps,
+    /// once.
+    fn named_where(
+        &self,
+        types: impl IntoIterator<Item = Ty<'tcx>>,
+        keep: impl Fn(DefId) -> bool,
+    ) -> Vec<DefId> {
+        let mut kept = Vec::new();
+        for ty in types {
+            for named in mentions(self.tcx, ty) {
+                if keep(named) && !kept.contains(&named) {
+                    kept.push(named);
                 }
             }
         }
-        raw
+        kept
     }
 
     /// A public field of an owner, or one that holds a service or what holds
@@ -584,14 +586,10 @@ impl<'tcx> Rules<'_, 'tcx> {
             }
             let identity = ty::GenericArgs::identity_for_item(tcx, id);
             for field in tcx.adt_def(id).all_fields() {
-                let mut internal = Vec::new();
-                for named in mentions(tcx, field.ty(tcx, identity).skip_norm_wip()) {
-                    if (self.owners.rows.internal.has(tcx, named, None) || self.is_raw(named))
-                        && !internal.contains(&named)
-                    {
-                        internal.push(named);
-                    }
-                }
+                let internal = self
+                    .named_where([field.ty(tcx, identity).skip_norm_wip()], |named| {
+                        self.owners.rows.internal.has(tcx, named, None) || self.is_raw(named)
+                    });
                 for dependency in internal {
                     self.emit(
                         OWNER_HANDS_OUT_DEPENDENCY,
@@ -636,12 +634,7 @@ impl<'tcx> Rules<'_, 'tcx> {
             };
             let output =
                 tcx.fn_sig(id).instantiate_identity().skip_norm_wip().output().skip_binder();
-            let mut returned = Vec::new();
-            for named in mentions(tcx, output) {
-                if self.is_raw(named) && !returned.contains(&named) {
-                    returned.push(named);
-                }
-            }
+            let returned = self.named_where([output], |named| self.is_raw(named));
             for raw in returned {
                 self.emit(
                     OWNER_HANDS_OUT_DEPENDENCY,

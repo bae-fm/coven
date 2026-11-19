@@ -25,7 +25,7 @@
 //! Test code answers to none of this: a test may open its own connection.
 
 use clippy_utils::paths::{PathNS, lookup_path_str};
-use owner_construction_policy::{Capability, RAW_SQLITE_HANDLES, describe_homes};
+use owner_construction_policy::{Capability, describe_homes};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -35,7 +35,7 @@ use rustc_middle::ty::{self, GenericArgKind, Ty, TyCtxt};
 use rustc_span::Span;
 
 use crate::finding::Finding;
-use crate::workspace_policy::WorkspacePolicy;
+use crate::workspace_policy::{WorkspacePolicy, raw_sqlite_handles};
 
 declare_tool_lint! {
     /// Production code outside the SQLite capability's homes that names an
@@ -86,12 +86,7 @@ impl SqliteOutsideItsHomes {
         let database = workspace.and_then(|workspace| {
             workspace.policy.database_capability().map(|capability| (workspace, capability))
         });
-        let raw_handles = RAW_SQLITE_HANDLES
-            .iter()
-            .flat_map(|&(path, kind)| {
-                lookup_path_str(tcx, PathNS::Type, path).into_iter().map(move |id| (id, kind))
-            })
-            .collect();
+        let raw_handles = raw_sqlite_handles(tcx);
         let value_conversions = VALUE_CONVERSIONS
             .iter()
             .flat_map(|path| lookup_path_str(tcx, PathNS::Type, path))

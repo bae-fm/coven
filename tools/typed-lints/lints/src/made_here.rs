@@ -30,9 +30,15 @@ use rustc_middle::ty::TyCtxt;
 /// each argument it gives the callback is.
 pub(crate) struct MadeHere<'tcx> {
     returns: bool,
-    /// The flow of the body that does the method's work, none for a method
-    /// with no body here, and the slot each parameter is in there.
-    flow: Option<Flow<'tcx>>,
+    /// The body that does the method's work, none for a method with no body
+    /// here.
+    work: Option<Work<'tcx>>,
+}
+
+/// The flow of the body that does a method's work, and the slot each of the
+/// method's parameters is in there, none for one the body doesn't hold.
+struct Work<'tcx> {
+    flow: Flow<'tcx>,
     parameters: Vec<Option<Slot>>,
 }
 
@@ -60,7 +66,7 @@ impl<'tcx> MadeHere<'tcx> {
     /// has one.
     pub(crate) fn of(tcx: TyCtxt<'tcx>, callable: DefId) -> Self {
         if !tcx.is_mir_available(callable) {
-            return Self { returns: false, flow: None, parameters: Vec::new() };
+            return Self { returns: false, work: None };
         }
         let body = tcx.optimized_mir(callable);
         let mut flow = Flow::new(tcx, body);
@@ -90,14 +96,11 @@ impl<'tcx> MadeHere<'tcx> {
                 })
                 .collect();
             let returns = !inner.reads_owner.contains(&Slot::Local(RETURN_PLACE));
-            return Self { returns, flow: Some(inner), parameters };
+            return Self { returns, work: Some(Work { flow: inner, parameters }) };
         }
         let returns = !flow.reads_owner.contains(&Slot::Local(RETURN_PLACE));
-        Self {
-            returns,
-            flow: Some(flow),
-            parameters: locals.map(|local| Some(Slot::Local(local))).collect(),
-        }
+        let parameters = locals.map(|local| Some(Slot::Local(local))).collect();
+        Self { returns, work: Some(Work { flow, parameters }) }
     }
 
     /// Whether every value the method returns is made in it.
@@ -109,8 +112,11 @@ impl<'tcx> MadeHere<'tcx> {
     /// callback its parameter `parameter` holds, counting from its first,
     /// is made in it: false for a callback it does anything else with.
     pub(crate) fn callback_argument(&self, parameter: usize, index: usize) -> bool {
-        match (&self.flow, self.parameters.get(parameter)) {
-            (Some(flow), Some(Some(slot))) => flow.callback_argument(*slot, index),
+        let Some(work) = &self.work else {
+            return false;
+        };
+        match work.parameters.get(parameter) {
+            Some(Some(slot)) => work.flow.callback_argument(*slot, index),
             _ => false,
         }
     }
@@ -161,11 +167,9 @@ impl<'tcx> Flow<'tcx> {
             (
                 Some([ProjectionElem::Downcast(_, variant), ProjectionElem::Field(field, _), ..]),
                 Some(layout),
-            ) => layout
-                .variant_fields
-                .get(*variant)
-                .and_then(|fields| fields.get(*field))
-                .map_or(Slot::Local(place.local), |&kept| Slot::Kept(kept)),
+                // The compiler's coroutine transform writes each downcast to name
+                // a field of its layout.
+            ) => Slot::Kept(layout.variant_fields[*variant][*field]),
             _ => Slot::Local(place.local),
         }
     }
