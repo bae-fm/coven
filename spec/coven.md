@@ -14991,10 +14991,10 @@ the same on any platform.
     starts from the database every time. A type that holds a live query or
     one of the policy's `value_stream_types`, at any depth through the
     workspace's types, keeps none of the policy's `kept_state_types` in
-    another field, and its methods write no such field. Read code that
-    outlives the call that made it, a closure that code passes to a method
-    of a live query among it, changes nothing it captures and captures no
-    kept state. Read code names no static that keeps state, and a method of
+    another field, and its methods write none of its other fields. Read
+    code that outlives the call that made it, a closure that code passes to
+    a method of a live query among it, changes nothing it captures and
+    captures no kept state. Read code names no static that keeps state, and a method of
     read code reads through no `self` that keeps state. A type keeps what
     its type arguments, references, tuples and the workspace's types hold,
     and nothing inside a live query or a value stream: their state is how

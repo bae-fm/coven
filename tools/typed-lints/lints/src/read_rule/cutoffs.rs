@@ -109,20 +109,8 @@ impl<'tcx> Visitor<'tcx> for Fixed<'_, '_, '_, 'tcx> {
                     self.found = Some(format!("the literal {}", value.get()));
                 }
             }
-            ExprKind::Call(function, _) => {
-                if let ExprKind::Path(ref qpath) = function.kind
-                    && let Res::Def(_, callee) = typeck.qpath_res(qpath, function.hir_id)
-                    && let Some(constant) = comparisons.constant_in(callee)
-                {
-                    self.found = Some(format!(
-                        "the constant `{}` in `{}`",
-                        tcx.def_path_str(constant),
-                        tcx.def_path_str(callee)
-                    ));
-                }
-            }
-            ExprKind::MethodCall(..) => {
-                if let Some(callee) = typeck.type_dependent_def_id(expr.hir_id)
+            ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+                if let Some(callee) = callee(typeck, expr)
                     && let Some(constant) = comparisons.constant_in(callee)
                 {
                     self.found = Some(format!(
@@ -135,6 +123,18 @@ impl<'tcx> Visitor<'tcx> for Fixed<'_, '_, '_, 'tcx> {
             _ => {}
         }
         intravisit::walk_expr(self, expr);
+    }
+}
+
+/// The function a call or a method call runs, when the compile resolves it.
+fn callee(typeck: &TypeckResults<'_>, expr: &Expr<'_>) -> Option<DefId> {
+    match expr.kind {
+        ExprKind::Call(function, _) => match function.kind {
+            ExprKind::Path(ref qpath) => typeck.qpath_res(qpath, function.hir_id).opt_def_id(),
+            _ => None,
+        },
+        ExprKind::MethodCall(..) => typeck.type_dependent_def_id(expr.hir_id),
+        _ => None,
     }
 }
 
