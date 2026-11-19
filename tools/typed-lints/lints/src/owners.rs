@@ -140,7 +140,7 @@ fn resolve_type_row<'tcx>(tcx: TyCtxt<'tcx>, row: &str, path: &str) -> Vec<Row<'
 }
 
 /// The definitions a type row's path names, with the same checks.
-fn resolve_type_ids(tcx: TyCtxt<'_>, row: &str, path: &str) -> Vec<DefId> {
+pub(crate) fn resolve_type_ids(tcx: TyCtxt<'_>, row: &str, path: &str) -> Vec<DefId> {
     if !path.contains("::") {
         tcx.dcx().fatal(format!(
             "typed lints: {FILE_NAME}'s {row} names {path}, which is no path to a type"

@@ -8,10 +8,10 @@ use crate::crate_dependencies::find_crate_dependency_violations;
 use crate::database_boundary::find_database_boundary_violations;
 use crate::domain_owners::find_domain_owner_forwarding;
 use crate::finding::Finding;
-use crate::owner_graph::OwnerGraph;
 use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
+use crate::type_graph::TypeGraph;
 use crate::typed_errors::find_string_error_violations;
 use owner_construction_policy::{Policy, Rule};
 
@@ -27,7 +27,7 @@ pub(crate) struct UnknownPackage(String);
 pub(crate) fn check_packages(
     workspace: &Workspace,
     code: &CrateCode,
-    graph: &OwnerGraph,
+    graph: &TypeGraph,
     policy: &Policy,
     packages: &[String],
 ) -> Result<Report, UnknownPackage> {
@@ -59,7 +59,7 @@ pub(crate) fn check_packages(
 fn check_paths(
     workspace: &Workspace,
     code: &CrateCode,
-    graph: &OwnerGraph,
+    graph: &TypeGraph,
     policy: &Policy,
     roots: &[&str],
 ) -> Report {

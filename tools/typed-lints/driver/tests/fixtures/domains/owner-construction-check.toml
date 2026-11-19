@@ -1,0 +1,19 @@
+# Two database domains, each owner named by its path: the owner of the first
+# holds a capability, and the second's holds nothing an owner holds.
+rules = ["database-boundary"]
+capability_types = ["rusqlite::Connection"]
+
+[database]
+capability = "SQLite"
+
+[[database.domains]]
+name = "records"
+owner = "domains::Records"
+homes = ["src/lib.rs"]
+tables = ["records"]
+
+[[database.domains]]
+name = "notes"
+owner = "domains::Notes"
+homes = ["src/lib.rs"]
+tables = ["notes"]

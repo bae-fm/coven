@@ -27,7 +27,7 @@ fn check_selected(
     packages: &[String],
 ) -> Result<Report, UnknownPackage> {
     let code = CrateCode::read(workspace, policy);
-    check_packages(workspace, &code, &OwnerGraph::collect(&code.expanded, policy), policy, packages)
+    check_packages(workspace, &code, &TypeGraph::collect(&code.expanded, policy), policy, packages)
 }
 
 fn workspace(files: Vec<RustFile>) -> Workspace {

@@ -1,7 +1,7 @@
 //! Which type a type path names, as the rules match types: by name. Each type
 //! the workspace declares is known by its name, and so is each type of a
-//! dependency or the standard library, which the policy names in
-//! `external_types`. A path that names an external type sharing its name with
+//! dependency or the standard library. A path that names an external type
+//! sharing its name with
 //! a workspace type, as `rusqlite::Connection` beside a workspace
 //! `Connection`, names neither of them for the rules: it is known by the path
 //! it resolves to, which no rule and no policy row names (`name_resolution.rs`).

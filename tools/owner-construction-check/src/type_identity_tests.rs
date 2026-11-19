@@ -1,6 +1,6 @@
 use super::*;
 use crate::crate_code::checked;
-use crate::owner_graph::OwnerGraph;
+use crate::type_graph::TypeGraph;
 use owner_construction_policy::Policy;
 
 /// A file of `app-core`, which depends on rusqlite.
@@ -10,8 +10,7 @@ fn file(path: &str, source: &str) -> RustFile {
     file
 }
 
-/// A workspace `Connection` holding a capability, which makes it an owner,
-/// beside rusqlite's.
+/// A workspace `Connection` beside rusqlite's.
 fn workspace(holders: &str, policy: &Policy) -> Vec<RustFile> {
     checked(
         &[
@@ -26,9 +25,20 @@ fn workspace(holders: &str, policy: &Policy) -> Vec<RustFile> {
     )
 }
 
-fn owners(holders: &str) -> BTreeSet<String> {
-    let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
-    OwnerGraph::collect(&workspace(holders, &policy), &policy).owners
+/// The types whose fields hold the workspace's `Connection`.
+fn holders_of_connection(holders: &str) -> BTreeSet<String> {
+    let policy = Policy::fixture("");
+    holding(&TypeGraph::collect(&workspace(holders, &policy), &policy), "Connection")
+}
+
+/// The types of the graph whose fields hold `name`.
+fn holding(graph: &TypeGraph, name: &str) -> BTreeSet<String> {
+    graph
+        .types
+        .iter()
+        .filter(|(_, info)| info.field_types.contains(name))
+        .map(|(holder, _)| holder.clone())
+        .collect()
 }
 
 /// A path to rusqlite's `Connection`, written out or imported, names no
@@ -36,7 +46,7 @@ fn owners(holders: &str) -> BTreeSet<String> {
 #[test]
 fn an_external_type_never_stands_for_a_workspace_type_of_its_name() {
     assert_eq!(
-        owners(
+        holders_of_connection(
             r#"
             use rusqlite::Connection as Sql;
             struct Written { connection: rusqlite::Connection }
@@ -52,7 +62,7 @@ fn an_external_type_never_stands_for_a_workspace_type_of_its_name() {
             }
             "#,
         ),
-        BTreeSet::from(["Connection".into(), "Local".into(), "Used".into()])
+        BTreeSet::from(["Local".into(), "Used".into()])
     );
 }
 
@@ -86,7 +96,7 @@ fn colliding_external_paths_are_known_by_their_resolved_path() {
 #[test]
 fn a_projection_names_every_type_impls_give_it() {
     assert_eq!(
-        owners(
+        holders_of_connection(
             r#"
             trait Mode { type Held; }
             enum Writer {}
@@ -98,7 +108,7 @@ fn a_projection_names_every_type_impls_give_it() {
             struct Plain<M: Mode> { held: M }
             "#,
         ),
-        BTreeSet::from(["Connection".into(), "Projected".into(), "Qualified".into()])
+        BTreeSet::from(["Projected".into(), "Qualified".into()])
     );
 }
 
@@ -107,7 +117,7 @@ fn a_projection_names_every_type_impls_give_it() {
 /// rusqlite's, so neither holder holds the workspace's `Connection`.
 #[test]
 fn a_module_file_two_roots_declare_resolves_from_each() {
-    let policy = Policy::fixture(r#"capability_types = ["Socket"]"#);
+    let policy = Policy::fixture("");
     let files = checked(
         &[
             file("crates/app-core/src/lib.rs", "mod connection;"),
@@ -127,5 +137,5 @@ fn a_module_file_two_roots_declare_resolves_from_each() {
         ],
         &policy,
     );
-    assert_eq!(OwnerGraph::collect(&files, &policy).owners, BTreeSet::from(["Connection".into()]));
+    assert_eq!(holding(&TypeGraph::collect(&files, &policy), "Connection"), BTreeSet::new());
 }

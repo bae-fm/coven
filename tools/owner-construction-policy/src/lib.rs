@@ -13,7 +13,8 @@
 //! any rule runs (its `policy_check.rs`), and a typed lint when it resolves the
 //! row's path in the crate the path names.
 //!
-//! The rows of the owner rules and the read rule name each type by its path:
+//! The rows of the owner rules and the read rule, and each database domain's
+//! owner, name each type by its path:
 //! the crate as Rust names it, its modules and the type,
 //! `coven_foundation::clock::Clock` or `std::sync::Arc`
 //! ([`Policy::owner_type_rows`], [`ReadShapes`]). A dependency's type goes by
@@ -226,13 +227,6 @@ pub struct Policy {
     /// library's own name reaches it only here.
     #[serde(default)]
     pub library_names: BTreeMap<String, String>,
-    /// Names the rows that name a type by its name alone use for types that
-    /// dependencies outside the workspace declare. The checker's rules match
-    /// types by name, so each must be named by a crate source and declared by
-    /// none. A row that names its type by path needs none: the path's crate
-    /// says whether a dependency declares it.
-    #[serde(default)]
-    pub external_types: BTreeSet<String>,
     /// The read rule's rows, which the typed lints of the read rule read
     /// when they are here.
     #[serde(default)]
@@ -479,8 +473,10 @@ pub struct Domain {
     /// tables alone, as SQL writes them; they compare without case.
     #[serde(default)]
     pub views: Vec<String>,
-    /// The owner that does the domain's work: the type holding what the
-    /// domain's writes go through (`domain_owners.rs`).
+    /// The owner that does the domain's work, by its path: the type holding
+    /// what the domain's writes go through. The typed lint
+    /// `clippy::domain_owner_is_no_owner` holds it to being an owner, and the
+    /// checker reads it by name (`domain_owners.rs`).
     pub owner: String,
 }
 
@@ -572,17 +568,6 @@ impl Policy {
         &self.test_support_features
     }
 
-    /// The types whose holder is an owner: the capability types, shared
-    /// state and the handles.
-    pub fn held_capabilities(&self) -> BTreeSet<String> {
-        self.capability_types
-            .iter()
-            .chain(&self.shared_state_types)
-            .chain(self.handles.keys())
-            .cloned()
-            .collect()
-    }
-
     /// Every type the owner rules' rows name, by path, with the row it came
     /// from.
     pub fn owner_type_rows(&self) -> Vec<(&'static str, &str)> {
@@ -614,8 +599,8 @@ impl Policy {
     }
 
     /// Every type the policy names, with the row it came from: the owner
-    /// rules' and the read rule's rows by path ([`Policy::owner_type_rows`],
-    /// [`ReadShapes`]), the others by name.
+    /// rules' and the read rule's rows and the domains' owners by path
+    /// ([`Policy::owner_type_rows`], [`ReadShapes`]), the others by name.
     pub fn named_types(&self) -> Vec<(&'static str, &str)> {
         let mut named = self.owner_type_rows();
         for root in &self.composition_roots {

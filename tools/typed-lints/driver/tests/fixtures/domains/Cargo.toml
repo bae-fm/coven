@@ -1,0 +1,3 @@
+# The root of the workspace the fixtures of this folder belong to, where the
+# lints find its policy file.
+[workspace]

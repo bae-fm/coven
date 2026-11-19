@@ -1,6 +1,6 @@
 use super::*;
 use crate::crate_code::checked;
-use crate::owner_graph::OwnerGraph;
+use crate::type_graph::TypeGraph;
 
 fn policy() -> Policy {
     Policy::fixture(
@@ -26,7 +26,7 @@ fn policy() -> Policy {
 fn findings(source: &str) -> Vec<(usize, String)> {
     let policy = policy();
     let files = checked(&[RustFile::fixture("crates/app-core/src/lib.rs", source)], &policy);
-    find_domain_owner_forwarding(&files, &policy, &OwnerGraph::collect(&files, &policy))
+    find_domain_owner_forwarding(&files, &policy, &TypeGraph::collect(&files, &policy))
         .into_iter()
         .map(|finding| (finding.line, finding.message))
         .collect()

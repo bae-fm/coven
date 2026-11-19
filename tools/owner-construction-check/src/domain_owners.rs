@@ -14,14 +14,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::finding::Finding;
-use crate::owner_graph::OwnerGraph;
 use crate::syntax::{type_name, RustFile};
+use crate::type_graph::TypeGraph;
 use owner_construction_policy::Policy;
 
 pub(crate) fn find_domain_owner_forwarding(
     files: &[RustFile],
     policy: &Policy,
-    graph: &OwnerGraph,
+    graph: &TypeGraph,
 ) -> Vec<Finding> {
     // Each owner and the domains it owns.
     let mut owners = BTreeMap::<&str, Vec<&str>>::new();

@@ -9,7 +9,7 @@ fn current_stale_rows(workspace: &Workspace, policy: Policy) -> Vec<String> {
     let mut policy = policy;
     crate::type_rows::read_by_name(&mut policy);
     let code = CrateCode::read(workspace, &policy);
-    let graph = OwnerGraph::collect(&code.expanded, &policy);
+    let graph = TypeGraph::collect(&code.expanded, &policy);
     stale_rows(workspace, &code, &graph, &policy, &rows)
 }
 
@@ -260,8 +260,7 @@ fn domains_place_each_schema_table_once() {
         struct Rows;"#,
     );
     let rows = r#"
-        capability_types = ["Connection"]
-        external_types = ["Connection"]
+        capability_types = ["rusqlite::Connection"]
         [database]
         capability = "SQLite"
         schema = "crates/app-foundation/src/schema.rs"
@@ -285,7 +284,6 @@ fn domains_place_each_schema_table_once() {
         [
             "database: domain writes has home crates/app-foundation/src/moved/, which holds no source",
             "database: domain writes is named twice",
-            "database: domain writes names owner Rows, which holds no capability, shared state or owner",
             "database: table _APP_WRITES is in domains writes and writes",
             "database: schema table _app_rows is in no domain",
             "database: domain table _app_gone is not a schema table",
@@ -301,8 +299,7 @@ fn a_domain_home_holding_only_test_code_holds_source() {
     let policy = Policy::fixture(
         r#"rules = ["database-boundary"]
         test_support_features = ["test-utils"]
-        capability_types = ["Connection"]
-        external_types = ["Connection"]
+        capability_types = ["rusqlite::Connection"]
         [database]
         capability = "SQLite"
         [[database.domains]]
@@ -383,8 +380,7 @@ fn sql_files_create_the_schemas_tables() {
     .into();
     let policy = Policy::fixture(
         r#"rules = ["database-boundary"]
-        capability_types = ["Connection"]
-        external_types = ["Connection"]
+        capability_types = ["rusqlite::Connection"]
         [database]
         capability = "SQLite"
         [[database.domains]]
@@ -431,8 +427,7 @@ fn domains_name_views_the_sql_creates() {
     .into();
     let policy = Policy::fixture(
         r#"rules = ["database-boundary"]
-        capability_types = ["Connection"]
-        external_types = ["Connection"]
+        capability_types = ["rusqlite::Connection"]
         [database]
         capability = "SQLite"
         [[database.domains]]
@@ -462,36 +457,9 @@ fn domains_name_views_the_sql_creates() {
     );
 }
 
-#[test]
-fn external_types_are_named_by_a_crate_and_declared_by_none() {
-    let files = vec![
-        RustFile::fixture(
-            "crates/app/src/lib.rs",
-            "struct Worker { runtime: tokio::runtime::Runtime, lock: Mutex<()> } struct Local;
-             fn read(sql: &impl coven::SqlRead) {}",
-        ),
-        RustFile::fixture("crates/app/src/lib_tests.rs", "struct Fixture { handle: Handle }"),
-    ];
-    let rows = r#"
-        capability_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "SqlRead"]
-        external_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "Unused", "SqlRead"]
-    "#;
-    assert_eq!(
-        stale(files, rows),
-        [
-            "external_types: no crate names Gone",
-            "external_types: no crate names Handle",
-            "external_types: a crate declares Local",
-            "external_types: no crate names Local",
-            "external_types: no crate names Unused",
-            "external_types: no type row names Unused",
-        ]
-    );
-}
-
 /// A row naming its type by path names a dependency's type when the path's
 /// crate is no crate of the workspace: a crate names it, and declares no
-/// type of its name, without an external_types row.
+/// type of its name.
 #[test]
 fn a_row_naming_its_type_by_path_tells_a_dependency_s_type_by_its_crate() {
     let files = vec![
@@ -573,16 +541,15 @@ fn plumbing_names_a_file_or_directory_holding_source() {
 }
 
 #[test]
-fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_external() {
+fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_a_dependency() {
     let rows = r#"
-        external_types = ["Mutex"]
         [read_shapes]
         statement_rows = []
         column_values = []
-        read_types = ["SqlReadContext"]
-        live_query_types = ["LiveQuery"]
-        value_stream_types = ["Watch"]
-        kept_state_types = ["Mutex", "Cell"]
+        read_types = ["app::SqlReadContext"]
+        live_query_types = ["app::LiveQuery"]
+        value_stream_types = ["app::Watch"]
+        kept_state_types = ["std::sync::Mutex", "app::Cell"]
         rule = "the rule"
     "#;
     let files = vec![RustFile::fixture(
@@ -592,8 +559,8 @@ fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_e
     assert_eq!(
         stale(files, rows),
         [
-            "read_shapes.value_stream_types: no crate declares Watch",
-            "read_shapes.kept_state_types: no crate declares Cell",
+            "read_shapes.value_stream_types: no crate declares app::Watch",
+            "read_shapes.kept_state_types: no crate declares app::Cell",
         ]
     );
 }

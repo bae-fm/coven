@@ -14,10 +14,10 @@ use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
-use crate::owner_graph::OwnerGraph;
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{type_name, RustFile, TypeNames};
+use crate::type_graph::TypeGraph;
 use owner_construction_policy::{home_holds, AllowedUses, Database, FrozenUses, ListKind, Policy};
 
 /// Every type the policy names, with its row, as the file names it: the
@@ -39,7 +39,7 @@ impl NamedTypes {
 pub(crate) fn stale_rows(
     workspace: &Workspace,
     code: &CrateCode,
-    graph: &OwnerGraph,
+    graph: &TypeGraph,
     policy: &Policy,
     rows: &NamedTypes,
 ) -> Vec<String> {
@@ -53,9 +53,9 @@ pub(crate) fn stale_rows(
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(invalid_capability_rows(code, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
-    stale.extend(undeclared_types(code, graph, policy, rows));
+    stale.extend(undeclared_types(code, graph, rows));
     stale.extend(missing_capability_traits(crate_files, policy));
-    stale.extend(invalid_database(code, graph, policy));
+    stale.extend(invalid_database(code, policy));
     stale.extend(invalid_read_plumbing(code, policy));
     stale.extend(invalid_counters(code, policy));
     stale
@@ -369,15 +369,10 @@ fn missing_composition_roots(files: &[RustFile], policy: &Policy) -> Vec<String>
 /// dependency's: a crate's production source names it, as a type or as a
 /// trait a bound names (`impl coven::SqlRead`), and no crate declares a type
 /// of its name. A row naming its type by path names a dependency's when the
-/// path's crate is no crate of the workspace; a row naming it by name alone,
-/// when the name is one of the policy's external types. Returns a message
-/// for each type that breaks this.
-fn undeclared_types(
-    code: &CrateCode,
-    graph: &OwnerGraph,
-    policy: &Policy,
-    rows: &NamedTypes,
-) -> Vec<String> {
+/// path's crate is no crate of the workspace; a row naming it by name alone
+/// names a type a crate declares. Returns a message for each type that
+/// breaks this.
+fn undeclared_types(code: &CrateCode, graph: &TypeGraph, rows: &NamedTypes) -> Vec<String> {
     let (identity, declared) = (&graph.identity, &graph.types);
     let mut mentioned = BTreeSet::new();
     for file in &code.expanded {
@@ -393,32 +388,18 @@ fn undeclared_types(
     let mut stale = Vec::new();
     for (row, named) in &rows.0 {
         let name = owner_construction_policy::type_name(named);
-        let dependency = match named.split_once("::") {
-            Some((krate, _)) => !crates.contains(krate),
-            None => policy.external_types.contains(named),
-        };
+        let dependency = named.split_once("::").is_some_and(|(krate, _)| !crates.contains(krate));
         if !dependency {
             if !declared.contains_key(name) {
                 stale.push(format!("{row}: no crate declares {named}"));
             }
-        } else if named.contains("::") {
+        } else {
             if declared.contains_key(name) {
                 stale.push(format!("{row}: {named} shares its name with a type a crate declares"));
             }
             if !mentioned.contains(name) {
                 stale.push(format!("{row}: no crate names {named}"));
             }
-        }
-    }
-    for name in &policy.external_types {
-        if declared.contains_key(name) {
-            stale.push(format!("external_types: a crate declares {name}"));
-        }
-        if !mentioned.contains(name) {
-            stale.push(format!("external_types: no crate names {name}"));
-        }
-        if !rows.0.iter().any(|(_, named)| named == name) {
-            stale.push(format!("external_types: no type row names {name}"));
         }
     }
     stale
@@ -459,7 +440,7 @@ fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<S
     policy
         .capability_traits
         .iter()
-        .filter(|name| !traits.0.contains(*name))
+        .filter(|path| !traits.0.contains(owner_construction_policy::type_name(path)))
         .map(|name| format!("capability_traits: no crate declares trait {name}"))
         .collect()
 }
@@ -473,7 +454,7 @@ fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<S
 /// is the schema's, so a new table is placed when it lands and none goes
 /// unguarded. The schema's tables are those its table macros declare and those
 /// a `CREATE TABLE` in the crates' SQL files makes.
-fn invalid_database(code: &CrateCode, graph: &OwnerGraph, policy: &Policy) -> Vec<String> {
+fn invalid_database(code: &CrateCode, policy: &Policy) -> Vec<String> {
     let Some(database) = &policy.database else {
         return Vec::new();
     };
@@ -481,7 +462,7 @@ fn invalid_database(code: &CrateCode, graph: &OwnerGraph, policy: &Policy) -> Ve
     if !policy.capabilities.iter().any(|capability| capability.name == database.capability) {
         stale.push(format!("database: capability {} is not in capabilities", database.capability));
     }
-    stale.extend(invalid_domains(code, database, &graph.owners));
+    stale.extend(invalid_domains(code, database));
     let mut schema = code
         .sql
         .iter()
@@ -581,14 +562,11 @@ fn invalid_domain_views(
     stale
 }
 
-/// Each domain has a unique name, homes that hold a file the database rule
-/// reads, production or test, Rust or SQL, and an owner the checker infers as
-/// one; no table is in two domains.
-fn invalid_domains(
-    code: &CrateCode,
-    database: &Database,
-    inferred: &BTreeSet<String>,
-) -> Vec<String> {
+/// Each domain has a unique name and homes that hold a file the database rule
+/// reads, production or test, Rust or SQL; no table is in two domains. The
+/// typed lint `clippy::domain_owner_is_no_owner` holds each domain's owner to
+/// being one.
+fn invalid_domains(code: &CrateCode, database: &Database) -> Vec<String> {
     let mut stale = Vec::new();
     let mut names = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -603,12 +581,6 @@ fn invalid_domains(
                     domain.name
                 ));
             }
-        }
-        if !inferred.contains(&domain.owner) {
-            stale.push(format!(
-                "database: domain {} names owner {}, which holds no capability, shared state or owner",
-                domain.name, domain.owner
-            ));
         }
         for table in &domain.tables {
             if let Some(other) = owners.insert(table.to_lowercase(), domain.name.as_str()) {

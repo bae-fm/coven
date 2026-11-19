@@ -2,8 +2,9 @@
 //! compiler's types (`owners.rs`), in one pass that shares their model:
 //! `clippy::built_outside_composition_root`, here,
 //! `clippy::method_takes_capability` (`method_takes_capability.rs`),
-//! `clippy::task_state_outside_task` (`task_state.rs`) and the hand-out rules
-//! (`owner_dependencies.rs`).
+//! `clippy::task_state_outside_task` (`task_state.rs`), the hand-out rules
+//! (`owner_dependencies.rs`) and `clippy::domain_owner_is_no_owner`
+//! (`domain_owners.rs`).
 //!
 //! `clippy::built_outside_composition_root` (the policy's
 //! `capability-construction`): owners, construction-only capabilities and
@@ -45,6 +46,7 @@ use rustc_middle::ty::{self, GenericArgsRef, Instance, InstanceKind, Ty, TyCtxt}
 use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::{Span, sym};
 
+use crate::domain_owners::{self, DOMAIN_OWNER_IS_NO_OWNER};
 use crate::finding::Finding;
 use crate::method_takes_capability::{self, METHOD_TAKES_CAPABILITY};
 use crate::owner_dependencies::{
@@ -71,6 +73,9 @@ pub(crate) struct OwnerRules<'tcx> {
     construction: bool,
     parameters: bool,
     dependencies: bool,
+    /// Whether the policy places the database's tables in domains, each
+    /// naming its owner.
+    domains: bool,
     scopes: FxHashMap<LocalDefId, Scope>,
 }
 
@@ -80,7 +85,8 @@ impl_lint_pass!(OwnerRules<'_> => [
     TASK_STATE_OUTSIDE_TASK,
     OWNER_HANDS_OUT_DEPENDENCY,
     HANDLE_NOT_FROM_ITS_OWNER,
-    SHARED_STATE_OUTSIDE_HANDLE
+    SHARED_STATE_OUTSIDE_HANDLE,
+    DOMAIN_OWNER_IS_NO_OWNER
 ]);
 
 /// What a callable may build.
@@ -103,10 +109,20 @@ impl<'tcx> OwnerRules<'tcx> {
         let construction = selects(Rule::CapabilityConstruction);
         let parameters = selects(Rule::RetainedCapabilityParameters);
         let dependencies = selects(Rule::OwnerDependencies);
+        let domains = workspace.is_some_and(|workspace| {
+            workspace.policy.database.as_ref().is_some_and(|database| !database.domains.is_empty())
+        });
         let owners = workspace
-            .filter(|_| construction || parameters || dependencies)
+            .filter(|_| construction || parameters || dependencies || domains)
             .map(|workspace| Owners::new(tcx, workspace));
-        Self { owners, construction, parameters, dependencies, scopes: FxHashMap::default() }
+        Self {
+            owners,
+            construction,
+            parameters,
+            dependencies,
+            domains,
+            scopes: FxHashMap::default(),
+        }
     }
 
     /// The model, when the policy selects the composition roots' rule.
@@ -456,6 +472,9 @@ impl<'tcx> LateLintPass<'tcx> for OwnerRules<'tcx> {
         if let Some(owners) = self.owners.as_ref().filter(|_| self.dependencies) {
             task_state::check(owners, cx);
             owner_dependencies::check(owners, cx);
+        }
+        if let Some(owners) = self.owners.as_ref().filter(|_| self.domains) {
+            domain_owners::check(owners, cx);
         }
     }
 

@@ -24,7 +24,6 @@ mod macro_rules;
 mod macros;
 mod module_sources;
 mod name_resolution;
-mod owner_graph;
 mod policy_check;
 mod report;
 mod rust_prelude;
@@ -34,6 +33,7 @@ mod sql_statements;
 mod syntax;
 mod test_code;
 mod test_layout;
+mod type_graph;
 mod type_identity;
 mod type_rows;
 mod typed_errors;
@@ -71,7 +71,7 @@ fn main() {
             }
         };
     let code = crate_code::CrateCode::read(&workspace, &policy);
-    let graph = owner_graph::OwnerGraph::collect(&code.expanded, &policy);
+    let graph = type_graph::TypeGraph::collect(&code.expanded, &policy);
     let stale = policy_check::stale_rows(&workspace, &code, &graph, &policy, &rows);
     if !stale.is_empty() {
         eprintln!(

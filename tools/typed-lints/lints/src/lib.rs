@@ -22,6 +22,7 @@ extern crate rustc_span;
 
 mod async_export_off_runtime;
 mod crate_graph;
+mod domain_owners;
 mod finding;
 mod kept_arguments;
 mod made_here;

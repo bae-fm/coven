@@ -14817,13 +14817,13 @@ the same on any platform.
    the checker cannot expand fails the check, since what it writes would
    otherwise go unchecked.
    The policy names each type of the owner rules (F.3) and of the read rule
-   (check 11) by its path, as `coven_foundation::clock::Clock` and
-   `std::sync::Arc`, and the rest by name. The typed lints of check 11, which
-   hold the owner rules and the read rule, read those rows by path. The
-   checker reads some of the owner rules' rows by name: check 4 infers
-   owners from them to test that each domain's owner is one, and F.2's rule
-   on domain owners follows the shared pointers that `shared_pointer_types`
-   names. The checker's rules match types by name, a
+   (check 11), and each database domain's owner, by its path, as
+   `coven_foundation::clock::Clock` and `std::sync::Arc`, and the rest by
+   name. The typed lints of check 11, which hold the owner rules, the read
+   rule and the test that each domain's owner is one, read those rows by
+   path. The checker reads two of them by name: F.2's rules on domains find
+   a domain's writes in its owner's methods and follow the shared pointers
+   that `shared_pointer_types` names to the owner. The checker's rules match types by name, a
    path by its last part: a dependency's type goes by its name unless one of
    coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
@@ -14833,8 +14833,7 @@ the same on any platform.
    holds.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
-   go stale. Each table the schema creates is in one domain, and each
-   domain's owner holds a capability, shared state or another owner. Each
+   go stale. Each table the schema creates is in one domain. Each
    counter the policy lists is a column the SQL only counts up, listed once
    with what it numbers.
 5. The visibility and file-size rules of F.5.
@@ -14954,6 +14953,9 @@ the same on any platform.
     compile at a handle whose owner, in the crate being compiled, has no
     method that returns it, and at a type that two of the policy's
     capability, shared state, private state and handle rows name.
+    `clippy::domain_owner_is_no_owner` holds F.2's rule that each domain
+    names the owner that does its work: in the crate that declares it, a
+    domain's owner holds a capability, shared state, a handle or an owner.
     A workspace whose screens read live queries can state a read rule in its
     policy's `read_shapes`: a read does no work that its SQL can do. coven's
     own policy states none. Eight lints hold the rule, one for each shape of such
