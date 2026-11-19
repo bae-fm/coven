@@ -30,7 +30,10 @@
 //! `read_rule/rows.rs`, and what flows from a read's result in
 //! `read_rule/flow.rs`.
 
+mod cutoffs;
 mod flow;
+mod kept_state;
+mod request_bumps;
 mod row_work;
 mod rows;
 mod statements;
@@ -45,6 +48,7 @@ use rustc_lint::{LateContext, LateLintPass, declare_tool_lint, impl_lint_pass};
 use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
 use crate::owner_rules::impl_type;
+use crate::owners::TypeSet;
 use crate::workspace_bodies::earlier_definitions;
 use crate::workspace_policy::{WorkspaceCrates, WorkspacePolicy, resolve_row};
 use owner_construction_policy::ReadShapes;
@@ -81,6 +85,11 @@ fn names_adt(ty: Ty<'_>, test: &impl Fn(DefId) -> bool) -> bool {
         ty::Tuple(items) => items.iter().any(|inner| names_adt(inner, test)),
         _ => false,
     }
+}
+
+/// The help a finding gives: the rule, and `what` it asks.
+fn help(rows: &ReadShapes, what: &str) -> &'static str {
+    Box::leak(format!("{}: {what}", rows.rule).into_boxed_str())
 }
 
 /// The closure or function an argument is, when it is code a callee may run:
@@ -125,6 +134,9 @@ shape_lints! {
     READ_DROP_ROW, "read code drops a row when an optional column is empty";
     READ_QUERY_PER_ROW, "read code runs a statement once for each row";
     READ_KEYED_STATEMENT, "read code runs a statement keyed by what an earlier one returned";
+    READ_KEPT_STATE, "read code keeps state between reads";
+    READ_CUTOFF, "read code picks between two paths by comparing against a limit";
+    READ_REQUEST_BUMP, "code adds one to a live query's request to run the query again";
 }
 
 /// The lint's pass: the policy's read rule, when the workspace has one.
@@ -134,7 +146,8 @@ pub(crate) struct ReadRule {
 
 impl_lint_pass!(ReadRule => [
     READ_SORT, READ_FILTER, READ_GROUP, READ_AGGREGATE, READ_PICK, READ_JOIN,
-    READ_LENGTH_BRANCH, READ_DROP_ROW, READ_QUERY_PER_ROW, READ_KEYED_STATEMENT
+    READ_LENGTH_BRANCH, READ_DROP_ROW, READ_QUERY_PER_ROW, READ_KEYED_STATEMENT, READ_KEPT_STATE,
+    READ_CUTOFF, READ_REQUEST_BUMP
 ]);
 
 /// The read rule's rows, resolved in the compile.
@@ -145,10 +158,18 @@ struct Setup {
     row_work_help: &'static str,
     /// The help a statement's finding gives.
     statement_help: &'static str,
+    /// The help a kept-state finding gives.
+    kept_help: &'static str,
+    /// The help a cutoff's finding gives.
+    cutoff_help: &'static str,
+    /// The help a request bump's finding gives.
+    bump_help: &'static str,
     read_types: FxHashSet<DefId>,
     live_types: FxHashSet<DefId>,
     statement_rows: FxHashSet<DefId>,
     column_values: FxHashSet<DefId>,
+    value_streams: FxHashSet<DefId>,
+    request_queries: FxHashSet<DefId>,
 }
 
 impl ReadRule {
@@ -167,28 +188,39 @@ impl ReadRule {
             Some(Setup {
                 workspace,
                 rows,
-                row_work_help: Box::leak(
-                    format!(
-                        "{}: the statement filters, sorts, joins, groups, counts and sums, in the \
-                         same query or its own live query beside it; a read returns what the \
-                         screen shows",
-                        rows.rule
-                    )
-                    .into_boxed_str(),
+                row_work_help: help(
+                    rows,
+                    "the statement filters, sorts, joins, groups, counts and sums, in the same \
+                     query or its own live query beside it; a read returns what the screen shows",
                 ),
-                statement_help: Box::leak(
-                    format!(
-                        "{}: one statement reads what the read needs, with a join or a \
-                         subquery, instead of a statement for each row or for each key an \
-                         earlier statement returned",
-                        rows.rule
-                    )
-                    .into_boxed_str(),
+                statement_help: help(
+                    rows,
+                    "one statement reads what the read needs, with a join or a subquery, instead \
+                     of a statement for each row or for each key an earlier statement returned",
+                ),
+                kept_help: help(
+                    rows,
+                    "a read starts from the database every time; it keeps nothing between reads",
+                ),
+                cutoff_help: help(
+                    rows,
+                    "a read has one path; the statement picks what it returns, with no limit \
+                     that picks between two",
+                ),
+                bump_help: help(
+                    rows,
+                    "a live query runs again when what it read changes; nothing counts up to \
+                     make it run",
                 ),
                 read_types,
                 live_types,
                 statement_rows: resolve("read_shapes.statement_rows", &rows.statement_rows),
                 column_values: resolve("read_shapes.column_values", &rows.column_values),
+                value_streams: resolve("read_shapes.value_stream_types", &rows.value_stream_types),
+                request_queries: resolve(
+                    "read_shapes.request_query_types",
+                    &rows.request_query_types,
+                ),
             })
         });
         Self { setup }
@@ -218,7 +250,12 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
         for &unit in &code.top {
             row_work::check(tcx, setup.row_work_help, &rows, &mappers, unit, &code.process_only);
             statements::check(&search, setup.statement_help, &mappers, unit, &code.process_only);
+            cutoffs::check(&search, setup.cutoff_help, unit, &code.process_only);
         }
+        let kept =
+            TypeSet::resolve(tcx, "read_shapes.kept_state_types", &setup.rows.kept_state_types);
+        kept_state::check(&search, setup.kept_help, &kept, &setup.value_streams, &code);
+        request_bumps::check(&search, setup.bump_help, &setup.request_queries);
     }
 }
 
@@ -227,6 +264,9 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
 struct ReadCode {
     top: Vec<LocalDefId>,
     process_only: FxHashSet<LocalDefId>,
+    /// The closures code passes to a method of a live query, which keeps
+    /// them between reads.
+    kept_by_live_queries: Vec<LocalDefId>,
 }
 
 /// What the search for read code knows of the crate.
@@ -248,27 +288,23 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
             .filter(|&id| {
                 matches!(tcx.def_kind(id), DefKind::Fn | DefKind::AssocFn | DefKind::Closure)
             })
-            .filter(|&id| !setup.workspace.is_test_code(tcx, tcx.local_def_id_to_hir_id(id)))
-            .filter(|&id| {
-                setup
-                    .workspace
-                    .relative_path(tcx, tcx.def_span(id))
-                    .is_some_and(|path| !setup.rows.is_plumbing(&path))
-            })
-            .collect();
-        Self {
+            .collect::<Vec<_>>();
+        let mut search = Self {
             setup,
             tcx,
-            candidates,
+            candidates: FxHashSet::default(),
             holders: std::cell::RefCell::default(),
             workspace_crates: WorkspaceCrates::new(setup.workspace),
-        }
+        };
+        search.candidates = candidates.into_iter().filter(|&id| search.is_production(id)).collect();
+        search
     }
 
     fn read_code(&self) -> ReadCode {
         let tcx = self.tcx;
         let mut seeds = Vec::new();
         let mut process_seeds = Vec::new();
+        let mut kept_by_live_queries = Vec::new();
         let mut edges: FxHashMap<LocalDefId, Vec<LocalDefId>> = FxHashMap::default();
         for &body in &self.candidates {
             if self.takes_read(body) || self.is_holder_method(body) {
@@ -277,6 +313,8 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
             let found = self.walk(body);
             seeds.extend(found.passed);
             process_seeds.extend(found.processed);
+            kept_by_live_queries
+                .extend(found.kept.into_iter().filter(|closure| self.candidates.contains(closure)));
             edges.insert(body, found.reached);
         }
         let mut children: FxHashMap<LocalDefId, Vec<LocalDefId>> = FxHashMap::default();
@@ -314,7 +352,7 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
         let mut top =
             general.iter().copied().filter(|&unit| !inside_unit(unit)).collect::<Vec<_>>();
         top.sort_by_key(|unit| tcx.def_span(*unit));
-        ReadCode { top, process_only }
+        ReadCode { top, process_only, kept_by_live_queries }
     }
 
     /// Whether a function or closure takes a read value: its inputs name a
@@ -399,31 +437,51 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
     /// Whether the type `adt` is a live query or holds one, through its
     /// fields at any depth through the workspace's types.
     fn holds_live(&self, adt: DefId) -> bool {
-        if self.setup.live_types.contains(&adt) {
+        self.holds(adt, &|id| self.setup.live_types.contains(&id), &self.holders)
+    }
+
+    /// Whether the type `adt` is one `target` picks or holds one, through its
+    /// fields at any depth through the workspace's types, with what is found
+    /// so far in `known`.
+    fn holds(
+        &self,
+        adt: DefId,
+        target: &dyn Fn(DefId) -> bool,
+        known: &std::cell::RefCell<FxHashMap<DefId, bool>>,
+    ) -> bool {
+        if target(adt) {
             return true;
         }
-        if let Some(&known) = self.holders.borrow().get(&adt) {
-            return known;
+        if let Some(&found) = known.borrow().get(&adt) {
+            return found;
         }
         if !self.is_workspace(adt)
             || !matches!(self.tcx.def_kind(adt), DefKind::Struct | DefKind::Enum | DefKind::Union)
         {
             return false;
         }
-        self.holders.borrow_mut().insert(adt, false);
+        known.borrow_mut().insert(adt, false);
         let tcx = self.tcx;
         let identity = ty::GenericArgs::identity_for_item(tcx, adt);
-        let holds = tcx
-            .adt_def(adt)
-            .all_fields()
-            .any(|field| self.type_holds_live(field.ty(tcx, identity).skip_norm_wip()));
-        self.holders.borrow_mut().insert(adt, holds);
+        let holds = tcx.adt_def(adt).all_fields().any(|field| {
+            names_adt(field.ty(tcx, identity).skip_norm_wip(), &|inner| {
+                self.holds(inner, target, known)
+            })
+        });
+        known.borrow_mut().insert(adt, holds);
         holds
     }
 
-    /// Whether a value of `ty` is or holds a live query.
-    fn type_holds_live(&self, ty: Ty<'tcx>) -> bool {
-        names_adt(ty, &|adt| self.holds_live(adt))
+    /// Whether `item`, a definition of the crate, is production code outside
+    /// the read plumbing.
+    fn is_production(&self, item: LocalDefId) -> bool {
+        let tcx = self.tcx;
+        !self.setup.workspace.is_test_code(tcx, tcx.local_def_id_to_hir_id(item))
+            && self
+                .setup
+                .workspace
+                .relative_path(tcx, tcx.def_span(item))
+                .is_some_and(|path| !self.setup.rows.is_plumbing(&path))
     }
 
     /// Whether a value of `ty` is a read value or holds a live query: what a
@@ -477,6 +535,8 @@ struct Walked {
     passed: Vec<LocalDefId>,
     /// The ones it passes to a live query's `process`.
     processed: Vec<LocalDefId>,
+    /// The closures it passes to a method of a live query.
+    kept: Vec<LocalDefId>,
     /// The functions of the crate it calls or passes on.
     reached: Vec<LocalDefId>,
 }
@@ -518,19 +578,21 @@ impl<'tcx> Visitor<'tcx> for Walker<'_, '_, 'tcx> {
         match expr.kind {
             ExprKind::MethodCall(segment, receiver, arguments, _) => {
                 let through = self.search.reads_through(self.typeck.expr_ty(receiver));
-                let process = through
-                    && segment.ident.name.as_str() == "process"
-                    && self
-                        .typeck
-                        .expr_ty(receiver)
-                        .peel_refs()
-                        .ty_adt_def()
-                        .is_some_and(|adt| self.search.setup.live_types.contains(&adt.did()));
+                let live = self
+                    .typeck
+                    .expr_ty(receiver)
+                    .peel_refs()
+                    .ty_adt_def()
+                    .is_some_and(|adt| self.search.setup.live_types.contains(&adt.did()));
+                let process = live && segment.ident.name.as_str() == "process";
                 let beside = arguments
                     .iter()
                     .chain([receiver])
                     .any(|value| self.names_read_value(self.typeck.expr_ty(value)));
                 for argument in arguments {
+                    if live && let ExprKind::Closure(closure) = argument.kind {
+                        self.found.kept.push(closure.def_id);
+                    }
                     if let Some(code) = self.code(argument) {
                         if process {
                             self.found.processed.push(code);

@@ -14987,6 +14987,27 @@ the same on any platform.
     statement's call: one statement, with a join or a subquery, reads both.
     A read value that a statement takes is the handle the statement runs
     on, never its key.
+    `clippy::read_kept_state` finds memory kept between reads, since a read
+    starts from the database every time. A type that holds a live query or
+    one of the policy's `value_stream_types`, at any depth through the
+    workspace's types, keeps none of the policy's `kept_state_types` in
+    another field, and its methods write no such field. Read code that
+    outlives the call that made it, a closure that code passes to a method
+    of a live query among it, changes nothing it captures and captures no
+    kept state. Read code names no static that keeps state, and a method of
+    read code reads through no `self` that keeps state. A type keeps what
+    its type arguments, references, tuples and the workspace's types hold,
+    and nothing inside a live query or a value stream: their state is how
+    they deliver their values. `clippy::read_cutoff` finds, in read code, a
+    comparison with `<`, `<=`, `>` or `>=` against an integer constant of
+    the workspace, an integer literal of 2 or more, or a call of a
+    workspace function whose body names such a constant: a read has one
+    path, and no limit picks between two. Comparing with 0 or 1, as a test
+    of emptiness does, is no cutoff. `clippy::read_request_bump` finds, in
+    any production code outside the plumbing, an integer field of a request
+    increased by one, since a live query runs again when what it read
+    changes. A request is a type of the workspace in the first type
+    argument of one of the policy's `request_query_types`.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

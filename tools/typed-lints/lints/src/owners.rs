@@ -69,6 +69,21 @@ impl<'tcx> TypeSet<'tcx> {
         self.has(tcx, part.id, part.args)
     }
 
+    /// The types the policy's type row `row` names by `paths`.
+    pub(crate) fn resolve(
+        tcx: TyCtxt<'tcx>,
+        row: &str,
+        paths: &std::collections::BTreeSet<String>,
+    ) -> Self {
+        let mut set = TypeSet::default();
+        for path in paths {
+            for found in resolve_type_row(tcx, row, path) {
+                set.insert(found);
+            }
+        }
+        set
+    }
+
     fn insert(&mut self, row: Row<'tcx>) {
         match row {
             Row::Id(id) => {
@@ -138,13 +153,7 @@ impl<'tcx> OwnerRows<'tcx> {
     pub(crate) fn resolve(tcx: TyCtxt<'tcx>, workspace: &WorkspacePolicy) -> Self {
         let policy = &workspace.policy;
         let set = |row: &str, paths: &std::collections::BTreeSet<String>| {
-            let mut set = TypeSet::default();
-            for path in paths {
-                for found in resolve_type_row(tcx, row, path) {
-                    set.insert(found);
-                }
-            }
-            set
+            TypeSet::resolve(tcx, row, paths)
         };
         let capability_traits = policy
             .capability_traits

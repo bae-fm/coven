@@ -1,9 +1,11 @@
 // The crate the read rule's lints check under the policy of this folder:
 // each line that holds a finding ends in a comment naming its lints.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use reads_base::{FromColumn, LiveQuery, Row, SqlRead, SqlReadContext};
+use reads_base::{FromColumn, LiveQuery, LiveRequest, Row, SqlRead, SqlReadContext, ValueStream};
 
 #[derive(Clone)]
 pub struct Album {
@@ -34,7 +36,7 @@ pub fn read_albums(read: &SqlReadContext, at: usize) -> Vec<Album> {
     albums.retain(|album| album.year > 0); // read_filter
     let _newest = albums.iter().max_by_key(|album| album.year); // read_aggregate
     let _found = albums.iter().any(|album| album.id == 1); // read_pick
-    let _many = albums.len() > 2; // read_length_branch
+    let _many = albums.len() > 2; // read_length_branch read_cutoff
     let _count = albums.len(); // read_aggregate
     let _by_year: HashMap<i64, Vec<&Album>> = HashMap::new(); // read_group
     let _first = if let [first, ..] = albums.as_slice() { first.id } else { 0 }; // read_length_branch
@@ -121,7 +123,7 @@ pub fn read_ids(sql: &impl SqlRead, mut wanted: Vec<i64>) -> Vec<(i64, i64)> {
     let [_first, ..] = kept.as_slice() else { return pairs }; // read_length_branch
     let _any = matches!(kept.as_slice(), [_, ..]); // read_length_branch
     let count = sql.query_row("SELECT count(*) FROM albums", |row| Ok(row.get(0)));
-    let _many = count.is_some_and(|count: i64| count > 2);
+    let _many = count.is_some_and(|count: i64| count > 2); // read_cutoff
     wanted.sort();
     let _wanted = wanted.len();
     pairs
@@ -166,4 +168,81 @@ pub fn read_each(sql: &impl SqlRead, ids: &[i64]) -> i64 {
 
 fn year_of(sql: &impl SqlRead, id: i64) -> i64 {
     sql.query_row("SELECT year", |row| Ok(row.get(0) + id)).unwrap_or(0)
+}
+
+/// Holds a live query and state beside it.
+pub struct Panel {
+    query: LiveQuery<Vec<Album>>,
+    shown: Mutex<usize>, // read_kept_state
+    title: String,
+}
+
+impl Panel {
+    pub fn show(&mut self) -> usize {
+        self.title = String::new(); // read_kept_state
+        self.title.push('a'); // read_kept_state
+        self.query.latest().capacity()
+    }
+
+    pub async fn clear(&mut self) {
+        self.title.clear(); // read_kept_state
+    }
+}
+
+/// Holds a value stream and the value it delivered last.
+pub struct Progress {
+    stream: ValueStream<u64>,
+    last: Cell<u64>, // read_kept_state
+}
+
+/// Keeps a count it reads through, beside no live query.
+pub struct Counter {
+    count: Cell<usize>,
+}
+
+impl Counter {
+    pub fn read_count_of_every_album(
+        &self, // read_kept_state
+        sql: &SqlReadContext,
+    ) -> usize {
+        let ids = sql.query("SELECT id FROM albums", |row| Ok(row.get(0)));
+        self.count.get() + ids.capacity()
+    }
+}
+
+static SEEN: Mutex<usize> = Mutex::new(0);
+
+pub fn read_seen(read: &SqlReadContext) -> usize {
+    let albums = read.query("SELECT id, year FROM albums", album);
+    let seen = SEEN.lock().map(|seen| *seen).unwrap_or(0); // read_kept_state
+    let _over = albums.capacity() > LIMIT; // read_cutoff
+    let _few = albums.capacity() < limit(); // read_cutoff
+    let _some = albums.capacity() > 0;
+    seen
+}
+
+const LIMIT: usize = 50;
+
+fn limit() -> usize {
+    LIMIT * 2
+}
+
+pub fn count_deliveries(query: &LiveQuery<Vec<Album>>) {
+    let mut total = 0;
+    query.subscribe(move |_| {
+        total += 1; // read_kept_state
+    });
+}
+
+/// What a live query is asked.
+pub struct Request {
+    pub generation: u64,
+    pub name: String,
+}
+
+pub fn rerun(query: &mut LiveRequest<Request>, mut request: Request) {
+    request.generation += 1; // read_request_bump
+    request.generation = request.generation.wrapping_add(1); // read_request_bump
+    let next = Request { generation: request.generation + 1, name: request.name }; // read_request_bump
+    query.ask(next);
 }

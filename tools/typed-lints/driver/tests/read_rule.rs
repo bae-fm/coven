@@ -10,7 +10,7 @@ mod support;
 use support::{Fixture, extern_library, out_dir};
 
 /// The read rule's lints, each named as the fixture's comments name it.
-const LINTS: [&str; 10] = [
+const LINTS: [&str; 13] = [
     "clippy::read_sort",
     "clippy::read_filter",
     "clippy::read_group",
@@ -21,10 +21,13 @@ const LINTS: [&str; 10] = [
     "clippy::read_drop_row",
     "clippy::read_query_per_row",
     "clippy::read_keyed_statement",
+    "clippy::read_kept_state",
+    "clippy::read_cutoff",
+    "clippy::read_request_bump",
 ];
 
 #[test]
-fn finds_each_shape_of_row_work_in_read_code_and_nothing_else() {
+fn finds_each_shape_of_the_read_rule_and_nothing_else() {
     let out_dir = out_dir("read_rule");
     let base = Fixture { source: "reads/base.rs", crate_name: "reads_base", manifest_dir: "reads" };
     base.compile(&out_dir, [] as [&str; 0]);

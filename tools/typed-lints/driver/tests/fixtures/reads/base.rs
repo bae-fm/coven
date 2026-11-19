@@ -69,3 +69,33 @@ impl<T> LiveQuery<T> {
         process(self.value)
     }
 }
+
+impl<T> LiveQuery<T> {
+    /// Runs `deliver` on each value the query reads, now and after each
+    /// write that changes it.
+    pub fn subscribe(&self, mut deliver: impl FnMut(&T)) {
+        deliver(&self.value);
+    }
+}
+
+/// A live query whose request its holder changes.
+pub struct LiveRequest<R> {
+    request: R,
+}
+
+impl<R> LiveRequest<R> {
+    pub fn ask(&mut self, request: R) {
+        self.request = request;
+    }
+}
+
+/// The latest value of something that changes many times a second.
+pub struct ValueStream<T> {
+    value: T,
+}
+
+impl<T: Copy> ValueStream<T> {
+    pub fn latest(&self) -> T {
+        self.value
+    }
+}
