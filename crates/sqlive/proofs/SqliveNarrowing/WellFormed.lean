@@ -52,4 +52,18 @@ def Statement.wellFormed (s : Statement) : Bool :=
   (List.range s.cores.length).all fun k => (s.core k).refs.all fun (i, _) =>
     (s.scopeChain k).any fun k' => (s.core k').items.contains i
 
+/-- A well-formed statement's cores list only items in range. -/
+theorem Statement.wellFormed_items {s : Statement} (h : s.wellFormed = true) {k i : Nat}
+    (hi : i ∈ (s.core k).items) : i < s.items.length := by
+  by_cases hk : k < s.cores.length
+  · simp only [Statement.wellFormed, Bool.and_eq_true, List.all_eq_true, List.mem_range,
+      decide_eq_true_eq, beq_iff_eq] at h
+    exact (h.1.1.1.2 k hk i hi).1
+  · have : s.core k = default := by
+      simp only [Statement.core, List.getD_eq_getElem?_getD]
+      rw [List.getElem?_eq_none (Nat.le_of_not_lt hk)]
+      rfl
+    rw [this] at hi
+    cases hi
+
 end SqliveNarrowing

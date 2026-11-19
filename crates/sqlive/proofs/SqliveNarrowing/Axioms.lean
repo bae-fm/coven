@@ -35,3 +35,6 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Whole.whole_sound
 #print axioms SqliveNarrowing.readCondition_sound
 #print axioms SqliveNarrowing.result_mask
+#print axioms SqliveNarrowing.Writes.unjudged
+#print axioms SqliveNarrowing.unjudged_rows
+#print axioms SqliveNarrowing.whole_narrowing_sound

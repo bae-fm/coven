@@ -12584,8 +12584,10 @@ What the models cover:
   cancelling the new device before its restore records itself binds nothing
   (§13.2, §13.4). The sealing and opening are taken as given.
 - **Narrowing a live query** to the rows its statements can depend on (§4):
-  each rule's step, against a port of sqlive's planner. A differential test
-  checks how the planner composes the rules against SQLite.
+  each rule's step, against a port of sqlive's planner, and the first steps of
+  putting them together: a write the judge lets pass leaves the rows that pass
+  each table's scope unchanged, and the rows of a statement read whole. A
+  differential test checks how the planner composes the rules against SQLite.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:
@@ -15123,6 +15125,7 @@ Write-ups explain each model and state its assumptions:
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
+| A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 
 ## Appendix H. Errors and statuses

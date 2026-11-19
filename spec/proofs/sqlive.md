@@ -245,6 +245,31 @@ masked to the columns the statement reads, and no row of any other table.
 returns the same rows from the masked database as from the database. So the
 judge's lookups in the masked database read the rows the statement reads.
 
+The second step shows what a write the judge lets pass leaves unchanged.
+[Unjudged.lean](../../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean)
+states a write's row changes as steps that each change one slot of a table,
+from the change's row before to its row after (`Writes`). A slot can change
+more than once in one write, as when one statement updates a row and the next
+deletes it. `Writes.unjudged` proves that when the masked row of a slot ends
+different from where it started, the slot's first and last rows each fail the
+table's scope, as long as every change that changes a masked row has rows
+before and after that fail it. `unjudged_rows` puts the two together: when the
+judge lets a write pass, each masked table holds the same rows that pass the
+table's scope before and after the write, in the same order.
+
+For a statement sqlive reads whole, the scope passes every row, so the masked
+tables are the same before and after, and `whole_narrowing_sound` proves the
+composed theorem: the write leaves the statement's rows unchanged. For any
+other statement, the steps still to prove show that the rows that pass the
+scopes decide the statement's rows. A row a scope leaves out fails a condition
+that every binding the statement keeps meets, so removing it changes no
+binding. A join's lookup finds its partner's row, because that row passes its
+own scope and so the write left its slot unchanged. The planner's state keeps
+each term and edge tied to the condition it came from, through every step that
+holds back, carries or passes it on. Under a LIMIT, the sorted item's scope
+keeps every row that sorts at or before the last row, so `limit_sound` and
+`atOrBefore_passes` give the same first rows.
+
 ## What the proofs don't cover
 
 The theorems prove each rule's step and the steps of putting them together
