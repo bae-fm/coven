@@ -257,6 +257,32 @@ impl StoreDir {
     pub fn area_path(&self, area: FileArea) -> std::path::PathBuf {
         self.path.join(area.name())
     }
+
+    /// Whether any of the store's files are on disk: its directory, or the
+    /// directory under its deletion name that a deletion not yet finished
+    /// leaves, for a test of what a deletion removes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn files_exist(&self) -> bool {
+        self.path.exists() || lock::deletion_path(&self.path, self.id).exists()
+    }
+
+    /// Copy the closed store's directory into `to`, making `to` and every
+    /// folder below it, as a backup of the app's folder does. Panics on
+    /// failure. Close the store first: a copy of an open store's files is a
+    /// copy of a crash.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn copy_files(&self, to: &std::path::Path) {
+        crate::files::copy_tree(&self.path, to);
+    }
+
+    /// Replace the closed store's directory with the copy at `from`, as
+    /// restoring a backup does: the files the store has now are removed first.
+    /// Panics on failure.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn restore_files(&self, from: &std::path::Path) {
+        std::fs::remove_dir_all(&self.path).unwrap();
+        crate::files::copy_tree(from, &self.path);
+    }
 }
 
 /// The folder of the store's folder that holds a rebuild's store (§18.3).

@@ -667,3 +667,37 @@ async fn a_store_opened_through_an_installation_uses_the_budget_the_app_gave_it(
     drop(cancel);
     handle.close().await.unwrap();
 }
+
+/// A closed store's files copy out, and a restore puts the copy back over what
+/// the store has since: the store opens again as it was, and a deleted store
+/// has no files left.
+#[tokio::test]
+async fn a_closed_stores_files_copy_out_and_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let id = directory.id();
+    assert!(directory.files_exist());
+    let backup = tempfile::tempdir().unwrap();
+    directory.copy_files(backup.path());
+    assert!(backup.path().join("store.db").exists());
+
+    let open = || async {
+        app.builder()
+            .synced_tables(Vec::new())
+            .migrations(Vec::new())
+            .open(id, |_| ())
+            .await
+            .unwrap()
+    };
+    let handle = open().await;
+    handle.rename_store("Renamed").await.unwrap();
+    handle.close().await.unwrap();
+    directory.restore_files(backup.path());
+    let restored = open().await;
+    assert_eq!(restored.store_name().await.unwrap(), "Household");
+    restored.close().await.unwrap();
+
+    app.discard_store(&directory).await.unwrap();
+    assert!(!app.store_dir(&id).files_exist());
+}

@@ -2423,6 +2423,20 @@ impl StoreDir {
     /// files coven keeps there.
     #[cfg(feature = "test-utils")]
     pub fn area_path(&self, area: FileArea) -> PathBuf;
+    /// Whether any of the store's files are on disk: its directory, or the
+    /// directory under its deletion name that a deletion not yet finished
+    /// leaves. A test uses it to see that a deletion removed the store.
+    #[cfg(feature = "test-utils")]
+    pub fn files_exist(&self) -> bool;
+    /// Copy the closed store's directory into `to`, making `to` and every
+    /// folder below it, as a backup of the app's folder does. Panics on
+    /// failure.
+    #[cfg(feature = "test-utils")]
+    pub fn copy_files(&self, to: &Path);
+    /// Replace the closed store's directory with the copy at `from`, as
+    /// restoring a backup does. Panics on failure.
+    #[cfg(feature = "test-utils")]
+    pub fn restore_files(&self, from: &Path);
 }
 
 impl Coven {
