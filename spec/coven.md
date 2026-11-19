@@ -14970,7 +14970,22 @@ the same on any platform.
     function that code passes to a method of a read type, of a live query or
     of a type that holds one, or to a call beside a value of such a type; and
     each function of the crate that read code calls or passes on. Test code
-    and the files the policy lists as plumbing are no read code. A row mapper
+    and the files the policy lists as plumbing are no read code. A function
+    of an earlier crate that read code calls or passes on is read code too,
+    though its own crate's compile cannot see the call. So each crate's
+    compile writes a record beside its metadata: for each function other
+    crates can call that no read code of the crate reaches, what the read
+    rule's lints would find in the code it reaches in the crate that no read
+    code reaches, and what the earlier crates' records hold for the functions
+    that code calls. A later crate's read code that calls or passes on such a
+    function gets each of those findings at the call, under the finding's own
+    lint, and the finding's mark sits there. A record names its crate by the
+    stable id rustc derives from the crate's name and build settings, and a
+    compile stops when a record it needs is missing or names another id. A
+    compile through the driver writes the record before the metadata, and
+    cargo compiles a crate again when another wrapper compiled it last, so
+    the record beside a crate's metadata is always the same compile's. A row
+    mapper
     is a function or closure whose inputs name the row a statement hands its
     mapper. When the mapper's result implements one of the policy's
     `column_values`, such as rusqlite's `FromSql`, the mapper reads one

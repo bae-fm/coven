@@ -1,4 +1,6 @@
 # The root of the workspace of the read rule fixture, where the lints find its
 # policy file: base.rs, a crate of the workspace the checked crate depends
-# on, and src/lib.rs, the checked crate.
+# on, and src/lib.rs, the checked crate; and helpers.rs, relay.rs and
+# helped.rs, crates that each depend on the ones before, whose helpers the
+# last one's read code calls.
 [workspace]

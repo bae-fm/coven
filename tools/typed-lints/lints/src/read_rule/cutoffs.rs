@@ -17,21 +17,21 @@ use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Location};
 use rustc_middle::ty::{TyCtxt, TypeckResults};
 
+use super::records::Reporter;
 use super::{READ_CUTOFF, Search, callee};
-use crate::finding::Finding;
 
 /// Reports the cutoffs in the read code `unit`, with the closures inside it,
 /// but those only a live query's `process` runs.
 pub(super) fn check<'tcx>(
     search: &Search<'_, 'tcx>,
-    help: &'static str,
     unit: LocalDefId,
     process_only: &FxHashSet<LocalDefId>,
+    reporter: &Reporter<'_, 'tcx>,
 ) {
     let tcx = search.tcx;
     let mut comparisons = Comparisons {
         search,
-        help,
+        reporter,
         typeck: tcx.typeck(unit),
         process_only,
         item: tcx.def_path_str(tcx.typeck_root_def_id(unit.to_def_id())),
@@ -41,7 +41,7 @@ pub(super) fn check<'tcx>(
 
 struct Comparisons<'a, 's, 'tcx> {
     search: &'a Search<'s, 'tcx>,
-    help: &'static str,
+    reporter: &'a Reporter<'a, 'tcx>,
     typeck: &'tcx TypeckResults<'tcx>,
     process_only: &'a FxHashSet<LocalDefId>,
     item: String,
@@ -164,17 +164,11 @@ impl<'tcx> Visitor<'tcx> for Comparisons<'_, '_, 'tcx> {
                 if let Some(operator) = operator
                     && let Some(fixed) = self.fixed(left).or_else(|| self.fixed(right))
                 {
-                    self.search.tcx.emit_node_span_lint(
+                    self.reporter.report(
                         READ_CUTOFF,
                         expr.hir_id,
-                        expr.span.source_callsite(),
-                        Finding {
-                            message: format!(
-                                "`{}` compares with `{operator}` against {fixed}",
-                                self.item
-                            ),
-                            help: self.help,
-                        },
+                        expr.span,
+                        format!("`{}` compares with `{operator}` against {fixed}", self.item),
                     );
                 }
             }

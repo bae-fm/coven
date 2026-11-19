@@ -26,14 +26,14 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{Expr, ExprKind, HirId, QPath};
+use rustc_hir::{Expr, ExprKind, QPath};
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::kw;
 use std::cell::RefCell;
 
-use super::{READ_KEPT_STATE, ReadCode, Search};
-use crate::finding::Finding;
+use super::records::Reporter;
+use super::{READ_KEPT_STATE, Search};
 use crate::owner_rules::impl_type;
 use crate::owners::TypeSet;
 
@@ -41,7 +41,6 @@ use crate::owners::TypeSet;
 /// retain, as found so far.
 pub(super) struct Kept<'a, 's, 'tcx> {
     search: &'a Search<'s, 'tcx>,
-    help: &'static str,
     kept: &'a TypeSet<'tcx>,
     streams: &'a FxHashSet<DefId>,
     /// What each type retains: the first kept-state type, by name.
@@ -50,37 +49,17 @@ pub(super) struct Kept<'a, 's, 'tcx> {
     holders: RefCell<FxHashMap<DefId, bool>>,
 }
 
-pub(super) fn check<'tcx>(
-    search: &Search<'_, 'tcx>,
-    help: &'static str,
-    kept: &TypeSet<'tcx>,
-    streams: &FxHashSet<DefId>,
-    code: &ReadCode,
-) {
-    let kept = Kept {
-        search,
-        help,
-        kept,
-        streams,
-        retained: RefCell::default(),
-        holders: RefCell::default(),
-    };
-    kept.holders();
-    kept.read_code(code);
-}
-
-impl<'tcx> Kept<'_, '_, 'tcx> {
-    fn tcx(&self) -> TyCtxt<'tcx> {
-        self.search.tcx
+impl<'a, 's, 'tcx> Kept<'a, 's, 'tcx> {
+    pub(super) fn new(
+        search: &'a Search<'s, 'tcx>,
+        kept: &'a TypeSet<'tcx>,
+        streams: &'a FxHashSet<DefId>,
+    ) -> Self {
+        Self { search, kept, streams, retained: RefCell::default(), holders: RefCell::default() }
     }
 
-    fn report(&self, id: HirId, span: rustc_span::Span, message: String) {
-        self.tcx().emit_node_span_lint(
-            READ_KEPT_STATE,
-            id,
-            span.source_callsite(),
-            Finding { message, help: self.help },
-        );
+    fn tcx(&self) -> TyCtxt<'tcx> {
+        self.search.tcx
     }
 
     /// Whether `adt` is a live query or a value stream.
@@ -133,7 +112,7 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
 
     /// The first form: each holder's fields beside its live query that keep
     /// state, and the second: its methods that write them.
-    fn holders(&self) {
+    pub(super) fn holders(&self, reporter: &Reporter<'_, 'tcx>) {
         let tcx = self.tcx();
         for item in tcx.hir_crate_items(()).definitions() {
             if !matches!(tcx.def_kind(item), DefKind::Struct | DefKind::Enum | DefKind::Union)
@@ -159,7 +138,8 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
                 others.insert(field.did);
                 if let Some(kept) = self.retains(ty) {
                     let local = field.did.expect_local();
-                    self.report(
+                    reporter.report(
+                        READ_KEPT_STATE,
                         tcx.local_def_id_to_hir_id(local),
                         tcx.def_span(local),
                         format!(
@@ -176,7 +156,7 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
                     if tcx.opt_associated_item(method.to_def_id()).is_some_and(|it| it.is_method())
                         && self.search.candidates.contains(&method)
                     {
-                        self.writes(method, &others);
+                        self.writes(method, &others, reporter);
                     }
                 }
             }
@@ -184,11 +164,12 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
     }
 
     /// Reports each write of a field of `others` in the method `method`.
-    fn writes(&self, method: LocalDefId, others: &FxHashSet<DefId>) {
+    fn writes(&self, method: LocalDefId, others: &FxHashSet<DefId>, reporter: &Reporter<'_, 'tcx>) {
         let tcx = self.tcx();
         let body = tcx.hir_body_owned_by(method);
         let mut writes = Writes {
             kept: self,
+            reporter,
             typeck: tcx.typeck(method),
             others,
             item: tcx.def_path_str(method),
@@ -196,48 +177,52 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
         writes.visit_expr(body.value);
     }
 
-    /// The third form and the fourth.
-    fn read_code(&self, code: &ReadCode) {
+    /// The third form and the fourth, in the read code `unit`, which is
+    /// inside no other read code, but the closures of `passed_over` in it.
+    pub(super) fn read_code(
+        &self,
+        unit: LocalDefId,
+        passed_over: &FxHashSet<LocalDefId>,
+        reporter: &Reporter<'_, 'tcx>,
+    ) {
         let tcx = self.tcx();
-        for &unit in &code.top {
-            if tcx.def_kind(unit) == DefKind::Closure {
-                self.captures(unit);
-            }
-            if tcx.opt_associated_item(unit.to_def_id()).is_some_and(|item| item.is_method())
-                && let Some(owner) = impl_type(tcx, unit.to_def_id())
-                && !self.adt_holds_request(owner)
+        if tcx.def_kind(unit) == DefKind::Closure {
+            self.captures(unit, reporter);
+        }
+        if tcx.opt_associated_item(unit.to_def_id()).is_some_and(|item| item.is_method())
+            && let Some(owner) = impl_type(tcx, unit.to_def_id())
+            && !self.adt_holds_request(owner)
+        {
+            let self_ty = tcx.type_of(owner).instantiate_identity().skip_norm_wip();
+            if let Some(kept) = self.retains(self_ty)
+                && let Some(receiver) = tcx.hir_body_owned_by(unit).params.first()
             {
-                let self_ty = tcx.type_of(owner).instantiate_identity().skip_norm_wip();
-                if let Some(kept) = self.retains(self_ty)
-                    && let Some(receiver) = tcx.hir_body_owned_by(unit).params.first()
-                {
-                    self.report(
-                        tcx.local_def_id_to_hir_id(unit),
-                        receiver.span,
-                        format!(
-                            "`{}` reads through `{}`, which keeps `{kept}` state",
-                            tcx.def_path_str(unit),
-                            tcx.def_path_str(owner)
-                        ),
-                    );
-                }
+                reporter.report(
+                    READ_KEPT_STATE,
+                    tcx.local_def_id_to_hir_id(unit),
+                    receiver.span,
+                    format!(
+                        "`{}` reads through `{}`, which keeps `{kept}` state",
+                        tcx.def_path_str(unit),
+                        tcx.def_path_str(owner)
+                    ),
+                );
             }
-            let mut statics = Statics {
-                kept: self,
-                typeck: tcx.typeck(unit),
-                item: tcx.def_path_str(tcx.typeck_root_def_id(unit.to_def_id())),
-                seen: FxHashSet::default(),
-            };
-            statics.visit_expr(tcx.hir_body_owned_by(unit).value);
         }
-        for &closure in &code.kept_by_live_queries {
-            self.captures(closure);
-        }
+        let mut statics = Statics {
+            kept: self,
+            reporter,
+            passed_over,
+            typeck: tcx.typeck(unit),
+            item: tcx.def_path_str(tcx.typeck_root_def_id(unit.to_def_id())),
+            seen: FxHashSet::default(),
+        };
+        statics.visit_expr(tcx.hir_body_owned_by(unit).value);
     }
 
     /// Reports what the closure `closure`, which outlives the call that made
     /// it, captures and changes, or captures with kept state.
-    fn captures(&self, closure: LocalDefId) {
+    pub(super) fn captures(&self, closure: LocalDefId, reporter: &Reporter<'_, 'tcx>) {
         let tcx = self.tcx();
         let item = tcx.def_path_str(tcx.typeck_root_def_id(closure.to_def_id()));
         for capture in tcx.closure_captures(closure) {
@@ -245,9 +230,15 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
             let span = capture.get_path_span(tcx);
             let id = tcx.local_def_id_to_hir_id(closure);
             if capture.mutability.is_mut() {
-                self.report(id, span, format!("`{item}` changes the captured `{name}`"));
+                reporter.report(
+                    READ_KEPT_STATE,
+                    id,
+                    span,
+                    format!("`{item}` changes the captured `{name}`"),
+                );
             } else if let Some(kept) = self.retains(capture.place.ty()) {
-                self.report(
+                reporter.report(
+                    READ_KEPT_STATE,
                     id,
                     span,
                     format!("`{item}` captures `{name}`, which keeps `{kept}` state"),
@@ -260,6 +251,7 @@ impl<'tcx> Kept<'_, '_, 'tcx> {
 /// The writes of a holder's fields beside its live query in one method.
 struct Writes<'a, 'k, 's, 'tcx> {
     kept: &'a Kept<'k, 's, 'tcx>,
+    reporter: &'a Reporter<'a, 'tcx>,
     typeck: &'tcx ty::TypeckResults<'tcx>,
     others: &'a FxHashSet<DefId>,
     item: String,
@@ -294,7 +286,8 @@ impl<'tcx> Writes<'_, '_, '_, 'tcx> {
             && self.others.contains(&field)
         {
             let tcx = self.kept.tcx();
-            self.kept.report(
+            self.reporter.report(
+                READ_KEPT_STATE,
                 at.hir_id,
                 at.span,
                 format!(
@@ -339,6 +332,8 @@ impl<'tcx> Visitor<'tcx> for Writes<'_, '_, '_, 'tcx> {
 /// The statics with kept state that one unit of read code names.
 struct Statics<'a, 'k, 's, 'tcx> {
     kept: &'a Kept<'k, 's, 'tcx>,
+    reporter: &'a Reporter<'a, 'tcx>,
+    passed_over: &'a FxHashSet<LocalDefId>,
     typeck: &'tcx ty::TypeckResults<'tcx>,
     item: String,
     seen: FxHashSet<DefId>,
@@ -352,6 +347,11 @@ impl<'tcx> Visitor<'tcx> for Statics<'_, '_, '_, 'tcx> {
     }
 
     fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::Closure(closure) = expr.kind
+            && self.passed_over.contains(&closure.def_id)
+        {
+            return;
+        }
         if let ExprKind::Path(ref qpath) = expr.kind
             && let Res::Def(DefKind::Static { .. }, id) = self.typeck.qpath_res(qpath, expr.hir_id)
             && self.seen.insert(id)
@@ -360,7 +360,8 @@ impl<'tcx> Visitor<'tcx> for Statics<'_, '_, '_, 'tcx> {
             if let Some(kept) =
                 self.kept.retains(tcx.type_of(id).instantiate_identity().skip_norm_wip())
             {
-                self.kept.report(
+                self.reporter.report(
+                    READ_KEPT_STATE,
                     expr.hir_id,
                     expr.span,
                     format!(

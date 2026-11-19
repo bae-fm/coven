@@ -16,16 +16,16 @@ use rustc_hir::{AssignOpKind, BinOpKind, Expr, ExprKind};
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
 
+use super::records::Reporter;
 use super::{READ_REQUEST_BUMP, Search};
-use crate::finding::Finding;
 use crate::workspace_bodies::workspace_bodies;
 
 /// Reports each request bump in the crate's production code outside the
 /// plumbing.
 pub(super) fn check<'tcx>(
     search: &Search<'_, 'tcx>,
-    help: &'static str,
     queries: &FxHashSet<DefId>,
+    reporter: &Reporter<'_, 'tcx>,
 ) {
     if queries.is_empty() {
         return;
@@ -41,7 +41,7 @@ pub(super) fn check<'tcx>(
         }
         let mut bumps = Bumps {
             tcx,
-            help,
+            reporter,
             requests: &requests,
             typeck: tcx.typeck(body),
             item: tcx.def_path_str(body),
@@ -100,7 +100,7 @@ fn requests<'tcx>(search: &Search<'_, 'tcx>, queries: &FxHashSet<DefId>) -> FxHa
 
 struct Bumps<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    help: &'static str,
+    reporter: &'a Reporter<'a, 'tcx>,
     requests: &'a FxHashSet<DefId>,
     typeck: &'tcx TypeckResults<'tcx>,
     item: String,
@@ -134,18 +134,15 @@ impl<'tcx> Bumps<'_, 'tcx> {
     }
 
     fn report(&self, at: &Expr<'tcx>, field: DefId) {
-        self.tcx.emit_node_span_lint(
+        self.reporter.report(
             READ_REQUEST_BUMP,
             at.hir_id,
-            at.span.source_callsite(),
-            Finding {
-                message: format!(
-                    "`{}` adds one to the request's `{}` to run the query again",
-                    self.item,
-                    self.tcx.item_name(field)
-                ),
-                help: self.help,
-            },
+            at.span,
+            format!(
+                "`{}` adds one to the request's `{}` to run the query again",
+                self.item,
+                self.tcx.item_name(field)
+            ),
         );
     }
 }

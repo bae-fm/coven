@@ -24,19 +24,19 @@ use rustc_middle::ty::{ParamEnv, TyCtxt, TypeckResults, TypingEnv};
 use rustc_span::sym;
 
 use super::flow::{Flow, Spread};
+use super::records::Reporter;
 use super::rows::Mappers;
 use super::{READ_KEYED_STATEMENT, READ_QUERY_PER_ROW, Search, callback, library_method};
-use crate::finding::Finding;
 
 /// Reports the statements of the read code `unit` that run once for each
 /// row or are keyed by what an earlier one returned, with the closures
 /// inside it, but those only a live query's `process` runs.
 pub(super) fn check<'tcx>(
     search: &Search<'_, 'tcx>,
-    help: &'static str,
     mappers: &Mappers<'_, 'tcx>,
     unit: LocalDefId,
     process_only: &FxHashSet<LocalDefId>,
+    reporter: &Reporter<'_, 'tcx>,
 ) {
     let tcx = search.tcx;
     let typeck = tcx.typeck(unit);
@@ -47,7 +47,7 @@ pub(super) fn check<'tcx>(
     let returned = Flow::of(tcx, typeck, body, Spread::Mention, &is_statement);
     let mut statements = Statements {
         tcx,
-        help,
+        reporter,
         kinds: &kinds,
         mappers,
         returned: &returned,
@@ -102,8 +102,7 @@ impl<'tcx> Kinds<'_, '_, 'tcx> {
 
 struct Statements<'a, 's, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    /// The help every finding gives: the rule, and what to do instead.
-    help: &'static str,
+    reporter: &'a Reporter<'a, 'tcx>,
     kinds: &'a Kinds<'a, 's, 'tcx>,
     mappers: &'a Mappers<'a, 'tcx>,
     /// What the body's statements returned.
@@ -136,12 +135,7 @@ impl<'tcx> Statements<'_, '_, 'tcx> {
         } else {
             return;
         };
-        self.tcx.emit_node_span_lint(
-            lint,
-            expr.hir_id,
-            expr.span.source_callsite(),
-            Finding { message: format!("`{}` {what}", self.item), help: self.help },
-        );
+        self.reporter.report(lint, expr.hir_id, expr.span, format!("`{}` {what}", self.item));
     }
 
     /// Whether an argument of the call `expr` is code that runs once for each

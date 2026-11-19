@@ -3,9 +3,15 @@
 //! read's rows in read code, and nothing on text, a constant table, one
 //! optional value, values no read returned or a workspace method of the
 //! same name, nothing in code no read reaches, and nothing in what only a
-//! live query's `process` runs; and the fixture's mark holds.
+//! live query's `process` runs; and the fixture's mark holds. A helper of
+//! an earlier crate that no read code of its own crate reaches gets its
+//! findings where a later crate's read code calls it, through a crate
+//! between them too, and a compile stops when the earlier crate's record is
+//! missing.
 
 mod support;
+
+use std::path::Path;
 
 use support::{Fixture, extern_library, out_dir};
 
@@ -37,4 +43,59 @@ fn finds_each_shape_of_the_read_rule_and_nothing_else() {
     for lint in LINTS {
         fixture.assert_findings(lint, &diagnostics);
     }
+}
+
+/// The crates of the fixture's helpers, in the order they compile: each
+/// one's source, crate name and the crates it depends on.
+const HELPER_CRATES: [(&str, &str, &[&str]); 4] = [
+    ("reads/base.rs", "reads_base", &[]),
+    ("reads/helpers.rs", "reads_helpers", &["reads_base"]),
+    ("reads/relay.rs", "reads_relay", &["reads_base", "reads_helpers"]),
+    ("reads/helped.rs", "reads_helped", &["reads_base", "reads_helpers", "reads_relay"]),
+];
+
+/// One of `HELPER_CRATES`, and the arguments that let it use the crates it
+/// depends on from `out_dir`.
+fn helper_crate(
+    (source, crate_name, dependencies): (&'static str, &'static str, &[&str]),
+    out_dir: &Path,
+) -> (Fixture<'static>, Vec<String>) {
+    let fixture = Fixture { source, crate_name, manifest_dir: "reads" };
+    let arguments =
+        dependencies.iter().flat_map(|dependency| extern_library(dependency, out_dir)).collect();
+    (fixture, arguments)
+}
+
+#[test]
+fn finds_what_an_earlier_crates_helper_does_where_read_code_calls_it() {
+    let out_dir = out_dir("read_rule_helpers");
+    for package in HELPER_CRATES {
+        let (fixture, arguments) = helper_crate(package, &out_dir);
+        let diagnostics = fixture.compile(&out_dir, arguments);
+        if fixture.crate_name != "reads_base" {
+            for lint in LINTS {
+                fixture.assert_findings(lint, &diagnostics);
+            }
+        }
+    }
+}
+
+#[test]
+fn stops_a_compile_whose_earlier_crate_has_no_record() {
+    let out_dir = out_dir("read_rule_helpers_unrecorded");
+    let [base, helpers, relay, helped] = HELPER_CRATES;
+    for package in [base, helpers, relay] {
+        let (fixture, arguments) = helper_crate(package, &out_dir);
+        fixture.compile(&out_dir, arguments);
+    }
+    std::fs::remove_file(out_dir.join("libreads_helpers.read-rule.toml"))
+        .expect("the helpers' compile wrote its record");
+    let (fixture, arguments) = helper_crate(helped, &out_dir);
+    let output = fixture.run(&out_dir, arguments);
+    let diagnostics = String::from_utf8(output.stderr).expect("rustc writes UTF-8");
+    assert!(!output.status.success(), "the compile went on without the record:\n{diagnostics}");
+    assert!(
+        diagnostics.contains("the read rule's record of the crate reads_helpers"),
+        "the compile stopped for another reason:\n{diagnostics}"
+    );
 }

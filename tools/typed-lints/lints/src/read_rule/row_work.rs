@@ -37,12 +37,12 @@ use rustc_middle::ty::{self, TyCtxt, TypeckResults, TypingEnv};
 use rustc_span::Symbol;
 
 use super::flow::{Flow, Spread};
+use super::records::Reporter;
 use super::rows::{Made, Mappers, RowTypes, is_collection, peel_result};
 use super::{
     READ_AGGREGATE, READ_DROP_ROW, READ_FILTER, READ_GROUP, READ_JOIN, READ_LENGTH_BRANCH,
     READ_PICK, READ_SORT, callback, callee, is_library, library_method,
 };
-use crate::finding::Finding;
 
 const SORT_WITHOUT_ARGUMENTS: [&str; 4] = ["sort", "sort_unstable", "sorted", "reverse"];
 const SORT_WITH_ARGUMENTS: [&str; 7] = [
@@ -91,11 +91,11 @@ const OPTION_CONSUMERS: [&str; 10] = [
 /// it, but those only a live query's `process` runs.
 pub(super) fn check<'tcx>(
     tcx: TyCtxt<'tcx>,
-    help: &'static str,
     rows: &RowTypes<'tcx>,
     mappers: &Mappers<'_, 'tcx>,
     unit: LocalDefId,
     process_only: &FxHashSet<LocalDefId>,
+    reporter: &Reporter<'_, 'tcx>,
 ) {
     let typeck = tcx.typeck(unit);
     let root = tcx.typeck_root_def_id(unit.to_def_id());
@@ -115,7 +115,7 @@ pub(super) fn check<'tcx>(
     let column_rows = Flow::of(tcx, typeck, body, Spread::Value, &column_read);
     let mut work = RowWork {
         tcx,
-        help,
+        reporter,
         rows,
         column_rows: &column_rows,
         typing_env,
@@ -131,8 +131,7 @@ pub(super) fn check<'tcx>(
 
 struct RowWork<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    /// The help every finding gives: the rule, and what to do instead.
-    help: &'static str,
+    reporter: &'a Reporter<'a, 'tcx>,
     rows: &'a RowTypes<'tcx>,
     /// What flows from the body's reads of one column.
     column_rows: &'a Flow<'a, 'tcx>,
@@ -157,12 +156,7 @@ impl<'tcx> RowWork<'_, 'tcx> {
         span: rustc_span::Span,
         what: String,
     ) {
-        self.tcx.emit_node_span_lint(
-            lint,
-            expr_id,
-            span.source_callsite(),
-            Finding { message: format!("`{}` {what}", self.item), help: self.help },
-        );
+        self.reporter.report(lint, expr_id, span, format!("`{}` {what}", self.item));
     }
 
     /// The library method a method call resolves to, by name.

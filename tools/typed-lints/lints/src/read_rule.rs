@@ -25,6 +25,11 @@
 //! lints find nothing there. A function other crates can call is never
 //! counted so, since this compile can't see their calls.
 //!
+//! A function other crates can call is read code for them when their read
+//! code calls or passes it on: its crate records what the lints would find
+//! through it, and the later crate reports that at the call
+//! (`read_rule/records.rs`).
+//!
 //! The shapes of row work in read code are in `read_rule/row_work.rs`, the
 //! statements read code runs in `read_rule/statements.rs`, what rows are in
 //! `read_rule/rows.rs`, and what flows from a read's result in
@@ -33,6 +38,7 @@
 mod cutoffs;
 mod flow;
 mod kept_state;
+mod records;
 mod request_bumps;
 mod row_work;
 mod rows;
@@ -43,8 +49,8 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{Expr, ExprKind};
-use rustc_lint::{LateContext, LateLintPass, declare_tool_lint, impl_lint_pass};
+use rustc_hir::{Expr, ExprKind, HirId};
+use rustc_lint::{LateContext, LateLintPass, Lint, LintId, declare_tool_lint, impl_lint_pass};
 use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
 use crate::owner_rules::impl_type;
@@ -52,6 +58,7 @@ use crate::owners::TypeSet;
 use crate::workspace_bodies::earlier_definitions;
 use crate::workspace_policy::{WorkspaceCrates, WorkspacePolicy, resolve_row};
 use owner_construction_policy::ReadShapes;
+use records::{Records, Reporter};
 use rows::{Mappers, RowTypes};
 
 /// The crates whose functions do work SQL does, and pass on what they are
@@ -73,6 +80,26 @@ fn callee(typeck: &ty::TypeckResults<'_>, expr: &Expr<'_>) -> Option<DefId> {
         ExprKind::MethodCall(..) => typeck.type_dependent_def_id(expr.hir_id),
         _ => None,
     }
+}
+
+/// The function a call of `callee`, with the generic arguments of the node
+/// `args_of`, runs: a trait method's impl when the arguments say which.
+fn resolve_callee<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typeck: &ty::TypeckResults<'tcx>,
+    typing_env: TypingEnv<'tcx>,
+    callee: DefId,
+    args_of: HirId,
+) -> DefId {
+    let args = typeck.node_args(args_of);
+    if tcx.trait_of_assoc(callee).is_some()
+        && args.len() == tcx.generics_of(callee).count()
+        && let Ok(Some(instance)) = Instance::try_resolve(tcx, typing_env, callee, args)
+        && let InstanceKind::Item(implemented) = instance.def
+    {
+        return implemented;
+    }
+    callee
 }
 
 /// The method of the standard library, itertools or indexmap that the
@@ -239,6 +266,24 @@ impl ReadRule {
     }
 }
 
+impl Setup {
+    /// The help a finding of `lint` gives: the rule, and what to do instead.
+    fn help(&self, lint: &'static Lint) -> &'static str {
+        let lint = LintId::of(lint);
+        if lint == LintId::of(READ_QUERY_PER_ROW) || lint == LintId::of(READ_KEYED_STATEMENT) {
+            self.statement_help
+        } else if lint == LintId::of(READ_KEPT_STATE) {
+            self.kept_help
+        } else if lint == LintId::of(READ_CUTOFF) {
+            self.cutoff_help
+        } else if lint == LintId::of(READ_REQUEST_BUMP) {
+            self.bump_help
+        } else {
+            self.row_work_help
+        }
+    }
+}
+
 impl<'tcx> LateLintPass<'tcx> for ReadRule {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
         let Some(setup) = &self.setup else {
@@ -259,26 +304,78 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
         );
         let search = Search::new(setup, tcx);
         let code = search.read_code();
-        for &unit in &code.top {
-            row_work::check(tcx, setup.row_work_help, &rows, &mappers, unit, &code.process_only);
-            statements::check(&search, setup.statement_help, &mappers, unit, &code.process_only);
-            cutoffs::check(&search, setup.cutoff_help, unit, &code.process_only);
-        }
-        let kept =
+        let kept_types =
             TypeSet::resolve(tcx, "read_shapes.kept_state_types", &setup.rows.kept_state_types);
-        kept_state::check(&search, setup.kept_help, &kept, &setup.value_streams, &code);
-        request_bumps::check(&search, setup.bump_help, &setup.request_queries);
+        let kept = kept_state::Kept::new(&search, &kept_types, &setup.value_streams);
+        let records = Records::new(tcx);
+        // Checks the unit, but the closures of `passed_over` in it, and the
+        // closures of `reported` for kept state: what only a live query's
+        // `process` runs may work on the rows, but keeps no state.
+        let check_unit = |unit: LocalDefId,
+                          passed_over: &FxHashSet<LocalDefId>,
+                          reported: &FxHashSet<LocalDefId>,
+                          reporter: &Reporter<'_, 'tcx>| {
+            row_work::check(tcx, &rows, &mappers, unit, passed_over, reporter);
+            statements::check(&search, &mappers, unit, passed_over, reporter);
+            cutoffs::check(&search, unit, passed_over, reporter);
+            kept.read_code(unit, reported, reporter);
+            records::check_calls(&search, &records, unit, passed_over, reporter);
+        };
+        let diagnostics = Reporter::diagnostics(tcx, setup);
+        kept.holders(&diagnostics);
+        for &unit in &code.top {
+            check_unit(unit, &code.process_only, &FxHashSet::default(), &diagnostics);
+        }
+        for &closure in &code.kept_by_live_queries {
+            kept.captures(closure, &diagnostics);
+        }
+        request_bumps::check(&search, &setup.request_queries, &diagnostics);
+
+        let found = code
+            .helper_top
+            .iter()
+            .map(|&unit| {
+                let reporter = Reporter::record(tcx, setup);
+                check_unit(unit, &code.helper_passed_over, &code.read, &reporter);
+                (unit, reporter.into_recorded())
+            })
+            .collect::<FxHashMap<_, _>>();
+        let functions = code
+            .helpers
+            .iter()
+            .filter_map(|(function, units)| {
+                let mut findings =
+                    units.iter().flat_map(|unit| found[unit].iter().cloned()).collect::<Vec<_>>();
+                findings.sort();
+                findings.dedup();
+                (!findings.is_empty()).then_some((*function, findings))
+            })
+            .collect::<Vec<_>>();
+        records::write(tcx, &functions);
     }
 }
 
 /// The crate's read code: the units to check, none inside another, and the
-/// closures and functions only a live query's `process` runs.
+/// closures and functions only a live query's `process` runs; and the code
+/// that is read code only for the later crates whose read code calls it.
 struct ReadCode {
+    /// Every unit of read code.
+    read: FxHashSet<LocalDefId>,
     top: Vec<LocalDefId>,
     process_only: FxHashSet<LocalDefId>,
     /// The closures code passes to a method of a live query, which keeps
     /// them between reads.
     kept_by_live_queries: Vec<LocalDefId>,
+    /// Each function other crates can call that no read code of the crate
+    /// reaches, with the units of `helper_top` it reaches.
+    helpers: Vec<(LocalDefId, Vec<LocalDefId>)>,
+    /// The units, none inside another or inside read code, that those
+    /// functions reach and no read code of the crate reaches.
+    helper_top: Vec<LocalDefId>,
+    /// The closures the checks of `helper_top` pass over: those only a live
+    /// query's `process` runs when those functions are read code, and those
+    /// that are read code of the crate, whose findings the crate reports.
+    helper_passed_over: FxHashSet<LocalDefId>,
 }
 
 /// What the search for read code knows of the crate.
@@ -357,14 +454,67 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
             .into_iter()
             .filter(|unit| !general.contains(unit) && !exported.is_exported(*unit))
             .collect::<FxHashSet<_>>();
-        let inside_unit = |unit: LocalDefId| {
+        let inside = |unit: LocalDefId, units: &FxHashSet<LocalDefId>| {
             std::iter::successors(tcx.opt_local_parent(unit), |&item| tcx.opt_local_parent(item))
-                .any(|item| general.contains(&item))
+                .any(|item| units.contains(&item))
         };
         let mut top =
-            general.iter().copied().filter(|&unit| !inside_unit(unit)).collect::<Vec<_>>();
+            general.iter().copied().filter(|&unit| !inside(unit, &general)).collect::<Vec<_>>();
         top.sort_by_key(|unit| tcx.def_span(*unit));
-        ReadCode { top, process_only, kept_by_live_queries }
+
+        let mut callable = self
+            .candidates
+            .iter()
+            .copied()
+            .filter(|&unit| {
+                matches!(tcx.def_kind(unit), DefKind::Fn | DefKind::AssocFn)
+                    && exported.is_reachable(unit)
+                    && !general.contains(&unit)
+            })
+            .collect::<Vec<_>>();
+        callable.sort_by_key(|unit| tcx.def_span(*unit));
+        let reached = callable
+            .into_iter()
+            .map(|function| {
+                let units = reach(vec![function])
+                    .into_iter()
+                    .filter(|unit| !general.contains(unit) && !inside(*unit, &general))
+                    .collect::<FxHashSet<_>>();
+                (function, units)
+            })
+            .collect::<Vec<_>>();
+        let helper_units = reached.iter().flat_map(|(_, units)| units.iter().copied()).collect();
+        let mut helper_top = reached
+            .iter()
+            .flat_map(|(_, units)| units.iter().copied())
+            .filter(|&unit| !inside(unit, &helper_units))
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        helper_top.sort_by_key(|unit| tcx.def_span(*unit));
+        let helpers = reached
+            .into_iter()
+            .map(|(function, units)| {
+                let reached_top =
+                    helper_top.iter().copied().filter(|unit| units.contains(unit)).collect();
+                (function, reached_top)
+            })
+            .collect();
+        let helper_passed_over = process_only
+            .iter()
+            .copied()
+            .filter(|unit| !helper_units.contains(unit))
+            .chain(general.iter().copied())
+            .collect();
+        ReadCode {
+            read: general,
+            top,
+            process_only,
+            kept_by_live_queries,
+            helpers,
+            helper_top,
+            helper_passed_over,
+        }
     }
 
     /// Whether a function or closure takes a read value: its inputs name a
@@ -572,16 +722,8 @@ impl<'tcx> Walker<'_, '_, 'tcx> {
     /// The crate function a call of `callee` with the expression's arguments
     /// runs: a trait method's impl when the arguments say which.
     fn resolved(&self, callee: DefId, expr: &Expr<'tcx>) -> Option<LocalDefId> {
-        let tcx = self.search.tcx;
-        let args = self.typeck.node_args(expr.hir_id);
-        if tcx.trait_of_assoc(callee).is_some()
-            && args.len() == tcx.generics_of(callee).count()
-            && let Ok(Some(instance)) = Instance::try_resolve(tcx, self.typing_env, callee, args)
-            && let InstanceKind::Item(implemented) = instance.def
-        {
-            return implemented.as_local();
-        }
-        callee.as_local()
+        resolve_callee(self.search.tcx, self.typeck, self.typing_env, callee, expr.hir_id)
+            .as_local()
     }
 }
 
