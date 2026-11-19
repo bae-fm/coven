@@ -1,7 +1,8 @@
 //! The owner rules' type rows as the checker reads them. The policy names
 //! each of those types by its path (`Policy::owner_type_rows`), which the
-//! typed lints read; the checker reads the rows only to infer owners
-//! (`owner_graph.rs`), and matches types by name (`type_identity.rs`), so it
+//! typed lints read. The checker reads some of them: it infers owners from
+//! them (`owner_graph.rs`), and its read and domain-owner rules follow the
+//! shared pointers. It matches types by name (`type_identity.rs`), so it
 //! reads each row as its path's last segment.
 
 use std::collections::{BTreeMap, BTreeSet};

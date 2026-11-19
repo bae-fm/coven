@@ -14724,8 +14724,10 @@ the same on any platform.
    The policy names each type of the owner rules (F.3) by its path, as
    `coven_foundation::clock::Clock` and `std::sync::Arc`, and the rest by
    name. The typed lints of check 11, which hold the owner rules, read those
-   rows by path; the checker reads them only for check 4's test that each
-   domain's owner is an owner. The checker's rules match types by name, a
+   rows by path. The checker reads some of them by name: check 4 infers
+   owners from them to test that each domain's owner is one, and the read
+   rule and F.2's rule on domain owners follow the shared pointers that
+   `shared_pointer_types` names. The checker's rules match types by name, a
    path by its last part: a dependency's type goes by its name unless one of
    coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
