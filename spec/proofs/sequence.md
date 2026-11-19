@@ -632,6 +632,16 @@ others stay is refused as `NotAllowed` (`mayLeave`).
   device holds any more, which deletes the circle at the recovery's slot; a
   circle with another member keeps them (coven.md §13.3). The Rust
   differential runs `admit` and `recover` histories through the same reader.
+- `own_agrees_until_removal`, `removed_member_keeps_circles`,
+  `removed_member_keeps_writing`: a device of member `own` applies each slot
+  as `ownStep` does. Until history removes `own`, it holds history's state.
+  The store's removal of `own` stops it for good, and it installs `own`
+  removed with every circle as history held it before the slot (`keep`): `own`
+  stays in each, and none is deleted, so the device keeps taking `own`'s local
+  writes into every circle `own` was in, while history deletes the circle
+  `own` alone was in (coven.md §14.1). After the removal the device applies
+  nothing. The Rust differential follows the devices of two members through
+  the same histories.
 
 These hold for every start whose circles keep `Wf`: a deleted circle was made
 and has no members, and a live one has a member. A store with no circles
@@ -645,7 +655,9 @@ device's committed membership tables in the write's transaction, not
 modelled: `CircleLifecycle` proves what that membership is after each
 applied slot, and `write_permission_at_authored_prefix` that applying the
 write judges it at its author's applied prefix. `coven-database`'s write
-tests check both refusals.
+tests check both refusals. A removed member's own devices hold the membership
+`ownStateAt` gives, so their writes into the member's circles still commit
+there.
 
 ## Snapshots and deletion
 
@@ -2389,7 +2401,10 @@ answer has one list per history, with one entry per slot: `outcome`
 state after the slot, `standing` (`[member, "absent"|"active"|"removed"]` for
 each of `people`) and `circles` (`[circle, null]` for one not made, else
 `[circle, {name, members, deleted}]`, with sorted `members` and `deleted` the
-deleting slot or null).
+deleting slot or null). An optional `devices` lists distinct members of
+`people`, none when it is missing. Each slot's entry also has `devices`, with
+`[member, {standing, circles}]` for each member it lists: the state a device of
+that member holds after the slot (`ownStep`).
 
 **`inviteLifecycle`** runs one invite's events through `InviteLifecycle`'s
 steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).

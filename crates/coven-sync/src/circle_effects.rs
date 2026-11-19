@@ -2,12 +2,15 @@
 //! what a member's removal from the store, or a recovery of their keys, does
 //! to the circles it was in (§13.3, §15.5, §15.8, §15.9). A circle left empty
 //! is deleted at that slot, whether its last member left it, was removed from
-//! the store or was recovered with new keys.
+//! the store or was recovered with new keys. The removed member's own devices
+//! keep their circles instead (§14.1).
 
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{StoreCircle, StoreState};
+use coven_format::admin::StoreChange;
 use coven_foundation::id_source::{CircleId, MemberId};
 use coven_merge::Slot;
+use std::collections::BTreeMap;
 
 /// Make `circle` with `author` its first member. An id the state already
 /// holds, deleted or not, is gone: a deleted circle is never made again.
@@ -115,6 +118,41 @@ pub(crate) fn leave_lone(next: &mut StoreState, member: &MemberId, slot: Slot) {
         .collect();
     for circle in lone {
         leave(next, circle, member, slot);
+    }
+}
+
+/// The circles a device of a member keeps through the store's removal of that
+/// member: every circle as history held it before the removal, with the member
+/// in each and none deleted at the removal (Lean `CircleLifecycle.keep`).
+pub(crate) struct KeptCircles {
+    circles: BTreeMap<CircleId, StoreCircle>,
+    deletions: BTreeMap<CircleId, Slot>,
+}
+
+impl KeptCircles {
+    /// What a device of `own` keeps through `change`, which `before`
+    /// precedes: nothing of its own unless `change` is the store's removal of
+    /// `own`. That removal stops the device for good, so its circles are its
+    /// own copy: it keeps their rows and keeps taking `own`'s writes into them,
+    /// which it never sends. Every other device takes `own` out of each circle
+    /// and deletes the ones left empty (`leave_all`) (§14.1, §15.8).
+    pub(crate) fn through(
+        own: &MemberId,
+        change: &StoreChange,
+        before: &StoreState,
+    ) -> Option<Self> {
+        matches!(change, StoreChange::RemoveMember { member } if member == own).then(|| Self {
+            circles: before.circles.clone(),
+            deletions: before.circle_deletions.clone(),
+        })
+    }
+
+    /// Put the kept circles in `next`, history's state after the removal, to
+    /// give the state the device installs: `own` removed with their devices,
+    /// as on every device, and the circles as they were.
+    pub(crate) fn install(self, next: &mut StoreState) {
+        next.circles = self.circles;
+        next.circle_deletions = self.deletions;
     }
 }
 

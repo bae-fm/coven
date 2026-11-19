@@ -31,6 +31,13 @@ this model is concrete and stands alone, and the Rust test
   whose keys no device can open any more, and so deletes it at that slot
   (`recovery_deletes_lone_circles`); a circle with another member keeps them
   (`recovery_keeps_shared_circles`) (§13.3).
+- A device of the member a store's removal removes installs the member
+  removed and keeps every circle as it was, so it keeps the circles' rows and
+  keeps taking the member's writes into them; the removal stops it, and it
+  applies nothing after (`removed_member_keeps_circles`,
+  `removed_member_keeps_writing`). Until then it holds history's state
+  (`own_agrees_until_removal`), and every other device deletes the circle the
+  member alone was in (§14.1).
 
 The store's admin authority over a removal is `Authority`'s. That the author's
 device is active and acts for the author is §10's check, made with the
@@ -914,5 +921,225 @@ theorem recovery_keeps_shared_circles (s : State M C) (k : Nat) (a m : M) (c d :
   obtain ⟨circles, deleted⟩ := recovery_elsewhere s k a m c d n next applied other
   rw [circles, deleted]
   simp [State.leave, alone, shared, others]
+
+/-! ## A removed member's own devices
+
+Every device applies the same entries, but a device of the member a store's
+removal removes installs that removal differently (§14.1). The removal stops
+the device for good: it never sends again, so what it installs is its own
+copy. It installs the member removed, as every device does, and keeps every
+circle as it was before the slot, the member in each and none deleted. So the
+person's own devices keep their circles' rows, the circle they alone were in
+among them, and keep taking writes into them, which stay on the device. Every
+other device takes the member out of each circle and deletes the ones left
+empty (`member_removal_deletes`). -/
+
+/-- `next` with the circles and deletions of `s`. -/
+def keep (s next : State M C) : State M C :=
+  { next with circles := s.circles, deleted := s.deleted }
+
+/-- What a device of member `own` installs for an entry: what every device
+installs, except for the store's removal of `own`, where it keeps every circle
+as it was (§14.1). -/
+def ownEffect (own : M) (s : State M C) (k : Nat) : Entry M C → Outcome M C
+  | .removeMember m =>
+    if m = own then
+      match removalEffect s k m with
+      | .applied next => .applied (keep s next)
+      | outcome => outcome
+    else removalEffect s k m
+  | e => effect s k e
+
+/-- A slot as a device of `own` applies it: once `own` is removed the device
+has stopped for good, and applies nothing. -/
+def ownStep (own : M) (s : State M C) (k : Nat) : Option (Entry M C) → State M C
+  | none => s
+  | some e => if s.standing own = .removed then s else (ownEffect own s k e).after s
+
+/-- The state a device of `own` holds after slots 1 to `k`. -/
+def ownStateAt (own : M) (init : State M C) (seq : Nat → Option (Entry M C)) :
+    Nat → State M C
+  | 0 => init
+  | k + 1 => ownStep own (ownStateAt own init seq k) (k + 1) (seq (k + 1))
+
+/-- Whether a device holding `s` takes a local write by member `m` into circle
+`c`: the circle is live and `m` is in it, as the write's membership check
+asks (§15.6, §15.9). -/
+def Writable (s : State M C) (m : M) (c : C) : Prop :=
+  ∃ x, s.circles c = some x ∧ s.deleted c = none ∧ m ∈ x.members
+
+theorem changeEffect_standing (s : State M C) (k : Nat) (a : M) (change : Change M C)
+    (next : State M C) (applied : changeEffect s k a change = .applied next) :
+    next.standing = s.standing := by
+  unfold changeEffect managed at applied
+  split at applied
+  · cases applied
+  · cases change <;> simp only at applied <;> (repeat' split at applied) <;>
+      first | (cases applied; rfl) | cases applied
+
+/-- **No entry changes a removed member's standing**: an admission needs its
+member unknown, a recovery needs them active, and a second removal finds
+them removed. -/
+theorem step_keeps_removed (s : State M C) (k : Nat) (e : Option (Entry M C)) (m : M)
+    (gone : s.standing m = .removed) : (step s k e).standing m = .removed := by
+  cases e with
+  | none => exact gone
+  | some e =>
+    simp only [step]
+    cases h : effect s k e with
+    | refused => exact gone
+    | unchanged => exact gone
+    | applied next =>
+      simp only [Outcome.after]
+      cases e with
+      | circle a change =>
+        rw [changeEffect_standing s k a change next h]
+        exact gone
+      | removeMember m' =>
+        simp only [effect, removalEffect] at h
+        split at h
+        · cases h
+        · cases h
+        · rename_i active
+          cases h
+          have other : m ≠ m' := by
+            intro same; subst same; rw [gone] at active; cases active
+          simp [other, gone]
+      | admit a m' c n | recover a m' c n =>
+        simp only [effect, admissionEffect] at h
+        repeat' split at h
+        all_goals cases h
+        all_goals
+          have other : m ≠ m' := by
+            intro same; subst same; simp_all
+          simp [other, gone]
+
+/-- Once removed, a member stays removed at every later prefix. -/
+theorem removed_stays (init : State M C) (seq : Nat → Option (Entry M C)) (m : M) (j : Nat)
+    (gone : (stateAt init seq j).standing m = .removed) :
+    ∀ i, j ≤ i → (stateAt init seq i).standing m = .removed
+  | i, later => by
+    induction i with
+    | zero => have same : j = 0 := by omega
+              subst j; exact gone
+    | succ i ih =>
+      by_cases same : j = i + 1
+      · subst j; exact gone
+      · exact step_keeps_removed _ _ _ m (ih (by omega))
+
+/-- A device of `own` installs what every device installs for each entry that
+leaves `own` not removed. -/
+theorem ownEffect_after (own : M) (s : State M C) (k : Nat) (e : Entry M C)
+    (stays : ((effect s k e).after s).standing own ≠ .removed) :
+    (ownEffect own s k e).after s = (effect s k e).after s := by
+  cases e with
+  | removeMember m =>
+    simp only [ownEffect, effect]
+    by_cases same : m = own
+    · subst m
+      simp only [ite_true]
+      cases h : removalEffect s k own with
+      | refused => rfl
+      | unchanged => rfl
+      | applied next =>
+        simp only [effect, h, Outcome.after] at stays
+        simp only [removalEffect] at h
+        split at h
+        · cases h
+        · cases h
+        · cases h; simp at stays
+    · simp only [same, ite_false]
+  | _ => rfl
+
+/-- **Until its member's removal, a device of `own` holds what every device
+holds**: while history has not removed `own`, the device's state is
+history's. -/
+theorem own_agrees_until_removal (own : M) (init : State M C)
+    (seq : Nat → Option (Entry M C)) :
+    ∀ k, (stateAt init seq k).standing own ≠ .removed →
+      ownStateAt own init seq k = stateAt init seq k
+  | 0, _ => rfl
+  | k + 1, stays => by
+    have before : (stateAt init seq k).standing own ≠ .removed := fun gone =>
+      stays (step_keeps_removed _ _ _ own gone)
+    have prior := own_agrees_until_removal own init seq k before
+    simp only [ownStateAt, stateAt, prior]
+    cases h : seq (k + 1) with
+    | none => rfl
+    | some e =>
+      simp only [stateAt, h, step] at stays
+      simp only [ownStep, step, before, ite_false]
+      exact ownEffect_after own _ _ e stays
+
+/-- A device that has applied its member's removal applies nothing more. -/
+theorem own_stopped_stays (own : M) (init : State M C) (seq : Nat → Option (Entry M C))
+    (j : Nat) (gone : (ownStateAt own init seq j).standing own = .removed) :
+    ∀ i, j ≤ i → ownStateAt own init seq i = ownStateAt own init seq j
+  | i, later => by
+    induction i with
+    | zero => have same : j = 0 := by omega
+              subst j; rfl
+    | succ i ih =>
+      by_cases same : j = i + 1
+      · subst j; rfl
+      · have prior := ih (by omega)
+        have still : (ownStateAt own init seq i).standing own = .removed := by
+          rw [prior]; exact gone
+        simp only [ownStateAt]
+        cases seq (i + 1) with
+        | none => exact prior
+        | some e => simp only [ownStep, still, ite_true]; exact prior
+
+/-- **A removed member's own devices keep their circles** (§14.1). Slot
+`r + 1` removes `own`, an active member before it. From that slot on, a device
+of `own` holds `own` removed, and every circle as history held it just before
+the removal: the same members, `own` among them wherever `own` was, and the
+same deletions, so the slot deletes none. -/
+theorem removed_member_keeps_circles (own : M) (init : State M C)
+    (seq : Nat → Option (Entry M C)) (r : Nat)
+    (removal : seq (r + 1) = some (.removeMember own))
+    (active : (stateAt init seq r).standing own = .active) :
+    ∀ i, r + 1 ≤ i →
+      (ownStateAt own init seq i).standing own = .removed ∧
+      (ownStateAt own init seq i).circles = (stateAt init seq r).circles ∧
+      (ownStateAt own init seq i).deleted = (stateAt init seq r).deleted := by
+  have agrees := own_agrees_until_removal own init seq r (by rw [active]; simp)
+  have at_removal : ownStateAt own init seq (r + 1) =
+      keep (stateAt init seq r) { (stateAt init seq r).leave (r + 1) own (fun _ => true) with
+        standing := fun m' => if m' = own then .removed else (stateAt init seq r).standing m' } := by
+    simp only [ownStateAt, removal, ownStep, agrees, active, ownEffect, removalEffect, ite_true]
+    rfl
+  intro i later
+  rw [own_stopped_stays own init seq (r + 1) (by rw [at_removal]; simp [keep]) i later,
+    at_removal]
+  exact ⟨by simp [keep], rfl, rfl⟩
+
+/-- **A removed member's own devices keep writing into their circles, and the
+circle they alone were in is deleted everywhere else** (§14.1, §15.8). Slot
+`r + 1` removes `own`, an active member before it. Every circle that was live
+with `own` in it still takes `own`'s local writes on every device of `own`
+from that slot on. A circle `own` alone was in is deleted at that slot in
+history, which every other device applies. -/
+theorem removed_member_keeps_writing (own : M) (init : State M C)
+    (seq : Nat → Option (Entry M C)) (r : Nat) (wf : Wf init)
+    (removal : seq (r + 1) = some (.removeMember own))
+    (active : (stateAt init seq r).standing own = .active)
+    (c : C) (x : Circle M) (made : (stateAt init seq r).circles c = some x)
+    (live : (stateAt init seq r).deleted c = none) (held : own ∈ x.members) :
+    (∀ i, r + 1 ≤ i → Writable (ownStateAt own init seq i) own c) ∧
+      ((stateAt init seq (r + 1)).deleted c = some (r + 1) ↔ x.members = [own]) := by
+  refine ⟨fun i later => ?_, ?_⟩
+  · obtain ⟨-, circles, deleted⟩ := removed_member_keeps_circles own init seq r removal active i later
+    exact ⟨x, by rw [circles, made], by rw [deleted, live], held⟩
+  · have applied : effect (stateAt init seq r) (r + 1) (.removeMember own) =
+        .applied { (stateAt init seq r).leave (r + 1) own (fun _ => true) with
+          standing := fun m' => if m' = own then .removed else (stateAt init seq r).standing m' } := by
+      simp [effect, removalEffect, active]
+    have after : stateAt init seq (r + 1) =
+        { (stateAt init seq r).leave (r + 1) own (fun _ => true) with
+          standing := fun m' => if m' = own then .removed else (stateAt init seq r).standing m' } := by
+      simp only [stateAt, removal, step, applied, Outcome.after]
+    rw [after]
+    exact member_removal_deletes _ (r + 1) own c x (wf_at init seq wf r) made live _ applied
 
 end CovenSequence.CircleLifecycle

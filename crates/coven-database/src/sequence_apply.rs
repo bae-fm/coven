@@ -55,7 +55,9 @@ pub enum SlotContent<R> {
 pub struct AdminEffect {
     /// The checked original change.
     pub change: StoreChange,
-    /// Membership, keys and audience state after the change.
+    /// Membership, keys and audience state after the change, as this device
+    /// installs it: history's, except that a device of the member a store's
+    /// removal removes keeps every circle as it was (§14.1).
     pub state: StoreState,
     /// The activated snapshot for a raise or reset.
     pub boundary: Option<crate::Boundary>,

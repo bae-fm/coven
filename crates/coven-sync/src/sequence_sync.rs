@@ -770,7 +770,18 @@ impl History {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
                             effect.reload = self.reload_of(effect, &member);
+                            // History takes the removal's own state; a device
+                            // of the member it removes installs it keeping
+                            // their circles (§14.1).
+                            let kept = crate::circle_effects::KeptCircles::through(
+                                &member,
+                                &effect.change,
+                                &self.state,
+                            );
                             self.accept_admin(slot, &received.header, effect);
+                            if let Some(kept) = kept {
+                                kept.install(&mut effect.state);
+                            }
                         }
                         effect
                     }

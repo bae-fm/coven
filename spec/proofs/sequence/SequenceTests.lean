@@ -697,7 +697,8 @@ def keyCase (slots held current : List Json) : Json := json% {
 -- store's removal of Cy, its last member, deletes it at slot 5. After that a
 -- rename by Ben, who is still in the store, an addition by Ana (1) and making
 -- a circle under its id find it gone; Cy, removed, is refused before that, and
--- a second deletion changes nothing.
+-- a second deletion changes nothing. A device of Cy keeps Gifts from his
+-- removal on, with him in it, and applies nothing after it.
 #eval do
   let entry := fun (kind : String) (author circle : Nat) (extra : List (String × Json)) =>
     Json.mkObj ([("kind", toJson kind), ("author", toJson author), ("circle", toJson circle)] ++
@@ -714,8 +715,15 @@ def keyCase (slots held current : List Json) : Json := json% {
     entry "rename" 3 1 [("name", toJson "Again")],
     entry "delete" 2 1 []]
   let out ← run (json% {"kind": "circleLifecycle", "people": [1, 2, 3, 4], "active": [1, 2, 3],
-    "circles": [1], "histories": [$(toJson history)]})
+    "circles": [1], "devices": [3], "histories": [$(toJson history)]})
   let slots := ["0"]
+  let kept := json% [[3, {"standing": [[1, "active"], [2, "active"], [3, "removed"],
+      [4, "absent"]], "circles": [[1, {"name": "Presents", "members": [3], "deleted": null}]]}]]
+  checkField out (slots ++ ["3", "devices"])
+    (json% [[3, {"standing": [[1, "active"], [2, "active"], [3, "active"], [4, "absent"]],
+      "circles": [[1, {"name": "Presents", "members": [3], "deleted": null}]]}]])
+  checkField out (slots ++ ["4", "devices"]) kept
+  checkField out (slots ++ ["9", "devices"]) kept
   checkField out (slots ++ ["3", "circles"])
     (json% [[1, {"name": "Presents", "members": [3], "deleted": null}]])
   checkField out (slots ++ ["4", "circles"])

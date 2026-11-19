@@ -6516,9 +6516,16 @@ which the laptop never sends, so it stays on the laptop, and the laptop's state
 counts it unsent (§19.1). A write still queued when the removal applied stays
 the same way. Without this, removing a device would also take from
 its person the data they still hold on it. The device's own removal leaves Ben
-in his circles, so the laptop still writes into them. A removal of Ben himself
-takes him out of every circle and deletes each circle he alone was in (§15.8),
-so his devices then write to the store's audience only.
+in his circles, so the laptop still writes into them.
+
+A removal of Ben himself stops each of his devices the same way, and each of
+them keeps his circles as they were before the removal's slot: Ben stays in
+each, and none is deleted. Ana removes Ben at slot 52. His phone still holds
+his own circle, the one he alone was in, with every row in it, and still
+commits the songs he plays there into it. Those writes stay on the phone, as
+the laptop's do. Every other device takes Ben out of each circle at slot 52
+and deletes the circles he alone was in (§15.8). Without this, removing a
+person would also delete their private rows on their own devices.
 
 A joined store whose admission its history refused stops the same way, for
 good, reporting `Removed(NeverAdmitted)` (§13.2): its device was never a member. No slot
@@ -6569,7 +6576,9 @@ back either.
 
 Removing a member also removes their devices and their circle memberships. A
 circle left empty is deleted at that slot. The removal entry lists no keys or
-circles: the state before its slot supplies them.
+circles: the state before its slot supplies them. The member's own devices
+remove the member and their devices too, but keep the member's circles as
+they were (above).
 
 Removing someone from a circle only, without removing them from the store, is
 different: §15.8 covers it.
@@ -7041,7 +7050,10 @@ the full cut-off (§14.1).
 **A circle left empty is deleted** at that slot, whether its last member left it,
 was removed from the store, or was recovered with new keys (§13.3). The state
 before the slot decides this, and no later operation can add a member to a
-deleted circle.
+deleted circle. A member's own devices delete no circle at the member's
+removal from the store: the removal stops each of them for good, and each
+keeps the circle, with the member in it and its rows, as its own copy
+(§14.1).
 
 #### 15.9 Deleting a circle
 
@@ -15056,6 +15068,7 @@ Write-ups explain each model and state its assumptions:
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
 | A circle's name is its creation's, then each valid rename's in slot order; once it is deleted, a rename of it, an addition to it or a removal from it is refused because its target is gone | `name_is_latest_rename`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.5 |
 | A live circle always has a member: a circle is deleted at the slot that takes its last member out, whether the member left it or was removed from the store, as the circle's members before that slot decide; no slot records another slot's deletion | `live_has_member`, `leaving_deletes`, `member_removal_deletes`, `deleted_at_slot` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8 |
+| A device of the member a store's removal removes holds history's state until that slot; from it on, the device holds the member removed and every circle as history held it before the slot, the member in each and none deleted, so it keeps taking the member's local writes into each circle they were in, while history deletes the circle the member alone was in | `own_agrees_until_removal`, `removed_member_keeps_circles`, `removed_member_keeps_writing` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §14.1, §15.8 |
 | A deletion is permanent: the deleted circle keeps no members and its deletion slot at every later prefix, and making a circle under its id is refused | `deleted_stays`, `deleted_target_refused` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §15.8, §15.9 |
 | An admission or a recovery makes its member's circle with the member alone in it, refuses a circle id already used, live or deleted, and changes nothing when repeated once the circle holds the member under that name | `admission_makes_circle`, `used_circle_refuses_admission`, `admission_repeat_unchanged` | `proofs/sequence/CovenSequence/CircleLifecycle.lean` | §13.2, §15.5 |
 | A recovery takes its member out of every live circle they alone are in, which deletes it at the recovery's slot, and keeps them in every circle someone else is in; after it, the member no longer reads such a circle, and still reads the shared ones and the new circle with the new pair | `recovery_deletes_lone_circles`, `recovery_keeps_shared_circles`, `recovery_leaves_lone_circle` | `proofs/sequence/CovenSequence/CircleLifecycle.lean`, `proofs/sequence/CovenSequence/CopyOrderExamples.lean` | §13.3, §15.8 |

@@ -421,3 +421,70 @@ async fn a_removed_device_keeps_writing_to_its_own_copy() {
     assert_eq!(ids(network.rows(0).await.0), ["1"]);
     network.close().await;
 }
+
+/// Ana removes Ben from the store. Every other device deletes the circle he
+/// alone was in, with its notes, but his phone keeps it: the circle, Ben in
+/// it, the note he sent, the note still queued when the removal applied, and
+/// a note he writes after it. The new write never leaves the phone, and Ana's
+/// device holds only the store row Ben sent (§14.1, §15.8).
+#[tokio::test]
+async fn a_removed_members_own_device_keeps_their_circle_and_writes_into_it() {
+    let network = Network::new(2).await;
+    let (ana, ben) = (&network.devices[0].handle, &network.devices[1].handle);
+    let circle = ben
+        .circles()
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|circle| circle.name == crate::tests::CIRCLE)
+        .unwrap()
+        .id;
+    let member = ben.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id;
+    let note = |id: &str| format!("00000000-0000-7000-8000-00000000{id:0>4}");
+    let write = |id: &'static str| {
+        let audience = circle.to_string();
+        move |sql: CovenWrite<'_>| {
+            sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [id])?;
+            sql.execute(
+                "INSERT INTO circle_notes(id,value,audience) VALUES(?1,1,?2)",
+                [format!("00000000-0000-7000-8000-00000000{id:0>4}"), audience],
+            )?;
+            Ok::<_, CovenError>(())
+        }
+    };
+    ben.write(write("1")).await.unwrap();
+    network.sync(1).await;
+    network.devices[1].stop_sync().await;
+    ben.write(write("2")).await.unwrap();
+    let removal = ana.remove_member(&member).await.unwrap();
+    crate::tests::landed(ana, removal).await;
+    let mut status = ben.test_sync_status();
+    ben.start_sync().await.unwrap();
+    ben.sync_now();
+    status.wait_for(|status| matches!(status.state, SyncState::Removed { .. })).await;
+
+    ben.write(write("3")).await.unwrap();
+    let ids =
+        |rows: Vec<(String, String, i64)>| rows.into_iter().map(|row| row.0).collect::<Vec<_>>();
+    let (parents, _, notes) = network.rows(1).await;
+    assert_eq!(ids(parents), ["1", "2", "3"]);
+    assert_eq!(
+        notes.into_iter().map(|note| note.0).collect::<Vec<_>>(),
+        [note("1"), note("2"), note("3")]
+    );
+    let kept = ben.store_state().await;
+    assert!(kept.members[&member].removed);
+    assert!(kept.circles[&circle].members.contains(&member));
+    assert!(!kept.circle_deletions.contains_key(&circle));
+    assert_eq!(
+        ben.sync_status().await.unwrap().state,
+        SyncState::Removed { removal: Removal::Member, unsent: UnsentWork { writes: 2, files: 0 } }
+    );
+    network.sync(0).await;
+    let history = ana.store_state().await;
+    assert!(history.circle_deletions.contains_key(&circle));
+    assert!(history.circles[&circle].members.is_empty());
+    assert_eq!(ids(network.rows(0).await.0), ["1"]);
+    network.close().await;
+}

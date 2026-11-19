@@ -241,7 +241,52 @@ fn outcome(checked: &Result<Option<AdminEffect>, OperationRejection>) -> &'stati
     }
 }
 
-fn observe(state: &StoreState, outcome: &str) -> Value {
+/// The members whose devices the differential follows: Ben, an admin in
+/// Gifts, and Cy, alone in Presents.
+const DEVICES: [u128; 2] = [2, 3];
+
+/// The state a device of `own` holds after `change` applies to `before`,
+/// as `History::consume` installs it: nothing more once the device's member
+/// is removed, which stops it for good (Lean `CircleLifecycle.ownStep`).
+fn own_device(
+    own: u128,
+    before: &StoreState,
+    author: u128,
+    at: u64,
+    change: &StoreChange,
+) -> StoreState {
+    if crate::effects::left(before, &id(own)) {
+        return before.clone();
+    }
+    let checked = checked_change(
+        before,
+        &header(author as u64, author, at - 1),
+        slot(at),
+        change,
+        &BTreeMap::new(),
+        &[],
+    );
+    let Ok(Some(effect)) = checked else { return before.clone() };
+    let mut next = effect.state;
+    if let Some(kept) = crate::circle_effects::KeptCircles::through(&id(own), change, before) {
+        kept.install(&mut next);
+    }
+    next
+}
+
+fn observe(state: &StoreState, outcome: &str, devices: &[StoreState]) -> Value {
+    let mut observed = state_fields(state);
+    observed["outcome"] = json!(outcome);
+    observed["devices"] = DEVICES
+        .iter()
+        .zip(devices)
+        .map(|(&own, held)| json!([own as u64, state_fields(held)]))
+        .collect();
+    observed
+}
+
+/// The state's `standing` and `circles`, as the model shows them.
+fn state_fields(state: &StoreState) -> Value {
     let standing: Vec<_> = PEOPLE
         .iter()
         .map(|&m| {
@@ -265,7 +310,7 @@ fn observe(state: &StoreState, outcome: &str) -> Value {
             json!([c as u64, record])
         })
         .collect();
-    json!({"outcome": outcome, "standing": standing, "circles": circles})
+    json!({"standing": standing, "circles": circles})
 }
 
 #[test]
@@ -303,7 +348,8 @@ fn circle_lifecycle_matches_lean() {
     let cases: Vec<Vec<Value>> =
         histories.iter().map(|history| history.iter().map(|e| e.json()).collect()).collect();
     let input = json!({"kind": "circleLifecycle", "people": PEOPLE.map(|m| m as u64),
-        "active": [1, 2, 3], "circles": CIRCLES.map(|c| c as u64), "histories": cases});
+        "active": [1, 2, 3], "circles": CIRCLES.map(|c| c as u64),
+        "devices": DEVICES.map(|m| m as u64), "histories": cases});
     let lean = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
     let start = with_a_plain_member(&household());
     let mut seen = BTreeMap::<&str, usize>::new();
@@ -312,23 +358,36 @@ fn circle_lifecycle_matches_lean() {
     for ((history, case), expected) in histories.iter().zip(&cases).zip(lean) {
         assert_eq!(expected.as_array().unwrap().len(), history.len(), "{}", json!(case));
         let mut state = start.clone();
+        let mut devices = DEVICES.map(|_| start.clone());
         for (i, entry) in history.iter().enumerate() {
             let slot = slot(BEFORE + i as u64 + 1);
             let author = entry.author();
+            let change = entry.change(&state, slot.get());
             let checked = checked_change(
                 &state,
                 &header(author as u64, author, slot.get() - 1),
                 slot,
-                &entry.change(&state, slot.get()),
+                &change,
                 &BTreeMap::new(),
                 &[],
             );
+            for (held, own) in devices.iter_mut().zip(DEVICES) {
+                // A stopped device applies nothing, and until then it holds
+                // history's state, so the entry's change is the same there.
+                *held = own_device(own, held, author, slot.get(), &change);
+            }
             let outcome = outcome(&checked);
             *seen.entry(outcome).or_default() += 1;
             if let Ok(Some(effect)) = checked {
                 state = effect.state;
             }
-            assert_eq!(observe(&state, outcome), expected[i], "slot {} of {}", i + 1, json!(case));
+            assert_eq!(
+                observe(&state, outcome, &devices),
+                expected[i],
+                "slot {} of {}",
+                i + 1,
+                json!(case)
+            );
         }
     }
     for kind in ["applied", "unchanged", "notAllowed", "goneCircle", "goneMember"] {

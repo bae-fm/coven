@@ -254,6 +254,9 @@ import SequenceApply
 #print axioms CovenSequence.CircleLifecycle.admission_repeat_unchanged
 #print axioms CovenSequence.CircleLifecycle.recovery_deletes_lone_circles
 #print axioms CovenSequence.CircleLifecycle.recovery_keeps_shared_circles
+#print axioms CovenSequence.CircleLifecycle.own_agrees_until_removal
+#print axioms CovenSequence.CircleLifecycle.removed_member_keeps_circles
+#print axioms CovenSequence.CircleLifecycle.removed_member_keeps_writing
 #print axioms CovenSequence.WriteVersion.step_version
 #print axioms CovenSequence.WriteVersion.version_mono
 #print axioms CovenSequence.WriteVersion.waiting_part_counts

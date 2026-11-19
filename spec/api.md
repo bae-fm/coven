@@ -8219,7 +8219,9 @@ impl CovenWrite<'_> {
     /// this device deletes their saved restore code and S3 key before
     /// applying the slot, then stops, and the operation ends landed. On
     /// Android that is this phone's Block Store only (§13.1). A failed
-    /// deletion fails the pass, which sync tries again.
+    /// deletion fails the pass, which sync tries again. Each of the member's
+    /// own devices keeps their circles and the rows in them, and keeps
+    /// committing writes into them, which it never sends (§14.1).
     pub fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError>;
 
     /// Removes a device: their own, or any as an admin. The provider can't
