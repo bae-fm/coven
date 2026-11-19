@@ -1,8 +1,8 @@
 //! What a read's rows are. A row mapper is a function or closure of the
 //! workspace whose inputs name the row a statement hands its mapper (the
-//! policy's `read_rule.statement_rows`). A mapper whose result, with
+//! policy's `read_shapes.statement_rows`). A mapper whose result, with
 //! `Result` and `Option` taken off, implements one of the policy's
-//! `read_rule.column_values` reads one column's value, such as a number, a
+//! `read_shapes.column_values` reads one column's value, such as a number, a
 //! text or a key: the rows of its read are the collections that flow from
 //! what the read returns (`flow.rs`), so a count or a flag elsewhere in read
 //! code is none. Any other mapper's result is a row type, and a value holds
@@ -17,6 +17,8 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypingEnv};
 use rustc_span::sym;
+
+use super::names_adt;
 
 /// What a row mapper makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +41,11 @@ impl<'tcx> Mappers<'_, 'tcx> {
     pub(super) fn made(&self, id: DefId) -> Option<Made<'tcx>> {
         let tcx = self.tcx;
         let signature = tcx.instantiate_bound_regions_with_erased(signature(tcx, id)?);
-        if !signature.inputs().iter().any(|&input| names_adt(input, self.statement_rows)) {
+        if !signature
+            .inputs()
+            .iter()
+            .any(|&input| names_adt(input, &|adt| self.statement_rows.contains(&adt)))
+        {
             return None;
         }
         let made = tcx.erase_and_anonymize_regions(peel_result(tcx, signature.output()));
@@ -162,7 +168,7 @@ fn is_single<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
 }
 
 /// The signature of a function or closure, none for anything else.
-fn signature<'tcx>(tcx: TyCtxt<'tcx>, id: DefId) -> Option<ty::PolyFnSig<'tcx>> {
+pub(super) fn signature<'tcx>(tcx: TyCtxt<'tcx>, id: DefId) -> Option<ty::PolyFnSig<'tcx>> {
     match tcx.def_kind(id) {
         DefKind::Fn | DefKind::AssocFn => {
             Some(tcx.fn_sig(id).instantiate_identity().skip_norm_wip())
@@ -172,20 +178,6 @@ fn signature<'tcx>(tcx: TyCtxt<'tcx>, id: DefId) -> Option<ty::PolyFnSig<'tcx>> 
             _ => None,
         },
         _ => None,
-    }
-}
-
-/// Whether `ty` is or holds one of `adts`, looking through no callback.
-fn names_adt(ty: Ty<'_>, adts: &FxHashSet<DefId>) -> bool {
-    match ty.kind() {
-        ty::Adt(adt, args) => {
-            adts.contains(&adt.did()) || args.types().any(|inner| names_adt(inner, adts))
-        }
-        ty::Ref(_, inner, _) | ty::RawPtr(inner, _) | ty::Slice(inner) | ty::Array(inner, _) => {
-            names_adt(*inner, adts)
-        }
-        ty::Tuple(items) => items.iter().any(|inner| names_adt(inner, adts)),
-        _ => false,
     }
 }
 

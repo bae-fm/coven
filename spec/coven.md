@@ -14812,13 +14812,14 @@ the same on any platform.
    invocation is in. A definition is no code until it is used. An invocation
    the checker cannot expand fails the check, since what it writes would
    otherwise go unchecked.
-   The policy names each type of the owner rules (F.3) by its path, as
-   `coven_foundation::clock::Clock` and `std::sync::Arc`, and the rest by
-   name. The typed lints of check 11, which hold the owner rules, read those
-   rows by path. The checker reads some of them by name: check 4 infers
-   owners from them to test that each domain's owner is one, and the read
-   rule and F.2's rule on domain owners follow the shared pointers that
-   `shared_pointer_types` names. The checker's rules match types by name, a
+   The policy names each type of the owner rules (F.3) and of the read rule
+   (check 11) by its path, as `coven_foundation::clock::Clock` and
+   `std::sync::Arc`, and the rest by name. The typed lints of check 11, which
+   hold the owner rules and part of the read rule, read those rows by path.
+   The checker reads some of them by name: check 4 infers owners from them
+   to test that each domain's owner is one, the read rule and F.2's rule on
+   domain owners follow the shared pointers that `shared_pointer_types`
+   names, and the read rule reads its own types. The checker's rules match types by name, a
    path by its last part: a dependency's type goes by its name unless one of
    coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
@@ -14948,8 +14949,8 @@ the same on any platform.
     method that returns it, and at a type that two of the policy's
     capability, shared state, private state and handle rows name.
     A workspace whose screens read live queries can state a read rule in its
-    policy's `read_rule`: a read does no work that its SQL can do. coven's own
-    policy states none. Eight lints hold the rule, one for each shape of such
+    policy's `read_shapes`: a read does no work that its SQL can do. coven's
+    own policy states none. Eight lints hold the rule, one for each shape of such
     work, so that a mark names the shape it keeps: `clippy::read_sort`,
     `clippy::read_filter`, `clippy::read_group`, `clippy::read_aggregate`,
     `clippy::read_pick`, `clippy::read_join`, `clippy::read_length_branch` and

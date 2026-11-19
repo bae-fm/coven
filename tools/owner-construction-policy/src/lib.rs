@@ -13,9 +13,10 @@
 //! any rule runs (its `policy_check.rs`), and a typed lint when it resolves the
 //! row's path in the crate the path names.
 //!
-//! The rows of the owner rules name each type by its path: the crate as Rust
-//! names it, its modules and the type, `coven_foundation::clock::Clock` or
-//! `std::sync::Arc` ([`Policy::owner_type_rows`]). A dependency's type goes by
+//! The rows of the owner rules and the read rule name each type by its path:
+//! the crate as Rust names it, its modules and the type,
+//! `coven_foundation::clock::Clock` or `std::sync::Arc`
+//! ([`Policy::owner_type_rows`], [`ReadShapes`]). A dependency's type goes by
 //! the path its crate gives it, a re-export's included. The other rows name a
 //! type by its name alone.
 
@@ -27,7 +28,7 @@ use serde::{Deserialize, Deserializer};
 
 mod read;
 
-pub use read::{AllowedRow, FrozenRow, ListKind, ListedRow, ReadRule, ReadShapes, Shape};
+pub use read::{AllowedRow, FrozenRow, ListKind, ListedRow, ReadShapes, Shape};
 
 /// The policy file's name, at the root of the workspace it describes.
 pub const FILE_NAME: &str = "owner-construction-check.toml";
@@ -236,17 +237,15 @@ pub struct Policy {
     /// says whether a dependency declares it.
     #[serde(default)]
     pub external_types: BTreeSet<String>,
-    /// The read rule's rows, for a workspace that selects `read-shapes`.
+    /// The read rule's rows: the typed lints of the read rule read them when
+    /// they are here, and the checker when the workspace selects
+    /// `read-shapes`.
     #[serde(default)]
     pub read_shapes: Option<ReadShapes>,
     /// Where the async functions uniffi exports run their work, which the
     /// typed lint `clippy::async_export_off_runtime` reads.
     #[serde(default)]
     pub async_exports: Option<AsyncExports>,
-    /// What the typed lints of the read rule read, for a workspace whose
-    /// screens read live queries.
-    #[serde(default)]
-    pub read_rule: Option<ReadRule>,
 }
 
 /// An async function that uniffi exports runs its work on a runtime that its

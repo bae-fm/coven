@@ -524,6 +524,8 @@ fn read_shapes_rows(rows: &str) -> String {
     format!(
         r#"
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         rule = "the rule"
         {rows}
@@ -634,6 +636,8 @@ fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_e
     let rows = r#"
         external_types = ["Mutex"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         live_query_types = ["LiveQuery"]
         value_stream_types = ["Watch"]

@@ -1,5 +1,5 @@
 # The read rule of the fixtures in this folder, each type by its path.
-[read_rule]
+[read_shapes]
 rule = "the read rule"
 read_types = ["reads_base::SqlReadContext", "reads_base::SqlRead"]
 live_query_types = ["reads_base::LiveQuery"]

@@ -2,7 +2,7 @@
 //! such work is a lint of its own, so a mark names the shape it keeps, and a
 //! mark covers every finding of its shape in the item it sits on.
 //!
-//! Read code, from the policy's `read_rule` rows:
+//! Read code, from the policy's `read_shapes` rows:
 //!
 //! - every function or closure whose inputs name a read type, through
 //!   references, wrappers and a generic's bounds, but not through a
@@ -45,7 +45,7 @@ use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 use crate::owner_rules::impl_type;
 use crate::workspace_bodies::earlier_definitions;
 use crate::workspace_policy::{WorkspaceCrates, WorkspacePolicy, resolve_row};
-use owner_construction_policy::ReadRule as ReadRuleRows;
+use owner_construction_policy::ReadShapes;
 use rows::{Mappers, RowTypes};
 
 /// The crates whose functions do work SQL does, and pass on what they are
@@ -55,6 +55,20 @@ const LIBRARIES: [&str; 5] = ["core", "alloc", "std", "itertools", "indexmap"];
 /// Whether `id` is defined in the standard library, itertools or indexmap.
 fn is_library(tcx: TyCtxt<'_>, id: DefId) -> bool {
     LIBRARIES.contains(&tcx.crate_name(id.krate).as_str())
+}
+
+/// Whether `ty` is, or holds through its type arguments, references,
+/// pointers, slices, arrays or tuples, a struct, enum or union that `test`
+/// picks: no callback, which holds none of what it is given.
+fn names_adt(ty: Ty<'_>, test: &impl Fn(DefId) -> bool) -> bool {
+    match ty.kind() {
+        ty::Adt(adt, args) => test(adt.did()) || args.types().any(|inner| names_adt(inner, test)),
+        ty::Ref(_, inner, _) | ty::RawPtr(inner, _) | ty::Slice(inner) | ty::Array(inner, _) => {
+            names_adt(*inner, test)
+        }
+        ty::Tuple(items) => items.iter().any(|inner| names_adt(inner, test)),
+        _ => false,
+    }
 }
 
 /// The closure or function an argument is, when it is code a callee may run:
@@ -112,7 +126,7 @@ impl_lint_pass!(ReadRule => [
 /// The read rule's rows, resolved in the compile.
 struct Setup {
     workspace: &'static WorkspacePolicy,
-    rows: &'static ReadRuleRows,
+    rows: &'static ReadShapes,
     /// The help a row work finding gives: the rule, and what to do instead.
     row_work_help: &'static str,
     read_types: FxHashSet<DefId>,
@@ -124,15 +138,15 @@ struct Setup {
 impl ReadRule {
     pub(crate) fn new(tcx: TyCtxt<'_>, workspace: Option<&'static WorkspacePolicy>) -> Self {
         let setup = workspace.and_then(|workspace| {
-            let rows = workspace.policy.read_rule.as_ref()?;
+            let rows = workspace.policy.read_shapes.as_ref()?;
             let resolve = |row: &str, paths: &std::collections::BTreeSet<String>| {
                 paths
                     .iter()
                     .flat_map(|path| resolve_row(tcx, row, path, PathNS::Type))
                     .collect::<FxHashSet<_>>()
             };
-            let live_types = resolve("read_rule.live_query_types", &rows.live_query_types);
-            let mut read_types = resolve("read_rule.read_types", &rows.read_types);
+            let live_types = resolve("read_shapes.live_query_types", &rows.live_query_types);
+            let mut read_types = resolve("read_shapes.read_types", &rows.read_types);
             read_types.extend(live_types.iter().copied());
             Some(Setup {
                 workspace,
@@ -148,8 +162,8 @@ impl ReadRule {
                 ),
                 read_types,
                 live_types,
-                statement_rows: resolve("read_rule.statement_rows", &rows.statement_rows),
-                column_values: resolve("read_rule.column_values", &rows.column_values),
+                statement_rows: resolve("read_shapes.statement_rows", &rows.statement_rows),
+                column_values: resolve("read_shapes.column_values", &rows.column_values),
             })
         });
         Self { setup }
@@ -281,21 +295,10 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
     /// read type, or a live query in a method of a type that holds one.
     fn takes_read(&self, body: LocalDefId) -> bool {
         let tcx = self.tcx;
-        let inputs = match tcx.def_kind(body) {
-            DefKind::Closure => {
-                match tcx.type_of(body).instantiate_identity().skip_norm_wip().kind() {
-                    ty::Closure(_, args) => args.as_closure().sig().skip_binder().inputs().to_vec(),
-                    _ => return false,
-                }
-            }
-            _ => tcx
-                .fn_sig(body)
-                .instantiate_identity()
-                .skip_norm_wip()
-                .skip_binder()
-                .inputs()
-                .to_vec(),
+        let Some(signature) = rows::signature(tcx, body.to_def_id()) else {
+            return false;
         };
+        let inputs = signature.skip_binder().inputs().to_vec();
         let root = tcx.typeck_root_def_id(body.to_def_id());
         let bounds = tcx.param_env(root);
         let holder_method = tcx
@@ -388,17 +391,7 @@ impl<'s, 'tcx> Search<'s, 'tcx> {
 
     /// Whether a value of `ty` is or holds a live query.
     fn type_holds_live(&self, ty: Ty<'tcx>) -> bool {
-        match ty.kind() {
-            ty::Adt(adt, args) => {
-                self.holds_live(adt.did()) || args.types().any(|inner| self.type_holds_live(inner))
-            }
-            ty::Ref(_, inner, _)
-            | ty::RawPtr(inner, _)
-            | ty::Slice(inner)
-            | ty::Array(inner, _) => self.type_holds_live(*inner),
-            ty::Tuple(items) => items.iter().any(|inner| self.type_holds_live(inner)),
-            _ => false,
-        }
+        names_adt(ty, &|adt| self.holds_live(adt))
     }
 
     /// Whether a value of `ty` is a read value or holds a live query: what a

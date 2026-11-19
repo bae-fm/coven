@@ -7,6 +7,8 @@ fn policy() -> Policy {
         rules = ["read-shapes"]
         test_support_features = ["test-utils"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext", "LiveQuery"]
         live_query_types = ["LiveQuery"]
         plumbing = ["crates/app-store/src/store.rs", "crates/app-store/src/live/"]

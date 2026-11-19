@@ -256,6 +256,8 @@ fn a_policy_selecting_read_shapes_reports_the_work_a_read_does_on_rows() {
     let policy = Policy::fixture(
         r#"rules = ["read-shapes"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         rule = "the read rule"
         "#,

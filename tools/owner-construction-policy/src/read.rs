@@ -1,53 +1,13 @@
-//! The read rule's rows: what the typed lints of the read rule read
-//! (`read_rule`), and the structural checker's read rule (`read_shapes`),
-//! with its shapes and the findings it freezes or allows.
+//! The read rule's rows (`read_shapes`), which the typed lints of the read
+//! rule and the structural checker's read rule read: the read rule's types,
+//! the read plumbing, the shapes, and the findings the checker freezes or
+//! allows.
 
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
 use crate::home_holds;
-
-/// The read rule, which the typed lints hold: a read does no work SQL does
-/// and keeps no state between reads. Each type is named by the path that
-/// defines it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadRule {
-    /// Where the rule is written, which every finding names.
-    pub rule: String,
-    /// The types of what a read receives and of the receivers whose callbacks
-    /// are reads: code whose inputs name one is read code.
-    pub read_types: BTreeSet<String>,
-    /// The live queries: a type holding one is a read's holder, and the
-    /// callback a live query's `process` runs works on what it read.
-    pub live_query_types: BTreeSet<String>,
-    /// The row a statement hands its row mapper: what a function or closure
-    /// taking one makes is a row type, unless it is one column's value.
-    pub statement_rows: BTreeSet<String>,
-    /// The traits of a value one column converts to, such as rusqlite's
-    /// `FromSql`: a row mapper whose result implements one reads one column,
-    /// and the rows of its read are the collections that flow from what the
-    /// read returns.
-    pub column_values: BTreeSet<String>,
-    /// The read plumbing, which is no read code: source files, and
-    /// directories (ending in `/`) of them.
-    #[serde(default)]
-    pub plumbing: Vec<String>,
-}
-
-impl ReadRule {
-    /// Whether the workspace file `path` is read plumbing.
-    pub fn is_plumbing(&self, path: &str) -> bool {
-        names_file(&self.plumbing, path)
-    }
-}
-
-/// Whether one of `entries`, files and directories (ending in `/`) of them,
-/// holds the workspace file `path`.
-fn names_file(entries: &[String], path: &str) -> bool {
-    entries.iter().any(|entry| home_holds(entry, path))
-}
 
 /// The shapes `read-shapes` finds in read code, by the id findings and list
 /// rows name them with.
@@ -135,8 +95,11 @@ impl Shape {
     }
 }
 
-/// The read rule (`read_shapes.rs`): what read code is, where the read
-/// plumbing is, and the findings the workspace has frozen or allowed.
+/// The read rule: a read does no work SQL does and keeps no state between
+/// reads. The typed lints hold some of its shapes and the checker the rest
+/// (`read_shapes.rs`). Each type row names its type by path, the crate as
+/// Rust names it, its modules and the type, as the owner rules' rows do; the
+/// checker reads each as its path's last segment.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadShapes {
@@ -150,6 +113,14 @@ pub struct ReadShapes {
     /// state beside it.
     #[serde(default)]
     pub live_query_types: BTreeSet<String>,
+    /// The row a statement hands its row mapper: what a function or closure
+    /// taking one makes is a row type, unless it is one column's value.
+    pub statement_rows: BTreeSet<String>,
+    /// The traits of a value one column converts to, such as rusqlite's
+    /// `FromSql`: a row mapper whose result implements one reads one column,
+    /// and the rows of its read are the collections that flow from what the
+    /// read returns.
+    pub column_values: BTreeSet<String>,
     /// The keyed latest-value streams, which a holder of a live query may
     /// hold: the values that change many times a second travel on them.
     #[serde(default)]
@@ -258,7 +229,7 @@ pub struct ListedRow<'a> {
 impl ReadShapes {
     /// Whether a file is read plumbing.
     pub fn is_plumbing(&self, path: &str) -> bool {
-        names_file(&self.plumbing, path)
+        self.plumbing.iter().any(|entry| home_holds(entry, path))
     }
 
     /// Every row of both lists.

@@ -8,6 +8,8 @@ fn policy() -> Policy {
         rules = ["read-shapes"]
         test_support_features = ["test-utils"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         rule = "the read rule"
         "#,

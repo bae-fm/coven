@@ -13,6 +13,8 @@ fn policy(rows: &str) -> Policy {
         rules = ["read-shapes"]
         test_support_features = ["test-utils"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         plumbing = ["crates/app/src/plumbing.rs"]
         rule = "projects/rule.md in agent-instructions"
@@ -179,6 +181,8 @@ fn kept_state_has_its_own_remedy_and_is_keyed_by_the_type() {
         r#"
         rules = ["read-shapes"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         live_query_types = ["LiveQuery"]
         kept_state_types = ["Mutex"]
@@ -212,6 +216,8 @@ fn a_workspace_with_every_shape_reports_the_exact_lines_and_remedies() {
         rules = ["read-shapes"]
         test_support_features = ["test-utils"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext"]
         live_query_types = ["LiveQuery"]
         request_query_types = ["LiveQuery"]
@@ -293,6 +299,8 @@ fn run_processed(rows: &str) -> Vec<String> {
         rules = ["read-shapes"]
         test_support_features = ["test-utils"]
         [read_shapes]
+        statement_rows = []
+        column_values = []
         read_types = ["SqlReadContext", "LiveQuery"]
         live_query_types = ["LiveQuery"]
         rule = "projects/rule.md in agent-instructions"
