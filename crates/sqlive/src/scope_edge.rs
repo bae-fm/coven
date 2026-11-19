@@ -5,20 +5,11 @@
 //! source's terms say of its column to the first.
 
 use crate::from_item::Columns;
-use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
-use crate::scope_term::{Affinity, ScopeTerm};
+use crate::scope_plan::{is_name, Edge, Member, PartnerValue, Planner};
+use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
-
-/// A column of one of a core's sources that sqlive narrows by: a table's or
-/// a derived item's column that sqlive gives an affinity.
-#[derive(Clone)]
-pub(crate) struct Member {
-    pub(crate) item: usize,
-    pub(crate) column: String,
-    pub(crate) affinity: Affinity,
-}
 
 impl Planner<'_> {
     /// The member column `member_expr`, written in `core`, names: a bare
@@ -147,8 +138,7 @@ impl Planner<'_> {
         value: PartnerValue,
     ) -> Option<Edge> {
         self.items[partner].source.from.as_ref()?;
-        let Member { item, column, affinity } = member;
-        Some(Edge { member: item, column, affinity, partner, value, nested: false, nulls: false })
+        Some(Edge { member, partner, value, nested: false, nulls: false })
     }
 
     /// The edge `member_expr IS other` gives: the equality's, matching a NULL
@@ -185,13 +175,13 @@ impl Planner<'_> {
         let mut carried: Vec<(usize, ScopeTerm)> = Vec::new();
         for edge in &self.edges {
             if edge.nested
-                || self.items[edge.member].core != core
+                || self.items[edge.member.item].core != core
                 || self.items[edge.partner].core != core
             {
                 continue;
             }
             let PartnerValue::Column(compared) = &edge.value else { continue };
-            let rename = |tested: &str| (tested == compared).then(|| edge.column.clone());
+            let rename = |tested: &str| (tested == compared).then(|| edge.member.column.clone());
             let own = self.items[edge.partner]
                 .source
                 .term
@@ -201,7 +191,7 @@ impl Planner<'_> {
                 .then(|| crate::derived::pulled(self, edge.partner, compared))
                 .flatten()
                 .and_then(|term| term.renamed(&rename));
-            carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member, term)));
+            carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member.item, term)));
         }
         for (item, term) in carried {
             ScopeTerm::add_to(&mut self.items[item].source.carried, term);

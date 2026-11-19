@@ -92,7 +92,7 @@ pub(crate) fn read_or<'a>(
     let mut items: Vec<usize> = Vec::new();
     if let Some(first) = found.first() {
         let named = first.terms.iter().map(|(item, _)| *item);
-        for item in named.chain(first.edges.iter().map(|edge| edge.member)) {
+        for item in named.chain(first.edges.iter().map(|edge| edge.member.item)) {
             if !items.contains(&item) {
                 items.push(item);
             }
@@ -109,7 +109,7 @@ pub(crate) fn read_or<'a>(
                     .filter(|(narrowed, _)| *narrowed == item)
                     .map(|(_, term)| term.clone())
                     .collect(),
-                edges: read.edges.iter().filter(|edge| edge.member == item).cloned().collect(),
+                edges: read.edges.iter().filter(|edge| edge.member.item == item).cloned().collect(),
             })
             .collect();
         if sides.iter().all(|side| !side.terms.is_empty() || !side.edges.is_empty()) {

@@ -166,8 +166,8 @@ impl Membership {
     /// The membership `edge` gives its member.
     pub(crate) fn of(edge: &Edge) -> Self {
         Self {
-            column: edge.column.clone(),
-            affinity: edge.affinity,
+            column: edge.member.column.clone(),
+            affinity: edge.member.affinity,
             partner: edge.partner,
             value: edge.value.clone(),
             nulls: edge.nulls,
@@ -294,9 +294,9 @@ impl Planner<'_> {
                         .iter()
                         .copied()
                         .find(|item| {
-                            self.edges
-                                .iter()
-                                .any(|edge| edge.member == *item && order.contains(&edge.partner))
+                            self.edges.iter().any(|edge| {
+                                edge.member.item == *item && order.contains(&edge.partner)
+                            })
                         })
                         .or_else(|| {
                             // An item that takes values from a FROM item
@@ -306,14 +306,14 @@ impl Planner<'_> {
                             // narrowing.
                             let takes_unplaced_values = |item: usize| {
                                 self.edges.iter().any(|edge| {
-                                    edge.member == item
+                                    edge.member.item == item
                                         && candidates.contains(&edge.partner)
                                         && items[edge.partner].source.table.is_none()
                                         && items[edge.partner].source.term.is_none()
                                         && !self
                                             .edges
                                             .iter()
-                                            .any(|other| other.member == edge.partner)
+                                            .any(|other| other.member.item == edge.partner)
                                 })
                             };
                             candidates.iter().copied().find(|item| {
@@ -335,7 +335,7 @@ impl Planner<'_> {
             let taken: Vec<Edge> = self
                 .edges
                 .iter()
-                .filter(|edge| edge.member == next && order.contains(&edge.partner))
+                .filter(|edge| edge.member.item == next && order.contains(&edge.partner))
                 .cloned()
                 .collect();
             for edge in &taken {
@@ -366,14 +366,17 @@ impl Planner<'_> {
             .copied()
             .filter(|item| {
                 self.edges.iter().any(|edge| {
-                    edge.nested && edge.member == *item && !order.contains(&edge.partner)
+                    edge.nested && edge.member.item == *item && !order.contains(&edge.partner)
                 }) || self.waits_for_or(*item, order)
             })
             .collect();
         loop {
             let starved = remaining.iter().copied().find(|item| {
-                let mut partners =
-                    self.edges.iter().filter(|edge| edge.member == *item).map(|edge| edge.partner);
+                let mut partners = self
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.member.item == *item)
+                    .map(|edge| edge.partner);
                 !waiting.contains(item)
                     && partners.clone().next().is_some()
                     && partners.all(|partner| waiting.contains(&partner))
@@ -499,7 +502,7 @@ impl Planner<'_> {
         found.terms.retain(|(item, term)| {
             !(term.may_hold_on_nulls() && self.items[*item].left_on.is_some())
         });
-        found.edges.retain(|edge| !(edge.nulls && self.items[edge.member].left_on.is_some()));
+        found.edges.retain(|edge| !(edge.nulls && self.items[edge.member.item].left_on.is_some()));
         found.ors.retain(|or| !(or.may_hold_on_nulls() && self.items[or.item].left_on.is_some()));
         for item in self.add(found) {
             self.join_inner(item);
@@ -536,7 +539,7 @@ impl Planner<'_> {
             narrowed.push(item);
         }
         for edge in found.edges {
-            narrowed.push(edge.member);
+            narrowed.push(edge.member.item);
             self.edges.push(edge);
         }
         for or in found.ors {
@@ -918,7 +921,7 @@ impl Narrowing {
     /// What of this narrows `item`, and the rest.
     fn split(self, item: usize) -> (Self, Self) {
         let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
-        let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member == item);
+        let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member.item == item);
         let (own_ors, ors) = self.ors.into_iter().partition(|or| or.item == item);
         (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
     }
@@ -930,12 +933,20 @@ impl Narrowing {
     }
 }
 
+/// A column of one of a core's sources that sqlive narrows by: a table's or
+/// a derived item's column that sqlive gives an affinity.
+#[derive(Clone)]
+pub(crate) struct Member {
+    pub(crate) item: usize,
+    pub(crate) column: String,
+    pub(crate) affinity: Affinity,
+}
+
 /// `member`'s column equals a value of `partner`'s rows.
 #[derive(Clone)]
 pub(crate) struct Edge {
-    pub(crate) member: usize,
-    pub(crate) column: String,
-    pub(crate) affinity: Affinity,
+    /// The column that takes values from `partner`.
+    pub(crate) member: Member,
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
     /// Whether `partner` is the source of a subquery's value that the

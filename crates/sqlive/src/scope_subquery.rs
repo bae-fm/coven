@@ -10,8 +10,7 @@
 //! takes values from `x`, never the reverse, and `x` is placed before `col`'s
 //! source (`Planner::ordered`).
 
-use crate::scope_edge::Member;
-use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
+use crate::scope_plan::{is_name, Edge, Member, PartnerValue, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
 
@@ -98,9 +97,7 @@ impl Planner<'_> {
             return None;
         }
         (item.columns.affinity(&partner_column)? == member.affinity).then_some(Edge {
-            member: member.item,
-            column: member.column,
-            affinity: member.affinity,
+            member,
             partner,
             value: PartnerValue::Column(partner_column),
             nested: true,

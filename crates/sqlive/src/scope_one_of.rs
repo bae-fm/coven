@@ -14,9 +14,8 @@
 //! argument or arm makes the comparison narrow nothing. The model states the
 //! rule as `OneOf.readCondition` in `crates/sqlive/proofs`.
 
-use crate::scope_edge::Member;
 use crate::scope_or::{Disjunction, Side};
-use crate::scope_plan::{Narrowing, PartnerValue, Planner, Subqueries};
+use crate::scope_plan::{Member, Narrowing, PartnerValue, Planner, Subqueries};
 use crate::scope_term::{operand, ScopeTerm};
 use crate::sql::unparenthesized;
 use rusqlite::Connection;

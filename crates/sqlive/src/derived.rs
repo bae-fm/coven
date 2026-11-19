@@ -10,7 +10,7 @@
 use crate::from_item::{Column, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
-use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
+use crate::scope_plan::{is_name, read_select, Edge, Member, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text};
 use rusqlite::Connection;
@@ -422,8 +422,10 @@ pub(crate) fn push_down(
         if let Some(term) = &term {
             term.columns(&mut tested);
         }
-        let reached =
-            tested.iter().map(String::as_str).chain(edges.iter().map(|edge| edge.column.as_str()));
+        let reached = tested
+            .iter()
+            .map(String::as_str)
+            .chain(edges.iter().map(|edge| edge.member.column.as_str()));
         for column in reached {
             if let Some((target, _)) = through(column) {
                 if !targets.contains(&target) {
@@ -454,8 +456,9 @@ pub(crate) fn push_down(
                 .iter()
                 .filter(|edge| !(left && edge.nulls))
                 .filter_map(|edge| {
-                    let (passed, column) = through(&edge.column)?;
-                    (passed == target).then(|| Edge { member: target, column, ..edge.clone() })
+                    let (passed, column) = through(&edge.member.column)?;
+                    let member = Member { item: target, column, affinity: edge.member.affinity };
+                    (passed == target).then(|| Edge { member, ..edge.clone() })
                 })
                 .collect();
             if let Some(renamed) = &renamed {
