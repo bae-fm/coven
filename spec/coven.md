@@ -975,8 +975,8 @@ LEFT JOIN narrows only its right side: it decides which right rows join each
 left row, and a left row none joins still appears, with
 NULLs in their place. Any other condition on the right side, in the WHERE or an
 inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
-by is false where its column is NULL, except a NULL test, a truth compared with
-a value and a condition SQLite judges, so a left row with NULLs in the right
+by is false where its column is NULL, except the conditions the next paragraph
+lists, so a left row with NULLs in the right
 side's place fails it, and can't appear whatever the LEFT JOIN's ON matched:
 only the rows an inner join gives are left. So coven narrows such a join as an
 inner join, by its ON both ways. Ben's album page can list only the album's
@@ -986,10 +986,11 @@ That narrows `track_artists` to the producer credits on this album's tracks, so
 crediting a producer on another album, or a singer on this one, doesn't rerun
 the page.
 
-A NULL test, a truth compared with a value or a condition SQLite judges, such
-as `lower(c.role) = 'x'`, on the right side doesn't make the join inner, since
-it can be true of the NULLs a missing right row gives, and it narrows nothing
-there. Ben's
+Five kinds of condition can be true of the NULLs a missing right row gives: a
+NULL test; a truth compared with a value; a condition SQLite judges, such as
+`lower(c.role) = 'x'`; a join on `IS`; and an OR with a side that holds one of
+these. On the right side, such a condition doesn't make the join inner, and it
+narrows nothing there. Ben's
 album page lists the tracks no artist is credited on with `LEFT JOIN
 track_artists AS c ON c.track_id = t.id WHERE c.track_id IS NULL`. Crediting an
 artist on one of those tracks takes it off the page, so coven reads
