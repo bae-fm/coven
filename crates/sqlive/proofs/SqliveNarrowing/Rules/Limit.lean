@@ -1,21 +1,46 @@
 import SqliveNarrowing.Reader
 
-/-! Rule 6: a statement that is one SELECT ordered by columns of one of its
-tables, each a result column, with a LIMIT and no OFFSET, depends only on that
-table's rows up to its last row when a run returns as many rows as its LIMIT
-(`scope_order.rs`). The table isn't a LEFT JOIN's right side, and the SELECT
-neither groups, aggregates nor calls a window function, whose value in a row
-the rows after the last can change. -/
+/-! Rule 6: a statement that is one SELECT ordered by its result columns,
+each a column or an expression over the columns of one of its tables, with a
+LIMIT and no OFFSET, depends only on that table's rows up to its last row when
+a run returns as many rows as its LIMIT (`scope_order.rs`). The table isn't a
+LEFT JOIN's right side, and the SELECT neither groups, aggregates nor calls a
+window function, whose value in a row the rows after the last can change. -/
 namespace SqliveNarrowing.Limit
+
+/-- What an ORDER BY term sorts the sorted item's rows by (`SortKey`): one of
+its columns, which sqlive compares itself, or an expression over its columns
+with no subquery, which sqlive asks SQLite to evaluate on each row a write
+changes. -/
+inductive SortKey where
+  | column (c : Nat)
+  | expr (e : Expr)
+  deriving Repr
+
+/-- The key's value in the sorted item's row `r`. -/
+def SortKey.value (r : Row) : SortKey → Value
+  | .column c => r.cell c
+  | .expr e => e.eval (rowBind (some r)) noSubs
 
 structure SortedLimit where
   /-- The item whose rows the order sorts. -/
   item : Nat
-  /-- Each ORDER BY term: the column, whether descending, and the result
-  column that returns it. -/
-  terms : List (Nat × Bool × Nat)
+  /-- Each ORDER BY term: its key, whether descending, and the result column
+  that returns it. -/
+  terms : List (SortKey × Bool × Nat)
   limit : Nat
   deriving Repr
+
+/-- The key the result column `e` sorts item `i`'s rows by: a column, or an
+expression over its columns and no subquery, where each column it names is
+one sqlive narrows by (`sort_key`). -/
+def sortKey (s : Statement) (i : Nat) (e : Expr) : Option SortKey :=
+  if e.queries.isEmpty && !e.refs.isEmpty &&
+      e.refs.all (fun (j, c) => j == i && (s.affinity i c).isSome) then
+    some (match e with
+      | .col _ c => .column c
+      | e => .expr e)
+  else none
 
 /-- The order and LIMIT of the root query, when a full run's last row bounds
 its sorted item's scope (`sorted_limit`); `st` is the state after the
@@ -28,34 +53,54 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let c := s.core k
   if c.aggregated || c.windowed then none
   let terms ← query.orderBy.mapM fun (p, desc) => do
-    let .expr (.col i col) ← c.output[p]? | none
+    let .expr e ← c.output[p]? | none
+    let (i, _) ← e.refs.head?
     let position ← c.output.findIdx? fun
-      | .expr (.col j d) => j == i && d == col
+      | .expr e' => e' == e
       | _ => false
-    pure (i, col, desc, position)
+    pure (i, e, desc, position)
   let (i, _, _, _) ← terms.head?
   if !terms.all (·.1 = i) then none
   if (s.item i).core ≠ k ∨ (s.table? i).isNone ∨ (st.items i).leftOn.isSome then none
-  if !terms.all (fun (_, col, _, _) => (s.affinity i col).isSome) then none
-  pure { item := i, terms := terms.map fun (_, col, desc, position) => (col, desc, position), limit := n }
+  let terms ← terms.mapM fun (_, e, desc, position) => do
+    pure ((← sortKey s i e), desc, position)
+  pure { item := i, terms, limit := n }
 
-/-- The rows whose column `c` sorts strictly before `v`: NULL first
-ascending and last descending. -/
-def beforeScope (c : Nat) (desc : Bool) : Value → RScope
-  | none => if desc then .null c true else .inVals c []
-  | some x => if desc then .compare c .gt x else (RScope.null c false).either (.compare c .lt x)
+/-- The rows of item `i` whose key is NULL, or isn't when `not`. -/
+def SortKey.nullScope (i : Nat) (not : Bool) : SortKey → RScope
+  | .column c => .null c not
+  | .expr e => .row i (.null e not)
 
-/-- The rows whose column `c` holds `v`, NULL included. -/
-def equalScope (c : Nat) : Value → RScope
-  | none => .null c false
-  | some x => .compare c .eq x
+/-- The rows of item `i` whose key compares with `x` by `op`. -/
+def SortKey.compareScope (i : Nat) (op : Op) (x : Int) : SortKey → RScope
+  | .column c => .compare c op x
+  | .expr e => .row i (.cmp op e (.lit (some x)))
 
-/-- The rows that sort at or before `last`, the ORDER BY's values of a run's
-last row: term by term, NULL first ascending and last descending; a row equal
-to `last` passes (`sorted_at_or_before`). -/
-def atOrBefore (terms : List (Nat × Bool)) (last : List Value) : RScope :=
-  (terms.zip last).foldr (fun ((c, desc), v) scope =>
-    (beforeScope c desc v).either ((equalScope c v).both scope)) .all
+/-- The rows of item `i` whose key sorts strictly before `v`: NULL first
+ascending and last descending; `none` when no value does. -/
+def SortKey.beforeScope (i : Nat) (key : SortKey) (desc : Bool) : Value → Option RScope
+  | none => if desc then some (key.nullScope i true) else none
+  | some x =>
+    if desc then some (key.compareScope i .gt x)
+    else some ((key.nullScope i false).either (key.compareScope i .lt x))
+
+/-- The rows of item `i` whose key holds `v`, NULL included. -/
+def SortKey.equalScope (i : Nat) (key : SortKey) : Value → RScope
+  | none => key.nullScope i false
+  | some x => key.compareScope i .eq x
+
+/-- The rows that sort before, if any value does, or that tie and pass
+`tied`. -/
+def orTied : Option RScope → RScope → RScope
+  | some before, tied => before.either tied
+  | none, tied => tied
+
+/-- The rows of item `i` that sort at or before `last`, the ORDER BY's values
+of a run's last row: term by term, NULL first ascending and last descending; a
+row equal to `last` passes (`sorted_at_or_before`). -/
+def atOrBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value) : RScope :=
+  (terms.zip last).foldr (fun ((key, desc), v) scope =>
+    orTied (key.beforeScope i desc v) ((key.equalScope i v).both scope)) .all
 
 /-- The last row's ORDER BY values, when the run returned as many rows as the
 LIMIT. -/
@@ -414,40 +459,75 @@ theorem passes_either (rowsOf : Nat → List Row) (r : Row) (a b : RScope) :
   unfold RScope.either
   split <;> simp_all [RScope.passes]
 
-theorem before_passes (rowsOf : Nat → List Row) (r : Row) (c : Nat) (d : Bool) (v : Value) :
-    (beforeScope c d v).passes rowsOf r = (dcmp d (r.cell c) v == .lt) := by
+theorem null_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (n : Bool) (key : SortKey) :
+    (key.nullScope i n).passes rowsOf r = ((key.value r).isNone != n) := by
+  cases key <;> simp [SortKey.nullScope, SortKey.value, RScope.passes, Cond.eval, isTrue]
+
+/-- A key's comparison by `<`, `>` or `=` passes a row whose key holds a value
+that compares so, and no row whose key is NULL. -/
+theorem compare_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) {op : Op}
+    (hop : op = .lt ∨ op = .gt ∨ op = .eq) (x : Int) (key : SortKey) :
+    (key.compareScope i op x).passes rowsOf r =
+      match key.value r with
+      | some y => op.compare y x
+      | none => false := by
+  cases key with
+  | column c => rfl
+  | expr e =>
+    simp only [SortKey.compareScope, SortKey.value, RScope.passes, Cond.eval, Expr.eval]
+    rcases hop with rfl | rfl | rfl <;>
+      cases e.eval (rowBind (some r)) noSubs <;> simp [Op.apply, isTrue]
+
+theorem orTied_passes (rowsOf : Nat → List Row) (r : Row) (before : Option RScope) (tied : RScope) :
+    (orTied before tied).passes rowsOf r =
+      (((before.map (·.passes rowsOf r)).getD false) || tied.passes rowsOf r) := by
+  cases before <;> simp [orTied, passes_either]
+
+theorem before_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Bool)
+    (v : Value) :
+    ((key.beforeScope i d v).map (·.passes rowsOf r)).getD false =
+      (dcmp d (key.value r) v == .lt) := by
+  have hlt : Op.lt = .lt ∨ Op.lt = .gt ∨ Op.lt = .eq := Or.inl rfl
+  have hgt : Op.gt = .lt ∨ Op.gt = .gt ∨ Op.gt = .eq := Or.inr (Or.inl rfl)
   cases d <;> cases v with
-  | none => cases hx : r.cell c <;> simp [beforeScope, RScope.passes, hx, dcmp, valueCompare,
-      Ordering.swap]
+  | none =>
+    cases hx : key.value r <;>
+      simp [SortKey.beforeScope, null_passes, hx, dcmp, valueCompare, Ordering.swap]
   | some y =>
-    cases hx : r.cell c with
-    | none => simp [beforeScope, RScope.passes, hx, dcmp, valueCompare, Ordering.swap, passes_either]
+    cases hx : key.value r with
+    | none =>
+      simp [SortKey.beforeScope, null_passes, compare_passes _ _ _ hlt, compare_passes _ _ _ hgt,
+        passes_either, hx, dcmp, valueCompare, Ordering.swap]
     | some x =>
-      simp only [beforeScope, dcmp, Bool.false_eq_true, ↓reduceIte, valueCompare_some, passes_either,
-        RScope.passes, hx, Op.compare, Option.isNone_some, bne_self_eq_false, Bool.false_or]
+      simp only [SortKey.beforeScope, dcmp, Bool.false_eq_true, ↓reduceIte, valueCompare_some,
+        passes_either, null_passes, compare_passes _ _ _ hlt, compare_passes _ _ _ hgt, hx,
+        Op.compare, Option.isNone_some, bne_self_eq_false, Bool.false_or, Option.map_some,
+        Option.getD_some]
       by_cases h1 : x < y <;> by_cases h2 : x = y <;> simp [h1, h2, Ordering.swap] <;> omega
 
-theorem equal_passes (rowsOf : Nat → List Row) (r : Row) (c : Nat) (d : Bool) (v : Value) :
-    (equalScope c v).passes rowsOf r = (dcmp d (r.cell c) v == .eq) := by
-  have key : (dcmp d (r.cell c) v == .eq) = decide (r.cell c = v) := by
-    by_cases h : r.cell c = v
+theorem equal_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Bool)
+    (v : Value) :
+    (key.equalScope i v).passes rowsOf r = (dcmp d (key.value r) v == .eq) := by
+  have heq : Op.eq = .lt ∨ Op.eq = .gt ∨ Op.eq = .eq := Or.inr (Or.inr rfl)
+  have key_eq : (dcmp d (key.value r) v == .eq) = decide (key.value r = v) := by
+    by_cases h : key.value r = v
     · rw [h, dcmp_eq.mpr rfl]; simp
-    · have : dcmp d (r.cell c) v ≠ .eq := fun h' => h (dcmp_eq.mp h')
+    · have : dcmp d (key.value r) v ≠ .eq := fun h' => h (dcmp_eq.mp h')
       simp only [h, decide_false]
-      cases hd : dcmp d (r.cell c) v <;> simp_all
-  rw [key]
+      cases hd : dcmp d (key.value r) v <;> simp_all
+  rw [key_eq]
   cases v with
-  | none => cases hx : r.cell c <;> simp [equalScope, RScope.passes, hx]
+  | none => cases hx : key.value r <;> simp [SortKey.equalScope, null_passes, hx]
   | some y =>
-    cases hx : r.cell c <;> simp [equalScope, RScope.passes, hx, Op.compare]
+    cases hx : key.value r <;> simp [SortKey.equalScope, compare_passes _ _ _ heq, hx, Op.compare]
     exact Bool.eq_iff_iff.mpr (by simp)
 
-/-- The bound's scope passes a row when the row's values in the ORDER BY's
-columns sort at or before `last`. -/
-theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (terms : List (Nat × Bool))
-    (last : List Value) (hlen : last.length = terms.length) :
-    (atOrBefore terms last).passes rowsOf r =
-      keyLe (terms.map (·.2)) (terms.map fun (c, _) => r.cell c) last := by
+/-- The bound's scope passes a row of the sorted item when the row's values
+of the ORDER BY's keys sort at or before `last`. -/
+theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
+    (terms : List (SortKey × Bool)) (last : List Value) (hlen : last.length = terms.length) :
+    (atOrBefore i terms last).passes rowsOf r =
+      keyLe (terms.map (·.2)) (terms.map fun (key, _) => key.value r) last := by
   induction terms generalizing last with
   | nil => simp [atOrBefore, RScope.passes, keyLe, keyCompare]
   | cons term terms ih =>
@@ -455,10 +535,34 @@ theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (terms : List (N
     | nil => simp at hlen
     | cons v vs =>
       simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
-      obtain ⟨c, d⟩ := term
+      obtain ⟨key, d⟩ := term
       have hrest := ih vs hlen
       simp only [atOrBefore, List.zip_cons_cons, List.foldr_cons] at hrest ⊢
-      rw [passes_either, passes_both, hrest, List.map_cons, List.map_cons, keyLe_cons,
+      rw [orTied_passes, passes_both, hrest, List.map_cons, List.map_cons, keyLe_cons,
         before_passes, equal_passes (d := d)]
+
+/-- A key `sortKey` reads sorts the core's bindings as its result column
+does: in a binding where the sorted item has the row `r`, the result column's
+expression gives the key's value in `r`. -/
+theorem sortKey_value {s : Statement} {i : Nat} {e : Expr} {key : SortKey}
+    (h : sortKey s i e = some key) {b : Bind} {sub : Subs} {r : Row} (hb : b i = some r) :
+    e.eval b sub = key.value r := by
+  unfold sortKey at h
+  split at h
+  · rename_i hcheck
+    simp only [Bool.and_eq_true, List.isEmpty_iff, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+      List.all_eq_true] at hcheck
+    obtain ⟨⟨hq, _⟩, hrefs⟩ := hcheck
+    have hitems : ∀ j ∈ e.items, j = i := by
+      intro j hj
+      simp only [Expr.items, List.mem_map] at hj
+      obtain ⟨⟨j', c⟩, hmem, rfl⟩ := hj
+      have := hrefs (j', c) hmem
+      simp only [beq_iff_eq] at this
+      exact this.1
+    rw [e.eval_rowBind hitems hq, hb]
+    cases h
+    cases e <;> simp [SortKey.value, Expr.eval, cellOf, rowBind]
+  · cases h
 
 end SqliveNarrowing.Limit

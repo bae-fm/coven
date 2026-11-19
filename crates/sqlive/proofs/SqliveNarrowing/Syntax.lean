@@ -153,8 +153,8 @@ structure Query where
   ops : List Combine
   /-- ORDER BY: result column positions, each descending when `true`. -/
   orderBy : List (Nat × Bool)
-  /-- Whether each ORDER BY term names its result column's column, which
-  sqlive's LIMIT bound needs, rather than its position. -/
+  /-- Whether each ORDER BY term writes its result column's column or
+  expression, which sqlive's LIMIT bound needs, rather than its position. -/
   orderNamed : Bool
   limit : Option Nat
   /-- OFFSET: how many of the ordered rows the query skips first. -/

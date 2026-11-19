@@ -154,9 +154,14 @@ promise of whichever rule reads it.
   a lookup reads alone.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
-  rows it returns. `atOrBefore_passes` proves that the bound's scope passes
-  exactly the rows that sort at or before the last row, NULL first ascending
-  and last descending.
+  rows it returns. Each ORDER BY term sorts the sorted item's rows by a key:
+  one of its columns, which sqlive compares itself, or an expression over its
+  columns with no subquery, which sqlive asks SQLite to evaluate on each row
+  a write changes. `sortKey_value` proves that in a binding where the sorted item
+  has a row, the term's result column holds the key's value in that row.
+  `atOrBefore_passes` proves that the bound's scope passes exactly the rows
+  whose keys sort at or before the last row, NULL first ascending and last
+  descending.
 - **The rows SQLite picks.** A query that keeps some of its rows, by a LIMIT
   or an OFFSET or as a subquery whose first row a comparison takes, keeps the
   rows SQLite reads first, in the order of the plan it chooses.
@@ -209,7 +214,11 @@ every statement it generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
-refusals. The model also leaves out bound parameters, table functions, the views sqlive
+refusals. The model has no generated columns: sqlive sorts by a generated
+column's expression, which the model states as an expression term. The
+differential's tables hold no generated column: sqlive records no value of
+one for a write and counts it as changed by every write to its row, which the
+model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
 reads whole as a join's partner, the terms that compare a NULL test's truth or
 a column `IS` a parameter, and the step limit on a lookup.
 

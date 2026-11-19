@@ -139,7 +139,7 @@ def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :
     let scope := match p.sorted, last with
       | some sorted, some values =>
         if sorted.item = i then
-          scope.both (Limit.atOrBefore (sorted.terms.map fun (c, d, _) => (c, d)) values)
+          scope.both (Limit.atOrBefore i (sorted.terms.map fun (key, d, _) => (key, d)) values)
         else scope
       | _, _ => scope
     fun j => if j = i then scope else bound j) fun _ => .all
