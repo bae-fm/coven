@@ -10,7 +10,7 @@
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
-use crate::scope_plan::{is_name, read_select, Edge, Member, Planner, Source};
+use crate::scope_plan::{is_name, read_select, Edge, Member, MemberValue, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text};
 use rusqlite::Connection;
@@ -460,7 +460,7 @@ pub(crate) fn push_down(
         let reached = tested
             .iter()
             .map(String::as_str)
-            .chain(edges.iter().map(|edge| edge.member.column.as_str()));
+            .chain(edges.iter().filter_map(|edge| edge.member.column()));
         for column in reached {
             if let Some((target, _)) = through(column) {
                 if !targets.contains(&target) {
@@ -491,8 +491,12 @@ pub(crate) fn push_down(
                 .iter()
                 .filter(|edge| !(left && edge.nulls))
                 .filter_map(|edge| {
-                    let (passed, column) = through(&edge.member.column)?;
-                    let member = Member { item: target, column, affinity: edge.member.affinity };
+                    let (passed, column) = through(edge.member.column()?)?;
+                    let member = Member {
+                        item: target,
+                        value: MemberValue::Column(column),
+                        affinity: edge.member.affinity,
+                    };
                     (passed == target).then(|| Edge { member, ..edge.clone() })
                 })
                 .collect();

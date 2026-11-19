@@ -1,13 +1,15 @@
-//! An equality between a column of one of a core's sources and a value of
-//! one other source, read as an edge the first takes values by (§4): from a
-//! condition, or from the ON a USING join stands for. `IS` reads the same
+//! An equality between a column of one of a core's sources, or an
+//! expression over a table's own row, and a value of one other source, read
+//! as an edge the first takes values by (§4): from a condition, or from the
+//! ON a USING join stands for. `IS` reads the same
 //! way, with a NULL matching a NULL. An edge also carries what the other
 //! source's terms say of its column to the first.
 
 use crate::from_item::Columns;
-use crate::scope_plan::{is_name, Edge, Member, PartnerValue, Planner};
-use crate::scope_term::ScopeTerm;
-use crate::select_syntax::{parts, Part};
+use crate::scope_plan::{is_name, Edge, Member, MemberValue, PartnerValue, Planner};
+use crate::scope_row::item_row_term;
+use crate::scope_term::{Affinity, ScopeTerm};
+use crate::select_syntax::{parts, strict, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
 
@@ -32,12 +34,30 @@ impl Planner<'_> {
             return None;
         }
         let affinity = found.columns.affinity(&column)?;
-        Some(Member { item, column, affinity })
+        Some(Member { item, value: MemberValue::Column(column), affinity })
+    }
+
+    /// The member `member_expr`, written in `core`, gives when it is an
+    /// expression over the row of one table of the core's own
+    /// (`source_of`), that SQLite can evaluate row by row and whose every
+    /// name is a column of that table that sqlive compares
+    /// (`scope_row::item_row_term`). A write asks SQLite for its value in
+    /// each row it changes.
+    fn member_expression(&self, core: usize, member_expr: &Expr<'_>) -> Option<Member> {
+        let item = self.source_of(core, member_expr)?;
+        if self.items[item].core != core {
+            return None;
+        }
+        let mut found = Vec::new();
+        parts(member_expr, &mut found);
+        let term = item_row_term(self, core, item, member_expr, &found)?;
+        Some(Member { item, value: MemberValue::Expression(term), affinity: Affinity::Blob })
     }
 
     /// The edge `member_expr = other` gives, written in `core` with `other`
-    /// first when `first`, when `member_expr` is a member column and `other`
-    /// is a value of one other source (`partner`); and when SQLite compares
+    /// first when `first`, when `member_expr` is a member column or an
+    /// expression over one table's row (`member_expression`) and `other` is
+    /// a value of one other source (`partner`); and when SQLite compares
     /// them by BINARY, as sqlive does: the comparison takes the collation of
     /// a COLLATE in either side, else of the first side when that is a
     /// column.
@@ -48,7 +68,9 @@ impl Planner<'_> {
         other: &Expr<'_>,
         first: bool,
     ) -> Option<Edge> {
-        let member = self.member_column(core, member_expr)?;
+        let member = self
+            .member_column(core, member_expr)
+            .or_else(|| self.member_expression(core, member_expr))?;
         let partner = self.partner(core, member.item, other)?;
         if is_name(other) {
             let (_, partner_column) = self.resolve(core, other)?;
@@ -69,16 +91,22 @@ impl Planner<'_> {
     }
 
     /// The one source other than `member` whose columns `other`, written in
-    /// `core`, reads, of this core or one it sits in. `other` holds no
-    /// subquery, no COLLATE, no clock and no function the connection doesn't
-    /// flag deterministic: a lookup evaluates it again, and would get another
-    /// answer than the query did. And every binding holds a row of the
-    /// source, or `other` is NULL wherever a column it names is
-    /// (`select_syntax::strict`).
+    /// `core`, reads (`source_of`).
     pub(crate) fn partner(&self, core: usize, member: usize, other: &Expr<'_>) -> Option<usize> {
+        self.source_of(core, other).filter(|partner| *partner != member)
+    }
+
+    /// The one source whose columns `expr`, written in `core`, reads, of
+    /// this core or one it sits in, and its parts. `expr` holds no subquery,
+    /// no COLLATE, no clock and no function the connection doesn't flag
+    /// deterministic: a write evaluates it again, and would get another
+    /// answer than the query did. And every binding holds a row of the
+    /// source, or `expr` is NULL wherever a column it names is
+    /// (`select_syntax::strict`).
+    fn source_of(&self, core: usize, expr: &Expr<'_>) -> Option<usize> {
         let mut found = Vec::new();
-        parts(other, &mut found);
-        let mut partner = None;
+        parts(expr, &mut found);
+        let mut source = None;
         for part in &found {
             let name = match part {
                 Part::Name(name) => name,
@@ -86,23 +114,24 @@ impl Planner<'_> {
                 Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Collation => return None,
             };
             let (item, _) = self.resolve(core, name)?;
-            if item == member || partner.is_some_and(|partner| partner != item) {
+            if source.is_some_and(|source| source != item) {
                 return None;
             }
-            partner = Some(item);
+            source = Some(item);
         }
-        let partner = partner?;
+        let source = source?;
         // Over a LEFT JOIN's missing row, an expression that can give a
-        // value where the partner's columns are NULL would match member rows
-        // that no lookup finds (`scope_one_of.rs` reads a column equal to
+        // value where the source's columns are NULL gives it in a binding
+        // that holds no row of the source: a partner's no lookup finds, and
+        // a member's makes the equality true of the NULLs, so it can't make
+        // the LEFT JOIN inner (`scope_one_of.rs` reads a column equal to
         // COALESCE).
-        let bound = self.items[partner].always_bound()
-            || crate::select_syntax::strict(other, self.functions);
-        (self.functions.repeatable(&found) && bound).then_some(partner)
+        let bound = self.items[source].always_bound() || strict(expr, self.functions);
+        (self.functions.repeatable(&found) && bound).then_some(source)
     }
 
-    /// The edge `member.column = partner.column` gives, with `partner`'s
-    /// column first when `first`: a column first in an equality gives it its
+    /// The edge `member = partner.column` gives, with `partner`'s column
+    /// first when `first`: a column first in an equality gives it its
     /// collation, which is BINARY when sqlive gives the column an affinity.
     pub(crate) fn column_edge(
         &self,
@@ -114,13 +143,17 @@ impl Planner<'_> {
         if first && partner_affinity.is_none() {
             return None;
         }
-        let value = match partner_affinity {
-            Some(partner_affinity) => (partner_affinity == member.affinity)
+        let value = match (partner_affinity, &member.value) {
+            (Some(partner_affinity), MemberValue::Column(_)) => (partner_affinity
+                == member.affinity)
                 .then_some(PartnerValue::Column(partner_column))?,
+            // SQLite gives an expression's value the column's affinity, and
+            // so does the question that judges a changed row (`scope_row.rs`).
+            (Some(_), MemberValue::Expression(_)) => PartnerValue::Column(partner_column),
             // A column sqlive gives no affinity, as a view's or a
             // function's: a lookup compares it as the statement does, with
             // whatever affinity SQLite gives it.
-            None => PartnerValue::Expression(format!(
+            (None, _) => PartnerValue::Expression(format!(
                 "{}.{}",
                 self.items[partner].source.qualifier,
                 crate::sql::identifier(&partner_column)
@@ -182,8 +215,12 @@ impl Planner<'_> {
             {
                 continue;
             }
-            let PartnerValue::Column(compared) = &edge.value else { continue };
-            let rename = |tested: &str| (tested == compared).then(|| edge.member.column.clone());
+            let (PartnerValue::Column(compared), Some(member)) =
+                (&edge.value, edge.member.column())
+            else {
+                continue;
+            };
+            let rename = |tested: &str| (tested == compared).then(|| member.to_owned());
             let own = self.items[edge.partner]
                 .source
                 .term

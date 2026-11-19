@@ -757,7 +757,7 @@ theorem joined_passes {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     (hnested : e.nested = false) (hholds : e.HoldsIn s db f b) {r r' : Row}
     (hm : b e.member = some r) (hp : b e.partner = some r') (rowsOf : Nat → List Row)
     (hr' : r' ∈ rowsOf e.partner) {scope : RScope} (hs : scope.passes rowsOf r') :
-    (RScope.joined e.column e.partner e.value scope e.nulls).passes rowsOf r := by
+    (RScope.joined e.memberValue e.partner e.value scope e.nulls).passes rowsOf r := by
   simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, List.any_eq_true]
   rcases hholds with ⟨x, hx, hrow⟩ | ⟨hn, _, _, hx, hnone⟩ | ⟨_, _, _, hnone⟩
   · rw [hnested] at hrow
@@ -765,12 +765,10 @@ theorem joined_passes {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     obtain ⟨r'', hr'', hv⟩ := hrow
     rw [hp] at hr''
     cases hr''
-    rw [hm] at hx
-    simp only [cellOf] at hx
+    rw [hm, PValue.on_some] at hx
     refine ⟨Or.inl (by simp [hx]), r', hr', ?_, hs⟩
     simp [hv, hx]
-  · rw [hm] at hx
-    simp only [cellOf] at hx
+  · rw [hm, PValue.on_some] at hx
     refine ⟨Or.inr hn, r', hr', ?_, hs⟩
     simp [hnone r' hp, hx]
   · rw [hp] at hnone

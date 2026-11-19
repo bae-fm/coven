@@ -72,9 +72,12 @@ impl Planner<'_> {
         member: &Member,
         expr: &Expr<'_>,
     ) -> rusqlite::Result<Option<Side>> {
+        let Some(column) = member.column() else {
+            return Ok(None);
+        };
         Ok(operand(connection, expr, member.affinity)?.map(|operand| Side {
             terms: vec![ScopeTerm::Compare {
-                column: member.column.clone(),
+                column: column.to_owned(),
                 affinity: member.affinity,
                 operand,
                 ordering: Ordering::Equal,

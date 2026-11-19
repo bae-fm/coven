@@ -54,13 +54,13 @@ items. -/
 def carried (s : Statement) (st : PState) (k : Nat) : List (Nat × STerm) :=
   st.edges.flatMap fun e =>
     if (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false then
-      match e.value with
-      | .column y =>
-        let rename (c : Nat) : Option Nat := if c = y then some e.column else none
+      match e.value, e.memberValue with
+      | .column y, .column mc =>
+        let rename (c : Nat) : Option Nat := if c = y then some mc else none
         let pulledTerm := if e.nulls then none else pulled s st e.partner y
         ((st.items e.partner).term.bind (·.renamed rename)).toList.map (e.member, ·) ++
           (pulledTerm.bind (·.renamed rename)).toList.map (e.member, ·)
-      | .expr _ => []
+      | _, _ => []
     else []
 
 /-- Add `t` to what the edges carry to item `i`, with AND. -/
@@ -123,12 +123,14 @@ theorem renamed_none {t t' : STerm} {rename : Nat → Option Nat} (h : t.renamed
 `y` holds of a binding, a term true of the partner's row is true, renamed
 from `y` to the member's column, of the member's row. -/
 theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge} {y : Nat}
-    {t t' : STerm} (hv : e.value = .column y) (hn : e.nested = false)
+    {mc : Nat} {t t' : STerm} (hv : e.value = .column y) (hm : e.memberValue = .column mc)
+    (hn : e.nested = false)
     (hh : e.HoldsIn s db f b) (ht : t.holds (b e.partner))
-    (hr : t.renamed (fun c => if c = y then some e.column else none) = some t') :
+    (hr : t.renamed (fun c => if c = y then some mc else none) = some t') :
     t'.holds (b e.member) := by
   rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩ | ⟨hvs, _⟩
-  · simp only [hn, Bool.false_eq_true, ite_false] at hp
+  · simp only [hm, PValue.on] at hx
+    simp only [hn, Bool.false_eq_true, ite_false] at hp
     obtain ⟨r, hb, hval⟩ := hp
     rw [hb] at ht
     refine PushDown.renamed_sound hr (fun c c' hc => ?_) ht
@@ -139,7 +141,8 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
       rw [hx]
       simpa [hv, PValue.eval] using hval
     · simp [hcy] at hc
-  · -- An `IS` edge whose member is NULL: the partner's column is NULL too,
+  · simp only [hm, PValue.on] at hx
+    -- An `IS` edge whose member is NULL: the partner's column is NULL too,
     -- in its row or for want of one.
     have hcell : cellOf (b e.partner) y = none := by
       cases hb : b e.partner with

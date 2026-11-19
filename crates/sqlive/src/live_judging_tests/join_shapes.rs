@@ -1,6 +1,7 @@
 //! Joins other than one column equal to another, each narrowing the joined
 //! table as the equality would: `IS` between two tables, an OR whose sides
-//! each narrow the table, and COALESCE of several partners' values; and
+//! each narrow the table, COALESCE of several partners' values, and an
+//! expression over the joined table's own row; and
 //! joins on an expression that gives a value where its table's row is
 //! missing, which narrow nothing.
 
@@ -163,5 +164,36 @@ async fn a_join_on_a_value_of_a_missing_row_reads_the_table_whole() {
         ("INSERT INTO covers VALUES (10,'front','u10')", true),
     ])
     .await;
+    db.close();
+}
+
+/// A record joins its owner by an expression over its own row, which picks
+/// an album's own key or a release's album key: a record whose expression
+/// gives another key wakes nothing, and one whose kind or key changes so
+/// that the expression gives the owner's key does. The same holds when the
+/// owner's key is an expression, under `IS`, and in a row value.
+#[tokio::test]
+async fn an_expression_of_the_row_narrows_by_its_value() {
+    const RECORDS: &str = "CREATE TABLE owned(id INTEGER PRIMARY KEY, album_catalog TEXT, album_key TEXT);
+        CREATE TABLE release_records(id INTEGER PRIMARY KEY, catalog TEXT, kind TEXT, key TEXT, album_key TEXT);
+        INSERT INTO owned VALUES (1,'c','a1'),(2,'c','a2');
+        INSERT INTO release_records VALUES (1,'c','album','a1',NULL),(2,'c','release','r1','a1'),(3,'c','album','a2',NULL),(4,'c','release','r2','a2')";
+    let db = TestDatabase::open(RECORDS);
+    for sql in [
+        "SELECT rr.key FROM owned o JOIN release_records rr ON rr.catalog = o.album_catalog AND (CASE WHEN rr.kind = 'album' THEN rr.key ELSE rr.album_key END) = o.album_key WHERE o.id = 1 ORDER BY rr.id",
+        "SELECT rr.key FROM owned o JOIN release_records rr ON o.album_key || '' = (CASE WHEN rr.kind = 'album' THEN rr.key ELSE rr.album_key END) WHERE o.id = 1 ORDER BY rr.id",
+        "SELECT rr.key FROM owned o JOIN release_records rr ON (CASE WHEN rr.kind = 'album' THEN rr.key ELSE rr.album_key END) IS o.album_key WHERE o.id = 1 ORDER BY rr.id",
+        "SELECT rr.key FROM owned o JOIN release_records rr ON (rr.catalog, CASE WHEN rr.kind = 'album' THEN rr.key ELSE rr.album_key END) = (o.album_catalog, o.album_key) WHERE o.id = 1 ORDER BY rr.id",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE release_records SET key = 'r9' WHERE id = 4", false),
+            ("UPDATE release_records SET catalog = 'd' WHERE id = 3", false),
+            ("UPDATE release_records SET key = 'r1.' WHERE id = 2", true),
+            ("UPDATE release_records SET kind = 'album', key = 'a1' WHERE id = 4", true),
+            ("UPDATE owned SET album_key = 'a2' WHERE id = 2", false),
+        ])
+        .await;
+        db.commit("DELETE FROM release_records; DELETE FROM owned; INSERT INTO owned VALUES (1,'c','a1'),(2,'c','a2'); INSERT INTO release_records VALUES (1,'c','album','a1',NULL),(2,'c','release','r1','a1'),(3,'c','album','a2',NULL),(4,'c','release','r2','a2')");
+    }
     db.close();
 }

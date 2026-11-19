@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
-use crate::scope_plan::{Membership, PartnerValue, Sources};
+use crate::scope_plan::{MemberValue, Membership, PartnerValue, Sources};
+use crate::scope_row::{RowCondition, RowTest};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
 
@@ -52,24 +53,34 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         // `partner_scope`.
         let joined = |membership: &Membership, partner_scope: RowScope| {
             let partner = &sources.sources[membership.partner];
-            RowScope::Joined {
-                column: membership.column.clone(),
-                lookup: Arc::new(Lookup::new(
-                    partner.from.clone().expect("an edge's partner reads alone"),
-                    partner.qualifier.clone(),
-                    membership.value.clone(),
-                    membership.affinity,
-                    membership.nulls,
-                    partner_scope,
-                    &parameters,
-                )),
+            let lookup = Arc::new(Lookup::new(
+                partner.from.clone().expect("an edge's partner reads alone"),
+                partner.qualifier.clone(),
+                membership.value.clone(),
+                membership.affinity,
+                membership.nulls,
+                partner_scope,
+                &parameters,
+            ));
+            match &membership.member {
+                MemberValue::Column(column) => RowScope::Joined { column: column.clone(), lookup },
+                // A write asks SQLite for the expression's value in the
+                // changed row and whether a partner row gives it, compared
+                // as the statement compares them (`scope_row.rs`).
+                MemberValue::Expression(term) => RowScope::Row(Arc::new(RowCondition {
+                    term: Arc::clone(term),
+                    parameters: parameters.to_vec(),
+                    test: RowTest::Joined(lookup),
+                })),
             }
         };
         for membership in &source.memberships {
             // Rows that must hold given values in the column hold no others.
-            if let PartnerValue::Column(column) = &membership.value {
+            if let (MemberValue::Column(member), PartnerValue::Column(column)) =
+                (&membership.member, &membership.value)
+            {
                 if let Some(found) = partner_scope(membership).equal_values(column) {
-                    scope = scope.and(RowScope::equal(membership.column.clone(), found));
+                    scope = scope.and(RowScope::equal(member.clone(), found));
                     continue;
                 }
             }
@@ -270,22 +281,7 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
         // passes every row, as a write's question counts it a match.
         RowScope::Row(row) => row.sql(bound).unwrap_or_else(|| "1".into()),
         RowScope::Joined { column, lookup } => {
-            let column = format!("{qualifier}.{}", crate::sql::identifier(column));
-            let value = partner_value(&lookup.qualifier, &lookup.value);
-            let listed = format!(
-                "{column} IN (SELECT {value} FROM {} WHERE {})",
-                lookup.from,
-                condition(&lookup.scope, &lookup.qualifier, bound)
-            );
-            if lookup.nulls {
-                format!(
-                    "({listed} OR {column} IS NULL AND EXISTS (SELECT 1 FROM {} WHERE {value} IS NULL AND {}))",
-                    lookup.from,
-                    condition(&lookup.scope, &lookup.qualifier, bound)
-                )
-            } else {
-                listed
-            }
+            joined(&format!("{qualifier}.{}", crate::sql::identifier(column)), lookup, bound)
         }
         RowScope::And(left, right) => format!(
             "({} AND {})",
@@ -297,5 +293,29 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
             condition(left, qualifier, bound),
             condition(right, qualifier, bound)
         ),
+    }
+}
+
+/// Whether `compared`, SQL over a changed row, equals a value some row of
+/// `lookup`'s partner in its scope gives, as SQL whose values go to
+/// `bound`. A join inside it lists its partner's values in a subquery that
+/// names only the partner's rows, so no name in it can mean a row around
+/// it; a join on `IS` also passes a NULL when some partner row in its scope
+/// gives NULL.
+pub(crate) fn joined(compared: &str, lookup: &Lookup, bound: &mut Vec<Value>) -> String {
+    let value = partner_value(&lookup.qualifier, &lookup.value);
+    let listed = format!(
+        "{compared} IN (SELECT {value} FROM {} WHERE {})",
+        lookup.from,
+        condition(&lookup.scope, &lookup.qualifier, bound)
+    );
+    if lookup.nulls {
+        format!(
+            "({listed} OR {compared} IS NULL AND EXISTS (SELECT 1 FROM {} WHERE {value} IS NULL AND {}))",
+            lookup.from,
+            condition(&lookup.scope, &lookup.qualifier, bound)
+        )
+    } else {
+        listed
     }
 }

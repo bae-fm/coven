@@ -104,6 +104,17 @@ promise of whichever rule reads it.
   row that gives the value. Over any other item, the edge's promise allows a
   binding with no row of `b`, as an `IS` edge's does: no binding a core keeps
   lacks one.
+- **An expression of the member's own row.** The member of an equality can
+  be an expression over one table item's own columns, as `CASE WHEN a.k = 1
+  THEN a.x ELSE a.y END = b.z`. `row_member_sound` proves that the member's
+  value in a binding's row of its item is the value the expression has in
+  the binding, so `edge_sound` holds of such a member as of a column: where
+  the equality holds, the item's row gives a value some row of `b` gives. A
+  write asks SQLite for the expression's value in each row it changes. The
+  reader takes an expression over an item a LEFT JOIN adds only when it is
+  strict, as it does an expression over the partner, since the equality
+  could otherwise hold of the NULLs a missing right row gives and make the
+  LEFT JOIN an inner join's wrongly.
 - **A row value equality between two items.** `row_edge_sound` proves the
   same of each pair of `(a.x, a.y) = (b.z, b.w)`, which holds only where
   every pair is equal.

@@ -74,28 +74,41 @@ def STerm.renamed (rename : Nat → Option Nat) : STerm → Option STerm
     | some l, some r => some (.or l r)
     | _, _ => none
 
-/-- What a membership compares with: a partner's column of the member
-column's affinity, or an expression over the partner's columns. -/
+/-- A value of one item's row: one of its columns, or an expression over its
+columns. An edge compares such a value of its member's row with such a value
+of its partner's (`MemberValue`, `PartnerValue`). -/
 inductive PValue where
   | column (c : Nat)
   | expr (e : Expr)
   deriving Repr, Inhabited
 
-/-- The value a partner row gives. -/
+/-- The value a row gives. -/
 def PValue.eval (r : Row) : PValue → Value
   | .column c => r.cell c
   | .expr e => e.eval (rowBind (some r)) noSubs
 
-/-- Whether the value is NULL where every column of the partner is: a column
+/-- The value an item's row in a binding gives, NULLs for a missing row. -/
+def PValue.on (r : Option Row) : PValue → Value
+  | .column c => cellOf r c
+  | .expr e => e.eval (rowBind r) noSubs
+
+theorem PValue.on_some (r : Row) (v : PValue) : v.on (some r) = v.eval r := by
+  cases v <;> rfl
+
+/-- Whether the value is NULL where every column of its item is: a column
 is, and so is a strict expression. -/
 def PValue.strict : PValue → Bool
   | .column _ => true
   | .expr e => e.strict
 
-/-- `member.column` equals a value of `partner`'s rows (`Edge`). -/
+/-- A value of `member`'s row equals a value of `partner`'s rows (`Edge`). -/
 structure Edge where
   member : Nat
-  column : Nat
+  /-- What it compares of the member's row: a column, or an expression over
+  the member's columns, which SQLite evaluates on each row a write changes. -/
+  memberValue : PValue
+  /-- The member column's affinity; BLOB, which converts nothing, for an
+  expression. -/
   affinity : Affinity
   partner : Nat
   value : PValue
@@ -155,9 +168,9 @@ inductive RScope where
   | null (column : Nat) (not : Bool)
   | inVals (column : Nat) (values : List Int)
   | row (item : Nat) (cond : Cond)
-  /-- `column` equals `value` over a row of `partner` in `scope`; a NULL
-  matches a NULL when `nulls`, as `IS` compares. -/
-  | joined (column : Nat) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
+  /-- The row's `member` value equals `value` over a row of `partner` in
+  `scope`; a NULL matches a NULL when `nulls`, as `IS` compares. -/
+  | joined (member : PValue) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
   | and (left right : RScope)
   | or (left right : RScope)
   deriving Repr, Inhabited
@@ -208,8 +221,8 @@ def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
     | some x => vs.contains x
     | none => false
   | .row _ cd => isTrue (cd.eval (rowBind (some r)) noSubs)
-  | .joined c p v s nulls =>
-    ((r.cell c).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == r.cell c && s.passes rowsOf r'
+  | .joined m p v s nulls =>
+    ((m.eval r).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == m.eval r && s.passes rowsOf r'
   | .and l t => l.passes rowsOf r && t.passes rowsOf r
   | .or l t => l.passes rowsOf r || t.passes rowsOf r
 

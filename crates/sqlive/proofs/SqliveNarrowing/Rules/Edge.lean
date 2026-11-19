@@ -1,13 +1,15 @@
-import SqliveNarrowing.Reader
+import SqliveNarrowing.Rules.RowMember
 
-/-! Rule 2: an equality between a column of one of a core's items and a value
-of one other item narrows the first to the rows whose column holds a value
-some row of the other holds, in its own scope (`Planner::edge_between`).
+/-! Rule 2: an equality between a value of one of a core's items and a value
+of one other item narrows the first to the rows whose value is one some row
+of the other gives, in its own scope (`Planner::edge`).
 
-The member is a column sqlive narrows by; the partner is readable alone,
-since a write's lookup reads it alone; a bare partner column has the
-member's affinity, and one written first has an affinity at all, so the
-equality compares by BINARY. An expression partner is strict, NULL where
+The member is a column sqlive narrows by, or an expression over one table
+item's own columns (`RowMember`); the partner is readable alone, since a
+write's lookup reads it alone; a bare partner column has a member column's
+affinity, and one written first has an affinity at all, so the equality
+compares by BINARY. SQLite gives an expression member's value the partner
+column's affinity, so a partner column of any affinity gives it values. An expression partner is strict, NULL where
 the partner's columns are, so a missing partner row gives no value, or the
 partner is no item a LEFT JOIN adds, so every binding a core keeps holds its
 row: a COALESCE, a CASE or `IS NULL` over a LEFT JOIN's item gives no edge
@@ -18,20 +20,20 @@ namespace SqliveNarrowing.Edge
 /-- The edge `member = other` gives, written in core `k`, with `other` first
 when `first`. -/
 def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option Edge := do
-  let .col m c := member | none
-  if (s.item m).core ≠ k then none
-  let affinity ← s.affinity m c
+  let (m, memberValue, affinity) ← RowMember.read s k member
   if !other.queries.isEmpty then none
   let p ← other.items.head?
   if !other.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨
     !(other.strict || s.alwaysBound p) then none
   let value ← match other with
     | .col _ pc =>
-      match s.affinity p pc with
-      | some pa => if pa = affinity then some (PValue.column pc) else none
-      | none => if first then none else some (PValue.expr other)
+      match s.affinity p pc, memberValue with
+      | some pa, .column _ => if pa = affinity then some (PValue.column pc) else none
+      -- SQLite gives an expression's value the column's affinity.
+      | some _, .expr _ => some (PValue.column pc)
+      | none, _ => if first then none else some (PValue.expr other)
     | _ => some (PValue.expr other)
-  pure { member := m, column := c, affinity, partner := p, value, nested := false }
+  pure { member := m, memberValue, affinity, partner := p, value, nested := false }
 
 /-- The reader: `a = b`, with no subquery, naming more than one item. -/
 def readCondition : ReadCondition := fun s k cd =>
@@ -47,65 +49,65 @@ to the value its partner's row in the binding gives, neither NULL. -/
 /-- What an edge `edge` reads says of the condition's sides. -/
 theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) :
-    member = .col e.member e.column ∧ (s.item e.member).core = k ∧ e.nested = false ∧
+    (∀ b sub, e.memberValue.on (b e.member) = member.eval b sub) ∧ (s.item e.member).core = k ∧
+    e.nested = false ∧
     other.queries = [] ∧ (∀ j ∈ other.items, j = e.partner) ∧ other.refs ≠ [] ∧
     (other.strict = true ∨ s.alwaysBound e.partner = true) ∧ e.partner ≠ e.member ∧
     (s.item e.partner).readable ∧ (∀ r, e.value.eval r = other.eval (rowBind (some r)) noSubs) ∧
     e.value.strict = other.strict := by
   unfold edge at h
-  cases member
-  case lit | add | greatest | sub | coalesce | iif | isNull => simp at h
-  case col m c =>
-    simp only [bind, Option.bind] at h
+  simp only [bind, Option.bind] at h
+  cases hmo : RowMember.read s k member with
+  | none => simp [hmo] at h
+  | some found =>
+    obtain ⟨m, mv, aff⟩ := found
+    obtain ⟨hk', hmv, _⟩ := RowMember.row_member_sound hmo
+    simp only [hmo] at h
     split at h
     · cases h
-    rename_i hk
-    have hk' : (s.item m).core = k := by simpa using hk
-    cases haff : s.affinity m c with
-    | none => simp [haff] at h
-    | some aff =>
-      simp only [haff] at h
+    rename_i hq
+    replace hq : other.queries = [] := by simpa using hq
+    cases hp : other.items.head? with
+    | none => simp [hp] at h
+    | some p =>
+      simp only [hp] at h
       split at h
       · cases h
-      rename_i hq
-      replace hq : other.queries = [] := by simpa using hq
-      cases hp : other.items.head? with
-      | none => simp [hp] at h
-      | some p =>
-        simp only [hp] at h
+      rename_i hbad
+      simp only [not_or, Bool.not_eq_true] at hbad
+      have hitems : ∀ j ∈ other.items, j = p := by
+        have h1 := hbad.1
+        simpa using h1
+      have hrefs : other.refs ≠ [] := by
+        intro hnil
+        simp [Expr.items, hnil] at hp
+      have hread : (s.item p).readable = true := by simpa using hbad.2.2.1
+      have hstrict : other.strict = true ∨ s.alwaysBound p = true := by
+        cases hs : other.strict
+        · exact Or.inr (by simpa [hs] using hbad.2.2.2)
+        · exact Or.inl rfl
+      have hcol : ∀ j pc, other = .col j pc →
+          ∀ r, (PValue.column pc).eval r = other.eval (rowBind (some r)) noSubs := by
+        intro j pc ho r
+        subst ho
+        have : j = p := hitems j (by simp [Expr.items, Expr.refs])
+        subst this
+        simp [PValue.eval, Expr.eval, rowBind, cellOf]
+      split at h
+      · rename_i j pc
         split at h
+        · split at h
+          · cases h
+            exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, hcol j pc rfl, rfl⟩
+          · cases h
         · cases h
-        rename_i hbad
-        simp only [not_or, Bool.not_eq_true] at hbad
-        have hitems : ∀ j ∈ other.items, j = p := by
-          have h1 := hbad.1
-          simpa using h1
-        have hrefs : other.refs ≠ [] := by
-          intro hnil
-          simp [Expr.items, hnil] at hp
-        have hread : (s.item p).readable = true := by simpa using hbad.2.2.1
-        have hstrict : other.strict = true ∨ s.alwaysBound p = true := by
-          cases hs : other.strict
-          · exact Or.inr (by simpa [hs] using hbad.2.2.2)
-          · exact Or.inl rfl
-        split at h
-        · rename_i j pc
-          split at h
-          · split at h
-            · cases h
-              refine ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, ?_, rfl⟩
-              intro r
-              have : j = p := hitems j (by simp [Expr.items, Expr.refs])
-              subst this
-              simp [PValue.eval, Expr.eval, rowBind, cellOf]
-            · cases h
-          · split at h
-            · cases h
-            · cases h
-              exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl,
-                rfl⟩
-        · cases h
-          exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
+          exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, hcol j pc rfl, rfl⟩
+        · split at h
+          · cases h
+          · cases h
+            exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
+      · cases h
+        exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
 
 /-- An edge holds of a binding where its member equals its partner's value. -/
 theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
@@ -126,9 +128,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
       have hab : s.alwaysBound e.partner = true := by simpa [hs] using hst
       exact Or.inr (Or.inr ⟨by rw [hvs, hs], hn, hab, hb⟩)
   | some r =>
-    refine Or.inl ⟨x, ?_, ?_⟩
-    · rw [hmem] at hm
-      simpa [Expr.eval] using hm
+    refine Or.inl ⟨x, by rw [hmem b sub]; exact hm, ?_⟩
     · simp only [hn, Bool.false_eq_true, ↓reduceIte]
       exact ⟨r, hb, by rw [hval, ← hb, ho]⟩
 

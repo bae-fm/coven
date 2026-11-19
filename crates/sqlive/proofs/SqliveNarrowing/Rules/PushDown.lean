@@ -38,7 +38,10 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
       else found.foldl (fun st arm =>
         let through (c : Nat) : Option (Nat × Nat) := (arm[c]?).join
         let tested := (term.map STerm.columns).getD []
-        let reached := tested ++ edges.map (·.column)
+        let reached := tested ++ edges.filterMap fun e =>
+          match e.memberValue with
+          | .column c => some c
+          | .expr _ => none
         let targets := (reached.filterMap fun c => (through c).map (·.1)).eraseDups
         targets.foldl (fun st target =>
           let rename (c : Nat) : Option Nat :=
@@ -49,7 +52,9 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
           let renamed := (term.bind (·.renamed rename)).filter
             fun r => !(left && r.mayHoldOnNulls)
           let passed := (edges.filter fun e => !(left && e.nulls)).filterMap fun e =>
-            (rename e.column).map fun c' => { e with member := target, column := c' }
+            match e.memberValue with
+            | .column c => (rename c).map fun c' => { e with member := target, memberValue := .column c' }
+            | .expr _ => none
           let st := match renamed with
             | some r => st.addTerm target r
             | none => st

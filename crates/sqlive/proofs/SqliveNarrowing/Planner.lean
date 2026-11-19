@@ -124,14 +124,14 @@ def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → R
       ((item.carried.map STerm.bind).getD .all)
     let scope := item.memberships.foldl (fun scope m =>
       let partner := bound m.partner
-      match m.value with
-      | .column c =>
+      match m.memberValue, m.value with
+      | .column mc, .column c =>
         match partner.equalValues c with
-        | some vs => scope.both (.inVals m.column vs.eraseDups)
-        | none => scope.both (.joined m.column m.partner m.value partner m.nulls)
-      | v => scope.both (.joined m.column m.partner v partner m.nulls)) scope
+        | some vs => scope.both (.inVals mc vs.eraseDups)
+        | none => scope.both (.joined m.memberValue m.partner m.value partner m.nulls)
+      | _, v => scope.both (.joined m.memberValue m.partner v partner m.nulls)) scope
     let sideScope (side : Side) : RScope :=
-      side.edges.foldl (fun acc m => acc.both (.joined m.column m.partner m.value (bound m.partner) m.nulls))
+      side.edges.foldl (fun acc m => acc.both (.joined m.memberValue m.partner m.value (bound m.partner) m.nulls))
         (side.terms.foldl (fun acc t => acc.both t.bind) .all)
     let scope := item.either.foldl (fun scope sides =>
       match sides.map sideScope with
@@ -141,7 +141,7 @@ def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → R
     -- first of its memberships that takes values from it.
     let lookup (j : Nat) : Option (RScope → RScope) :=
       (item.memberships.find? (·.partner == j)).map fun m before =>
-        .joined m.column m.partner m.value ((bound m.partner).both before) m.nulls
+        .joined m.memberValue m.partner m.value ((bound m.partner).both before) m.nulls
     let scope := match p.sorted, last with
       | some sorted, some values =>
         match Limit.runBound i lookup (sorted.runs.zip values) with

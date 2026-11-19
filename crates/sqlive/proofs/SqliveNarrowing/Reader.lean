@@ -183,13 +183,13 @@ has its row. Or the partner's value isn't strict, `b` holds no row of the
 partner, and the partner is no item a LEFT JOIN adds, so `b` is no binding a
 core keeps. -/
 def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Prop :=
-  (∃ x, cellOf (b e.member) e.column = some x ∧
+  (∃ x, e.memberValue.on (b e.member) = some x ∧
     if e.nested then
       ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item e.partner).core,
         ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
     else ∃ r, b e.partner = some r ∧ e.value.eval r = some x) ∨
   (e.nulls = true ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
-    cellOf (b e.member) e.column = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none) ∨
+    e.memberValue.on (b e.member) = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none) ∨
   (e.value.strict = false ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
     b e.partner = none)
 

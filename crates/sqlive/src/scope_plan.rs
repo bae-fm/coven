@@ -28,7 +28,7 @@ use crate::from_item::{read_item, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
-use crate::scope_row::item_row_term;
+use crate::scope_row::{item_row_term, RowTerm};
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
@@ -152,10 +152,10 @@ pub(crate) struct Source {
     pub(crate) either: Vec<Vec<crate::scope_or::EitherSide>>,
 }
 
-/// `column` equals `value` over some row of `partner` in its scope, a NULL
+/// `member` equals `value` over some row of `partner` in its scope, a NULL
 /// matching a NULL when `nulls`.
 pub(crate) struct Membership {
-    pub(crate) column: String,
+    pub(crate) member: MemberValue,
     pub(crate) affinity: Affinity,
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
@@ -166,7 +166,7 @@ impl Membership {
     /// The membership `edge` gives its member.
     pub(crate) fn of(edge: &Edge) -> Self {
         Self {
-            column: edge.member.column.clone(),
+            member: edge.member.value.clone(),
             affinity: edge.member.affinity,
             partner: edge.partner,
             value: edge.value.clone(),
@@ -938,13 +938,37 @@ impl Narrowing {
     }
 }
 
-/// A column of one of a core's sources that sqlive narrows by: a table's or
-/// a derived item's column that sqlive gives an affinity.
+/// What sqlive narrows one of a core's sources by: a table's or a derived
+/// item's column that sqlive gives an affinity, or an expression over a
+/// table's own columns.
 #[derive(Clone)]
 pub(crate) struct Member {
     pub(crate) item: usize,
-    pub(crate) column: String,
+    pub(crate) value: MemberValue,
+    /// The affinity a lookup gives a value it compares with the member's:
+    /// its column's, or BLOB, which converts nothing, for an expression,
+    /// whose comparison the question that judges a row leaves to SQLite.
     pub(crate) affinity: Affinity,
+}
+
+/// What an edge compares of its member's rows.
+#[derive(Clone)]
+pub(crate) enum MemberValue {
+    /// One of its columns, lowercase.
+    Column(String),
+    /// An expression over a table's own columns, whose value in a changed
+    /// row a write asks SQLite for (`scope_row.rs`).
+    Expression(Arc<RowTerm>),
+}
+
+impl Member {
+    /// The member's column, unless it is an expression.
+    pub(crate) fn column(&self) -> Option<&str> {
+        match &self.value {
+            MemberValue::Column(column) => Some(column),
+            MemberValue::Expression(_) => None,
+        }
+    }
 }
 
 /// `member`'s column equals a value of `partner`'s rows.

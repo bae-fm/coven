@@ -30,7 +30,7 @@ def valueEdge (s : Statement) (m c : Nat) (affinity : Affinity) (arg : Expr) : O
   let p ← arg.items.head?
   if !arg.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨
     !(arg.strict || s.alwaysBound p) then none
-  pure { member := m, column := c, affinity, partner := p, value := .expr arg, nested := false }
+  pure { member := m, memberValue := .column c, affinity, partner := p, value := .expr arg, nested := false }
 
 /-- The side one argument of COALESCE gives `m.c`, written in core `k`. -/
 def argSide (s : Statement) (k m c : Nat) (affinity : Affinity) : Expr → Option Side
@@ -44,7 +44,7 @@ def armSide (s : Statement) (m c : Nat) (affinity : Affinity) (arm : Nat) : Opti
   | [.expr (.lit (some v))] => some { terms := [.compare c .eq v] }
   | [.expr (.col p pc)] =>
     if (s.item p).core = arm ∧ (s.item p).readable ∧ s.affinity p pc = some affinity then
-      some { edges := [{ member := m, column := c, affinity, partner := p, value := .column pc,
+      some { edges := [{ member := m, memberValue := .column c, affinity, partner := p, value := .column pc,
                          nested := true }] }
     else none
   | _ => none
@@ -142,7 +142,7 @@ theorem arm_row {s : Statement} {db : Db} {f : Nat} {b : Bind} {q : Nat} {r : Ro
 /-- What a value edge says of its partner. -/
 theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr} {e : Edge}
     (h : valueEdge s m c aff arg = some e) :
-    e.member = m ∧ e.column = c ∧ e.nested = false ∧ e.nulls = false ∧ e.partner ≠ m ∧
+    e.member = m ∧ e.memberValue = .column c ∧ e.nested = false ∧ e.nulls = false ∧ e.partner ≠ m ∧
     (s.item e.partner).readable ∧ arg.queries = [] ∧
     (arg.strict = true ∨ s.alwaysBound e.partner = true) ∧
     (∀ j ∈ arg.items, j = e.partner) ∧ arg.refs ≠ [] ∧ e.value = .expr arg := by
@@ -194,11 +194,11 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
     (h : SubqueryEdge.edge s k (.col m c) q = some e) {db : Db} {f : Nat} {b : Bind} {x : Int}
     (hm : cellOf (b m) c = some x)
     (hs : (Expr.sub q).eval b (evalQuery s db f b) = some x) : e.HoldsIn s db f b := by
-  obtain ⟨sub', pc, harms, hout, hval, hpcore, _, hmem, _, hnest⟩ :=
+  obtain ⟨sub', pc, mc, harms, hout, hval, hpcore, _, hmem, hmv, _, hnest⟩ :=
     SubqueryEdge.edge_facts h
   simp only [Expr.col.injEq] at hmem
   obtain ⟨rfl, rfl⟩ := hmem
-  refine Or.inl ⟨x, hm, ?_⟩
+  refine Or.inl ⟨x, by simpa [hmv, PValue.on] using hm, ?_⟩
   simp only [hnest, ↓reduceIte]
   simp only [Expr.eval] at hs
   cases hhead : (evalQuery s db f b q).head? with
@@ -237,7 +237,7 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨_, _, _, _, _, _, hread, hmem, _, hnest⟩ := SubqueryEdge.edge_facts he'
+    obtain ⟨_, _, _, _, _, _, _, hread, hmem, _, _, hnest⟩ := SubqueryEdge.edge_facts he'
     simp only [Expr.col.injEq] at hmem
     exact ⟨hmem.1.symm, fun h => by simp [hnest] at h, hread⟩
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h

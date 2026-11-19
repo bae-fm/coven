@@ -53,9 +53,9 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     e.HoldsIn s db f b := by
   obtain ⟨e', he', rfl, hleft⟩ := edge_facts h
   obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval, hvs⟩ := Edge.edge_facts he'
-  have hmv : cellOf (b e'.member) e'.column = v := by
-    rw [hmem] at hm
-    simpa [Expr.eval] using hm
+  have hmv : e'.memberValue.on (b e'.member) = v := by
+    rw [hmem b sub]
+    exact hm
   have hov : ∀ r, b e'.partner = some r → e'.value.eval r = v := by
     intro r hb
     rw [hval, ← hb, ← other.eval_rowBind hitems hq]

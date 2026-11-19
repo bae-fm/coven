@@ -1013,9 +1013,10 @@ of an album's screens open, each joining tables the import writes, it ran
 about 50 lookups a write, and cost the same 94 µs a row as with none open.
 
 A join narrows a table this way through an equality between one of its
-columns and a column, or an expression over the columns, of one other table in
-the join. The expression holds no clock (`CURRENT_TIMESTAMP`, `date('now')`) and
-no function SQLite doesn't flag deterministic, as `random()` or an app function
+columns, or an expression over its own columns, and a column, or an expression
+over the columns, of one other table in the join. Each expression holds no
+clock (`CURRENT_TIMESTAMP`, `date('now')`) and no function SQLite doesn't flag
+deterministic, as `random()` or an app function
 registered nondeterministic: a write's lookup evaluates it again and could get
 another answer than the query did, so such a join narrows nothing. A row value
 equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
@@ -1024,6 +1025,16 @@ with COALESCE or IFNULL of such values narrows by each of them, since COALESCE
 returns one of its arguments: a value of one other table, a subquery's
 returned column or a constant. A lookup compares each value with the joined
 column's affinity, as SQLite gives it to COALESCE's value.
+
+Ben's album choice joins a record to its owner by `(CASE WHEN rr.kind =
+'album' THEN rr.key ELSE rr.album_key END) = o.album_key`: for a record a write
+changes, coven asks SQLite for the CASE's value in the record's row and whether
+an owner in the query's scope holds it, so a record of another album doesn't
+rerun the choice. SQLite gives such an expression's value the other side's
+affinity, and coven compares it the same way. An expression of a table's own
+columns that holds a COLLATE narrows nothing, and one over a table a LEFT JOIN
+adds narrows that table only when it is NULL wherever a column it names is
+NULL, as the next paragraph says of an expression over the other table.
 
 An expression over a table a LEFT JOIN adds gives the joined column values
 only when it is NULL wherever a column it names is NULL. Ben's album page
@@ -15126,6 +15137,7 @@ Write-ups explain each model and state its assumptions:
 | An equality between two items, true of a binding, carries a term true of one side's row on its compared column to the other side's column; a derived item's row whose column isn't NULL passes what each of its arms' items' terms say of the column the arm passes on | `transfer_sound`, `pulled_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Transfer.lean` | §4 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
+| An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowMember.lean` | §4 |
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/CteNames.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |

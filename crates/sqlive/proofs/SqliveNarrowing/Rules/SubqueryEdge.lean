@@ -31,7 +31,7 @@ def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
   if (s.item m).core ≠ k then none
   let affinity ← s.affinity m c
   if affinity ≠ pa then none
-  pure { member := m, column := c, affinity, partner := p, value := .column pc, nested := true }
+  pure { member := m, memberValue := .column c, affinity, partner := p, value := .column pc, nested := true }
 
 def readCondition : ReadCondition := fun s k cd => do
   let (member, q) ← compared cd
@@ -44,9 +44,10 @@ column's value. -/
 
 theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
     (h : edge s k member q = some e) :
-    ∃ sub pc, (s.query q).arms = [sub] ∧ (s.core sub).output = [.expr (.col e.partner pc)] ∧
+    ∃ sub pc c, (s.query q).arms = [sub] ∧ (s.core sub).output = [.expr (.col e.partner pc)] ∧
       e.value = .column pc ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
-      member = .col e.member e.column ∧ (s.item e.member).core = k ∧ e.nested = true := by
+      member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
+      e.nested = true := by
   unfold edge at h
   simp only [bind, Option.bind] at h
   split at h
@@ -75,8 +76,8 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
             split at h
             · cases h
             · cases h
-              exact ⟨sub, pc, harms, hout, rfl, by simpa using hbad.1, by simpa using hbad.2,
-                rfl, by simpa using hk, rfl⟩
+              exact ⟨sub, pc, _, harms, hout, rfl, by simpa using hbad.1, by simpa using hbad.2,
+                rfl, rfl, by simpa using hk, rfl⟩
     · cases h
   · cases h
 
@@ -162,7 +163,7 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     subst h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨sub, pc, harms, hout, hval, hpcore, hread, hmem, hk, hnest⟩ := edge_facts hedge
+    obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hedge
     refine ⟨hk, fun h => by simp [hnest] at h, hread, fun db f b hc => ?_⟩
     -- The condition gives the member's value and a row of the subquery with it.
     have hrow : ∃ x row, member.eval b (evalQuery s db f b) = some x ∧
@@ -170,7 +171,7 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     obtain ⟨x, row, hmx, hrowq, hcell⟩ := hrow
     refine Or.inl ⟨x, ?_, ?_⟩
     · rw [hmem] at hmx
-      simpa [Expr.eval] using hmx
+      simpa [Expr.eval, hmv, PValue.on] using hmx
     · simp only [hnest, ↓reduceIte]
       cases f with
       | zero => simp [evalQuery] at hrowq

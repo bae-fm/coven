@@ -1,5 +1,6 @@
 import SqliveNarrowing.Rules.Term
 import SqliveNarrowing.Rules.CteNames
+import SqliveNarrowing.Rules.RowMember
 import SqliveNarrowing.Rules.Edge
 import SqliveNarrowing.Rules.RowEdge
 import SqliveNarrowing.Rules.IsEdge

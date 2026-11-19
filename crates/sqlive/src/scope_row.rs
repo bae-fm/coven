@@ -1,4 +1,5 @@
 //! A condition on one table's row that sqlive's own comparisons can't read,
+//! an expression over one table's row compared with another source's value,
 //! and an ORDER BY term's expression over one table's row, judged by asking
 //! SQLite (§4).
 //!
@@ -17,6 +18,15 @@
 //! never makes a LEFT JOIN inner, and it isn't passed into a view's or
 //! subquery's rows.
 //!
+//! An expression over such columns that an equality compares with another
+//! source's value narrows the table to the rows whose value some row of that
+//! source gives in its scope: the question asks whether the expression's
+//! value in the changed row is IN the values the other source's rows give
+//! (`scope_lookup::joined`), as the statement's equality compares them. The
+//! expression is NULL wherever its columns are, or its table is no LEFT
+//! JOIN's (`Planner::member_expression`), so the equality, as an edge, can
+//! make a LEFT JOIN inner.
+//!
 //! An ORDER BY term's expression over such columns, or a generated column's,
 //! bounds a full run's rows by the last row's value (`scope_order.rs`): the
 //! question tests whether the changed row's value is NULL, or how it compares
@@ -26,6 +36,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::row_scope::RowImage;
+use crate::scope_lookup::Lookup;
 use crate::scope_plan::Planner;
 use crate::scope_term::Affinity;
 use crate::select_syntax::{Functions, Part};
@@ -131,6 +142,10 @@ pub(crate) enum RowTest {
     /// That the term's value, given `affinity`, compares with `value`, which
     /// isn't NULL, as `ordering`, as an ORDER BY compares two values.
     Compare { ordering: Ordering, value: Value, affinity: Affinity },
+    /// That the term's value equals a value some row of the lookup's
+    /// partner gives in its scope, as the statement's equality compares
+    /// them: a member's expression joined to its partner.
+    Joined(Arc<Lookup>),
 }
 
 impl RowCondition {
@@ -157,6 +172,9 @@ impl RowCondition {
                 // comparison converts its value only to the affinity the
                 // typed value carries, as a generated column's value has it.
                 format!("+({sql}) {operator} {typed}")
+            }
+            RowTest::Joined(lookup) => {
+                crate::scope_lookup::joined(&format!("({sql})"), lookup, bound)
             }
         })
     }
