@@ -769,18 +769,43 @@ stays as the WHERE gives it.
 
 The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. Coven
-reads the last row's values from the result, so each ORDER BY term must be a
-column the statement also returns, listed before any `*`. Each term names a
-column of the same table, stored and BINARY, with no COLLATE and no NULLS FIRST
-or LAST. That table isn't the right side of a LEFT JOIN. There, when a write
-adds a row that matches a left row that had no match, SQLite no longer returns
-the row of NULLs it returned for that left row, and that row of NULLs can sort
-before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
-and no aggregate or window function in its result columns, since there one
-result row's values depend on many table rows. A join
-that narrows another table by the sorted table's rows takes only the rows up to
-the bound. Any other ORDER BY, such as an expression, and any OFFSET leave the
-scope as the WHERE gives it.
+reads the last row's values from the result, so the statement must also return
+each ORDER BY term as a result column, listed before any `*` and written as the
+term writes it. Every term reads the same table, with no COLLATE and no NULLS
+FIRST or LAST, and is one of these:
+
+- a stored column whose collation is BINARY, which coven compares itself;
+- an expression over that table's stored BINARY columns, such as `year IS
+  NULL` or `coalesce(year, 0) + 1`, that holds no subquery, no `rowid`, no
+  clock and no function that isn't deterministic;
+- a generated column whose collation is BINARY and whose expression names only
+  that table's stored BINARY columns.
+
+To judge a write for a term that isn't a stored column, coven asks SQLite to
+compare the term's value in the changed row with the last row's, as it judges a
+condition on one table's row (below): a SELECT over the row's values that
+evaluates the expression, or a generated column's own expression. Coven
+writes the expression after a unary plus, as `+(year IS NULL) < ?3`, which
+takes away its affinity, so SQLite compares the two values as the ORDER BY
+does. For a generated column, coven gives the last row's value the column's
+type, as `CAST(?3 AS INTEGER)` in an INTEGER column, so SQLite converts the
+expression's value as it does the column's. Ben's album grid sorted by year
+orders by `year IS NULL, year, id` and returns each term, so a full window
+that ends in 1998 doesn't rerun when Ben adds an album from 2004. His storage
+list sorts by `storage_order`, a generated column that ranks how each release
+is stored, and a release Ben adds with a later rank doesn't rerun a full
+window.
+
+That table isn't the right side of a LEFT JOIN. There, when a write adds a row
+that matches a left row that had no match, SQLite no longer returns the row of
+NULLs it returned for that left row, and that row of NULLs can sort before the
+last row. The statement is one SELECT with no OFFSET, no GROUP BY, and no
+aggregate or window function in its result columns, since there one result
+row's values depend on many table rows. A join that narrows another table by
+the sorted table's rows takes only the rows up to the bound. Any other ORDER
+BY, such as one by a result column's position, by a NOCASE column or by an
+expression over two tables, and any OFFSET leave the scope as the WHERE gives
+it.
 
 Which rows a LIMIT keeps can depend on columns the statement never names.
 SQLite keeps the first rows it reads, and it reads them in the order of the

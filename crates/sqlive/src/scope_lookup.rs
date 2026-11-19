@@ -87,7 +87,11 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         }
         if let (Some(sorted), Some(last)) = (&sources.sorted, last) {
             if sorted.source == position {
-                scope = scope.and(crate::scope_order::sorted_at_or_before(&sorted.terms, last));
+                scope = scope.and(crate::scope_order::sorted_at_or_before(
+                    &sorted.terms,
+                    last,
+                    &parameters,
+                ));
             }
         }
         bound[position] = Some(scope);
@@ -256,8 +260,9 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
             format!("{qualifier}.{} IN ({})", crate::sql::identifier(column), list.join(","))
         }
         // Its parameters are numbered as the statement's, which the lookup
-        // binds first.
-        RowScope::Row(row) => format!("({})", row.term.condition),
+        // binds first. A comparison with a value no cast keeps as it is
+        // passes every row, as a write's question counts it a match.
+        RowScope::Row(row) => row.sql(bound).unwrap_or_else(|| "1".into()),
         RowScope::Joined { column, lookup } => {
             let column = format!("{qualifier}.{}", crate::sql::identifier(column));
             let value = partner_value(&lookup.qualifier, &lookup.value);

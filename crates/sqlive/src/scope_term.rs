@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::row_scope::{compare, RowScope};
-use crate::scope_row::{RowCondition, RowTerm};
+use crate::scope_row::{RowCondition, RowTerm, RowTest};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Literal, Operator, UnaryOperator};
@@ -87,6 +87,7 @@ impl ScopeTerm {
             Self::Row(term) => Some(RowScope::Row(Arc::new(RowCondition {
                 term: Arc::clone(term),
                 parameters: parameters.to_vec(),
+                test: RowTest::Holds,
             }))),
             Self::Truth { condition, ordering, inclusive, is, operand } => {
                 let value = operand.value(parameters);

@@ -3,20 +3,45 @@
 //! view read as cores of its own (§4).
 
 use crate::derived::{read_derived_item, Ctes, Derived};
-use crate::schema_objects::{declared_columns, main_object, DeclaredColumn};
+use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
 use crate::scope_plan::{Planner, Source};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::ast::{As, Name, QualifiedName, SelectTable};
+use sqlite3_parser::ast::{As, Expr, Name, QualifiedName, SelectTable};
+use std::sync::Arc;
 
 /// One of a FROM item's columns: its name, lowercase, when sqlive knows the
-/// name SQLite gives it, and its affinity, or `None` when a condition on it
-/// can't narrow, as a generated column's, one whose collation isn't BINARY,
-/// or a column of a view read whole.
+/// name SQLite gives it, and what sqlive knows of its values.
 pub(crate) struct Column {
     pub(crate) name: Option<String>,
-    pub(crate) affinity: Option<Affinity>,
+    pub(crate) value: ColumnValue,
+}
+
+/// What sqlive knows of a column's values.
+pub(crate) enum ColumnValue {
+    /// Values sqlive compares as SQLite does, of this affinity, so a
+    /// condition on the column narrows: a stored column whose collation is
+    /// BINARY, or a derived item's column that passes such columns on.
+    Compared(Affinity),
+    /// A generated column's values, which its expression gives (§4).
+    Generated(Arc<Generated>),
+    /// Values no condition narrows by: a column whose collation isn't
+    /// BINARY, a generated column sqlive can't evaluate, or a column of a
+    /// view read whole.
+    Unknown,
+}
+
+/// A generated column whose collation is BINARY and whose expression names
+/// only its table's stored columns of BINARY collation.
+#[derive(Debug)]
+pub(crate) struct Generated {
+    /// The expression, as SQL that names the table's columns by bare names.
+    pub(crate) sql: String,
+    /// The column's affinity, which SQLite gives the expression's value.
+    pub(crate) affinity: Affinity,
+    /// The columns the expression names, lowercase, with their affinities.
+    pub(crate) columns: Vec<(String, Affinity)>,
 }
 
 /// A FROM item's columns.
@@ -41,13 +66,21 @@ impl Columns {
         }
     }
 
-    /// The affinity a condition on `column` narrows by.
-    pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
+    /// What sqlive knows of the values of `column`.
+    pub(crate) fn value(&self, column: &str) -> Option<&ColumnValue> {
         match self {
             Self::Listed(columns) => {
-                columns.iter().find(|listed| listed.name.as_deref() == Some(column))?.affinity
+                Some(&columns.iter().find(|listed| listed.name.as_deref() == Some(column))?.value)
             }
             Self::Unknown => None,
+        }
+    }
+
+    /// The affinity a condition on `column` narrows by.
+    pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
+        match self.value(column)? {
+            ColumnValue::Compared(affinity) => Some(*affinity),
+            ColumnValue::Generated(_) | ColumnValue::Unknown => None,
         }
     }
 
@@ -255,17 +288,83 @@ pub(crate) fn columns(
     ordinary: bool,
 ) -> rusqlite::Result<Columns> {
     let mut columns = Vec::new();
+    // A table's hidden columns are its generated ones.
+    let mut generated = Vec::new();
     for DeclaredColumn { name: column, declared, hidden } in declared_columns(connection, table)? {
-        let affinity = if ordinary && !hidden {
+        let binary = ordinary && {
             let (_, collation, _, _, _) =
                 connection.column_metadata(Some("main"), table, column.as_str())?;
-            collation
-                .is_some_and(|collation| collation.to_bytes().eq_ignore_ascii_case(b"BINARY"))
-                .then(|| Affinity::declared(&declared))
-        } else {
-            None
+            collation.is_some_and(|collation| collation.to_bytes().eq_ignore_ascii_case(b"BINARY"))
         };
-        columns.push(Column { name: Some(column.to_ascii_lowercase()), affinity });
+        let affinity = Affinity::declared(&declared);
+        if binary && hidden {
+            generated.push((columns.len(), affinity));
+        }
+        let value =
+            if binary && !hidden { ColumnValue::Compared(affinity) } else { ColumnValue::Unknown };
+        columns.push(Column { name: Some(column.to_ascii_lowercase()), value });
+    }
+    if generated.is_empty() {
+        return Ok(Columns::Listed(columns));
+    }
+    let read = read_generated(connection, table, |expressions| {
+        let mut found = Vec::new();
+        for (position, affinity) in generated {
+            let name = columns[position].name.as_deref().expect("a table's columns are named");
+            let expression = expressions.iter().find(|(named, _)| **named == name);
+            if let Some(evaluated) =
+                expression.and_then(|(_, expr)| evaluated(&columns, expr, affinity))
+            {
+                found.push((position, evaluated));
+            }
+        }
+        found
+    })?;
+    let found = match read {
+        Ok(found) => found,
+        // A table the parser can't read keeps its generated columns unknown.
+        Err(why) => {
+            tracing::debug!(table, %why, "sqlive can't read a table's generated columns");
+            Vec::new()
+        }
+    };
+    for (position, generated) in found {
+        columns[position].value = ColumnValue::Generated(Arc::new(generated));
     }
     Ok(Columns::Listed(columns))
+}
+
+/// The generated column of affinity `affinity` that `expr` gives, among the
+/// table's `columns`, when the expression names only columns sqlive compares
+/// and holds no COLLATE, which would give a comparison of its value another
+/// collation. SQLite allows a generated column's expression only columns of
+/// its own row and deterministic functions.
+fn evaluated(columns: &[Column], expr: &Expr<'_>, affinity: Affinity) -> Option<Generated> {
+    let mut found = Vec::new();
+    parts(expr, &mut found);
+    let mut named: Vec<(String, Affinity)> = Vec::new();
+    for part in &found {
+        match part {
+            Part::Name(expr) => {
+                let name = match expr {
+                    Expr::Id(name) => Name(name.0),
+                    Expr::Name(name) => name.clone(),
+                    _ => return None,
+                };
+                let column = columns
+                    .iter()
+                    .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
+                let ColumnValue::Compared(compared) = column.value else {
+                    return None;
+                };
+                let name = column.name.clone().expect("a table's columns are named");
+                if !named.iter().any(|(listed, _)| *listed == name) {
+                    named.push((name, compared));
+                }
+            }
+            Part::Function(..) => {}
+            _ => return None,
+        }
+    }
+    Some(Generated { sql: text(expr), affinity, columns: named })
 }

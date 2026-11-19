@@ -867,7 +867,7 @@ pub(crate) fn read_condition<'a>(
         // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
         let narrowed = match term(connection, &column, condition)? {
             Some(term) => Some(term),
-            None => row_term(planner, core, item, condition, &read),
+            None => row_term(planner, core, item, condition, &read).map(ScopeTerm::Row),
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
     } else if or {

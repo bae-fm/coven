@@ -137,6 +137,97 @@ INSERT INTO albums VALUES (10,2000,''),(20,2000,''),(30,2005,''),(40,2005,''),(5
     db.close();
 }
 
+/// A window ordered by expressions it returns, as an album grid sorted by
+/// year lists the albums with no year last, ends at its last row's values of
+/// them, which SQLite computes for each changed row.
+#[tokio::test]
+async fn a_window_ordered_by_expressions_ends_at_its_last_rows_values() {
+    let db = TestDatabase::open(
+        "CREATE TABLE albums(id INTEGER PRIMARY KEY, year INTEGER, title TEXT);
+INSERT INTO albums VALUES (1,1990,''),(2,1995,''),(3,NULL,''),(4,2000,''),(5,2005,'')",
+    );
+    // 1, 2 and 4.
+    follows(
+        &db,
+        "SELECT id, title, year IS NULL, year FROM albums ORDER BY year IS NULL, year, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO albums VALUES (6,2010,'')", false),
+            // No year sorts after every year.
+            ("INSERT INTO albums VALUES (7,NULL,'')", false),
+            ("UPDATE albums SET title = 'x' WHERE id = 5", false),
+            ("UPDATE albums SET title = 'x' WHERE id = 2", true),
+            // 1, 8 and 2.
+            ("INSERT INTO albums VALUES (8,1992,'')", true),
+            ("UPDATE albums SET title = 'y' WHERE id = 4", false),
+            // 1, 2 and 4.
+            ("UPDATE albums SET year = NULL WHERE id = 8", true),
+            // 1, 2 and 3.
+            ("UPDATE albums SET year = 1999 WHERE id = 3", true),
+            ("UPDATE albums SET title = 'z' WHERE id = 4", false),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A window ordered by a generated column ends at its last row's value of
+/// it, which the column's expression gives each changed row.
+#[tokio::test]
+async fn a_window_ordered_by_a_generated_column_ends_at_its_last_rows_value() {
+    let db = TestDatabase::open(
+        "CREATE TABLE releases(id INTEGER PRIMARY KEY, stored INTEGER, title TEXT,
+    rank INTEGER GENERATED ALWAYS AS (CASE WHEN stored THEN 0 ELSE 1 END));
+INSERT INTO releases(id, stored, title) VALUES (1,1,''),(2,0,''),(3,1,''),(4,0,''),(5,1,'')",
+    );
+    // 2 and 4, whose rank is 1.
+    follows(
+        &db,
+        "SELECT id, title, rank FROM releases ORDER BY rank DESC, id LIMIT 2",
+        vec![],
+        &[
+            ("INSERT INTO releases(id, stored, title) VALUES (6,1,'')", false),
+            ("UPDATE releases SET title = 'x' WHERE id = 1", false),
+            ("INSERT INTO releases(id, stored, title) VALUES (7,0,'')", false),
+            // 2 and 3.
+            ("UPDATE releases SET stored = 0 WHERE id = 3", true),
+            ("UPDATE releases SET title = 'x' WHERE id = 4", false),
+            // 3 and 4.
+            ("UPDATE releases SET stored = 1 WHERE id = 2", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A generated column's value takes the column's affinity: a TEXT column of
+/// `n * 10` holds `'100'`, which sorts before `'20'`, though 100 is greater
+/// than 20.
+#[tokio::test]
+async fn a_generated_columns_value_sorts_in_the_columns_type() {
+    let db = TestDatabase::open(
+        "CREATE TABLE files(id INTEGER PRIMARY KEY, n INTEGER,
+    label TEXT GENERATED ALWAYS AS (n * 10));
+INSERT INTO files(id, n) VALUES (1,1),(2,2),(3,3),(4,5)",
+    );
+    // '10' and '20'.
+    follows(
+        &db,
+        "SELECT id, label FROM files ORDER BY label LIMIT 2",
+        vec![],
+        &[
+            // '10' and '100'.
+            ("INSERT INTO files(id, n) VALUES (5,10)", true),
+            ("INSERT INTO files(id, n) VALUES (6,4)", false),
+            ("INSERT INTO files(id, n) VALUES (7,2)", false),
+            // '10' and '10'.
+            ("UPDATE files SET n = 1 WHERE id = 3", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// When sqlive narrows `tracks` by the releases the window joins them to, it
 /// looks up only the releases up to the window's last row: a change to a track
 /// of a release after the window reruns nothing.
@@ -166,17 +257,18 @@ INSERT INTO tracks VALUES (1,'r1','one'),(2,'r2','two'),(3,'r3','three')",
     db.close();
 }
 
-/// With an OFFSET, an ORDER BY column the statement doesn't return, an ORDER
-/// BY expression or a COLLATE, the scope stays as the WHERE gives it, so a row
-/// added after the window's last row reruns the window.
+/// With an OFFSET, an ORDER BY column or expression the statement doesn't
+/// return, or a COLLATE, the scope stays as the WHERE gives it, so a row added
+/// after the window's last row reruns the window.
 #[tokio::test]
-async fn an_offset_an_unreturned_column_or_an_expression_narrows_nothing_more() {
+async fn an_offset_an_unreturned_term_or_a_collate_narrows_nothing_more() {
     let db = TestDatabase::open(NOTES);
     for sql in [
         "SELECT title, id FROM notes ORDER BY title LIMIT 2 OFFSET 1",
         "SELECT id FROM notes ORDER BY title LIMIT 2",
         "SELECT title, id FROM notes ORDER BY lower(title) LIMIT 2",
         "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE LIMIT 2",
+        "SELECT title, id, lower(title) COLLATE NOCASE FROM notes ORDER BY lower(title) COLLATE NOCASE LIMIT 2",
     ] {
         follows(&db, sql, vec![], &[("INSERT INTO notes VALUES (7,'z','')", true)]).await;
         db.commit("DELETE FROM notes WHERE id = 7");

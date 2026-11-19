@@ -7,7 +7,7 @@
 //! statement puts on the column holds of the source rows too: a source row
 //! failing it makes only output rows that fail it.
 
-use crate::from_item::{Column, Columns, FromItem};
+use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
 use crate::scope_plan::{is_name, read_select, Edge, Member, Planner, Source};
@@ -241,7 +241,8 @@ fn read_derived<'a>(
         });
         let first = affinities.next().flatten();
         let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));
-        columns.push(Column { name, affinity });
+        let value = affinity.map_or(ColumnValue::Unknown, ColumnValue::Compared);
+        columns.push(Column { name, value });
     }
     let rows = (!arms.iter().any(|(_, _, grouped)| *grouped)).then(|| {
         arms.iter()

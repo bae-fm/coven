@@ -3,7 +3,10 @@
 
 use rusqlite::Connection;
 use sqlite3_parser::{
-    ast::{Cmd, IndexedColumn, Name, Select, Stmt},
+    ast::{
+        Cmd, ColumnConstraint, CreateTableBody, Expr, IndexedColumn, Name, NamedColumnConstraint,
+        Select, Stmt,
+    },
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
@@ -84,4 +87,45 @@ pub(crate) fn read_view<T>(
         Err(error) => Ok(Err(format!("view {stored}: {error}"))),
     };
     result
+}
+
+/// `read` run on the generated columns of the main schema's table `stored`,
+/// each by its name with its expression, as the parser reads its CREATE
+/// TABLE; or the parser's message when it can't read the CREATE TABLE.
+pub(crate) fn read_generated<T>(
+    connection: &Connection,
+    stored: &str,
+    read: impl FnOnce(&[(&Name<'_>, &Expr<'_>)]) -> T,
+) -> rusqlite::Result<Result<T, String>> {
+    let sql: String = connection.query_row(
+        "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1",
+        [stored],
+        |row| row.get(0),
+    )?;
+    let bump = Bump::new();
+    let mut parser = Parser::new(&bump, sql.as_bytes());
+    let result = match parser.next() {
+        Ok(Some(Cmd::Stmt(Stmt::CreateTable {
+            body: CreateTableBody::ColumnsAndConstraints { columns, .. },
+            ..
+        }))) => {
+            let generated: Vec<(&Name<'_>, &Expr<'_>)> = columns
+                .iter()
+                .filter_map(|column| {
+                    column.constraints.iter().find_map(
+                        |NamedColumnConstraint { constraint, .. }| match constraint {
+                            ColumnConstraint::Generated { expr, .. } => {
+                                Some((&column.col_name, expr))
+                            }
+                            _ => None,
+                        },
+                    )
+                })
+                .collect();
+            Ok(read(&generated))
+        }
+        Ok(_) => Err(format!("table {stored} holds no CREATE TABLE the parser reads")),
+        Err(error) => Err(format!("table {stored}: {error}")),
+    };
+    Ok(result)
 }
