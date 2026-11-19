@@ -82,3 +82,4 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Statement.on_kept
 #print axioms SqliveNarrowing.PState.Sem.initial
 #print axioms SqliveNarrowing.PState.Sem.readConds
+#print axioms SqliveNarrowing.PState.Sem.carry

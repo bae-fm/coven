@@ -7,7 +7,8 @@ of the core's conditions: the WHERE's always, and a LEFT JOIN's ON where it
 holds a row of the join's item (`Statement.on_kept`). It holds a row of each
 item no LEFT JOIN adds, and of each such item its conditions name. So each
 term, edge and OR a condition gives holds of the binding itself
-(`Narrowing.Facts`). -/
+(`Narrowing.Facts`), and an edge's fact carries a term true of its partner's
+row to its member's (`PState.Sem.carry`). -/
 namespace SqliveNarrowing
 
 
@@ -539,5 +540,98 @@ theorem PState.Sem.readConds {s : Statement} (h : s.wellFormed = true) {P : Cls}
     exact PState.Sem.narrow h hP s.fuel _ _ k hst hin fun Z f b hb =>
       hfacts Z f b (hP Z f k b hb) (((hP Z f k b hb).facts h).2.2.1 cd hcd)
   | leftOn i => exact hst.narrowOn h hP hcd s.fuel
+
+/-! Carrying terms across a core's edges. -/
+
+/-- What `Transfer.carried` lists: a term from an edge of the state between
+two items of core `k`, outside a subquery, that compares the partner's column
+`y` with the member's column `mc`, renamed from `y` to `mc` from the
+partner's own term or, for an edge that compares by `=`, from what the
+partner's arms say of `y`. -/
+theorem Transfer.mem_carried {s : Statement} {st : PState} {k : Nat} {x : Nat × STerm}
+    (hx : x ∈ Transfer.carried s st k) :
+    ∃ e ∈ st.edges, (s.item e.member).core = k ∧ (s.item e.partner).core = k ∧ e.nested = false ∧
+      ∃ y mc, e.value = .column y ∧ e.memberValue = .column mc ∧ x.1 = e.member ∧
+        ∃ u, u.renamed (fun c => if c = y then some mc else none) = some x.2 ∧
+          ((st.items e.partner).term = some u ∨
+            (e.nulls = false ∧ Transfer.pulled s st e.partner y = some u)) := by
+  obtain ⟨e, he, hx⟩ := List.mem_flatMap.mp hx
+  split at hx
+  · rename_i hc
+    obtain ⟨hcm, hcp, hn⟩ := hc
+    split at hx
+    · rename_i y mc hv hm
+      refine ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, ?_⟩
+      rcases List.mem_append.mp hx with hx | hx
+      · obtain ⟨t', ht', rfl⟩ := List.mem_map.mp hx
+        simp only [Option.mem_toList, Option.bind_eq_some_iff] at ht'
+        obtain ⟨u, hu, hr⟩ := ht'
+        exact ⟨rfl, u, hr, Or.inl hu⟩
+      · obtain ⟨t', ht', rfl⟩ := List.mem_map.mp hx
+        simp only [Option.mem_toList, Option.bind_eq_some_iff] at ht'
+        obtain ⟨u, hu, hr⟩ := ht'
+        cases hnull : e.nulls with
+        | true => simp [hnull] at hu
+        | false =>
+          simp only [hnull, Bool.false_eq_true, ↓reduceIte] at hu
+          exact ⟨rfl, u, hr, Or.inr ⟨rfl, hu⟩⟩
+    · cases hx
+  · cases hx
+
+theorem PState.Sem.addCarried {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P) {i : Nat}
+    {t : STerm} (ht : ∀ Z f b r, P Z f (s.item i).core b → b i = some r → t.holds (some r) = true) :
+    (Transfer.addCarried st i t).Sem s P := by
+  unfold Transfer.addCarried
+  refine hs.update (fun hl Z f k b hb hi => hs.rows Z f k b hb i hi hl)
+    (fun Z f b r hb hr u hu => hs.terms Z f b i r hb hr u hu) (fun Z f b r hb hr u hu => ?_)
+    (fun Z f b hb hr sides hsides => hs.ors Z f b i hb hr sides hsides)
+    (fun n hn => hs.held i n hn)
+  simp only [Option.some.injEq] at hu
+  subst hu
+  split
+  · rename_i e he
+    simp [STerm.holds, hs.carried Z f b i r hb hr e he, ht Z f b r hb hr]
+  · exact ht Z f b r hb hr
+
+/-- Carrying terms across core `k`'s edges keeps the invariant, when the
+state has pushed no edge into a derived item's arm, and a derived item's row
+passes what its arms say of each of its columns that isn't NULL: each edge
+an item with a row holds has its fact, whose partner then has a row, and a
+term true of the partner's row is true, renamed, of the member's. -/
+theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P)
+    (hpushed : st.pushed = []) (k : Nat)
+    (hpull : ∀ Z f b i r y t, P Z f (s.item i).core b → b i = some r → r.cell y ≠ none →
+      Transfer.pulled s st i y = some t → t.holds (some r) = true) :
+    (Transfer.carry s st k).Sem s P := by
+  unfold Transfer.carry
+  refine foldl_invariant (P := PState.Sem s P) _ (fun x c hc hx => hx.addCarried ?_) st hs
+  obtain ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hc
+  intro Z f b r hb hbr
+  rw [hi] at hb hbr
+  have hmem : b e.member ≠ none := by rw [hbr]; simp
+  rcases hs.edges Z f b e he hb hmem with hp | ⟨hh, _, hpart, _⟩
+  · rw [hpushed] at hp
+    cases hp
+  have hpk : P Z f (s.item e.partner).core b := by rw [hcp, ← hcm]; exact hb
+  have hh' := hh
+  obtain ⟨rp, hrp, hcell⟩ : ∃ rp, b e.partner = some rp ∧ (e.nulls = false → rp.cell y ≠ none) := by
+    rcases hh' with ⟨x, _, hx⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩
+    · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hx
+      obtain ⟨rp, hrp, hval⟩ := hx
+      refine ⟨rp, hrp, fun _ => ?_⟩
+      rw [hv] at hval
+      simp only [PValue.eval] at hval
+      rw [hval]
+      simp
+    · obtain ⟨rp, hrp⟩ := Option.ne_none_iff_exists'.mp (hpart hn hab)
+      exact ⟨rp, hrp, fun hnf => by rw [hnf] at hnul; cases hnul⟩
+    · simp [hv, PValue.strict] at hst
+  have hut : u.holds (b e.partner) = true := by
+    rw [hrp]
+    rcases hu with hu | ⟨hnf, hu⟩
+    · exact hs.terms Z f b e.partner rp hpk hrp u hu
+    · exact hpull Z f b e.partner rp y u hpk hrp (hcell hnf) hu
+  have := Transfer.transfer_sound hv hm hn hh hut hr
+  rwa [hbr] at this
 
 end SqliveNarrowing

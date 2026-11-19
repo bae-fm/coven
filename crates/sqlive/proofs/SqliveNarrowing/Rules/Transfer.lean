@@ -214,13 +214,14 @@ theorem orAll_holds {l : List (Option STerm)} {t u : STerm} {row : Option Row}
       · exact Or.inr (ih hb (by simpa using hu))
 
 /-- Rule 8's theorem for a derived partner: when each arm's items' terms
-hold of their rows in the bindings the arm keeps, a row of the derived item's
+hold of the rows the bindings the arm keeps hold of them, a row of the derived item's
 query whose column `y` isn't NULL passes what its arms say of `y`. -/
 theorem pulled_sound {s : Statement} {st : PState} {i y q : Nat} {view : Bool}
     (hk : (s.item i).kind = .derived q view) {t : STerm} (hp : pulled s st i y = some t)
     {db : Db} {f : Nat} {b : Bind} {r : Row} (hr : r ∈ evalQuery s db (f + 1) b q)
     (hterms : ∀ k ∈ (s.query q).arms, ∀ b' ∈ coreBindings s db (evalQuery s db f) b k,
-      ∀ j u, (s.item j).core = k → (st.items j).term = some u → u.holds (b' j))
+      ∀ j u r0, (s.item j).core = k → (st.items j).term = some u → b' j = some r0 →
+        u.holds (some r0))
     (hy : r.cell y ≠ none) : t.holds (some r) := by
   simp only [pulled, hk] at hp
   split at hp
@@ -255,8 +256,7 @@ theorem pulled_sound {s : Statement} {st : PState} {i y q : Nat} {view : Bool}
           simp [hbj, cellOf] at hcell
           exact absurd hcell hy
         | some r0 =>
-          have hv := hterms k hk' b' hb' j v hj hterm
-          rw [hbj] at hv
+          have hv := hterms k hk' b' hb' j v r0 hj hterm hbj
           refine PushDown.renamed_sound hu (fun c₁ c₂ hc => ?_) hv
           by_cases hc₁ : c₁ = c
           · subst hc₁

@@ -510,6 +510,11 @@ the reader's promise gives each term, edge and OR at the binding itself. An
 item the planner makes an inner join's holds a fact that a row of NULLs fails
 (`holds_none`, `HoldsIn.bound`, `Disjunction.HoldsIn.bound`), so every such
 binding holds its row, and what its ON held back holds there too.
+`PState.Sem.carry` proves that carrying terms across a core's edges keeps it,
+when the planner has passed no edge into a derived item's arm yet and a
+derived item's row passes what its arms say of each column that isn't NULL:
+an edge an item with a row holds holds of the binding, so its partner has a
+row, and `transfer_sound` carries the partner's term to the member.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the terms the planner carries and passes into derived items, the
