@@ -887,3 +887,22 @@ async fn collated_comparisons_narrow_by_sqlites_answer() {
     }
     db.close();
 }
+
+/// A bare name in a subquery that none of its own tables has names the
+/// column of the query around it, as SQLite resolves it: the subquery's
+/// table narrows by that column's values, so an order of another customer
+/// wakes nothing.
+#[tokio::test]
+async fn a_bare_name_of_the_query_around_a_subquery_narrows_its_table() {
+    let db = TestDatabase::open(
+        "CREATE TABLE customers(id INTEGER PRIMARY KEY, number INTEGER, name TEXT);
+CREATE TABLE orders(id INTEGER PRIMARY KEY, customer INTEGER);
+INSERT INTO customers VALUES (1,10,'a'),(2,20,'b');
+INSERT INTO orders VALUES (1,10),(2,20)",
+    );
+    follows(&db, "SELECT name FROM customers WHERE id = 1 AND EXISTS (SELECT 1 FROM orders WHERE orders.customer = number)", vec![], &[
+        ("UPDATE orders SET customer = 30 WHERE id = 2", false),
+        ("UPDATE orders SET customer = 40 WHERE id = 1", true),
+    ]).await;
+    db.close();
+}
