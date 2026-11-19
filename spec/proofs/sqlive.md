@@ -72,9 +72,16 @@ cores around its own. Every column a core's clauses name belongs to an item of
 the core or of a core around it. The statement is a tree: each core lists each
 item once, one place reads each query, no core reads the statement's own
 query, and each core is an arm of one query, since the reader gives each FROM
-item, CTE reference and subquery a query of its own. `whole_narrowing_sound`
-and `evalQuery_fuel` assume these facts, and the differential checks that
-every statement it generates has them.
+item, CTE reference and subquery a query of its own. The cores sit in one
+another as the queries hold one another: the statement's own query sits in no
+core, each core sits in an arm of a query numbered after its own, a
+subquery's arms sit in the core that holds it, and a derived item's query's
+arms sit in no core, as a view's do, or in the core around the item's core,
+as a FROM subquery's or a CTE's do. The subqueries of a LEFT JOIN's ON name,
+of the ON's own core, only the item the join adds and items before it.
+`whole_narrowing_sound`, `evalQuery_fuel` and the restriction below assume
+these facts, and the differential checks that every statement it generates
+has them.
 
 ## Each rule's theorem
 
@@ -331,6 +338,21 @@ DISTINCT, UNION, EXCEPT, INTERSECT and the ORDER BY of a query with no LIMIT,
 matters. `scoped_rows` gives the restriction its tables: when the judge lets
 a write pass, each masked table holds the same rows that pass the scope of
 an item reading it, before and after the write.
+
+A query's cores, and the cores of the queries they read, name items of their
+own and items of the cores around them.
+[Outer.lean](../../crates/sqlive/proofs/SqliveNarrowing/Outer.lean) states the
+bindings a run of a query reads those outer items' rows from: a binding that
+holds a row of each outer item the query names that no LEFT JOIN adds
+(`Statement.Outer`). `outer_root` proves that the statement's own query names
+no outer item. `outer_derived`, `outer_sub` and `outer_subOn` prove that a
+core run under such a binding runs its derived items' queries and its
+subqueries under such bindings too: a derived item's query under the binding
+the core's items join onto, a subquery of the WHERE or of a result column
+under a binding that holds a row of each of the core's items that no LEFT
+JOIN adds, and a subquery of an ON under a binding that holds a row of each
+such item up to the ON's own. The restriction compares each query's runs
+under these bindings.
 
 A statement with a LIMIT bound needs only the bindings of its own core whose
 rows sort at or before the last row the run before the write returned.

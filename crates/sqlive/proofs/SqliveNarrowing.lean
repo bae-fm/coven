@@ -15,6 +15,7 @@ import SqliveNarrowing.Mask
 import SqliveNarrowing.Unjudged
 import SqliveNarrowing.Fuel
 import SqliveNarrowing.Filter
+import SqliveNarrowing.Outer
 import SqliveNarrowing.Restrict
 import SqliveNarrowing.Scopes
 import SqliveNarrowing.PlannerState
