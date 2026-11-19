@@ -513,11 +513,7 @@ impl Planner<'_> {
     fn add(&mut self, found: Narrowing) -> Vec<usize> {
         let mut narrowed = Vec::new();
         for (item, term) in found.terms {
-            let source = &mut self.items[item].source;
-            source.term = Some(match source.term.take() {
-                Some(existing) => existing.and(term),
-                None => term,
-            });
+            ScopeTerm::add_to(&mut self.items[item].source.term, term);
             narrowed.push(item);
         }
         for edge in found.edges {

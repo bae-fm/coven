@@ -456,11 +456,7 @@ pub(crate) fn push_down(
                 })
                 .collect();
             if let Some(renamed) = &renamed {
-                let source = &mut planner.items[target].source;
-                source.term = Some(match source.term.take() {
-                    Some(existing) => existing.and(renamed.clone()),
-                    None => renamed.clone(),
-                });
+                ScopeTerm::add_to(&mut planner.items[target].source.term, renamed.clone());
             }
             planner.edges.extend(passed.iter().cloned());
             if renamed.is_some() || !passed.is_empty() {

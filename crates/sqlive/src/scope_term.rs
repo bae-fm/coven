@@ -161,6 +161,15 @@ impl ScopeTerm {
         Self::And(Box::new(self), Box::new(other))
     }
 
+    /// Add `term` to the term `found` holds, with AND, or hold `term` alone
+    /// when it holds none.
+    pub(crate) fn add_to(found: &mut Option<Self>, term: Self) {
+        *found = Some(match found.take() {
+            Some(existing) => existing.and(term),
+            None => term,
+        });
+    }
+
     /// The columns it tests.
     pub(crate) fn columns(&self, into: &mut Vec<String>) {
         match self {

@@ -167,11 +167,7 @@ impl Planner<'_> {
             carried.extend(own.into_iter().chain(pulled).map(|term| (edge.member, term)));
         }
         for (item, term) in carried {
-            let source = &mut self.items[item].source;
-            source.carried = Some(match source.carried.take() {
-                Some(existing) => existing.and(term),
-                None => term,
-            });
+            ScopeTerm::add_to(&mut self.items[item].source.carried, term);
         }
     }
 
