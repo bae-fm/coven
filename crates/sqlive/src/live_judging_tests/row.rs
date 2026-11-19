@@ -177,6 +177,7 @@ async fn the_judgment_compares_each_value_as_its_column_does() {
         ("b = 5", 1, 2, false),
         ("a = '5'", 1, 2, false),
         ("typeof(c) = 'real'", 1, 3, false),
+        ("abs(c) > 4", 2, 1, false),
         ("typeof(a) = 'integer'", 1, 3, false),
         ("lower(b) = 'zz'", 4, 3, true),
         ("b = 5 OR b = 6 OR b = 'zz'", 1, 3, true),
