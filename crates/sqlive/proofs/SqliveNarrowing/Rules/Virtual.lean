@@ -1,6 +1,6 @@
 import SqliveNarrowing.Changes
 
-/-! Case C9: a contentful FTS5 table is a table item of the model, every
+/-! A contentful FTS5 table is a table item of the model, every
 column of it of no affinity (BLOB), compared by BINARY (`fts5_columns`). Its
 content table, an ordinary table, holds its rows: the rowid in `id`, then
 each column in its place, so sqlive records each of the content table's row
