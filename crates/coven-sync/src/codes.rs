@@ -172,6 +172,40 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     })
 }
 
+/// A restore code's metadata, or `WrongKind` for an invite or pairing code
+/// and `Invalid` for one that doesn't decode.
+pub fn decode_restore_info(code: &str) -> Result<CodeMetadata, CodeError> {
+    match decode_code_info(code)? {
+        CodeInfo::Restore(metadata) => Ok(metadata),
+        CodeInfo::Invite(_) => wrong_kind(CodeKind::Restore, CodeKind::Invite),
+        CodeInfo::Pairing(_) => wrong_kind(CodeKind::Restore, CodeKind::Pairing),
+    }
+}
+
+/// What an invite code tells, read before any sign-in: the app signs in with
+/// its `metadata.oauth_access`, then calls `join_with_invite`. Refuses the
+/// code as that call would: `WrongKind` for a restore or pairing code,
+/// `Invalid` for one that doesn't decode.
+pub fn decode_invite_info(code: &str) -> Result<InviteInfo, CodeError> {
+    match decode_code_info(code)? {
+        CodeInfo::Invite(info) => Ok(info),
+        CodeInfo::Restore(_) => wrong_kind(CodeKind::Invite, CodeKind::Restore),
+        CodeInfo::Pairing(_) => wrong_kind(CodeKind::Invite, CodeKind::Pairing),
+    }
+}
+
+/// What a pairing code tells, read before any sign-in: the app signs in with
+/// its `metadata.oauth_access`, then calls `join_with_pairing`. Refuses the
+/// code as that call would: `WrongKind` for a restore or invite code,
+/// `Invalid` for one that doesn't decode.
+pub fn decode_pairing_info(code: &str) -> Result<PairingInfo, CodeError> {
+    match decode_code_info(code)? {
+        CodeInfo::Pairing(info) => Ok(info),
+        CodeInfo::Restore(_) => wrong_kind(CodeKind::Pairing, CodeKind::Restore),
+        CodeInfo::Invite(_) => wrong_kind(CodeKind::Pairing, CodeKind::Invite),
+    }
+}
+
 /// Decode a restore code for bootstrap, preserving a
 /// valid wrong-kind distinction. Its storage part has already been validated.
 pub fn read_restore_code(code: &str) -> Result<RestoreCode, CodeError> {

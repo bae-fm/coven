@@ -232,23 +232,7 @@ pub(crate) async fn unfinished_restores(
         let Kept::Restore(code) = kept(builder, &entries, store).await? else {
             continue;
         };
-        let metadata = match coven_sync::decode_code_info(code.as_str())? {
-            CodeInfo::Restore(metadata) => metadata,
-            CodeInfo::Invite(_) => {
-                return Err(CodeError::WrongKind {
-                    expected: CodeKind::Restore,
-                    actual: CodeKind::Invite,
-                }
-                .into())
-            }
-            CodeInfo::Pairing(_) => {
-                return Err(CodeError::WrongKind {
-                    expected: CodeKind::Restore,
-                    actual: CodeKind::Pairing,
-                }
-                .into())
-            }
-        };
+        let metadata = coven_sync::decode_restore_info(code.as_str())?;
         CodeError::require_store(store, metadata.store_id)?;
         restores.push(metadata);
     }

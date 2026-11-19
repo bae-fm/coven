@@ -131,8 +131,9 @@ pub use coven_storage::{
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_storage::{StorageCheck, StorageCheckError};
 pub use coven_sync::{
-    decode_code_info, restore_sign_in, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteAdmits,
-    InviteInfo, Joiner, PairingInfo, UnreadableSavedCode,
+    decode_code_info, decode_invite_info, decode_pairing_info, restore_sign_in, CodeError,
+    CodeInfo, CodeKind, CodeMetadata, InviteAdmits, InviteInfo, Joiner, PairingInfo,
+    UnreadableSavedCode,
 };
 pub use coven_sync::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use coven_sync::{

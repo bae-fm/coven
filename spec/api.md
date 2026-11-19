@@ -8375,6 +8375,10 @@ pub enum ProviderSignOut {
   `decode_code_info` exposes the same location as a saved entry, so a
   typed or scanned code can show which account it is for before connecting. A
   pairing code carries no name either; it expires 30 minutes after it is made.
+  `decode_invite_info` and `decode_pairing_info` read an invite or a pairing
+  code, and refuse a code of another kind as `join_with_invite` and
+  `join_with_pairing` would, before any sign-in, so the app asks for no
+  sign-in that the join would refuse.
 - Coven's saved entry, in iCloud Keychain or Block Store, saves the code with
   the store's name: the last
   name one of the person's devices saw, kept with the slot that set it. Setup,
@@ -9353,6 +9357,18 @@ pub struct AddDeviceRequest {
 /// invite returns a store name, captured when the invite was made.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
+/// What an invite code tells, for the app to read before any sign-in and sign
+/// in with `metadata.oauth_access` before `join_with_invite`. Refuses the
+/// code as that call does: WrongKind for a restore or pairing code, Invalid
+/// for one that doesn't decode (§13.2).
+pub fn decode_invite_info(code: &str) -> Result<InviteInfo, CodeError>;
+
+/// What a pairing code tells, for the app to read before any sign-in and sign
+/// in with `metadata.oauth_access` before `join_with_pairing`. Refuses the
+/// code as that call does: WrongKind for a restore or invite code, Invalid
+/// for one that doesn't decode (§13.2).
+pub fn decode_pairing_info(code: &str) -> Result<PairingInfo, CodeError>;
+
 /// The sign-in that restoring `store` in place from `code` needs, `None` on
 /// S3 and CloudKit, for the app to read before any sign-in and sign in with
 /// before `CovenBuilder::restore_device`. Refuses the code as that call does:
@@ -9903,7 +9919,8 @@ handle.end_add_device(pairing.id).await?;
 On the laptop:
 
 ```rust
-let CodeInfo::Pairing(info) = decode_code_info(&scanned)? else { return wrong_code() };
+// Refuses a restore or invite code before asking for a sign-in.
+let info = decode_pairing_info(&scanned)?;
 let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
@@ -10079,12 +10096,16 @@ loop {
 On Carol's phone:
 
 ```rust
+// Refuses a restore or pairing code before asking for a sign-in.
+let info = decode_invite_info(&scanned)?;
 let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
     .oauth_presenter(platform_sign_in_sheet);
-builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
+if let Some(access) = info.metadata.oauth_access {
+    builder.authenticate(access).await?;
+}
 // The waiting screen shows Carol's number; while it shows, the app holds
 // control.check_often(Duration::from_secs(5)).
 let control = JoinControl::new();

@@ -552,3 +552,54 @@ async fn an_account_invite_code_names_the_account_it_was_shared_with() {
         Some(coven_storage::test_utils::account_id("dan@example.com").as_str())
     );
 }
+
+#[test]
+fn each_kind_of_code_reads_its_info_and_refuses_the_other_kinds() {
+    let restore = RestoreCode {
+        store: StoreId(uuid::Uuid::from_u128(1)),
+        member: MemberId(uuid::Uuid::from_u128(1)),
+        member_keys: coven_crypto::MemberKeys::generate().unwrap(),
+        storage: RestoreStorage::location_only(location()).encode().unwrap(),
+    }
+    .to_text()
+    .unwrap();
+    let invite = invite(InviteStorage::S3 {
+        invitation: StorageInvitation::for_account(location()).unwrap(),
+        credentials: credentials(),
+    })
+    .to_text()
+    .unwrap();
+    let pairing = pairing(RestoreStorage::location_only(location())).to_text().unwrap();
+    let CodeInfo::Restore(metadata) = decode_code_info(&restore).unwrap() else {
+        panic!("a restore code")
+    };
+    assert_eq!(decode_restore_info(&restore).unwrap(), metadata);
+    let CodeInfo::Invite(info) = decode_code_info(&invite).unwrap() else {
+        panic!("an invite code")
+    };
+    assert_eq!(decode_invite_info(&invite).unwrap(), info);
+    let CodeInfo::Pairing(info) = decode_code_info(&pairing).unwrap() else {
+        panic!("a pairing code")
+    };
+    assert_eq!(decode_pairing_info(&pairing).unwrap(), info);
+    let wrong = |result: Result<(), CodeError>| match result {
+        Err(CodeError::WrongKind { expected, actual }) => (expected, actual),
+        other => panic!("not refused as another kind: {other:?}"),
+    };
+    let restore_info = |code: &str| decode_restore_info(code).map(drop);
+    let invite_info = |code: &str| decode_invite_info(code).map(drop);
+    let pairing_info = |code: &str| decode_pairing_info(code).map(drop);
+    assert_eq!(wrong(restore_info(&invite)), (CodeKind::Restore, CodeKind::Invite));
+    assert_eq!(wrong(restore_info(&pairing)), (CodeKind::Restore, CodeKind::Pairing));
+    assert_eq!(wrong(invite_info(&restore)), (CodeKind::Invite, CodeKind::Restore));
+    assert_eq!(wrong(invite_info(&pairing)), (CodeKind::Invite, CodeKind::Pairing));
+    assert_eq!(wrong(pairing_info(&restore)), (CodeKind::Pairing, CodeKind::Restore));
+    assert_eq!(wrong(pairing_info(&invite)), (CodeKind::Pairing, CodeKind::Invite));
+    for (text, read) in [
+        (&restore, &restore_info as &dyn Fn(&str) -> Result<(), CodeError>),
+        (&invite, &invite_info),
+        (&pairing, &pairing_info),
+    ] {
+        assert!(matches!(read(&text[..text.len() - 1]), Err(CodeError::Invalid)));
+    }
+}

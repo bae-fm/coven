@@ -127,7 +127,7 @@ pub async fn join_with_invite(
 }
 
 /// The joins under way on this device, ordered by store id: each unfinished
-/// first installation with a saved invite code, as `decode_code_info` reads
+/// first installation with a saved invite code, as `decode_invite_info` reads
 /// it (`CovenBuilder::unfinished_joins`).
 pub(super) async fn unfinished_joins(
     builder: &CovenBuilder,
@@ -141,23 +141,7 @@ pub(super) async fn unfinished_joins(
         let Kept::Join(text) = kept(builder, &entries, store).await? else {
             continue;
         };
-        let info = match coven_sync::decode_code_info(text.as_str())? {
-            CodeInfo::Invite(info) => info,
-            CodeInfo::Restore(_) => {
-                return Err(CodeError::WrongKind {
-                    expected: CodeKind::Invite,
-                    actual: CodeKind::Restore,
-                }
-                .into())
-            }
-            CodeInfo::Pairing(_) => {
-                return Err(CodeError::WrongKind {
-                    expected: CodeKind::Invite,
-                    actual: CodeKind::Pairing,
-                }
-                .into())
-            }
-        };
+        let info = coven_sync::decode_invite_info(text.as_str())?;
         CodeError::require_store(store, info.metadata.store_id)?;
         joins.push(info);
     }
