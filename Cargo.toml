@@ -99,6 +99,12 @@ unreachable_pub = "deny"
 dead_code = "deny"
 missing_docs = "deny"
 
+# Cargo's own lints on the manifests. `-D warnings` on clippy does not reach
+# them: a dependency a crate never uses fails every cargo build and clippy run,
+# the hook's included.
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+
 [workspace.lints.clippy]
 # Composition roots and owner constructors take their collaborators by name
 # (Appendix F.3), so long argument lists are the intended shape there.
