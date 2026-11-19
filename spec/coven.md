@@ -12613,8 +12613,10 @@ What the models cover:
 - **Narrowing a live query** to the rows its statements can depend on (§4):
   each rule's step, against a port of sqlive's planner, and the first steps of
   putting them together: a write the judge lets pass leaves the rows that pass
-  each table's scope unchanged, and the rows of a statement read whole. A
-  differential test checks how the planner composes the rules against SQLite.
+  each table's scope unchanged, and the rows of a statement read whole; and two
+  databases that hold the same rows passing each item's scope give a statement
+  the same rows when its bindings keep the scopes' promise. A differential test
+  checks how the planner composes the rules against SQLite.
 - **Pieces of storage behaviour,** such as copy publication and upload sessions.
 
 What they don't cover:
@@ -15156,6 +15158,7 @@ Write-ups explain each model and state its assumptions:
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
 | A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
+| Two databases that hold the same rows passing each item's test give a core the same bindings that decide its query's rows, and the statement the same rows, when every such binding holds rows that pass their tests; when the judge lets a write pass, each masked table holds the same rows that pass the scope of an item reading it | `joinItems_restricted`, `coreBindings_restricted`, `queryRows_restricted`, `agree_of_kept`, `result_restricted`, `scoped_rows` | `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 
 ## Appendix H. Errors and statuses

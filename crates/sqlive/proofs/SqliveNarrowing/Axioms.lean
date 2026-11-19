@@ -43,3 +43,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.whole_narrowing_sound
 #print axioms SqliveNarrowing.evalQuery_fuel
 #print axioms SqliveNarrowing.lookupRows_derived
+#print axioms SqliveNarrowing.joinItems_restricted
+#print axioms SqliveNarrowing.coreBindings_restricted
+#print axioms SqliveNarrowing.queryRows_restricted
+#print axioms SqliveNarrowing.agree_of_kept
+#print axioms SqliveNarrowing.result_restricted
+#print axioms SqliveNarrowing.scoped_rows

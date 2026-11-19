@@ -288,6 +288,29 @@ query returns the same rows with any fuel past its number, and
 `lookupRows_derived` that a lookup of a derived item whose arms sit in no core
 reads the rows the statement reads of it.
 
+Two databases that hold the same rows passing each item's scope give the
+statement the same rows, as long as every binding that decides those rows
+holds only rows that pass their scopes.
+[Restrict.lean](../../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean)
+proves this from a promise that it states apart from the planner (`Kept`):
+each binding a core keeps that decides the rows its query returns holds rows
+that pass their items' tests, and holds no row of a LEFT JOIN item only when
+that item's ON can't hold for a row that fails its test. A binding of a
+derived item's arm decides the derived item's rows when its row passes the
+derived item's test; a binding of an arm that aggregates or calls a window
+function always decides them. `joinItems_restricted` and
+`coreBindings_restricted` prove that a core then keeps the same such bindings
+from both databases: a join reads the same rows that pass each item's test,
+and the ON and WHERE conditions read the same subquery rows under a binding
+whose rows pass their tests. `queryRows_restricted` carries that through
+DISTINCT, UNION, EXCEPT, INTERSECT and the ORDER BY of a query with no LIMIT,
+`agree_of_kept` through every nested query at every fuel, and
+`result_restricted` to the statement's rows when every row of its own query
+matters. `scoped_rows` gives the restriction its tables: when the judge lets
+a write pass, each masked table holds the same rows that pass the scope of
+an item reading it, before and after the write. Whether the planner's scopes
+keep the promise is the step that remains.
+
 ## What the proofs don't cover
 
 The theorems prove each rule's step and the steps of putting them together
@@ -295,9 +318,10 @@ that the section above names. For a statement sqlive doesn't read whole, no
 theorem yet proves that a write the judge lets pass leaves the statement's
 rows unchanged: that the order in which the planner places items, the ON
 conditions it holds back, the terms it carries across equalities, the terms
-it passes into derived items, the lookups of each join's partner and the
-LIMIT bound give scopes outside of which a write leaves the result unchanged.
-The differential checks that composition against SQLite on every statement it
+it passes into derived items and the lookups of each join's partner give
+scopes that keep the promise `agree_of_kept` takes, and that the LIMIT bound
+leaves the rows that sort at or before the last row unchanged. The
+differential checks that composition against SQLite on every statement it
 generates.
 
 The model leaves out text, real and blob values, collations and the
