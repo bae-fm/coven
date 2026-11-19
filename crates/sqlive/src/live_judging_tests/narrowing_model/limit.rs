@@ -1,8 +1,10 @@
-//! Rule 6: a statement ordered by its result columns of one table, columns
-//! or expressions over them, with a LIMIT, depends on that table's rows up to
-//! its last row; and the forms that keep the WHERE's scope: an order by
-//! position, by a LEFT JOIN's right side, by another table's column too, or
-//! by an expression over a column sqlive doesn't compare, and an OFFSET.
+//! Rule 6: a statement ordered by its result columns, columns or expressions
+//! over one table's columns, with a LIMIT, depends on each ordered table's
+//! rows up to its last row: the table whose terms come first by its own
+//! terms, and a table whose terms come later also by the rows of the tables
+//! before it that it joins. And the forms that keep the WHERE's scope: an
+//! order by position, by a LEFT JOIN's right side, or by an expression over
+//! two tables or over a column sqlive doesn't compare, and an OFFSET.
 //! Rule 7: an order that doesn't sort by the rowid of each table, as one over
 //! a join, makes every column of the tables count as read.
 
@@ -50,23 +52,39 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             vec![eq(col("y", "a"), col("x", "id"))],
         )),
     }
+    // A condition on `y` decides which item the planner places first.
+    if from.len() > 1 && rng.chance(25) {
+        conditions.push(super::term::condition(rng, "y", 1));
+    }
     let sorted = if from.len() == 1 { "x" } else { sorted };
     let other = (from.len() > 1).then(|| if sorted == "x" { "y" } else { "x" });
     // The result shows the sorted item's columns and an expression over
-    // them, or over another item's column too.
-    let select_ = vec![
+    // them, or over another item's column too, then the other item's
+    // columns, by which an order across the join sorts.
+    let mut select_ = vec![
         out(col(sorted, "c")),
         out(col(sorted, "id")),
         out(col(sorted, "a")),
         out(expression(rng, sorted, other)),
     ];
-    let order = match rng.below(6) {
+    if let Some(other) = other {
+        select_.push(out(col(other, "c")));
+        select_.push(out(col(other, "id")));
+    }
+    let order = match rng.below(if other.is_some() { 11 } else { 6 }) {
         0 => vec![(0, false)],
         1 => vec![(0, true), (1, false)],
         2 => vec![(2, false), (1, true)],
         3 => vec![(3, false), (1, false)],
         4 => vec![(3, true), (0, false), (1, true)],
-        _ => vec![(0, false), (1, false)],
+        5 => vec![(0, false), (1, false)],
+        // Orders across the join: the other item's terms first, or the
+        // sorted item's, or the other's on both sides of the sorted item's.
+        6 => vec![(4, false), (0, false), (1, true)],
+        7 => vec![(0, true), (4, false), (5, false)],
+        8 => vec![(4, true), (5, false), (3, false), (1, false)],
+        9 => vec![(2, false), (1, false), (4, true)],
+        _ => vec![(4, false), (0, true), (5, false)],
     };
     Query {
         arms: vec![Core { from, conditions, select: select_, group: Vec::new(), distinct: false }],
