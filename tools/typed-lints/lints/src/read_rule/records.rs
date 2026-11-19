@@ -132,9 +132,9 @@ impl<'a, 'tcx> Reporter<'a, 'tcx> {
         format!("{file}:{}:{}", start.line, start.col_display + 1)
     }
 
-    /// What the reporter recorded.
+    /// What the reporter, made by `record`, recorded.
     pub(super) fn into_recorded(self) -> Vec<Recorded> {
-        self.recorded.map(RefCell::into_inner).unwrap_or_default()
+        self.recorded.expect("only a reporter made by `record` records").into_inner()
     }
 }
 
@@ -198,15 +198,17 @@ impl<'tcx> Records<'tcx> {
                 .map(str::to_string)
                 .unwrap_or_else(|| stop(&format!("has a row without its {key}")))
         };
-        let mut record = FxHashMap::default();
-        for function in table.get("functions").and_then(toml::Value::as_array).into_iter().flatten()
-        {
-            let definition = text_of(function, "definition");
-            let findings = function
-                .get("findings")
+        let list_of = |value: Option<&toml::Value>, key: &str| {
+            value
                 .and_then(toml::Value::as_array)
-                .into_iter()
-                .flatten()
+                .cloned()
+                .unwrap_or_else(|| stop(&format!("has no list of {key}")))
+        };
+        let mut record = FxHashMap::default();
+        for function in list_of(table.get("functions"), "functions") {
+            let definition = text_of(&function, "definition");
+            let findings = list_of(function.get("findings"), "findings")
+                .iter()
                 .map(|finding| Recorded {
                     at: text_of(finding, "at"),
                     lint: text_of(finding, "lint"),
@@ -238,7 +240,10 @@ fn record_file(metadata: &Path) -> PathBuf {
 /// function of `functions` with what read code would find through it.
 pub(super) fn write(tcx: TyCtxt<'_>, functions: &[(LocalDefId, Vec<Recorded>)]) {
     let OutFileName::Real(metadata) = tcx.output_filenames(()).path(OutputType::Metadata) else {
-        return;
+        tcx.dcx().fatal(
+            "typed lints: the read rule writes the crate's record beside its metadata file, and \
+             this compile writes its metadata to the standard output",
+        );
     };
     let mut rows = Vec::new();
     for (function, findings) in functions {
@@ -254,7 +259,6 @@ pub(super) fn write(tcx: TyCtxt<'_>, functions: &[(LocalDefId, Vec<Recorded>)]) 
             .collect::<Vec<_>>();
         let mut row = toml::Table::new();
         row.insert("definition".into(), path_hash(tcx, function.to_def_id()).into());
-        row.insert("path".into(), tcx.def_path_str(*function).into());
         row.insert("findings".into(), toml::Value::Array(findings));
         rows.push(toml::Value::Table(row));
     }
