@@ -66,3 +66,4 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_leftOn
 #print axioms SqliveNarrowing.plan_pushed
 #print axioms SqliveNarrowing.plan_order
+#print axioms SqliveNarrowing.plan_restriction

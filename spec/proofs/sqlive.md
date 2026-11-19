@@ -389,10 +389,25 @@ passed into it, through the result column that an arm passes the target's
 column on to unchanged, and that the target is an inner join's. The planner
 keeps the edges it passes in a list of their own (`PState.pushed`), apart
 from the edges conditions give, and no step of the planner reads that list.
-Whether the planner's state gives each item terms, edges and ORs that hold of
-the bindings that matter, through the conditions it reads, the ON conditions it
+
+[Tests.lean](../../crates/sqlive/proofs/SqliveNarrowing/Tests.lean) states the
+tests the restriction takes from the planner's scopes. An item's row passes
+its test when it passes the item's scope, with lookups in what sqlive keeps
+of the database the write leaves, and the scope of each edge the planner
+passed into the item, and, for an item a lookup reads alone, is among the
+rows the lookup reads. A query's row matters when it passes the scope and
+passed edges of the derived item that reads the query, and every row of a
+query with a LIMIT or an OFFSET, or that no derived item reads, matters.
+`plan_restriction` proves that when the judge lets a write pass, the tables
+before and after the write hold the same rows that pass each item's test,
+and that each derived item's test keeps only rows that matter to its query,
+since one place reads each query.
+
+Whether these tests keep the promise `Kept` is the step that remains: whether
+the planner's state gives each item terms, edges and ORs that hold of the
+bindings that matter, through the conditions it reads, the ON conditions it
 holds back, the terms it carries and passes into derived items, and the order
-it places items in, is the step that remains.
+it places items in.
 
 ## What the proofs don't cover
 

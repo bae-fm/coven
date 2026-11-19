@@ -19,3 +19,4 @@ import SqliveNarrowing.Outer
 import SqliveNarrowing.Restrict
 import SqliveNarrowing.Scopes
 import SqliveNarrowing.PlannerState
+import SqliveNarrowing.Tests

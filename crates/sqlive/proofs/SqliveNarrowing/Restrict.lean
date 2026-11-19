@@ -570,14 +570,17 @@ theorem queryRows_restricted {s : Statement} {rel : Nat → Row → Bool} {q : N
 
 /-- What the restriction needs of the statement and the tests, beside the
 promise: a well-formed statement, tables that hold the same rows that pass
-each item's test, a derived item's query whose rows that matter include
-those that pass the item's test, subqueries all of whose rows matter, and a
-LIMIT or an OFFSET whose query's rows all matter. -/
+the test of each item a core lists, a derived item's query whose rows that
+matter include those that pass the test of each item a core lists of it,
+subqueries all of whose rows matter, and a LIMIT or an OFFSET whose query's
+rows all matter. -/
 structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel : Nat → Row → Bool) :
     Prop where
   wf : s.wellFormed = true
-  tables : ∀ i t, s.table? i = some t → (X.rows t).filter (G i) = (Y.rows t).filter (G i)
-  derived : ∀ i q v, (s.item i).kind = .derived q v → ∀ r, G i r = true → rel q r = true
+  tables : ∀ k, ∀ i ∈ (s.core k).items, ∀ t, s.table? i = some t →
+    (X.rows t).filter (G i) = (Y.rows t).filter (G i)
+  derived : ∀ k, ∀ i ∈ (s.core k).items, ∀ q v, (s.item i).kind = .derived q v →
+    ∀ r, G i r = true → rel q r = true
   subs : ∀ q, ∀ k ∈ (s.query q).arms, ∀ q' ∈ (s.core k).subqueries, ∀ r, rel q' r = true
   post : ∀ q, q ≠ s.root →
     ((s.query q).limit.isSome || (s.query q).offset.isSome) = true → ∀ r, rel q r = true
@@ -647,15 +650,15 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
     · exact Passes.empty G
     · exact ho
   have hkeep := coreBindings_restricted (k := k) (o := o) hLeft ((s.wellFormed_parts h.wf).nodup k ((s.wellFormed_parts h.wf).arms q (s.query_lt hk) k hk).1) ho
-    (fun i _ t ht => h.tables i t ht)
+    (fun i hi t ht => h.tables k i hi t ht)
     (fun i hi q' v hkind => by
       have hmem : q' ∈ s.nestedQueries k :=
         List.mem_append_left _ (List.mem_filterMap.mpr ⟨i, hi, by simp [hkind]⟩)
       have hne : q' ≠ s.root := fun e => s.wellFormed_root h.wf k (e ▸ hmem)
       have := congrArg (List.filter (G i)) (hagree q' (Nat.lt_of_lt_of_le
         (s.wellFormed_nested h.wf (s.query_lt hk) hk hmem) hq) hne _ (s.outer_derived h.wf hk hout hi hkind) hb0)
-      rwa [filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr),
-        filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr)] at this)
+      rwa [filter_filter_of_imp (fun r _ hr => h.derived k i hi q' v hkind r hr),
+        filter_filter_of_imp (fun r _ hr => h.derived k i hi q' v hkind r hr)] at this)
     (fun i hi b hb hw hbd cd hcd q' hq' => hsub b hb q' (Core.onOf_queries hcd hq')
       (s.outer_subOn h.wf hk hout hw hbd hcd hq'))
     hsubs ((hX k hk).2) ((hY k hk).2)
