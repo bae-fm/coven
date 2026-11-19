@@ -629,3 +629,21 @@ async fn a_cte_no_query_reads_adds_no_column() {
     .await;
     db.close();
 }
+
+/// An order by a LEFT JOIN's right side keeps the scope its WHERE gives: a
+/// right row added for a left row with none takes away that left row's row
+/// of NULLs, which sorted first, whatever the new row's value.
+#[tokio::test]
+async fn an_order_by_a_left_joins_right_side_narrows_nothing_more() {
+    let db = TestDatabase::open(
+        "CREATE TABLE albums(id INTEGER PRIMARY KEY);
+CREATE TABLE ratings(id INTEGER PRIMARY KEY, album INTEGER, stars INTEGER);
+INSERT INTO albums VALUES (1),(2),(3),(4);
+INSERT INTO ratings VALUES (1,2,5),(2,3,6),(3,4,7)",
+    );
+    follows(&db, "SELECT r.stars, a.id FROM albums a LEFT JOIN ratings r ON r.album = a.id ORDER BY r.stars LIMIT 2", vec![], &[
+        ("INSERT INTO ratings VALUES (4,1,9)", true),
+    ])
+    .await;
+    db.close();
+}

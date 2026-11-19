@@ -461,7 +461,7 @@ pub fn query(rng: &mut Rng) -> Generated {
     };
     let (_, last) = sources[sources.len() - 1];
     let (_, first) = sources[0];
-    let sql = match rng.below(7) {
+    let sql = match rng.below(8) {
         0 => format!("SELECT count(*) FROM {from}{filter}"),
         1 => format!("SELECT sum({last}.c), count({first}.b) FROM {from}{filter}"),
         2 => format!(
@@ -474,6 +474,17 @@ pub fn query(rng: &mut Rng) -> Generated {
         4 => {
             let (sql, _) = subquery(rng, "q", &sources, "max({}.c)", &mut parameters);
             format!("SELECT {first}.id, ({sql}) FROM {from}{filter} ORDER BY 1, 2")
+        }
+        5 => {
+            // Sorted by one source's columns with a LIMIT, so a full run's
+            // last row can bound that source: a table, a LEFT JOIN's right
+            // side, a subquery, a CTE or a view.
+            let (_, sorted) = *rng.pick(&sources);
+            let direction = *rng.pick(&["", " DESC"]);
+            format!(
+                "SELECT {sorted}.c, {sorted}.id, {first}.id, {last}.id, {last}.b FROM {from}{filter} ORDER BY {sorted}.c{direction}, {sorted}.id, {first}.id, {last}.id LIMIT {}",
+                1 + rng.below(3)
+            )
         }
         _ => format!(
             "SELECT {first}.id, {first}.a, {last}.id, {last}.b, {last}.c FROM {from}{filter} ORDER BY 1, 2, 3, 4, 5"

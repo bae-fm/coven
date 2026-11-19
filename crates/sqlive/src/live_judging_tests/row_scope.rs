@@ -166,13 +166,13 @@ type Kind = (&'static str, bool);
 /// measures over the default seeds, so a weaker narrowing, which reruns more
 /// queries for the same writes, fails here.
 const WASTED_PERCENT: [(&str, usize); 7] = [
-    ("compound", 6),
+    ("compound", 10),
     ("no from", 16),
     ("table", 11),
     ("view", 23),
     ("derived", 14),
     ("cte", 18),
-    ("join", 20),
+    ("join", 23),
 ];
 
 /// What one seed found: commits that left a narrowing query's result alone
