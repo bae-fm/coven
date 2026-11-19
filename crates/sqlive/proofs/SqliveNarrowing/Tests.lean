@@ -372,9 +372,10 @@ statement's conditions leave. -/
 theorem plan_sorted (s : Statement) :
     (plan s).sorted = Limit.sortedLimit s (s.readOrder.foldl (readCore s) (PState.initial s)) := rfl
 
-/-- The sixth step's bound: in a binding `b` of the statement's own core
-whose ORDER BY values sort at or before those of the core's row of `b'`,
-the LIMIT bound of each item the ORDER BY sorts passes the item's row, when
+/-- The LIMIT bound's part of the planner's promise: in a binding `b` of the
+statement's own core whose ORDER BY values sort at or before those of the
+core's row of `b'`, the LIMIT bound of each item the ORDER BY sorts passes
+the item's row, when
 `b` holds a row of each item the ORDER BY sorts, among `rowsOf` and passing
 its scope among `bound`, and each membership from one such item to another
 holds of `b`. -/
