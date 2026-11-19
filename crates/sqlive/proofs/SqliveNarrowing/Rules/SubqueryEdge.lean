@@ -135,6 +135,22 @@ theorem compared_sound {cd : Cond} {member : Expr} {q : Nat} (h : compared cd = 
     · cases h
   · cases h
 
+/-- The subquery `compared` reads is one the condition holds. -/
+theorem compared_queries {cd : Cond} {member : Expr} {q : Nat} (h : compared cd = some (member, q)) :
+    q ∈ cd.queries := by
+  unfold compared at h
+  split at h
+  · split at h
+    · cases h; simp [Cond.queries, Expr.queries]
+    · cases h
+  · split at h
+    · cases h; simp [Cond.queries, Expr.queries]
+    · cases h
+  · split at h
+    · cases h; simp [Cond.queries]
+    · cases h
+  · cases h
+
 /-- Rule 3's theorem: a column compared with a subquery's value, true of a
 binding, takes a value a binding of the subquery's core gives its source. -/
 theorem subquery_edge_sound : ReadCondition.Sound readCondition where
@@ -166,6 +182,7 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hedge
     refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
       Or.inl (by rw [hmv]; rfl),
+      fun _ => ⟨q, compared_queries hcmp, by rw [hpcore, harms]; simp⟩,
       fun db f b hc => ?_⟩
     -- The condition gives the member's value and a row of the subquery with it.
     have hrow : ∃ x row, member.eval b (evalQuery s db f b) = some x ∧

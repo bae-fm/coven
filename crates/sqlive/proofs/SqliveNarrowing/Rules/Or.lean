@@ -120,6 +120,36 @@ theorem conjuncts_items {cd c : Cond} (h : c ∈ conjuncts cd) : ∀ j ∈ c.ite
     subst h
     exact fun j hj => hj
 
+/-- The subqueries a side of an OR holds are subqueries the OR holds. -/
+theorem sides_queries {cd c : Cond} (h : c ∈ sides cd) : ∀ q ∈ c.queries, q ∈ cd.queries := by
+  induction cd with
+  | or l r ihl ihr =>
+    intro q hq
+    simp only [sides, List.mem_append] at h
+    simp only [Cond.queries, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (ihl h q hq)
+    · exact Or.inr (ihr h q hq)
+  | _ =>
+    simp only [sides, List.mem_singleton] at h
+    subst h
+    exact fun q hq => hq
+
+/-- The subqueries a conjunct holds are subqueries its condition holds. -/
+theorem conjuncts_queries {cd c : Cond} (h : c ∈ conjuncts cd) : ∀ q ∈ c.queries, q ∈ cd.queries := by
+  induction cd with
+  | and l r ihl ihr =>
+    intro q hq
+    simp only [conjuncts, List.mem_append] at h
+    simp only [Cond.queries, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (ihl h q hq)
+    · exact Or.inr (ihr h q hq)
+  | _ =>
+    simp only [conjuncts, List.mem_singleton] at h
+    subst h
+    exact fun q hq => hq
+
 theorem mem_side_terms {read : ReadCondition} {s : Statement} {k : Nat} {side : Cond}
     {i : Nat} {t : STerm} (h : (i, t) ∈ (sideNarrowing read s k side).terms) :
     ∃ c ∈ conjuncts side, ∃ n, read s k c = some n ∧ (i, t) ∈ n.terms := by
@@ -174,9 +204,11 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
         obtain ⟨he, hmem⟩ := he
         obtain ⟨side', hside', rfl⟩ := List.mem_map.mp hfound
         obtain ⟨c, hc, n', hr, he'⟩ := mem_side_edges he
-        obtain ⟨_, hne, hnamed, hread, hstrict, _⟩ := h.edges hr e he'
-        exact ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread,
-          hstrict⟩
+        obtain ⟨_, hne, hnamed, hread, hstrict, hnested, _⟩ := h.edges hr e he'
+        refine ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread,
+          hstrict, fun hn => ?_⟩
+        obtain ⟨q, hq, harm⟩ := hnested hn
+        exact ⟨q, sides_queries hside' _ (conjuncts_queries hc _ hq), harm⟩
       · intro db f b hc
         obtain ⟨side, hside, htrue⟩ := sides_true hc
         refine ⟨sideFor (sideNarrowing read s k side) i,
@@ -192,7 +224,7 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
           simp only [sideFor, List.mem_filter, decide_eq_true_eq] at he
           obtain ⟨he, _⟩ := he
           obtain ⟨c, hc', n', hr, he'⟩ := mem_side_edges he
-          exact (h.edges hr e he').2.2.2.2.2 db f b (conjuncts_true htrue c hc')
+          exact (h.edges hr e he').2.2.2.2.2.2 db f b (conjuncts_true htrue c hc')
     · cases hd
   all_goals simp [readCondition] at hn
 

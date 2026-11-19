@@ -103,14 +103,14 @@ theorem is_edge_sound : ReadCondition.Sound readCondition where
       simp only [List.mem_append, Option.mem_toList] at he
       rcases he with he | he
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
-        obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
+        obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
         refine ⟨hk, fun _ => hne, fun _ => Edge.items_right _ (show e'.partner ∈ r.items from Edge.edge_partner_mem he'), hread,
-          (Edge.edge_memberStrict he' :), fun db f b hc => ?_⟩
+          (Edge.edge_memberStrict he' :), fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc).symm
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
-        obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
+        obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
         refine ⟨hk, fun _ => hne, fun _ => Edge.items_left _ (show e'.partner ∈ l.items from Edge.edge_partner_mem he'), hread,
-          (Edge.edge_memberStrict he' :), fun db f b hc => ?_⟩
+          (Edge.edge_memberStrict he' :), fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc)
     · cases h
 

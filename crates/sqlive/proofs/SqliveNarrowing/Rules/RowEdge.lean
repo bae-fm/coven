@@ -72,14 +72,14 @@ theorem row_edge_sound : ReadCondition.Sound readCondition where
         · exact ⟨p, Or.inl ⟨x, hl, hp⟩, rfl⟩
         · exact ⟨p, Or.inr ⟨x, hr, hp⟩, rfl⟩
       rcases he with he | he
-      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
+      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => hnamed r (Or.inr rfl) _ (Edge.edge_partner_mem he), hread,
-          Edge.edge_memberStrict he, fun db f b hc => ?_⟩
+          Edge.edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hl hr
-      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
+      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => hnamed l (Or.inl rfl) _ (Edge.edge_partner_mem he), hread,
-          Edge.edge_memberStrict he, fun db f b hc => ?_⟩
+          Edge.edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hr hl
     · cases h

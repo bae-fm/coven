@@ -224,11 +224,13 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
           simp only [hp, cellOf] at hs
           simp [hval, PValue.eval, hs]
 
-/-- What a side's edges say statically: each is from `m`, and outside a
-subquery its partner isn't `m` and is among the items `named`. -/
-def SideFacts (s : Statement) (m : Nat) (named : List Nat) (side : Side) : Prop :=
+/-- What a side's edges say statically: each is from `m`, outside a
+subquery its partner isn't `m` and is among the items `named`, and inside
+one it sits in an arm of one of the subqueries `queries`. -/
+def SideFacts (s : Statement) (m : Nat) (named queries : List Nat) (side : Side) : Prop :=
   ∀ e ∈ side.edges, e.member = m ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (e.nested = false → e.partner ∈ named) ∧ (s.item e.partner).readable ∧ e.memberStrict s
+    (e.nested = false → e.partner ∈ named) ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
+    e.NestedIn s queries
 
 /-- The items an argument of COALESCE names are items the COALESCE names. -/
 theorem args_items {e arg : Expr} (h : arg ∈ args e) : ∀ j ∈ arg.items, j ∈ e.items := by
@@ -244,6 +246,22 @@ theorem args_items {e arg : Expr} (h : arg ∈ args e) : ∀ j ∈ arg.items, j 
     simp only [args, List.mem_singleton] at h
     subst h
     exact fun j hj => hj
+
+/-- The subqueries an argument of COALESCE holds are subqueries the
+COALESCE holds. -/
+theorem args_queries {e arg : Expr} (h : arg ∈ args e) : ∀ q ∈ arg.queries, q ∈ e.queries := by
+  induction e with
+  | coalesce l r ihl ihr =>
+    intro q hq
+    simp only [args, List.mem_append] at h
+    simp only [Expr.queries, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (ihl h q hq)
+    · exact Or.inr (ihr h q hq)
+  | _ =>
+    simp only [args, List.mem_singleton] at h
+    subst h
+    exact fun q hq => hq
 
 /-- Each side an argument gives narrows the member. -/
 theorem argSide_narrows {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
@@ -266,22 +284,23 @@ theorem armSide_narrows {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat}
   · cases h
 
 theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
-    (h : argSide s k m c aff arg = some side) : SideFacts s m arg.items side := by
+    (h : argSide s k m c aff arg = some side) : SideFacts s m arg.items arg.queries side := by
   intro e he
   unfold argSide at h
   split at h
   · cases h; simp at he
-  · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
+  · rename_i q
+    obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨_, _, _, _, _, _, _, hread, hmem, hmv, _, hnest⟩ := SubqueryEdge.edge_facts he'
+    obtain ⟨_, _, _, harms, _, _, hpcore, hread, hmem, hmv, _, hnest⟩ := SubqueryEdge.edge_facts he'
     simp only [Expr.col.injEq] at hmem
     exact ⟨hmem.1.symm, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
-      Or.inl (by rw [hmv]; rfl)⟩
+      Or.inl (by rw [hmv]; rfl), fun _ => ⟨q, by simp [Expr.queries], by rw [hpcore, harms]; simp⟩⟩
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨hmem, hmv, _, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
+    obtain ⟨hmem, hmv, hnest, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
     have hpart : e.partner ∈ arg.items := by
       cases hr : arg.refs with
       | nil => exact absurd hr hrefs
@@ -289,7 +308,8 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
         have hp : p.1 ∈ arg.items := by simp [Expr.items, hr]
         rw [← hitems p.1 hp]
         exact hp
-    exact ⟨hmem, fun _ => by rw [hmem]; exact hne, fun _ => hpart, hread, Or.inl (by rw [hmv]; rfl)⟩
+    exact ⟨hmem, fun _ => by rw [hmem]; exact hne, fun _ => hpart, hread, Or.inl (by rw [hmv]; rfl),
+      fun h => by simp [hnest] at h⟩
 
 /-- A side of an argument that gives the member's value holds. -/
 theorem argSide_holds {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
@@ -319,7 +339,8 @@ theorem argSide_holds {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
     exact valueEdge_holds he' hm ha
 
 theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {side : Side}
-    (named : List Nat) (h : armSide s m c aff arm = some side) : SideFacts s m named side := by
+    (named : List Nat) {queries : List Nat} (harm : ∃ q ∈ queries, arm ∈ (s.query q).arms)
+    (h : armSide s m c aff arm = some side) : SideFacts s m named queries side := by
   intro e he
   unfold armSide at h
   split at h
@@ -329,7 +350,8 @@ theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
       cases h
       simp only [List.mem_singleton] at he
       subst he
-      exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2.1, Or.inl rfl⟩
+      exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2.1, Or.inl rfl,
+        fun _ => by rw [hp.1]; exact harm⟩
     · cases h
   · cases h
 
@@ -414,15 +436,16 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
   intro s k cd n hn
   -- Each case gives one disjunction for the member column.
   have compound_sound : ∀ {member : Expr} {q : Nat}, compound s k member q = some n →
+      q ∈ cd.queries →
       (∀ {m c}, member = .col m c → ∀ {db f b}, isTrue (cd.eval b (evalQuery s db f b)) →
         ∃ x row, cellOf (b m) c = some x ∧ row ∈ evalQuery s db f b q ∧ row.cell 0 = some x) →
       n.terms = [] ∧ n.edges = [] ∧ ∀ d ∈ n.ors, (s.item d.item).core = k ∧
         (∀ side ∈ d.sides, side.narrows = true) ∧
         (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
           (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-          (s.item e.partner).readable ∧ e.memberStrict s) ∧
+          (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries) ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b := by
-    intro member q h hrow
+    intro member q h hq hrow
     unfold compound at h
     simp only [bind, Option.bind] at h
     cases hmo : memberOf s k member with
@@ -445,7 +468,7 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
         · obtain ⟨arm, _, harm⟩ := (mapM_mem hsides).2 side hside
           exact armSide_narrows harm
         · obtain ⟨arm, _, harm⟩ := (mapM_mem hsides).2 side hside
-          exact armSide_facts cd.items harm
+          exact armSide_facts cd.items ⟨q, hq, by assumption⟩ harm
         · obtain ⟨x, row, hm, hrowq, hx⟩ := hrow hmember hc
           cases f with
           | zero => simp [evalQuery] at hrowq
@@ -455,7 +478,7 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
             obtain ⟨hterms, hedges⟩ := armSide_holds hsome hm hrows hx
             exact ⟨side, hside, hterms, hedges⟩
   have coalesced_sound : ∀ {member other : Expr}, coalesced s k member other = some n →
-      (∀ j ∈ other.items, j ∈ cd.items) →
+      (∀ j ∈ other.items, j ∈ cd.items) → (∀ q ∈ other.queries, q ∈ cd.queries) →
       (∀ {db f b}, isTrue (cd.eval b (evalQuery s db f b)) →
         ∃ x, member.eval b (evalQuery s db f b) = some x ∧
           other.eval b (evalQuery s db f b) = some x) →
@@ -463,9 +486,9 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
         (∀ side ∈ d.sides, side.narrows = true) ∧
         (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
           (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-          (s.item e.partner).readable ∧ e.memberStrict s) ∧
+          (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries) ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b := by
-    intro member other h hnamed hval
+    intro member other h hnamed hqueries hval
     unfold coalesced at h
     simp only [bind, Option.bind] at h
     cases hmo : memberOf s k member with
@@ -489,8 +512,10 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
             exact argSide_narrows harg
           · obtain ⟨arg, hargm, harg⟩ := (mapM_mem hsides).2 side hside
             intro e he
-            obtain ⟨h1, h2, h3, h4, h5⟩ := argSide_facts harg e he
-            exact ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4, h5⟩
+            obtain ⟨h1, h2, h3, h4, h5, h6⟩ := argSide_facts harg e he
+            refine ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4, h5, fun hn => ?_⟩
+            obtain ⟨q, hq, harm⟩ := h6 hn
+            exact ⟨q, hqueries _ (args_queries hargm _ hq), harm⟩
           · obtain ⟨x, hm, ho⟩ := hval hc
             rw [hmember] at hm
             simp only [Expr.eval] at hm
@@ -518,21 +543,22 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
   · rename_i l r
     split at hn
     · rename_i q m
-      exact compound_sound hn (viaRow (Or.inl rfl))
+      exact compound_sound hn (by simp [Cond.queries, Expr.queries]) (viaRow (Or.inl rfl))
     · rename_i m q _
-      exact compound_sound hn (viaRow (Or.inr (Or.inl rfl)))
+      exact compound_sound hn (by simp [Cond.queries, Expr.queries]) (viaRow (Or.inr (Or.inl rfl)))
     · cases hco : coalesced s k l r with
       | some n' =>
         simp only [hco, Option.orElse_some, Option.some.injEq] at hn
         subst hn
-        exact coalesced_sound hco (Edge.items_right) (fun hc => heq rfl hc)
+        exact coalesced_sound hco (Edge.items_right) (fun q hq => by simp [Cond.queries, hq])
+          (fun hc => heq rfl hc)
       | none =>
         simp only [hco, Option.orElse_none] at hn
-        exact coalesced_sound hn (Edge.items_left) (fun hc => by
+        exact coalesced_sound hn (Edge.items_left) (fun q hq => by simp [Cond.queries, hq]) (fun hc => by
           obtain ⟨x, hl, hr⟩ := heq rfl hc
           exact ⟨x, hr, hl⟩)
   · rename_i m q
-    exact compound_sound hn (viaRow (Or.inr (Or.inr rfl)))
+    exact compound_sound hn (by simp [Cond.queries]) (viaRow (Or.inr (Or.inr rfl)))
   · cases hn
 
 end SqliveNarrowing.OneOf

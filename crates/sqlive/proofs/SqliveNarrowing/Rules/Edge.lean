@@ -224,14 +224,14 @@ theorem edge_sound : ReadCondition.Sound readCondition where
           simp_all [Op.apply, Op.compare]
       simp only [List.mem_append, Option.mem_toList] at he
       rcases he with he | he
-      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
+      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => items_right _ (edge_partner_mem he), hread,
-          edge_memberStrict he, fun db f b hc => ?_⟩
+          edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hl hr
-      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
+      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => items_left _ (edge_partner_mem he), hread,
-          edge_memberStrict he, fun db f b hc => ?_⟩
+          edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hr hl
     · cases h

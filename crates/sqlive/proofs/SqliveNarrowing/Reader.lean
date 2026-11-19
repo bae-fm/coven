@@ -205,18 +205,25 @@ whose member has no row, unless its partner has none either. -/
 def Edge.memberStrict (s : Statement) (e : Edge) : Prop :=
   e.memberValue.on none = none ∨ s.alwaysBound e.member = true
 
+/-- Whether an edge to a subquery's source has its partner in an arm of
+one of the subqueries `queries`: the queries of the condition that gives
+the edge. -/
+def Edge.NestedIn (s : Statement) (queries : List Nat) (e : Edge) : Prop :=
+  e.nested = true → ∃ q ∈ queries, (s.item e.partner).core ∈ (s.query q).arms
+
 /-- What a reader that reads a condition as ORs promises: it gives no term
 and no edge, and of each OR it gives, the item is one of core `k`'s, each
 side narrows it, each side's edges are from that item to a partner readable
 alone that, outside a subquery, isn't the item and is an item the condition
-names, with a member value NULL for a missing row unless every binding holds
-the item's row, and wherever the condition holds, one side does. -/
+names, and inside one sits in an arm of one of the condition's subqueries,
+with a member value NULL for a missing row unless every binding holds the
+item's row, and wherever the condition holds, one side does. -/
 def ReadCondition.Disjoins (read : ReadCondition) : Prop :=
   ∀ {s k cd n}, read s k cd = some n → n.terms = [] ∧ n.edges = [] ∧
     ∀ d ∈ n.ors, (s.item d.item).core = k ∧ (∀ side ∈ d.sides, side.narrows = true) ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
         (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-        (s.item e.partner).readable ∧ e.memberStrict s) ∧
+        (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries) ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b
 
 /-- What a reader promises of the narrowing it reads from a condition of
@@ -225,8 +232,9 @@ fuel `f`, each term holds of its item's row and each edge holds. Each term
 and edge is on an item of core `k`, and an edge's partner is readable alone
 and, outside a subquery, isn't its member and is an item the condition
 names, so a binding that holds a row of each item the condition names holds
-one of the partner. An edge's member value is NULL for a missing row, unless
-every binding holds the member's row. -/
+one of the partner; inside a subquery, the partner sits in an arm of one of
+the condition's subqueries. An edge's member value is NULL for a missing
+row, unless every binding holds the member's row. -/
 structure ReadCondition.Sound (read : ReadCondition) : Prop where
   terms : ∀ {s k cd n}, read s k cd = some n → ∀ i t, (i, t) ∈ n.terms →
     (s.item i).core = k ∧
@@ -234,6 +242,7 @@ structure ReadCondition.Sound (read : ReadCondition) : Prop where
   edges : ∀ {s k cd n}, read s k cd = some n → ∀ e ∈ n.edges,
     (s.item e.member).core = k ∧ (e.nested = false → e.partner ≠ e.member) ∧
     (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
+    e.NestedIn s cd.queries ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b
 
 /-! What makes a LEFT JOIN an inner join's: a part of a narrowing that a row
