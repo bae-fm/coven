@@ -110,3 +110,10 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.item_passes
 #print axioms SqliveNarrowing.plan_kept_rows
 #print axioms SqliveNarrowing.plan_restricted
+#print axioms SqliveNarrowing.PState.untouched_narrow
+#print axioms SqliveNarrowing.PushDown.untouched_pushDown
+#print axioms SqliveNarrowing.PState.Held.narrowOn
+#print axioms SqliveNarrowing.PState.Held.carry
+#print axioms SqliveNarrowing.PState.Sem.pull_lookup
+#print axioms SqliveNarrowing.plan_held
+#print axioms SqliveNarrowing.plan_left_passes

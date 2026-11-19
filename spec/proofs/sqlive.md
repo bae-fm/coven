@@ -597,15 +597,32 @@ binding that matters passes its test, and `plan_restricted` that such a
 binding holds no row only of an item the planned state still holds an ON
 narrowing back for.
 
+[Held.lean](../../crates/sqlive/proofs/SqliveNarrowing/Held.lean) proves the
+promise for a LEFT JOIN item the planned state still holds an ON narrowing
+back for. While the planner holds one back, it adds to the item only what the
+item's own ON says of it. Any other narrowing, and any pass into the item,
+makes the item an inner join's first, and such a step leaves every item the
+planner still holds back as it was (`untouched_narrow`, `untouched_pushDown`). The reader's promise holds wherever its condition
+holds, so each term, edge and OR the planned state holds of such an item
+holds at each binding where the item's ON holds of a row of it
+(`plan_held`). A term the planner carries to the item from a partner holds
+there too, when the partner's row passes what the planned state says of it:
+the partner's term, or, for a derived partner, what its arms say of the
+compared column of a row its lookup reads (`PState.Held.carry`,
+`PState.Sem.pull_lookup`). `plan_left_passes` proves that a row the item's
+ON holds for passes the item's test. Each partner the item's ON gives sits
+before the item in the order, so its row in the binding, or in a binding of
+the ON's subquery under it, passes its test, and no edge passes into the
+item.
+
 ## What the proofs don't cover
 
 The theorems prove each rule's step and the steps of putting them together
 that the section above names. For a statement sqlive doesn't read whole, no
 theorem proves that a write the judge lets pass leaves the statement's rows
-unchanged. The proofs give the promise `agree_of_kept` and `limit_restricted`
-take for every binding that matters, but not for a LEFT JOIN item the
-planned state still holds an ON narrowing back for: that a row the item's ON
-holds for passes the item's test. The differential checks that composition
+unchanged. The proofs give each part of the promise `agree_of_kept` and
+`limit_restricted` take, and no theorem composes them into that statement.
+The differential checks that composition
 against SQLite on every statement it generates.
 
 The model leaves out text, real and blob values, collations and the
