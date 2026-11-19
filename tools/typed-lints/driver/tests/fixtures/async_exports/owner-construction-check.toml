@@ -1,0 +1,6 @@
+# The runs an async export of `async_export_off_runtime.rs` may call.
+[async_exports]
+runs = [
+    "async_export_off_runtime::runtime::OperationRuntime::run",
+    "async_export_off_runtime::Handle::run_exported",
+]

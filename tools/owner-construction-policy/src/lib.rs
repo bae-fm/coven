@@ -222,6 +222,22 @@ pub struct Policy {
     /// The read rule's rows, for a workspace that selects `read-shapes`.
     #[serde(default)]
     pub read_shapes: Option<ReadShapes>,
+    /// Where the async functions uniffi exports run their work, which the
+    /// typed lint `clippy::async_export_off_runtime` reads.
+    #[serde(default)]
+    pub async_exports: Option<AsyncExports>,
+}
+
+/// An async function that uniffi exports runs its work on a runtime that its
+/// owner owns, never on the executor of the language that called it: its body
+/// calls one of `runs`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncExports {
+    /// The functions that run an operation on such a runtime, by the path
+    /// that defines each, `app_bridge::runtime::Runtime::run`: the crate's
+    /// name, its modules, and for a method its type.
+    pub runs: Vec<String>,
 }
 
 /// The shapes `read-shapes` finds in read code, by the id findings and list

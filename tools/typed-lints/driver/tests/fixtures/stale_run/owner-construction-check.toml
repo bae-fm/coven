@@ -1,0 +1,3 @@
+# A run that `async_export_off_runtime.rs` doesn't define.
+[async_exports]
+runs = ["async_export_off_runtime::runtime::OperationRuntime::run_later"]

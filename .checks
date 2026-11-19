@@ -27,7 +27,7 @@ check rustdoc *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/c
 # setup runs prepare-build.sh, which installs and downloads them; without them
 # the hook's build fails in its first crates and names `builds setup`
 # (cargo.sh).
-check typed-lints-clippy tools/typed-lints/**,rust-toolchain.toml tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
+check typed-lints-clippy tools/typed-lints/**,tools/owner-construction-policy/**,rust-toolchain.toml tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
 
 # Spec
 whole spec-readability spec/*.md,scripts/check-spec.py python3 scripts/check-spec.py
@@ -35,4 +35,4 @@ whole spec-readability spec/*.md,scripts/check-spec.py python3 scripts/check-spe
 # Checker tests, run in CI when a push touches a checker or its test
 test check-spec-test scripts/check-spec.py,scripts/check_spec_tests.py python3 scripts/check_spec_tests.py
 test perf-test scripts/perf.py,scripts/perf.sh,scripts/perf_tests.py python3 scripts/perf_tests.py
-test typed-lints-test tools/typed-lints/**,rust-toolchain.toml tools/typed-lints/cargo.sh test --release
+test typed-lints-test tools/typed-lints/**,tools/owner-construction-policy/**,rust-toolchain.toml tools/typed-lints/cargo.sh test --release

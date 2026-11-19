@@ -8,23 +8,31 @@
 #   tool.sh build <folder>  build the driver into <folder>, with a `check`
 #                           that makes it ready to run on the machine it is on
 #
-# A build copies the sources into $BUILDS_TOOL_WORK/src, rewriting only the
-# files that changed, and builds there with its target folder beside them:
-# one folder per toolchain on each machine, so a new key compiles only the
-# lints and the driver, not clippy's crates.
+# A build copies the sources into $BUILDS_TOOL_WORK/src, at their places in
+# coven's tree, rewriting only the files that changed, and builds there with
+# its target folder beside them: one folder per toolchain on each machine, so
+# a new key compiles only the lints, the policy model and the driver, not
+# clippy's crates. The policy model is a member of coven's workspace and takes
+# its package fields, dependencies and lints from coven's manifest, which the
+# copy holds too.
 set -eu
 cd "$(dirname "$0")"
 . ./toolchain.sh
 
-# What the driver builds from, besides clippy's source at $commit.
+# What the driver builds from, besides clippy's source at $commit, relative
+# to coven's top folder.
 sources() {
-    find Cargo.toml Cargo.lock lints driver/Cargo.toml driver/build.rs -type f | LC_ALL=C sort
+    (cd ../.. && find Cargo.toml tools/owner-construction-policy/Cargo.toml \
+        tools/owner-construction-policy/src tools/typed-lints/Cargo.toml \
+        tools/typed-lints/Cargo.lock tools/typed-lints/lints \
+        tools/typed-lints/driver/Cargo.toml tools/typed-lints/driver/build.rs -type f) |
+        LC_ALL=C sort
 }
 
 case "${1-}:$#" in
 key:1)
     hash=$(sources | while read -r file; do
-        printf '%s %s\n' "$(git hash-object "$file")" "$file"
+        printf '%s %s\n' "$(git hash-object "../../$file")" "$file"
     done | git hash-object --stdin)
     echo "$host-$commit $hash"
     ;;
@@ -37,20 +45,21 @@ build:2)
     # cargo rebuilds a crate whose files are newer than its last build, so
     # an unchanged file keeps its time and a changed one gets a new one.
     sources | while read -r file; do
-        if ! cmp -s "$file" "$src/$file"; then
+        if ! cmp -s "../../$file" "$src/$file"; then
             mkdir -p "$(dirname "$src/$file")"
-            cp "$file" "$src/$file"
+            cp "../../$file" "$src/$file"
         fi
     done
-    (cd "$src" && find lints driver -type f) | while read -r file; do
-        [ -e "$file" ] || rm "$src/$file"
+    listed=$(sources)
+    (cd "$src" && find . -type f | sed 's|^\./||') | while read -r file; do
+        printf '%s\n' "$listed" | grep -qxF "$file" || rm "$src/$file"
     done
-    rm -rf "$src/clippy"
-    ln -s "$clippy_home/$commit" "$src/clippy"
+    rm -rf "$src/tools/typed-lints/clippy"
+    ln -s "$clippy_home/$commit" "$src/tools/typed-lints/clippy"
     # The driver builds as a plain compile, never under itself.
     (cd ../.. && env -u RUSTC_WORKSPACE_WRAPPER -u CLIPPY_ARGS RUSTC_BOOTSTRAP=1 \
         scripts/cargo.sh build --quiet --release -p typed-lints-driver \
-        --manifest-path "$src/Cargo.toml" \
+        --manifest-path "$src/tools/typed-lints/Cargo.toml" \
         --config "build.target-dir=\"$work/target\"")
     mkdir -p "$out"
     cp "$work/target/release/typed-lints-driver$exe" "$out/"

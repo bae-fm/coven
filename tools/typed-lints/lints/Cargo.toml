@@ -16,6 +16,9 @@ doctest = false
 clippy_config = { path = "../clippy/clippy_config" }
 clippy_lints = { path = "../clippy/clippy_lints" }
 clippy_utils = { path = "../clippy/clippy_utils" }
+# The workspace's policy file, which the structural checker reads too.
+owner-construction-policy = { path = "../../owner-construction-policy" }
+toml = "1.1"
 
 [package.metadata.rust-analyzer]
 rustc_private = true

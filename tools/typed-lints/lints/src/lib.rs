@@ -12,14 +12,17 @@
 #![feature(rustc_private)]
 
 extern crate rustc_attr_ir;
+extern crate rustc_data_structures;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_lint;
 extern crate rustc_middle;
 extern crate rustc_span;
 
+mod async_export_off_runtime;
 mod finding;
 mod reqwest_error_display;
+mod workspace_policy;
 
 use clippy_config::Conf;
 use rustc_lint::LintStore;
@@ -31,8 +34,14 @@ pub use clippy_lints::declared_lints;
 /// Registers clippy's lint passes, then these lints and their passes.
 pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
     clippy_lints::register_lint_passes(store, conf);
-    store.register_lints(&[reqwest_error_display::REQWEST_ERROR_DISPLAY]);
+    store.register_lints(&[
+        reqwest_error_display::REQWEST_ERROR_DISPLAY,
+        async_export_off_runtime::ASYNC_EXPORT_OFF_RUNTIME,
+    ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
+    }));
+    store.register_late_lint_pass(Box::new(|tcx| {
+        Box::new(async_export_off_runtime::AsyncExportOffRuntime::new(tcx))
     }));
 }
