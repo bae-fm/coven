@@ -40,7 +40,7 @@ use super::flow::{Flow, Spread};
 use super::rows::{Made, Mappers, RowTypes, is_collection, peel_result};
 use super::{
     READ_AGGREGATE, READ_DROP_ROW, READ_FILTER, READ_GROUP, READ_JOIN, READ_LENGTH_BRANCH,
-    READ_PICK, READ_SORT, callback, is_library, library_method,
+    READ_PICK, READ_SORT, callback, callee, is_library, library_method,
 };
 use crate::finding::Finding;
 
@@ -292,17 +292,7 @@ impl<'tcx> RowWork<'_, 'tcx> {
     /// Reports a map or set of rows that a library constructor or `collect`
     /// makes.
     fn grouped(&self, expr: &'tcx Expr<'tcx>) {
-        let callee = match expr.kind {
-            ExprKind::Call(function, _) => match function.kind {
-                ExprKind::Path(ref qpath) => {
-                    self.typeck.qpath_res(qpath, function.hir_id).opt_def_id()
-                }
-                _ => None,
-            },
-            ExprKind::MethodCall(..) => self.typeck.type_dependent_def_id(expr.hir_id),
-            _ => None,
-        };
-        if !callee.is_some_and(|callee| is_library(self.tcx, callee)) {
+        if !callee(self.typeck, expr).is_some_and(|callee| is_library(self.tcx, callee)) {
             return;
         }
         let made = self.typeck.expr_ty(expr);

@@ -17,7 +17,7 @@ use rustc_middle::mir::visit::Visitor as MirVisitor;
 use rustc_middle::mir::{self, Location};
 use rustc_middle::ty::{TyCtxt, TypeckResults};
 
-use super::{READ_CUTOFF, Search};
+use super::{READ_CUTOFF, Search, callee};
 use crate::finding::Finding;
 
 /// Reports the cutoffs in the read code `unit`, with the closures inside it,
@@ -123,18 +123,6 @@ impl<'tcx> Visitor<'tcx> for Fixed<'_, '_, '_, 'tcx> {
             _ => {}
         }
         intravisit::walk_expr(self, expr);
-    }
-}
-
-/// The function a call or a method call runs, when the compile resolves it.
-fn callee(typeck: &TypeckResults<'_>, expr: &Expr<'_>) -> Option<DefId> {
-    match expr.kind {
-        ExprKind::Call(function, _) => match function.kind {
-            ExprKind::Path(ref qpath) => typeck.qpath_res(qpath, function.hir_id).opt_def_id(),
-            _ => None,
-        },
-        ExprKind::MethodCall(..) => typeck.type_dependent_def_id(expr.hir_id),
-        _ => None,
     }
 }
 

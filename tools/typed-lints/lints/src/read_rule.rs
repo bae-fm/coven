@@ -63,6 +63,18 @@ fn is_library(tcx: TyCtxt<'_>, id: DefId) -> bool {
     LIBRARIES.contains(&tcx.crate_name(id.krate).as_str())
 }
 
+/// The function a call or a method call runs, when the compile resolves it.
+fn callee(typeck: &ty::TypeckResults<'_>, expr: &Expr<'_>) -> Option<DefId> {
+    match expr.kind {
+        ExprKind::Call(function, _) => match function.kind {
+            ExprKind::Path(ref qpath) => typeck.qpath_res(qpath, function.hir_id).opt_def_id(),
+            _ => None,
+        },
+        ExprKind::MethodCall(..) => typeck.type_dependent_def_id(expr.hir_id),
+        _ => None,
+    }
+}
+
 /// The method of the standard library, itertools or indexmap that the
 /// method call `expr` runs.
 fn library_method(
