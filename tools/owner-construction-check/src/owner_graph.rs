@@ -1,5 +1,6 @@
-//! The single field graph and owner inference shared by every owner rule,
-//! and the names its types go by (`type_identity.rs`).
+//! The field graph of the workspace's declared types, the names its types go
+//! by (`type_identity.rs`), and the owners inferred from it, which the policy
+//! check reads to hold each database domain's owner to being one.
 
 use crate::syntax::{collect_declared_types, RustFile, StructInfo};
 use crate::type_identity::TypeIdentity;
@@ -14,7 +15,7 @@ pub(crate) struct OwnerGraph {
 
 impl OwnerGraph {
     pub(crate) fn collect(files: &[RustFile], policy: &Policy) -> Self {
-        let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
+        let identity = TypeIdentity::of(files);
         let types = collect_declared_types(files, &policy.shared_pointer_types, &identity);
         let owners = infer_owners(&types, policy);
         Self { identity, types, owners }

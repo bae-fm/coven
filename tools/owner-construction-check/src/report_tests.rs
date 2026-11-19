@@ -45,59 +45,6 @@ fn an_empty_workspace_passes() {
 }
 
 #[test]
-fn duplicate_capability_and_owner_names_report_every_declaration() {
-    let policy = policy(r#"capability_types = ["Clock"]"#);
-    for (name, first, second) in [
-        ("Clock", "trait Clock {}", "struct Clock;"),
-        ("Worker", "trait Clock {} struct Worker { clock: Box<dyn Clock> }", "struct Worker;"),
-    ] {
-        let report = check(
-            &workspace(vec![
-                RustFile::fixture("crates/first/src/lib.rs", first),
-                RustFile::fixture("crates/second/src/lib.rs", second),
-            ]),
-            &policy,
-        );
-        assert!(!report.is_empty(), "accepted duplicate {name}");
-        assert_eq!(
-            report.lines(),
-            [
-                format!("crates/first/src/lib.rs:1: type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
-                "type names used by the policy and inferred owners must be unique across the workspace's crates".to_string(),
-            ],
-        );
-    }
-}
-
-#[test]
-fn duplicate_plain_value_names_pass() {
-    let report = check(
-        &workspace(vec![
-            RustFile::fixture("crates/first/src/lib.rs", "struct Value(u64);"),
-            RustFile::fixture("crates/second/src/lib.rs", "struct Value(String);"),
-        ]),
-        &policy(""),
-    );
-    assert!(report.is_empty(), "{:?}", report.lines());
-}
-
-#[test]
-fn tool_declarations_do_not_make_crate_names_ambiguous() {
-    let policy = policy(
-        r#"capability_types = ["Clock"]
-        tools = ["second"]"#,
-    );
-    let report = check(
-        &workspace(vec![
-            RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
-            RustFile::fixture("tools/second/src/main.rs", "struct Clock;"),
-        ]),
-        &policy,
-    );
-    assert!(report.is_empty(), "{:?}", report.lines());
-}
-
-#[test]
 fn test_only_duplicate_capability_names_pass() {
     let policy = policy(r#"capability_types = ["Clock"]"#);
     let report = check(
@@ -252,19 +199,6 @@ fn package_selection_uses_manifest_names_and_directory_boundaries() {
 }
 
 #[test]
-fn package_selection_cannot_hide_an_ambiguous_workspace_graph() {
-    let policy = policy(r#"capability_types = ["Clock"]"#);
-    let mut workspace = workspace(vec![
-        RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
-        RustFile::fixture("crates/second/src/lib.rs", "struct Clock;"),
-    ]);
-    workspace.manifests = vec![member("crates/second", "second")];
-    let selected = check_selected(&workspace, &policy, &["second".into()]).unwrap();
-    assert!(selected.0.iter().any(|finding| finding.path == "crates/first/src/lib.rs"
-        && finding.message.contains("declared more than once")));
-}
-
-#[test]
 fn an_unknown_package_is_an_error() {
     let (workspace, policy) = (workspace(Vec::new()), policy(""));
     let result = check_selected(&workspace, &policy, &["missing".into()]);
@@ -293,14 +227,6 @@ fn only_the_selected_rules_run() {
     assert_eq!(
         messages(&selected),
         ["system clock (current time) is used directly only in crates/app-foundation/src/clock.rs"]
-    );
-    // Name-based owner rules need every name they reason about declared once.
-    selected.rules = [Rule::OwnerDependencies].into();
-    assert_eq!(
-        messages(&selected),
-        [
-            "type Clock is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"
-        ]
     );
 }
 

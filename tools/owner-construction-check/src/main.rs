@@ -47,7 +47,6 @@ mod test_layout;
 mod type_identity;
 mod type_rows;
 mod typed_errors;
-mod unique_type_names;
 
 use std::path::PathBuf;
 

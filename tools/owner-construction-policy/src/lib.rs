@@ -99,12 +99,6 @@ impl Rule {
                 | Rule::RetainedCapabilityParameters
         )
     }
-
-    /// Whether the rule infers owners and matches types by name, so it needs
-    /// every name it reasons about declared once (`unique_type_names.rs`).
-    pub fn reads_owner_graph(self) -> bool {
-        matches!(self, Rule::OwnerDependencies)
-    }
 }
 
 /// The policy file's rows.
@@ -225,12 +219,6 @@ pub struct Policy {
     /// module of the crate.
     #[serde(default)]
     pub closed_session_types: BTreeSet<String>,
-    /// Generic types that hold no value of their type arguments, such as a
-    /// router typed by the state it will later be given: `Router<AppState>`
-    /// holds no `AppState`. A type argument of one is no value the type holds,
-    /// so returning one constructs none and a field holding one retains none.
-    #[serde(default)]
-    pub phantom_type_arguments: BTreeSet<String>,
     /// Dependencies whose library, as source code names it, is not their
     /// package's name with `-` as `_`: `"coreaudio-rs" = "coreaudio"`. The
     /// checker reads the workspace's manifests, not its dependencies', so a
@@ -850,11 +838,6 @@ impl Policy {
     /// rules' rows by path ([`Policy::owner_type_rows`]), the others by name.
     pub fn named_types(&self) -> Vec<(&'static str, &str)> {
         let mut named = self.owner_type_rows();
-        named.extend(
-            self.phantom_type_arguments
-                .iter()
-                .map(|name| ("phantom_type_arguments", name.as_str())),
-        );
         for root in &self.composition_roots {
             if root.owner != "<free>" {
                 named.push(("composition_roots", root.owner.as_str()));

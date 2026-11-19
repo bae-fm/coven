@@ -67,7 +67,7 @@ fn colliding_external_paths_are_known_by_their_resolved_path() {
         "#,
         &Policy::fixture(""),
     );
-    let identity = TypeIdentity::of(&files, &BTreeSet::new());
+    let identity = TypeIdentity::of(&files);
     let holder = files.iter().find(|file| file.relative_path.ends_with("holders.rs")).unwrap();
     let syn::Item::Struct(item) = &holder.syntax.items[1] else { panic!("the holder struct") };
     let names = item

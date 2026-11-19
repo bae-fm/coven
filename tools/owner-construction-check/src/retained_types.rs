@@ -17,7 +17,7 @@ pub(crate) struct Graph<'a> {
 
 impl<'a> Graph<'a> {
     pub(crate) fn of(files: &[RustFile], policy: &Policy, shapes: &'a ReadShapes) -> Self {
-        let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
+        let identity = TypeIdentity::of(files);
         Graph {
             types: collect_declared_types(files, &policy.shared_pointer_types, &identity),
             shapes,

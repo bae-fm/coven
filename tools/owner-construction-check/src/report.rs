@@ -14,7 +14,6 @@ use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
 use crate::typed_errors::find_string_error_violations;
-use crate::unique_type_names::find_unique_type_name_violations;
 use owner_construction_policy::{Policy, Rule};
 
 pub(crate) struct Report(pub(crate) Vec<Finding>);
@@ -97,11 +96,6 @@ fn check_paths(
             || finding.path == "Cargo.toml"
             || roots.iter().any(|root| finding.path.starts_with(root))
     });
-    // Ambiguous names invalidate the workspace graph, even when the first
-    // declaration (where the diagnostic points) is outside selected packages.
-    if policy.rules.iter().any(|rule| rule.reads_owner_graph()) {
-        findings.extend(find_unique_type_name_violations(policy, graph));
-    }
     findings.sort();
     findings.dedup();
     Report(findings)

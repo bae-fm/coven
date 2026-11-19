@@ -14723,9 +14723,11 @@ the same on any platform.
    otherwise go unchecked.
    The policy names each type of the owner rules (F.3) by its path, as
    `coven_foundation::clock::Clock` and `std::sync::Arc`, and the rest by
-   name. The rules match types by name, a path by its last part: coven's own
-   types each have one declaration, and a dependency's type goes by its name
-   unless one of coven's has it. A path to such a type, as
+   name. The typed lints of check 11, which hold the owner rules, read those
+   rows by path; the checker reads them only for check 4's test that each
+   domain's owner is an owner. The checker's rules match types by name, a
+   path by its last part: a dependency's type goes by its name unless one of
+   coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
    it by the path it resolves to, so it never stands for coven's type. A
    projection of an associated type, as `M::Open`, names every type coven's

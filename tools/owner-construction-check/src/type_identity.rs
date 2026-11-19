@@ -1,7 +1,6 @@
 //! Which type a type path names, as the rules match types: by name. Each type
-//! the workspace declares is known by its name, which the rules that reason
-//! about it hold to one declaration (`unique_type_names.rs`), and so is each
-//! type of a dependency or the standard library, which the policy names in
+//! the workspace declares is known by its name, and so is each type of a
+//! dependency or the standard library, which the policy names in
 //! `external_types`. A path that names an external type sharing its name with
 //! a workspace type, as `rusqlite::Connection` beside a workspace
 //! `Connection`, names neither of them for the rules: it is known by the path
@@ -26,9 +25,6 @@ use crate::syntax::RustFile;
 type PathKey = (usize, usize, ItemPath);
 
 pub(crate) struct TypeIdentity {
-    /// The policy's generic types whose type arguments are no value they hold
-    /// (`Policy::phantom_type_arguments`).
-    phantoms: BTreeSet<String>,
     /// Per file, each path naming an external type under a workspace type's
     /// name, and the path it resolves to.
     external: BTreeMap<String, BTreeMap<PathKey, String>>,
@@ -38,7 +34,7 @@ pub(crate) struct TypeIdentity {
 }
 
 impl TypeIdentity {
-    pub(crate) fn of(files: &[RustFile], phantoms: &BTreeSet<String>) -> Self {
+    pub(crate) fn of(files: &[RustFile]) -> Self {
         let resolver = NameResolver::collect(files);
         let declared =
             resolver.types.iter().filter_map(|path| path.last().cloned()).collect::<BTreeSet<_>>();
@@ -55,8 +51,7 @@ impl TypeIdentity {
                 external.insert(file.relative_path.clone(), paths.found);
             }
         }
-        let mut identity =
-            Self { phantoms: phantoms.clone(), external, projections: BTreeMap::new() };
+        let mut identity = Self { external, projections: BTreeMap::new() };
         let mut projections = BTreeMap::<String, BTreeSet<String>>::new();
         for file in files {
             let mut assigned = AssociatedTypes {
@@ -71,28 +66,18 @@ impl TypeIdentity {
 
     /// The types `file`'s paths name.
     pub(crate) fn in_file<'a>(&'a self, file: &'a str) -> FileTypes<'a> {
-        FileTypes {
-            phantoms: &self.phantoms,
-            external: self.external.get(file),
-            projections: &self.projections,
-        }
+        FileTypes { external: self.external.get(file), projections: &self.projections }
     }
 }
 
 /// How one file's type paths name types.
 #[derive(Clone, Copy)]
 pub(crate) struct FileTypes<'a> {
-    pub(crate) phantoms: &'a BTreeSet<String>,
     external: Option<&'a BTreeMap<PathKey, String>>,
     projections: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
 impl<'a> FileTypes<'a> {
-    /// The same names, with `phantoms` as the policy's phantom generics.
-    pub(crate) fn with_phantoms(self, phantoms: &'a BTreeSet<String>) -> Self {
-        Self { phantoms, ..self }
-    }
-
     /// The types a projection of an associated type names: every type the
     /// workspace's trait impls give it. `None` for any other path. A
     /// projection is `<T as Trait>::Name`, or `T::Name` where `T` is a type

@@ -79,9 +79,7 @@ pub(crate) fn is_in_test_directory(relative_path: &str, package_root: &str) -> b
 }
 
 /// The name of every type path and trait bound a type mentions, as `types`
-/// knows it (`type_identity.rs`). The type arguments of a generic type in the
-/// policy's phantoms are left out: the type holds no value of them
-/// (`Policy::phantom_type_arguments`).
+/// knows it (`type_identity.rs`).
 pub(crate) struct TypeNames<'p> {
     pub(crate) names: BTreeSet<String>,
     callback_outputs_only: bool,
@@ -120,16 +118,6 @@ impl<'ast> Visit<'ast> for TypeNames<'_> {
             return;
         }
         if let Some(name) = self.types.name(&node.path) {
-            if self.types.phantoms.contains(&name) {
-                if let Some(qself) = &node.qself {
-                    self.visit_qself(qself);
-                }
-                for outer in node.path.segments.iter().take(node.path.segments.len() - 1) {
-                    self.visit_path_segment(outer);
-                }
-                self.names.insert(name);
-                return;
-            }
             self.names.insert(name);
         }
         visit::visit_type_path(self, node);
@@ -198,7 +186,7 @@ impl<'ast> Visit<'ast> for SharedTypeNames<'_> {
                     }
                 }
             }
-        } else if !self.types.phantoms.contains(&name) {
+        } else {
             visit::visit_type_path(self, node);
         }
     }

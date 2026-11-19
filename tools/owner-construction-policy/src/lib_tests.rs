@@ -100,21 +100,3 @@ fn the_database_homes_are_its_capabilitys() {
     assert_eq!(policy.database_homes(), ["crates/app-database/src/"]);
     assert!(Policy::fixture("").database_homes().is_empty());
 }
-
-#[test]
-fn only_owner_graph_rules_need_unique_type_names() {
-    let graph_rules = [
-        Rule::CrateDependencies,
-        Rule::CapabilityBoundaries,
-        Rule::DatabaseBoundary,
-        Rule::OwnerDependencies,
-        Rule::RetainedCapabilityParameters,
-        Rule::ComponentBundles,
-        Rule::CapabilityConstruction,
-        Rule::Conventions,
-    ]
-    .into_iter()
-    .filter(|rule| rule.reads_owner_graph())
-    .collect::<Vec<_>>();
-    assert_eq!(graph_rules, [Rule::OwnerDependencies]);
-}

@@ -381,12 +381,9 @@ fn undeclared_types(
     rows: &NamedTypes,
 ) -> Vec<String> {
     let (identity, declared) = (&graph.identity, &graph.types);
-    // Every name, type arguments of phantom generics included.
-    let every_argument = BTreeSet::new();
     let mut mentioned = BTreeSet::new();
     for file in &code.expanded {
-        let names = identity.in_file(&file.relative_path).with_phantoms(&every_argument);
-        let mut names = TypeNames::new(names);
+        let mut names = TypeNames::new(identity.in_file(&file.relative_path));
         names.visit_file(&file.syntax);
         mentioned.extend(names.names);
         let mut bounds = BoundTraits(BTreeSet::new());
