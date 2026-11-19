@@ -20,7 +20,7 @@ use owner_construction_policy::{FILE_NAME, Policy, RAW_SQLITE_HANDLES};
 use rustc_attr_ir::CfgEntry;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LOCAL_CRATE};
-use rustc_hir::{HirId, find_attr};
+use rustc_hir::{HirId, ItemKind, Node, find_attr};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{FileName, Span, Symbol, sym};
 
@@ -208,7 +208,29 @@ impl WorkspacePolicy {
             find_attr!(tcx, node, CfgTrace(cfgs) => cfgs)
                 .is_some_and(|cfgs| cfgs.iter().any(|(cfg, _)| requires_test(cfg, features)))
         });
-        in_test_folder || test_only || is_in_test_function(tcx, id)
+        in_test_folder
+            || test_only
+            || is_in_test_function(tcx, id)
+            || self.derived_for_test(tcx, id)
+    }
+
+    /// Whether the code at `id` is in an impl a derive wrote for a type that
+    /// is test code: the derive's impl keeps none of its type's `cfg`s.
+    fn derived_for_test(&self, tcx: TyCtxt<'_>, id: HirId) -> bool {
+        std::iter::once(id)
+            .chain(tcx.hir_parent_id_iter(id))
+            .filter_map(|node| match tcx.hir_node(node) {
+                Node::Item(item) if matches!(item.kind, ItemKind::Impl(..)) => {
+                    Some(item.owner_id.to_def_id())
+                }
+                _ => None,
+            })
+            .filter(|&implementation| tcx.is_automatically_derived(implementation))
+            .filter_map(|implementation| {
+                tcx.type_of(implementation).instantiate_identity().skip_norm_wip().ty_adt_def()
+            })
+            .filter_map(|adt| adt.did().as_local())
+            .any(|adt| self.is_test_code(tcx, tcx.local_def_id_to_hir_id(adt)))
     }
 
     /// Whether the definition `id` is test code, as `is_test_code` counts

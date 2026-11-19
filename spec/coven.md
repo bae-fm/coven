@@ -14811,7 +14811,8 @@ the same on any platform.
     `clippy::built_outside_composition_root` holds F.3's composition roots:
     outside the roots the policy lists, production code builds no owner,
     construction-only capability or handle, and no static holds shared state
-    or a lock. The lint reads the policy's type rows by path. It knows
+    or a lock. An impl that a derive writes for a test-only type is test code,
+    as the type is. The lint reads the policy's type rows by path. It knows
     the crates the compile loads, so a type that only a later crate holds
     through an `Arc` is no owner in an earlier one.
     `clippy::method_takes_capability` holds F.2's rule that a method takes no

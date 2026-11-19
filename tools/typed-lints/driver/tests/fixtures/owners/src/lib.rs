@@ -137,6 +137,13 @@ pub fn with_test_only_code() {
     let _ = SystemClock;
 }
 
+/// A test-only owner that a derive builds: the derive's impl is test code.
+#[cfg(feature = "test-utils")]
+#[derive(Default)]
+pub struct TestCounter {
+    count: AtomicU64,
+}
+
 /// What another platform builds: the policy's row names a type in it.
 #[cfg(feature = "another-platform")]
 mod elsewhere {
