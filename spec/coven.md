@@ -14823,9 +14823,12 @@ the same on any platform.
    rule and the test that each domain's owner is one, read those rows by
    path. The checker reads two of them by name: F.2's rules on domains find
    a domain's writes in its owner's methods and follow the shared pointers
-   that `shared_pointer_types` names to the owner. The checker's rules match types by name, a
-   path by its last part: a dependency's type goes by its name unless one of
-   coven's has it. A path to such a type, as
+   that `shared_pointer_types` names to the owner. The read rule's rows
+   (`read_shapes`) are the typed lints' alone: the checker parses them, and
+   neither reads nor checks them, in check 4 or any rule, so a row such as
+   `std::cell::Cell` stands beside a type of coven's named `Cell`. The checker's
+   rules match types by name, a path by its last part: a dependency's type
+   goes by its name unless one of coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
    it by the path it resolves to, so it never stands for coven's type. A
    projection of an associated type, as `M::Open`, names every type coven's

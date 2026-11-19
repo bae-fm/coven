@@ -488,81 +488,22 @@ fn a_row_naming_its_type_by_path_tells_a_dependency_s_type_by_its_crate() {
     );
 }
 
-fn read_shapes_rows(rows: &str) -> String {
-    format!(
-        r#"
-        [read_shapes]
-        statement_rows = []
-        column_values = []
-        read_types = ["SqlReadContext"]
-        rule = "the rule"
-        {rows}
-        "#
-    )
-}
-
-fn read_shape_files() -> Vec<RustFile> {
-    vec![
-        RustFile::fixture(
-            "crates/app/src/reads.rs",
-            "pub struct SqlReadContext; struct Screen; impl Screen { fn read(&self) {} } fn free() {}",
-        ),
-        RustFile::fixture("crates/app/src/plumbing.rs", ""),
-    ]
-}
-
 #[test]
-fn the_read_shapes_rows_naming_what_exists_are_current() {
-    let rows = read_shapes_rows(r#"plumbing = ["crates/app/src/plumbing.rs"]"#);
-    assert_eq!(stale(read_shape_files(), &rows), Vec::<String>::new());
-}
-
-#[test]
-fn a_read_type_is_declared_by_a_crate_or_external() {
-    let rows = read_shapes_rows("").replace("SqlReadContext", "NoSuchType");
-    assert_eq!(
-        stale(read_shape_files(), &rows),
-        ["read_shapes.read_types: no crate declares NoSuchType"]
-    );
-}
-
-#[test]
-fn plumbing_names_a_file_or_directory_holding_source() {
-    let rows = read_shapes_rows(
-        r#"plumbing = ["crates/app/src/plumbing.rs", "crates/app/src/moved/", "crates/app/src/gone.rs"]"#,
-    );
-    assert_eq!(
-        stale(read_shape_files(), &rows),
-        [
-            "read_shapes.plumbing: crates/app/src/moved/ holds no source",
-            "read_shapes.plumbing: crates/app/src/gone.rs holds no source",
-        ]
-    );
-}
-
-#[test]
-fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_a_dependency() {
+fn the_read_shapes_rows_are_the_typed_lints_and_the_checker_leaves_them() {
     let rows = r#"
         [read_shapes]
-        statement_rows = []
-        column_values = []
-        read_types = ["app::SqlReadContext"]
-        live_query_types = ["app::LiveQuery"]
+        statement_rows = ["rusqlite::Row"]
+        column_values = ["rusqlite::types::FromSql"]
+        read_types = ["app::Gone"]
+        live_query_types = ["app::NoSuchLiveQuery"]
         value_stream_types = ["app::Watch"]
-        kept_state_types = ["std::sync::Mutex", "app::Cell"]
+        kept_state_types = ["std::cell::Cell", "std::sync::Mutex"]
+        plumbing = ["crates/app/src/gone.rs"]
         rule = "the rule"
     "#;
-    let files = vec![RustFile::fixture(
-        "crates/app/src/reads.rs",
-        "pub struct SqlReadContext; pub struct LiveQuery; struct Holds(Mutex<u8>);",
-    )];
-    assert_eq!(
-        stale(files, rows),
-        [
-            "read_shapes.value_stream_types: no crate declares app::Watch",
-            "read_shapes.kept_state_types: no crate declares app::Cell",
-        ]
-    );
+    let files =
+        vec![RustFile::fixture("crates/app/src/cells.rs", "pub struct Cell; struct Mutex;")];
+    assert_eq!(stale(files, rows), Vec::<String>::new());
 }
 
 #[test]
@@ -581,7 +522,7 @@ fn a_counter_row_names_a_column_the_sql_only_counts_up_once_with_a_reason() {
         homes = ["crates/app/src/"]
     "#;
     let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
-    let mut workspace = workspace(read_shape_files(), &members);
+    let mut workspace = workspace(vec![RustFile::fixture("crates/app/src/reads.rs", "")], &members);
     workspace.sql_files = vec![SqlFile {
         relative_path: "crates/app/src/schema.sql".to_string(),
         package_root: "crates/app/".to_string(),

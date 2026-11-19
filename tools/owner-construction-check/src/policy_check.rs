@@ -56,7 +56,6 @@ pub(crate) fn stale_rows(
     stale.extend(undeclared_types(code, graph, rows));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, policy));
-    stale.extend(invalid_read_plumbing(code, policy));
     stale.extend(invalid_counters(code, policy));
     stale
 }
@@ -592,20 +591,6 @@ fn invalid_domains(code: &CrateCode, database: &Database) -> Vec<String> {
         }
     }
     stale
-}
-
-/// The read rule's plumbing, which the typed lints read: each file or
-/// directory holds a source.
-fn invalid_read_plumbing(code: &CrateCode, policy: &Policy) -> Vec<String> {
-    let Some(shapes) = &policy.read_shapes else {
-        return Vec::new();
-    };
-    shapes
-        .plumbing
-        .iter()
-        .filter(|home| !holds_source(&code.written, home))
-        .map(|home| format!("read_shapes.plumbing: {home} holds no source"))
-        .collect()
 }
 
 /// The database's counter rows: each names a column the SQL only counts up,

@@ -598,9 +598,10 @@ impl Policy {
         named
     }
 
-    /// Every type the policy names, with the row it came from: the owner
-    /// rules' and the read rule's rows and the domains' owners by path
-    /// ([`Policy::owner_type_rows`], [`ReadShapes`]), the others by name.
+    /// Every type the checker checks the policy's rows for, with the row it
+    /// came from: the owner rules' rows and the domains' owners by path
+    /// ([`Policy::owner_type_rows`]), the others by name. The read rule's
+    /// rows ([`ReadShapes`]) are the typed lints' alone, so none is here.
     pub fn named_types(&self) -> Vec<(&'static str, &str)> {
         let mut named = self.owner_type_rows();
         for root in &self.composition_roots {
@@ -613,18 +614,6 @@ impl Policy {
         }
         for write in self.database.iter().flat_map(|database| &database.write_types) {
             named.push(("database.write_types", write.as_str()));
-        }
-        if let Some(read) = &self.read_shapes {
-            let lists = [
-                ("read_shapes.read_types", &read.read_types),
-                ("read_shapes.live_query_types", &read.live_query_types),
-                ("read_shapes.request_query_types", &read.request_query_types),
-                ("read_shapes.value_stream_types", &read.value_stream_types),
-                ("read_shapes.kept_state_types", &read.kept_state_types),
-            ];
-            for (row, names) in lists {
-                named.extend(names.iter().map(|name| (row, name.as_str())));
-            }
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));
