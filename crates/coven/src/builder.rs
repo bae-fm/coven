@@ -171,7 +171,8 @@ impl CovenBuilder {
         self
     }
     /// The source of new ids: store, circle, member, key, invite, file and
-    /// stored object ids, and this install's device id (Appendix F.2).
+    /// stored object ids, the ids of S3 detection runs and upload sessions, and
+    /// this install's device id (Appendix F.2).
     /// Defaults to `UuidIds`.
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;

@@ -35,7 +35,7 @@ impl StoreKey {
         Self { id, bytes }
     }
 
-    /// The random identity named by the entry introducing this key (§12.1).
+    /// The id named by the entry introducing this key, which the id source supplied (§12.1).
     pub fn id(&self) -> KeyId {
         self.id
     }
@@ -108,7 +108,7 @@ impl CircleKey {
         self.circle
     }
 
-    /// The random identity named by the entry introducing this key.
+    /// The id named by the entry introducing this key, which the id source supplied.
     pub fn id(&self) -> KeyId {
         self.key.id()
     }

@@ -1134,7 +1134,7 @@ impl StoreKey {
     /// Import a store key opened from custody or a member's sealed copy (§12.1).
     pub fn from_bytes(id: KeyId, bytes: [u8; 32]) -> Self;
 
-    /// The random identity named by the entry introducing this key (§12.1).
+    /// The id named by the entry introducing this key, which the id source supplied (§12.1).
     pub fn id(&self) -> KeyId;
 
     /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
@@ -1161,7 +1161,7 @@ impl CircleKey {
     /// The circle whose rows this key protects; file keys travel inside those rows.
     pub fn circle(&self) -> CircleId;
 
-    /// The random identity named by the entry introducing this key.
+    /// The id named by the entry introducing this key, which the id source supplied.
     pub fn id(&self) -> KeyId;
 
     /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
@@ -2394,8 +2394,8 @@ pub enum MaterialError {
     UnknownCircleKey { circle: CircleId, key: KeyId },
 }
 
-/// A store or circle key's random id, named by the admin slot that
-/// brings the key in (§12.1). ToSql/FromSql bind/read its 16 bytes.
+/// A store or circle key's id, from the id source. The admin slot that brings
+/// the key in names it (§12.1). ToSql/FromSql bind/read its 16 bytes.
 pub struct KeyId(pub Uuid);
 
 /// The two places coven keeps file bytes inside a store (E1).

@@ -254,7 +254,7 @@ pub enum StoreChange {
     RotateKey {
         /// The audience whose member authored the rotation.
         audience: Audience,
-        /// The introduced key's random id.
+        /// The introduced key's id, which the id source supplied.
         key: KeyId,
         /// SHA-256 of the exact 32 key bytes.
         key_hash: [u8; 32],

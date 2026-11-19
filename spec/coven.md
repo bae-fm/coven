@@ -4591,11 +4591,12 @@ sealing key, published in its own slot. Its routing is readable by the provider:
 the audience, the key's id, the recipient member and the exact sealing key it is
 sealed to. That is how Dan finds his copy before he holds any key.
 
-A new audience key is *introduced* by an admin entry naming the key's random id
-and a SHA-256 hash of its exact 32 bytes. Store creation, circle creation, an
-admission (for the circle it makes), rotations and a circle member's removal
-introduce keys; every other removal carries none. The introduction's fields are
-encrypted like the rest of the entry.
+A new audience key is *introduced* by an admin entry naming the key's id, which
+coven takes from the app's id source, and a SHA-256 hash of its exact 32 bytes.
+Store creation, circle creation, an admission (for the circle it makes),
+rotations and a circle member's removal introduce keys; every other removal
+carries none. The introduction's fields are encrypted like the rest of the
+entry.
 
 **Copies come first, then the introduction.** An operation claims every copy the
 key needs before it claims the introduction, so by the time a key is in use,
@@ -12168,9 +12169,9 @@ may also run it beforehand to prefill advanced settings (`detect_s3_settings`,
 api.md E5).
 
 - It writes only fresh objects under `<store>/.coven-check/<run>/`, where
-  `<run>` is a fresh random UUID. That reserved place is distinct from every
-  coven path, and listings exclude it, so a probe left by a killed process never
-  shows up as a published object.
+  `<run>` is a fresh UUID from the app's id source. That reserved place is
+  distinct from every coven path, and listings exclude it, so a probe left by a
+  killed process never shows up as a published object.
 - Afterwards it deletes its objects and aborts its multipart uploads, also after
   a failed probe. A failed cleanup fails the call, keeping both causes.
 - A run can be cut before its cleanup. Ben's laptop is killed while detection
@@ -13266,7 +13267,7 @@ A member's keys are two key pairs, kept together:
 | A join request's key | HKDF-SHA256 from the invite or pairing secret, with its own label |
 | A confirmation number | SHA-256 of a label, the invite or pairing id and the request's two public keys, reduced to six digits |
 | Sealing a pairing's handover | anonymous sealed box to the request's sealing key: X25519 with XChaCha20-Poly1305, with its own label |
-| Key introductions | SHA-256 of the key's exact 32 bytes, with a random key id |
+| Key introductions | SHA-256 of the key's exact 32 bytes, with a key id from the app's id source |
 | Slot signatures | over the path and a SHA-256 hash of every preceding byte |
 | A file | a random key of its own; its storage name is a new object id from the app's id source (§17.5) |
 
@@ -13312,7 +13313,7 @@ identifiers let a reader choose the key before opening the encrypted contents.
 
 | Object | In the clear | Encrypted |
 |---|---|---|
-| Key introduction (inside an admin entry) | the common slot prefix above | the introduced key's random id and the SHA-256 of its 32 bytes |
+| Key introduction (inside an admin entry) | the common slot prefix above | the introduced key's id and the SHA-256 of its 32 bytes |
 | Key copy (its own slot) | the common slot prefix; audience, copied key id, recipient member, the exact public sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
 | Admission | the common slot prefix; each copy's audience, copied key id, recipient member, exact public sealing key and box, in key order | each key, inside a box sealed to the new member alone, bound to its index; the entry admitting the member and registering their device, under a store key the copies carry |
 | Any slot | the common slot prefix | its device and claim number, under the store key |
@@ -13599,10 +13600,10 @@ coven uploads to `<store>/.coven-uploads/<device>/<session>` inside the
 configured folder, in the uploading device's own folder there. That reserved
 place is distinct from every coven path.
 
-- The session's random UUID is recorded before native initiation, so a lost
-  initiation reply cannot strand an unnamed temporary. The returned upload
-  capability is then saved in that same session before any part is sent.
-  Retries and resumption derive the same temporary name.
+- The session's UUID, from the app's id source, is recorded before native
+  initiation, so a lost initiation reply cannot strand an unnamed temporary. The
+  returned upload capability is then saved in that same session before any part
+  is sent. Retries and resumption derive the same temporary name.
 - After all parts are stored, coven publishes with one server-side Graph `copy`
   to the final parent and name, with `@microsoft.graph.conflictBehavior=fail`. It
   follows the returned monitor URL until the asynchronous copy completes,
@@ -14033,9 +14034,9 @@ order. Detection never chooses copy publication for every object (E.6).
 
 **Where uploads go.** A copy-publication profile uploads unconditionally to
 `<store>/.coven-uploads/<device>/<session>`, where `<device>` is the
-device whose connection began the upload and `<session>` is the upload's random
-UUID. Other profiles upload at the destination: a slot, another immutable
-object, or the floor. That reserved place is distinct from every coven path.
+device whose connection began the upload and `<session>` is the upload's UUID
+from the app's id source. Other profiles upload at the destination: a slot,
+another immutable object, or the floor. That reserved place is distinct from every coven path.
 
 **Session records.** Every S3 session is recorded with its name before its native
 multipart upload exists. The first part starts the native upload, and the record
