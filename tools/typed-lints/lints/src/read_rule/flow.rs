@@ -1,11 +1,9 @@
 //! What flows from a read's result in one body: the locals that hold it, and
-//! the expressions whose value carries it. A value carries what an
-//! expression of `source` returned, what a local holding it holds, what a
-//! method called on it returns, what a function of the standard library or
-//! itertools given it returns (`?` and `for` call one), and what a block,
-//! `if`, `match`, reference, field or index around it yields. A `let`, an
-//! assignment, an `if let` and a `match` arm bind what their value carries.
-//! What a closure or a workspace function makes of it carries nothing.
+//! the expressions whose value carries it. A `let`, an assignment, an
+//! `if let` and a `match` arm bind what their value carries, and so do the
+//! parameters of a closure given to a library method called on such a value,
+//! as `head.cover.map(|cover| ..)` binds `cover`: to a fixed point over the
+//! body and its closures. How a value carries it is the flow's `Spread`.
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::Res;
@@ -16,10 +14,26 @@ use rustc_middle::ty::{TyCtxt, TypeckResults};
 
 use super::is_library;
 
+/// How a value carries what flows from a source.
+#[derive(Clone, Copy)]
+pub(super) enum Spread {
+    /// The value is the source's own: what a source returned, what a local
+    /// holding it holds, what a method called on it returns, what a
+    /// function of the standard library or itertools given it returns (`?`
+    /// and `for` call one), and what a block, `if`, `match`, reference,
+    /// field or index around it yields. What a closure or a workspace
+    /// function makes of it carries nothing.
+    Value,
+    /// The expression names a source or a local holding what one returned,
+    /// anywhere outside a closure: a value computed from it.
+    Mention,
+}
+
 /// The locals of one body that hold what flows from its sources.
 pub(super) struct Flow<'s, 'tcx> {
     tcx: TyCtxt<'tcx>,
     typeck: &'tcx TypeckResults<'tcx>,
+    spread: Spread,
     /// Whether an expression's value is a source.
     source: &'s dyn Fn(&Expr<'tcx>) -> bool,
     locals: FxHashSet<HirId>,
@@ -32,9 +46,10 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
         tcx: TyCtxt<'tcx>,
         typeck: &'tcx TypeckResults<'tcx>,
         body: &'tcx Expr<'tcx>,
+        spread: Spread,
         source: &'s dyn Fn(&Expr<'tcx>) -> bool,
     ) -> Self {
-        let mut flow = Self { tcx, typeck, source, locals: FxHashSet::default() };
+        let mut flow = Self { tcx, typeck, spread, source, locals: FxHashSet::default() };
         loop {
             let known = flow.locals.len();
             Binder { flow: &mut flow }.visit_expr(body);
@@ -45,15 +60,32 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
     }
 
     /// Whether the expression's value carries what flows from a source.
-    pub(super) fn carries(&self, expr: &Expr<'tcx>) -> bool {
-        if (self.source)(expr) {
+    pub(super) fn carries(&self, expr: &'tcx Expr<'tcx>) -> bool {
+        match self.spread {
+            Spread::Value => self.carries_value(expr),
+            Spread::Mention => {
+                let mut mention = Mention { flow: self, found: false };
+                mention.visit_expr(expr);
+                mention.found
+            }
+        }
+    }
+
+    /// Whether the expression names a source, or a local holding what flows
+    /// from one.
+    fn names(&self, expr: &Expr<'tcx>) -> bool {
+        (self.source)(expr)
+            || matches!(expr.kind, ExprKind::Path(QPath::Resolved(None, path))
+                if matches!(path.res, Res::Local(local) if self.locals.contains(&local)))
+    }
+
+    fn carries_value(&self, expr: &Expr<'tcx>) -> bool {
+        if self.names(expr) {
             return true;
         }
+        let carries = |inner| self.carries_value(inner);
         match expr.kind {
-            ExprKind::Path(QPath::Resolved(None, path)) => {
-                matches!(path.res, Res::Local(local) if self.locals.contains(&local))
-            }
-            ExprKind::MethodCall(_, receiver, ..) => self.carries(receiver),
+            ExprKind::MethodCall(_, receiver, ..) => carries(receiver),
             ExprKind::Call(function, arguments) => {
                 let library = match function.kind {
                     ExprKind::Path(ref qpath) => self
@@ -63,28 +95,54 @@ impl<'s, 'tcx> Flow<'s, 'tcx> {
                         .is_some_and(|callee| is_library(self.tcx, callee)),
                     _ => false,
                 };
-                library && arguments.iter().any(|argument| self.carries(argument))
+                library && arguments.iter().any(carries)
             }
-            ExprKind::Match(_, arms, _) => arms.iter().any(|arm| self.carries(arm.body)),
-            ExprKind::If(_, then, otherwise) => {
-                self.carries(then) || otherwise.is_some_and(|otherwise| self.carries(otherwise))
-            }
-            ExprKind::Block(block, _) => block.expr.is_some_and(|value| self.carries(value)),
+            ExprKind::Match(_, arms, _) => arms.iter().any(|arm| carries(arm.body)),
+            ExprKind::If(_, then, otherwise) => carries(then) || otherwise.is_some_and(carries),
+            ExprKind::Block(block, _) => block.expr.is_some_and(carries),
             ExprKind::AddrOf(_, _, inner)
             | ExprKind::DropTemps(inner)
             | ExprKind::Field(inner, _)
             | ExprKind::Index(inner, _, _)
             | ExprKind::Unary(_, inner)
             | ExprKind::Cast(inner, _)
-            | ExprKind::Type(inner, _) => self.carries(inner),
+            | ExprKind::Type(inner, _) => carries(inner),
             _ => false,
         }
+    }
+
+    /// Whether the method call `expr` runs a method of the standard library or
+    /// itertools.
+    fn library_call(&self, expr: &Expr<'tcx>) -> bool {
+        self.typeck
+            .type_dependent_def_id(expr.hir_id)
+            .is_some_and(|callee| is_library(self.tcx, callee))
     }
 
     fn bind(&mut self, pat: &Pat<'_>) {
         pat.each_binding(|_, local, _, _| {
             self.locals.insert(local);
         });
+    }
+}
+
+/// Finds, in an expression outside its closures, a source or a local that
+/// holds what flows from one.
+struct Mention<'f, 's, 'tcx> {
+    flow: &'f Flow<'s, 'tcx>,
+    found: bool,
+}
+
+impl<'tcx> Visitor<'tcx> for Mention<'_, '_, 'tcx> {
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if self.found || matches!(expr.kind, ExprKind::Closure(_)) {
+            return;
+        }
+        if self.flow.names(expr) {
+            self.found = true;
+            return;
+        }
+        intravisit::walk_expr(self, expr);
     }
 }
 
@@ -116,6 +174,17 @@ impl<'tcx> Visitor<'tcx> for Binder<'_, '_, 'tcx> {
             ExprKind::Match(scrutinee, arms, _) if self.flow.carries(scrutinee) => {
                 for arm in arms {
                     self.flow.bind(arm.pat);
+                }
+            }
+            ExprKind::MethodCall(_, receiver, arguments, _)
+                if self.flow.library_call(expr) && self.flow.carries(receiver) =>
+            {
+                for argument in arguments {
+                    if let ExprKind::Closure(closure) = argument.kind {
+                        for parameter in self.flow.tcx.hir_body(closure.body).params {
+                            self.flow.bind(parameter.pat);
+                        }
+                    }
                 }
             }
             ExprKind::Assign(target, value, _) if self.flow.carries(value) => {

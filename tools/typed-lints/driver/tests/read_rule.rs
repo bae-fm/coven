@@ -10,7 +10,7 @@ mod support;
 use support::{Fixture, extern_library, out_dir};
 
 /// The read rule's lints, each named as the fixture's comments name it.
-const LINTS: [&str; 8] = [
+const LINTS: [&str; 10] = [
     "clippy::read_sort",
     "clippy::read_filter",
     "clippy::read_group",
@@ -19,6 +19,8 @@ const LINTS: [&str; 8] = [
     "clippy::read_join",
     "clippy::read_length_branch",
     "clippy::read_drop_row",
+    "clippy::read_query_per_row",
+    "clippy::read_keyed_statement",
 ];
 
 #[test]

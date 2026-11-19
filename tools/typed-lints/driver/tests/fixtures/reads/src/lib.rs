@@ -144,3 +144,26 @@ pub fn read_keys(sql: &impl SqlRead, mut known: Vec<Key>) -> Result<Vec<Key>, ()
     known.sort();
     Ok(keys)
 }
+
+/// Runs statements for each row, and statements keyed by what another
+/// returned.
+pub fn read_each(sql: &impl SqlRead, ids: &[i64]) -> i64 {
+    let albums = sql.query("SELECT id, year FROM albums", album);
+    for album in &albums {
+        let _ = sql.query_row("SELECT 1", |row| Ok(row.get(0) + album.id)); // read_query_per_row
+    }
+    let _years = ids.iter().map(|id| sql.query_row("SELECT 2", |row| Ok(row.get(0) + id))); // read_query_per_row
+    let _nested =
+        sql.query("SELECT id", |row| sql.query_row("SELECT 3", |_| Ok(row.get(0))).ok_or(())); // read_query_per_row
+    let first = albums.first().map(|album| album.id).unwrap_or(0);
+    let _ = sql.query_row(&format!("SELECT {first}"), |row| Ok(row.get(0))); // read_keyed_statement
+    let _ = year_of(sql, first); // read_keyed_statement
+    let _year = albums.first().map(|album| year_of(sql, album.id)); // read_keyed_statement
+    let _ = sql.query_row("SELECT 4", |row| Ok(row.get(0) + first));
+    let _ = sql.query_row("SELECT 5", |row| Ok(row.get(0)));
+    year_of(sql, ids.len() as i64)
+}
+
+fn year_of(sql: &impl SqlRead, id: i64) -> i64 {
+    sql.query_row("SELECT year", |row| Ok(row.get(0) + id)).unwrap_or(0)
+}

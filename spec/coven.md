@@ -14976,6 +14976,17 @@ the same on any platform.
     can call is never such code, since the compile cannot see their calls. A
     mark sits on the narrowest item that takes one, a statement where it can,
     and covers every finding of its shape in that item.
+    Two more lints find statements in read code. A statement is a call of a
+    function that takes a read value, a live query aside, and returns none:
+    a method of a read type that hands out another read value runs no SQL.
+    `clippy::read_query_per_row` finds a statement that runs once for each
+    row: in a loop's body, in a closure that a library method of an iterator
+    runs on each item, or in a statement's row mapper.
+    `clippy::read_keyed_statement` finds any other statement given, outside
+    a closure, a value that an earlier statement returned or another
+    statement's call: one statement, with a join or a subquery, reads both.
+    A read value that a statement takes is the handle the statement runs
+    on, never its key.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

@@ -36,7 +36,7 @@ use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::ty::{self, TyCtxt, TypeckResults, TypingEnv};
 use rustc_span::Symbol;
 
-use super::flow::Flow;
+use super::flow::{Flow, Spread};
 use super::rows::{Made, Mappers, RowTypes, is_collection, peel_result};
 use super::{
     READ_AGGREGATE, READ_DROP_ROW, READ_FILTER, READ_GROUP, READ_JOIN, READ_LENGTH_BRANCH,
@@ -112,7 +112,7 @@ pub(super) fn check<'tcx>(
             callback(typeck, argument).and_then(|id| mappers.made(id)) == Some(Made::Column)
         }) && is_collection(tcx, typing_env, peel_result(tcx, typeck.expr_ty(expr)))
     };
-    let column_rows = Flow::of(tcx, typeck, body, &column_read);
+    let column_rows = Flow::of(tcx, typeck, body, Spread::Value, &column_read);
     let mut work = RowWork {
         tcx,
         help,
@@ -173,7 +173,7 @@ impl<'tcx> RowWork<'_, 'tcx> {
 
     /// Whether the expression's value holds rows: its type holds a row
     /// type, or it is a collection that flows from a read of one column.
-    fn holds_rows(&self, expr: &Expr<'tcx>) -> bool {
+    fn holds_rows(&self, expr: &'tcx Expr<'tcx>) -> bool {
         let ty = self.typeck.expr_ty(expr);
         self.rows.holds_rows(ty)
             || self.column_rows.carries(expr) && is_collection(self.tcx, self.typing_env, ty)

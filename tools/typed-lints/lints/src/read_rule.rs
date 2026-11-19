@@ -25,13 +25,15 @@
 //! lints find nothing there. A function other crates can call is never
 //! counted so, since this compile can't see their calls.
 //!
-//! The shapes in read code are in `read_rule/row_work.rs`, what rows are in
+//! The shapes of row work in read code are in `read_rule/row_work.rs`, the
+//! statements read code runs in `read_rule/statements.rs`, what rows are in
 //! `read_rule/rows.rs`, and what flows from a read's result in
 //! `read_rule/flow.rs`.
 
 mod flow;
 mod row_work;
 mod rows;
+mod statements;
 
 use clippy_utils::paths::PathNS;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -111,6 +113,8 @@ shape_lints! {
     READ_JOIN, "read code joins a read's rows to another's by a key or place";
     READ_LENGTH_BRANCH, "read code branches on how many rows a read returned";
     READ_DROP_ROW, "read code drops a row when an optional column is empty";
+    READ_QUERY_PER_ROW, "read code runs a statement once for each row";
+    READ_KEYED_STATEMENT, "read code runs a statement keyed by what an earlier one returned";
 }
 
 /// The lint's pass: the policy's read rule, when the workspace has one.
@@ -120,7 +124,7 @@ pub(crate) struct ReadRule {
 
 impl_lint_pass!(ReadRule => [
     READ_SORT, READ_FILTER, READ_GROUP, READ_AGGREGATE, READ_PICK, READ_JOIN,
-    READ_LENGTH_BRANCH, READ_DROP_ROW
+    READ_LENGTH_BRANCH, READ_DROP_ROW, READ_QUERY_PER_ROW, READ_KEYED_STATEMENT
 ]);
 
 /// The read rule's rows, resolved in the compile.
@@ -129,6 +133,8 @@ struct Setup {
     rows: &'static ReadShapes,
     /// The help a row work finding gives: the rule, and what to do instead.
     row_work_help: &'static str,
+    /// The help a statement's finding gives.
+    statement_help: &'static str,
     read_types: FxHashSet<DefId>,
     live_types: FxHashSet<DefId>,
     statement_rows: FxHashSet<DefId>,
@@ -156,6 +162,15 @@ impl ReadRule {
                         "{}: the statement filters, sorts, joins, groups, counts and sums, in the \
                          same query or its own live query beside it; a read returns what the \
                          screen shows",
+                        rows.rule
+                    )
+                    .into_boxed_str(),
+                ),
+                statement_help: Box::leak(
+                    format!(
+                        "{}: one statement reads what the read needs, with a join or a \
+                         subquery, instead of a statement for each row or for each key an \
+                         earlier statement returned",
                         rows.rule
                     )
                     .into_boxed_str(),
@@ -192,6 +207,7 @@ impl<'tcx> LateLintPass<'tcx> for ReadRule {
         let code = search.read_code();
         for &unit in &code.top {
             row_work::check(tcx, setup.row_work_help, &rows, &mappers, unit, &code.process_only);
+            statements::check(&search, setup.statement_help, &mappers, unit, &code.process_only);
         }
     }
 }
