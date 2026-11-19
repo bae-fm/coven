@@ -10,7 +10,8 @@
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::schema_objects::read_view;
-use crate::scope_plan::{is_name, read_select, Edge, Member, MemberValue, Planner, Source};
+use crate::scope_edge::{Member, MemberValue};
+use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text};
 use rusqlite::Connection;

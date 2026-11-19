@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
-use crate::scope_plan::{MemberValue, Membership, PartnerValue, Sources};
+use crate::scope_edge::MemberValue;
+use crate::scope_plan::{Membership, PartnerValue, Sources};
 use crate::scope_row::{RowCondition, RowTest};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::sql_value::SqlValue as Value;

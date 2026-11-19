@@ -27,8 +27,9 @@ use crate::derived::Ctes;
 use crate::from_item::{read_item, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
+use crate::scope_edge::{Member, MemberValue};
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
-use crate::scope_row::{item_row_term, RowTerm};
+use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
@@ -399,7 +400,7 @@ impl Planner<'_> {
         let edges = [(left.clone(), right.clone(), false), (right, left, true)].map(
             |((member, column), partner, first)| {
                 let member = self.narrowed_column(member, column)?;
-                self.column_edge(member, partner, first)
+                self.column_edge(member.into(), partner, first)
             },
         );
         Narrowing { edges: edges.into_iter().flatten().collect(), ..Narrowing::default() }
@@ -935,39 +936,6 @@ impl Narrowing {
         self.terms.extend(other.terms);
         self.edges.extend(other.edges);
         self.ors.extend(other.ors);
-    }
-}
-
-/// What sqlive narrows one of a core's sources by: a table's or a derived
-/// item's column that sqlive gives an affinity, or an expression over a
-/// table's own columns.
-#[derive(Clone)]
-pub(crate) struct Member {
-    pub(crate) item: usize,
-    pub(crate) value: MemberValue,
-    /// The affinity a lookup gives a value it compares with the member's:
-    /// its column's, or BLOB, which converts nothing, for an expression,
-    /// whose comparison the question that judges a row leaves to SQLite.
-    pub(crate) affinity: Affinity,
-}
-
-/// What an edge compares of its member's rows.
-#[derive(Clone)]
-pub(crate) enum MemberValue {
-    /// One of its columns, lowercase.
-    Column(String),
-    /// An expression over a table's own columns, whose value in a changed
-    /// row a write asks SQLite for (`scope_row.rs`).
-    Expression(Arc<RowTerm>),
-}
-
-impl Member {
-    /// The member's column, unless it is an expression.
-    pub(crate) fn column(&self) -> Option<&str> {
-        match &self.value {
-            MemberValue::Column(column) => Some(column),
-            MemberValue::Expression(_) => None,
-        }
     }
 }
 

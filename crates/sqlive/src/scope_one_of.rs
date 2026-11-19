@@ -14,8 +14,9 @@
 //! argument or arm makes the comparison narrow nothing. The model states the
 //! rule as `OneOf.readCondition` in `crates/sqlive/proofs`.
 
+use crate::scope_edge::MemberColumn;
 use crate::scope_or::{Disjunction, Side};
-use crate::scope_plan::{Member, Narrowing, PartnerValue, Planner, Subqueries};
+use crate::scope_plan::{Narrowing, PartnerValue, Planner, Subqueries};
 use crate::scope_term::{operand, ScopeTerm};
 use crate::sql::unparenthesized;
 use rusqlite::Connection;
@@ -69,15 +70,12 @@ impl Planner<'_> {
     /// The side a constant gives: the member column equal to it.
     fn constant_side(
         connection: &Connection,
-        member: &Member,
+        member: &MemberColumn,
         expr: &Expr<'_>,
     ) -> rusqlite::Result<Option<Side>> {
-        let Some(column) = member.column() else {
-            return Ok(None);
-        };
         Ok(operand(connection, expr, member.affinity)?.map(|operand| Side {
             terms: vec![ScopeTerm::Compare {
-                column: column.to_owned(),
+                column: member.column.clone(),
                 affinity: member.affinity,
                 operand,
                 ordering: Ordering::Equal,
@@ -123,7 +121,7 @@ impl Planner<'_> {
                     .partner(core, member.item, argument)
                     .and_then(|partner| {
                         let value = PartnerValue::Expression(argument.to_string());
-                        self.edge_to(member.clone(), partner, value)
+                        self.edge_to(member.clone().into(), partner, value)
                     })
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] }),
             };
@@ -165,7 +163,7 @@ impl Planner<'_> {
             let side = if constant(returned) {
                 Self::constant_side(connection, &member, returned)?
             } else {
-                self.arm_edge(arm, member.clone(), returned)
+                self.arm_edge(arm, member.clone().into(), returned)
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] })
             };
             let Some(side) = side else {

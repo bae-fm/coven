@@ -10,7 +10,8 @@
 //! takes values from `x`, never the reverse, and `x` is placed before `col`'s
 //! source (`Planner::ordered`).
 
-use crate::scope_plan::{is_name, Edge, Member, PartnerValue, Planner};
+use crate::scope_edge::Member;
+use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
 
@@ -79,7 +80,7 @@ impl Planner<'_> {
             return None;
         }
         let member = self.member_column(core, member_expr)?;
-        self.arm_edge(subquery, member, returned[position])
+        self.arm_edge(subquery, member.into(), returned[position])
     }
 
     /// The edge from `member` to the source of the core `arm` whose column

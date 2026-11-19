@@ -6,8 +6,10 @@
 //! source's terms say of its column to the first.
 
 use crate::from_item::Columns;
-use crate::scope_plan::{is_name, Edge, Member, MemberValue, PartnerValue, Planner};
-use crate::scope_row::item_row_term;
+use std::sync::Arc;
+
+use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
+use crate::scope_row::{item_row_term, RowTerm};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, strict, Part};
 use crate::sql::unparenthesized;
@@ -16,7 +18,11 @@ use sqlite3_parser::ast::{Expr, Name};
 impl Planner<'_> {
     /// The member column `member_expr`, written in `core`, names: a bare
     /// column of one of the core's own sources that sqlive narrows by.
-    pub(crate) fn member_column(&self, core: usize, member_expr: &Expr<'_>) -> Option<Member> {
+    pub(crate) fn member_column(
+        &self,
+        core: usize,
+        member_expr: &Expr<'_>,
+    ) -> Option<MemberColumn> {
         if !is_name(member_expr) {
             return None;
         }
@@ -28,13 +34,13 @@ impl Planner<'_> {
     }
 
     /// `item`'s `column` as a member column, when sqlive narrows by it.
-    pub(crate) fn narrowed_column(&self, item: usize, column: String) -> Option<Member> {
+    pub(crate) fn narrowed_column(&self, item: usize, column: String) -> Option<MemberColumn> {
         let found = &self.items[item];
         if found.source.table.is_none() && found.derived.is_none() {
             return None;
         }
         let affinity = found.columns.affinity(&column)?;
-        Some(Member { item, value: MemberValue::Column(column), affinity })
+        Some(MemberColumn { item, column, affinity })
     }
 
     /// The member `member_expr`, written in `core`, gives when it is an
@@ -55,8 +61,9 @@ impl Planner<'_> {
     }
 
     /// The edge `member_expr = other` gives, written in `core` with `other`
-    /// first when `first`, when `member_expr` is a member column or an
-    /// expression over one table's row (`member_expression`) and `other` is
+    /// first when `first`, when `member_expr` is a member column, if it is a
+    /// bare name, or else an expression over one table's row
+    /// (`member_expression`), and `other` is
     /// a value of one other source (`partner`); and when SQLite compares
     /// them by BINARY, as sqlive does: the comparison takes the collation of
     /// a COLLATE in either side, else of the first side when that is a
@@ -68,9 +75,11 @@ impl Planner<'_> {
         other: &Expr<'_>,
         first: bool,
     ) -> Option<Edge> {
-        let member = self
-            .member_column(core, member_expr)
-            .or_else(|| self.member_expression(core, member_expr))?;
+        let member = if is_name(member_expr) {
+            self.member_column(core, member_expr)?.into()
+        } else {
+            self.member_expression(core, member_expr)?
+        };
         let partner = self.partner(core, member.item, other)?;
         if is_name(other) {
             let (_, partner_column) = self.resolve(core, other)?;
@@ -263,6 +272,54 @@ impl Planner<'_> {
             }
         }
         None
+    }
+}
+
+/// What sqlive narrows one of a core's sources by: a table's or a derived
+/// item's column that sqlive gives an affinity, or an expression over a
+/// table's own columns.
+#[derive(Clone)]
+pub(crate) struct Member {
+    pub(crate) item: usize,
+    pub(crate) value: MemberValue,
+    /// The affinity a lookup gives a value it compares with the member's:
+    /// its column's, or BLOB, which converts nothing, for an expression,
+    /// whose comparison the question that judges a row leaves to SQLite.
+    pub(crate) affinity: Affinity,
+}
+
+/// A member that is one of its source's columns: a table's or a derived
+/// item's column that sqlive gives an affinity.
+#[derive(Clone)]
+pub(crate) struct MemberColumn {
+    pub(crate) item: usize,
+    pub(crate) column: String,
+    pub(crate) affinity: Affinity,
+}
+
+impl From<MemberColumn> for Member {
+    fn from(MemberColumn { item, column, affinity }: MemberColumn) -> Self {
+        Self { item, value: MemberValue::Column(column), affinity }
+    }
+}
+
+/// What an edge compares of its member's rows.
+#[derive(Clone)]
+pub(crate) enum MemberValue {
+    /// One of its columns, lowercase.
+    Column(String),
+    /// An expression over a table's own columns, whose value in a changed
+    /// row a write asks SQLite for (`scope_row.rs`).
+    Expression(Arc<RowTerm>),
+}
+
+impl Member {
+    /// The member's column, unless it is an expression.
+    pub(crate) fn column(&self) -> Option<&str> {
+        match &self.value {
+            MemberValue::Column(column) => Some(column),
+            MemberValue::Expression(_) => None,
+        }
     }
 }
 
