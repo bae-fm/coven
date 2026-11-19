@@ -163,11 +163,12 @@ code_checks() {
     cargo fmt --all --check
 
     # A workspace of its own, which builds against the toolchain's compiler
-    # crates and clippy's source; prepare-build.sh fetches both.
+    # crates and clippy's source; prepare-build.sh fetches both. Its tests
+    # build in release, as tools/typed-lints/clippy.sh builds the driver.
     step "the typed lints (tools/typed-lints): clippy and their tests"
     tools/typed-lints/prepare-build.sh
     tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
-    tools/typed-lints/cargo.sh test
+    tools/typed-lints/cargo.sh test --release
 
     if [ ${#crates[@]} = 0 ]; then
         return
@@ -175,9 +176,9 @@ code_checks() {
     local packages
     packages=$(cargo_packages)
 
-    step "cargo clippy --all-targets --all-features ($packages)"
+    step "cargo clippy, with the typed lints, --all-targets --all-features ($packages)"
     # shellcheck disable=SC2086
-    scripts/cargo.sh clippy $packages --all-targets --all-features -- -D warnings
+    tools/typed-lints/clippy.sh $packages --all-targets --all-features -- -D warnings
 
     step "cargo doc (broken links denied)"
     # shellcheck disable=SC2086
@@ -256,11 +257,12 @@ android_checks() {
         echo "no Android NDK found: set ANDROID_NDK_HOME" >&2
         exit 1
     fi
-    step "cargo clippy --target aarch64-linux-android --all-targets --all-features (NDK $(basename "$ndk"))"
+    step "cargo clippy, with the typed lints, --target aarch64-linux-android --all-targets --all-features (NDK $(basename "$ndk"))"
+    tools/typed-lints/prepare-build.sh
     CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang" \
         AR_aarch64_linux_android="$bin/llvm-ar" \
-        scripts/cargo.sh clippy --workspace --target aarch64-linux-android --all-targets --all-features \
-        -- -D warnings
+        tools/typed-lints/clippy.sh --workspace --target aarch64-linux-android --all-targets \
+        --all-features -- -D warnings
 }
 
 # The crates whose build without their features compiles something the build

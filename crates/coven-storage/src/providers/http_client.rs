@@ -30,16 +30,25 @@ pub(crate) const STALL_WINDOW: Duration = Duration::from_secs(60);
 const UPLOAD_STEP: usize = 64 * 1024;
 
 /// Why the HTTPS client could not be built: its TLS setup failed.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub(crate) enum TlsSetupError {
     /// reqwest refused to build the client.
-    #[error(transparent)]
+    #[error("building the HTTPS client")]
     Client(#[from] reqwest::Error),
     /// Android's certificate verifier, which asks the JVM, could not start
     /// (api.md E1).
     #[cfg(target_os = "android")]
     #[error("starting Android's certificate verifier: {0}")]
     AndroidVerifier(#[source] jni::errors::Error),
+}
+
+/// The error and every cause below it, as a cause chain prints them:
+/// reqwest's own `Debug` can hold a full URL.
+impl fmt::Debug for TlsSetupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let causes = super::error_text::CauseChain(self);
+        f.debug_tuple("TlsSetupError").field(&format_args!("{causes}")).finish()
+    }
 }
 
 /// A request to `provider` that can't be sent because the client's TLS setup
@@ -158,7 +167,6 @@ impl HttpClient {
 }
 
 /// Why a request failed before its response arrived.
-#[derive(Debug)]
 pub(crate) enum SendError {
     /// reqwest's own failure: building, connecting, TLS or the exchange.
     Http(reqwest::Error),
@@ -167,6 +175,21 @@ pub(crate) enum SendError {
     /// Handing over the request's body panicked, as in a caller's progress
     /// reader: a bug, not a failure of the exchange (E15).
     Bug(Bug),
+}
+
+/// reqwest's failure prints as a cause chain prints it: reqwest's own
+/// `Debug` can hold a full URL.
+impl fmt::Debug for SendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(error) => {
+                let causes = super::error_text::CauseChain(error);
+                f.debug_tuple("Http").field(&format_args!("{causes}")).finish()
+            }
+            Self::Stalled(stalled) => f.debug_tuple("Stalled").field(stalled).finish(),
+            Self::Bug(bug) => f.debug_tuple("Bug").field(bug).finish(),
+        }
+    }
 }
 
 impl SendError {
