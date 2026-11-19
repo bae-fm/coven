@@ -68,18 +68,22 @@ build:2)
 #!/bin/sh
 # Points toolchain-lib at this machine's copy of the toolchain's libraries,
 # where the driver finds librustc_driver (driver/build.rs), and runs it.
+# Windows finds the DLL through PATH instead, which holds the toolchain's
+# bin folder only under rustup, so the driver runs under `rustup run` there.
 set -eu
 cd "$(dirname "$0")"
 toolchain=$(cat toolchain)
 case "$toolchain" in
-*windows*) ;;
+*windows*)
+    rustup run "$toolchain" ./typed-lints-driver.exe --version >/dev/null
+    ;;
 *)
     sysroot=$(rustup run "$toolchain" rustc --print sysroot)
     rm -f toolchain-lib
     ln -s "$sysroot/lib" toolchain-lib
+    ./typed-lints-driver --version >/dev/null
     ;;
 esac
-./typed-lints-driver --version >/dev/null
 CHECK
     chmod +x "$out/check"
     ;;
