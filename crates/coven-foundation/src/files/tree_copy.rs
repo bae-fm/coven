@@ -26,20 +26,9 @@ pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool) {
 }
 
 /// Every file in the tree at `dir`, at any depth, sorted by path. Folders are
-/// not listed.
+/// not listed. Panics on failure.
 pub fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    let mut folders = vec![dir.to_path_buf()];
-    while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                folders.push(entry.path());
-            } else {
-                files.push(entry.path());
-            }
-        }
-    }
+    let mut files = super::held_open::walk_files(dir, &|_| Ok(true)).unwrap();
     files.sort();
     files
 }

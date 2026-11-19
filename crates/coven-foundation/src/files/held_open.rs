@@ -60,8 +60,8 @@ fn files_held_open(_: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// The files under `directory`, in subdirectories too, for which `held` is
 /// true. A directory or file that can't be read fails the walk.
-#[cfg(any(windows, test))]
-fn walk_files(
+#[cfg(any(windows, test, feature = "test-utils"))]
+pub(super) fn walk_files(
     directory: &Path,
     held: &dyn Fn(&Path) -> io::Result<bool>,
 ) -> io::Result<Vec<PathBuf>> {
