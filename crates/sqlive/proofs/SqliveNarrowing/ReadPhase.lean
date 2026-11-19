@@ -424,7 +424,8 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
     {Good : Nat → Row → Prop}
     (hGood : ∀ i r, Good i r → ∀ u, (Fin.items i).term = some u → u.holds (some r) = true)
     (hcls : ∀ Z f k b d q v, Src d → (s.item d).kind = .derived q v → k ∈ (s.query q).arms →
-      (s.core k).windowed = false → P Z f k b → ∃ r, Good d r ∧ s.PassedCells k r b)
+      (s.core k).windowed = false → (s.query q).limit = none → (s.query q).offset = none →
+      P Z f k b → ∃ r, Good d r ∧ s.PassedCells k r b)
     (hsrc : ∀ d q v k t, Src d → (s.item d).kind = .derived q v → k ∈ (s.query q).arms →
       t ∈ (s.core k).items → Src t) (narrowFuel : Nat) :
     ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm), Src item → st.Sem s P →
@@ -484,7 +485,7 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
         refine PState.TermGrows.foldl_until (Q := fun x => x.Sem s P)
           (fun st0 arm => PState.TermGrows.foldl (fun st1 target => hstep st1 target _) _ st0) _
           (fun st0 arm harm hs0 hfin0 => ?_) st hs hfin
-        obtain ⟨q, v, k, hkind, _, _, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
+        obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
         have hklt := ((s.wellFormed_parts h).arms q (s.query_lt hk) k hk).1
         refine PState.TermGrows.foldl_until (Q := fun x => x.Sem s P)
           (fun st1 target => hstep st1 target _) _ (fun st1 target htarget hs1 hfin1 => ?_) st0 hs0 hfin0
@@ -511,7 +512,7 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
             · cases hr
           · cases hr
         · rw [hcore] at hb
-          obtain ⟨row, hgood, hcells⟩ := hcls Z f k b item q v hsrc0 hkind hk hwin hb
+          obtain ⟨row, hgood, hcells⟩ := hcls Z f k b item q v hsrc0 hkind hk hwin hlim hoff hb
           simp only [Option.filter, Option.bind] at hr
           split at hr
           · rename_i u' hren
@@ -621,7 +622,7 @@ derived item's term in `Fin`. -/
 theorem PState.Sem.readCore {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
     {Fin : PState}
     (hrel : ∀ d q v, d ∈ (s.core (s.item d).core).items → (s.item d).kind = .derived q v →
-      ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true)
+      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true)
     {done : List Nat} {st : PState} (hs : st.Sem s (readCls s rel done)) (hpushed : st.pushed = [])
     {k : Nat} (hk : k ∉ done ∧ ∀ a ∈ done, ¬s.Below k a) (hfin : (readCore s st k).TermGrows Fin) :
     (readCore s st k).Sem s (readCls s rel (done ++ [k])) := by
@@ -639,7 +640,7 @@ theorem PState.Sem.readCore {s : Statement} (h : s.wellFormed = true) {rel : Nat
       (Good := fun d r => ∀ u, (Fin.items d).term = some u → u.holds (some r) = true)
       (fun _ _ hg => hg) ?_ ?_ s.fuel s.fuel st0 i _ ⟨by rw [hcore]; exact hi, k, by simp, Or.inl hcore⟩
       hs0 hfin0 fun u hu r hr => ?_
-    · intro Z f k' b d q v ⟨hdl, a, ha, hda⟩ hkind hk' hwin hb
+    · intro Z f k' b d q v ⟨hdl, a, ha, hda⟩ hkind hk' hwin hlim hoff hb
       have harm : s.ArmOf k' (s.item d).core :=
         ⟨q, List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hkind]⟩), hk'⟩
       have hbelow : s.Below k' a := by
@@ -647,7 +648,7 @@ theorem PState.Sem.readCore {s : Statement} (h : s.wellFormed = true) {rel : Nat
         · rw [← hda]; exact .arm harm
         · exact (Statement.Below.arm harm).trans hda
       obtain ⟨r, hr, hcells⟩ := relevant_cells (hb.2 ⟨a, ha, hbelow⟩ q hk') hwin
-      exact ⟨r, hrel d q v hdl hkind r hr, hcells⟩
+      exact ⟨r, hrel d q v hdl hkind hlim hoff r hr, hcells⟩
     · intro d q v k' t ⟨hdl, a, ha, hda⟩ hkind hk' ht
       have harm : s.ArmOf k' (s.item d).core :=
         ⟨q, List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hkind]⟩), hk'⟩
@@ -684,7 +685,7 @@ theorem PState.Sem.readCore {s : Statement} (h : s.wellFormed = true) {rel : Nat
 theorem plan_readSem_go {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
     {Fin : PState}
     (hrel : ∀ d q v, d ∈ (s.core (s.item d).core).items → (s.item d).kind = .derived q v →
-      ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true) :
+      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true) :
     ∀ (rest done : List Nat) (st : PState), done ++ rest = s.readOrder →
       st.Sem s (readCls s rel done) → st.pushed = [] → (rest.foldl (readCore s) st).TermGrows Fin →
       (rest.foldl (readCore s) st).Sem s (readCls s rel s.readOrder)
@@ -712,7 +713,7 @@ passes the derived item's term in `Fin`. -/
 theorem plan_readSem {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
     {Fin : PState}
     (hrel : ∀ d q v, d ∈ (s.core (s.item d).core).items → (s.item d).kind = .derived q v →
-      ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true)
+      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true → ∀ u, (Fin.items d).term = some u → u.holds (some r) = true)
     (hfin : (s.readOrder.foldl (readCore s) (PState.initial s)).TermGrows Fin) :
     (s.readOrder.foldl (readCore s) (PState.initial s)).Sem s (readCls s rel s.readOrder) :=
   plan_readSem_go h hrel s.readOrder [] _ rfl (PState.Sem.initial h fun _ _ _ _ hb => hb.1) rfl hfin

@@ -88,3 +88,6 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.PState.Sem.pushDown
 #print axioms SqliveNarrowing.PState.Sem.readCore
 #print axioms SqliveNarrowing.plan_readSem
+#print axioms SqliveNarrowing.PState.Sem.pushEdges
+#print axioms SqliveNarrowing.PState.Sem.placed
+#print axioms SqliveNarrowing.plan_sem

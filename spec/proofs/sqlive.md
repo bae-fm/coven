@@ -538,11 +538,26 @@ binding the arms keep, as the carry needs. `PState.Sem.readCore` proves
 that reading a core keeps the invariant, and `plan_readSem` that the state
 after the planner reads every core says only what holds of each binding a
 core keeps, and of each binding below a core that matters.
+[OrderPhase.lean](../../crates/sqlive/proofs/SqliveNarrowing/OrderPhase.lean)
+carries it through the order the planner places items in. As the planner
+places an item, it takes the item's edges to items placed before it as
+memberships and passes them into the item's arms when the item is derived.
+A passed edge joins the edges the planner keeps apart (`PState.pushed`), and
+makes its target an inner join's where a row of NULLs fails it: a binding of
+the arm that matters holds, in the column the arm passes on, the value of a
+row the derived item's test keeps, and the test keeps a row only where the
+edge's member column holds a value, so the target has a row there.
+`PState.Sem.pushEdges` proves that passing edges into an arm keeps the
+invariant, `PState.Sem.placed` that placing an item does, and `plan_sem`
+that the planned state says only what holds of each binding a core keeps
+that matters to its query's test.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
-the terms the planner carries and passes into derived items, the
-memberships and ORs it takes as it places items, and the order it places
-them in keep the state's facts true of the bindings that matter.
+the planned state's facts at a binding that matters, with the order the
+planner places items in, give each row of the binding its item's test: its
+memberships' and ORs' lookups, the edges passed into it, its LIMIT bound,
+and, for a LEFT JOIN item the planned state still holds an ON narrowing back
+for, a test its ON alone decides.
 
 ## What the proofs don't cover
 
