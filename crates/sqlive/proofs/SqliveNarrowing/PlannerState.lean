@@ -19,14 +19,15 @@ namespace SqliveNarrowing
 
 /-- Where a pushed edge comes from, in the state `st`: its member is an
 inner join's, and an arm of a derived item's query, which keeps every row
-and makes a row of each binding, passes the member's column on unchanged as
-a result column, of which the derived item holds an edge, as a membership or
-as an edge pushed into it, with the same partner, partner value and NULL
-matching. -/
+and makes a row of each binding, or groups its rows by the member's column,
+passes the member's column on unchanged as a result column, of which the
+derived item holds an edge, as a membership or as an edge pushed into it,
+with the same partner, partner value and NULL matching. -/
 def PState.PushedFrom (s : Statement) (st : PState) (e : Edge) : Prop :=
   (st.items e.member).leftOn = none ∧
   ∃ d q v k c c', (s.item d).kind = .derived q v ∧ (s.query q).limit = none ∧
-    (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧ (s.core k).aggregated = false ∧
+    (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧
+    ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col e.member c') = true) ∧
     (s.core k).windowed = false ∧ (s.item e.member).core = k ∧
     (s.core k).output[c]? = some (.expr (.col e.member c')) ∧ e.memberValue = .column c' ∧
     ∃ e0, (e0 ∈ (st.items d).memberships ∨ (e0 ∈ st.pushed ∧ e0.member = d)) ∧
@@ -197,15 +198,17 @@ theorem PState.Passes.mono {st st' : PState} (h : st.Grows st')
   · exact Or.inr ⟨h.2.2 e hm, hi⟩
 
 /-- An arm `pushDown` passes conditions into: an arm of a derived item's
-query with no LIMIT and no OFFSET that neither aggregates nor calls a window
-function, passing on each result column that is a bare column of its own
-item. -/
+query with no LIMIT and no OFFSET that calls no window function, passing on
+each result column that is a bare column of its own item and, when the arm
+groups its rows, one its GROUP BY lists. -/
 theorem PushDown.mem_arms {s : Statement} {item : Nat} {found : List (List (Option (Nat × Nat)))}
     (h : PushDown.arms s item = some found) {arm : List (Option (Nat × Nat))} (harm : arm ∈ found) :
     ∃ q v k, (s.item item).kind = .derived q v ∧ (s.query q).limit = none ∧
-      (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧ (s.core k).aggregated = false ∧
+      (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧
       (s.core k).windowed = false ∧ ∀ (c t c' : Nat), (arm[c]?).join = some (t, c') →
-        (s.item t).core = k ∧ (s.core k).output[c]? = some (OutCol.expr (Expr.col t c')) := by
+        (s.item t).core = k ∧
+        ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col t c') = true) ∧
+        (s.core k).output[c]? = some (OutCol.expr (Expr.col t c')) := by
   unfold PushDown.arms at h
   dsimp only at h
   split at h
@@ -217,9 +220,9 @@ theorem PushDown.mem_arms {s : Statement} {item : Nat} {found : List (List (Opti
     · rename_i hcut
       cases h
       obtain ⟨k, hk, rfl⟩ := List.mem_map.mp harm
-      simp only [List.mem_filter, Bool.and_eq_true, Bool.not_eq_true'] at hk
+      simp only [List.mem_filter, Bool.not_eq_true'] at hk
       simp only [Bool.or_eq_true, Option.isSome_iff_ne_none, ne_eq, not_or, Decidable.not_not] at hcut
-      refine ⟨q, v, k, hkind, hcut.1, hcut.2, hk.1, hk.2.1, hk.2.2, fun c t c' hc => ?_⟩
+      refine ⟨q, v, k, hkind, hcut.1, hcut.2, hk.1, hk.2, fun c t c' hc => ?_⟩
       simp only [List.getElem?_map] at hc
       cases ho : (s.core k).output[c]? with
       | none => simp [ho] at hc
@@ -230,7 +233,8 @@ theorem PushDown.mem_arms {s : Statement} {item : Nat} {found : List (List (Opti
           split at hc
           · rename_i hj
             cases hc
-            exact ⟨hj, rfl⟩
+            simp only [Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true, Bool.not_eq_true'] at hj
+            exact ⟨hj.1, hj.2, rfl⟩
           · cases hc
         · cases hc
 
@@ -354,7 +358,7 @@ theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
       · exact PState.Keeps.refl s st
       · refine PState.Keeps.foldl_from (base := st) (fun st0 arm harm hst0 => ?_) st
           (PState.Keeps.refl s st)
-        obtain ⟨q, v, k, hkind, hlim, hoff, hk, hagg, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
+        obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
         have hpass0 := hpass.mono hst0.1
         refine PState.Keeps.foldl_from (base := st0) (fun st1 target _ hst1 => ?_) st0
           (PState.Keeps.refl s st0)
@@ -362,7 +366,7 @@ theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
         refine PushDown.step_keeps (fun e he => ?_)
           (fun st' h => PushDown.pushDown_keeps s narrowFuel fuel st' target _ _ h)
         obtain ⟨e0, he0, c, c', hc, hthr, rfl⟩ := PushDown.mem_passed (through := fun c => arm[c]?.join) he
-        obtain ⟨hcore, hout⟩ := hthrough c target c' hthr
+        obtain ⟨hcore, hagg, hout⟩ := hthrough c target c' hthr
         refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, item, q, v, k, c, c', hkind, hlim, hoff, hk, hagg,
           hwin, hcore, hout, rfl, e0, ?_, hc, rfl, rfl, rfl⟩⟩
         rcases hpass1 e0 he0 with hm | ⟨hm, hi⟩

@@ -5,14 +5,17 @@
 //! neither groups nor limits its rows, an output column that is a bare
 //! column of a source holds that source row's value, so a condition the
 //! statement puts on the column holds of the source rows too: a source row
-//! failing it makes only output rows that fail it.
+//! failing it makes only output rows that fail it. When it groups them, a
+//! column the GROUP BY lists holds the same value in every row of a group,
+//! so the same holds of that column: a source row failing the condition is
+//! in a group whose row fails it.
 
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Member, MemberValue};
 use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
-use crate::select_syntax::{parts, text};
+use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
 
@@ -237,13 +240,7 @@ fn read_derived<'a>(
             // A `*` over a table function's columns: no column is known.
             return Ok(Some((Columns::Unknown, Derived { arms: Vec::new(), rows: None })));
         };
-        let grouped = match body {
-            OneSelect::Select { group_by, having, window_clause, .. } => {
-                group_by.is_some() || having.is_some() || window_clause.is_some()
-            }
-            OneSelect::Values(_) => false,
-        };
-        arms.push((core, columns, grouped || aggregates(planner, select, body)));
+        arms.push((core, columns, arm_rows(planner, select, core, body)));
     }
     let width = arms[0].1.len();
     let named: Vec<Option<String>> = match names {
@@ -267,33 +264,59 @@ fn read_derived<'a>(
         let value = affinity.map_or(ColumnValue::Unknown, ColumnValue::Compared);
         columns.push(Column { name, value });
     }
-    let rows = (!arms.iter().any(|(_, _, grouped)| *grouped)).then(|| {
+    let rows = (!arms.iter().any(|(_, _, rows)| rows.aggregated || rows.windowed)).then(|| {
         arms.iter()
             .map(|(_, columns, _)| columns.iter().map(|output| output.passed.clone()).collect())
             .collect()
     });
-    // A LIMIT keeps rows by the others around them, and grouping makes one
-    // row of many: a condition on such a row says nothing of its sources.
+    // A LIMIT keeps rows by the others around them, and a window function's
+    // value in a row depends on the rows around it: a condition on such a
+    // row says nothing of its sources. Grouping makes one row of many, which
+    // hold the group's value only in a column the GROUP BY lists.
     let arms = if select.limit.is_some() {
         Vec::new()
     } else {
         arms.into_iter()
-            .filter(|(_, _, grouped)| !grouped)
-            .map(|(_, columns, _)| columns.into_iter().map(|output| output.passed).collect())
+            .filter(|(_, _, rows)| !rows.windowed)
+            .map(|(_, columns, rows)| {
+                columns
+                    .into_iter()
+                    .map(|output| {
+                        output
+                            .passed
+                            .filter(|passed| !rows.aggregated || rows.keys.contains(passed))
+                    })
+                    .collect()
+            })
             .collect()
     };
     Ok(Some((Columns::Listed(columns), Derived { arms, rows })))
 }
 
-/// Whether `body` calls an aggregate or window function, which makes its
-/// rows of many of its sources' rows.
-fn aggregates(planner: &Planner, select: &Select<'_>, body: &OneSelect<'_>) -> bool {
+/// How an arm makes its rows from its sources' rows.
+struct ArmRows {
+    /// Whether it groups its rows or calls an aggregate, which makes one row
+    /// of many.
+    aggregated: bool,
+    /// Whether it calls a window function, whose value in a row depends on
+    /// the arm's other rows.
+    windowed: bool,
+    /// The columns its GROUP BY lists as bare columns of its own sources,
+    /// whose collation is BINARY: each row of a group holds the group's
+    /// value in them, where another collation could group values that
+    /// differ.
+    keys: Vec<(usize, String)>,
+}
+
+/// How `body`, the arm `core` of `select`, makes its rows.
+fn arm_rows(planner: &Planner, select: &Select<'_>, core: usize, body: &OneSelect<'_>) -> ArmRows {
+    let OneSelect::Select { columns, group_by, having, window_clause, .. } = body else {
+        return ArmRows { aggregated: false, windowed: false, keys: Vec::new() };
+    };
     let mut found = Vec::new();
-    if let OneSelect::Select { columns, .. } = body {
-        for column in columns.iter() {
-            if let ResultColumn::Expr(expr, _) = column {
-                parts(expr, &mut found);
-            }
+    for column in columns.iter() {
+        if let ResultColumn::Expr(expr, _) = column {
+            parts(expr, &mut found);
         }
     }
     if select.body.compounds.is_none() {
@@ -301,7 +324,23 @@ fn aggregates(planner: &Planner, select: &Select<'_>, body: &OneSelect<'_>) -> b
             parts(&term.expr, &mut found);
         }
     }
-    found.iter().any(|part| part.many_rows(planner.functions))
+    let keys = group_by
+        .iter()
+        .flat_map(|exprs| exprs.iter())
+        .filter(|expr| is_name(expr))
+        .filter_map(|expr| planner.resolve(core, expr))
+        .filter(|(item, column)| {
+            planner.items[*item].core == core
+                && planner.items[*item].columns.affinity(column).is_some()
+        })
+        .collect();
+    ArmRows {
+        aggregated: group_by.is_some()
+            || having.is_some()
+            || found.iter().any(|part| part.aggregates(planner.functions)),
+        windowed: window_clause.is_some() || found.iter().any(Part::windowed),
+        keys,
+    }
 }
 
 /// A column a core outputs: its name as SQLite gives it, when sqlive knows

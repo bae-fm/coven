@@ -138,7 +138,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT value FROM items, n WHERE id=1",
         "SELECT value FROM (SELECT * FROM items LIMIT 5) WHERE id=1",
-        "SELECT value FROM (SELECT id, max(value) AS value FROM items GROUP BY id) WHERE id=1",
+        "SELECT value FROM (SELECT id, max(value) AS value FROM items GROUP BY id) WHERE value=10",
         "SELECT value FROM (SELECT id, value, sum(value) OVER () AS total FROM items) WHERE id=1",
         "SELECT a.value FROM items a JOIN items b ON a.id<b.id WHERE b.value=90",
         "SELECT a.value FROM items a NATURAL JOIN items b WHERE a.id=1",

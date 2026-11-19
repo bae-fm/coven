@@ -28,6 +28,8 @@ mod cte_names;
 mod distinct;
 #[path = "narrowing_model/edge.rs"]
 mod edge;
+#[path = "narrowing_model/group_key.rs"]
+mod group_key;
 #[path = "narrowing_model/is_edge.rs"]
 mod is_edge;
 #[path = "narrowing_model/limit.rs"]
@@ -573,6 +575,12 @@ async fn row_subquery_edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn push_down_matches_lean() {
     differential("push down", push_down::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn group_key_matches_lean() {
+    differential("group key", group_key::statement).await;
 }
 
 #[tokio::test]

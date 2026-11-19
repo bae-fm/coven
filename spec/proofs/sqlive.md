@@ -184,6 +184,13 @@ JOIN adds, so where such a part holds, its item has a row.
   that a row of an arm that doesn't aggregate holds, in each column that is a
   bare column of one of the arm's items, that item's value. `renamed_sound`
   proves that a term true of the derived row is then true of the item's row.
+  An arm that groups its rows or calls an aggregate passes on only the
+  columns its GROUP BY lists as bare columns: `group_key_sound` proves that a
+  row of such an arm is the row of a group of the bindings the arm keeps, and
+  that every binding of the group holds the row's value in each such column.
+  So a term true of the row is true of the item's row in every binding the
+  row is made from, and a row of the item that fails the term is in a group
+  whose row fails it. An arm that calls a window function passes on nothing.
 - **A condition carried across an equality.** `transfer_sound` proves that
   when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
   true of `a`'s row on `x`. The planner adds such a term to `a`'s scope,
@@ -387,7 +394,8 @@ the planner takes a step for each item. `Planned.scopes_eq` takes both.
 `plan_pushed` proves that each edge the planner passes into a derived item's
 arms comes from an edge the derived item holds, as a membership or as an edge
 passed into it, through the result column that an arm passes the target's
-column on to unchanged, and that the target is an inner join's. The planner
+column on to unchanged, from an arm that groups no rows or groups them by
+that column, and that the target is an inner join's. The planner
 keeps the edges it passes in a list of their own (`PState.pushed`), apart
 from the edges conditions give, and no step of the planner reads that list.
 `plan_nestedOK` proves that each edge of the planned state whose partner is

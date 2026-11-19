@@ -1106,10 +1106,11 @@ and a numbered track added to this release does. A CTE, a subquery in FROM or a 
 carries its own tables' conditions the same way, through a column that passes
 a table's column on: `tracks` joined to `WITH r AS (SELECT id FROM releases
 WHERE id = ?1 LIMIT 1)` by `t.release_id = r.id` narrows by `t.release_id =
-?1`. One of its SELECTs that groups its rows or calls an aggregate or window
-function passes on no row's own value, so it carries nothing. A carried
-condition narrows only the table it is carried to: it doesn't change which
-table comes first, and an equality with an expression carries none.
+?1`. A query with a SELECT that groups its rows or calls an aggregate or
+window function carries nothing out, even in a column its GROUP BY lists.
+A carried condition narrows only the table it is carried to: it doesn't
+change which table comes first, and an equality with an expression carries
+none.
 
 A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the
@@ -1213,10 +1214,18 @@ album_tracks WHERE album_id = ?1`: that narrows `releases` to the album's
 releases and `tracks` to theirs, as the join written out would. A LEFT JOIN's
 right side in the view takes the condition too, which makes that join an inner
 join, as a WHERE condition does. A condition passes into each arm of a compound,
-but not into a query that groups its rows, calls an aggregate or window
-function, or has a LIMIT: a row of such a query
-comes of many rows of its tables, or depends on which other rows there are, so a
-condition on it says nothing of each. Coven's own views are read whole, since
+but not into a query that calls a window function or has a LIMIT: a row of
+such a query depends on which other rows there are, so a condition on it says
+nothing of each. Nor does it pass into a query that groups its rows or calls
+an aggregate, whose row comes of many rows of its tables, except a condition on
+a column the GROUP BY lists, which holds the same value in each row of a
+group. Ben's release page counts the release's files that wait to upload
+with `LEFT JOIN (SELECT f.release_id, count(*) AS n FROM waiting AS f GROUP BY
+f.release_id) AS w ON w.release_id = r.id`. Each row of a group holds the
+group's `release_id`, so the join narrows `waiting` to this release's files,
+and a file of another release that starts to wait doesn't rerun the page. A
+condition on `n`, or on a column the query computes from the key, narrows
+nothing there. Coven's own views are read whole, since
 what they show changes with what coven holds in memory too. A view coven can't
 read this way, as one with a recursive CTE, is read whole; a lookup still asks
 it, so it narrows the tables beside it. SQLite names each read inside a view
@@ -15178,7 +15187,7 @@ Write-ups explain each model and state its assumptions:
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
 | A term, an edge that compares by `=` or an OR that a row of NULLs fails, true of a binding with no row of its item, has an item no LEFT JOIN adds, or an edge's partner outside a subquery that no LEFT JOIN adds and the binding has no row of | `holds_none`, `HoldsIn.bound` | `../crates/sqlive/proofs/SqliveNarrowing/Reader.lean` | §4 |
-| A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row | `push_down_sound`, `renamed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
+| A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row; a row of an arm that groups its rows holds, in each column its GROUP BY lists, the value of that column's item in every binding of its group | `push_down_sound`, `renamed_sound`, `group_key_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
 | An equality between two items, true of a binding, carries a term true of one side's row on its compared column to the other side's column; a derived item's row whose column isn't NULL passes what each of its arms' items' terms say of the column the arm passes on | `transfer_sound`, `pulled_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Transfer.lean` | §4 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |

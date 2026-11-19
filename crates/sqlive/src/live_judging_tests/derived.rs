@@ -160,6 +160,38 @@ async fn grouped_or_limited_rows_keep_their_tables_whole() {
     db.close();
 }
 
+/// A condition on a column a grouped subquery's GROUP BY lists passes into
+/// it: every row of a group holds the group's value there, so a cover of
+/// another hash is in a group the join leaves out. A column computed from
+/// the key passes nothing, and a window over the groups keeps the table
+/// whole.
+#[tokio::test]
+async fn a_condition_on_a_group_key_passes_into_the_group() {
+    let db = TestDatabase::open(SCANS);
+    for sql in [
+        "SELECT g.n FROM scan c LEFT JOIN (SELECT hash, count(*) AS n FROM covers GROUP BY hash) g ON g.hash = c.hash WHERE c.path = ?1",
+        "WITH g AS (SELECT hash, count(*) AS n, max(url) AS url FROM covers GROUP BY hash HAVING count(*) > 0) SELECT g.n || g.url FROM scan c JOIN g ON g.hash = c.hash WHERE c.path = ?1",
+    ] {
+        follows(&db, sql, path("/m/a"), &[
+            ("INSERT INTO covers VALUES (3,'h2','three')", false),
+            ("UPDATE covers SET url = 'two2' WHERE id = 2", false),
+            ("INSERT INTO covers VALUES (4,'h1','four')", true),
+            ("UPDATE covers SET hash = 'h1' WHERE id = 2", true),
+            ("UPDATE scan SET hash = 'h2' WHERE id = 1", true),
+        ])
+        .await;
+        write(&db, "DELETE FROM covers WHERE id IN (3, 4); UPDATE covers SET url = 'two', hash = 'h2' WHERE id = 2; UPDATE scan SET hash = 'h1' WHERE id = 1");
+    }
+    for sql in [
+        "SELECT g.n FROM (SELECT hash || '' AS hash, count(*) AS n FROM covers GROUP BY hash) g WHERE g.hash = 'h1'",
+        "SELECT g.n FROM (SELECT hash, count(*) OVER () AS n FROM covers GROUP BY hash) g WHERE g.hash = 'h1'",
+    ] {
+        follows(&db, sql, vec![], &[("INSERT INTO covers VALUES (3,'h2','three')", true)]).await;
+        write(&db, "DELETE FROM covers WHERE id = 3");
+    }
+    db.close();
+}
+
 /// A subquery inside a correlated one reads the names around it, so sqlive
 /// reads none of its rows alone; its tables still take the values the
 /// statement around it matched.
