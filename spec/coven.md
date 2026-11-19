@@ -14493,10 +14493,14 @@ the same on any platform.
     clippy, and live in `tools/typed-lints`, a workspace of their own that no
     crate of coven's builds against. A machine's setup installs those compiler
     crates and fetches clippy's source once per toolchain
-    (`tools/typed-lints/prepare-build.sh`); the hook only checks that both are
-    in place. The driver builds once for each toolchain and version of the
-    lints' sources on each machine, and every checkout with the same sources
-    runs that build (`tools/typed-lints/tool.sh`). The first lint,
+    (`tools/typed-lints/prepare-build.sh`). The driver builds once for each
+    toolchain and version of the lints' sources on each machine, and every
+    checkout with the same sources runs that build (`tools/typed-lints/tool.sh`).
+    The hook installs, fetches and builds none of these. Its check of the lints'
+    own code only checks that the compiler crates and clippy's source are in
+    place. Its clippy runs the driver that the machine already has for the
+    lints' sources and toolchain, and when the machine has none it fails at
+    once and names `builds setup`, which builds the driver. The first lint,
     `clippy::reqwest_error_display`, finds code that prints a `reqwest::Error`
     with `Display` or `Debug`: the error's text leaves out the cause below it,
     and its URL can hold a path or a query.
