@@ -444,6 +444,12 @@ impl Planner<'_> {
         Narrowing { edges: edges.into_iter().flatten().collect(), ..Narrowing::default() }
     }
 
+    /// The cores whose items a name written in `core` can name: `core`, then
+    /// each core it sits in, outward.
+    pub(crate) fn scope_of(&self, core: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(Some(core), |current| self.cores[*current].parent)
+    }
+
     /// The item a column name written in `core` belongs to, and the column,
     /// lowercase, as SQLite resolves it: among the core's own items first,
     /// then those of each core it sits in. `None` when sqlive can't be sure.
@@ -455,8 +461,7 @@ impl Planner<'_> {
             Expr::DoublyQualified(db, table, name) if *db == "main" => (Some(table), name.clone()),
             _ => return None,
         };
-        let mut scope = Some(core);
-        while let Some(current) = scope {
+        for current in self.scope_of(core) {
             let items = self.cores[current]
                 .items
                 .iter()
@@ -496,7 +501,6 @@ impl Planner<'_> {
                     }
                 }
             }
-            scope = self.cores[current].parent;
         }
         None
     }

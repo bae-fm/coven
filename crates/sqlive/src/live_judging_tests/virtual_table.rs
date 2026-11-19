@@ -68,6 +68,27 @@ async fn a_hidden_column_keeps_the_virtual_table_whole() {
     }
 }
 
+/// A name sqlive can't resolve keeps a statement whole only where it can name
+/// a hidden column: the result column `rank` the outer SELECT names doesn't
+/// read the search table's `rank`, which its subquery reads in a core of its
+/// own, so the statement still narrows `albums` and the search table.
+#[tokio::test]
+async fn a_hidden_column_name_outside_the_virtual_tables_scope_narrows() {
+    let db = TestDatabase::open(SEARCH);
+    follows(
+        &db,
+        "SELECT a.year AS rank FROM albums a WHERE a.id IN (SELECT album_id FROM album_search WHERE title GLOB ?1) ORDER BY rank",
+        vec![SqlValue::Text(b"*light*".to_vec())],
+        &[
+            ("UPDATE albums SET year = year + 10 WHERE id = 'a2'", false),
+            ("INSERT INTO album_search(rowid, album_id, title) VALUES (9, 'a9', 'no match')", false),
+            ("UPDATE albums SET year = year + 10 WHERE id = 'a1'", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// A contentless FTS5 table keeps no rows sqlive can see change, so a
 /// statement that reads it narrows nothing.
 #[tokio::test]

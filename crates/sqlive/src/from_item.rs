@@ -413,7 +413,8 @@ impl Planner<'_> {
     /// Whether a name among `found`, written in `core`, can name a
     /// contentful FTS5 table's hidden column (`ColumnValue::Hidden`): one
     /// that resolves to it, or one sqlive can't resolve that such a column
-    /// of any item read so far bears. `rank` and the functions that take the
+    /// of an item of `core`, or of a core it sits in, bears. `rank` and the
+    /// functions that take the
     /// column bearing the table's name, as `bm25`, give a row values that
     /// depend on the table's other rows, and `MATCH` on that column is no
     /// test sqlive can ask of one row.
@@ -433,10 +434,11 @@ impl Planner<'_> {
                 }
                 _ => return false,
             };
-            self.items.iter().any(|item| {
-                item.columns.named(&column).is_some_and(|named| {
-                    matches!(item.columns.value(&named), Some(ColumnValue::Hidden))
-                })
+            self.scope_of(core).flat_map(|current| &self.cores[current].items).any(|item| {
+                let columns = &self.items[*item].columns;
+                columns
+                    .named(&column)
+                    .is_some_and(|named| matches!(columns.value(&named), Some(ColumnValue::Hidden)))
             })
         })
     }
