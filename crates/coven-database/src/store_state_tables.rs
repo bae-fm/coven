@@ -194,6 +194,31 @@ pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
     }
     Ok(state)
 }
+/// The statement that stores one member, with the values [`member_values`] binds.
+pub(crate) const INSERT_MEMBER: &str =
+    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
+     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)";
+
+/// `member`'s values for [`INSERT_MEMBER`], in the order its placeholders take them.
+pub(crate) fn member_values<'a>(
+    id: &'a MemberId,
+    member: &'a StoreMember,
+) -> impl sqlive::rusqlite::Params + 'a {
+    (
+        id,
+        member.keys.signing.as_bytes().as_slice(),
+        member.keys.sealing.as_bytes().as_slice(),
+        member.role,
+        member.removed,
+        member
+            .access
+            .as_ref()
+            .map(|access| serde_json::to_vec(access).expect("member access encoding")),
+        member.joined.circle,
+        member.joined.person.as_deref(),
+    )
+}
+
 pub(crate) fn replace(database: &StoreSql, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
         database.execute("INSERT INTO _coven_store(singleton,store,name,named_at,created,joined) VALUES(1,?1,?2,?3,1,0) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id,store.name,store.named_at.get().to_be_bytes().as_slice()])?;
@@ -209,23 +234,7 @@ pub(crate) fn replace(database: &StoreSql, state: &StoreState) -> Result<(), DbE
         database.execute(&format!("DELETE FROM {table}"), [])?;
     }
     for (id, member) in &state.members {
-        database.execute(
-            "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                id,
-                member.keys.signing.as_bytes().as_slice(),
-                member.keys.sealing.as_bytes().as_slice(),
-                member.role,
-                member.removed,
-                member
-                    .access
-                    .as_ref()
-                    .map(|access| serde_json::to_vec(access).expect("member access encoding")),
-                member.joined.circle,
-                member.joined.person.as_deref()
-            ],
-        )?;
+        database.execute(INSERT_MEMBER, member_values(id, member))?;
     }
     for keys in &state.bound_keys {
         database.execute(

@@ -93,7 +93,7 @@ mod fixture {
      SELECT i, counter(i) AS n, counter((i-1)%64+1) AS device,
             'table_' || ((i-1)%32) AS tab, 'audience_' || ((i-1)%64) AS audience,
             CAST(printf('%032d',i) AS BLOB) AS key,
-            printf('%036d',i) AS member FROM numbers;
+            printf('00000000-0000-0000-0000-%012d',i) AS member FROM numbers;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
      INSERT INTO _coven_install_fixture SELECT key,audience,counter(1),device,n,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;

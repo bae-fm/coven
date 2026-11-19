@@ -9,7 +9,6 @@ use crate::sqlite::StoreSql;
 pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1,0);
-         INSERT INTO _coven_members(member,signing,sealing,access,role,removed) SELECT member,key,key,x'00','member',i%2 FROM fixture;
          INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
          INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
          INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i,i%3 FROM fixture;
@@ -17,6 +16,37 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
          INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;",
     )
     .unwrap();
+    fill_members(db);
+}
+
+/// Store one member for each row of the plan audit's `fixture` table, through
+/// the write that stores members, so a change to what a member holds reaches
+/// the fixture as a compile error.
+fn fill_members(db: &sqlive::rusqlite::Connection) {
+    let ids: Vec<String> = db
+        .prepare("SELECT member FROM fixture ORDER BY i")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<sqlive::rusqlite::Result<_>>()
+        .unwrap();
+    let mut insert = db.prepare(crate::store_state_tables::INSERT_MEMBER).unwrap();
+    for (index, id) in ids.iter().enumerate() {
+        let member = crate::StoreMember {
+            keys: crate::tests::keys(1),
+            access: None,
+            role: coven_format::admin::MemberRole::Member,
+            removed: index % 2 == 0,
+            joined: crate::store_state::Joined {
+                person: None,
+                circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(
+                    index as u128 + 1,
+                )),
+            },
+        };
+        let id: coven_foundation::id_source::MemberId = id.parse().unwrap();
+        insert.execute(crate::store_state_tables::member_values(&id, &member)).unwrap();
+    }
 }
 
 /// Each way damaged storage can break a stored member fact, or the member a
