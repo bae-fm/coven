@@ -362,3 +362,75 @@ CREATE VIEW release_years AS SELECT id, year FROM releases"
     .await;
     db.close();
 }
+
+/// Each condition sqlive reads as a term on a subquery's column passes into
+/// the subquery's table: a comparison by each operator, an IN list, an OR of
+/// terms, an AND inside an OR that keeps the side sqlive reads, a NULL test
+/// of each spelling, and the truth of a comparison compared with a value,
+/// either way round. SQLite can't judge a subquery's rows one by one, so
+/// without the term a write to a row outside the condition would rerun the
+/// query.
+#[tokio::test]
+async fn each_term_on_a_subquerys_column_narrows_its_table() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER, v INTEGER);
+INSERT INTO t VALUES (1,1,0),(2,2,0),(3,3,0),(4,4,0),(5,5,0),(6,NULL,0)",
+    );
+    // The statement, a row its condition leaves out and a row it keeps.
+    let cases: [(&'static str, i64, i64); 13] = [
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x < 3 ORDER BY s.id", 4, 1),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x <= 2 ORDER BY s.id", 3, 2),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x > 3 ORDER BY s.id", 2, 4),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x >= 4 ORDER BY s.id", 3, 4),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x IN (1, 3) ORDER BY s.id", 2, 3),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x = 1 OR s.x = 3 ORDER BY s.id", 2, 1),
+        (
+            "SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE (s.x = 1 AND abs(s.v) >= 0) OR s.x = 3 ORDER BY s.id",
+            2,
+            3,
+        ),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x ISNULL ORDER BY s.id", 2, 6),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE s.x NOTNULL ORDER BY s.id", 6, 2),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE (s.x = 1) = 1 ORDER BY s.id", 2, 1),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE 1 = (s.x = 1) ORDER BY s.id", 2, 1),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE (s.x <= 2) = 1 ORDER BY s.id", 3, 1),
+        ("SELECT s.v FROM (SELECT id, x, v FROM t) AS s WHERE (s.x > 3) = 1 ORDER BY s.id", 2, 5),
+    ];
+    for (sql, outside, inside) in cases {
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[
+                (&format!("UPDATE t SET v = v + 1 WHERE id = {outside}"), false),
+                (&format!("UPDATE t SET v = v + 1 WHERE id = {inside}"), true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}
+
+/// The terms on a subquery's columns pass each to the table its column comes
+/// from: the truth of a comparison on one table's column, after a comparison
+/// on another table's, narrows its own table.
+#[tokio::test]
+async fn each_term_on_a_subquerys_columns_narrows_the_table_its_column_comes_from() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, x INTEGER, v INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, t INTEGER, y INTEGER);
+INSERT INTO t VALUES (1,1,0),(2,2,0);
+INSERT INTO u VALUES (1,1,1),(2,2,1)",
+    );
+    follows(
+        &db,
+        "SELECT s.v FROM (SELECT t.id, t.x, u.y, t.v FROM t JOIN u ON u.t = t.id) AS s WHERE s.y = 1 AND (s.x = 1) = 1 ORDER BY s.id",
+        vec![],
+        &[
+            ("UPDATE t SET v = v + 1 WHERE id = 2", false),
+            ("UPDATE t SET v = v + 1 WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}

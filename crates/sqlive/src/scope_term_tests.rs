@@ -108,3 +108,29 @@ fn other_truths_narrow_nothing() {
         assert!(bound(&connection, sql, &[]).is_none(), "{sql}");
     }
 }
+
+/// The columns a term tests, each once, in the order it first tests them:
+/// a column's own, the column of a condition whose truth it compares, and
+/// those of a condition SQLite judges row by row.
+#[test]
+fn a_term_lists_each_column_it_tests_once() {
+    let null = |column: &str| ScopeTerm::Null { column: column.to_owned(), not: false };
+    let truth = |column: &str| ScopeTerm::Truth {
+        condition: Truth::Null { column: column.to_owned(), not: false },
+        ordering: Ordering::Equal,
+        inclusive: false,
+        is: false,
+        operand: Operand::Constant(Value::Integer(1)),
+    };
+    let row = |columns: &[&str]| {
+        ScopeTerm::Row(Arc::new(RowTerm {
+            sql: String::new(),
+            qualifier: "t".to_owned(),
+            columns: columns.iter().map(|column| ((*column).to_owned(), Affinity::Blob)).collect(),
+        }))
+    };
+    let term = null("a").and(truth("b")).and(truth("a")).and(row(&["c", "b", "d"]));
+    let mut columns = Vec::new();
+    term.columns(&mut columns);
+    assert_eq!(columns, ["a", "b", "c", "d"]);
+}

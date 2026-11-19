@@ -829,6 +829,31 @@ CREATE VIEW credited AS SELECT t.id, t.release, c.id AS credit, c.track, c.role,
     db.close();
 }
 
+/// A term on a LEFT JOIN's right side that the NULLs of a missing right row
+/// fail makes the join inner and narrows the side: an OR of a NULL test
+/// joined by AND to a comparison, and of another comparison, fails them. An
+/// OR with a NULL test as one side holds of them, so it narrows nothing: a
+/// credit that joins a track with none takes the track's row of NULLs out.
+#[tokio::test]
+async fn an_or_on_a_left_joins_right_side_narrows_only_where_nulls_fail_it() {
+    let db = TestDatabase::open(
+        "CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT);
+CREATE TABLE credits(id INTEGER PRIMARY KEY, track INTEGER, role TEXT, name TEXT);
+INSERT INTO tracks VALUES (1,'r1'),(2,'r1'),(3,'r2');
+INSERT INTO credits VALUES (1,2,'x','Ana')",
+    );
+    follows(&db, "SELECT t.id FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE t.release = 'r1' AND ((c.name IS NULL AND c.role = 'x') OR c.role = 'y') ORDER BY t.id", vec![], &[
+        ("INSERT INTO credits VALUES (2,1,'z','Ben')", false),
+        ("INSERT INTO credits VALUES (3,1,'y','Cy')", true),
+    ]).await;
+    write(&db, "DELETE FROM credits WHERE id > 1");
+    follows(&db, "SELECT t.id FROM tracks t LEFT JOIN credits c ON c.track = t.id WHERE t.release = 'r1' AND (c.name IS NULL OR c.role = 'x') ORDER BY t.id", vec![], &[
+        ("INSERT INTO credits VALUES (4,3,'y','Dee')", false),
+        ("INSERT INTO credits VALUES (5,1,'y','Eve')", true),
+    ]).await;
+    db.close();
+}
+
 /// A comparison under a COLLATE, or against a value under one, and `IS NOT`
 /// a value, aren't comparisons sqlive makes: SQLite judges each changed row
 /// (`scope_row.rs`), so a row it fails is spared and one it passes reruns.
