@@ -31,8 +31,9 @@ FROM albums AS a WHERE a.id = 'a1'";
 /// `covers` narrows to the covers of the album's releases, and the files
 /// beside them to those covers' files: a cover or file written for another
 /// album's release wakes nothing. One for any release of this album does,
-/// whether or not it is the first, and so does moving a release between
-/// albums or making another release the first.
+/// whether or not it is the first. Moving a release out of the album when
+/// it is not the album's first wakes nothing, since the first release's
+/// cover is unchanged; moving it back as the first release does.
 #[tokio::test]
 async fn a_cover_pick_narrows_covers_and_files_to_the_albums_releases() {
     let db = TestDatabase::open(ALBUMS);
@@ -46,7 +47,7 @@ async fn a_cover_pick_narrows_covers_and_files_to_the_albums_releases() {
             ("UPDATE releases SET album_order = 5 WHERE id = 'r3'", false),
             ("UPDATE files SET name = 'n1b' WHERE id = 'f1'", true),
             ("UPDATE covers SET file = 'f2b' WHERE id = 'r2'", true),
-            ("UPDATE releases SET album_id = 'a2' WHERE id = 'r2'", true),
+            ("UPDATE releases SET album_id = 'a2' WHERE id = 'r2'", false),
             ("UPDATE covers SET file = 'f9' WHERE id = 'r2'", false),
             ("UPDATE releases SET album_id = 'a1', album_order = 0 WHERE id = 'r2'", true),
             ("UPDATE covers SET file = 'f1c' WHERE id = 'r1'", true),
