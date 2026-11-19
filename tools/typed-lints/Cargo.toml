@@ -1,0 +1,11 @@
+# coven's typed lints: lints that ask the compiler for each expression's type,
+# and run in the same compile as clippy's own. They link the compiler's crates,
+# so they build against the toolchain's rustc-dev component and clippy's
+# source at the toolchain's own commit, which prepare-build.sh fetches into
+# clippy/. This is a workspace of its own, outside coven's, so nothing else in
+# coven builds against the compiler. Run cargo here through ./cargo.sh.
+[workspace]
+resolver = "3"
+members = ["lints", "driver"]
+# clippy's crates are dependencies, not members, so clippy lints only these.
+exclude = ["clippy"]

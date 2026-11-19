@@ -1,0 +1,39 @@
+[package]
+name = "typed-lints-driver"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# clippy's own driver, unchanged: it runs rustc with clippy's lints, which it
+# takes from `clippy_lints`. Here `clippy_lints` is ../lints, which adds
+# coven's typed lints to clippy's, so the driver runs both in one compile.
+# Run it as clippy runs clippy-driver: cargo's RUSTC_WORKSPACE_WRAPPER.
+[[bin]]
+name = "typed-lints-driver"
+path = "../clippy/src/driver.rs"
+test = false
+
+[dependencies]
+clippy_config = { path = "../clippy/clippy_config" }
+clippy_lints = { package = "typed-lints", path = "../lints" }
+clippy_utils = { path = "../clippy/clippy_utils" }
+declare_clippy_lint = { path = "../clippy/declare_clippy_lint" }
+rustc_tools_util = { path = "../clippy/rustc_tools_util" }
+# The versions clippy's own manifest names for its driver.
+color-print = "0.3.4"
+anstream = "0.6.18"
+
+[dev-dependencies]
+serde_json = "1.0.145"
+
+[build-dependencies]
+rustc_tools_util = { path = "../clippy/rustc_tools_util" }
+
+[lints.rust]
+# clippy's driver registers its internal lints under a feature clippy's own
+# manifest declares.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("internal"))'] }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

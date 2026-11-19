@@ -1,0 +1,14 @@
+[package]
+name = "typed-lints"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+clippy_config = { path = "../clippy/clippy_config" }
+clippy_lints = { path = "../clippy/clippy_lints" }
+clippy_utils = { path = "../clippy/clippy_utils" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true

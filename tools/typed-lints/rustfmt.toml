@@ -1,0 +1,5 @@
+use_small_heuristics = "Max"
+# These crates are edition 2024, as clippy's driver is. cargo fmt passes each
+# crate's edition, but a bare `rustfmt <file>`, as the commit hook runs it,
+# reads it here.
+edition = "2024"
