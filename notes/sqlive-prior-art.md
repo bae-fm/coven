@@ -92,9 +92,7 @@ LiveQuery decide what to rerun.
   views](https://home.cse.ust.hk/~yike/topk/icde03.pdf) (ICDE 2003). Deletes
   inside a window force a refill; keeping between k and kmax rows avoids it.
 
-## What sqlive takes from them
-
-sqlive takes each idea below on before its first release.
+## Ideas these projects show
 
 - **Index live queries by their constants.** sqlive judges each write against
   every waiting query (`Handle::judge`). Electric indexes shapes by their
