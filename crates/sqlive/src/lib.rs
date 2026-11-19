@@ -55,6 +55,7 @@ mod scope_plan;
 mod scope_row;
 mod scope_subquery;
 mod scope_term;
+mod scope_window;
 mod scoped_counts;
 mod select_syntax;
 mod snapshot_values;

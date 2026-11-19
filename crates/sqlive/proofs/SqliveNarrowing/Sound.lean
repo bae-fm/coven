@@ -27,21 +27,23 @@ theorem plan_armsKept {s : Statement} {X Y : Db} {last : Option (List (List Valu
     (hR : ∀ k ∈ (s.query q).arms, ∀ b ∈ coreBindings s Z (evalQuery s Z f) o k,
       R k (evalQuery s Z f) b = true →
         relevant s (planRel s Y last) q k (evalQuery s Z f) b = true ∧
-          (q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z f) b)) :
+          (q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z f) b) ∧
+          (plan s).windowPasses s Y k b = true) :
     ArmsKept s Z (planTest s Y last) (planLeft s) R q o (evalQuery s Z f) := by
   intro k hk
   refine ⟨fun b hb hRb => ?_, fun i hi hl b hb hw hbd r hr hon => ?_⟩
-  · obtain ⟨hrel, hroot⟩ := hR k hk b hb hRb
-    exact plan_restricted base hZ (Nat.le_refl f) hq ho hoG hk hb hrel hroot
+  · obtain ⟨hrel, hroot, hwin⟩ := hR k hk b hb hRb
+    exact plan_restricted base hZ (Nat.le_refl f) hq ho hoG hk hb hrel hroot hwin
   · exact plan_left_passes base hZ hq ho hk hi hl hb hw hbd hr hon
 
 /-- The planner's scopes keep their promise at fuel `f` on `X` and `Y`, when
 the two databases return the same rows that matter at every fuel up to `f`. -/
 theorem plan_kept {s : Statement} {X Y : Db} {last : Option (List (List Value))} {f : Nat}
     (base : KeptBase s X Y last f) {Z : Db} (hZ : Z = X ∨ Z = Y) :
-    Kept s Z (planTest s Y last) (planLeft s) (planRel s Y last) f :=
-  fun _ hq hne _ ho hoG => plan_armsKept base hZ hq ho hoG fun _ _ _ _ hrel =>
-    ⟨hrel, fun he => absurd he hne⟩
+    Kept s Z (planTest s Y last) (planLeft s) (planRel s Y last) ((plan s).windowPasses s Y) f :=
+  fun _ hq hne _ ho hoG => plan_armsKept base hZ hq ho hoG fun _ _ _ _ hR => by
+    simp only [Bool.and_eq_true] at hR
+    exact ⟨hR.1, fun he => absurd he hne, hR.2⟩
 
 /-! The LIMIT bound's run. -/
 
@@ -116,13 +118,13 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
     rw [← result_mask hitems db, ← result_mask hitems db']
     obtain ⟨last, hlast⟩ : ∃ last, (plan s).lastOf s db = last := ⟨_, rfl⟩
     have hR : Restriction s (db.mask s.reads) (db'.mask s.reads) (planTest s (db'.mask s.reads) last)
-        (planRel s (db'.mask s.reads) last) := by
+        (planRel s (db'.mask s.reads) last) ((plan s).windowPasses s (db'.mask s.reads)) := by
       have := plan_restriction hwf hw hr hwhole
       dsimp only at this
       rw [hlast] at this
       exact this
     have hLeft : ∀ j, planLeft s j → s.alwaysBound j = false := fun j hj => plan_leftOn s hj
-    have hscopes : s.tableScopes db = some (tableScope s ((plan s).scopes last)) := by
+    have hscopes : s.tableScopes db = some (tableScope s ((plan s).itemScopes last)) := by
       rw [← hlast]
       simp [Statement.tableScopes, hwhole, Planned.lastOf]
     have htab : ∀ i t, s.table? i = some t → i < s.items.length → ∀ r ∈ (db.mask s.reads).rows t,
@@ -131,16 +133,19 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
       intro i t ht hi r hr' hst
       have := scoped_rows hw hr hscopes hi ht
         (G := (plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i)
-        (fun r hg => by simp only [Planned.scopeTest, Bool.and_eq_true] at hg; exact hg.1)
+        (fun r hg => by
+          simp only [Planned.scopeTest, Bool.and_eq_true] at hg
+          simp only [Planned.itemScopes, Limit.passes_both, Bool.and_eq_true]
+          exact hg.1)
       have hmem := List.mem_filter.mpr ⟨hr', hst⟩
       rw [this] at hmem
       exact (List.mem_filter.mp hmem).1
     have hkept : ∀ f, (∀ f' ≤ f, Agree s (db.mask s.reads) (db'.mask s.reads)
         (planTest s (db'.mask s.reads) last) (planRel s (db'.mask s.reads) last) f') →
         Kept s (db.mask s.reads) (planTest s (db'.mask s.reads) last) (planLeft s)
-          (planRel s (db'.mask s.reads) last) f ∧
+          (planRel s (db'.mask s.reads) last) ((plan s).windowPasses s (db'.mask s.reads)) f ∧
         Kept s (db'.mask s.reads) (planTest s (db'.mask s.reads) last) (planLeft s)
-          (planRel s (db'.mask s.reads) last) f :=
+          (planRel s (db'.mask s.reads) last) ((plan s).windowPasses s (db'.mask s.reads)) f :=
       fun f hagree => ⟨plan_kept ⟨hwf, htab, hagree⟩ (Or.inl rfl), plan_kept ⟨hwf, htab, hagree⟩ (Or.inr rfl)⟩
     have hagree := agree_of_kept hR hLeft hkept
     have base : KeptBase s (db.mask s.reads) (db'.mask s.reads) last s.queries.length :=
@@ -155,7 +160,7 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
             (relevant s (planRel s (db'.mask s.reads) none) s.root) s.root Bind.empty
             (evalQuery s Z s.queries.length) :=
         fun Z hZ => plan_armsKept base hZ hrootLe (s.outer_root hwf) (Passes.empty _)
-          fun k _ b _ _ => ⟨hrel k _ b, fun _ _ _ _ hl => by cases hl⟩
+          fun k hk b _ _ => ⟨hrel k _ b, (fun _ _ _ _ hl => by cases hl), windowPasses_root hwf hk _ b⟩
       exact (result_restricted hR hLeft (fun r => queryTest_root hwf _ _ _ r) hkept
         (hroot _ (Or.inl rfl)) (hroot _ (Or.inr rfl))).symm
     | some values =>
@@ -174,7 +179,7 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
             s.root Bind.empty (evalQuery s Z s.queries.length) := by
         intro Z hZ
         refine plan_armsKept base hZ hrootLe (s.outer_root hwf) (Passes.empty _)
-          fun k hk b _ hRb => ⟨hrel k _ b, fun _ sorted' values' hs'' hl => ?_⟩
+          fun k hk b _ hRb => ⟨hrel k _ b, fun _ sorted' values' hs'' hl => ?_, windowPasses_root hwf hk _ b⟩
         rw [harms, List.mem_singleton] at hk
         subst hk
         rw [hs] at hs''

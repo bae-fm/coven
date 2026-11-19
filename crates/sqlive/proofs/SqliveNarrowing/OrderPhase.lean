@@ -474,7 +474,7 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
     exact this
   simp only [Planned.scopeTest, Bool.and_eq_true, List.all_eq_true, Bool.or_eq_true, bne_iff_ne,
     ne_eq] at htest
-  obtain ⟨hsc, hpushed⟩ := htest
+  obtain ⟨⟨hsc, _⟩, hpushed⟩ := htest
   obtain ⟨hnd, hall⟩ := plan_order s
   obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
   rw [hbound] at hsc

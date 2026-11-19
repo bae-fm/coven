@@ -1,4 +1,5 @@
 import SqliveNarrowing.Restrict
+import SqliveNarrowing.Windows
 import SqliveNarrowing.Scopes
 import SqliveNarrowing.PlannerState
 
@@ -17,11 +18,11 @@ row in a binding of the statement's own core that sorts at or before the
 last row. -/
 namespace SqliveNarrowing
 
-/-- Whether item `i`'s row `r` passes its scope among `scopes`, with lookups
-`rowsOf`, and each edge the planner pushed into `i`. -/
+/-- Whether item `i`'s row `r` passes its scope among `scopes` and its
+window's, with lookups `rowsOf`, and each edge the planner pushed into `i`. -/
 def Planned.scopeTest (p : Planned) (scopes : Nat → RScope) (rowsOf : Nat → List Row)
     (i : Nat) (r : Row) : Bool :=
-  (scopes i).passes rowsOf r && p.state.pushed.all fun e =>
+  (scopes i).passes rowsOf r && (p.windowScope i).passes rowsOf r && p.state.pushed.all fun e =>
     e.member != i || (Planned.membershipScope scopes e).passes rowsOf r
 
 /-- Item `i`'s test: its row passes its scope and pushed edges, and is among
@@ -148,14 +149,15 @@ theorem plan_restriction {s : Statement} (hwf : s.wellFormed = true) {db db' : D
     let scopes := p.scopes (p.lastOf s db)
     let rowsOf := lookupRows s (db'.mask s.reads)
     Restriction s (db.mask s.reads) (db'.mask s.reads) (p.itemTest s scopes rowsOf)
-      (p.queryTest s scopes rowsOf) := by
+      (p.queryTest s scopes rowsOf) (p.windowPasses s (db'.mask s.reads)) := by
   intro p scopes rowsOf
-  have hscopes : s.tableScopes db = some (tableScope s scopes) := by
-    simp [Statement.tableScopes, hwhole, scopes, p, Planned.lastOf]
+  have hscopes : s.tableScopes db = some (tableScope s (p.itemScopes (p.lastOf s db))) := by
+    simp [Statement.tableScopes, hwhole, p, Planned.lastOf]
   refine ⟨hwf, fun k i hi t ht => ?_, fun k i hi q v hkind r hr => ?_, fun q k hk q' hq' r => ?_,
-    fun q _ hcut r => ?_⟩
+    fun q _ hcut r => ?_, fun q _ k hk b hb => plan_windowRows hwf hk hb⟩
   · refine scoped_rows hw hr hscopes (s.wellFormed_items hwf hi) ht fun r hg => ?_
     simp only [Planned.itemTest, Planned.scopeTest, Bool.and_eq_true] at hg
+    simp only [Planned.itemScopes, Limit.passes_both, Bool.and_eq_true]
     exact hg.1.1
   · simp only [Planned.queryTest, Bool.or_eq_true, List.all_eq_true, List.mem_range]
     refine Or.inr fun k' _ d hd => ?_

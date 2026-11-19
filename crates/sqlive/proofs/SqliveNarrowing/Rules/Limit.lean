@@ -449,6 +449,41 @@ theorem take_sortBy {P : α → Bool} (down : ∀ a b, le a b → P b → P a) {
   rw [h1]
   exact hsplit
 
+theorem length_insertSorted (x : α) (l : List α) : (insertSorted le x l).length = l.length + 1 := by
+  induction l with
+  | nil => rfl
+  | cons y ys ih =>
+    unfold insertSorted
+    split
+    · rfl
+    · simp [ih]
+
+theorem length_sortBy (l : List α) : (sortBy le l).length = l.length := by
+  induction l with
+  | nil => rfl
+  | cons x xs ih => simp [sortBy, length_insertSorted, ih]
+
+include total trans in
+/-- The first `n` sorted rows of a list holding at least `n` rows that pass a
+test closed downward are the first `n` sorted rows that pass it. -/
+theorem take_sortBy_passing {P : α → Bool} (down : ∀ a b, le a b → P b → P a) {n : Nat}
+    {l : List α} (hn : n ≤ (l.filter P).length) :
+    (sortBy le l).take n = (sortBy le (l.filter P)).take n := by
+  have hs := pairwise_sortBy total trans l
+  have hsplit := congrArg (List.take n) (split_sorted down hs)
+  rw [← sortBy_filter total trans] at hsplit
+  rw [List.take_append_of_le_length (by rw [length_sortBy]; exact hn)] at hsplit
+  exact hsplit
+
+include total trans in
+/-- Two lists that hold the same rows that pass a test closed downward, at
+least `n` of them, have the same first `n` sorted rows: a window's LIMIT
+keeps rows that pass. -/
+theorem take_sortBy_window {P : α → Bool} (down : ∀ a b, le a b → P b → P a) {n : Nat}
+    {l l' : List α} (heq : l.filter P = l'.filter P) (hn : n ≤ (l'.filter P).length) :
+    (sortBy le l).take n = (sortBy le l').take n := by
+  rw [take_sortBy_passing total trans down (heq ▸ hn), take_sortBy_passing total trans down hn, heq]
+
 end Sorting
 
 /-- An ORDER BY's sort key of a row. -/

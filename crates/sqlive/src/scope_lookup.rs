@@ -129,9 +129,16 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         bound[position] = Some(scope);
     }
     let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
-    for (source, scope) in sources.sources.iter().zip(bound) {
+    for (position, (source, scope)) in sources.sources.iter().zip(bound).enumerate() {
         let (Some(table), Some(scope)) = (&source.table, scope) else {
             continue;
+        };
+        // A subquery's window narrows its table's own scope, and no lookup
+        // of another source (`scope_window.rs`).
+        let window = sources.windows.iter().find(|window| window.item == position);
+        let scope = match window.and_then(|window| window.bind(&parameters)) {
+            Some(window) => scope.and(window),
+            None => scope,
         };
         let scope = match scopes.remove(table) {
             Some(other) => other.or(scope),
@@ -300,6 +307,9 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
         // binds first. A comparison with a value no cast keeps as it is
         // passes every row, as a write's question counts it a match.
         RowScope::Row(row) => row.sql(bound).unwrap_or_else(|| "1".into()),
+        // A window narrows only its own table's scope, which no lookup
+        // reads (`scopes`); passing every row keeps a lookup's rows whole.
+        RowScope::Window(_) => "1".into(),
         RowScope::Joined { column, lookup } => {
             joined(&format!("{qualifier}.{}", crate::sql::identifier(column)), lookup, bound)
         }

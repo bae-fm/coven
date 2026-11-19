@@ -208,7 +208,7 @@ impl RowCondition {
 /// subquery's column, and a comparison's operand, take the affinity of their
 /// expression, so a cast gives the value its own. `None` for a value no cast
 /// keeps as it is.
-fn typed(placeholder: &str, affinity: Affinity, value: &Value) -> Option<String> {
+pub(crate) fn typed(placeholder: &str, affinity: Affinity, value: &Value) -> Option<String> {
     Some(match (affinity, value) {
         (_, Value::Null) | (Affinity::Blob, _) => placeholder.to_owned(),
         (Affinity::Text, Value::Text(_)) => format!("CAST({placeholder} AS TEXT)"),

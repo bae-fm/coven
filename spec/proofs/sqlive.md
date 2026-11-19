@@ -290,6 +290,31 @@ JOIN adds, so where such a part holds, its item has a row.
   its row, when each lookup passes the item's row wherever the partner's row
   passes the lookup's scope, and `joined_passes` proves that a membership's
   lookup does, in a binding where its edge holds.
+- **A subquery's window.** A subquery that is one SELECT of one table, with
+  an ORDER BY over that table's columns, a LIMIT and no OFFSET, returns for
+  each binding around it the first rows of that binding's window: the
+  table's rows that its own conditions pass and that hold the binding's value
+  in each column an equality compares with a value around it.
+  [Rules/Window.lean](../../crates/sqlive/proofs/SqliveNarrowing/Rules/Window.lean)
+  states the reader (`Window.read`), and `read_facts` proves what it checks:
+  every condition of the subquery names only the table's columns
+  (`ownCond`) or compares one of them by `=` with a value around it, as the
+  edge reader reads it (`partitionOf_holds`), and each ORDER BY term is an
+  expression over the table's columns that names its result column. The
+  window's scope passes a row that holds no NULL in a compared column and
+  that fewer than LIMIT rows of its window sort before, with the table's
+  rows read as a lookup reads them (`RScope.window`).
+  [Windows.lean](../../crates/sqlive/proofs/SqliveNarrowing/Windows.lean)
+  proves the rule. `window_bindings` proves that the subquery's core keeps,
+  under a binding around it, a binding of each table row its conditions
+  keep, and `window_kept` that the rows the conditions keep are exactly the
+  window of each of them. So `window_passes` proves that the scope passes
+  such a row exactly when fewer than LIMIT rows the core keeps sort before
+  it, a test of its ORDER BY values that is closed downward.
+  `count_first` proves that of LIMIT rows or more, the first LIMIT in their
+  order pass that test, and `take_sortBy_window` that two lists of rows
+  that hold the same rows passing such a test, of which at least LIMIT pass
+  in one, have the same first LIMIT rows.
 - **The rows SQLite picks.** A query that keeps some of its rows, by a LIMIT
   or an OFFSET or as a subquery whose first row a comparison takes, keeps the
   rows SQLite reads first, in the order of the plan it chooses.
@@ -438,6 +463,18 @@ those bindings, and the bindings of every other query, keep the promise: the
 two runs return the same rows that sort at or before the last row, and
 `limit_sound` gives the same first rows.
 
+A subquery's window needs only the bindings of its core that pass the window.
+`window_queryRows` proves that a query of one core, with an ORDER BY, a LIMIT
+and no OFFSET, returns the same rows from both databases when its bindings
+that pass a test of their ORDER BY values closed downward agree, and either
+every binding passes the test in both databases, or at least LIMIT bindings
+pass it in the database the write leaves. The promise `Kept` counts a
+binding as one that matters only when it passes its windows
+(`Planned.windowPasses`), so the restriction carries, for each query a
+binding fails the windows of, what `window_queryRows` takes
+(`Restriction.windows`). `agree_of_kept` takes it for each such query and
+the old argument for the rest.
+
 The promise rests on what makes a row pass the scope the planner gives an
 item. [Scopes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Scopes.lean)
 states it. `Planned.scopes_eq` proves that a placed item's scope reads the
@@ -494,6 +531,18 @@ query with a LIMIT or an OFFSET, or that no derived item reads, matters.
 before and after the write hold the same rows that pass each item's test,
 and that each derived item's test keeps only rows that matter to its query,
 since one place reads each query.
+`plan_windowRows` proves the windows' part: a core whose binding fails its
+windows is the one core of a window's subquery, whose bindings pass by
+`window_passes`, and either every binding passes, when the database the
+write leaves holds fewer than LIMIT rows the core keeps under the binding
+around it, or the first LIMIT do (`count_first`). The window's scope enters
+only its table's scope, not the scopes that the lookups of other items read,
+so it changes no other item's test. A window's subquery is the source of no
+subquery's value that a comparison takes (`Window.takesValues`): such a
+comparison holds of a binding with some row of the subquery's core,
+wherever that row sorts, so `windowPasses_taken` proves that each binding of
+the core of a source whose value an edge or a side of an OR takes passes its
+windows, and the partner that the edge finds passes its test.
 `Planned.bound_passes` proves the LIMIT bound's part of the promise: in a
 binding of the statement's own core whose ORDER BY values sort at or before
 the last row's, the bound of each item the ORDER BY sorts passes the item's
@@ -664,7 +713,11 @@ refusals. A partner column of no affinity gives a member column of another
 affinity its values: SQLite compares a TEXT member with it as they are, and
 gives its values an INTEGER member's affinity, which leaves an integer as it
 is. The differential's column of no affinity holds integers, so it checks the
-INTEGER case, and a unit test checks the TEXT case against SQLite. The model has no generated columns: sqlive sorts by a generated
+INTEGER case, and a unit test checks the TEXT case against SQLite. A subquery's window narrows only a subquery whose value no comparison takes.
+For `cover.id = (SELECT r.id ... LIMIT 1)`, the edge reader's promise gives the
+comparison some row of the subquery's core, not one inside its window, so the
+model keeps that subquery's table as its conditions narrow it. The model has
+no generated columns: sqlive sorts by a generated
 column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
 one for a write and counts it as changed by every write to its row, which the
@@ -709,7 +762,11 @@ term, or a `group_concat` or a window with no ORDER BY that sorts by each
 table's rowid, may take other rows' values. The test compares the rows there only through
 the reruns. The model's values are integers, so the differential reads
 `group_concat` as `CAST(group_concat(e, '') AS INTEGER)`, the joined digits read
-back as one integer, which the model computes the same way.
+back as one integer, which the model computes the same way. A subquery's
+ORDER BY term that its result doesn't return is a result column the model's
+query returns after the SQL's columns: SQLite allows no second column in a
+scalar subquery, and a subquery's value, EXISTS and a comparison with a
+subquery read only the first column.
 
 SQLite's authorizer reports no read of the columns a USING or NATURAL join
 compares, nor of the columns that decide which rows a query whose rows SQLite

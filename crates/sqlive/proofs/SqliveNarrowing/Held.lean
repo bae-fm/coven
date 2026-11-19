@@ -747,12 +747,13 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
     exact ⟨(scopes_parts last _ hjo h1).1, fun hread => ⟨Y, h2 hread⟩⟩
   -- A partner `i`'s ON gives, placed before `i`, finds its row.
   have hpartner : ∀ e : Edge, e.member = i → e.partner ∈ pre → e.OnPartner s i →
+      (e.nested = true → ∀ b', (plan s).windowPasses s Y (s.item e.partner).core b' = true) →
       e.HoldsIn s Z f (b.set i (some r)) →
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
         ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := by
-    intro e hm hp ⟨hread, hplain, hnest⟩ hh
+    intro e hm hp ⟨hread, hplain, hnest⟩ hwp hh
     have hpi : e.partner ≠ i := fun he => hipre (he ▸ hp)
     refine partner_found hm hbi hh (fun hn hab => by rw [hset _ hpi]; exact hnamed _ hpi (hplain hn).2 hab)
       (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn g' hg' b' hb' r' hr' => ?_) hread
@@ -780,7 +781,7 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
         rw [hset j hji] at hrj
         exact hb j rj hrj) _ harm b' hb'
       (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) (lookupRows s Y) hsub) _ _)
-      (fun he => absurd (he ▸ List.mem_append_right _ hsub) (s.wellFormed_root hwf k))
+      (fun he => absurd (he ▸ List.mem_append_right _ hsub) (s.wellFormed_root hwf k)) (hwp hn b')
     exact hall _ r' (by rw [horder, List.take_append_length]; exact hp) hr'
   have hscope : ((plan s).scopes last i).passes (lookupRows s Y) r = true := by
     rw [hbound]
@@ -792,7 +793,9 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       have hp := hinpre _ ((plan_placedBefore s i).1 m hmm)
       rw [membershipScope_congr (hbefore' _ hp)]
       obtain ⟨hpart, hholds⟩ := hH.edges i hl m hme hmi
-      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hpart (hholds Z f b r honAt)
+      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hpart
+        (fun hn b' => windowPasses_taken hwf (fun i' hc => takesValues_edge hme hn hc.symm) Y b')
+        (hholds Z f b r honAt)
       exact membershipScope_passes hr' hsc hv hn
     · have hors := (plan_lookups hwf).2.2.1 i sides hsides
       obtain ⟨hsd, hholds⟩ := hH.ors i hl sides hors
@@ -802,7 +805,10 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       obtain ⟨hmem, hpart⟩ := hsd side hside e he
       have hp := hinpre _ ((plan_placedBefore s i).2 sides hsides side hside e he)
       rw [hbefore' _ hp]
-      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner e hmem hp hpart (hedges e he)
+      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner e hmem hp hpart
+        (fun hn b' => windowPasses_taken hwf (fun i' hc => takesValues_side (j := i)
+          (by simpa [Statement.itemNumbers] using s.wellFormed_items hwf hi) hors hside he hn hc.symm)
+          Y b') (hedges e he)
       exact joined_passes_of hr' hsc hv hn
     · obtain ⟨⟨run, _⟩, hpr, hri⟩ := Limit.runBound_item hf
       obtain ⟨_, _, _, hleft⟩ := Limit.run_facts hwf hs (List.of_mem_zip hpr).1
@@ -811,9 +817,13 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       unfold planLeft at hl
       rw [hleft] at hl
       cases hl
+  have hleft : (s.item i).left = true := by
+    have := plan_leftOn s hl
+    simpa [Statement.alwaysBound] using this
   have hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i r = true := by
     unfold Planned.scopeTest
-    rw [hscope, Bool.true_and]
+    rw [hscope, windowScope_left hleft]
+    simp only [RScope.passes, Bool.true_and]
     refine List.all_eq_true.mpr fun e he => ?_
     by_cases hm : e.member = i
     · have := (plan_pushed s he).1

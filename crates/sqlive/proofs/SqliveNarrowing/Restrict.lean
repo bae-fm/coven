@@ -691,16 +691,129 @@ theorem queryRows_restricted {s : Statement} {rel : Nat → Row → Bool} {q : N
     congr 2
     exact List.map_congr_left harm
 
+/-! A subquery's window. -/
+
+/-- What makes a query's rows the same from two runs that keep the same
+bindings that pass `win k`: its one core makes a row of each binding, it
+keeps its first `n` rows in an ORDER BY whose values hold no subquery, and
+under each outer binding whose rows pass their tests, whether a binding
+passes `win k` is a test `P` of its ORDER BY values closed downward, and
+either every binding of both runs passes it, or at least `n` of the second
+run's do (`Window`). -/
+structure WindowRows (s : Statement) (X Y : Db) (G : Nat → Row → Bool)
+    (win : Nat → Bind → Bool) (q k : Nat) : Prop where
+  arms : (s.query q).arms = [k]
+  agg : (s.core k).aggregated = false
+  windowed : (s.core k).windowed = false
+  distinct : (s.core k).distinct = false
+  offset : (s.query q).offset = none
+  order : (s.query q).orderBy ≠ []
+  keys : ∀ (E E' : Bind → Nat → List Row) b,
+    Limit.orderKey (s.query q) ((s.core k).outRow E b) =
+      Limit.orderKey (s.query q) ((s.core k).outRow E' b)
+  limit : ∃ n, (s.query q).limit = some n ∧
+    ∀ o, s.Outer q o → Passes G o → ∀ EX EY : Bind → Nat → List Row, ∃ P : List Value → Bool,
+      (∀ a b, a.length = (s.query q).orderBy.length → b.length = (s.query q).orderBy.length →
+        keyLe ((s.query q).orderBy.map (·.2)) a b = true → P b = true → P a = true) ∧
+      (∀ b ∈ coreBindings s X EX o k,
+        win k b = P (Limit.orderKey (s.query q) ((s.core k).outRow EX b))) ∧
+      (∀ b ∈ coreBindings s Y EY o k,
+        win k b = P (Limit.orderKey (s.query q) ((s.core k).outRow EY b))) ∧
+      (((∀ b ∈ coreBindings s X EX o k, win k b = true) ∧
+          ∀ b ∈ coreBindings s Y EY o k, win k b = true) ∨
+        n ≤ ((coreBindings s Y EY o k).filter (win k)).length)
+
+/-- A query whose rows are a window's returns the same rows from two runs
+that keep the same bindings that pass `win k` and read the same subquery
+rows under them. -/
+theorem window_queryRows {s : Statement} {X Y : Db} {G : Nat → Row → Bool}
+    {win : Nat → Bind → Bool} {q k : Nat} (hw : WindowRows s X Y G win q k) {o : Bind}
+    (hout : s.Outer q o) (ho : Passes G o) {EX EY : Bind → Nat → List Row}
+    (hkeep : (coreBindings s X EX o k).filter (win k) = (coreBindings s Y EY o k).filter (win k))
+    (hE : ∀ b ∈ (coreBindings s X EX o k).filter (win k), ∀ q' ∈ (s.core k).subqueries,
+      EX b q' = EY b q') :
+    queryRows s X EX o q = queryRows s Y EY o q := by
+  obtain ⟨n, hlim, hP⟩ := hw.limit
+  obtain ⟨P, hdown, hPX, hPY, hcount⟩ := hP o hout ho EX EY
+  let c := s.core k
+  let query := s.query q
+  let ds := query.orderBy.map (·.2)
+  let le (a b : Row) : Bool := keyLe ds (Limit.orderKey query a) (Limit.orderKey query b)
+  have hklen : ∀ r, (Limit.orderKey query r).length = ds.length := by
+    intro r; simp [Limit.orderKey, ds]
+  have hne : query.orderBy.isEmpty = false := by simpa using hw.order
+  have hpost : ∀ rows : List Row, query.post rows = (sortBy le rows).take n := by
+    intro rows
+    simp only [Query.post, query, hne, Bool.false_eq_true, ↓reduceIte, hw.offset, Option.getD_none,
+      List.drop_zero, hlim]
+    rfl
+  have hres : ∀ (E : Bind → Nat → List Row) (kept : List Bind),
+      c.result E kept = kept.map (c.outRow E) := by
+    intro E kept
+    unfold Core.result
+    simp only [c, hw.distinct, Bool.false_eq_true, ↓reduceIte]
+    exact Core.rows_plain hw.agg hw.windowed E kept
+  have hrows : ∀ (Z : Db) (E : Bind → Nat → List Row),
+      queryRows s Z E o q = (sortBy le ((coreBindings s Z E o k).map (c.outRow E))).take n := by
+    intro Z E
+    unfold queryRows
+    simp only [hw.arms, List.map_cons, List.map_nil, combineAll_single]
+    rw [hres, hpost]
+  rw [hrows, hrows]
+  have hout_eq : ∀ b ∈ (coreBindings s X EX o k).filter (win k), c.outRow EX b = c.outRow EY b := by
+    intro b hb
+    have := Core.result_congr (c := c) (kept := [b]) (fun b' hb' q' hq' => by
+      obtain rfl := List.mem_singleton.mp hb'
+      exact hE _ hb q' hq')
+    rw [hres, hres] at this
+    simpa using this
+  rcases hcount with ⟨hallX, hallY⟩ | hn
+  · have hX : (coreBindings s X EX o k).filter (win k) = coreBindings s X EX o k :=
+      List.filter_eq_self.mpr hallX
+    have hY : (coreBindings s Y EY o k).filter (win k) = coreBindings s Y EY o k :=
+      List.filter_eq_self.mpr hallY
+    rw [hX, hY] at hkeep
+    rw [hX] at hout_eq
+    rw [List.map_congr_left hout_eq, hkeep]
+  · let P' : Row → Bool := fun r => P (Limit.orderKey query r)
+    have hfX : ((coreBindings s X EX o k).map (c.outRow EX)).filter P' =
+        ((coreBindings s X EX o k).filter (win k)).map (c.outRow EX) := by
+      rw [List.filter_map]
+      congr 1
+      apply List.filter_congr
+      intro b hb
+      show P (Limit.orderKey query (c.outRow EX b)) = win k b
+      rw [hPX b hb]
+    have hfY : ((coreBindings s Y EY o k).map (c.outRow EY)).filter P' =
+        ((coreBindings s Y EY o k).filter (win k)).map (c.outRow EY) := by
+      rw [List.filter_map]
+      congr 1
+      apply List.filter_congr
+      intro b hb
+      show P (Limit.orderKey query (c.outRow EY b)) = win k b
+      rw [hPY b hb]
+    have heq : ((coreBindings s X EX o k).map (c.outRow EX)).filter P' =
+        ((coreBindings s Y EY o k).map (c.outRow EY)).filter P' := by
+      rw [hfX, hfY, List.map_congr_left hout_eq, hkeep]
+    apply Limit.take_sortBy_window (le := le) (P := P')
+    · intro a b; exact Limit.keyLe_total _ _ _
+    · intro a b c' h1 h2; exact Limit.keyLe_trans (hklen a) (hklen b) (hklen c') h1 h2
+    · intro a b hab hb
+      exact hdown _ _ (by simpa [ds] using hklen a) (by simpa [ds] using hklen b) hab hb
+    · exact heq
+    · rw [hfY, List.length_map]; exact hn
+
 /-! Every fuel. -/
 
 /-- What the restriction needs of the statement and the tests, beside the
 promise: a well-formed statement, tables that hold the same rows that pass
 the test of each item a core lists, a derived item's query whose rows that
 matter include those that pass the test of each item a core lists of it,
-subqueries all of whose rows matter, and a LIMIT or an OFFSET whose query's
-rows all matter. -/
-structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel : Nat → Row → Bool) :
-    Prop where
+subqueries all of whose rows matter, a LIMIT or an OFFSET whose query's
+rows all matter, and a query whose bindings `win` doesn't all pass, whose
+rows are a window's. -/
+structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel : Nat → Row → Bool)
+    (win : Nat → Bind → Bool) : Prop where
   wf : s.wellFormed = true
   tables : ∀ k, ∀ i ∈ (s.core k).items, ∀ t, s.table? i = some t →
     (X.rows t).filter (G i) = (Y.rows t).filter (G i)
@@ -709,6 +822,8 @@ structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel
   subs : ∀ q, ∀ k ∈ (s.query q).arms, ∀ q' ∈ (s.core k).subqueries, ∀ r, rel q' r = true
   post : ∀ q, q ≠ s.root →
     ((s.query q).limit.isSome || (s.query q).offset.isSome) = true → ∀ r, rel q r = true
+  windows : ∀ q, q ≠ s.root → ∀ k ∈ (s.query q).arms, ∀ b, win k b = false →
+    WindowRows s X Y G win q k
 
 /-- At fuel `f`, two databases' runs of each query below `f` but the
 statement's own return the same rows that `rel` keeps, under any of its
@@ -734,27 +849,72 @@ def ArmsKept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat →
       s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b → ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
         onHolds (s.core k) E i (b.set i (some r)) = true → G i r = true
 
+/-- The promise holds for a test of the bindings that matter that passes
+fewer of them. -/
+theorem ArmsKept.mono {s : Statement} {Z : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
+    {R R' : Nat → (Bind → Nat → List Row) → Bind → Bool} {q : Nat} {o : Bind}
+    {E : Bind → Nat → List Row} (h : ArmsKept s Z G Left R q o E)
+    (himp : ∀ k b, R' k E b = true → R k E b = true) : ArmsKept s Z G Left R' q o E :=
+  fun k hk => ⟨fun b hb hR => (h k hk).1 b hb (himp k b hR), (h k hk).2⟩
+
 /-- The promise for every query up to `f` but the statement's own, run on `Z`
 at fuel `f` under any of its outer bindings whose rows pass their tests,
-where a binding matters when its row passes `rel`. -/
+where a binding matters when its row passes `rel` and it passes `win`. -/
 def Kept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat → Prop)
-    (rel : Nat → Row → Bool) (f : Nat) : Prop :=
+    (rel : Nat → Row → Bool) (win : Nat → Bind → Bool) (f : Nat) : Prop :=
   ∀ q, q ≤ f → q ≠ s.root → ∀ o, s.Outer q o → Passes G o →
-    ArmsKept s Z G Left (relevant s rel q) q (o) (evalQuery s Z f)
+    ArmsKept s Z G Left (fun k E b => relevant s rel q k E b && win k b) q o (evalQuery s Z f)
+
+/-- Whether a binding matters depends, of the runs of its core's subqueries,
+only on the rows they return under it. -/
+theorem relevant_congr {s : Statement} {rel : Nat → Row → Bool} {q k : Nat}
+    {EX EY : Bind → Nat → List Row} {b : Bind}
+    (hsubs : ∀ q' ∈ (s.core k).subqueries, EX b q' = EY b q') :
+    relevant s rel q k EX b = relevant s rel q k EY b := by
+  unfold relevant
+  congr 1
+  split
+  · congr 1
+    unfold Statement.groupKey
+    apply List.map_congr_left
+    intro e he
+    apply e.eval_congr
+    · intro _ _ _; rfl
+    · intro q' hq'
+      apply hsubs q'
+      unfold Core.subqueries
+      exact List.mem_eraseDups.mpr (List.mem_append_right _ (List.mem_flatMap.mpr ⟨e, he, hq'⟩))
+  · congr 1
+    apply List.map_congr_left
+    intro o' ho'
+    cases o' with
+    | expr e =>
+      apply e.eval_congr
+      · intro _ _ _; rfl
+      · intro q' hq'
+        apply hsubs q'
+        unfold Core.subqueries
+        exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
+          (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
+    | _ => rfl
 
 /-- Two runs at fuel `f` whose arms of query `q` keep the promise, with any
-test `rel'` of the bindings that matter, keep the same bindings that matter
-and read the same subquery rows under them. -/
+test `R` of the bindings that matter that depends, of the runs of a core's
+subqueries, only on the rows they return under the binding, keep the same
+bindings that matter and read the same subquery rows under them. -/
 theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
-    {rel rel' : Nat → Row → Bool} (h : Restriction s X Y G rel)
+    {rel : Nat → Row → Bool} {win : Nat → Bind → Bool}
+    {R : Nat → (Bind → Nat → List Row) → Bind → Bool} (h : Restriction s X Y G rel win)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false) {f q : Nat} (hq : q ≤ f) {o : Bind} (hout : s.Outer q o) (ho : Passes G o)
     (hagree : Agree s X Y G rel f)
-    (hX : ArmsKept s X G Left (relevant s rel' q) q o (evalQuery s X f))
-    (hY : ArmsKept s Y G Left (relevant s rel' q) q o (evalQuery s Y f)) :
+    (hR : ∀ k b, (∀ q' ∈ (s.core k).subqueries, evalQuery s X f b q' = evalQuery s Y f b q') →
+      R k (evalQuery s X f) b = R k (evalQuery s Y f) b)
+    (hX : ArmsKept s X G Left R q o (evalQuery s X f))
+    (hY : ArmsKept s Y G Left R q o (evalQuery s Y f)) :
     ∀ k ∈ (s.query q).arms,
-      (coreBindings s X (evalQuery s X f) o k).filter (relevant s rel' q k (evalQuery s X f)) =
-        (coreBindings s Y (evalQuery s Y f) o k).filter (relevant s rel' q k (evalQuery s Y f)) ∧
-      ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter (relevant s rel' q k (evalQuery s X f)),
+      (coreBindings s X (evalQuery s X f) o k).filter (R k (evalQuery s X f)) =
+        (coreBindings s Y (evalQuery s Y f) o k).filter (R k (evalQuery s Y f)) ∧
+      ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter (R k (evalQuery s X f)),
         ∀ q' ∈ (s.core k).subqueries, evalQuery s X f b q' = evalQuery s Y f b q' := by
   intro k hk
   -- A subquery returns the same rows under a binding its outer bindings hold.
@@ -787,37 +947,11 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
     (fun i hi b hb hw hbd cd hcd q' hq' => hsub b hb q' (Core.onOf_queries hcd hq')
       (s.outer_subOn h.wf hk hout hw hbd hcd hq'))
     hsubs ((hX k hk).2) ((hY k hk).2)
-    (RX := relevant s rel' q k (evalQuery s X f)) (RY := relevant s rel' q k (evalQuery s Y f))
-    (fun b hb hw hbd => by
-      unfold relevant
-      congr 1
-      split
-      · congr 1
-        unfold Statement.groupKey
-        apply List.map_congr_left
-        intro e he
-        apply e.eval_congr
-        · intro _ _ _; rfl
-        · intro q' hq'
-          apply hsubs b hb hw hbd q'
-          unfold Core.subqueries
-          exact List.mem_eraseDups.mpr (List.mem_append_right _ (List.mem_flatMap.mpr ⟨e, he, hq'⟩))
-      · congr 1
-        apply List.map_congr_left
-        intro o' ho'
-        cases o' with
-        | expr e =>
-          apply e.eval_congr
-          · intro _ _ _; rfl
-          · intro q' hq'
-            apply hsubs b hb hw hbd q'
-            unfold Core.subqueries
-            exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
-              (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
-        | _ => rfl)
+    (RX := R k (evalQuery s X f)) (RY := R k (evalQuery s Y f))
+    (fun b hb hw hbd => hR k b (hsubs b hb hw hbd))
     ((hX k hk).1) ((hY k hk).1)
   have hres : ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter
-      (relevant s rel' q k (evalQuery s X f)), Restricted G Left (s.core k).items b := by
+      (R k (evalQuery s X f)), Restricted G Left (s.core k).items b := by
     intro b hb
     have hb' := List.mem_filter.mp hb
     exact (hX k hk).1 b hb'.1 hb'.2
@@ -836,10 +970,10 @@ runs return the same rows that matter at every lower fuel, the runs return the
 same rows that matter of every query but the statement's own, at every fuel
 past the query's number. -/
 theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
-    {rel : Nat → Row → Bool} (h : Restriction s X Y G rel)
+    {rel : Nat → Row → Bool} {win : Nat → Bind → Bool} (h : Restriction s X Y G rel win)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel f') →
-      Kept s X G Left rel f ∧ Kept s Y G Left rel f) :
+      Kept s X G Left rel win f ∧ Kept s Y G Left rel win f) :
     ∀ f, Agree s X Y G rel f := by
   have key : ∀ f, ∀ f' ≤ f, Agree s X Y G rel f' := by
     intro f
@@ -856,8 +990,42 @@ theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Lef
         obtain ⟨hX, hY⟩ := hkept f ih
         intro q hq hne o hout ho
         have hq' := Nat.le_of_lt_succ hq
-        exact queryRows_restricted (h.post q hne) (arms_agree h hLeft hq' hout ho (ih f (Nat.le_refl _))
-          (hX q hq' hne o hout ho) (hY q hq' hne o hout ho))
+        by_cases hall : ∀ k ∈ (s.query q).arms, ∀ b, win k b = true
+        · have hmono : ∀ (Z : Db), ArmsKept s Z G Left
+              (fun k E b => relevant s rel q k E b && win k b) q o (evalQuery s Z f) →
+              ArmsKept s Z G Left (relevant s rel q) q o (evalQuery s Z f) := by
+            intro Z hZ k hk
+            refine ⟨fun b hb hR => (hZ k hk).1 b hb ?_, (hZ k hk).2⟩
+            simp [hR, hall k hk b]
+          exact queryRows_restricted (h.post q hne) (arms_agree h hLeft hq' hout ho
+            (ih f (Nat.le_refl _)) (fun _ _ hs => relevant_congr hs)
+            (hmono X (hX q hq' hne o hout ho)) (hmono Y (hY q hq' hne o hout ho)))
+        · -- A query whose bindings `win` doesn't all pass is a window's.
+          obtain ⟨k, hk, b0, hb0⟩ : ∃ k ∈ (s.query q).arms, ∃ b, win k b ≠ true :=
+            Classical.byContradiction fun hne' => hall fun k hk b =>
+              Classical.byContradiction fun hb => hne' ⟨k, hk, b, hb⟩
+          have hw := h.windows q hne k hk b0 (by simpa using hb0)
+          obtain ⟨n, hlim, _⟩ := hw.limit
+          have hcut : ((s.query q).limit.isSome || (s.query q).offset.isSome) = true := by
+            simp [hlim]
+          have hrel : ∀ r, rel q r = true := h.post q hne hcut
+          have hmono : ∀ (Z : Db), ArmsKept s Z G Left
+              (fun k E b => relevant s rel q k E b && win k b) q o (evalQuery s Z f) →
+              ArmsKept s Z G Left (fun k _ b => win k b) q o (evalQuery s Z f) := by
+            intro Z hZ k' hk'
+            rw [hw.arms, List.mem_singleton] at hk'
+            subst hk'
+            refine ⟨fun b hb hR => (hZ k' (by rw [hw.arms]; simp)).1 b hb ?_,
+              (hZ k' (by rw [hw.arms]; simp)).2⟩
+            simp [relevant, hw.windowed, hw.agg, hrel, hR]
+          have harms := arms_agree (R := fun k _ b => win k b) h hLeft hq' hout ho
+            (ih f (Nat.le_refl _)) (fun _ _ _ => rfl)
+            (hmono X (hX q hq' hne o hout ho)) (hmono Y (hY q hq' hne o hout ho)) k
+            (by rw [hw.arms]; simp)
+          have hid : ∀ l : List Row, l.filter (rel q) = l :=
+            fun l => List.filter_eq_self.mpr fun r _ => hrel r
+          rw [hid, hid]
+          exact window_queryRows hw hout ho harms.1 harms.2
   exact fun f => key f f (Nat.le_refl _)
 
 /-- The statement's rows from two databases, when every row of its own
@@ -865,11 +1033,11 @@ query matters and the planner's scopes keep their promise for it and for
 every other query: with no LIMIT bound, every binding of the statement's own
 core matters. -/
 theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
-    {rel : Nat → Row → Bool} (h : Restriction s X Y G rel)
+    {rel : Nat → Row → Bool} {win : Nat → Bind → Bool} (h : Restriction s X Y G rel win)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hall : ∀ r, rel s.root r = true)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel f') →
-      Kept s X G Left rel f ∧ Kept s Y G Left rel f)
+      Kept s X G Left rel win f ∧ Kept s Y G Left rel win f)
     (hrootX : ArmsKept s X G Left (relevant s rel s.root) s.root Bind.empty
       (evalQuery s X s.queries.length))
     (hrootY : ArmsKept s Y G Left (relevant s rel s.root) s.root Bind.empty
@@ -879,7 +1047,7 @@ theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} 
   unfold Statement.result
   simp only [evalQuery]
   have := queryRows_restricted (fun _ => hall) (arms_agree h hLeft (Nat.le_of_lt (s.wellFormed_parts h.wf).root) (s.outer_root h.wf)
-    (Passes.empty G) (hagree _) hrootX hrootY)
+    (Passes.empty G) (hagree _) (fun _ _ hs => relevant_congr hs) hrootX hrootY)
   rwa [List.filter_eq_self.mpr (fun r _ => hall r), List.filter_eq_self.mpr (fun r _ => hall r)] at this
 
 /-- A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no
@@ -888,14 +1056,14 @@ ORDER BY values `last`, returns the same rows from `Y`, when the planner's
 scopes keep their promise for every other query and for the bindings of its own
 core whose rows sort at or before `last`. -/
 theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
-    {rel : Nat → Row → Bool} (h : Restriction s X Y G rel)
+    {rel : Nat → Row → Bool} {win : Nat → Bind → Bool} (h : Restriction s X Y G rel win)
     (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     {n : Nat} (hlimit : (s.query s.root).limit = some n) (hoffset : (s.query s.root).offset = none)
     (horder : (s.query s.root).orderBy ≠ []) {last : List Value}
     (hlen : (s.result X).length = n)
     (hlast : (s.result X).getLast?.map (Limit.orderKey (s.query s.root)) = some last)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel f') →
-      Kept s X G Left rel f ∧ Kept s Y G Left rel f)
+      Kept s X G Left rel win f ∧ Kept s Y G Left rel win f)
     (hrootX : ArmsKept s X G Left (relevant s (fun _ r => keyLe ((s.query s.root).orderBy.map (·.2))
       (Limit.orderKey (s.query s.root) r) last) s.root) s.root Bind.empty
       (evalQuery s X s.queries.length))
@@ -906,8 +1074,8 @@ theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {
   let P : Row → Bool := fun r =>
     keyLe ((s.query s.root).orderBy.map (·.2)) (Limit.orderKey (s.query s.root) r) last
   have hagree := agree_of_kept h hLeft hkept
-  have harms := arms_agree (rel' := fun _ => P) h hLeft (Nat.le_of_lt (s.wellFormed_parts h.wf).root) (s.outer_root h.wf) (Passes.empty G)
-    (hagree _) hrootX hrootY
+  have harms := arms_agree (R := relevant s (fun _ => P) s.root) h hLeft (Nat.le_of_lt (s.wellFormed_parts h.wf).root) (s.outer_root h.wf) (Passes.empty G)
+    (hagree _) (fun _ _ hs => relevant_congr hs) hrootX hrootY
   have hcombine : ∀ (Z : Db), (combineAll (s.query s.root).ops ((s.query s.root).arms.map fun k =>
       (s.core k).result (evalQuery s Z s.queries.length)
         (coreBindings s Z (evalQuery s Z s.queries.length) Bind.empty k))).filter P =

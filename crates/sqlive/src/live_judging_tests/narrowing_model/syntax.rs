@@ -136,6 +136,11 @@ pub(super) enum Out {
     /// `row_number() OVER (PARTITION BY ... ORDER BY ...)`, each ORDER BY
     /// term descending when `true`.
     RowNumber(Vec<Expr>, Vec<(Expr, bool)>, Option<String>),
+    /// A column the model's query returns after the SQL's columns, which
+    /// the SQL leaves out: an ORDER BY term a subquery doesn't return. A
+    /// subquery's value, EXISTS and a comparison with a subquery read only
+    /// its first column, so the model's rows give what SQLite's do.
+    Hidden(Expr),
 }
 
 pub(super) fn col(alias: &str, column: &'static str) -> Expr {
@@ -194,7 +199,7 @@ impl Query {
                 .iter()
                 .map(|(position, descending)| {
                     let term = match (&self.arms[0].select[*position], self.order_named) {
-                        (Out::Expr(e, _), true) => e.sql(),
+                        (Out::Expr(e, _), true) | (Out::Hidden(e), _) => e.sql(),
                         _ => (position + 1).to_string(),
                     };
                     if *descending {
@@ -249,7 +254,12 @@ impl Query {
 
 impl Core {
     fn sql(&self) -> String {
-        let columns: Vec<String> = self.select.iter().map(Out::sql).collect();
+        let columns: Vec<String> = self
+            .select
+            .iter()
+            .filter(|column| !matches!(column, Out::Hidden(_)))
+            .map(Out::sql)
+            .collect();
         let distinct = if self.distinct { "DISTINCT " } else { "" };
         let mut sql = format!("SELECT {distinct}{}", columns.join(", "));
         if !self.from.is_empty() {
@@ -281,7 +291,7 @@ impl Core {
         items_ambiguous(&self.from)
             || self.conditions.iter().any(Cond::ambiguous)
             || self.select.iter().any(|column| match column {
-                Out::Expr(e, _) | Out::Max(e, _) => e.ambiguous(),
+                Out::Expr(e, _) | Out::Max(e, _) | Out::Hidden(e) => e.ambiguous(),
                 Out::Count(_) => false,
                 Out::Concat(e, order, _) => {
                     e.ambiguous() || order.iter().any(|(sorted, _)| sorted.ambiguous())
@@ -301,10 +311,9 @@ impl Core {
     /// its rows in another order.
     fn follows_order(&self) -> bool {
         let aggregates = !self.group.is_empty()
-            || self
-                .select
-                .iter()
-                .any(|column| !matches!(column, Out::Expr(..) | Out::RowNumber(..)));
+            || self.select.iter().any(|column| {
+                !matches!(column, Out::Expr(..) | Out::RowNumber(..) | Out::Hidden(_))
+            });
         let rowids = |order: &[(Expr, bool)]| {
             self.from.iter().all(|item| {
                 matches!(item.source, Source::Table(_))
@@ -314,7 +323,7 @@ impl Core {
             })
         };
         self.select.iter().any(|column| match column {
-            Out::Expr(e, _) => {
+            Out::Expr(e, _) | Out::Hidden(e) => {
                 aggregates
                     && !matches!(e, Expr::Lit(_))
                     && !self.group.iter().any(|g| g.sql() == e.sql())
@@ -557,6 +566,7 @@ impl Out {
     fn sql(&self) -> String {
         let (sql, alias) = match self {
             Self::Expr(e, alias) => (e.sql(), alias),
+            Self::Hidden(e) => (e.sql(), &None),
             Self::Count(alias) => ("count(*)".to_owned(), alias),
             Self::Max(e, alias) => (format!("max({})", e.sql()), alias),
             Self::Concat(e, order, alias) => {
@@ -582,6 +592,7 @@ impl Out {
     fn json(&self) -> Json {
         match self {
             Self::Expr(e, alias) => json!({"expr": e.json(), "as": alias}),
+            Self::Hidden(e) => json!({"expr": e.json(), "as": null}),
             Self::Count(alias) => json!({"count": true, "as": alias}),
             Self::Max(e, alias) => json!({"max": e.json(), "as": alias}),
             Self::Concat(e, order, alias) => json!({

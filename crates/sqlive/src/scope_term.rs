@@ -344,7 +344,7 @@ impl Truth {
 }
 
 /// A value in a condition: one the SQL spells, or a bound parameter.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum Operand {
     Constant(Value),
     /// A parameter's position, from zero.

@@ -194,6 +194,13 @@ inductive RScope where
   /-- The row's `member` value equals `value` over a row of `partner` in
   `scope`; a NULL matches a NULL when `nulls`, as `IS` compares. -/
   | joined (member : PValue) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
+  /-- The rows of `item` that sort at or before the `limit`-th row of the
+  window they sit in: a subquery's rows for one binding around it, which are
+  the rows of `item` that its `own` conditions pass and that hold one value in
+  each `partition` column, sorted by `keys`, each descending when `true`
+  (`Window`). A row with a NULL in a partition column sits in no window. -/
+  | window (item : Nat) (own : List Cond) (partition : List Nat) (keys : List (Expr × Bool))
+      (limit : Nat)
   | and (left right : RScope)
   | or (left right : RScope)
   deriving Repr, Inhabited
@@ -230,6 +237,20 @@ def RScope.equalValues (column : Nat) : RScope → Option (List Int)
     pure (a ++ b)
   | _ => none
 
+/-- The values of the ORDER BY terms `keys`, expressions over one item's
+columns, in its row `r`. -/
+def keyValues (keys : List (Expr × Bool)) (r : Row) : List Value :=
+  keys.map fun (e, _) => e.eval (rowBind (some r)) noSubs
+
+/-- Whether `r'` is a row of the window `r` sits in that sorts before `r`:
+its `own` conditions hold, it holds `r`'s value in each `partition` column,
+and its values of `keys` sort before `r`'s. -/
+def windowBefore (own : List Cond) (partition : List Nat) (keys : List (Expr × Bool)) (r r' : Row) :
+    Bool :=
+  own.all (fun cd => isTrue (cd.eval (rowBind (some r')) noSubs)) &&
+    partition.all (fun c => r'.cell c == r.cell c) &&
+    keyCompare (keys.map (·.2)) (keyValues keys r') (keyValues keys r) == .lt
+
 /-- Whether row `r` passes, looking a join's value up among `rowsOf partner`
 (`RowScope::matches`, and the SQL `scope_lookup.rs` renders). -/
 def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
@@ -246,6 +267,9 @@ def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
   | .row _ cd => isTrue (cd.eval (rowBind (some r)) noSubs)
   | .joined m p v s nulls =>
     ((m.eval r).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == m.eval r && s.passes rowsOf r'
+  | .window i own part keys n =>
+    part.all (fun c => (r.cell c).isSome) &&
+      decide (((rowsOf i).filter (windowBefore own part keys r)).length < n)
   | .and l t => l.passes rowsOf r && t.passes rowsOf r
   | .or l t => l.passes rowsOf r || t.passes rowsOf r
 

@@ -1259,6 +1259,40 @@ as `cover.id = (SELECT r.id FROM releases AS r WHERE r.kind = cover.kind)`,
 narrows its own table without the correlation: coven can't read the subquery's
 source before the covers it takes values from.
 
+A subquery that keeps the first rows for each row around it narrows the way a
+statement's LIMIT does. Ben's album grid shows the title of each album's first
+release with `(SELECT r.title FROM releases AS r WHERE r.album_id = a.id ORDER
+BY r.album_order, r.id LIMIT 1)` as a result column. For each album, the
+subquery returns the first row of the album's window: the releases whose
+`album_id` holds the album's `id`, in the subquery's order. A release that
+sorts after the first of its album's releases changes nothing the grid shows,
+wherever it sorts in another album's window. So coven narrows `releases` to the
+rows that fewer than LIMIT rows of their own window sort before. A release Ben
+adds as an album's second doesn't rerun the grid. One he adds before the
+album's first release does, and so do deleting the first release and moving a
+release to another album where it sorts first. A release whose `album_id` is
+NULL sits in no window, since `=` holds of no NULL. To judge a write, coven
+asks SQLite for the first LIMIT rows of the changed row's window, in the
+subquery's order, and whether the changed row sorts before the last of them.
+The question reads the database a lookup reads, so the run keeps no value.
+
+The subquery is one SELECT of one table, with a LIMIT whose value is a positive
+integer and no OFFSET, and with no GROUP BY, DISTINCT, aggregate or window
+function, since there one row depends on many. Each of its conditions is one of
+two kinds: a condition that names only that table's columns and that SQLite can
+judge row by row, as a condition on one table's row (above), or an equality of
+one of its columns with a value of the query around it that coven reads as a
+join's. The rows those conditions keep for a row around the subquery are then
+exactly that row's window. Each ORDER BY term is an expression over the table's
+columns of the first kind, written out rather than as a position, with no
+COLLATE and no NULLS FIRST or LAST. The window narrows only the table's own
+scope, not the rows another table's lookup reads. No comparison takes the
+subquery's value as a value of its table. The cover above, `cover.id = (SELECT
+r.id ... LIMIT 1)`, takes its values from every release of each album, wherever
+the release sorts, and a scope that left out the releases past each window
+would hide them from the lookups of `covers`. So `releases` keeps the scope its
+conditions give.
+
 A subquery in FROM, a CTE and one of the app's own views are read as queries of
 their own. A condition on one of their columns that passes a
 table's column on unchanged narrows that table. Ben's app defines `CREATE VIEW
@@ -15354,6 +15388,7 @@ Write-ups explain each model and state its assumptions:
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
 | A well-formed statement's own query names no item outside its cores, and a core run under a binding that holds a row of each outer item its query names that no LEFT JOIN adds runs its derived items' queries and its subqueries under such bindings too | `outer_root`, `outer_derived`, `outer_sub`, `outer_subOn` | `../crates/sqlive/proofs/SqliveNarrowing/Outer.lean` | §4 |
 | A query returns the same rows under two bindings that hold the same rows of the outer items it names, so each ON condition of a LEFT JOIN holds of each binding its core keeps that holds a row of the join's item | `evalQuery_outer_congr`, `Statement.on_kept` | `../crates/sqlive/proofs/SqliveNarrowing/Congr.lean` | §4 |
+| A subquery of one table with an ORDER BY over that table's columns, a LIMIT and no OFFSET, each of whose conditions names only that table's columns or compares one of its columns by `=` with a value around it, returns for each binding around it the first rows of that binding's window; a row passes the window's scope exactly when it holds no NULL in a compared column and fewer than LIMIT rows its core keeps sort before it, so either every binding of the core passes, or the first LIMIT do in the database the write leaves; the subquery returns the same rows from two databases that hold the same bindings that pass; no comparison takes the value of such a subquery, so its window narrows no lookup of a value a comparison takes | `read_facts`, `partitionOf_holds`, `window_bindings`, `window_kept`, `window_passes`, `count_first`, `take_sortBy_window`, `window_queryRows`, `plan_windowRows`, `windowPasses_taken` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Window.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Windows.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
 | Two databases that hold the same rows passing each item's test give a core the same bindings that decide its query's rows, and the statement the same rows, when every such binding holds rows that pass their tests; an arm that aggregates makes the same rows that pass a test from the bindings whose GROUP BY values a row that passes it holds as from all its bindings; when the judge lets a write pass, each masked table holds the same rows that pass the scope of an item reading it | `joinItems_restricted`, `coreBindings_restricted`, `Core.result_filter_key`, `queryRows_restricted`, `agree_of_kept`, `result_restricted`, `scoped_rows` | `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
 | A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no OFFSET, whose run returned as many rows as its LIMIT, returns the same rows from two databases whose bindings that sort at or before the last row, and whose other queries' bindings, hold rows that pass their tests | `limit_restricted` | `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
 | A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Scopes.lean` | §4 |

@@ -32,6 +32,7 @@ use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
+use crate::scope_window::{read_window, Window};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
@@ -129,6 +130,9 @@ pub(crate) struct Sources {
     pub(crate) fts5_shadows: BTreeSet<String>,
     /// The order and LIMIT a full run's last row bounds its source by.
     pub(crate) sorted: Option<SortedLimit>,
+    /// The subqueries that keep the first rows of each window, which
+    /// narrow their tables' own scopes (`scope_window.rs`).
+    pub(crate) windows: Vec<Window>,
 }
 
 pub(crate) struct Source {
@@ -206,6 +210,9 @@ pub(crate) struct Core {
     /// The item each name in its clauses resolves to, `None` for a name
     /// sqlive can't place.
     names: Vec<Option<usize>>,
+    /// The window of the subquery whose one core this is, until the order
+    /// shows whether a comparison takes the subquery's value.
+    window: Option<Window>,
 }
 
 /// Where a condition was written: the WHERE or an inner join's ON, or the
@@ -366,6 +373,10 @@ impl Planner<'_> {
             crate::derived::push_down(&mut self, next, None, taken);
             order.push(next);
         }
+        let windows: Vec<Window> =
+            self.cores.iter_mut().filter_map(|core| core.window.take()).collect();
+        let windows =
+            windows.into_iter().filter(|window| !self.takes_values(window.item)).collect();
         let whole_names = self.whole_names;
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
@@ -377,6 +388,7 @@ impl Planner<'_> {
                 .collect(),
             fts5_shadows: self.fts5_shadows.into_iter().collect(),
             sorted,
+            windows,
         }
     }
 
@@ -678,6 +690,9 @@ fn read_nested<'a>(
                 let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
                     return Ok(None);
                 };
+                if let (Some(_), [core]) = (parent, &cores[..]) {
+                    planner.cores[*core].window = read_window(connection, planner, select, *core)?;
+                }
                 read.push((*select, cores));
             }
             // Its table is read outside any FROM, and so in every row.
@@ -698,7 +713,13 @@ fn read_core<'a>(
     ctes: &Ctes<'a>,
 ) -> rusqlite::Result<Option<usize>> {
     let core = planner.cores.len();
-    planner.cores.push(Core { parent, items: Vec::new(), aliases: Vec::new(), names: Vec::new() });
+    planner.cores.push(Core {
+        parent,
+        items: Vec::new(),
+        aliases: Vec::new(),
+        names: Vec::new(),
+        window: None,
+    });
     let mut found = Vec::new();
     let (columns, from, where_clause, group_by, having, window_clause) = match select {
         OneSelect::Values(rows) => {

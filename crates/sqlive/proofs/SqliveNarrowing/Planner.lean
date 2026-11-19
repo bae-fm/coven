@@ -102,17 +102,25 @@ where
         go f all st (order ++ [next]) waited
 
 /-- The planner's state once every core is read and every item placed, with
-the order and the root's LIMIT bound. -/
+the order, the root's LIMIT bound and the subqueries' windows. -/
 structure Planned where
   state : PState
   order : List Nat
   sorted : Option Limit.SortedLimit
+  windows : List Window.Window
 
 def plan (s : Statement) : Planned :=
   let st := s.readOrder.foldl (readCore s) (PState.initial s)
   let sorted := Limit.sortedLimit s st
   let (st, order) := ordered s st
-  { state := st, order, sorted }
+  { state := st, order, sorted, windows := Window.windows s st }
+
+/-- The scope item `i`'s window gives it: every row for an item no window
+sorts. -/
+def Planned.windowScope (p : Planned) (i : Nat) : RScope :=
+  match p.windows.find? (·.item == i) with
+  | some w => w.scope
+  | none => .all
 
 /-- The scope a membership gives its member, with `bound` giving each item
 placed before it its scope: the member's values among those its partner's
@@ -167,6 +175,12 @@ def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → R
   p.order.foldl (fun bound i =>
     let scope := p.scopeAt last bound i
     fun j => if j = i then scope else bound j) fun _ => .all
+
+/-- Each item's scope as its table's scope reads it: its scope among
+`Planned.scopes`, which lookups read, and its window's
+(`scope_lookup::scopes`). -/
+def Planned.itemScopes (p : Planned) (last : Option (List (List Value))) (i : Nat) : RScope :=
+  (p.scopes last i).both (p.windowScope i)
 
 /-- Each table's scope: the scopes of the items reading it, joined with OR;
 `none` for a table no item reads. -/

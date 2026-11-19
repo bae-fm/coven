@@ -57,6 +57,8 @@ mod row_member;
 mod row_subquery_edge;
 #[path = "narrowing_model/subquery_edge.rs"]
 mod subquery_edge;
+#[path = "narrowing_model/subquery_window.rs"]
+mod subquery_window;
 #[path = "narrowing_model/syntax.rs"]
 mod syntax;
 #[path = "narrowing_model/term.rs"]
@@ -635,6 +637,12 @@ async fn one_of_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn subquery_edge_matches_lean() {
     differential("subquery edge", subquery_edge::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn subquery_window_matches_lean() {
+    differential("subquery window", subquery_window::statement).await;
 }
 
 #[tokio::test]

@@ -12,7 +12,7 @@ def Statement.tableScopes (s : Statement) (db : Db) : Option (Nat → Option RSc
   else
     let planned := plan s
     let last := planned.sorted.bind fun sorted => Limit.lastValues sorted (s.result db)
-    some (tableScope s (planned.scopes last))
+    some (tableScope s (planned.itemScopes last))
 
 /-- Whether sqlive's narrowing, as the model states it, reruns the statement
 whose last run read `db`, for a write whose `changes` leave `db'`. -/

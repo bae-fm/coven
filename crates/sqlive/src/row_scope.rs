@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::scope_lookup::{Judging, Lookup, Lookups, NoAnswer};
 use crate::scope_row::RowCondition;
+use crate::scope_window::{RowWindow, WindowQuestion};
 use crate::sql_value::SqlValue as Value;
 
 /// A predicate over a table's rows. A change reruns a query when its row
@@ -55,6 +56,9 @@ pub enum RowScope {
         /// The question that finds partner rows holding a value.
         lookup: Arc<Lookup>,
     },
+    /// Rows that fewer than a subquery's LIMIT rows of their window sort
+    /// before, which a write judges by asking SQLite (`scope_window.rs`).
+    Window(Arc<RowWindow>),
     /// Rows both scopes pass.
     And(Box<Self>, Box<Self>),
     /// Rows either scope passes.
@@ -102,6 +106,10 @@ impl RowScope {
             Self::Row(condition) => match condition.question(row) {
                 None => true,
                 Some((sql, parameters)) => lookups(Judging::Row(&sql, &parameters))?,
+            },
+            Self::Window(window) => match window.question(row) {
+                WindowQuestion::Answered(passes) => passes,
+                WindowQuestion::Ask(sql, parameters) => lookups(Judging::Row(&sql, &parameters))?,
             },
             Self::And(left, right) => left.matches(row, lookups)? && right.matches(row, lookups)?,
             Self::Or(left, right) => left.matches(row, lookups)? || right.matches(row, lookups)?,
@@ -166,7 +174,8 @@ impl RowScope {
             | Self::Compare { .. }
             | Self::Null { .. }
             | Self::Row(_)
-            | Self::Joined { .. } => {}
+            | Self::Joined { .. }
+            | Self::Window(_) => {}
         }
     }
 
@@ -183,6 +192,7 @@ impl RowScope {
             Self::Row(condition) => {
                 into.extend(condition.term.columns.iter().map(|(column, _)| column.clone()));
             }
+            Self::Window(window) => into.extend(window.columns().cloned()),
             Self::And(left, right) | Self::Or(left, right) => {
                 left.columns(into);
                 right.columns(into);

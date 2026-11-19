@@ -27,6 +27,8 @@ mod row;
 mod row_scope;
 #[path = "live_judging_tests/subquery.rs"]
 mod subquery;
+#[path = "live_judging_tests/subquery_window.rs"]
+mod subquery_window;
 #[path = "live_judging_tests/term.rs"]
 mod term;
 #[path = "live_judging_tests/virtual_table.rs"]

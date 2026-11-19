@@ -45,7 +45,7 @@ theorem planTest_parts {s : Statement} {Y : Db} {last : Option (List (List Value
       ((s.item i).readable = true → r ∈ lookupRows s Y i) := by
   unfold planTest Planned.itemTest Planned.scopeTest at h
   simp only [Bool.and_eq_true] at h
-  refine ⟨h.1.1, fun hr => ?_⟩
+  refine ⟨h.1.1.1, fun hr => ?_⟩
   have := h.2
   rw [hr] at this
   simpa using this
@@ -198,7 +198,7 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
   have h0 : (Planned.membershipScope ((plan s).scopes last) e0).passes (lookupRows s Y) r0 = true := by
     rcases he0 with he0 | ⟨he0, hm0⟩
     · obtain ⟨pre, post, horder, _⟩ := (plan_placedBefore s d).1 e0 he0
-      exact (scopes_parts last _ (by rw [horder]; simp) htest.1).2.2 e0 he0
+      exact (scopes_parts last _ (by rw [horder]; simp) htest.1.1).2.2 e0 he0
     · rcases htest.2 e0 he0 with h | h
       · exact absurd hm0 h
       · exact h
@@ -321,12 +321,13 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
     (hb : b ∈ coreBindings s Z (evalQuery s Z g) o k)
     (hrel : relevant s (planRel s Y last) q k (evalQuery s Z g) b = true)
     (hroot : q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z g) b)
+    (hwin : (plan s).windowPasses s Y k b = true)
     {pre post : List Nat} {i : Nat} (horder : (plan s).order = pre ++ i :: post)
     (hi : i ∈ (s.core k).items) {r : Row} (hbi : b i = some r)
     (hpre : ∀ j r', j ∈ pre → b j = some r' → planTest s Y last j r' = true)
     (hsub : ∀ q' ∈ (s.core k).subqueries, ∀ g', g = g' + 1 → ∀ k' ∈ (s.query q').arms,
-      ∀ b' ∈ coreBindings s Z (evalQuery s Z g') b k', ∀ j r', j ∈ pre → b' j = some r' →
-        planTest s Y last j r' = true) :
+      ∀ b' ∈ coreBindings s Z (evalQuery s Z g') b k', (plan s).windowPasses s Y k' b' = true →
+        ∀ j r', j ∈ pre → b' j = some r' → planTest s Y last j r' = true) :
     planTest s Y last i r = true := by
   have hwf := base.wf
   have hS := plan_semTests hwf last (lookupRows s Y)
@@ -351,16 +352,17 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
   have hpartner : ∀ e : Edge, e.member = i → e.partner ∈ pre → e.HoldsIn s Z g b →
       (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) →
       (e.nested = true → ∃ q' ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q').arms) →
+      (e.nested = true → ∀ b', (plan s).windowPasses s Y (s.item e.partner).core b' = true) →
       (s.item e.partner).readable = true →
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
         ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := by
-    intro e hm hp hh hbnd hnest hread
+    intro e hm hp hh hbnd hnest hwp hread
     refine partner_found hm hbi hh hbnd (fun r' hr' => hpre _ r' hp hr')
       (fun hn g' hg' b' hb' r' hr' => ?_) hread
     obtain ⟨q', hq', harm⟩ := hnest hn
-    exact hsub q' hq' g' hg' _ harm b' hb' _ r' hp hr'
+    exact hsub q' hq' g' hg' _ harm b' hb' (hwp hn b') _ r' hp hr'
   -- The item's scope.
   have hscope : ((plan s).scopes last i).passes (lookupRows s Y) r = true := by
     rw [hbound]
@@ -374,7 +376,9 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
         hpush | ⟨hh, _, hbnd, hnest, _⟩
       · exact pushed_passes hwf hk hi hrel hbi hpush hmi
       · rw [hmi, hcorei] at hnest
-        obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hh hbnd hnest ((plan_lookups hwf).1 m hme)
+        obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hh hbnd hnest
+          (fun hn b' => windowPasses_taken hwf (fun i' hc => takesValues_edge hme hn hc.symm) Y b')
+          ((plan_lookups hwf).1 m hme)
         exact membershipScope_passes hr' hsc hv hn
     · have hors := (plan_lookups hwf).2.2.1 i sides hsides
       obtain ⟨⟨side, hside, hterms, hedges⟩, _, hsd⟩ := hS.ors Z g b i hcls hbi' sides hors
@@ -385,6 +389,9 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
       rw [hbefore' _ hp]
       rw [hcorei] at hnest
       obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner e hmem hp (hedges e he) hbnd hnest
+        (fun hn b' => windowPasses_taken hwf (fun i' hc => takesValues_side (j := i)
+          (by simpa [Statement.itemNumbers] using s.wellFormed_items hwf hi)
+          ((plan_lookups hwf).2.2.1 i sides hsides) hside he hn hc.symm) Y b')
         ((plan_lookups hwf).2.1 i sides hors side hside e he)
       exact joined_passes_of hr' hsc hv hn
     · -- The LIMIT bound bounds only items of the statement's own core.
@@ -423,9 +430,12 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
           rw [hbefore' _ hp]
           exact h1
   -- Each edge pushed into the item.
+  have hwini : ((plan s).windowScope i).passes (lookupRows s Y) r = true := by
+    have := List.all_eq_true.mp hwin i hi
+    simpa [hbi] using this
   have hst : (plan s).scopeTest ((plan s).scopes last) (lookupRows s Y) i r = true := by
     unfold Planned.scopeTest
-    rw [hscope, Bool.true_and]
+    rw [hscope, hwini, Bool.true_and, Bool.true_and]
     refine List.all_eq_true.mpr fun e he => ?_
     by_cases hm : e.member = i
     · simp [pushed_passes hwf hk hi hrel hbi he hm]
@@ -481,16 +491,17 @@ theorem plan_kept_rows {s : Statement} {X Y : Db} {last : Option (List (List Val
       ∀ k ∈ (s.query q).arms, ∀ b ∈ coreBindings s Z (evalQuery s Z g) o k,
       relevant s (planRel s Y last) q k (evalQuery s Z g) b = true →
       (q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z g) b) →
+      (plan s).windowPasses s Y k b = true →
       ∀ j r, j ∈ (plan s).order.take n → b j = some r → planTest s Y last j r = true := by
   have hwf := base.wf
   intro n
   induction n with
-  | zero => intro _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ j r hj; simp at hj
+  | zero => intro _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ j r hj; simp at hj
   | succ n ih =>
-    intro Z hZ g hg q hq o ho hoG k hk b hb hrel hroot j r hj hbj
+    intro Z hZ g hg q hq o ho hoG k hk b hb hrel hroot hwin j r hj hbj
     have hoG' : ∀ j r, j ∈ (plan s).order.take n → o j = some r → planTest s Y last j r = true :=
       fun j r hj => hoG j r (by rw [List.take_add_one]; exact List.mem_append_left _ hj)
-    have hbn := ih Z hZ g hg q hq o ho hoG' k hk b hb hrel hroot
+    have hbn := ih Z hZ g hg q hq o ho hoG' k hk b hb hrel hroot hwin
     have hj' := hj
     rw [List.take_add_one] at hj'
     rcases List.mem_append.mp hj' with hj' | hj'
@@ -508,8 +519,8 @@ theorem plan_kept_rows {s : Statement} {X Y : Db} {last : Option (List (List Val
       · have horder : (plan s).order =
             (plan s).order.take n ++ (plan s).order[n] :: (plan s).order.drop (n + 1) := by
           rw [← List.drop_eq_getElem_cons hlt, List.take_append_drop]
-        refine item_passes base hZ hg hq ho hk hb hrel hroot horder hik hbj hbn ?_
-        intro q' hq' g' hg' k' hk' b' hb' j' r' hj' hbj'
+        refine item_passes base hZ hg hq ho hk hb hrel hroot hwin horder hik hbj hbn ?_
+        intro q' hq' g' hg' k' hk' b' hb' hwb' j' r' hj' hbj'
         have hnest : q' ∈ s.nestedQueries k := List.mem_append_right _ hq'
         have hqq := s.wellFormed_nested hwf (s.query_lt hk) hk hnest
         have hbd : s.BoundIn (s.core k).items b := fun j hj hab =>
@@ -518,7 +529,7 @@ theorem plan_kept_rows {s : Statement} {X Y : Db} {last : Option (List (List Val
         exact ih Z hZ g' (by omega) q' (by omega) b
           (s.outer_sub hwf hk ho (coreBindings_within hb) hbd hq') hbn k' hk' b' hb'
           (relevant_of_all (queryTest_sub hwf (plan s) ((plan s).scopes last) (lookupRows s Y) hq') _ _)
-          (fun he => absurd (he ▸ hnest) (s.wellFormed_root hwf k)) j' r' hj' hbj'
+          (fun he => absurd (he ▸ hnest) (s.wellFormed_root hwf k)) hwb' j' r' hj' hbj'
       · rw [coreBindings_within hb _ hik] at hbj
         unfold Statement.outerOf at hbj
         split at hbj
@@ -538,12 +549,13 @@ theorem plan_restricted {s : Statement} {X Y : Db} {last : Option (List (List Va
     (hg : g ≤ f) (hq : q ≤ g) (ho : s.Outer q o) (hoG : Passes (planTest s Y last) o)
     (hk : k ∈ (s.query q).arms) (hb : b ∈ coreBindings s Z (evalQuery s Z g) o k)
     (hrel : relevant s (planRel s Y last) q k (evalQuery s Z g) b = true)
-    (hroot : q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z g) b) :
+    (hroot : q = s.root → (plan s).AtOrBefore s last k (evalQuery s Z g) b)
+    (hwin : (plan s).windowPasses s Y k b = true) :
     Restricted (planTest s Y last) (planLeft s) (s.core k).items b := by
   have hwf := base.wf
   have hklt := ((s.wellFormed_parts hwf).arms q (s.query_lt hk) k hk).1
   have hall := plan_kept_rows base (plan s).order.length Z hZ g hg q hq o ho
-    (fun j r _ hr => hoG j r hr) k hk b hb hrel hroot
+    (fun j r _ hr => hoG j r hr) k hk b hb hrel hroot hwin
   rw [List.take_length] at hall
   refine ⟨fun j r hr => ?_, fun j hj hn => ?_⟩
   · by_cases hj : j ∈ (s.core k).items

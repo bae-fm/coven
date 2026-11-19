@@ -92,6 +92,7 @@ theorem RScope.equalValues_passes {rowsOf : Nat → List Row} {r : Row} {c : Nat
   | .null .., _, h, _ => by simp [RScope.equalValues] at h
   | .row .., _, h, _ => by simp [RScope.equalValues] at h
   | .joined .., _, h, _ => by simp [RScope.equalValues] at h
+  | .window .., _, h, _ => by simp [RScope.equalValues] at h
 
 /-- A lookup passes a row whose value, NULL only for an `IS` edge, a row of
 the partner among `rowsOf` in the partner's scope gives. -/

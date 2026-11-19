@@ -12,6 +12,7 @@ import SqliveNarrowing.Rules.PushDown
 import SqliveNarrowing.Rules.Transfer
 import SqliveNarrowing.Rules.View
 import SqliveNarrowing.Rules.Limit
+import SqliveNarrowing.Rules.Window
 import SqliveNarrowing.Rules.Whole
 import SqliveNarrowing.Rules.Parenthesized
 import SqliveNarrowing.Rules.Virtual
