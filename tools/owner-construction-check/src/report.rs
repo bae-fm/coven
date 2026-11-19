@@ -9,7 +9,6 @@ use crate::database_boundary::find_database_boundary_violations;
 use crate::domain_owners::find_domain_owner_forwarding;
 use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
-use crate::read_shapes::find_read_shape_violations;
 use crate::sources::Workspace;
 #[cfg(test)]
 use crate::syntax::RustFile;
@@ -81,9 +80,6 @@ fn check_paths(
     }
     if policy.selects(Rule::CapabilityBoundaries) {
         findings.extend(find_capability_boundary_violations(code, policy));
-    }
-    if policy.selects(Rule::ReadShapes) {
-        findings.extend(find_read_shape_violations(code, policy));
     }
     if policy.selects(Rule::TypedErrors) {
         findings.extend(find_string_error_violations(files));

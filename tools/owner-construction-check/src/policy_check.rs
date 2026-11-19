@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::capability_boundaries::declared_items;
-use crate::counters::increment_sites;
+use crate::counters::counters;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::{schema_table_macros, schema_views};
@@ -18,10 +18,7 @@ use crate::owner_graph::OwnerGraph;
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{type_name, RustFile, TypeNames};
-use owner_construction_policy::{
-    home_holds, is_identifier, split_callable, AllowedUses, Database, FrozenUses, ListKind, Policy,
-    Shape,
-};
+use owner_construction_policy::{home_holds, AllowedUses, Database, FrozenUses, ListKind, Policy};
 
 /// Every type the policy names, with its row, as the file names it: the
 /// owner rules' rows by path, before the checker reads them by name
@@ -59,7 +56,8 @@ pub(crate) fn stale_rows(
     stale.extend(undeclared_types(code, graph, policy, rows));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, graph, policy));
-    stale.extend(invalid_read_shapes(crate_files, code, graph, policy));
+    stale.extend(invalid_read_plumbing(code, policy));
+    stale.extend(invalid_counters(code, policy));
     stale
 }
 
@@ -624,90 +622,39 @@ fn invalid_domains(
     stale
 }
 
-/// The read rule's rows: its plumbing holds a source, and each list row names
-/// a file and what it found there (a function or method, a type for the
-/// memory a type keeps, `table.column` for a counter), with a count of at
-/// least one and what it found or why it is allowed. A key is in one list,
-/// once.
-fn invalid_read_shapes(
-    files: &[RustFile],
-    code: &CrateCode,
-    graph: &OwnerGraph,
-    policy: &Policy,
-) -> Vec<String> {
+/// The read rule's plumbing, which the typed lints read: each file or
+/// directory holds a source.
+fn invalid_read_plumbing(code: &CrateCode, policy: &Policy) -> Vec<String> {
     let Some(shapes) = &policy.read_shapes else {
         return Vec::new();
     };
+    shapes
+        .plumbing
+        .iter()
+        .filter(|home| !holds_source(&code.written, home))
+        .map(|home| format!("read_shapes.plumbing: {home} holds no source"))
+        .collect()
+}
+
+/// The database's counter rows: each names a column the SQL only counts up,
+/// once, with why it may.
+fn invalid_counters(code: &CrateCode, policy: &Policy) -> Vec<String> {
+    let Some(database) = &policy.database else {
+        return Vec::new();
+    };
+    let counted = counters(code).into_iter().map(|counter| counter.column).collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
     let mut stale = Vec::new();
-    for home in &shapes.plumbing {
-        if !holds_source(&code.written, home) {
-            stale.push(format!("read_shapes.plumbing: {home} holds no source"));
+    for row in &database.counters {
+        let column = row.column.as_str();
+        if !counted.contains(column) {
+            stale.push(format!("database.counters: {column} is no column the SQL only counts up"));
         }
-    }
-    let methods = declared_methods(files);
-    let types = &graph.types;
-    let increments = increment_sites(code);
-    let sql_paths =
-        code.sql.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();
-    let mut seen = BTreeMap::new();
-    for row in shapes.listed() {
-        let list = row.list.name();
-        let (path, item, shape) = (row.path, row.item, row.shape.id());
-        let is_counter = matches!(row.shape, Shape::Counter | Shape::ResetCounter);
-        let rust = files.iter().any(|file| file.relative_path == path);
-        if !(rust || (is_counter && sql_paths.contains(path))) {
-            stale.push(format!("read_shapes.{list}: {path} holds no source"));
-            continue;
+        if row.reason.trim().is_empty() {
+            stale.push(format!("database.counters: {column} states no reason"));
         }
-        let function = || {
-            let (owner, method) = match split_callable(item) {
-                Some(parts) => parts,
-                None if is_identifier(item) => ("<free>", item),
-                None => return Err("is neither `Type::method` nor a function name"),
-            };
-            methods
-                .contains_key(&(path.to_string(), owner.to_string(), method.to_string()))
-                .then_some(())
-                .ok_or("names no function there")
-        };
-        let found = match row.shape {
-            Shape::Counter | Shape::ResetCounter => increments
-                .contains(&(path.to_string(), item.to_string()))
-                .then_some(())
-                .ok_or("is no column the SQL there increases"),
-            Shape::KeptState => {
-                let type_there = types
-                    .get(item)
-                    .is_some_and(|info| info.declarations.iter().any(|(file, _)| file == path));
-                if type_there {
-                    Ok(())
-                } else {
-                    function().or(Err("names no type or function there"))
-                }
-            }
-            _ => function(),
-        };
-        if let Err(reason) = found {
-            stale.push(format!("read_shapes.{list}: {path}: {item} {reason}"));
-        }
-        if row.count == 0 {
-            stale.push(format!(
-                "read_shapes.{list}: {path}: {item} ({shape}) has a count of 0, not at least 1"
-            ));
-        }
-        if row.note.trim().is_empty() {
-            let note = if row.list == ListKind::Frozen { "finding" } else { "reason" };
-            stale.push(format!("read_shapes.{list}: {path}: {item} ({shape}) states no {note}"));
-        }
-        match seen.insert((path, item, row.shape), row.list) {
-            Some(first) if first == row.list => {
-                stale.push(format!("read_shapes.{list}: {path}: {item} ({shape}) is listed twice"));
-            }
-            Some(first) => stale.push(format!(
-                "read_shapes.{list}: {path}: {item} ({shape}) is also in {}",
-                first.name()
-            )),
-            None => {}
+        if !seen.insert(column) {
+            stale.push(format!("database.counters: {column} is listed twice"));
         }
     }
     stale

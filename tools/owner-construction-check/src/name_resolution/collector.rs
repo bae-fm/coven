@@ -80,10 +80,6 @@ impl Collector<'_> {
             .entry(ident.to_string())
             .or_default()
             .push(Binding::Definition(path.clone(), namespace, visibility));
-        self.resolver.definitions.insert(
-            (self.file.to_string(), position(ident.span().start()), ident.to_string()),
-            path.clone(),
-        );
         path
     }
 

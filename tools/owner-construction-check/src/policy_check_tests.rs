@@ -545,11 +545,7 @@ fn read_shape_files() -> Vec<RustFile> {
 
 #[test]
 fn the_read_shapes_rows_naming_what_exists_are_current() {
-    let rows = read_shapes_rows(
-        r#"plumbing = ["crates/app/src/plumbing.rs"]
-        frozen = [{ path = "crates/app/src/reads.rs", item = "Screen::read", shape = "sort", count = 1, finding = "sorts" }]
-        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "pick", count = 2, reason = "a constant table" }]"#,
-    );
+    let rows = read_shapes_rows(r#"plumbing = ["crates/app/src/plumbing.rs"]"#);
     assert_eq!(stale(read_shape_files(), &rows), Vec::<String>::new());
 }
 
@@ -572,61 +568,6 @@ fn plumbing_names_a_file_or_directory_holding_source() {
         [
             "read_shapes.plumbing: crates/app/src/moved/ holds no source",
             "read_shapes.plumbing: crates/app/src/gone.rs holds no source",
-        ]
-    );
-}
-
-#[test]
-fn a_list_row_names_a_file_and_an_item_there() {
-    let rows = read_shapes_rows(
-        r#"frozen = [
-            { path = "crates/app/src/moved.rs", item = "free", shape = "sort", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "Screen::gone", shape = "sort", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "gone", shape = "sort", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "not an item", shape = "sort", count = 1, finding = "x" },
-        ]"#,
-    );
-    assert_eq!(
-        stale(read_shape_files(), &rows),
-        [
-            "read_shapes.frozen: crates/app/src/moved.rs holds no source",
-            "read_shapes.frozen: crates/app/src/reads.rs: Screen::gone names no function there",
-            "read_shapes.frozen: crates/app/src/reads.rs: gone names no function there",
-            "read_shapes.frozen: crates/app/src/reads.rs: not an item is neither `Type::method` nor a function name",
-        ]
-    );
-}
-
-#[test]
-fn a_list_row_has_a_count_of_at_least_one_and_a_note() {
-    let rows = read_shapes_rows(
-        r#"frozen = [{ path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 0, finding = "" }]
-        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "pick", count = 1, reason = "" }]"#,
-    );
-    assert_eq!(
-        stale(read_shape_files(), &rows),
-        [
-            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) has a count of 0, not at least 1",
-            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) states no finding",
-            "read_shapes.allowed: crates/app/src/reads.rs: free (pick) states no reason",
-        ]
-    );
-}
-
-#[test]
-fn a_key_is_in_at_most_one_list_and_once() {
-    let rows = read_shapes_rows(
-        r#"frozen = [
-            { path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 2, finding = "x" },
-        ]
-        allowed = [{ path = "crates/app/src/reads.rs", item = "free", shape = "sort", count = 1, reason = "x" }]"#,
-    );
-    assert_eq!(
-        stale(read_shape_files(), &rows),
-        [
-            "read_shapes.frozen: crates/app/src/reads.rs: free (sort) is listed twice",
-            "read_shapes.allowed: crates/app/src/reads.rs: free (sort) is also in frozen",
         ]
     );
 }
@@ -658,30 +599,37 @@ fn the_live_query_value_stream_and_kept_state_types_are_declared_by_a_crate_or_e
 }
 
 #[test]
-fn a_kept_state_row_names_a_type_or_a_function_and_a_counter_row_a_sql_column() {
-    let rows = read_shapes_rows(
-        r#"frozen = [
-            { path = "crates/app/src/reads.rs", item = "Screen", shape = "kept-state", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "Screen::read", shape = "kept-state", count = 1, finding = "x" },
-            { path = "crates/app/src/reads.rs", item = "Gone", shape = "kept-state", count = 1, finding = "x" },
-            { path = "crates/app/src/schema.sql", item = "v.version", shape = "counter", count = 1, finding = "x" },
-            { path = "crates/app/src/schema.sql", item = "v.gone", shape = "counter", count = 1, finding = "x" },
-        ]"#,
-    );
+fn a_counter_row_names_a_column_the_sql_only_counts_up_once_with_a_reason() {
+    let rows = r#"
+        [database]
+        capability = "SQLite"
+        counters = [
+            { column = "v.version", reason = "numbers the scans" },
+            { column = "v.version", reason = "" },
+            { column = "v.seen", reason = "numbers the views" },
+            { column = "v.gone", reason = "numbers nothing" },
+        ]
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app/src/"]
+    "#;
     let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
     let mut workspace = workspace(read_shape_files(), &members);
     workspace.sql_files = vec![SqlFile {
         relative_path: "crates/app/src/schema.sql".to_string(),
         package_root: "crates/app/".to_string(),
         package: "app".to_string(),
-        text: "UPDATE v SET version = version + 1;".to_string(),
+        text: "UPDATE v SET version = version + 1; UPDATE v SET seen = seen + 1; UPDATE v SET seen = 4;"
+            .to_string(),
     }];
     let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
     assert_eq!(
         current_stale_rows(&workspace, policy),
         [
-            "read_shapes.frozen: crates/app/src/reads.rs: Gone names no type or function there",
-            "read_shapes.frozen: crates/app/src/schema.sql: v.gone is no column the SQL there increases",
+            "database.counters: v.version states no reason",
+            "database.counters: v.version is listed twice",
+            "database.counters: v.seen is no column the SQL only counts up",
+            "database.counters: v.gone is no column the SQL only counts up",
         ]
     );
 }

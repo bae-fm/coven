@@ -87,9 +87,6 @@ pub(crate) struct NameResolver {
     modules: BTreeMap<ItemPath, usize>,
     module_parents: BTreeMap<ItemPath, ItemPath>,
     regions: BTreeMap<String, Vec<Region>>,
-    /// Keyed by file, position and name: an expansion's items share the
-    /// invocation's position.
-    definitions: BTreeMap<(String, Position, String), ItemPath>,
     pub(crate) types: BTreeSet<ItemPath>,
     enum_members: BTreeMap<ItemPath, BTreeSet<String>>,
     extern_crates: BTreeMap<String, BTreeMap<String, String>>,
@@ -161,7 +158,6 @@ impl NameResolver {
             modules: BTreeMap::new(),
             module_parents: BTreeMap::new(),
             regions: BTreeMap::new(),
-            definitions: BTreeMap::new(),
             types: BTreeSet::new(),
             enum_members: BTreeMap::new(),
             extern_crates: BTreeMap::new(),
@@ -361,11 +357,6 @@ impl NameResolver {
             .find(|region| region.start <= position && position <= region.end)
             .expect("file scope")
             .scope
-    }
-
-    pub(crate) fn definition(&self, file: &str, ident: &syn::Ident) -> ItemPath {
-        self.definitions[&(file.to_string(), position(ident.span().start()), ident.to_string())]
-            .clone()
     }
 
     /// The crate a position in a file is in.

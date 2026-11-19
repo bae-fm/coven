@@ -7,15 +7,8 @@ use owner_construction_policy::Policy;
 fn policy() -> Policy {
     Policy::fixture(
         r#"
-        rules = ["read-shapes"]
+        rules = ["database-boundary"]
         test_support_features = ["test-utils"]
-        [read_shapes]
-        statement_rows = []
-        column_values = []
-        read_types = ["SqlReadContext"]
-        request_query_types = ["LiveRead", "ReconfigurableLiveQuery"]
-        plumbing = ["crates/app/src/plumbing.rs"]
-        rule = "the read rule"
         "#,
     )
 }
@@ -35,10 +28,7 @@ fn counters_in(sql: &[(&str, &str)], rust: &[(&str, &str)]) -> Vec<String> {
     let files = rust.iter().map(|(path, text)| RustFile::fixture(path, text)).collect::<Vec<_>>();
     let mut found = counters(&CrateCode::fixture(&files, &sql, &policy()))
         .into_iter()
-        .map(|hit| {
-            assert!(matches!(hit.shape.id(), "counter" | "reset-counter"));
-            format!("{}:{} {}", hit.path, hit.line, hit.item)
-        })
+        .map(|counter| format!("{}:{} {}", counter.path, counter.line, counter.column))
         .collect::<Vec<_>>();
     found.sort();
     found
@@ -113,88 +103,15 @@ fn the_finding_is_at_the_first_increment() {
 }
 
 #[test]
-fn increment_sites_list_every_increment_whether_a_counter_or_not() {
-    let sql = sql_file(SQL, "UPDATE v SET version = version + 1; UPDATE v SET version = 0;");
-    let sites = increment_sites(&CrateCode::fixture(&[], &[sql], &policy()));
-    assert_eq!(sites.into_iter().collect::<Vec<_>>(), [(SQL.to_string(), "v.version".to_string())]);
-}
-
-const REQUESTS: &str = r#"
-    struct Query { revision: u64, offset: u64, name: String }
-    struct Shared { revision: u64 }
-    struct Own { epoch: u64, offset: u64 }
-    struct Window { limit: u64 }
-    struct Screen { query: ReconfigurableLiveQuery<Own, u8>, other: LiveRead<Option<Vec<Query>>, u8> }
-"#;
-
-fn bumps(body: &str) -> Vec<(String, String)> {
-    let source = format!("{REQUESTS}\nimpl Screen {{ fn work(&mut self, x: &mut Own, q: &mut Query, limit: u64) {{ {body} }} }}");
-    let files = [RustFile::fixture("crates/app/src/a.rs", &source)];
-    let policy = policy();
-    let files = crate::crate_code::checked(&files, &policy);
-    let shapes = policy.read_shapes.as_ref().expect("rows");
-    let read = ReadCode::collect(&files, &policy, shapes);
-    let mut found = request_bumps(&read, &files, shapes)
-        .into_iter()
-        .map(|hit| {
-            assert_eq!(hit.shape.id(), "request-bump");
-            (hit.item, hit.what)
-        })
-        .collect::<Vec<_>>();
-    found.sort();
-    found
-}
-
-#[test]
-fn a_request_fields_increase_by_one_is_found_in_every_form() {
-    assert_eq!(
-        bumps(
-            "x.epoch += 1; x.epoch = x.epoch + 1; let y = Own { epoch: x.epoch + 1, offset: 0 };
-             x.epoch = x.epoch.wrapping_add(1); x.epoch = x.epoch.saturating_add(1);
-             let z = x.epoch.checked_add(1);"
-        )
-        .len(),
-        6
-    );
-    assert_eq!(bumps("x.epoch += 1;")[0].0, "Screen::work");
-}
-
-#[test]
-fn a_request_field_moved_another_way_is_not_found() {
-    assert_eq!(
-        bumps("x.offset += limit; x.offset = x.offset + limit; x.epoch += 2; x.epoch -= 1; x.epoch = 0;"),
-        Vec::<(String, String)>::new()
-    );
-}
-
-#[test]
-fn a_field_name_another_struct_shares_is_skipped_unless_the_literal_names_its_type() {
-    // `revision` is a field of `Query`, a request, and of `Shared`, which is none.
-    assert_eq!(bumps("q.revision += 1;"), Vec::<(String, String)>::new());
-    assert_eq!(bumps("let y = Query { revision: q.revision + 1, offset: 0, name: n };").len(), 1);
-}
-
-#[test]
-fn a_struct_that_is_no_request_has_no_bump() {
-    assert_eq!(bumps("w.limit += 1;"), Vec::<(String, String)>::new());
-}
-
-#[test]
-fn request_types_are_the_first_type_argument_through_options_and_collections() {
-    // `Query` is named inside `Option<Vec<..>>`: a request.
-    assert_eq!(bumps("let y = Query { revision: q.revision + 1, offset: 0, name: n };").len(), 1);
-}
-
-#[test]
 fn a_column_counted_up_and_reset_to_zero_is_a_counter() {
     // queue.rs: `additions = additions + 1`, and `additions = 0` on start.
     let sql = "UPDATE q SET additions = additions + 1; UPDATE q SET additions = 0, added = NULL;";
     assert_eq!(counters_in(&[(SQL, sql)], &[]), ["crates/app/src/schema.sql:1 q.additions"]);
     let files = [sql_file(SQL, sql)];
     let hits = counters(&CrateCode::fixture(&[], &files, &policy()));
-    assert_eq!(hits[0].shape.id(), "reset-counter");
+    assert!(hits[0].reset);
     let plain = [sql_file(SQL, "UPDATE q SET additions = additions + 1;")];
-    assert_eq!(counters(&CrateCode::fixture(&[], &plain, &policy()))[0].shape.id(), "counter");
+    assert!(!counters(&CrateCode::fixture(&[], &plain, &policy()))[0].reset);
     assert_eq!(
         counters_in(
             &[(SQL, "UPDATE q SET additions = additions + 1; UPDATE q SET additions = ?1;")],

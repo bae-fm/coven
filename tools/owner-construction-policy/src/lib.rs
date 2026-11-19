@@ -28,7 +28,7 @@ use serde::{Deserialize, Deserializer};
 
 mod read;
 
-pub use read::{AllowedRow, FrozenRow, ListKind, ListedRow, ReadShapes, Shape};
+pub use read::ReadShapes;
 
 /// The policy file's name, at the root of the workspace it describes.
 pub const FILE_NAME: &str = "owner-construction-check.toml";
@@ -82,10 +82,6 @@ pub enum Rule {
     CapabilityConstruction,
     /// Appendix F.2: errors are typed, never strings (`typed_errors.rs`).
     TypedErrors,
-    /// The workspace's read rule: a read does no work SQL does and keeps no
-    /// state between reads, except what its policy freezes or allows
-    /// (`read_shapes.rs`).
-    ReadShapes,
     /// Appendix F.5: visibility, file length and test layout (`conventions.rs`).
     Conventions,
 }
@@ -237,9 +233,8 @@ pub struct Policy {
     /// says whether a dependency declares it.
     #[serde(default)]
     pub external_types: BTreeSet<String>,
-    /// The read rule's rows: the typed lints of the read rule read them when
-    /// they are here, and the checker when the workspace selects
-    /// `read-shapes`.
+    /// The read rule's rows, which the typed lints of the read rule read
+    /// when they are here.
     #[serde(default)]
     pub read_shapes: Option<ReadShapes>,
     /// Where the async functions uniffi exports run their work, which the
@@ -433,6 +428,23 @@ pub struct Database {
     /// from the parameter rule only; returning a handle stays refused.
     #[serde(default)]
     pub raw_handle_parameters: Vec<RawHandleParameter>,
+    /// The columns the SQL only ever counts up that may, each with why. A
+    /// live query runs again when what it read changes, so any other such
+    /// column is a finding (`counters.rs`).
+    #[serde(default)]
+    pub counters: Vec<CounterColumn>,
+}
+
+/// A column the SQL only ever counts up, or resets, and why it may: it
+/// numbers something, as a sequence does, rather than making a live query
+/// run again.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterColumn {
+    /// The column, as `table.column`.
+    pub column: String,
+    /// What the count is for.
+    pub reason: String,
 }
 
 /// A public callable that takes a raw database handle. The policy file states
@@ -602,7 +614,8 @@ impl Policy {
     }
 
     /// Every type the policy names, with the row it came from: the owner
-    /// rules' rows by path ([`Policy::owner_type_rows`]), the others by name.
+    /// rules' and the read rule's rows by path ([`Policy::owner_type_rows`],
+    /// [`ReadShapes`]), the others by name.
     pub fn named_types(&self) -> Vec<(&'static str, &str)> {
         let mut named = self.owner_type_rows();
         for root in &self.composition_roots {
@@ -638,6 +651,26 @@ impl Policy {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fixture(text: &str) -> Policy {
         toml::from_str(text).expect("parse fixture policy")
+    }
+}
+
+/// The two lists of a rule's rows: the violations the workspace has today,
+/// and the findings that are not violations.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ListKind {
+    /// Violations the workspace has today.
+    Frozen,
+    /// Findings that are not violations.
+    Allowed,
+}
+
+impl ListKind {
+    /// The list's key in the policy file.
+    pub fn name(self) -> &'static str {
+        match self {
+            ListKind::Frozen => "frozen",
+            ListKind::Allowed => "allowed",
+        }
     }
 }
 
@@ -713,14 +746,14 @@ pub fn type_name(path: &str) -> &str {
 }
 
 /// `Type::method`, both parts identifiers.
-pub fn split_callable(callable: &str) -> Option<(&str, &str)> {
+fn split_callable(callable: &str) -> Option<(&str, &str)> {
     callable
         .split_once("::")
         .filter(|(owner, method)| is_identifier(owner) && is_identifier(method))
 }
 
 /// Whether `name` is a Rust identifier.
-pub fn is_identifier(name: &str) -> bool {
+fn is_identifier(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|character| character.is_alphanumeric() || character == '_')
 }

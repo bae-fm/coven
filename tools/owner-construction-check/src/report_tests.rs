@@ -252,20 +252,28 @@ fn string_errors_are_refused_in_production_code_and_not_in_tests() {
 }
 
 #[test]
-fn a_policy_selecting_read_shapes_reports_the_work_a_read_does_on_rows() {
-    let policy = Policy::fixture(
-        r#"rules = ["read-shapes"]
-        [read_shapes]
-        statement_rows = []
-        column_values = []
-        read_types = ["SqlReadContext"]
-        rule = "the read rule"
+fn database_boundary_reports_a_column_only_counted_up_unless_the_policy_lists_it() {
+    let bump = || {
+        vec![RustFile::fixture(
+            "crates/app/src/bump.rs",
+            "fn bump() {\n    let _ = \"UPDATE v SET version = version + 1\";\n}",
+        )]
+    };
+    let policy = Policy::fixture(r#"rules = ["database-boundary"]"#);
+    let lines = check(&workspace(bump()), &policy).lines();
+    assert_eq!(
+        lines[0],
+        "crates/app/src/bump.rs:2: v.version is only ever counted up and never set to another value"
+    );
+    let listed = Policy::fixture(
+        r#"rules = ["database-boundary"]
+        [database]
+        capability = "SQLite"
+        counters = [{ column = "v.version", reason = "numbers the scans" }]
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app/src/"]
         "#,
     );
-    let files = vec![RustFile::fixture(
-        "crates/app/src/reads.rs",
-        "fn read(sql: &SqlReadContext<'_>) {\n    rows.sort();\n}",
-    )];
-    let lines = check(&workspace(files), &policy).lines();
-    assert_eq!(lines[0], "crates/app/src/reads.rs:2: read sorts with `sort` (sort)");
+    assert!(check(&workspace(bump()), &listed).is_empty());
 }

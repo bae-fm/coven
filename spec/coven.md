@@ -14531,7 +14531,11 @@ shared state.
   `for table in ["_coven_cells", "_coven_claims"]`, writes each table its
   SQL names through the loop's variable. Any other SQL built while the
   program runs names its table nowhere in the source, so the checker can't
-  see it.
+  see it. A live query runs again when what it read changes, so no column
+  counts up to make one run: a column that the production SQL only ever
+  counts up, or resets to zero, and sets to nothing else is a finding
+  unless the policy lists it with what it numbers, as the snapshot
+  reservation numbers a device's snapshots (§19.3).
 
 **Errors are typed.** Production code never makes an error a string: no
 function returns `Result<_, String>`, and no `map_err` closure turns its
@@ -14815,11 +14819,11 @@ the same on any platform.
    The policy names each type of the owner rules (F.3) and of the read rule
    (check 11) by its path, as `coven_foundation::clock::Clock` and
    `std::sync::Arc`, and the rest by name. The typed lints of check 11, which
-   hold the owner rules and part of the read rule, read those rows by path.
-   The checker reads some of them by name: check 4 infers owners from them
-   to test that each domain's owner is one, the read rule and F.2's rule on
-   domain owners follow the shared pointers that `shared_pointer_types`
-   names, and the read rule reads its own types. The checker's rules match types by name, a
+   hold the owner rules and the read rule, read those rows by path. The
+   checker reads some of the owner rules' rows by name: check 4 infers
+   owners from them to test that each domain's owner is one, and F.2's rule
+   on domain owners follows the shared pointers that `shared_pointer_types`
+   names. The checker's rules match types by name, a
    path by its last part: a dependency's type goes by its name unless one of
    coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
@@ -14830,7 +14834,9 @@ the same on any platform.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
    go stale. Each table the schema creates is in one domain, and each
-   domain's owner holds a capability, shared state or another owner.
+   domain's owner holds a capability, shared state or another owner. Each
+   counter the policy lists is a column the SQL only counts up, listed once
+   with what it numbers.
 5. The visibility and file-size rules of F.5.
 6. `cargo doc` with broken links denied.
 7. Every crate built without test code, so an item only tests use shows up as

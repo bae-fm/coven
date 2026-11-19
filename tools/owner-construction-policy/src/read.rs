@@ -1,7 +1,5 @@
 //! The read rule's rows (`read_shapes`), which the typed lints of the read
-//! rule and the structural checker's read rule read: the read rule's types,
-//! the read plumbing, the shapes, and the findings the checker freezes or
-//! allows.
+//! rule read: the read rule's types and the read plumbing.
 
 use std::collections::BTreeSet;
 
@@ -9,97 +7,10 @@ use serde::Deserialize;
 
 use crate::home_holds;
 
-/// The shapes `read-shapes` finds in read code, by the id findings and list
-/// rows name them with.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Shape {
-    /// Rust sorting rows.
-    Sort,
-    /// Rust filtering rows.
-    Filter,
-    /// Rust grouping rows into a map or set.
-    Group,
-    /// Rust counting, summing or folding rows.
-    Aggregate,
-    /// Rust picking a row out of rows.
-    Pick,
-    /// A statement run once for each row of another.
-    QueryPerRow,
-    /// A statement keyed by a value an earlier statement returned.
-    KeyedStatement,
-    /// Memory kept between reads.
-    KeptState,
-    /// A column only ever counted up, to run a live query again.
-    Counter,
-    /// A column only ever counted up or reset to zero, to run a live query again.
-    ResetCounter,
-    /// A request's integer field counted up by one, to run a live query again.
-    RequestBump,
-    /// A comparison with a fixed limit, which picks one read path over another.
-    Cutoff,
-    /// Rust joining one statement's rows to another's by a key or a place.
-    Join,
-    /// A branch on how many rows a slice holds, the count and the case done in
-    /// Rust.
-    LengthBranch,
-    /// A row dropped in Rust because one of its optional columns is empty.
-    DropRow,
-}
-
-impl Shape {
-    /// Whether a function that only a live query's `process` runs may make a
-    /// finding of this shape: one that sorts, filters, groups, counts or
-    /// picks among the rows of the one result that `process` passes the
-    /// function. Keeping state, running a statement and choosing a read path
-    /// do none of these.
-    pub fn shapes_display(self) -> bool {
-        match self {
-            Shape::Sort
-            | Shape::Filter
-            | Shape::Group
-            | Shape::Aggregate
-            | Shape::Pick
-            | Shape::Join
-            | Shape::LengthBranch
-            | Shape::DropRow => true,
-            Shape::QueryPerRow
-            | Shape::KeyedStatement
-            | Shape::KeptState
-            | Shape::Counter
-            | Shape::ResetCounter
-            | Shape::RequestBump
-            | Shape::Cutoff => false,
-        }
-    }
-
-    /// The id findings and list rows use.
-    pub fn id(self) -> &'static str {
-        match self {
-            Shape::Sort => "sort",
-            Shape::Filter => "filter",
-            Shape::Group => "group",
-            Shape::Aggregate => "aggregate",
-            Shape::Pick => "pick",
-            Shape::QueryPerRow => "query-per-row",
-            Shape::KeyedStatement => "keyed-statement",
-            Shape::KeptState => "kept-state",
-            Shape::Counter => "counter",
-            Shape::ResetCounter => "reset-counter",
-            Shape::RequestBump => "request-bump",
-            Shape::Cutoff => "cutoff",
-            Shape::Join => "join",
-            Shape::LengthBranch => "length-branch",
-            Shape::DropRow => "drop-row",
-        }
-    }
-}
-
 /// The read rule: a read does no work SQL does and keeps no state between
-/// reads. The typed lints hold some of its shapes and the checker the rest
-/// (`read_shapes.rs`). Each type row names its type by path, the crate as
-/// Rust names it, its modules and the type, as the owner rules' rows do; the
-/// checker reads each as its path's last segment.
+/// reads. The typed lints hold it (`tools/typed-lints`, `read_rule.rs`).
+/// Each type row names its type by path, the crate as Rust names it, its
+/// modules and the type, as the owner rules' rows do.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadShapes {
@@ -137,119 +48,13 @@ pub struct ReadShapes {
     /// directories (ending in `/`) of them.
     #[serde(default)]
     pub plumbing: Vec<String>,
-    /// Where the rule is written, which every finding's remedy names.
+    /// Where the rule is written, which every finding's help names.
     pub rule: String,
-    /// The violations the workspace has today; they only shrink.
-    #[serde(default)]
-    pub frozen: Vec<FrozenRow>,
-    /// Findings that are not a read's work.
-    #[serde(default)]
-    pub allowed: Vec<AllowedRow>,
-}
-
-/// A violation the workspace has today: `count` findings of `shape` in `item`
-/// of `path`, and what the audit found there.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrozenRow {
-    /// The source file.
-    pub path: String,
-    /// The function, method (`Type::method`), static or const that holds the
-    /// findings.
-    pub item: String,
-    /// What the findings find.
-    pub shape: Shape,
-    /// How many findings the item holds.
-    pub count: usize,
-    /// What the audit found there.
-    pub finding: String,
-}
-
-/// A finding that is not a read's work. The row lists either code that works
-/// on values that are not rows, with `reason` saying what the values are, or
-/// a function that only a live query's `process` runs to sort, filter,
-/// group, count or pick among one result's rows for display, with `reason`
-/// saying what the function does and `process` naming the query whose result
-/// it takes.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AllowedRow {
-    /// The source file.
-    pub path: String,
-    /// The function, method (`Type::method`), static or const that holds the
-    /// findings.
-    pub item: String,
-    /// What the findings find.
-    pub shape: Shape,
-    /// How many findings the item holds.
-    pub count: usize,
-    /// What the values are, or what the function does for display.
-    pub reason: String,
-    /// The live query whose result the function takes, for a function that
-    /// only that query's `process` runs.
-    #[serde(default)]
-    pub process: Option<String>,
-}
-
-/// The two lists of a policy's read rule.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ListKind {
-    /// Violations the workspace has today.
-    Frozen,
-    /// Findings that are not a read's work.
-    Allowed,
-}
-
-impl ListKind {
-    /// The list's key in the policy file.
-    pub fn name(self) -> &'static str {
-        match self {
-            ListKind::Frozen => "frozen",
-            ListKind::Allowed => "allowed",
-        }
-    }
-}
-
-/// One row of either list.
-pub struct ListedRow<'a> {
-    /// The list that holds the row.
-    pub list: ListKind,
-    /// The source file.
-    pub path: &'a str,
-    /// The item that holds the findings.
-    pub item: &'a str,
-    /// What the findings find.
-    pub shape: Shape,
-    /// How many findings the item holds.
-    pub count: usize,
-    /// The audit's finding (`frozen`) or the reason (`allowed`).
-    pub note: &'a str,
 }
 
 impl ReadShapes {
     /// Whether a file is read plumbing.
     pub fn is_plumbing(&self, path: &str) -> bool {
         self.plumbing.iter().any(|entry| home_holds(entry, path))
-    }
-
-    /// Every row of both lists.
-    pub fn listed(&self) -> Vec<ListedRow<'_>> {
-        let frozen = self.frozen.iter().map(|row| ListedRow {
-            list: ListKind::Frozen,
-            path: &row.path,
-            item: &row.item,
-            shape: row.shape,
-            count: row.count,
-            note: &row.finding,
-        });
-        let allowed = self.allowed.iter().map(|row| ListedRow {
-            list: ListKind::Allowed,
-            path: &row.path,
-            item: &row.item,
-            shape: row.shape,
-            count: row.count,
-            note: &row.reason,
-        });
-        frozen.chain(allowed).collect()
     }
 }

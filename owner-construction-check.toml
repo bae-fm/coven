@@ -615,6 +615,11 @@ table_macros = [
 # caller opened, so a domain's tables are written there or in its owner's
 # methods (F.2).
 write_types = ["StoreSql"]
+# The columns the SQL only counts up that may: each numbers something, as a
+# sequence does, and makes no live query run again.
+counters = [
+    { column = "_coven_snapshot_reservation.number", reason = "numbers this device's snapshots: every preparation reserves the next number, so an abandoned attempt's path is never used again (§19.3)" },
+]
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement
 # or a trigger's body, create it and its indexes, and hold the tests that

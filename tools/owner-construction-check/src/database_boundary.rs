@@ -38,6 +38,11 @@
 //! program builds at runtime, from `format!` or by joining pieces, names its
 //! table nowhere in the source, so the rule cannot see it.
 //!
+//! A live query runs again because what it read changed, so no column
+//! counts up to make it run: a column the production SQL only ever counts
+//! up, or resets to zero, is a violation unless the policy's
+//! `database.counters` lists it with why (`counters.rs`).
+//!
 //! The SQL the rule reads is every string literal of the crates and their
 //! `.sql` files, which the crates bring in with `include_str!`. Test code is
 //! read only for the domains (`test_code.rs`).
@@ -48,6 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use proc_macro2::Span;
 use syn::visit::{self, Visit};
 
+use crate::counters::counters;
 use crate::crate_code::CrateCode;
 use crate::macros::{parse_macro_body, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
@@ -137,6 +143,29 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
             domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
         })
         .visit_file(&file.syntax);
+    }
+    let listed = policy
+        .database
+        .iter()
+        .flat_map(|database| &database.counters)
+        .map(|row| row.column.as_str())
+        .collect::<BTreeSet<_>>();
+    for counter in counters(code) {
+        if listed.contains(counter.column.as_str()) {
+            continue;
+        }
+        let start = if counter.reset { ", or reset to zero," } else { "" };
+        violations.insert(Finding::new(
+            &counter.path,
+            counter.line,
+            format!(
+                "{} is only ever counted up{start} and never set to another value",
+                counter.column
+            ),
+            "a live query runs again when what it read changes, so no column counts up to make \
+             it run: write the value the screen shows, or list a column that numbers something \
+             in database.counters with why",
+        ));
     }
     violations.into_iter().collect()
 }
