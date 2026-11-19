@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use sqlite3_parser::ast::{
     As, Expr, FrameBound, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name, Operator,
-    Over, ResultColumn, Select, SortedColumn, Window,
+    Over, QualifiedName, ResultColumn, Select, SortedColumn, Window,
 };
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
@@ -73,8 +73,9 @@ pub(crate) enum Part<'a> {
     /// A SELECT whose first row the expression takes: a scalar subquery, or
     /// the subquery a row value is compared with.
     Subquery(&'a Select<'a>),
-    /// `x IN table`: a table read outside any FROM.
-    Table,
+    /// `x IN table`: a table, view or CTE read outside any FROM, by its
+    /// name.
+    Table(&'a QualifiedName<'a>),
     /// A COLLATE, which gives a comparison holding it its collation.
     Collation,
     /// A function called by name, with how many arguments, and whether it
@@ -213,9 +214,9 @@ impl<'a> PartWalk<'a, '_> {
                 self.expr(lhs);
                 self.parts.push(Part::Select(rhs));
             }
-            Expr::InTable { lhs, args, .. } => {
+            Expr::InTable { lhs, rhs, args, .. } => {
                 self.expr(lhs);
-                self.parts.push(Part::Table);
+                self.parts.push(Part::Table(rhs));
                 self.every(args.iter().flat_map(|args| args.iter()));
             }
             Expr::Between { lhs, start, end, .. } => self.every([*lhs, *start, *end]),

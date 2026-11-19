@@ -1219,8 +1219,16 @@ comes of many rows of its tables, or depends on which other rows there are, so a
 condition on it says nothing of each. Coven's own views are read whole, since
 what they show changes with what coven holds in memory too. A view coven can't
 read this way, as one with a recursive CTE, is read whole; a lookup still asks
-it, so it narrows the tables beside it. A CTE gives the tables joined to it
-their values wherever the statement reads it, in a subquery or in another CTE
+it, so it narrows the tables beside it. SQLite names each read inside a view
+that coven reads whole by the innermost view or CTE the read goes through. When
+the statement's own CTE or view has the name of one inside such a view, coven
+can't tell their reads apart, so no read through that name narrows its table.
+Otherwise a statement whose CTE narrows `releases` to one row would take the
+view's reads of `releases` for the CTE's, and a write to another row, which
+changes the view, wouldn't rerun the statement.
+When coven's parser can't read such a view, coven doesn't know the names inside
+it, and no read through any view or CTE narrows. A CTE gives the tables joined
+to it their values wherever the statement reads it, in a subquery or in another CTE
 too, and so does a subquery in FROM, as long as its SQL names no row of the
 query around it. One that names such a row, as a subquery correlated with the
 row around it, lists rows only beside that row, so a lookup can't ask it

@@ -68,6 +68,7 @@ pub mod triggered_inserts;
 mod unreported_columns;
 mod upkeep;
 mod wal_checkpoints;
+mod whole_view_names;
 
 pub use authorization::{
     FunctionCall, HostError, LocalSql, Owner, Policy, PolicyAction, PolicyError, Refresh,

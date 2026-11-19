@@ -120,7 +120,9 @@ impl Planner<'_> {
             let name = match part {
                 Part::Name(name) => name,
                 Part::Function(..) | Part::Clock => continue,
-                Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Collation => return None,
+                Part::Select(_) | Part::Subquery(_) | Part::Table(_) | Part::Collation => {
+                    return None
+                }
             };
             let (item, _) = self.resolve(core, name)?;
             if source.is_some_and(|source| source != item) {

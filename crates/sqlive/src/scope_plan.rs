@@ -119,7 +119,9 @@ pub(crate) struct Sources {
     /// Positions in `sources`, each after the sources its memberships use.
     pub(crate) order: Vec<usize>,
     /// The app's views and the CTEs read as sources of their own, by the
-    /// names, lowercase, SQLite reports reads through them by.
+    /// names, lowercase, SQLite reports reads through them by, but none that
+    /// SQLite can also report a read through inside a view read whole: such
+    /// a read could be the view's, whose tables no source narrows.
     pub(crate) inlined: BTreeSet<String>,
     /// The order and LIMIT a full run's last row bounds its source by.
     pub(crate) sorted: Option<SortedLimit>,
@@ -225,6 +227,7 @@ impl Sources {
             inlined: Vec::new(),
             whole,
             declared_ctes: 0,
+            whole_names: Some(BTreeSet::new()),
         };
         let Some(cores) = read_select(connection, &mut planner, select, None, &Ctes::default())?
         else {
@@ -256,6 +259,10 @@ pub(crate) struct Planner<'a> {
     pub(crate) whole: &'a WholeViews,
     /// How many CTEs the WITHs read so far declare, which numbers each.
     pub(crate) declared_ctes: usize,
+    /// The names, lowercase, SQLite can report a read through inside the
+    /// views the statement reads whole (`whole_view_names.rs`); `None` once
+    /// the parser can't read one of those, whose SQL could use any name.
+    pub(crate) whole_names: Option<BTreeSet<String>>,
 }
 
 impl Planner<'_> {
@@ -351,11 +358,33 @@ impl Planner<'_> {
             crate::derived::push_down(&mut self, next, None, taken);
             order.push(next);
         }
+        let whole_names = self.whole_names;
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
             order,
-            inlined: self.inlined.into_iter().collect(),
+            inlined: self
+                .inlined
+                .into_iter()
+                .filter(|name| whole_names.as_ref().is_some_and(|whole| !whole.contains(name)))
+                .collect(),
             sorted,
+        }
+    }
+
+    /// Note `found`, the names SQLite can report a read through inside a
+    /// view the statement reads whole (`whole_view_names.rs`).
+    pub(crate) fn note_whole_view(&mut self, found: Result<BTreeSet<String>, String>) {
+        match (found, &mut self.whole_names) {
+            (Ok(found), Some(names)) => names.extend(found),
+            (Ok(_), None) => {}
+            (Err(why), _) => {
+                tracing::debug!(
+                    %why,
+                    "sqlive can't read the names inside a view read whole, so no read through \
+                     a view or CTE narrows"
+                );
+                self.whole_names = None;
+            }
         }
     }
 
@@ -599,7 +628,7 @@ pub(crate) fn read_select<'a>(
         }
         _ if found
             .iter()
-            .any(|part| matches!(part, Part::Select(_) | Part::Subquery(_) | Part::Table)) =>
+            .any(|part| matches!(part, Part::Select(_) | Part::Subquery(_) | Part::Table(_))) =>
         {
             return Ok(None)
         }
@@ -641,7 +670,7 @@ fn read_nested<'a>(
                 read.push((*select, cores));
             }
             // Its table is read outside any FROM, and so in every row.
-            Part::Table => return Ok(None),
+            Part::Table(_) => return Ok(None),
         }
     }
     Ok(Some(read))
@@ -849,7 +878,7 @@ pub(crate) fn read_condition<'a>(
             // `edge` refuse the comparisons it reaches, and a NULL test
             // looks through it.
             Part::Collation => continue,
-            Part::Select(_) | Part::Subquery(_) | Part::Table => return Ok(Narrowing::default()),
+            Part::Select(_) | Part::Subquery(_) | Part::Table(_) => return Ok(Narrowing::default()),
         };
         let Some((item, _)) = planner.resolve(core, name) else {
             // A name sqlive can't place keeps the condition from narrowing.

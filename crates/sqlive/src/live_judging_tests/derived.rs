@@ -304,3 +304,39 @@ async fn an_inner_cte_of_an_outer_cte_s_name_narrows_by_the_inner_one() {
     }
     db.close();
 }
+
+/// A view read whole, by the app's choice or as one sqlive can't read as
+/// cores, keeps every table it reads whole, even when its SQL reads them
+/// through a CTE or a view whose name the statement's own CTE or view
+/// shares, which narrows the same table: a write to a row only the view
+/// reads reruns the query.
+#[tokio::test]
+async fn a_view_read_whole_keeps_its_tables_whole_beside_a_name_it_uses_inside() {
+    let schema = format!(
+        "{MUSIC};
+CREATE VIEW albums AS WITH c AS (SELECT id, album FROM releases) SELECT id, album FROM c;
+CREATE VIEW first_release AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM releases UNION SELECT r.id FROM releases r JOIN c ON r.id < c.id) SELECT id FROM c;
+CREATE VIEW all_tracks AS SELECT title FROM release_tracks"
+    );
+    let db = TestDatabase::open_with(
+        &schema,
+        crate::tests::TestOptions {
+            whole_views: vec!["albums", "all_tracks"],
+            ..Default::default()
+        },
+    );
+    let releases: &[(&str, bool)] = &[
+        ("UPDATE releases SET album = 'z' WHERE id = 'r3'", true),
+        ("INSERT INTO releases VALUES ('r0','q',1999)", true),
+    ];
+    let tracks: &[(&str, bool)] = &[("UPDATE tracks SET title = 'cuatro' WHERE id = 4", true)];
+    for (sql, writes) in [
+        ("WITH c AS (SELECT id, album FROM releases WHERE id = 'r1') SELECT c.album || ':' || group_concat(a.album, ',') FROM c, albums a", releases),
+        ("WITH c AS (SELECT id, album FROM releases WHERE id = 'r1') SELECT c.album || ':' || group_concat(f.id, ',') FROM c, first_release f", releases),
+        ("SELECT v.title || ':' || (SELECT group_concat(title, ',') FROM all_tracks) FROM release_tracks v WHERE v.track = 1", tracks),
+    ] {
+        follows(&db, sql, vec![], writes).await;
+        write(&db, "DELETE FROM releases WHERE id = 'r0'; UPDATE releases SET album = 'y' WHERE id = 'r3'; UPDATE tracks SET title = 'four' WHERE id = 4");
+    }
+    db.close();
+}

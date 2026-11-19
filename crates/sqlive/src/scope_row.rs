@@ -115,7 +115,7 @@ pub(crate) fn row_term(
                 }
             }
             Part::Collation => {}
-            Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Clock => return None,
+            Part::Select(_) | Part::Subquery(_) | Part::Table(_) | Part::Clock => return None,
         }
     }
     if columns.is_empty() {

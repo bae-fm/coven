@@ -198,6 +198,13 @@ pub(crate) fn read_item<'a>(
                 planner.edges.truncate(read.2);
                 planner.inlined.truncate(read.3);
             }
+            // A read SQLite reports inside a view read whole names the view
+            // or a CTE or view inside it, which the statement's own CTEs and
+            // views may share.
+            if !ordinary {
+                let found = crate::whole_view_names::whole_view_names(connection, &stored)?;
+                planner.note_whole_view(found);
+            }
             // An ordinary table, or a view read only for its values: a view
             // read whole can show what the host's memory holds as well as
             // its tables.
