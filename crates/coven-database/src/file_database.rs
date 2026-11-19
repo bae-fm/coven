@@ -644,14 +644,27 @@ impl FileDatabase {
     }
 
     /// Observe the upload worker's work: newly queued uploads, and uploads a
-    /// file stopped waiting for. Subscribing before reading the work list
-    /// prevents missed commits.
+    /// file stopped waiting for. The first report is the state now, which
+    /// starts the worker's first run.
     pub fn queued_work_changes(&self) -> DatabaseChanges<DbError> {
+        self.database.observer.changes(Self::queued_work_reads(), true, DbError::from)
+    }
+
+    /// Observe the commits from now on that change the upload worker's work,
+    /// as `queued_work_changes` names it, with no report of the state now:
+    /// a run subscribes before it reads the work list, so the read covers
+    /// what came before, and no commit after it goes missed.
+    pub fn queued_work_commits(&self) -> DatabaseChanges<DbError> {
+        self.database.observer.changes(Self::queued_work_reads(), false, DbError::from)
+    }
+
+    /// What the upload worker's work reads.
+    fn queued_work_reads() -> sqlive::ReadSet {
         // A newly queued upload, an upload a file stopped waiting for, which
         // the worker then retires (§17.9), and a self-replacement's write
         // pause starting or ending, which holds trailing uploads'
         // completions (§12.3, §17.4).
-        let reads = vec![
+        vec![
             sqlive::TableRead {
                 table: "_coven_write_pause".into(),
                 columns: ["paused".into()].into(),
@@ -670,8 +683,7 @@ impl FileDatabase {
                 scope: sqlive::RowScope::All,
                 inserted_only: false,
             },
-        ];
-        self.database.observer.changes(reads, true, DbError::from)
+        ]
     }
 }
 
