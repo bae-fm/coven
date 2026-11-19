@@ -64,7 +64,6 @@ def combineOp : String → Except String Combine
 def wholeShape : String → Except String WholeShape
   | "natural" => pure .natural | "right" => pure .right
   | "recursive" => pure .recursive | "in_table" => pure .inTable | "virtual" => pure .virtual
-  | "parenthesized" => pure .parenthesized
   | other => throw s!"unknown whole shape {other}"
 
 def lift {α : Type} (e : Except String α) : M α := StateT.lift e
@@ -146,19 +145,7 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
   modify fun b => { b with
     cores := b.cores.push { parent, items := [], conds := [], output := [], groupBy := [] }
     outNames := b.outNames.push [] }
-  let mut items := []
-  -- Each ON's conditions, as JSON, and each USING's equalities, read.
-  let mut ons : List (Nat × (Json ⊕ Cond) × Bool) := []
-  for entry in list j "from" do
-    let i ← readItem schema entry k parent ctes
-    let left := (field entry "left").bind (·.getBool?.toOption) |>.getD false
-    for column in list entry "using" do
-      ons := ons ++ [(i, .inr (← usingCond items i (← lift column.getStr?)), left)]
-    items := items ++ [i]
-    for shape in list entry "whole" do
-      let shape ← lift (wholeShape (← lift shape.getStr?))
-      modify fun b => { b with whole := b.whole ++ [shape] }
-    ons := ons ++ (list entry "on").flatMap fun c => (conjuncts c).map ((i, .inl ·, left))
+  let (items, ons, groups) ← readFrom schema (list j "from") k parent ctes [] false
   modify fun b => { b with cores := b.cores.modify k fun c => { c with items } }
   let mut output := []
   let mut names := []
@@ -181,10 +168,72 @@ partial def readCore (schema : Schema) (j : Json) (parent : Option Nat)
   let core : Core := { parent, items, conds, output, groupBy, distinct }
   if core.aggregated && core.windowed then
     lift (throw "the model numbers a window's rows only in a core that doesn't aggregate")
+  let b ← get
+  let s : Statement :=
+    { items := b.items.toList, cores := b.cores.toList, queries := b.queries.toList
+      root := 0, whole := [] }
+  for (first, rest, left, start, count) in groups do
+    let later := (items.dropWhile (· != first)).drop (1 + rest.length)
+    let on := ((conds.drop start).take count).map (·.1)
+    let flattens := if left then Parenthesized.leftFlattens s core first rest
+      else Parenthesized.innerFlattens s core first later on
+    if !flattens then
+      lift (throw "the model reads a parenthesized join only where its tables joined one after another give SQLite's rows")
   modify fun b => { b with
     cores := b.cores.modify k fun c => { c with conds, output, groupBy, distinct }
     outNames := b.outNames.modify k fun _ => names }
   pure k
+
+/-- Read the FROM entries `entries` of core `k`, after its items `before`, as
+items of the core, the tables of a parenthesized join among them
+(`read_from`), the first a LEFT JOIN's when `firstLeft`. Gives the items;
+each ON condition, as JSON, or USING equality, with its item and whether a
+LEFT JOIN adds that item; and each parenthesized join, as its first item, its
+other items, whether a LEFT JOIN adds it, and where its ON's conditions start
+among the conditions and how many there are. -/
+partial def readFrom (schema : Schema) (entries : List Json) (k : Nat) (parent : Option Nat)
+    (ctes : CteNames.Visible Json) (before : List Nat) (firstLeft : Bool) :
+    M (List Nat × List (Nat × (Json ⊕ Cond) × Bool) × List (Nat × List Nat × Bool × Nat × Nat)) := do
+  let mut items := []
+  let mut ons : List (Nat × (Json ⊕ Cond) × Bool) := []
+  let mut groups : List (Nat × List Nat × Bool × Nat × Nat) := []
+  let mut position := 0
+  for entry in entries do
+    let left := if position == 0 then firstLeft
+      else (field entry "left").bind (·.getBool?.toOption) |>.getD false
+    position := position + 1
+    if let some (.arr group) := field entry "group" then
+      if !(list entry "using").isEmpty then
+        lift (throw "the model reads no USING join of a parenthesized join")
+      if (group[0]?.bind (field · "group")).isSome then
+        lift (throw "the model reads no parenthesized join that starts with another")
+      let (inner, innerOns, innerGroups) ←
+        readFrom schema group.toList k parent ctes (before ++ items) left
+      let some first := inner.head? | lift (throw "a parenthesized join with no item")
+      groups := groups ++ innerGroups.map fun (f, r, l, start, count) => (f, r, l, ons.length + start, count)
+      ons := ons ++ innerOns
+      let on := (list entry "on").flatMap conjuncts
+      groups := groups ++ [(first, inner.tail, left, ons.length, on.length)]
+      ons := ons ++ on.map ((first, .inl ·, left))
+      items := items ++ inner
+      -- SQLite reads a join in parentheses of two tables or more, after the
+      -- first item of its FROM, as a `SELECT *` of its own, which reads every
+      -- column of its tables; one of one table, or first, it reads in place.
+      if position > 1 && inner.length > 1 then
+        modify fun b => { b with
+          items := inner.foldl (fun all i => all.modify i fun item => { item with grouped := true }) b.items }
+    else
+      let i ← readItem schema entry k parent ctes
+      if left then
+        modify fun b => { b with items := b.items.modify i fun item => { item with left := true } }
+      for column in list entry "using" do
+        ons := ons ++ [(i, .inr (← usingCond (before ++ items) i (← lift column.getStr?)), left)]
+      items := items ++ [i]
+      for shape in list entry "whole" do
+        let shape ← lift (wholeShape (← lift shape.getStr?))
+        modify fun b => { b with whole := b.whole ++ [shape] }
+      ons := ons ++ (list entry "on").flatMap fun c => (conjuncts c).map ((i, .inl ·, left))
+  pure (items, ons, groups)
 
 /-- Read a FROM item of core `k`, which sits in `parent`. -/
 partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat)

@@ -71,6 +71,8 @@ pub(super) enum Source {
     View(&'static str),
     Cte(String),
     Query(Box<Query>),
+    /// A parenthesized join of these items, which no alias names.
+    Group(Vec<Item>),
 }
 
 #[derive(Clone)]
@@ -250,41 +252,8 @@ impl Core {
         let columns: Vec<String> = self.select.iter().map(Out::sql).collect();
         let distinct = if self.distinct { "DISTINCT " } else { "" };
         let mut sql = format!("SELECT {distinct}{}", columns.join(", "));
-        for (position, item) in self.from.iter().enumerate() {
-            let source = match &item.source {
-                Source::Table(name) | Source::View(name) => (*name).to_owned(),
-                Source::Cte(name) => name.clone(),
-                Source::Query(query) => format!("({})", query.sql()),
-            };
-            let on = || {
-                let conditions: Vec<String> = item.on.iter().map(Cond::sql).collect();
-                if conditions.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ON {}", conditions.join(" AND "))
-                }
-            };
-            match (position, item.join) {
-                (0, _) => sql.push_str(&format!(" FROM {source} AS {}", item.alias)),
-                (_, Join::Comma) => sql.push_str(&format!(", {source} AS {}", item.alias)),
-                (_, Join::Inner) => {
-                    sql.push_str(&format!(" JOIN {source} AS {}{}", item.alias, on()))
-                }
-                (_, Join::Left) => {
-                    sql.push_str(&format!(" LEFT JOIN {source} AS {}{}", item.alias, on()));
-                }
-                (_, Join::Using { left, columns }) => {
-                    sql.push_str(&format!(
-                        " {}JOIN {source} AS {} USING ({})",
-                        if left { "LEFT " } else { "" },
-                        item.alias,
-                        columns.join(", ")
-                    ));
-                }
-                (_, Join::Natural) => {
-                    sql.push_str(&format!(" NATURAL JOIN {source} AS {}", item.alias));
-                }
-            }
+        if !self.from.is_empty() {
+            sql.push_str(&format!(" FROM {}", items_sql(&self.from)));
         }
         if !self.conditions.is_empty() {
             let conditions: Vec<String> = self.conditions.iter().map(Cond::sql).collect();
@@ -298,32 +267,7 @@ impl Core {
     }
 
     fn json(&self) -> Json {
-        let from: Vec<Json> = self
-            .from
-            .iter()
-            .map(|item| {
-                let (left, using) = match item.join {
-                    Join::Left => (true, &[][..]),
-                    Join::Using { left, columns } => (left, columns),
-                    _ => (false, &[][..]),
-                };
-                let mut entry = json!({
-                    "alias": item.alias,
-                    "left": left,
-                    "using": using,
-                    "on": item.on.iter().map(Cond::json).collect::<Vec<_>>(),
-                    "whole": if item.join == Join::Natural { vec!["natural"] } else { Vec::new() },
-                });
-                let (key, value) = match &item.source {
-                    Source::Table(name) => ("table", json!(name)),
-                    Source::View(name) => ("view", json!(name)),
-                    Source::Cte(name) => ("cte", json!(name)),
-                    Source::Query(query) => ("query", query.json()),
-                };
-                entry[key] = value;
-                entry
-            })
-            .collect();
+        let from: Vec<Json> = self.from.iter().map(item_json).collect();
         json!({
             "from": from,
             "where": self.conditions.iter().map(Cond::json).collect::<Vec<_>>(),
@@ -334,10 +278,8 @@ impl Core {
     }
 
     fn ambiguous(&self) -> bool {
-        self.from.iter().any(|item| match &item.source {
-            Source::Query(query) => query.ambiguous(),
-            _ => false,
-        }) || self.conditions.iter().any(Cond::ambiguous)
+        items_ambiguous(&self.from)
+            || self.conditions.iter().any(Cond::ambiguous)
             || self.select.iter().any(|column| match column {
                 Out::Expr(e, _) | Out::Max(e, _) => e.ambiguous(),
                 Out::Count(_) => false,
@@ -349,7 +291,6 @@ impl Core {
                         || order.iter().any(|(sorted, _)| sorted.ambiguous())
                 }
             })
-            || self.from.iter().any(|item| item.on.iter().any(Cond::ambiguous))
             || self.follows_order()
     }
 
@@ -389,6 +330,80 @@ impl Core {
             Out::Count(_) => false,
         })
     }
+}
+
+/// A FROM's items as SQL, after `FROM` or inside a parenthesized join.
+fn items_sql(items: &[Item]) -> String {
+    let mut sql = String::new();
+    for (position, item) in items.iter().enumerate() {
+        let source = match &item.source {
+            Source::Table(name) | Source::View(name) => format!("{name} AS {}", item.alias),
+            Source::Cte(name) => format!("{name} AS {}", item.alias),
+            Source::Query(query) => format!("({}) AS {}", query.sql(), item.alias),
+            Source::Group(items) => format!("({})", items_sql(items)),
+        };
+        let on = || {
+            let conditions: Vec<String> = item.on.iter().map(Cond::sql).collect();
+            if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" ON {}", conditions.join(" AND "))
+            }
+        };
+        match (position, item.join) {
+            (0, _) => sql.push_str(&source),
+            (_, Join::Comma) => sql.push_str(&format!(", {source}")),
+            (_, Join::Inner) => sql.push_str(&format!(" JOIN {source}{}", on())),
+            (_, Join::Left) => sql.push_str(&format!(" LEFT JOIN {source}{}", on())),
+            (_, Join::Using { left, columns }) => {
+                sql.push_str(&format!(
+                    " {}JOIN {source} USING ({})",
+                    if left { "LEFT " } else { "" },
+                    columns.join(", ")
+                ));
+            }
+            (_, Join::Natural) => sql.push_str(&format!(" NATURAL JOIN {source}")),
+        }
+    }
+    sql
+}
+
+/// A FROM item as the runner's JSON, a parenthesized join's items in it.
+fn item_json(item: &Item) -> Json {
+    let (left, using) = match item.join {
+        Join::Left => (true, &[][..]),
+        Join::Using { left, columns } => (left, columns),
+        _ => (false, &[][..]),
+    };
+    let mut entry = json!({
+        "alias": item.alias,
+        "left": left,
+        "using": using,
+        "on": item.on.iter().map(Cond::json).collect::<Vec<_>>(),
+        "whole": if item.join == Join::Natural { vec!["natural"] } else { Vec::new() },
+    });
+    let (key, value) = match &item.source {
+        Source::Table(name) => ("table", json!(name)),
+        Source::View(name) => ("view", json!(name)),
+        Source::Cte(name) => ("cte", json!(name)),
+        Source::Query(query) => ("query", query.json()),
+        Source::Group(items) => ("group", Json::Array(items.iter().map(item_json).collect())),
+    };
+    entry[key] = value;
+    entry
+}
+
+/// Whether SQLite may pick other rows than the model among the rows of
+/// `items` and their joins.
+fn items_ambiguous(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        item.on.iter().any(Cond::ambiguous)
+            || match &item.source {
+                Source::Query(query) => query.ambiguous(),
+                Source::Group(items) => items_ambiguous(items),
+                _ => false,
+            }
+    })
 }
 
 impl Expr {

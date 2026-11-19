@@ -1129,6 +1129,27 @@ NATURAL, RIGHT and FULL joins narrow nothing either. A join with USING narrows
 as the ON it stands for: `JOIN r USING (k)` compares `r.k` with the `k` of the
 leftmost table before it that has one, by that table's collation.
 
+A join in parentheses narrows as its joins do, as if its tables were joined
+one after another, wherever that gives the rows SQLite gives. Ben's people
+screen lists each member with their person and avatar: `FROM members AS m LEFT
+JOIN (people AS p LEFT JOIN files AS a ON a.id = p.avatar_id) ON p.id =
+m.member`. SQLite joins `people` and `files` first, and gives a member whom no
+person joins NULLs in both tables. Joining `people` to the member, then
+`files` to the person, gives the same rows, since `a.id = p.avatar_id` can't
+hold where `people` has no row. So the ON around the parentheses narrows
+`people` as a LEFT JOIN's ON narrows its right side, and `files` narrows to
+the avatars of the people it allows: a file that is no listed person's avatar
+doesn't rerun the screen. SQLite reads a join in parentheses of two tables or
+more that follows another item of the FROM as a SELECT of every column of its
+tables, so a write to any column of `people` or `files` in those rows reruns
+the screen. An inner join of a join in parentheses always
+narrows this way, its ON read with the WHERE. A LEFT JOIN of one narrows
+this way only when its ON names no table in the parentheses but the first,
+holds no subquery, and each later table there joins by a LEFT JOIN whose ON
+compares a column of a table before it, other than by `IS`. A statement with
+any other join in parentheses narrows nothing, and so does one whose join in
+parentheses has an alias, starts with another, or joins a table by USING.
+
 One of coven's views or a table function in a join narrows the tables beside
 it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
 or the function. The view's own tables are read whole. A table function of
@@ -15192,6 +15213,7 @@ Write-ups explain each model and state its assumptions:
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
 | An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowMember.lean` | §4 |
+| A parenthesized join gives the rows its tables give joined one after another: an inner join of one always, its ON read with the WHERE, and a LEFT JOIN of one when its ON names no table of the join but the first and each later table is a LEFT JOIN's whose ON can't hold where a table before it has no row | `left_group_flat`, `inner_group_flat` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Parenthesized.lean` | §4 |
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/CteNames.lean` | §4 |
 | A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |

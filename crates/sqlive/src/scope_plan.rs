@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::derived::Ctes;
-use crate::from_item::{read_item, Columns, FromItem};
+use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_edge::{Member, MemberValue};
@@ -38,10 +38,7 @@ use crate::sql_value::SqlValue as Value;
 use crate::unreported_columns::{unreported_columns, UnreportedColumns};
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
-    ast::{
-        As, Cmd, Expr, JoinConstraint, JoinOperator, JoinType, Name, OneSelect, Operator,
-        ResultColumn, Select, SelectTable, Stmt,
-    },
+    ast::{As, Cmd, Expr, Name, OneSelect, Operator, ResultColumn, Select, Stmt},
     lexer::sql::Parser,
     Bump, FallibleIterator,
 };
@@ -207,7 +204,7 @@ pub(crate) struct Core {
 /// Where a condition was written: the WHERE or an inner join's ON, or the
 /// ON of the LEFT JOIN that adds the item at this position.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Place {
+pub(crate) enum Place {
     Inner,
     LeftOn(usize),
 }
@@ -706,55 +703,17 @@ fn read_core<'a>(
     }
     let mut conditions: Vec<(Written<'_>, Place)> = Vec::new();
     if let Some(from) = from {
-        let tables = from
-            .select
-            .iter()
-            .map(|table| (*table, None))
-            .chain(from.joins.iter().flatten().map(|join| (&join.table, Some(join))));
-        for (table, join) in tables {
-            let left = match join.map(|join| join.operator) {
-                None | Some(JoinOperator::Comma | JoinOperator::TypedJoin(None)) => false,
-                Some(JoinOperator::TypedJoin(Some(kind))) => {
-                    if kind.intersects(JoinType::NATURAL | JoinType::RIGHT) {
-                        return Ok(None);
-                    }
-                    kind.contains(JoinType::LEFT)
-                }
-            };
-            if let SelectTable::TableCall(_, Some(args), _) = table {
-                for arg in args.iter() {
-                    parts(arg, &mut found);
-                }
-            }
-            let Some(item) = read_item(connection, planner, table, left, core, parent, ctes)?
-            else {
-                return Ok(None);
-            };
-            let place = if left { Place::LeftOn(planner.items.len()) } else { Place::Inner };
-            planner.cores[core].items.push(planner.items.len());
-            planner.items.push(item);
-            match join.and_then(|join| join.constraint.as_ref()) {
-                None => {}
-                Some(JoinConstraint::On(expr)) => {
-                    parts(expr, &mut found);
-                    let mut joined = Vec::new();
-                    conjuncts(expr, &mut joined);
-                    conditions.extend(joined.into_iter().map(|expr| (Written::Expr(expr), place)));
-                }
-                Some(JoinConstraint::Using(names)) => {
-                    let right = planner.items.len() - 1;
-                    for name in names.iter() {
-                        let column = crate::sql::name(name.0).to_ascii_lowercase();
-                        let left = planner.using_left(core, right, &column);
-                        let right_column = planner.items[right].columns.named(&Name(&column));
-                        if let (Some(left), Some(right_column)) = (left, right_column) {
-                            let using = Written::Using { left, right: (right, right_column) };
-                            conditions.push((using, place));
-                        }
-                        planner.items[right].using.push(column);
-                    }
-                }
-            }
+        let read = crate::from_item::read_from(
+            connection,
+            planner,
+            from,
+            None,
+            (core, parent, ctes),
+            &mut conditions,
+            &mut found,
+        )?;
+        if read.is_none() {
+            return Ok(None);
         }
     }
     if let Some(predicate) = where_clause {
@@ -808,7 +767,7 @@ fn read_core<'a>(
 }
 
 /// A condition of a core as its SQL writes it.
-enum Written<'a> {
+pub(crate) enum Written<'a> {
     Expr(&'a Expr<'a>),
     /// `JOIN right USING (column)`: the item and column to its left that
     /// SQLite compares the right item's column with, and that one.

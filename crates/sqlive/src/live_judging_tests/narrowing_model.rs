@@ -44,6 +44,8 @@ mod nonstrict_edge;
 mod one_of;
 #[path = "narrowing_model/or.rs"]
 mod or;
+#[path = "narrowing_model/parenthesized.rs"]
+mod parenthesized;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
 #[path = "narrowing_model/row_edge.rs"]
@@ -599,6 +601,12 @@ async fn nested_derived_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn cte_names_match_lean() {
     differential("cte names", cte_names::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn parenthesized_matches_lean() {
+    differential("parenthesized", parenthesized::statement).await;
 }
 
 #[tokio::test]

@@ -15,7 +15,8 @@ statement as the planner numbers it: its FROM items, the SELECT cores that hold
 them, the queries whose arms the cores are, and the conditions on each core's
 rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
 equality of each column it names with the column of that name of the leftmost
-item before it that has one, as SQLite compares them. A subquery is a query
+item before it that has one, as SQLite compares them. A parenthesized join's
+tables are items of the core it sits in. A subquery is a query
 number, so an expression names it without nesting. COALESCE of more than two
 arguments nests in its second. A CASE with one WHEN and an ELSE, which is also
 how the model reads `iif`, and `IS NULL` as a value stand for the expressions
@@ -223,6 +224,23 @@ JOIN adds, so where such a part holds, its item has a row.
   declares one of their names. The model's statement numbers each query, so
   its rules read the CTE each FROM item names, and the differential checks
   that its rows are SQLite's.
+- **A parenthesized join.** SQLite joins the tables of `m LEFT JOIN (p LEFT
+  JOIN a ON a.x = p.y) ON p.z = m.w` among themselves first, keeps the rows
+  its ON holds for, and gives a left row that no such row joins NULLs in
+  every table of the join. `groupJoin` states that reading. The runner reads
+  the join's tables as items of the core, joined one after another, the
+  first by the ON around the parentheses, and only where that gives the
+  same rows. `inner_group_flat` proves that it always does for an inner
+  join, whose ON holds no subquery and names no table after it, as one more
+  condition on the joined rows. `left_group_flat` proves that it does for a
+  LEFT JOIN whose ON holds no subquery and names no table of the join but
+  the first, when each later table of the join is a LEFT JOIN's whose ON has
+  a comparison, other than `IS`, with a column of a table before it, which
+  can't hold where that table has no row. The runner refuses any other join
+  in parentheses, and sqlive reads such a statement whole. SQLite reads a
+  join in parentheses of two tables or more that follows another item of its
+  FROM through a `SELECT *` of its own, and its authorizer reports every
+  column of those tables, so the model counts every column of them as read.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. Each ORDER BY term sorts one item's rows by a key: one of

@@ -36,6 +36,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Pick.picked_column_reruns
 #print axioms SqliveNarrowing.CteNames.resolve_inner
 #print axioms SqliveNarrowing.CteNames.resolve_outer
+#print axioms SqliveNarrowing.Parenthesized.left_group_flat
+#print axioms SqliveNarrowing.Parenthesized.inner_group_flat
 #print axioms SqliveNarrowing.Whole.whole_sound
 #print axioms SqliveNarrowing.readCondition_sound
 #print axioms SqliveNarrowing.STerm.holds_none

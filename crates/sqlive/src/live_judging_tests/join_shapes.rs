@@ -1,9 +1,9 @@
 //! Joins other than one column equal to another, each narrowing the joined
 //! table as the equality would: `IS` between two tables, an OR whose sides
 //! each narrow the table, COALESCE of several partners' values, and an
-//! expression over the joined table's own row; and
-//! joins on an expression that gives a value where its table's row is
-//! missing, which narrow nothing.
+//! expression over the joined table's own row; a parenthesized join, whose
+//! tables narrow as their joins do; and joins on an expression that gives a
+//! value where its table's row is missing, which narrow nothing.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -194,6 +194,58 @@ async fn an_expression_of_the_row_narrows_by_its_value() {
         ])
         .await;
         db.commit("DELETE FROM release_records; DELETE FROM owned; INSERT INTO owned VALUES (1,'c','a1'),(2,'c','a2'); INSERT INTO release_records VALUES (1,'c','album','a1',NULL),(2,'c','release','r1','a1'),(3,'c','album','a2',NULL),(4,'c','release','r2','a2')");
+    }
+    db.close();
+}
+
+const PEOPLE: &str = "CREATE TABLE members(id INTEGER PRIMARY KEY, member TEXT);
+CREATE TABLE people(id TEXT PRIMARY KEY, name TEXT, avatar_id INTEGER);
+CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT);
+INSERT INTO members VALUES (1,'p1'),(2,'p2');
+INSERT INTO people VALUES ('p1','one',1),('p2','two',2),('p3','three',3);
+INSERT INTO files VALUES (1,'a.png'),(2,'b.png'),(3,'c.png')";
+
+/// A parenthesized join's tables narrow as their joins do: the ON around a
+/// LEFT JOIN of the group narrows its first table, and the group's own ON
+/// narrows the next by the first. A person not the member's, or a file not
+/// that person's avatar, reruns nothing.
+#[tokio::test]
+async fn a_parenthesized_join_narrows_as_its_joins() {
+    let db = TestDatabase::open(PEOPLE);
+    for sql in [
+        "SELECT m.id || ':' || coalesce(p.name, '') || ':' || coalesce(a.path, '') FROM members m LEFT JOIN (people p LEFT JOIN files a ON a.id = p.avatar_id) ON p.id = m.member WHERE m.id = 1",
+        "SELECT m.id || ':' || p.name || ':' || coalesce(a.path, '') FROM members m JOIN (people p LEFT JOIN files a ON a.id = p.avatar_id) ON p.id = m.member WHERE m.id = 1",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE people SET name = 'two2' WHERE id = 'p2'", false),
+            ("UPDATE files SET path = 'b2.png' WHERE id = 2", false),
+            ("UPDATE people SET name = 'one2' WHERE id = 'p1'", true),
+            ("UPDATE files SET path = 'a2.png' WHERE id = 1", true),
+            ("UPDATE people SET avatar_id = 3 WHERE id = 'p1'", true),
+            ("UPDATE files SET path = 'c2.png' WHERE id = 3", true),
+            ("UPDATE members SET member = 'p3' WHERE id = 1", true),
+        ])
+        .await;
+        db.commit("UPDATE people SET name = 'one' WHERE id = 'p1'; UPDATE people SET name = 'two' WHERE id = 'p2'; UPDATE people SET avatar_id = 1 WHERE id = 'p1'; UPDATE files SET path = 'a.png' WHERE id = 1; UPDATE files SET path = 'b.png' WHERE id = 2; UPDATE files SET path = 'c.png' WHERE id = 3; UPDATE members SET member = 'p1' WHERE id = 1");
+    }
+    db.close();
+}
+
+/// A LEFT JOIN of a parenthesized join whose tables joined one after another
+/// would give other rows keeps every table whole: one named by an alias, one
+/// whose ON names a later table of the join, one with an inner join inside,
+/// and one whose inner ON can hold where the first table has no row.
+#[tokio::test]
+async fn a_parenthesized_join_sqlite_reads_otherwise_keeps_its_tables_whole() {
+    let db = TestDatabase::open(PEOPLE);
+    for sql in [
+        "SELECT count(g.name) FROM members m LEFT JOIN (people p LEFT JOIN files a ON a.id = p.avatar_id) AS g ON g.id = m.member WHERE m.id = 1",
+        "SELECT count(p.name) FROM members m LEFT JOIN (people p LEFT JOIN files a ON a.id = p.avatar_id) ON p.id = m.member AND a.path IS NOT NULL WHERE m.id = 1",
+        "SELECT count(p.name) FROM members m LEFT JOIN (people p JOIN files a ON a.id = p.avatar_id) ON p.id = m.member WHERE m.id = 1",
+        "SELECT count(a.path) FROM members m LEFT JOIN (people p LEFT JOIN files a ON a.id IS p.avatar_id) ON p.id = m.member WHERE m.id = 1",
+    ] {
+        follows(&db, sql, vec![], &[("UPDATE people SET name = 'two2' WHERE id = 'p2'", true)]).await;
+        db.commit("UPDATE people SET name = 'two' WHERE id = 'p2'");
     }
     db.close();
 }

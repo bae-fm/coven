@@ -76,6 +76,10 @@ structure Item where
   and a FROM subquery or CTE outside any expression subquery or whose query
   names nothing outside it (`View.readable`). -/
   readable : Bool
+  /-- Whether a parenthesized join of two tables or more, after the first
+  item of its FROM, holds it: SQLite reads such a join through a `SELECT *`
+  of its own, which reads every column of its tables. -/
+  grouped : Bool := false
   deriving Repr, Inhabited
 
 /-- Where a condition is written: the WHERE or an inner join's ON, or the ON
@@ -165,9 +169,11 @@ structure Query where
 USING join is none: the JSON reader reads it as the equalities it stands for
 (`Json.readCore`). Nor are two CTEs of one name: the JSON reader reads each
 FROM item that names a CTE as the CTE SQLite resolves the name to
-(`CteNames.resolve`). -/
+(`CteNames.resolve`). Nor is a parenthesized join: the JSON reader reads its
+tables as items of the core, joined one after another, where that gives
+SQLite's rows (`Parenthesized`), and refuses one where it doesn't. -/
 inductive WholeShape where
-  | natural | right | recursive | inTable | virtual | parenthesized
+  | natural | right | recursive | inTable | virtual
   deriving DecidableEq, Repr, Inhabited
 
 structure Statement where

@@ -7,7 +7,7 @@ namespace SqliveNarrowing.Whole
 
 /-- The shapes sqlive reads whole today. -/
 def shapes : List WholeShape :=
-  [.natural, .right, .recursive, .inTable, .virtual, .parenthesized]
+  [.natural, .right, .recursive, .inTable, .virtual]
 
 /-- Whether sqlive reads the statement whole. -/
 def readsWhole (s : Statement) : Bool := s.whole.any (shapes.contains ·)

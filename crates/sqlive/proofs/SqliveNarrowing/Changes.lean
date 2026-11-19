@@ -6,7 +6,8 @@ deletes a row, or changes a column the statement reads, and the row before
 or after passes the table's scope. The columns a statement reads are those
 its clauses name, and every column of a table it reads in a query whose rows
 SQLite picks or a compound or core whose rows follow the order SQLite reads
-its rows in (`unreported_columns.rs`). sqlive keeps of a changed row only
+its rows in (`unreported_columns.rs`), or in a parenthesized join, whose
+every column SQLite's authorizer reports. sqlive keeps of a changed row only
 the values a scope tests (`pre_update_changes.rs`), so the model tests the
 row masked to the columns the statement reads. A join's lookups read the
 database the write leaves, as sqlive judges a write in the write's own
@@ -190,15 +191,22 @@ def Statement.pickedTables (s : Statement) : List Nat :=
 def Statement.width (s : Statement) (t : Nat) : Nat :=
   ((s.itemNumbers.find? (s.table? · = some t)).map fun i => (s.item i).columns.length).getD 0
 
+/-- The tables of a parenthesized join that SQLite reads through a `SELECT *`
+of its own, which reads every column of them (`Item.grouped`). -/
+def Statement.groupedTables (s : Statement) : List Nat :=
+  (s.itemNumbers.filter fun i => (s.item i).grouped).filterMap s.table?
+
 /-- Each table the statement reads, with the columns of it any of its
 clauses names, and every column of a table that a query whose rows SQLite
 picks, or a compound or core whose rows follow the order SQLite reads its
-rows in, reads: what its rows can depend on. -/
+rows in, reads, and of a table of a parenthesized join: what its rows can
+depend on, and what SQLite reports it reads. -/
 def Statement.reads (s : Statement) : List (Nat × List Nat) :=
   let refs := s.cores.flatMap Core.refs
   (s.itemNumbers.filterMap s.table?).eraseDups.map fun t =>
     let named := refs.filterMap fun (i, c) => if s.table? i = some t then some c else none
-    let picked := if s.pickedTables.contains t then List.range (s.width t) else []
+    let picked := if s.pickedTables.contains t || s.groupedTables.contains t then
+      List.range (s.width t) else []
     (t, (named ++ picked).eraseDups)
 
 /-- Each element of `l` paired with its value under `f`: the pair of `t`
@@ -218,13 +226,15 @@ theorem find?_pairs {f : Nat → List Nat} {l : List Nat} {t : Nat} (ht : t ∈ 
 
 /-- What `Statement.reads` names of a table an item reads: the columns the
 clauses name of it, and every column when a picked query or a core whose
-rows follow the order SQLite reads them in reads it. -/
+rows follow the order SQLite reads them in reads it, or a parenthesized join
+holds it. -/
 theorem Statement.find?_reads (s : Statement) {t : Nat}
     (h : t ∈ s.itemNumbers.filterMap s.table?) :
     s.reads.find? (·.1 == t) = some (t,
       ((s.cores.flatMap Core.refs).filterMap (fun (i, c) =>
           if s.table? i = some t then some c else none) ++
-        if s.pickedTables.contains t then List.range (s.width t) else []).eraseDups) := by
+        if s.pickedTables.contains t || s.groupedTables.contains t then List.range (s.width t)
+        else []).eraseDups) := by
   unfold Statement.reads
   exact find?_pairs (List.mem_eraseDups.mpr h)
 

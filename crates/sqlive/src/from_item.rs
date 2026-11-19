@@ -1,15 +1,20 @@
 //! A FROM item of a statement's core, as the scope planner reads it: a
 //! table, a table function, a view read whole, or a subquery, CTE or app
-//! view read as cores of its own (§4).
+//! view read as cores of its own (§4); and a core's FROM, whose
+//! parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
 use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
-use crate::scope_plan::{Planner, Source};
+use crate::scope_plan::{is_name, Place, Planner, Source, Written};
 use crate::scope_row::{row_term, RowExpression};
 use crate::scope_term::Affinity;
-use crate::select_syntax::{parts, text, Functions, Part};
+use crate::select_syntax::{conjuncts, parts, text, Functions, Part};
+use crate::sql::unparenthesized;
 use rusqlite::Connection;
-use sqlite3_parser::ast::{As, Expr, Name, QualifiedName, SelectTable};
+use sqlite3_parser::ast::{
+    As, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name, Operator, QualifiedName,
+    SelectTable,
+};
 
 /// One of a FROM item's columns: its name, lowercase, when sqlive knows the
 /// name SQLite gives it, and what sqlive knows of its values.
@@ -269,7 +274,190 @@ pub(crate) fn read_item<'a>(
                 found.map(|(source, columns, derived)| item(source, columns, Some(derived)))
             })
         }
-        SelectTable::Sub(..) => Ok(None),
+        SelectTable::Sub(..) => unreachable!("read_from reads a parenthesized join's tables"),
+    }
+}
+
+/// Read the FROM `from` of `core`, which sits in `parent` where its names can
+/// name `ctes`, into the core's items and the conditions of its joins, and
+/// the parts of those conditions into `found`. For a parenthesized join's
+/// tables, `group` says whether a LEFT JOIN adds the join, which then adds
+/// its first table. A parenthesized join's tables are items of the core too,
+/// joined one after another, where that gives SQLite's rows
+/// (`Planner::group_flattens`). `None` for a shape that keeps every table
+/// whole.
+pub(crate) fn read_from<'a>(
+    connection: &Connection,
+    planner: &mut Planner,
+    from: &'a FromClause<'a>,
+    group: Option<bool>,
+    (core, parent, ctes): (usize, Option<usize>, &Ctes<'a>),
+    conditions: &mut Vec<(Written<'a>, Place)>,
+    found: &mut Vec<Part<'a>>,
+) -> rusqlite::Result<Option<()>> {
+    let tables = from
+        .select
+        .iter()
+        .map(|table| (*table, None))
+        .chain(from.joins.iter().flatten().map(|join| (&join.table, Some(join))));
+    for (table, join) in tables {
+        let left = match join.map(|join| join.operator) {
+            None => group.unwrap_or(false),
+            Some(JoinOperator::Comma | JoinOperator::TypedJoin(None)) => false,
+            Some(JoinOperator::TypedJoin(Some(kind))) => {
+                if kind.intersects(JoinType::NATURAL | JoinType::RIGHT) {
+                    return Ok(None);
+                }
+                kind.contains(JoinType::LEFT)
+            }
+        };
+        let constraint = join.and_then(|join| join.constraint.as_ref());
+        if let SelectTable::Sub(inner, alias) = table {
+            // SQLite reads a parenthesized join under an alias as a
+            // subquery's rows. One that starts with another, or that USING
+            // joins, no reading here states.
+            if alias.is_some()
+                || matches!(inner.select, Some(SelectTable::Sub(..)))
+                || matches!(constraint, Some(JoinConstraint::Using(_)))
+            {
+                return Ok(None);
+            }
+            let first = planner.items.len();
+            let held = conditions.len();
+            let read = read_from(
+                connection,
+                planner,
+                inner,
+                Some(left),
+                (core, parent, ctes),
+                conditions,
+                found,
+            )?;
+            if read.is_none() {
+                return Ok(None);
+            }
+            let mut on = Vec::new();
+            if let Some(JoinConstraint::On(expr)) = constraint {
+                parts(expr, found);
+                conjuncts(expr, &mut on);
+            }
+            if !planner.group_flattens(core, first, left, &conditions[held..], &on) {
+                return Ok(None);
+            }
+            let place = if left { Place::LeftOn(first) } else { Place::Inner };
+            conditions.extend(on.into_iter().map(|expr| (Written::Expr(expr), place)));
+            continue;
+        }
+        if let SelectTable::TableCall(_, Some(args), _) = table {
+            for arg in args.iter() {
+                parts(arg, found);
+            }
+        }
+        let Some(item) = read_item(connection, planner, table, left, core, parent, ctes)? else {
+            return Ok(None);
+        };
+        let place = if left { Place::LeftOn(planner.items.len()) } else { Place::Inner };
+        planner.cores[core].items.push(planner.items.len());
+        planner.items.push(item);
+        match constraint {
+            None => {}
+            Some(JoinConstraint::On(expr)) => {
+                parts(expr, found);
+                let mut joined = Vec::new();
+                conjuncts(expr, &mut joined);
+                conditions.extend(joined.into_iter().map(|expr| (Written::Expr(expr), place)));
+            }
+            // Inside a parenthesized join, USING compares with the leftmost
+            // table of the join, not of the core.
+            Some(JoinConstraint::Using(_)) if group.is_some() => return Ok(None),
+            Some(JoinConstraint::Using(names)) => {
+                let right = planner.items.len() - 1;
+                for name in names.iter() {
+                    let column = crate::sql::name(name.0).to_ascii_lowercase();
+                    let left = planner.using_left(core, right, &column);
+                    let right_column = planner.items[right].columns.named(&Name(&column));
+                    if let (Some(left), Some(right_column)) = (left, right_column) {
+                        let using = Written::Using { left, right: (right, right_column) };
+                        conditions.push((using, place));
+                    }
+                    planner.items[right].using.push(column);
+                }
+            }
+        }
+    }
+    Ok(Some(()))
+}
+
+impl Planner<'_> {
+    /// Whether `JOIN (...) ON on`, or a LEFT JOIN when `left`, of the items
+    /// from `first` on, whose own joins' conditions are `inner`, gives the
+    /// rows its tables give joined one after another, the first by `on`.
+    /// SQLite joins the parenthesized tables among themselves and keeps the
+    /// rows `on` holds for; a LEFT JOIN gives a left row that no such row
+    /// joins NULLs in every table of the join. An inner join's `on`, when it
+    /// holds no subquery, is one more condition on the joined rows. A LEFT
+    /// JOIN's is the ON of its first table when it names no other table of
+    /// the join, and each later table is a LEFT JOIN's whose ON compares a
+    /// column of a table before it in the join, other than by `IS`: such an
+    /// ON can't hold where that table has no row, so a left row that no row
+    /// of the join joins gets NULLs in each table, one after another.
+    pub(crate) fn group_flattens(
+        &self,
+        core: usize,
+        first: usize,
+        left: bool,
+        inner: &[(Written<'_>, Place)],
+        on: &[&Expr<'_>],
+    ) -> bool {
+        let mut found = Vec::new();
+        for expr in on {
+            parts(expr, &mut found);
+        }
+        if found
+            .iter()
+            .any(|part| matches!(part, Part::Select(_) | Part::Subquery(_) | Part::Table(_)))
+        {
+            return false;
+        }
+        if !left {
+            return true;
+        }
+        let end = self.items.len();
+        let named_first = found.iter().all(|part| match part {
+            Part::Name(name) => {
+                self.resolve(core, name).is_some_and(|(item, _)| !(first + 1..end).contains(&item))
+            }
+            _ => true,
+        });
+        named_first
+            && (first + 1..end).all(|item| {
+                self.items[item].left
+                    && inner.iter().any(|(written, place)| {
+                        *place == Place::LeftOn(item)
+                            && matches!(written, Written::Expr(condition)
+                                if self.rejects(core, condition, first..item))
+                    })
+            })
+    }
+
+    /// Whether `condition`, written in `core`, can't hold where an item of
+    /// `items` has no row: a comparison other than `IS` and `IS NOT` with a
+    /// column of one of them on a side.
+    fn rejects(&self, core: usize, condition: &Expr<'_>, items: std::ops::Range<usize>) -> bool {
+        let Expr::Binary(left, op, right) = unparenthesized(condition) else {
+            return false;
+        };
+        matches!(
+            op,
+            Operator::Equals
+                | Operator::NotEquals
+                | Operator::Less
+                | Operator::LessEquals
+                | Operator::Greater
+                | Operator::GreaterEquals
+        ) && [left, right].into_iter().any(|side| {
+            is_name(side) && self.resolve(core, side).is_some_and(|(item, _)| items.contains(&item))
+        })
     }
 }
 

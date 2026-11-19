@@ -13,6 +13,7 @@ import SqliveNarrowing.Rules.Transfer
 import SqliveNarrowing.Rules.View
 import SqliveNarrowing.Rules.Limit
 import SqliveNarrowing.Rules.Whole
+import SqliveNarrowing.Rules.Parenthesized
 
 /-! The rules that read a condition, in the order sqlive tries them
 (`read_condition`): the first that reads a condition gives its narrowing, and
