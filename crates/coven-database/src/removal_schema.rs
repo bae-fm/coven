@@ -238,7 +238,6 @@ fn terms(
 fn column(table: &TableSchema, expr: &Expr<'_>) -> Option<String> {
     let id = match expr {
         Expr::Id(id) => id.0,
-        Expr::Name(name) => name.0,
         _ => return None,
     };
     // TRUE/FALSE are parsed as identifiers; SQLite resolves them as literals

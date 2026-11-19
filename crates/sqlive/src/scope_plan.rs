@@ -465,7 +465,6 @@ impl Planner<'_> {
     pub(crate) fn resolve(&self, core: usize, expr: &Expr<'_>) -> Option<(usize, String)> {
         let (qualifier, name) = match unparenthesized(expr) {
             Expr::Id(name) => (None, Name(name.0)),
-            Expr::Name(name) => (None, name.clone()),
             Expr::Qualified(table, name) => (Some(table), name.clone()),
             Expr::DoublyQualified(db, table, name) if *db == "main" => (Some(table), name.clone()),
             _ => return None,
@@ -981,8 +980,5 @@ pub(crate) struct Edge {
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {
-    matches!(
-        unparenthesized(expr),
-        Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..)
-    )
+    matches!(unparenthesized(expr), Expr::Id(_) | Expr::Qualified(..) | Expr::DoublyQualified(..))
 }

@@ -147,7 +147,6 @@ pub(crate) fn order_term<'a>(columns: &'a [ResultColumn<'a>], expr: &'a Expr<'a>
             };
         }
         Expr::Id(name) => Name(name.0),
-        Expr::Name(name) => Name(name.0),
         _ => return OrderTerm::Expr(expr),
     };
     let named: Vec<usize> = columns

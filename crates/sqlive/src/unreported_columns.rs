@@ -622,7 +622,6 @@ impl Found<'_> {
     ) -> rusqlite::Result<Option<(usize, String)>> {
         let (qualifier, name) = match crate::sql::unparenthesized(expr) {
             Expr::Id(name) => (None, name.0),
-            Expr::Name(name) => (None, name.0),
             Expr::Qualified(table, name) => (Some(table), name.0),
             Expr::DoublyQualified(db, table, name) if *db == "main" => (Some(table), name.0),
             _ => return Ok(None),
@@ -731,9 +730,7 @@ fn result_names(select: &Select<'_>) -> Option<Vec<String>> {
                 ResultColumn::Expr(_, Some(alias)) => return Some(crate::sql::alias_name(alias)),
                 ResultColumn::Expr(expr, None) => match crate::sql::unparenthesized(expr) {
                     Expr::Id(name) => name.0,
-                    Expr::Name(name)
-                    | Expr::Qualified(_, name)
-                    | Expr::DoublyQualified(_, _, name) => name.0,
+                    Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => name.0,
                     _ => return None,
                 },
                 ResultColumn::Star | ResultColumn::TableStar(_) => return None,

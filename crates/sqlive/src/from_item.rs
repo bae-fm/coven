@@ -429,9 +429,7 @@ impl Planner<'_> {
             }
             let column = match unparenthesized(name) {
                 Expr::Id(name) => Name(name.0),
-                Expr::Name(name) | Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => {
-                    name.clone()
-                }
+                Expr::Qualified(_, name) | Expr::DoublyQualified(_, _, name) => name.clone(),
                 _ => return false,
             };
             self.scope_of(core).flat_map(|current| &self.cores[current].items).any(|item| {
@@ -632,7 +630,6 @@ fn evaluated(
     let term = row_term(functions, qualifier, expr, &found, &|name| {
         let name = match name {
             Expr::Id(name) => Name(name.0),
-            Expr::Name(name) => name.clone(),
             _ => return None,
         };
         let column = columns

@@ -28,7 +28,6 @@ pub(crate) fn compared_subquery<'a>(
     match unparenthesized(condition) {
         Expr::Binary(left, Operator::Equals, right) => {
             match (unparenthesized(left), unparenthesized(right)) {
-                (Expr::Subquery(_), Expr::Subquery(_)) => None,
                 (compared, Expr::Subquery(select)) | (Expr::Subquery(select), compared) => {
                     Some((values(compared)?, select))
                 }
