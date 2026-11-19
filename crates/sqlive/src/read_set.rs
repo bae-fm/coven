@@ -165,7 +165,7 @@ impl Answers {
 
 /// A value as a hash key, by its type and bytes.
 #[derive(Hash, PartialEq, Eq)]
-enum ValueKey {
+pub(crate) enum ValueKey {
     Null,
     Integer(i64),
     Real(u64),
@@ -174,7 +174,7 @@ enum ValueKey {
 }
 
 impl ValueKey {
-    fn of(value: &SqlValue) -> Self {
+    pub(crate) fn of(value: &SqlValue) -> Self {
         match value {
             SqlValue::Null => Self::Null,
             SqlValue::Integer(value) => Self::Integer(*value),

@@ -2,11 +2,13 @@
 //! (§4.1): a local write's on device-local tables, which never sync, and a
 //! streamed transaction's on any table, as applying another device's slot.
 //! sqlive keeps of the rows only what wakes a live query: the table and the
-//! columns changed, and the changed rows' keys and the values a live query's
-//! scope tests, only where a waiting live query narrows that table.
+//! columns changed, and, where a waiting live query reads the table, each
+//! changed row's key and the values live queries read or test, folded into
+//! the row's net change over the transaction (`net_changes.rs`).
 
 use super::table_shapes::{Shadow, TableShape, TableShapes};
 use crate::authorization::HostError;
+use crate::net_changes::{Captured, ColumnChange, NetRows, RowOperation};
 use crate::{RowChange, RowImage, SqlValue, ROWS_PER_TABLE};
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
@@ -20,20 +22,22 @@ const ROW: usize = usize::MAX;
 pub(crate) struct ImageColumns {
     names: Arc<[String]>,
     positions: Vec<usize>,
+    /// The table's generated columns.
+    generated: Arc<[String]>,
 }
 
 impl ImageColumns {
-    /// The row images of the tables `scoped` names, by position: each one's
-    /// key and the scoped columns it has. A table no key can name keeps none.
-    pub(crate) fn scoped(
+    /// The row images of the tables `kept` names, by position: each one's
+    /// key and the kept columns it has. A table no key can name keeps none.
+    pub(crate) fn kept(
         shapes: &TableShapes,
-        scoped: &crate::change_capture::ScopedColumns,
+        kept: &crate::change_capture::KeptColumns,
     ) -> HashMap<usize, ImageColumns> {
         shapes
             .iter()
             .filter(|(_, shape)| !shape.whole)
             .filter_map(|(position, shape)| {
-                let columns = scoped.get(&shape.name)?;
+                let columns = kept.get(&shape.name)?;
                 let positions: Vec<usize> = (0..shape.columns.len())
                     .filter(|index| shape.columns[*index].1)
                     .chain((0..shape.columns.len()).filter(|index| {
@@ -42,7 +46,7 @@ impl ImageColumns {
                     }))
                     .collect();
                 let names = positions.iter().map(|index| shape.columns[*index].0.clone()).collect();
-                Some((position, ImageColumns { names, positions }))
+                Some((position, ImageColumns { names, positions, generated: shape.generated() }))
             })
             .collect()
     }
@@ -71,6 +75,52 @@ impl ImageColumns {
             .map(|index| Ok(value(*index)?.map(SqlValue::from)))
             .collect::<Result<_, crate::Error<F, R>>>()?;
         Ok(RowImage::new(Arc::clone(&self.names), values))
+    }
+
+    /// One operation on a row of `shape`, whose images these are: an insert
+    /// with only `new`, a delete with only `old`, or an update of the row's
+    /// columns outside its key with both. It changes each stored column an
+    /// insert or a delete changes, or whose value an update changes, and
+    /// keeps the values of the columns the images hold.
+    fn operation<F: HostError, R: HostError>(
+        &self,
+        shape: &TableShape,
+        old: Option<&PreUpdateOldValueAccessor>,
+        new: Option<&PreUpdateNewValueAccessor>,
+    ) -> Result<RowOperation, crate::Error<F, R>> {
+        let value = |index: usize| -> Result<_, crate::Error<F, R>> {
+            Ok((
+                old.map(|old| old_value(old, index)).transpose()?.flatten(),
+                new.map(|new| new_value(new, index)).transpose()?.flatten(),
+            ))
+        };
+        let mut key = Vec::new();
+        let mut columns = Vec::new();
+        for (index, (name, is_key, hidden)) in shape.columns.iter().enumerate() {
+            if *hidden {
+                continue;
+            }
+            let (before, after) = value(index)?;
+            if *is_key {
+                key.push(before.or(after).map_or(SqlValue::Null, SqlValue::from));
+                continue;
+            }
+            if old.is_some() && new.is_some() && before == after {
+                continue;
+            }
+            // Only a kept column's values are copied.
+            let kept = self.positions.contains(&index);
+            let copy = |value: Option<ValueRef<'_>>| value.filter(|_| kept).map(SqlValue::from);
+            columns.push(ColumnChange::new(name.clone(), kept, copy(before), copy(after)));
+        }
+        Ok(RowOperation {
+            table: shape.name.clone(),
+            key,
+            before: old.map(|old| self.before(old)).transpose()?,
+            after: new.map(|new| self.after(new)).transpose()?,
+            columns,
+            generated: Arc::clone(&self.generated),
+        })
     }
 }
 
@@ -111,12 +161,15 @@ pub(crate) fn new_value<F: HostError, R: HostError>(
 /// One transaction's row changes, as its pre-update hook reports them.
 #[derive(Default)]
 pub(crate) struct PreUpdateChanges {
-    /// Tables a waiting live query narrows, and their images' columns.
-    scoped: HashMap<usize, ImageColumns>,
-    /// A table and a column changed, or `ROW` for a whole row.
+    /// Tables a waiting live query reads, and their images' columns: the
+    /// capture names their changed rows by key and folds each row's
+    /// operations into its net change, up to `ROWS_PER_TABLE` rows a table.
+    kept: HashMap<usize, ImageColumns>,
+    /// A table and a column changed, or `ROW` for a whole row, for the
+    /// tables whose rows the capture doesn't keep.
     columns: BTreeSet<(usize, usize)>,
-    /// Changes with their rows' images, for the tables in `scoped`.
-    rows: Vec<RowChange>,
+    /// The net change of each row of the tables in `kept`.
+    rows: NetRows,
     /// Shadow tables changed whose every change is their virtual table's
     /// too, in every column (`Shadow::Whole`).
     shadows: BTreeSet<usize>,
@@ -129,13 +182,14 @@ pub(crate) struct PreUpdateChanges {
     /// Tables a row was inserted into without an image of it: a read of
     /// insertions alone still learns of it.
     inserted: BTreeSet<usize>,
-    /// Row changes kept so far, by table position.
-    kept: HashMap<usize, usize>,
+    /// Tables in `kept` a row was inserted into, which join `inserted` if
+    /// the capture stops keeping their rows.
+    inserts: BTreeSet<usize>,
 }
 
 impl PreUpdateChanges {
-    pub(crate) fn new(scoped: HashMap<usize, ImageColumns>) -> Self {
-        Self { scoped, ..Self::default() }
+    pub(crate) fn new(kept: HashMap<usize, ImageColumns>) -> Self {
+        Self { kept, ..Self::default() }
     }
 
     /// Record an operation on a table the transaction's shapes don't hold.
@@ -153,18 +207,15 @@ impl PreUpdateChanges {
         case: &PreUpdateCase,
     ) -> Result<(), crate::Error<F, R>> {
         let shape = shapes.shape(position);
-        let before = self.rows.len();
         self.record_rows(shape, position, case)?;
-        let kept = self.kept.entry(position).or_default();
-        *kept += self.rows.len() - before;
-        if *kept > ROWS_PER_TABLE && self.scoped.remove(&position).is_some() {
-            if self.rows.iter().any(|change| {
-                change.table == shape.name
-                    && change.rows.as_ref().is_some_and(|(old, _)| old.is_none())
-            }) {
+        // Past the bound, the table's changes count whole, so the
+        // transaction's memory stays bounded.
+        if self.kept.contains_key(&position) && self.rows.count(&shape.name) > ROWS_PER_TABLE {
+            self.kept.remove(&position);
+            self.rows.forget(&shape.name);
+            if self.inserts.contains(&position) {
                 self.inserted.insert(position);
             }
-            self.rows.retain(|change| change.table != shape.name);
             self.columns.insert((position, ROW));
         }
         match shape.shadow {
@@ -185,64 +236,58 @@ impl PreUpdateChanges {
         position: usize,
         case: &PreUpdateCase,
     ) -> Result<(), crate::Error<F, R>> {
-        let image = self.scoped.get(&position);
+        let Some(image) = self.kept.get(&position) else {
+            return self.record_columns(shape, position, case);
+        };
         match case {
-            PreUpdateCase::Insert(new) => match image {
-                Some(image) => self.rows.push(whole(shape, None, Some(image.after(new)?))),
-                None => {
-                    self.columns.insert((position, ROW));
-                    self.inserted.insert(position);
-                }
-            },
-            PreUpdateCase::Delete(old) => match image {
-                Some(image) => self.rows.push(whole(shape, Some(image.before(old)?), None)),
-                None => {
-                    self.columns.insert((position, ROW));
-                }
-            },
+            PreUpdateCase::Insert(new) => {
+                self.inserts.insert(position);
+                self.rows.record(image.operation(shape, None, Some(new))?);
+            }
+            PreUpdateCase::Delete(old) => {
+                self.rows.record(image.operation(shape, Some(old), None)?);
+            }
             PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
-                let changed = |index: usize| -> Result<bool, crate::Error<F, R>> {
-                    Ok(old_value(old, index)? != new_value(new, index)?)
-                };
-                let mut key_changed = false;
-                for (index, (_, key, _)) in shape.columns.iter().enumerate() {
-                    if *key && changed(index)? {
-                        key_changed = true;
-                        break;
-                    }
+                if key_changed(shape, old, new)? {
+                    self.rows.record(image.operation(shape, Some(old), None)?);
+                    self.inserts.insert(position);
+                    self.rows.record(image.operation(shape, None, Some(new))?);
+                } else {
+                    self.rows.record(image.operation(shape, Some(old), Some(new))?);
                 }
-                if shape.whole || key_changed {
-                    match image {
-                        Some(image) => {
-                            let (before, after) = (image.before(old)?, image.after(new)?);
-                            self.rows.push(whole(shape, Some(before), None));
-                            self.rows.push(whole(shape, None, Some(after)));
-                        }
-                        None => {
-                            self.columns.insert((position, ROW));
-                        }
-                    }
+            }
+            PreUpdateCase::Unknown => {}
+        }
+        Ok(())
+    }
+
+    /// Record an operation on a table whose rows the capture doesn't keep:
+    /// the columns it changed, or the whole row.
+    fn record_columns<F: HostError, R: HostError>(
+        &mut self,
+        shape: &TableShape,
+        position: usize,
+        case: &PreUpdateCase,
+    ) -> Result<(), crate::Error<F, R>> {
+        match case {
+            PreUpdateCase::Insert(_) => {
+                self.columns.insert((position, ROW));
+                self.inserted.insert(position);
+            }
+            PreUpdateCase::Delete(_) => {
+                self.columns.insert((position, ROW));
+            }
+            PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
+                if shape.whole || key_changed(shape, old, new)? {
+                    self.columns.insert((position, ROW));
                     return Ok(());
                 }
-                let rows = match image {
-                    Some(image) => Some((Some(image.before(old)?), Some(image.after(new)?))),
-                    None => None,
-                };
-                for (index, (name, key, hidden)) in shape.columns.iter().enumerate() {
+                for (index, (_, key, hidden)) in shape.columns.iter().enumerate() {
                     // Sessions omit generated columns; they can change with their inputs.
-                    if *key || (!*hidden && !changed(index)?) {
+                    if *key || (!*hidden && old_value(old, index)? == new_value(new, index)?) {
                         continue;
                     }
-                    match &rows {
-                        Some(rows) => self.rows.push(RowChange {
-                            table: shape.name.clone(),
-                            column: name.clone(),
-                            rows: Some(rows.clone()),
-                        }),
-                        None => {
-                            self.columns.insert((position, index));
-                        }
-                    }
+                    self.columns.insert((position, index));
                 }
             }
             PreUpdateCase::Unknown => {}
@@ -251,8 +296,8 @@ impl PreUpdateChanges {
     }
 
     /// The live-query changes the operations recorded made.
-    pub(crate) fn finish(self, shapes: &TableShapes) -> Vec<RowChange> {
-        let mut changes = self.rows;
+    pub(crate) fn finish(self, shapes: &TableShapes) -> Captured {
+        let mut changes = Vec::new();
         let parents: BTreeSet<String> = self
             .shadows
             .iter()
@@ -278,8 +323,23 @@ impl PreUpdateChanges {
             column: String::new(),
             rows: None,
         }));
-        changes
+        Captured::new(self.rows, changes)
     }
+}
+
+/// Whether an update changes the row's key, which makes it a delete of the
+/// old key's row and an insert of the new key's.
+fn key_changed<F: HostError, R: HostError>(
+    shape: &TableShape,
+    old: &PreUpdateOldValueAccessor,
+    new: &PreUpdateNewValueAccessor,
+) -> Result<bool, crate::Error<F, R>> {
+    for (index, (_, key, _)) in shape.columns.iter().enumerate() {
+        if *key && old_value(old, index)? != new_value(new, index)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn whole(shape: &TableShape, old: Option<RowImage>, new: Option<RowImage>) -> RowChange {

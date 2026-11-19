@@ -51,12 +51,13 @@ that any item of the table passes.
 [Changes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Changes.lean) and
 [Judge.lean](../../crates/sqlive/proofs/SqliveNarrowing/Judge.lean) judge a
 write as sqlive does. The write's row changes are one per row that each of its
-statements changed, as sqlive's pre-update hook records them. A change reruns
+statements changed, as sqlive's pre-update hook records them, and the judge
+reads each row's net change over the write (below). A change reruns
 the query when it inserts or deletes a row of a table the statement reads, or
 changes a column the statement reads, and the row before or after passes the
-table's scope. sqlive keeps of a changed row only the values its scopes test,
-so the model tests the row masked to the columns the statement reads: their
-values, and NULL in every other column. A join's lookups read the database the
+table's scope. sqlive keeps of a changed row only the values of the columns
+live queries read or test, so the model tests the row masked to the columns
+the statement reads: their values, and NULL in every other column. A join's lookups read the database the
 write leaves, which the model masks the same way. The model takes the columns
 a statement reads to be the columns its clauses name, and every column of
 each table that a query whose rows SQLite picks reads; the differential checks
@@ -258,11 +259,10 @@ JOIN adds, so where such a part holds, its item has a row.
   same change of the FTS5 table, so the model reads the FTS5 table as a
   table whose columns have no affinity and compare by BINARY. FTS5 deletes a
   row of its content table and inserts it again when an UPDATE names it,
-  changed or not. A session, and sqlive's capture of a write's operations,
-  read the two as one update of the columns that changed; sqlive's
-  pre-update hook judges both. `rewrite_reruns` proves
-  that the two changes rerun a statement wherever the update as one change
-  would. A lookup reads the FTS5 table's rows from its content table, which
+  changed or not. sqlive judges the row's net change, one update of the
+  columns that changed, or none when no column changed. `rewrite_reruns`
+  proves that the two changes rerun a statement wherever the update as one
+  change would. A lookup reads the FTS5 table's rows from its content table, which
   costs fewer of SQLite's steps. sqlive doesn't know the FTS5 table's first
   column to hold its rowid, so the model's sort by each table's rowid counts
   only a table whose first column is its INTEGER PRIMARY KEY
@@ -680,6 +680,34 @@ judge lets pass leaves a well-formed statement's rows unchanged, and
 `narrowing_sound_limited` that the same holds of sqlive's judge, which
 narrows nothing for a write whose question stopped at the step limit.
 
+## A write's net change of each row
+
+A write can change one row more than once: a statement inserts a row and the
+next deletes it, an update sets a column and a later one sets it back, or
+`INSERT OR REPLACE` deletes a row and inserts it again with the same values.
+sqlive judges each row's net change instead of each change
+(`net_changes.rs`).
+[Net.lean](../../crates/sqlive/proofs/SqliveNarrowing/Net.lean) names the
+slot each change changes, as sqlive names a row by its key, and folds the
+changes of each slot into one change, from the slot's row before the write's
+first change of it to its row after the last, with none for a slot that ends
+as it began (`net`, in
+[Changes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Changes.lean)).
+
+`SlotWrites.firstOld_eq` and `SlotWrites.lastNew_eq` prove that those rows are
+the slot's rows before and after the write, so the net changes take the
+database before the write to the database after it (`net_writes`), and
+`net_sound` and `indexed_net_sound` prove that a write whose net changes the
+judge lets pass leaves a well-formed statement's rows unchanged. `mem_net`
+proves that the net changes are exactly the changes of the slots whose rows
+differ before and after the write. So the judge's verdict on them depends only
+on those two databases (`net_judges_states`), a write whose every slot ends as
+it began reruns no statement (`net_unchanged`), and the judge of the net
+changes reruns a statement only where the judge of every change does
+(`net_reruns_imp`): `unjudged_slots` proves that when the judge of every
+change lets a write pass, each slot whose kept row the write changes holds
+rows that fail the scope before and after it.
+
 ## Which live queries judge a write
 
 [Index.lean](../../crates/sqlive/proofs/SqliveNarrowing/Index.lean) models
@@ -720,15 +748,19 @@ model keeps that subquery's table as its conditions narrow it. The model has
 no generated columns: sqlive sorts by a generated
 column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
-one for a write and counts it as changed by every write to its row, which the
-model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
+one for a write and counts it as changed by every write that changes a stored
+column of its row, which the model doesn't state. The model also leaves out bound parameters, table functions, the views sqlive
 reads whole as a join's partner, and the terms that compare a NULL test's truth or
 a column `IS` a parameter. The model's index holds only integers, so it doesn't
 state that sqlive files an integer and a real that compare equal under one
 value. Every changed row in the model holds a value in each column, so the
 model doesn't state that a row whose value a write didn't record, or a
 change that names no row, reaches every live query sqlive filed under its
-table.
+table. The model names a row by its rowid. sqlive names it by its primary key,
+and doesn't fold the changes of a table with no primary key. The model keeps
+every column of a changed row, so it doesn't state that sqlive counts a column
+whose values it doesn't keep, one no live query reads or tests, as changed
+once a statement changes it.
 
 ## The runner and the differential
 
@@ -736,15 +768,21 @@ table.
 columns and their affinities, and each view's query), the statement as a tree
 that names its sources by alias, the database before and after the write, the
 write's row changes, and whether one of sqlive's questions about the write
-stopped at the step limit. The runner reads a CTE where a query names it, so a
+stopped at the step limit. The runner reads each change's slot from the rowid
+in the first column of its row, and judges the write's net change of each
+row. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
 statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether the write reruns the statement,
 whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
 statement's rows before and after.
 
 The differential in sqlive (`narrowing_model` among the live judging tests)
-has one test per rule, `<rule>_matches_lean`, and `mixed_shapes_match_lean`
-for statements that hold several rules. One of its tables is a contentful
+has one test per rule, `<rule>_matches_lean`, `mixed_shapes_match_lean`
+for statements that hold several rules, and `net_change_matches_lean`, whose
+writes change one row more than once: a pair of statements that cancel out,
+as an insert and a delete, an update and an update back, a delete and an
+insert of the same row, or a key changed and changed back, or a row changed
+and changed again. One of its tables is a contentful
 FTS5 table, whose `id` its writes keep equal to its rowid. Its changes are
 the operations SQLite makes on its content table, which a pre-update hook on
 the test's copy of the database records, as sqlive's own pre-update hook

@@ -156,6 +156,16 @@ impl TableShapes {
 }
 
 impl TableShape {
+    /// The names of the table's generated columns, which change with the
+    /// stored columns they read.
+    pub(crate) fn generated(&self) -> Arc<[String]> {
+        self.columns
+            .iter()
+            .filter(|(_, _, hidden)| *hidden)
+            .map(|(name, _, _)| name.clone())
+            .collect()
+    }
+
     /// The virtual table that a change to every row of this table changes
     /// every row of too, lowercase.
     pub(crate) fn parent<'a>(&'a self, shapes: &'a TableShapes) -> Option<&'a str> {

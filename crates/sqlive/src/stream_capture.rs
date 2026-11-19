@@ -9,7 +9,7 @@ use super::write_transaction::WriteTransaction;
 use super::HostSql;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
-use crate::RowChange;
+use crate::net_changes::Captured;
 use panic_as_error::locks::lock_unpoisoned;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ enum Recorded {
 /// What a streamed transaction changed, as its capture saw it.
 pub(super) enum StreamChanges {
     /// The changed rows, as live queries read them.
-    Rows(Vec<RowChange>),
+    Rows(Captured),
     /// The tables changed, on a connection that observes no commits: the
     /// connection reads their changes (`change_capture::table_changes`).
     Tables(BTreeSet<String>),
@@ -51,7 +51,7 @@ impl StreamCapture {
                 Some(_) => {
                     let shapes = database.table_shapes()?;
                     let scoped = match &database.handle {
-                        Some(handle) => ImageColumns::scoped(&shapes, &handle.scoped_columns()),
+                        Some(handle) => ImageColumns::kept(&shapes, &handle.kept_columns()),
                         None => std::collections::HashMap::new(),
                     };
                     Recorded::Rows { shapes, changes: PreUpdateChanges::new(scoped) }

@@ -1,10 +1,13 @@
-//! Convert transaction changes into read dependencies before commit.
+//! Convert transaction changes into read dependencies before commit: each
+//! operation on a row a key names, which `net_changes.rs` folds into the
+//! row's net change, and the changes no key names.
 
 use crate::authorization::HostError;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::connection::table_shapes::{Shadow, TableShape, TableShapes};
 use crate::connection::HostSql;
+use crate::net_changes::{Captured, ColumnChange, RowOperation};
 use crate::{RowChange, RowImage, SqlValue};
 use rusqlite::{
     fallible_streaming_iterator::FallibleStreamingIterator, hooks::Action, session::ChangesetIter,
@@ -12,22 +15,25 @@ use rusqlite::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// The columns waiting live queries' scopes test, by table, lowercase.
-pub(crate) type ScopedColumns = BTreeMap<String, BTreeSet<String>>;
+/// The columns of each table live queries read or test, whose values a
+/// write keeps of the rows it changes, by table, lowercase
+/// (`Handle::kept_columns`).
+pub(crate) type KeptColumns = BTreeMap<String, BTreeSet<String>>;
 
-/// The columns a table's row images hold: its key's, then those `scoped`
+/// The columns a table's row images hold: its key's, then those `kept`
 /// names, each with its position among `names`.
 fn image_columns(
     names: &[&str],
     key: impl Fn(usize) -> bool,
-    scoped: Option<&BTreeSet<String>>,
+    kept: Option<&BTreeSet<String>>,
 ) -> (Arc<[String]>, Vec<usize>) {
-    let positions: Vec<usize> = (0..names.len())
-        .filter(|index| key(*index))
-        .chain((0..names.len()).filter(|index| {
-            !key(*index) && scoped.is_some_and(|scoped| scoped.contains(names[*index]))
-        }))
-        .collect();
+    let positions: Vec<usize> =
+        (0..names.len())
+            .filter(|index| key(*index))
+            .chain((0..names.len()).filter(|index| {
+                !key(*index) && kept.is_some_and(|kept| kept.contains(names[*index]))
+            }))
+            .collect();
     let columns = positions.iter().map(|index| names[*index].to_owned()).collect();
     (columns, positions)
 }
@@ -40,7 +46,7 @@ fn image_columns(
 fn changed_shapes<'a, F: HostError, R: HostError>(
     shapes: &'a TableShapes,
     table: &str,
-    changes: &mut Vec<RowChange>,
+    changes: &mut Captured,
 ) -> Result<Vec<&'a TableShape>, crate::Error<F, R>> {
     let shape = shapes
         .position(table)
@@ -63,30 +69,35 @@ fn changed_shapes<'a, F: HostError, R: HostError>(
 pub(crate) fn table_changes<P: Policy>(
     database: &HostSql<P>,
     mut tables: BTreeSet<String>,
-) -> Result<Vec<RowChange>, PolicyError<P>> {
+) -> Result<Captured, PolicyError<P>> {
     let shapes = database.table_shapes()?;
     for table in tables.clone() {
         if let Some(parent) = shapes.parent(&table) {
             tables.insert(parent.to_owned());
         }
     }
-    Ok(tables
-        .into_iter()
-        .map(|table| RowChange { table, column: String::new(), rows: None })
-        .collect())
+    Ok(Captured::unkeyed(
+        tables
+            .into_iter()
+            .map(|table| RowChange { table, column: String::new(), rows: None })
+            .collect(),
+    ))
 }
 
+/// What a session's changeset `bytes` holds, with the values of the
+/// columns `kept` names: one operation for each row it changed, which the
+/// session already gives as the row's net change since the session began.
 pub(crate) fn changes<P: Policy>(
     database: &HostSql<P>,
     bytes: &[u8],
-    scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, PolicyError<P>> {
+    kept: &KeptColumns,
+) -> Result<Captured, PolicyError<P>> {
     let mut input = bytes;
     let input: &mut dyn std::io::Read = &mut input;
     let mut items = ChangesetIter::start_strm(&input)?;
     let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
-    let mut changes = Vec::new();
+    let mut changes = Captured::default();
     while let Some(item) = items.next()? {
         let operation = item.op()?;
         for columns in changed_shapes(&shapes, operation.table_name(), &mut changes)? {
@@ -116,14 +127,12 @@ pub(crate) fn changes<P: Policy>(
             let pk = item.pk()?;
             let (image, positions) = images
                 .entry(table.clone())
-                .or_insert_with(|| {
-                    image_columns(&names, |index| pk[index] != 0, scoped.get(&table))
-                })
+                .or_insert_with(|| image_columns(&names, |index| pk[index] != 0, kept.get(&table)))
                 .clone();
             let mut before = Vec::with_capacity(names.len());
             let mut after = Vec::with_capacity(names.len());
             let mut changed = Vec::new();
-            for (index, name) in names.iter().enumerate() {
+            for (index, key) in pk.iter().enumerate() {
                 let old = if operation.code() == Action::SQLITE_INSERT {
                     None
                 } else {
@@ -134,7 +143,7 @@ pub(crate) fn changes<P: Policy>(
                 } else {
                     value(item.new_value(index), index)?
                 };
-                if pk[index] != 0 {
+                if *key != 0 {
                     // An UPDATE includes the old key and omits unchanged new keys.
                     let new = match (operation.code(), new) {
                         (Action::SQLITE_UPDATE, None) => old.clone(),
@@ -143,20 +152,41 @@ pub(crate) fn changes<P: Policy>(
                     before.push(Some(old.unwrap_or(SqlValue::Null)));
                     after.push(Some(new.unwrap_or(SqlValue::Null)));
                 } else {
-                    if old.is_some() || new.is_some() {
-                        changed.push((*name).to_owned());
+                    // An UPDATE holds only the columns it changed; an insert
+                    // or a delete changes every column.
+                    if operation.code() != Action::SQLITE_UPDATE || old.is_some() || new.is_some() {
+                        changed.push(index);
                     }
                     before.push(old);
                     after.push(new);
                 }
             }
+            let key: Vec<SqlValue> = (0..names.len())
+                .filter(|index| pk[*index] != 0)
+                .map(|index| {
+                    let side =
+                        if operation.code() == Action::SQLITE_INSERT { &after } else { &before };
+                    side[index].clone().unwrap_or(SqlValue::Null)
+                })
+                .collect();
+            let column_changes = changed
+                .iter()
+                .map(|index| {
+                    ColumnChange::new(
+                        names[*index].to_owned(),
+                        positions.contains(index),
+                        before[*index].clone(),
+                        after[*index].clone(),
+                    )
+                })
+                .collect();
             let row = |values: &[Option<SqlValue>]| {
                 RowImage::new(
                     Arc::clone(&image),
                     positions.iter().map(|index| values[*index].clone()).collect(),
                 )
             };
-            let rows = match operation.code() {
+            let (old, new) = match operation.code() {
                 Action::SQLITE_INSERT => (None, Some(row(&after))),
                 Action::SQLITE_DELETE => (Some(row(&before)), None),
                 _ => {
@@ -177,21 +207,15 @@ pub(crate) fn changes<P: Policy>(
                     (Some(row(&before)), Some(row(&after)))
                 }
             };
-            if operation.code() == Action::SQLITE_UPDATE {
+            changes.record(RowOperation {
+                table,
+                key,
+                before: old,
+                after: new,
+                columns: column_changes,
                 // Sessions omit generated columns; they can change with their inputs.
-                changed.extend(
-                    columns
-                        .columns
-                        .iter()
-                        .filter(|(_, _, hidden)| *hidden)
-                        .map(|(name, _, _)| name.clone()),
-                );
-            } else {
-                changed = vec![String::new()];
-            }
-            for column in changed {
-                changes.push(RowChange { table: table.clone(), column, rows: Some(rows.clone()) });
-            }
+                generated: columns.generated(),
+            });
         }
     }
     Ok(changes)
@@ -249,15 +273,16 @@ fn value(
 /// Each operation counts as a session change of its row would: inserts and
 /// deletes change the whole row, updates each column whose value changed,
 /// and a primary-key update deletes the old key's row and inserts the new.
-/// Tables with no primary key report table-wide changes.
+/// Each operation on a row a key names folds into the row's net change;
+/// tables with no primary key report table-wide changes.
 pub(crate) fn event_changes<P: Policy>(
     database: &HostSql<P>,
     events: &[crate::connection::Operation],
-    scoped: &ScopedColumns,
-) -> Result<Vec<RowChange>, PolicyError<P>> {
+    kept: &KeptColumns,
+) -> Result<Captured, PolicyError<P>> {
     let shapes = database.table_shapes()?;
     let mut images = BTreeMap::<String, (Arc<[String]>, Vec<usize>)>::new();
-    let mut changes = Vec::new();
+    let mut changes = Captured::default();
     for event in events {
         for fields in changed_shapes(&shapes, &event.table, &mut changes)? {
             let table = fields.name.clone();
@@ -270,47 +295,73 @@ pub(crate) fn event_changes<P: Policy>(
                 .or_insert_with(|| {
                     let names: Vec<&str> =
                         fields.columns.iter().map(|(name, _, _)| name.as_str()).collect();
-                    image_columns(&names, |index| fields.columns[index].1, scoped.get(&table))
+                    image_columns(&names, |index| fields.columns[index].1, kept.get(&table))
                 })
                 .clone();
+            let at =
+                |values: &[Option<SqlValue>], index: usize| values.get(index).cloned().flatten();
             let key = |values: &[Option<SqlValue>]| {
-                fields
-                    .columns
-                    .iter()
-                    .zip(values.iter().map(Some).chain(std::iter::repeat(None)))
-                    .filter(|((_, pk, _), _)| *pk)
-                    .map(|(_, value)| value.and_then(Option::clone).unwrap_or(SqlValue::Null))
+                (0..fields.columns.len())
+                    .filter(|index| fields.columns[*index].1)
+                    .map(|index| at(values, index).unwrap_or(SqlValue::Null))
                     .collect::<Vec<_>>()
             };
             let row = |values: &[Option<SqlValue>]| {
                 RowImage::new(
                     Arc::clone(&image),
-                    positions.iter().map(|index| values.get(*index).cloned().flatten()).collect(),
+                    positions.iter().map(|index| at(values, *index)).collect(),
                 )
             };
-            let whole =
-                |rows| RowChange { table: table.clone(), column: String::new(), rows: Some(rows) };
+            // The stored columns outside the key `changed` picks, with the
+            // values the transaction keeps of them.
+            let columns = |old: &[Option<SqlValue>],
+                           new: &[Option<SqlValue>],
+                           changed: &dyn Fn(usize) -> bool| {
+                fields
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, (_, pk, hidden))| !pk && !hidden && changed(*index))
+                    .map(|(index, (name, _, _))| {
+                        ColumnChange::new(
+                            name.clone(),
+                            positions.contains(&index),
+                            at(old, index),
+                            at(new, index),
+                        )
+                    })
+                    .collect()
+            };
+            let operation = |key, before, after, columns| RowOperation {
+                table: table.clone(),
+                key,
+                before,
+                after,
+                columns,
+                // A generated column changes with the stored columns it reads.
+                generated: fields.generated(),
+            };
+            let inserted = |new: &[Option<SqlValue>]| {
+                operation(key(new), None, Some(row(new)), columns(&[], new, &|_| true))
+            };
+            let deleted = |old: &[Option<SqlValue>]| {
+                operation(key(old), Some(row(old)), None, columns(old, &[], &|_| true))
+            };
             match event.action {
-                Action::SQLITE_INSERT => changes.push(whole((None, Some(row(&event.new))))),
-                Action::SQLITE_DELETE => changes.push(whole((Some(row(&event.old)), None))),
+                Action::SQLITE_INSERT => changes.record(inserted(&event.new)),
+                Action::SQLITE_DELETE => changes.record(deleted(&event.old)),
                 _ if key(&event.old) != key(&event.new) => {
-                    changes.push(whole((Some(row(&event.old)), None)));
-                    changes.push(whole((None, Some(row(&event.new)))));
+                    changes.record(deleted(&event.old));
+                    changes.record(inserted(&event.new));
                 }
-                _ => {
-                    let rows = (Some(row(&event.old)), Some(row(&event.new)));
-                    for (index, (name, pk, hidden)) in fields.columns.iter().enumerate() {
-                        // Sessions omit generated columns; they can change with their inputs.
-                        if *pk || (!*hidden && event.old.get(index) == event.new.get(index)) {
-                            continue;
-                        }
-                        changes.push(RowChange {
-                            table: table.clone(),
-                            column: name.clone(),
-                            rows: Some(rows.clone()),
-                        });
-                    }
-                }
+                _ => changes.record(operation(
+                    key(&event.old),
+                    Some(row(&event.old)),
+                    Some(row(&event.new)),
+                    columns(&event.old, &event.new, &|index| {
+                        event.old.get(index) != event.new.get(index)
+                    }),
+                )),
             }
         }
     }

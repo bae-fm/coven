@@ -7,7 +7,7 @@
 use super::HostSql;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
-use crate::RowChange;
+use crate::net_changes::Captured;
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
@@ -129,11 +129,12 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
         run(self.database)
     }
 
-    /// Judge `outcome`'s changes for the handle's live queries, commit and
-    /// report them; or roll back, when `outcome` or any of that fails.
+    /// Judge `outcome`'s changes, each row's net change over the
+    /// transaction, for the handle's live queries, commit and report them;
+    /// or roll back, when `outcome` or any of that fails.
     pub(super) fn commit<T, E: crate::RollbackJoin<P::Failure, P::Refusal>>(
         &self,
-        outcome: Result<(T, Vec<RowChange>), E>,
+        outcome: Result<(T, Captured), E>,
     ) -> Result<T, E> {
         let database = &*self.database;
         let failed = lock_unpoisoned(&self.hook_failure).take();
@@ -143,7 +144,7 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
         };
         let result = outcome.and_then(|(result, changes)| {
             let judged = match &database.handle {
-                Some(handle) => Some(database.judge(handle, changes)?),
+                Some(handle) => Some(database.judge(handle, changes.finish())?),
                 None => None,
             };
             #[cfg(any(test, feature = "test-utils"))]

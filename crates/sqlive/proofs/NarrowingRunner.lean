@@ -7,8 +7,8 @@ a case it can't read fails on stderr with a nonzero exit.
 Input: `schema` (`tables`, `views`), `statement` (a query tree whose FROM
 items name the shapes sqlive reads whole), the database `before` and `after`
 a write, the write's row `changes` in order, and whether a question that
-judged the write `stopped` at sqlive's step limit. Output: whether the write
-reruns the statement (`Statement.rerunsLimited`), whether the statement is well formed
+judged the write `stopped` at sqlive's step limit. Output: whether the write's
+net change of each row (`net`) reruns the statement (`Statement.rerunsLimited`), whether the statement is well formed
 (`Statement.wellFormed`), whether the model reads it whole, each table's
 scope, and the statement's rows before and after. -/
 open Lean SqliveNarrowing
@@ -28,7 +28,7 @@ def run (input : Json) : Except String Json := do
     (scopes.bind fun scopeOf => scopeOf t).map fun scope =>
       ((schema.tables.getD t default).1, Lean.Json.str (toString (repr scope)))
   pure <| Json.mkObj [
-    ("reruns", toJson (s.rerunsLimited db changes db' stopped)),
+    ("reruns", toJson (s.rerunsLimited db (net changes) db' stopped)),
     ("wellFormed", toJson s.wellFormed),
     ("whole", toJson scopes.isNone),
     ("scopes", Json.mkObj shown),

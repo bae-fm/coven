@@ -47,6 +47,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Disjunction.HoldsIn.bound
 #print axioms SqliveNarrowing.result_mask
 #print axioms SqliveNarrowing.Writes.unjudged
+#print axioms SqliveNarrowing.unjudged_slots
 #print axioms SqliveNarrowing.unjudged_rows
 #print axioms SqliveNarrowing.whole_narrowing_sound
 #print axioms SqliveNarrowing.reruns_whole
@@ -138,3 +139,12 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.lookup_complete
 #print axioms SqliveNarrowing.index_judges_alike
 #print axioms SqliveNarrowing.indexed_narrowing_sound
+#print axioms SqliveNarrowing.SlotWrites.firstOld_eq
+#print axioms SqliveNarrowing.SlotWrites.lastNew_eq
+#print axioms SqliveNarrowing.net_writes
+#print axioms SqliveNarrowing.mem_net
+#print axioms SqliveNarrowing.net_sound
+#print axioms SqliveNarrowing.indexed_net_sound
+#print axioms SqliveNarrowing.net_judges_states
+#print axioms SqliveNarrowing.net_unchanged
+#print axioms SqliveNarrowing.net_reruns_imp

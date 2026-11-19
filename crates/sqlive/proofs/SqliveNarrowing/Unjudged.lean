@@ -129,6 +129,67 @@ theorem Db.mask_slot (reads : List (Nat × List Nat)) (db : Db) (t n : Nat) :
     simp only [Db.mask, Db.slot, hf, List.getElem?_map]
     cases (db t)[n]? <;> rfl
 
+/-- What sqlive keeps of row `x` of a slot of table `t` for statement `s`:
+the row masked to the columns `s` reads of the table, and nothing of a table
+`s` doesn't read. -/
+def Statement.keptSlot (s : Statement) (t : Nat) (x : Option Row) : Option Row :=
+  match s.reads.find? (·.1 == t) with
+  | some (_, columns) => x.map (maskRow columns)
+  | none => none
+
+/-- Whether row `x` of a slot of table `t` passes the table's scope as the
+judge tests it, for the run that read `db`, with lookups in what sqlive keeps
+of `db'`: never for a table `s` doesn't read. -/
+def Statement.slotPasses (s : Statement) (db db' : Db) (t : Nat) (x : Option Row) : Bool :=
+  match s.reads.find? (·.1 == t) with
+  | some _ => x.any (scopePasses s ((s.tableScopes db).getD fun _ => none) s.reads db' t)
+  | none => false
+
+/-- When the judge lets a write pass, each slot whose kept row the write
+changes holds rows that fail its table's scope, before the write and after
+it. -/
+theorem unjudged_slots {s : Statement} {db db' : Db} {changes : List Change}
+    (hw : Writes db changes db') (hr : s.reruns db changes db' = false) :
+    ∀ t n, s.keptSlot t (db.slot t n) ≠ s.keptSlot t (db'.slot t n) →
+      s.slotPasses db db' t (db.slot t n) = false ∧
+        s.slotPasses db db' t (db'.slot t n) = false := by
+  have hcols : ∀ t columns, s.reads.find? (·.1 == t) = some columns →
+      readColumns s.reads t = columns.2 := by
+    intro t columns h; simp [readColumns, h]
+  have hP : ∀ t x y, s.keptSlot t x = s.keptSlot t y →
+      s.slotPasses db db' t x = s.slotPasses db db' t y := by
+    intro t x y h
+    unfold Statement.keptSlot at h
+    unfold Statement.slotPasses
+    cases hf : s.reads.find? (·.1 == t) with
+    | none => rfl
+    | some read =>
+      rw [hf] at h
+      obtain ⟨_, columns⟩ := read
+      simp only at h ⊢
+      unfold scopePasses
+      rw [hcols t _ hf]
+      cases x <;> cases y <;> simp_all
+  have hj : ∀ ch ∈ changes, s.keptSlot ch.table ch.old ≠ s.keptSlot ch.table ch.new →
+      s.slotPasses db db' ch.table ch.old = false ∧
+        s.slotPasses db db' ch.table ch.new = false := by
+    intro ch hch hne
+    unfold Statement.keptSlot at hne
+    unfold Statement.slotPasses
+    cases hf : s.reads.find? (·.1 == ch.table) with
+    | none => rw [hf] at hne; exact absurd rfl hne
+    | some read =>
+      rw [hf] at hne
+      obtain ⟨_, columns⟩ := read
+      simp only at hne ⊢
+      have hchanged : changedIn columns ch.old ch.new = true := changedIn_iff.mpr hne
+      unfold Statement.reruns reruns at hr
+      have := List.any_eq_false.mp hr ch hch
+      rw [hf] at this
+      simp only [hchanged, Bool.true_and, Bool.or_eq_true, not_or, Bool.not_eq_true] at this
+      exact this
+  exact hw.unjudged hP hj
+
 /-- When the judge lets a write pass, what sqlive keeps of each table holds,
 before and after the write, the same rows that pass the table's scope, with
 lookups in what it keeps of the database after the write. -/
@@ -161,23 +222,9 @@ theorem unjudged_rows {s : Statement} {db db' : Db} {changes : List Change}
       unfold scopePasses
       rw [hcols t _ hf]
       cases x <;> cases y <;> simp_all
-  have hj : ∀ ch ∈ changes, m ch.table ch.old ≠ m ch.table ch.new →
-      P ch.table ch.old = false ∧ P ch.table ch.new = false := by
-    intro ch hch hne
-    simp only [m, P] at hne ⊢
-    cases hf : s.reads.find? (·.1 == ch.table) with
-    | none => rw [hf] at hne; exact absurd rfl hne
-    | some read =>
-      rw [hf] at hne
-      obtain ⟨_, columns⟩ := read
-      simp only at hne ⊢
-      have hchanged : changedIn columns ch.old ch.new = true := changedIn_iff.mpr hne
-      unfold Statement.reruns reruns at hr
-      have := List.any_eq_false.mp hr ch hch
-      rw [hf] at this
-      simp only [hchanged, Bool.true_and, Bool.or_eq_true, not_or, Bool.not_eq_true] at this
-      exact this
-  have hslots := hw.unjudged hP hj
+  have hslots : ∀ t n, m t (db.slot t n) ≠ m t (db'.slot t n) →
+      P t (db.slot t n) = false ∧ P t (db'.slot t n) = false :=
+    unjudged_slots hw hr
   have hmask : ∀ (d : Db) n, ((d.mask s.reads t)[n]?).join = m t (d.slot t n) := by
     intro d n
     exact Db.mask_slot s.reads d t n

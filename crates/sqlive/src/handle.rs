@@ -5,9 +5,9 @@
 
 use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
+use crate::kept_counts::KeptCounts;
 use crate::read_index::{ReadIndex, SubscriptionId};
 use crate::read_set::{affected_by, past_row_limit};
-use crate::scoped_counts::ScopedCounts;
 use crate::{affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange};
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{Bug, BugSinkRef};
@@ -110,10 +110,10 @@ enum Tracking {
 }
 
 impl Tracking {
-    /// The reads whose scopes a write records values for: those waited on,
-    /// or, while a run reads, its previous run's, which a run with the
-    /// same statements tests again.
-    fn scoped(&self) -> &Arc<ReadSet> {
+    /// The reads whose values a write keeps: those waited on, or, while a
+    /// run reads, its previous run's, which a run with the same statements
+    /// reads and tests again.
+    fn kept(&self) -> &Arc<ReadSet> {
         match self {
             Self::Reading { previous: reads, .. } | Self::Waiting(reads) => reads,
         }
@@ -297,7 +297,7 @@ impl CommitSubscription {
     /// until now test.
     pub fn begin(&self) {
         self.track(|tracked| {
-            let previous = Arc::clone(tracked.tracking.scoped());
+            let previous = Arc::clone(tracked.tracking.kept());
             tracked.set(Tracking::Reading { commits: Vec::new(), previous });
         });
         self.shared.entry.state.send_modify(|state| state.changed = false);
@@ -452,8 +452,8 @@ enum Filing {
 }
 
 impl Filing {
-    /// The reads whose scopes a write records values for (`Tracking::scoped`).
-    fn scoped(&self) -> &ReadSet {
+    /// The reads whose values a write keeps (`Tracking::kept`).
+    fn kept(&self) -> &ReadSet {
         match self {
             Self::Waiting { reads, .. } | Self::Reading { previous: reads } => reads,
         }
@@ -462,13 +462,14 @@ impl Filing {
 
 /// A handle's subscriptions by how each tracked commits when the handle last
 /// filed it: those waiting on known reads by their reads, and those whose
-/// runs were reading; and the columns their scopes test.
+/// runs were reading; and the columns of each table they read that a write
+/// keeps.
 #[derive(Default)]
 struct Filed {
     filings: HashMap<SubscriptionId, Filing>,
     waiting: ReadIndex,
     reading: BTreeSet<SubscriptionId>,
-    scoped: ScopedCounts,
+    kept: KeptCounts,
 }
 
 impl Filed {
@@ -485,7 +486,7 @@ impl Filed {
                 Filing::Reading { previous: Arc::clone(previous) }
             }
         };
-        self.scoped.add(filing.scoped());
+        self.kept.add(filing.kept());
         self.filings.insert(id, filing);
     }
 
@@ -494,7 +495,7 @@ impl Filed {
         let Some(filing) = self.filings.remove(&id) else {
             return;
         };
-        self.scoped.remove(filing.scoped());
+        self.kept.remove(filing.kept());
         match filing {
             Filing::Waiting { reads, .. } => self.waiting.remove(id, &reads),
             Filing::Reading { .. } => {
@@ -811,13 +812,15 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
         self.with_state(|state| state.commit(&changes, &verdicts, scope));
     }
 
-    /// The columns some subscription's scope tests, by table, all
-    /// lowercase: a waiting one's, or a running one's previous run's. A
-    /// write records those values of the rows it changes there. A change to
-    /// any other table needs no values to wake the subscriptions that read
-    /// it.
-    pub fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.with_state(|state| state.filed.scoped.columns())
+    /// The columns some subscription reads or its scope tests, by table,
+    /// all lowercase: a waiting one's, or a running one's previous run's.
+    /// Each table such a subscription reads is here, with no column where
+    /// it reads none. A write keys the rows it changes in these tables and
+    /// keeps those values of them, so it can tell each row's net change and
+    /// test the row against the scopes (`net_changes.rs`). A change to any
+    /// other table needs no values to wake the subscriptions that read it.
+    pub fn kept_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.with_state(|state| state.filed.kept.columns())
     }
 
     /// What every call on the handle fails with: its failure, or

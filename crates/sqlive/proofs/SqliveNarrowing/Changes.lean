@@ -8,11 +8,11 @@ its clauses name, and every column of a table it reads in a query whose rows
 SQLite picks or a compound or core whose rows follow the order SQLite reads
 its rows in (`unreported_columns.rs`), or in a parenthesized join, whose
 every column SQLite's authorizer reports. sqlive keeps of a changed row only
-the values a scope tests (`pre_update_changes.rs`), so the model tests the
-row masked to the columns the statement reads. A join's lookups read the
-database the write leaves, as sqlive judges a write in the write's own
-transaction before it commits; the model looks up in that database masked
-the same way, which gives the statement's rows unchanged
+the values of the columns live queries read or test (`pre_update_changes.rs`),
+so the model tests the row masked to the columns the statement reads. A
+join's lookups read the database the write leaves, as sqlive judges a write
+in the write's own transaction before it commits; the model looks up in that
+database masked the same way, which gives the statement's rows unchanged
 (`Mask.result_mask`). -/
 namespace SqliveNarrowing
 
@@ -277,5 +277,51 @@ def reruns (s : Statement) (scopeOf : Nat → Option RScope)
     | some (_, columns) =>
       let passes := scopePasses s scopeOf reads db' ch.table
       changedIn columns ch.old ch.new && (ch.old.any passes || ch.new.any passes)
+
+/-! A write can change one row more than once. sqlive judges each row's net
+change instead (`net_changes.rs`): the row before the write's first change of
+it and after the write's last, and none for a row that ends as it began. The
+model names each row by its slot, its rowid (`Net.lean`). -/
+
+/-- One row change of a write with the slot it changes, the rowid of the
+row. -/
+structure SlotChange where
+  table : Nat
+  slot : Nat
+  old : Option Row
+  new : Option Row
+
+/-- The change, without its slot, as the judge reads it. -/
+def SlotChange.change (c : SlotChange) : Change := ⟨c.table, c.old, c.new⟩
+
+/-- The table and slot the change changes. -/
+def SlotChange.place (c : SlotChange) : Nat × Nat := (c.table, c.slot)
+
+/-- The elements of a list, each once, where it first appears. -/
+def distinct : List (Nat × Nat) → List (Nat × Nat)
+  | [] => []
+  | p :: ps => p :: (distinct ps).filter (· != p)
+
+/-- The slots a write changes, each once, in the order it first changes
+them. -/
+def touched (cs : List SlotChange) : List (Nat × Nat) := distinct (cs.map SlotChange.place)
+
+/-- The row slot `p` held before the write's first change of it. -/
+def firstOld (cs : List SlotChange) (p : Nat × Nat) : Option Row :=
+  ((cs.find? (·.place == p)).map (·.old)).join
+
+/-- The row slot `p` holds after the write's last change of it. -/
+def lastNew (cs : List SlotChange) (p : Nat × Nat) : Option Row :=
+  ((cs.reverse.find? (·.place == p)).map (·.new)).join
+
+/-- The write's net change of each slot it changes, from its row before the
+first change of it to its row after the last, and none for a slot whose row
+ends as it began. -/
+def netSlots (cs : List SlotChange) : List SlotChange :=
+  (touched cs).filterMap fun p =>
+    if firstOld cs p = lastNew cs p then none else some ⟨p.1, p.2, firstOld cs p, lastNew cs p⟩
+
+/-- The net changes, as the judge reads them. -/
+def net (cs : List SlotChange) : List Change := (netSlots cs).map SlotChange.change
 
 end SqliveNarrowing

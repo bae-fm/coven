@@ -8,7 +8,7 @@ use super::transaction_capture::{ChangeCapture, SupplementalChanges};
 use super::write_transaction::WriteTransaction;
 use super::HostSql;
 use crate::authorization::Policy;
-use crate::RowChange;
+use crate::net_changes::Captured;
 
 impl<P: Policy> HostSql<P> {
     /// Run `app` while the pre-update hook keeps each operation on the
@@ -54,7 +54,7 @@ impl<P: Policy> HostSql<P> {
                 transaction.stop_observing_operations()?;
                 transaction.keep_schema_cookie();
                 let ((), rows) = phases(&mut transaction, app, host)?;
-                changes.extend(rows);
+                changes.append(rows);
             }
             Ok((result, changes))
         });
@@ -63,14 +63,14 @@ impl<P: Policy> HostSql<P> {
 }
 
 /// Runs the phases of a write on `transaction`, whose connection holds the
-/// transaction and whose hooks this sets. Returns the host's result and the
-/// row changes that the commit sends to the live queries; `transaction`
-/// commits or rolls back with them.
+/// transaction and whose hooks this sets. Returns the host's result and
+/// what the phases changed, which the commit sends to the live queries as
+/// each row's net change; `transaction` commits or rolls back with them.
 fn phases<P: Policy, A, T, E: crate::RollbackJoin<P::Failure, P::Refusal>>(
     transaction: &mut WriteTransaction<'_, P>,
     app: impl FnOnce(&HostSql<P>, &dyn Fn() -> Vec<Operation>) -> Result<A, E>,
     host: impl FnOnce(&HostSql<P>, &[Operation], A) -> Result<T, E>,
-) -> Result<(T, Vec<RowChange>), E> {
+) -> Result<(T, Captured), E> {
     let recording = EventCapture::begin(transaction);
     let begun = recording.map_err(E::from).and_then(|recording| {
         transaction.within(|database| {
@@ -99,16 +99,16 @@ fn phases<P: Policy, A, T, E: crate::RollbackJoin<P::Failure, P::Refusal>>(
             let result = host(database, &operations, begun)?;
             database.require_transaction()?;
             if database.observation.is_some() {
-                let scoped =
-                    database.handle.as_ref().map(crate::Handle::scoped_columns).unwrap_or_default();
-                let mut app = crate::change_capture::event_changes(database, &operations, &scoped)?;
-                app.append(&mut changes);
+                let kept =
+                    database.handle.as_ref().map(crate::Handle::kept_columns).unwrap_or_default();
+                let mut app = crate::change_capture::event_changes(database, &operations, &kept)?;
+                app.append(changes);
                 changes = app;
             } else {
-                changes.clear();
+                changes = Captured::default();
             }
             if let Some(capture) = &mut capture {
-                changes.extend(capture.take_changes()?);
+                changes.append(capture.take_changes()?);
             }
             Ok((result, changes))
         })

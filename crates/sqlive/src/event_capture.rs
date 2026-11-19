@@ -62,7 +62,7 @@ impl EventCapture {
             );
             let tables = database.table_shapes()?;
             let scoped = match &database.handle {
-                Some(handle) => ImageColumns::scoped(&tables, &handle.scoped_columns()),
+                Some(handle) => ImageColumns::kept(&tables, &handle.kept_columns()),
                 None => std::collections::HashMap::new(),
             };
             Ok::<_, PolicyError<P>>((tables, recorded, scoped))
@@ -142,7 +142,7 @@ impl EventCapture {
     }
 
     /// The device-local tables' changes, as live queries read them.
-    pub(super) fn local_changes(&self) -> Vec<crate::RowChange> {
+    pub(super) fn local_changes(&self) -> crate::net_changes::Captured {
         std::mem::take(&mut lock_unpoisoned(&self.events).local).finish(&self.shapes)
     }
 

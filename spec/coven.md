@@ -728,6 +728,21 @@ can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.
 
+Coven judges each row a write changes by the row's net change: the row as it was
+before the write and as it is when the write commits. A write can change one row
+more than once. Ben's import marks a folder busy as a write starts to read its
+files, and marks it idle again before the write commits. His music app rewrites
+an album's list row with `INSERT OR REPLACE`, which SQLite runs as a delete and
+an insert even when every value comes out the same. Neither row changed, so
+neither write runs a live query again. A column that ends with the value it
+began with changed nothing either, and a row changed twice runs a query again as
+one change from its first values to its last would. For each row a write changes
+in a table that some live query reads, coven keeps the row's key and the values
+of the columns live queries read or narrow by, as they were before the write
+first changed the row and after it last did. A column whose values coven doesn't
+keep counts as changed once a statement changes it, and so does every column of
+a table with no primary key, since no key names its rows.
+
 Within a table, a statement that reads one table depends only on the rows its
 WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
 `<=`, `>`, `>=` or `IN` with a list, and conditions like these joined by AND
@@ -1175,9 +1190,9 @@ table. Ben's library search reads `a.id IN (SELECT album_id FROM
 album_search WHERE title GLOB ?1)`: an edit to an album the search doesn't
 find doesn't rerun it, and neither does a search row whose title the pattern
 doesn't match. FTS5 deletes a row of its content table and inserts it again
-when an UPDATE names it. Where coven notes each row operation of a write, as
-it does for a device-local search index, it judges both, so a write to any
-column of a row the search finds reruns the search. A statement that names
+when an UPDATE names it. Coven judges the row's net change, one update of the
+columns whose values changed, so an UPDATE of a column the search doesn't read
+doesn't rerun it. A statement that names
 a column FTS5 adds narrows nothing, since coven can't judge one on a single
 row: `rank`, whose value depends on the table's other rows, and the column
 that bears the table's name, which `MATCH` and `bm25` name. An FTS5 table
@@ -1339,12 +1354,13 @@ statement with a recursive CTE of its own, or with `x IN table`, narrows
 nothing: it depends on every row of each table it read.
 
 Applying another device's slot narrows the same way. As the slot's rows change,
-coven notes each table's changed columns and, for a table a live query
-narrows, the changed rows' keys and the values that query tests, as it does for
-a local write; it runs the lookups in the slot's own transaction before it
-commits. Loading a snapshot and coven's upload and claim bookkeeping are noted
-the same way. When Ben's phone applies an edit his laptop made to another
-album's track, the album page open on his phone doesn't run again.
+coven notes each table's changed columns and, for a table a live query reads,
+the changed rows' keys and the values live queries read or test, and judges each
+row's net change, as it does for a local write; it runs the lookups in the
+slot's own transaction before it commits. Loading a snapshot and coven's upload
+and claim bookkeeping are noted the same way. When Ben's phone applies an edit
+his laptop made to another album's track, the album page open on his phone
+doesn't run again.
 
 Some changes rewrite a whole device-local table. Ben plays his library of
 100,000 tracks, and his music app empties its play queue, a device-local
@@ -1736,8 +1752,8 @@ how the app receives them.
   from 70.7 µs a row to 65.0 µs, and the merge state from 57.2 µs to 54.3 µs.
 - **Device-local tables.** Their row changes are kept only for live queries,
   since their rows never sync. Coven notes the tables and columns a write
-  changed. Only for a table a live query narrows does it also copy the
-  changed rows' keys and the values of the columns that query narrows by, and
+  changed. Only for a table a live query reads does it also copy the changed
+  rows' keys and the values of the columns live queries read or narrow by, and
   no other values. Filling a 1,000,000-row local
   table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
   took 0.35 s against 0.01 s: while coven's pre-update hook watches a write,
@@ -15410,7 +15426,7 @@ Write-ups explain each model and state its assumptions:
 | A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Virtual.lean` | §4 |
 | A statement read whole reruns on every write that any scopes rerun it on, so sqlive's judge, which narrows nothing for a write whose question stopped at the step limit, lets a write pass only when the judge without the limit does | `reruns_whole`, `Statement.rerunsLimited_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Judge.lean` | §4 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
-| A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
+| A write the judge lets pass leaves each slot whose masked row it changes holding rows that fail the table's scope before and after it, and each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_slots`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
 | A well-formed statement's own query names no item outside its cores, and a core run under a binding that holds a row of each outer item its query names that no LEFT JOIN adds runs its derived items' queries and its subqueries under such bindings too | `outer_root`, `outer_derived`, `outer_sub`, `outer_subOn` | `../crates/sqlive/proofs/SqliveNarrowing/Outer.lean` | §4 |
 | A query returns the same rows under two bindings that hold the same rows of the outer items it names, so each ON condition of a LEFT JOIN holds of each binding its core keeps that holds a row of the join's item | `evalQuery_outer_congr`, `Statement.on_kept` | `../crates/sqlive/proofs/SqliveNarrowing/Congr.lean` | §4 |
@@ -15428,6 +15444,7 @@ Write-ups explain each model and state its assumptions:
 | While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Held.lean` | §4 |
 | The planner's scopes keep their promise for every query at every fuel at which two databases return the same rows that matter; a write the judge lets pass, with the scopes the planner gives the run that read the database before it, leaves a well-formed statement's rows unchanged, the statement's own query with a LIMIT bound included, and so does a write sqlive's judge lets pass when a question stopped at the step limit | `plan_kept`, `narrowing_sound`, `narrowing_sound_limited` | `../crates/sqlive/proofs/SqliveNarrowing/Sound.lean` | §4 |
 | A row a scope passes holds one of its key's values in the key's column, so the index of live queries finds each query for every change that reruns it; the judge through the index reruns each query on exactly the writes the judge of every change reruns it on, and so lets pass only writes that leave a well-formed statement's rows unchanged | `key_passes`, `lookup_complete`, `index_judges_alike`, `indexed_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Index.lean` | §4 |
+| A write's net change of each row, from the row before its first change to the row after its last, takes the database before the write to the database after it, and holds exactly the rows that differ between the two; so the judge of the net changes lets pass only writes that leave a well-formed statement's rows unchanged, directly or through the index, its verdict depends only on the databases before and after, a write whose every row ends as it began reruns nothing, and it reruns a statement only where the judge of every change does | `firstOld_eq`, `lastNew_eq`, `net_writes`, `mem_net`, `net_sound`, `indexed_net_sound`, `net_judges_states`, `net_unchanged`, `net_reruns_imp` | `../crates/sqlive/proofs/SqliveNarrowing/Net.lean` | §4 |
 | When the judge lets a write pass, the tables before and after it hold the same rows that pass each item's test from the planner's scopes and passed edges, and a derived item's test keeps only rows that matter to its query; in a binding of the statement's own core that sorts at or before the last row, the LIMIT bound of each item the ORDER BY sorts passes the item's row when its memberships to other such items hold | `plan_restriction`, `Planned.bound_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Tests.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 

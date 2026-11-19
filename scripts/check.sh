@@ -590,7 +590,8 @@ proofs() {
             connection::live_judging::tests::narrowing_model::window_matches_lean \
             connection::live_judging::tests::narrowing_model::distinct_matches_lean \
             connection::live_judging::tests::narrowing_model::carry_matches_lean \
-            connection::live_judging::tests::narrowing_model::mixed_shapes_match_lean
+            connection::live_judging::tests::narrowing_model::mixed_shapes_match_lean \
+            connection::live_judging::tests::narrowing_model::net_change_matches_lean
     fi
 }
 

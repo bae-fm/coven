@@ -39,6 +39,8 @@ mod limit;
 mod mixed;
 #[path = "narrowing_model/nested_derived.rs"]
 mod nested_derived;
+#[path = "narrowing_model/net.rs"]
+mod net;
 #[path = "narrowing_model/nonstrict_edge.rs"]
 mod nonstrict_edge;
 #[path = "narrowing_model/one_of.rs"]
@@ -89,7 +91,7 @@ pub(super) const COLUMNS: [&str; 5] = ["id", "a", "b", "c", "n"];
 const TABLE_SQL: &str =
     "(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE)";
 /// The contentful FTS5 table, whose content table holds its rows.
-const SEARCH: &str = "s";
+pub(super) const SEARCH: &str = "s";
 
 /// The app's views, which the view rule's statements read: each with the
 /// columns its statements can name.
@@ -236,13 +238,13 @@ pub(super) fn value(rng: &mut Rng) -> Option<i64> {
     }
 }
 
-fn sql_value(value: Option<i64>) -> String {
+pub(super) fn sql_value(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_owned(), |value| value.to_string())
 }
 
 /// An insert of a row of `id` into `table`, as `verb`: into `SEARCH` with its
 /// rowid `id` too.
-fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> String {
+pub(super) fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> String {
     let (rowid, key) =
         if table == SEARCH { ("rowid, ", format!("{id}, ")) } else { ("", String::new()) };
     format!(
@@ -255,7 +257,7 @@ fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> String {
 }
 
 /// A write of one to three statements, each to one table.
-fn write(rng: &mut Rng) -> String {
+pub(super) fn write(rng: &mut Rng) -> String {
     let mut statements = Vec::new();
     for _ in 0..1 + rng.below(3) {
         let table = pick(rng, &TABLES);
@@ -315,11 +317,11 @@ fn snapshot(db: &TestDatabase) -> Json {
 }
 
 /// A copy of the database on a plain connection, which applies each write
-/// one statement at a time to find the rows each statement changes, as
-/// sqlive's capture reports them. `SEARCH`'s changes are those SQLite makes
-/// to its content table, which a hook on the copy records as sqlive's
-/// pre-update hook records the test's writes: FTS5 deletes and inserts again
-/// each row an UPDATE names, changed or not.
+/// one statement at a time to find the rows each statement changes, which
+/// the model folds into each row's net change as sqlive does. `SEARCH`'s
+/// changes are those SQLite makes to its content table, which a hook on the
+/// copy records as sqlive's pre-update hook records the test's writes: FTS5
+/// deletes and inserts again each row an UPDATE names, changed or not.
 struct Mirror {
     connection: rusqlite::Connection,
     /// The operations on `SEARCH`'s content table since the last statement,
@@ -478,13 +480,14 @@ fn register_nz(db: &TestDatabase) {
 /// Each write a statement's live query sees.
 const STEPS: usize = 12;
 
-/// Run one generated statement through random writes, comparing sqlive's
+/// Run one generated statement through `writes`, comparing sqlive's
 /// decisions with the model's and both with SQLite's rows.
 async fn run_case(
     runner: &std::ffi::OsStr,
     seed: u64,
     rule: &str,
     statement: &Query,
+    writes: fn(&mut Rng) -> String,
     rng: &mut Rng,
 ) -> usize {
     let sql = statement.sql();
@@ -513,7 +516,7 @@ async fn run_case(
     let mut spared = 0;
     for step in 0..STEPS {
         let before = snapshot(&db);
-        let change = write(rng);
+        let change = writes(rng);
         let changes = mirror.apply(&change);
         work.take();
         db.write(&change).unwrap();
@@ -568,8 +571,18 @@ async fn run_case(
     spared
 }
 
-/// Run `generate`'s statements, one a seed.
+/// Run `generate`'s statements, one a seed, through random writes.
 async fn differential(rule: &str, generate: fn(&mut Rng) -> Query) {
+    differential_with(rule, generate, write).await;
+}
+
+/// Run `generate`'s statements, one a seed, through the writes `writes`
+/// makes.
+async fn differential_with(
+    rule: &str,
+    generate: fn(&mut Rng) -> Query,
+    writes: fn(&mut Rng) -> String,
+) {
     let runner = std::env::var_os("SQLIVE_NARROWING_LEAN")
         .expect("SQLIVE_NARROWING_LEAN names narrowingRunner");
     let seeds: u64 = std::env::var("SQLIVE_NARROWING_SEEDS")
@@ -579,7 +592,7 @@ async fn differential(rule: &str, generate: fn(&mut Rng) -> Query) {
     for seed in 0..seeds {
         let mut rng = Rng::seeded(seed);
         let statement = generate(&mut rng);
-        spared += run_case(&runner, seed, rule, &statement, &mut rng).await;
+        spared += run_case(&runner, seed, rule, &statement, writes, &mut rng).await;
     }
     eprintln!("{rule}: {seeds} statements, {spared} writes neither reran");
     assert!(spared > 0, "{rule}: every write reran its statement, so nothing narrowed");
@@ -733,4 +746,10 @@ async fn carry_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn mixed_shapes_match_lean() {
     differential("mixed", mixed::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn net_change_matches_lean() {
+    differential_with("net change", net::statement, net::write).await;
 }

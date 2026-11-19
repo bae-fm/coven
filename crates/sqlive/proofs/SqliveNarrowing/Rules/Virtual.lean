@@ -6,11 +6,10 @@ content table, an ordinary table, holds its rows: the rowid in `id`, then
 each column in its place, so sqlive records each of the content table's row
 changes as the same change of the FTS5 table (`Shadow::Rows`). FTS5
 rewrites a row an UPDATE names: it deletes the content table's row and
-inserts it again. A session, and sqlive's capture of a write's operations,
-read the two as one update of the columns that changed; sqlive's pre-update
-hook judges two changes, the old row going and the new one coming.
-`rewrite_reruns` shows those two rerun a statement whenever the update as
-one change would. A statement that names a hidden column,
+inserts it again. sqlive folds the two into the row's net change, one update
+of the columns that changed (`Net.lean`). `rewrite_reruns` shows the two
+changes rerun a statement whenever the update as one change would, so a
+judge of each change would be sound too. A statement that names a hidden column,
 `rank` or the one that bears the table's name, as MATCH and `bm25` do, and
 one that reads any other virtual table, reads it whole (`WholeShape.virtual`).
 -/

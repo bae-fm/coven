@@ -216,7 +216,8 @@ fn a_failing_hook_rolls_its_transaction_back() {
             })
             .unwrap();
         transaction.within(|db| db.batch("INSERT INTO parent VALUES('p')")).unwrap();
-        let committed = transaction.commit(Ok::<_, TestError>(((), Vec::new())));
+        let committed =
+            transaction.commit(Ok::<_, TestError>(((), crate::net_changes::Captured::default())));
         assert!(matches!(committed, Err(crate::Error::Invariant { .. })), "{committed:?}");
     });
     assert_eq!(db.value::<i64>("SELECT count(*) FROM parent"), 0);

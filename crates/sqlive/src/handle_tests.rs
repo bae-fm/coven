@@ -87,13 +87,14 @@ fn a_run_that_reads_an_unrecorded_table_panics() {
     assert!(panicked.is_err());
 }
 
-/// A write learns the columns the live queries' scopes test from what the
+/// A write learns the columns the live queries read or test from what the
 /// handle filed, which it files again only for the subscriptions whose
 /// tracking changed since: a run that begins keeps its previous run's
 /// columns, one that finishes brings its own, and a dropped subscription
-/// takes its columns out.
+/// takes its columns out. A table read with no column it keeps is still
+/// there, since a write keys its rows.
 #[test]
-fn scoped_columns_read_only_the_subscriptions_that_changed() {
+fn kept_columns_read_only_the_subscriptions_that_changed() {
     let handle = text_handle(&Arc::<HeardBugs>::default());
     let narrowed = |table: &str, column: &str| {
         vec![TableRead {
@@ -123,33 +124,36 @@ fn scoped_columns_read_only_the_subscriptions_that_changed() {
     let albums = handle.subscribe();
     albums.begin();
     albums.finish(narrowed("Albums", "year"));
-    assert_eq!(
-        handle.scoped_columns(),
-        columns(&[("albums", &["year"]), ("tracks", &["release"])])
-    );
+    assert_eq!(handle.kept_columns(), columns(&[("albums", &["year"]), ("tracks", &["release"])]));
     assert_eq!(entries_read(), 201);
-    assert_eq!(
-        handle.scoped_columns(),
-        columns(&[("albums", &["year"]), ("tracks", &["release"])])
-    );
+    assert_eq!(handle.kept_columns(), columns(&[("albums", &["year"]), ("tracks", &["release"])]));
     assert_eq!(entries_read(), 0);
 
     albums.begin();
-    assert_eq!(
-        handle.scoped_columns(),
-        columns(&[("albums", &["year"]), ("tracks", &["release"])])
-    );
+    assert_eq!(handle.kept_columns(), columns(&[("albums", &["year"]), ("tracks", &["release"])]));
     assert_eq!(entries_read(), 1);
     albums.finish(narrowed("albums", "artist"));
     assert_eq!(
-        handle.scoped_columns(),
+        handle.kept_columns(),
         columns(&[("albums", &["artist"]), ("tracks", &["release"])])
     );
     assert_eq!(entries_read(), 1);
 
     drop(albums);
-    assert_eq!(handle.scoped_columns(), columns(&[("tracks", &["release"])]));
+    assert_eq!(handle.kept_columns(), columns(&[("tracks", &["release"])]));
+    let count = handle.subscribe();
+    count.begin();
+    count.finish(vec![TableRead {
+        table: "notes".into(),
+        columns: BTreeSet::new(),
+        scope: RowScope::All,
+        inserted_only: false,
+    }]);
+    assert_eq!(handle.kept_columns(), columns(&[("notes", &[]), ("tracks", &["release"])]));
+    assert_eq!(entries_read(), 1);
+    drop(count);
+    assert_eq!(handle.kept_columns(), columns(&[("tracks", &["release"])]));
     drop(pages);
-    assert_eq!(handle.scoped_columns(), columns(&[]));
+    assert_eq!(handle.kept_columns(), columns(&[]));
     assert_eq!(entries_read(), 0);
 }

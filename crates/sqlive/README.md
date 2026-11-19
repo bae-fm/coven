@@ -8,12 +8,13 @@ the display current.
 A `Database` opens one SQLite file, bundled through `rusqlite`, in WAL mode
 with one writer connection and several read-only connections. A write is one
 transaction on the writer. sqlive captures each row change the transaction
-makes and, when it commits, judges the changes to find the live queries whose
-results could differ now. sqlive judges them only against the live queries
-whose scopes the changed rows could pass, which it finds by the values the rows
-hold, so a write's judging doesn't grow with the number of live queries. Options
-can also start threads that checkpoint the WAL and keep the query planner's
-statistics.
+makes and, when it commits, judges each row's net change, from the row before
+the transaction to the row at its end, to find the live queries whose results
+could differ now: a row that ends as it began changes nothing. sqlive judges
+the changes only against the live queries whose scopes the changed rows could
+pass, which it finds by the values the rows hold, so a write's judging doesn't
+grow with the number of live queries. Options can also start threads that
+checkpoint the WAL and keep the query planner's statistics.
 
 ## Example
 

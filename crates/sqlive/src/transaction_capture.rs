@@ -6,6 +6,7 @@ use super::HostSql;
 use crate::authorization::HostError;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
+use crate::net_changes::Captured;
 use crate::RowChange;
 use crate::UnrecordedTables;
 use panic_as_error::locks::lock_unpoisoned;
@@ -106,12 +107,12 @@ impl<'a, P: Policy> ChangeCapture<'a, P> {
         Ok(capture)
     }
 
-    pub(super) fn take_changes(&mut self) -> Result<Vec<RowChange>, PolicyError<P>> {
+    pub(super) fn take_changes(&mut self) -> Result<Captured, PolicyError<P>> {
         let _scope = self.database.authorization.internal();
         let copied = self.changeset()?;
-        let scoped =
-            self.database.handle.as_ref().map(crate::Handle::scoped_columns).unwrap_or_default();
-        let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
+        let kept =
+            self.database.handle.as_ref().map(crate::Handle::kept_columns).unwrap_or_default();
+        let mut changes = crate::change_capture::changes(self.database, &copied, &kept)?;
         for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {
             let shapes = &self.supplemental.shapes;
             let shape = shapes.shape(position);

@@ -443,8 +443,9 @@ def readDb (schema : Schema) (j : Json) : Except String Db := do
     pure ((List.range size).map fun slot => (rows.find? (·.1 == slot)).map (·.2))
   pure fun t => tables.getD t []
 
-/-- A write's row changes, in order. -/
-def readChanges (schema : Schema) (j : Json) : Except String (List Change) :=
+/-- A write's row changes, in order, each with the slot it changes: the rowid
+in the first column of its row before or after. -/
+def readChanges (schema : Schema) (j : Json) : Except String (List SlotChange) :=
   (list j "changes").mapM fun c => do
     let name ← str c "table"
     let some t := schema.tables.findIdx? (·.1 == name) | throw s!"no table {name}"
@@ -452,6 +453,11 @@ def readChanges (schema : Schema) (j : Json) : Except String (List Change) :=
       match (c.getObjVal? key).toOption with
       | some (.arr values) => do pure (some (← values.toList.mapM value))
       | _ => pure none
-    pure { table := t, old := ← row "old", new := ← row "new" }
+    let old ← row "old"
+    let new ← row "new"
+    let slot ← match ((old.orElse fun _ => new).bind (·.head?)) with
+      | some (some id) => if id < 0 then throw "a rowid below zero" else pure id.toNat
+      | _ => throw "a change whose row's first column is not its rowid"
+    pure { table := t, slot, old, new }
 
 end SqliveNarrowing.Json

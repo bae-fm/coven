@@ -2,7 +2,7 @@ import SqliveNarrowing.WellFormed
 
 /-! A statement's rows depend only on the columns it reads
 (`Statement.reads`). sqlive keeps of a changed row only the
-values its scopes test, and the model's judge tests a row masked to the
+values of the columns live queries read or test, and the model's judge tests a row masked to the
 columns the statement reads (`maskRow`), with lookups in the database masked
 the same way (`Db.mask`). Running the statement on a masked database gives
 its rows unchanged (`result_mask`), so the judge's lookups read the rows the

@@ -251,7 +251,7 @@ impl Default for Scopes {
 }
 
 /// The values of some of a changed row's columns, as a write recorded them:
-/// its key's, and those a waiting live query's scope tests.
+/// its key's, and those a waiting live query reads or its scope tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowImage {
     /// The columns, lowercase, shared by every image of one table in a write.

@@ -34,9 +34,11 @@ mod derived;
 mod error;
 mod from_item;
 mod handle;
+mod kept_counts;
 mod live_query;
 #[cfg(any(test, feature = "test-utils"))]
 mod live_query_runs;
+mod net_changes;
 mod no_policy;
 mod planner_statistics;
 #[cfg(any(test, feature = "test-utils"))]
@@ -56,7 +58,6 @@ mod scope_row;
 mod scope_subquery;
 mod scope_term;
 mod scope_window;
-mod scoped_counts;
 mod select_syntax;
 mod snapshot_values;
 pub mod sql;

@@ -752,7 +752,7 @@ impl<P: Policy> HostSql<P> {
                             crate::change_capture::table_changes(database, tables)?
                         }
                     },
-                    (None, None) => Vec::new(),
+                    (None, None) => crate::net_changes::Captured::default(),
                 };
                 Ok((result, changes))
             })

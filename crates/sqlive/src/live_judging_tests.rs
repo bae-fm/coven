@@ -19,6 +19,8 @@ mod limit;
 mod lookup;
 #[path = "live_judging_tests/narrowing_model.rs"]
 mod narrowing_model;
+#[path = "live_judging_tests/net_change.rs"]
+mod net_change;
 #[path = "live_judging_tests/plan.rs"]
 mod plan;
 #[path = "live_judging_tests/row.rs"]
