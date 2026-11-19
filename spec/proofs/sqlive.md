@@ -317,7 +317,11 @@ function always decides them. `joinItems_restricted` and
 `coreBindings_restricted` prove that a core then keeps the same such bindings
 from both databases: a join reads the same rows that pass each item's test,
 and the ON and WHERE conditions read the same subquery rows under a binding
-whose rows pass their tests. `queryRows_restricted` carries that through
+whose rows pass their tests. Such a binding holds a row of each item that no
+LEFT JOIN adds and that the join has reached: an ON reads its subqueries
+where the join has reached the ON's item, and the WHERE where it has joined
+every item. The promise for a LEFT JOIN item's ON takes only such a
+binding. `queryRows_restricted` carries that through
 DISTINCT, UNION, EXCEPT, INTERSECT and the ORDER BY of a query with no LIMIT,
 `agree_of_kept` through every nested query at every fuel, and
 `result_restricted` to the statement's rows when every row of its own query

@@ -18,7 +18,8 @@ that fails its test.
 From that promise, `coreBindings_restricted` proves that a core keeps the
 same bindings that matter from both databases: a join reads the same rows
 that pass each item's test, and the ON and WHERE conditions read the same
-subquery rows under a binding whose rows pass their tests. `arm_restricted`
+subquery rows under a binding whose rows pass their tests and that holds a
+row of each item no LEFT JOIN adds that the join has reached (`BoundIn`). `arm_restricted`
 and `queryRows_restricted` carry it to a query's rows that matter, through
 DISTINCT, the compounds and the ORDER BY, and `agree_of_kept` to every query
 but the statement's own at every fuel past its number, under the outer
@@ -70,6 +71,21 @@ theorem restricted_set {G : Nat → Row → Bool} {Left : Nat → Prop} {S : Lis
     · have hjS : j ∈ S := by simpa [hji] using hj
       exact hl j hjS (by simpa [Bind.set, hji] using h)
 
+/-- Whether binding `b` holds a row of each of `S`'s items that no LEFT JOIN
+adds, as a join does once it has joined them. -/
+def Statement.BoundIn (s : Statement) (S : List Nat) (b : Bind) : Prop :=
+  ∀ j ∈ S, s.alwaysBound j = true → b j ≠ none
+
+/-- A binding that only items `Left` allows hold no row of, when `Left`
+allows none that no LEFT JOIN adds, holds a row of each item of `S` that no
+LEFT JOIN adds. -/
+theorem Restricted.boundIn {s : Statement} {G : Nat → Row → Bool} {Left : Nat → Prop}
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false) {S : List Nat} {b : Bind}
+    (h : Restricted G Left S b) : s.BoundIn S b := by
+  intro j hj hab hn
+  rw [hLeft j (h.2 j hj hn)] at hab
+  cases hab
+
 /-- Whether item `i`'s ON conditions hold of a binding. -/
 def onHolds (c : Core) (subs : Bind → Subs) (i : Nat) (b : Bind) : Bool :=
   (c.onOf i).all fun cd => isTrue (cd.eval b (subs b))
@@ -92,10 +108,12 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
     {subsX subsY : Bind → Subs} {G : Nat → Row → Bool} {Left : Nat → Prop} {V : Bind → Prop}
     {S : List Nat} {i : Nat}
     (hi : i ∉ S) (hrows : (rowsX i).filter (G i) = (rowsY i).filter (G i))
-    (hon : ∀ b, Passes G b → V b → onHolds c subsX i b = onHolds c subsY i b)
-    (hleftX : Left i → ∀ b, Passes G b → V b → ∀ r ∈ rowsX i,
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false)
+    (hon : ∀ b, Passes G b → V b → s.BoundIn (S ++ [i]) b →
+      onHolds c subsX i b = onHolds c subsY i b)
+    (hleftX : Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rowsX i,
       onHolds c subsX i (b.set i (some r)) = true → G i r = true)
-    (hleftY : Left i → ∀ b, Passes G b → V b → ∀ r ∈ rowsY i,
+    (hleftY : Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rowsY i,
       onHolds c subsY i (b.set i (some r)) = true → G i r = true)
     {b : Bind} (hVb : V b) (hVi : ∀ x, V (b.set i x)) (hbi : ∀ r, b i = some r → G i r = true) :
     (View.joinStep s c rowsX subsX i b).filter (fun b => decide (Restricted G Left (S ++ [i]) b)) =
@@ -106,6 +124,14 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
       if onHolds c subs i (b.set i (some r)) then some (b.set i (some r)) else none
     have hset : ∀ r, G i r = true → Passes G (b.set i (some r)) := fun r hg =>
       hb.1.set (fun r' h => by rw [← Option.some.inj h]; exact hg)
+    have hbound : s.BoundIn S b := hb.boundIn hLeft
+    have hboundSet : ∀ r, s.BoundIn (S ++ [i]) (b.set i (some r)) := by
+      intro r j hj hab
+      by_cases hji : j = i
+      · subst hji
+        simp [Bind.set]
+      · have hjS : j ∈ S := by simpa [hji] using hj
+        simpa [Bind.set, hji] using hbound j hjS hab
     -- The joined bindings that pass the tests are those of the rows that pass `G i`.
     have hfilter : ∀ (rows : List Row) (subs : Bind → Subs),
         (rows.filterMap (f subs)).filter (fun b => decide (Restricted G Left (S ++ [i]) b)) =
@@ -130,7 +156,7 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
       apply filterMap_congr_mem
       intro r hr
       have hg : G i r = true := (List.mem_filter.mp hr).2
-      simp only [f, hon _ (hset r hg) (hVi _)]
+      simp only [f, hon _ (hset r hg) (hVi _) (hboundSet r)]
     have hstep : ∀ (rows : Nat → List Row) (subs : Bind → Subs),
         View.joinStep s c rows subs i b =
           if (s.item i).left && (rows i |>.filterMap (f subs)).isEmpty then [b.set i none]
@@ -138,7 +164,7 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
     by_cases hl : Left i
     · -- Every row its ON holds for passes the test, so both steps are the same.
       have hall : ∀ (rows : List Row) (subs : Bind → Subs),
-          (Left i → ∀ b, Passes G b → V b → ∀ r ∈ rows,
+          (Left i → ∀ b, Passes G b → V b → s.BoundIn S b → ∀ r ∈ rows,
             onHolds c subs i (b.set i (some r)) = true → G i r = true) →
           rows.filterMap (f subs) = (rows.filter (G i)).filterMap (f subs) := by
         intro rows subs hleft
@@ -150,7 +176,7 @@ theorem joinStep_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → Li
         · simp only [hg, Bool.false_eq_true, ↓reduceIte, f]
           split
           · rename_i hon'
-            exact absurd (hleft hl b hb.1 hVb r hr hon') hg
+            exact absurd (hleft hl b hb.1 hVb hbound r hr hon') hg
           · rfl
       rw [hstep, hstep, hall _ _ hleftX, hall _ _ hleftY, hsame]
     · -- A binding that holds no row of the item fails the test.
@@ -186,14 +212,16 @@ sources that agree on the rows that pass each item's test, when the ON
 conditions agree under such bindings and a LEFT JOIN item that holds no row
 in such a binding has no row its ON holds for that fails its test. -/
 theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → List Row}
-    {subsX subsY : Bind → Subs} {G : Nat → Row → Bool} {Left : Nat → Prop} {V : Bind → Prop} :
+    {subsX subsY : Bind → Subs} {G : Nat → Row → Bool} {Left : Nat → Prop} {V : Bind → Prop}
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false) :
     ∀ (is S : List Nat), (S ++ is).Nodup → (∀ b j x, V b → j ∈ is → V (b.set j x)) →
     (∀ i ∈ is, (rowsX i).filter (G i) = (rowsY i).filter (G i)) →
-    (∀ i ∈ is, ∀ b, Passes G b → V b → onHolds c subsX i b = onHolds c subsY i b) →
-    (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → ∀ r ∈ rowsX i,
-      onHolds c subsX i (b.set i (some r)) = true → G i r = true) →
-    (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → ∀ r ∈ rowsY i,
-      onHolds c subsY i (b.set i (some r)) = true → G i r = true) →
+    (∀ i ∈ is, ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i) ++ [i]) b →
+      onHolds c subsX i b = onHolds c subsY i b) →
+    (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i)) b →
+      ∀ r ∈ rowsX i, onHolds c subsX i (b.set i (some r)) = true → G i r = true) →
+    (∀ i ∈ is, Left i → ∀ b, Passes G b → V b → s.BoundIn (S ++ is.takeWhile (· ≠ i)) b →
+      ∀ r ∈ rowsY i, onHolds c subsY i (b.set i (some r)) = true → G i r = true) →
     ∀ (bsX bsY : List Bind), (∀ b ∈ bsX ++ bsY, V b) →
     (∀ b ∈ bsX ++ bsY, ∀ j ∈ is, ∀ r, b j = some r → G j r = true) →
     bsX.filter (fun b => decide (Restricted G Left S b)) =
@@ -211,12 +239,20 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
     have hiis : i ∉ is := by
       have := (List.nodup_append.mp hnd).2.1
       exact (List.nodup_cons.mp this).1
-    have ih := joinItems_restricted (s := s) is (S ++ [i]) hnd'
+    -- An item after `i` comes after `S`, `i` and the items between.
+    have htake : ∀ j ∈ is, (i :: is).takeWhile (· ≠ j) = i :: is.takeWhile (· ≠ j) := by
+      intro j hj
+      have hij : i ≠ j := fun e => hiis (e ▸ hj)
+      simp [hij]
+    have ih := joinItems_restricted (s := s) hLeft is (S ++ [i]) hnd'
       (fun b j x hb hj => hV b j x hb (List.mem_cons_of_mem i hj))
       (fun j hj => hrows j (List.mem_cons_of_mem i hj))
-      (fun j hj => hon j (List.mem_cons_of_mem i hj))
-      (fun j hj => hleftX j (List.mem_cons_of_mem i hj))
-      (fun j hj => hleftY j (List.mem_cons_of_mem i hj))
+      (fun j hj b hb hv hbd => hon j (List.mem_cons_of_mem i hj) b hb hv
+        (by rw [htake j hj]; simpa using hbd))
+      (fun j hj hl b hb hv hbd => hleftX j (List.mem_cons_of_mem i hj) hl b hb hv
+        (by rw [htake j hj]; simpa using hbd))
+      (fun j hj hl b hb hv hbd => hleftY j (List.mem_cons_of_mem i hj) hl b hb hv
+        (by rw [htake j hj]; simpa using hbd))
     rw [List.append_assoc, List.singleton_append] at ih
     apply ih
     · intro b' hb'
@@ -254,9 +290,11 @@ theorem joinItems_restricted {s : Statement} {c : Core} {rowsX rowsY : Nat → L
       intro b hb
       have hbY : b ∈ bsY := (List.mem_filter.mp hb).1
       have hVb := hVbs b (List.mem_append_right _ hbY)
-      exact joinStep_restricted hiS (hrows i (by simp)) (hon i (by simp))
-        (hleftX i (by simp)) (hleftY i (by simp)) hVb (fun x => hV b i x hVb (by simp))
-        (hbi b (List.mem_append_right _ hbY))
+      exact joinStep_restricted hiS (hrows i (by simp)) hLeft
+        (fun b hb hv hbd => hon i (by simp) b hb hv (by simpa using hbd))
+        (fun hl b hb hv hbd => hleftX i (by simp) hl b hb hv (by simpa using hbd))
+        (fun hl b hb hv hbd => hleftY i (by simp) hl b hb hv (by simpa using hbd))
+        hVb (fun x => hV b i x hVb (by simp)) (hbi b (List.mem_append_right _ hbY))
 
 /-- What every binding a join starts from has, and each item's step keeps,
 every binding the join keeps has. -/
@@ -272,6 +310,18 @@ theorem joinItems_preserves {s : Statement} {c : Core} {rowsOf : Nat → List Ro
     obtain ⟨b0, hb0, hb'⟩ := List.mem_flatMap.mp hb'
     obtain ⟨x, rfl⟩ := mem_joinStep hb'
     exact hset b0 i x (hbs b0 hb0) (by simp)
+
+/-- The queries of a LEFT JOIN's ON are subqueries of its core. -/
+theorem Core.onOf_queries {c : Core} {i : Nat} {cd : Cond} {q : Nat} (hcd : cd ∈ c.onOf i)
+    (hq : q ∈ cd.queries) : q ∈ c.subqueries := by
+  simp only [Core.onOf, List.mem_filterMap] at hcd
+  obtain ⟨⟨cd', p⟩, hmem, hp⟩ := hcd
+  split at hp
+  · obtain rfl := Option.some.inj hp
+    unfold Core.subqueries
+    exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_right _
+      (List.mem_flatMap.mpr ⟨(_, p), hmem, hq⟩)))
+  · cases hp
 
 /-- The binding a core's items join onto under the binding `o` around it:
 none for a core in no other (`coreBindings`). -/
@@ -296,49 +346,55 @@ def Statement.Within (s : Statement) (k : Nat) (o b : Bind) : Prop :=
 rows pass their tests, the same bindings that matter from two databases
 whose tables hold the same rows that pass each item's test, whose derived
 items' queries return the same rows that pass the item's test, and whose
-subqueries return the same rows under a binding whose rows pass their tests,
-when every binding that matters holds rows that pass their tests (and no
-row only of an item `Left` allows), and a LEFT JOIN item `Left` allows has
-no row its ON holds for that fails its test. -/
+subqueries return the same rows under a binding whose rows pass their tests
+(an ON's under one that holds a row of each item up to its own that no LEFT
+JOIN adds, any other's under one that holds a row of each such item), when
+every binding that matters holds rows that pass their tests (and no row only
+of an item `Left` allows, which allows none that no LEFT JOIN adds), and a
+LEFT JOIN item `Left` allows has no row its ON holds for that fails its
+test. -/
 theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat → List Row}
     {G : Nat → Row → Bool} {Left : Nat → Prop} {o : Bind} {k : Nat}
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hnodup : (s.core k).items.Nodup) (ho : Passes G o)
     (htables : ∀ i ∈ (s.core k).items, ∀ t, s.table? i = some t →
       (X.rows t).filter (G i) = (Y.rows t).filter (G i))
     (hderived : ∀ i ∈ (s.core k).items, ∀ q v, (s.item i).kind = .derived q v →
       (EX (s.outerOf k o) q).filter (G i) = (EY (s.outerOf k o) q).filter (G i))
-    (hsubs : ∀ b, Passes G b → s.Within k o b → ∀ q ∈ (s.core k).subqueries, EX b q = EY b q)
+    (hsubsOn : ∀ i ∈ (s.core k).items, ∀ b, Passes G b → s.Within k o b →
+      s.BoundIn ((s.core k).items.takeWhile (· ≠ i) ++ [i]) b →
+      ∀ cd ∈ (s.core k).onOf i, ∀ q ∈ cd.queries, EX b q = EY b q)
+    (hsubs : ∀ b, Passes G b → s.Within k o b → s.BoundIn (s.core k).items b →
+      ∀ q ∈ (s.core k).subqueries, EX b q = EY b q)
     (hleftX : ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
+      s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b →
       ∀ r ∈ s.itemRows X EX (s.outerOf k o) i, onHolds (s.core k) EX i (b.set i (some r)) = true →
         G i r = true)
     (hleftY : ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
+      s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b →
       ∀ r ∈ s.itemRows Y EY (s.outerOf k o) i, onHolds (s.core k) EY i (b.set i (some r)) = true →
         G i r = true)
-    {RX RY : Bind → Bool} (hR : ∀ b, Passes G b → s.Within k o b → RX b = RY b)
+    {RX RY : Bind → Bool}
+    (hR : ∀ b, Passes G b → s.Within k o b → s.BoundIn (s.core k).items b → RX b = RY b)
     (hinvX : ∀ b ∈ coreBindings s X EX o k, RX b = true → Restricted G Left (s.core k).items b)
     (hinvY : ∀ b ∈ coreBindings s Y EY o k, RY b = true → Restricted G Left (s.core k).items b) :
     (coreBindings s X EX o k).filter RX = (coreBindings s Y EY o k).filter RY := by
   let c := s.core k
-  have hcond : ∀ cd ∈ c.conds.map (·.1), ∀ b, Passes G b → s.Within k o b →
-      cd.eval b (EX b) = cd.eval b (EY b) := by
-    intro cd hcd b hb hw
-    obtain ⟨⟨cd', p⟩, hmem, rfl⟩ := List.mem_map.mp hcd
-    apply Cond.eval_congr
-    · intro _ _ _; rfl
-    · intro q hq
-      apply hsubs b hb hw q
-      unfold Core.subqueries
-      exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_right _
-        (List.mem_flatMap.mpr ⟨(cd', p), hmem, hq⟩)))
-  have hall : ∀ (cds : List Cond), (∀ cd ∈ cds, cd ∈ c.conds.map (·.1)) → ∀ b, Passes G b →
-      s.Within k o b →
+  have hall : ∀ (cds : List Cond) (b : Bind), (∀ cd ∈ cds, ∀ q ∈ cd.queries, EX b q = EY b q) →
       (cds.all fun cd => isTrue (cd.eval b (EX b))) = (cds.all fun cd => isTrue (cd.eval b (EY b))) := by
-    intro cds hcds b hb hw
+    intro cds b hcds
     induction cds with
     | nil => rfl
     | cons cd rest ihc =>
       simp only [List.all_cons]
-      rw [hcond cd (hcds cd (by simp)) b hb hw, ihc (fun c' h' => hcds c' (by simp [h']))]
+      rw [Cond.eval_congr cd (fun _ _ _ => rfl) (hcds cd (by simp)),
+        ihc (fun c' h' => hcds c' (by simp [h']))]
+  have hcondQ : ∀ cd ∈ c.conds.map (·.1), ∀ q ∈ cd.queries, q ∈ c.subqueries := by
+    intro cd hcd q hq
+    obtain ⟨⟨cd', p⟩, hmem, rfl⟩ := List.mem_map.mp hcd
+    unfold Core.subqueries
+    exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_right _
+      (List.mem_flatMap.mpr ⟨(cd', p), hmem, hq⟩)))
   have honOf : ∀ i cd, cd ∈ c.onOf i → cd ∈ c.conds.map (·.1) := by
     intro i cd hcd
     simp only [Core.onOf, List.mem_filterMap] at hcd
@@ -368,15 +424,17 @@ theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat
     exact hb j' hj'
   have hV0 : s.Within k o b0 := fun _ _ => rfl
   have hJ := joinItems_restricted (s := s) (c := c) (rowsX := rowsOf X EX) (rowsY := rowsOf Y EY)
-    (subsX := EX) (subsY := EY) (G := G) (Left := Left) (V := s.Within k o) c.items []
+    (subsX := EX) (subsY := EY) (G := G) (Left := Left) (V := s.Within k o) hLeft c.items []
     (by simpa using hnodup) hVset
     (fun i hi => by
       simp only [rowsOf, Statement.itemRows]
       cases hkind : (s.item i).kind with
       | table t => exact htables i hi t (by simp [Statement.table?, hkind])
       | derived q v => exact hderived i hi q v hkind)
-    (fun i _ b hb hw => hall _ (fun cd hcd => honOf i cd hcd) b hb hw)
-    hleftX hleftY [b0] [b0] (fun b hb => by
+    (fun i hi b hb hw hbd => hall _ b (hsubsOn i hi b hb hw (by simpa using hbd)))
+    (fun i hi hl b hb hw hbd => hleftX i hi hl b hb hw (by simpa using hbd))
+    (fun i hi hl b hb hw hbd => hleftY i hi hl b hb hw (by simpa using hbd))
+    [b0] [b0] (fun b hb => by
       simp only [List.mem_append, List.mem_singleton, or_self] at hb
       subst hb
       exact hV0) (fun b hb j _ r hr => by
@@ -399,11 +457,13 @@ theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat
   rw [hW X EX RX hinvX, hW Y EY RY hinvY, hJ]
   apply List.filter_congr
   intro b hb
-  have hp : Passes G b := (of_decide_eq_true (List.mem_filter.mp hb).2).1
+  have hres : Restricted G Left c.items b := of_decide_eq_true (List.mem_filter.mp hb).2
   have hw : s.Within k o b := joinItems_preserves c.items [b0]
     (fun b hb => by simp only [List.mem_singleton] at hb; subst hb; exact hV0) hVset b
     (List.mem_filter.mp hb).1
-  rw [hR b hp hw, hall _ (fun cd hcd => hinner cd hcd) b hp hw]
+  have hbd := hres.boundIn hLeft
+  rw [hR b hres.1 hw hbd, hall _ b (fun cd hcd q hq =>
+    hsubs b hres.1 hw hbd q (hcondQ cd (hinner cd hcd) q hq))]
 
 /-! A query's rows that matter. -/
 
@@ -543,7 +603,9 @@ rows that pass each item's test, a derived item's query whose rows that
 matter include those that pass the item's test, subqueries all of whose
 rows matter, a LIMIT or an OFFSET whose query's rows all matter, and the
 bindings a derived item's query and a subquery run under among their outer
-bindings. -/
+bindings: an ON's subquery's under a binding that holds a row of each item
+up to its own that no LEFT JOIN adds, any other subquery's under one that
+holds a row of each such item. -/
 structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel : Nat → Row → Bool)
     (Outer : Nat → Bind → Prop) : Prop where
   nodup : ∀ q, ∀ k ∈ (s.query q).arms, (s.core k).items.Nodup
@@ -556,8 +618,11 @@ structure Restriction (s : Statement) (X Y : Db) (G : Nat → Row → Bool) (rel
     ((s.query q).limit.isSome || (s.query q).offset.isSome) = true → ∀ r, rel q r = true
   derivedOuter : ∀ q, ∀ k ∈ (s.query q).arms, ∀ o, Outer q o → ∀ i ∈ (s.core k).items,
     ∀ q' v, (s.item i).kind = .derived q' v → Outer q' (s.outerOf k o)
+  subOuterOn : ∀ q, ∀ k ∈ (s.query q).arms, ∀ o, Outer q o → ∀ i ∈ (s.core k).items, ∀ b,
+    s.Within k o b → s.BoundIn ((s.core k).items.takeWhile (· ≠ i) ++ [i]) b →
+    ∀ cd ∈ (s.core k).onOf i, ∀ q' ∈ cd.queries, Outer q' b
   subOuter : ∀ q, ∀ k ∈ (s.query q).arms, ∀ o, Outer q o → ∀ b, s.Within k o b →
-    ∀ q' ∈ (s.core k).subqueries, Outer q' b
+    s.BoundIn (s.core k).items b → ∀ q' ∈ (s.core k).subqueries, Outer q' b
 
 /-- At fuel `f`, two databases' runs of each query below `f` but the
 statement's own return the same rows that `rel` keeps, under any of its
@@ -572,14 +637,15 @@ outer binding `o`, with `E` running the queries its arms read: every binding
 of an arm that its core keeps, and that matters by `R`, holds rows that pass
 their tests, and no row only of an item `Left` allows; and an item `Left`
 allows has no row its ON holds for, in a binding of the core whose rows pass
-their tests, that fails its test. -/
+their tests and that holds a row of each item before it that no LEFT JOIN
+adds, that fails its test. -/
 def ArmsKept (s : Statement) (Z : Db) (G : Nat → Row → Bool) (Left : Nat → Prop)
     (R : Nat → (Bind → Nat → List Row) → Bind → Bool) (q : Nat) (o : Bind)
     (E : Bind → Nat → List Row) : Prop :=
   ∀ k ∈ (s.query q).arms,
     (∀ b ∈ coreBindings s Z E o k, R k E b = true → Restricted G Left (s.core k).items b) ∧
     ∀ i ∈ (s.core k).items, Left i → ∀ b, Passes G b → s.Within k o b →
-      ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
+      s.BoundIn ((s.core k).items.takeWhile (· ≠ i)) b → ∀ r ∈ s.itemRows Z E (s.outerOf k o) i,
         onHolds (s.core k) E i (b.set i (some r)) = true → G i r = true
 
 /-- The promise for every query up to `f` but the statement's own, run on `Z`
@@ -595,7 +661,7 @@ test `rel'` of the bindings that matter, keep the same bindings that matter
 and read the same subquery rows under them. -/
 theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel rel' : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
-    {f q : Nat} (hq : q ≤ f) {o : Bind} (hout : Outer q o) (ho : Passes G o)
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false) {f q : Nat} (hq : q ≤ f) {o : Bind} (hout : Outer q o) (ho : Passes G o)
     (hagree : Agree s X Y G rel Outer f)
     (hX : ArmsKept s X G Left (relevant s rel' q) q o (evalQuery s X f))
     (hY : ArmsKept s Y G Left (relevant s rel' q) q o (evalQuery s Y f)) :
@@ -605,21 +671,24 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
       ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter (relevant s rel' q k (evalQuery s X f)),
         ∀ q' ∈ (s.core k).subqueries, evalQuery s X f b q' = evalQuery s Y f b q' := by
   intro k hk
-  have hsubs : ∀ b, Passes G b → s.Within k o b → ∀ q' ∈ (s.core k).subqueries,
+  -- A subquery returns the same rows under a binding its outer bindings hold.
+  have hsub : ∀ b, Passes G b → ∀ q' ∈ (s.core k).subqueries, Outer q' b →
       evalQuery s X f b q' = evalQuery s Y f b q' := by
-    intro b hb hw q' hq'
+    intro b hb q' hq' hout'
     have hmem : q' ∈ s.nestedQueries k := List.mem_append_right _ hq'
     have hne : q' ≠ s.root := fun e => h.root q k hk (e ▸ hmem)
-    have := hagree q' (Nat.lt_of_lt_of_le (h.nested q k hk q' hmem) hq) hne b
-      (h.subOuter q k hk o hout b hw q' hq') hb
+    have := hagree q' (Nat.lt_of_lt_of_le (h.nested q k hk q' hmem) hq) hne b hout' hb
     rwa [List.filter_eq_self.mpr (fun r _ => h.subs q k hk q' hq' r),
       List.filter_eq_self.mpr (fun r _ => h.subs q k hk q' hq' r)] at this
+  have hsubs : ∀ b, Passes G b → s.Within k o b → s.BoundIn (s.core k).items b →
+      ∀ q' ∈ (s.core k).subqueries, evalQuery s X f b q' = evalQuery s Y f b q' :=
+    fun b hb hw hbd q' hq' => hsub b hb q' hq' (h.subOuter q k hk o hout b hw hbd q' hq')
   have hb0 : Passes G (s.outerOf k o) := by
     unfold Statement.outerOf
     split
     · exact Passes.empty G
     · exact ho
-  have hkeep := coreBindings_restricted (k := k) (o := o) (h.nodup q k hk) ho
+  have hkeep := coreBindings_restricted (k := k) (o := o) hLeft (h.nodup q k hk) ho
     (fun i _ t ht => h.tables i t ht)
     (fun i hi q' v hkind => by
       have hmem : q' ∈ s.nestedQueries k :=
@@ -629,9 +698,11 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
         (h.nested q k hk q' hmem) hq) hne _ (h.derivedOuter q k hk o hout i hi q' v hkind) hb0)
       rwa [filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr),
         filter_filter_of_imp (fun r _ hr => h.derived i q' v hkind r hr)] at this)
+    (fun i hi b hb hw hbd cd hcd q' hq' => hsub b hb q' (Core.onOf_queries hcd hq')
+      (h.subOuterOn q k hk o hout i hi b hw hbd cd hcd q' hq'))
     hsubs ((hX k hk).2) ((hY k hk).2)
     (RX := relevant s rel' q k (evalQuery s X f)) (RY := relevant s rel' q k (evalQuery s Y f))
-    (fun b hb hw => by
+    (fun b hb hw hbd => by
       unfold relevant
       congr 2
       apply List.map_congr_left
@@ -641,15 +712,18 @@ theorem arms_agree {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left :
         apply e.eval_congr
         · intro _ _ _; rfl
         · intro q' hq'
-          apply hsubs b hb hw q'
+          apply hsubs b hb hw hbd q'
           unfold Core.subqueries
           exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_left _
             (List.mem_flatMap.mpr ⟨_, ho', List.mem_flatMap.mpr ⟨e, by simp [OutCol.exprs], hq'⟩⟩)))
       | _ => rfl)
     ((hX k hk).1) ((hY k hk).1)
-  refine ⟨hkeep, fun b hb q' hq' => hsubs b ?_ ?_ q' hq'⟩
-  · have hb' := List.mem_filter.mp hb
-    exact ((hX k hk).1 b hb'.1 hb'.2).1
+  have hres : ∀ b ∈ (coreBindings s X (evalQuery s X f) o k).filter
+      (relevant s rel' q k (evalQuery s X f)), Restricted G Left (s.core k).items b := by
+    intro b hb
+    have hb' := List.mem_filter.mp hb
+    exact (hX k hk).1 b hb'.1 hb'.2
+  refine ⟨hkeep, fun b hb q' hq' => hsubs b (hres b hb).1 ?_ ((hres b hb).boundIn hLeft) q' hq'⟩
   · intro j hj
     exact joinItems_preserves (P := s.Within k o) (s.core k).items [s.outerOf k o]
       (fun b hb => by simp only [List.mem_singleton] at hb; subst hb; exact fun _ _ => rfl)
@@ -665,6 +739,7 @@ lower fuel, the runs return the same rows that matter of every query but the
 statement's own, at every fuel past the query's number. -/
 theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel Outer f') →
       Kept s X G Left rel Outer f ∧ Kept s Y G Left rel Outer f) :
     ∀ f, Agree s X Y G rel Outer f := by
@@ -683,7 +758,7 @@ theorem agree_of_kept {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Lef
         obtain ⟨hX, hY⟩ := hkept f ih
         intro q hq hne o hout ho
         have hq' := Nat.le_of_lt_succ hq
-        exact queryRows_restricted (h.post q hne) (arms_agree h hq' hout ho (ih f (Nat.le_refl _))
+        exact queryRows_restricted (h.post q hne) (arms_agree h hLeft hq' hout ho (ih f (Nat.le_refl _))
           (hX q hq' hne o hout ho) (hY q hq' hne o hout ho))
   exact fun f => key f f (Nat.le_refl _)
 
@@ -693,6 +768,7 @@ every other query: with no LIMIT bound, every binding of the statement's own
 core matters. -/
 theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hroot : s.root < s.queries.length) (hrootOuter : Outer s.root Bind.empty)
     (hall : ∀ r, rel s.root r = true)
     (hkept : ∀ f, (∀ f' ≤ f, Agree s X Y G rel Outer f') →
@@ -702,10 +778,10 @@ theorem result_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} 
     (hrootY : ArmsKept s Y G Left (relevant s rel s.root) s.root Bind.empty
       (evalQuery s Y s.queries.length)) :
     s.result X = s.result Y := by
-  have hagree := agree_of_kept h hkept
+  have hagree := agree_of_kept h hLeft hkept
   unfold Statement.result
   simp only [evalQuery]
-  have := queryRows_restricted (fun _ => hall) (arms_agree h (Nat.le_of_lt hroot) hrootOuter
+  have := queryRows_restricted (fun _ => hall) (arms_agree h hLeft (Nat.le_of_lt hroot) hrootOuter
     (Passes.empty G) (hagree _) hrootX hrootY)
   rwa [List.filter_eq_self.mpr (fun r _ => hall r), List.filter_eq_self.mpr (fun r _ => hall r)] at this
 
@@ -717,6 +793,7 @@ query and for the bindings of its own core whose rows sort at or before
 `last`. -/
 theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {Left : Nat → Prop}
     {rel : Nat → Row → Bool} {Outer : Nat → Bind → Prop} (h : Restriction s X Y G rel Outer)
+    (hLeft : ∀ j, Left j → s.alwaysBound j = false)
     (hroot : s.root < s.queries.length) (hrootOuter : Outer s.root Bind.empty)
     {n : Nat} (hlimit : (s.query s.root).limit = some n) (hoffset : (s.query s.root).offset = none)
     (horder : (s.query s.root).orderBy ≠ []) {last : List Value}
@@ -733,8 +810,8 @@ theorem limit_restricted {s : Statement} {X Y : Db} {G : Nat → Row → Bool} {
     s.result Y = s.result X := by
   let P : Row → Bool := fun r =>
     keyLe ((s.query s.root).orderBy.map (·.2)) (Limit.orderKey (s.query s.root) r) last
-  have hagree := agree_of_kept h hkept
-  have harms := arms_agree (rel' := fun _ => P) h (Nat.le_of_lt hroot) hrootOuter (Passes.empty G)
+  have hagree := agree_of_kept h hLeft hkept
+  have harms := arms_agree (rel' := fun _ => P) h hLeft (Nat.le_of_lt hroot) hrootOuter (Passes.empty G)
     (hagree _) hrootX hrootY
   have hcombine : ∀ (Z : Db), (combineAll (s.query s.root).ops ((s.query s.root).arms.map fun k =>
       (s.core k).result (evalQuery s Z s.queries.length)
