@@ -42,32 +42,65 @@ pub(crate) fn prepare_internal_schema(sql: &mut StoreSql) -> Result<(), OpenErro
     Ok(())
 }
 
-/// Prepare the app's schema: on a writable connection, rebuild what a
-/// new version of SQLite or of the app's collations and functions
-/// changes, then migrate, reporting both steps to `progress`; on a
-/// read-only one, require the app's versions rebuilt and the migrations
-/// done, which reports nothing.
+/// The app's schema, read and checked against `tables`, the declarations it
+/// opens with, when no migration is left to run.
+fn checked_schema(sql: &StoreSql, tables: &[SyncedTable]) -> Result<Schema, OpenError> {
+    let schema = Schema::read(sql, &crate::file_table::declared(tables))?;
+    schema.validate(tables)?;
+    crate::schema::validate_local_keys(sql, &schema, tables)?;
+    crate::sqlite::check_followed_triggers(sql)?;
+    if let Some(table) = crate::row_queries::owner_declaration_changed(sql, &schema, tables)? {
+        return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+    }
+    if let Some(table) = crate::file_table::changed(sql, &schema, tables)? {
+        return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into());
+    }
+    Ok(schema)
+}
+
+/// How a connection prepares the app's schema as it opens.
+pub(crate) enum Preparation<'a> {
+    /// A read-only connection requires the app's versions rebuilt and the
+    /// migrations done, and reports nothing.
+    ReadOnly,
+    /// A writable connection rebuilds what a new version of SQLite or of the
+    /// app's collations and functions changes, then migrates.
+    Writable {
+        /// The device and wall clock authoring the migrations' write, and
+        /// where the installation's state comes from.
+        author: crate::migration_run::MigrationOrigin,
+        /// How the device journals the raise a breaking migration publishes,
+        /// when the composition root supplied one.
+        operation: Option<&'a crate::migration::MigrationOperation>,
+        /// Stages each audience's copy of the rows, which a run with a
+        /// breaking migration is checked against (§18.3).
+        audiences: &'a crate::audience_database::Stage<'a>,
+        /// The app's before-commit function, which the migration's
+        /// transaction runs last (§9.4).
+        before_commit: Option<&'a crate::before_commit::BeforeCommit>,
+    },
+}
+
+/// Prepare the app's schema as `preparation` says, reporting a writable
+/// connection's rebuild and migration steps to `progress`.
 pub(crate) fn prepare_schema(
     sql: &mut StoreSql,
     call: &StoreCall<'_>,
     tables: &[SyncedTable],
     migrations: &[Migration],
     versions: &[crate::sql_versions::SqlVersion],
-    author: Option<crate::migration_run::MigrationOrigin>,
-    operation: Option<&crate::migration::MigrationOperation>,
-    audiences: Option<&crate::audience_database::Stage<'_>>,
-    before_commit: Option<&crate::before_commit::BeforeCommit>,
+    preparation: Preparation<'_>,
     progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
 ) -> Result<Vec<MigrationOutcome>, OpenError> {
-    let read_only = author.is_none();
     let supported = validate_versions(migrations)?;
     prepare_internal_schema(sql)?;
     // Rebuild the indexes, or on a read-only connection require them rebuilt,
     // before the app's migrations run, since their statements use the indexes.
-    if read_only {
-        crate::sql_versions::require_built(sql, versions)?;
-    } else {
-        crate::sql_versions::rebuild(sql, tables, versions, progress)?;
+    match &preparation {
+        Preparation::ReadOnly => crate::sql_versions::require_built(sql, versions)?,
+        Preparation::Writable { .. } => {
+            crate::sql_versions::rebuild(sql, tables, versions, progress)?
+        }
     }
     let current = crate::transaction_constants::schema_version(sql, call)?;
     if current > supported {
@@ -85,27 +118,24 @@ pub(crate) fn prepare_schema(
         )?;
         migration.check_kind(breaking)?;
     }
-    if read_only || current == supported {
-        let db = &*sql;
-        let schema = Schema::read(db, &crate::file_table::declared(tables))?;
-        schema.validate(tables)?;
-        crate::schema::validate_local_keys(db, &schema, tables)?;
-        crate::sqlite::check_followed_triggers(db)?;
-        if let Some(table) = crate::row_queries::owner_declaration_changed(db, &schema, tables)? {
-            return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+    let (author, operation, audiences, before_commit) = match preparation {
+        Preparation::ReadOnly => {
+            checked_schema(sql, tables)?;
+            sql.refresh_policy(sqlive::Refresh::Changed)?;
+            return Ok(Vec::new());
         }
-        if let Some(table) = crate::file_table::changed(db, &schema, tables)? {
-            return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into());
-        }
-        if !read_only {
+        Preparation::Writable { .. } if current == supported => {
+            let schema = checked_schema(sql, tables)?;
             sql.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
+            sql.refresh_policy(sqlive::Refresh::Changed)?;
+            return Ok(Vec::new());
         }
-        sql.refresh_policy(sqlive::Refresh::Changed)?;
-        return Ok(Vec::new());
-    }
+        Preparation::Writable { author, operation, audiences, before_commit } => {
+            (author, operation, audiences, before_commit)
+        }
+    };
     let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
-    let publishes = author.is_some();
-    let device = author.as_ref().map(|origin| origin.0);
+    let device = author.0;
     progress.begin(
         crate::OpenStep::Migrating,
         migrations.iter().filter(|m| m.version > current).count() as u64,
@@ -114,11 +144,9 @@ pub(crate) fn prepare_schema(
     // with a breaking migration against each copy (§18.3).
     let pending: Vec<&Migration> = migrations.iter().filter(|m| m.version > current).collect();
     let mut staged = None;
-    if let Some(stage) = audiences.filter(|_| {
-        pending.iter().any(|m| matches!(m.kind, crate::migration::MigrationKind::Breaking(_)))
-    }) {
+    if pending.iter().any(|m| matches!(m.kind, crate::migration::MigrationKind::Breaking(_))) {
         let first = pending[0];
-        let before = stage(sql, call);
+        let before = audiences(sql, call);
         staged = Some(before.map_err(|source| MigrationError::Failed {
             version: first.version,
             name: first.name,
@@ -129,15 +157,7 @@ pub(crate) fn prepare_schema(
         db.transaction(|db| {
             let crate::migration_run::MigrationRun { outcomes, marker } =
                 crate::migration_run::run(
-                    db,
-                    call,
-                    tables,
-                    migrations,
-                    current,
-                    supported,
-                    author.expect("writable migration"),
-                    &mut at,
-                    progress,
+                    db, call, tables, migrations, current, supported, author, &mut at, progress,
                 )?;
             if let Some(staged) = staged.as_mut() {
                 crate::audience_database::verify(staged, db, call, &pending, tables)?;
@@ -167,11 +187,10 @@ pub(crate) fn prepare_schema(
                 // When the migrations only add, coven moves a raise that has not
                 // published yet to this version and captures it again at this
                 // version (§18.5).
-                let device = device.expect("writable migration");
                 crate::raise_capture::raise_to(db, tables, device, supported)?
             };
             if raises {
-                if let Some(operation) = operation.filter(|_| publishes) {
+                if let Some(operation) = operation {
                     crate::raise_capture::journal(db, operation, supported)?;
                 }
             }

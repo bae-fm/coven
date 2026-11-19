@@ -331,27 +331,29 @@ impl DatabaseBuilder {
                     &tables,
                     &migrations,
                     &self.functions.versions(),
-                    Some(crate::migration_run::MigrationOrigin(
-                        settings.device_id,
-                        clock.now(),
-                        self.installation.clone(),
-                    )),
-                    self.migration_operation.as_deref(),
-                    Some(&|live, call| {
-                        crate::audience_database::AudienceDatabase::stage(
-                            &self.directory,
-                            &self.sqlite,
-                            &self.functions,
-                            self.sync_functions.as_ref(),
-                            &observer,
+                    crate::schema_preparation::Preparation::Writable {
+                        author: crate::migration_run::MigrationOrigin(
                             settings.device_id,
-                            &tables,
-                            &whole,
-                            live,
-                            call,
-                        )
-                    }),
-                    self.before_commit.as_deref(),
+                            clock.now(),
+                            self.installation.clone(),
+                        ),
+                        operation: self.migration_operation.as_deref(),
+                        audiences: &|live, call| {
+                            crate::audience_database::AudienceDatabase::stage(
+                                &self.directory,
+                                &self.sqlite,
+                                &self.functions,
+                                self.sync_functions.as_ref(),
+                                &observer,
+                                settings.device_id,
+                                &tables,
+                                &whole,
+                                live,
+                                call,
+                            )
+                        },
+                        before_commit: self.before_commit.as_deref(),
+                    },
                     &mut progress,
                 )?;
                 coven_foundation::task::operation_step("reading the store's state after migrating");
@@ -534,10 +536,7 @@ impl DatabaseBuilder {
                         &tables,
                         &migrations,
                         &self.functions.versions(),
-                        None,
-                        None,
-                        None,
-                        None,
+                        crate::schema_preparation::Preparation::ReadOnly,
                         &mut ProgressReport::of(&self.progress, clock),
                     )
                 })?;
