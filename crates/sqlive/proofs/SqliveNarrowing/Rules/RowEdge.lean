@@ -74,12 +74,12 @@ theorem row_edge_sound : ReadCondition.Sound readCondition where
       rcases he with he | he
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => hnamed r (Or.inr rfl) _ (Edge.edge_partner_mem he), hread,
-          fun db f b hc => ?_⟩
+          Edge.edge_memberStrict he, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hl hr
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => hnamed l (Or.inl rfl) _ (Edge.edge_partner_mem he), hread,
-          fun db f b hc => ?_⟩
+          Edge.edge_memberStrict he, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hr hl
     · cases h

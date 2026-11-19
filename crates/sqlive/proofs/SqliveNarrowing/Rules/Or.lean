@@ -40,9 +40,6 @@ def items : List Narrowing → List Nat
     (first.terms.map (fun (p : Nat × STerm) => p.1) ++ first.edges.map (fun (e : Edge) => e.member)).eraseDups
   | [] => []
 
-/-- Whether a side narrows its item. -/
-def Side.narrows (side : Side) : Bool := !side.terms.isEmpty || !side.edges.isEmpty
-
 /-- The reader, with `read` reading each side's conjuncts: an OR gives a
 disjunction for each item its first side narrows and every other side
 narrows too. -/
@@ -154,8 +151,9 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
     simp only [List.mem_filterMap] at hd
     obtain ⟨i, hi, hd⟩ := hd
     split at hd
-    · cases hd
-      refine ⟨?_, ?_, ?_⟩
+    · rename_i hnarrows
+      cases hd
+      refine ⟨?_, fun side hside => List.all_eq_true.mp hnarrows side hside, ?_, ?_⟩
       · -- The item is one the first side's conjuncts narrow, an item of core `k`.
         generalize hfound : (sides (.or l r)).map (sideNarrowing read s k) = found at hi
         cases found with
@@ -176,8 +174,9 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
         obtain ⟨he, hmem⟩ := he
         obtain ⟨side', hside', rfl⟩ := List.mem_map.mp hfound
         obtain ⟨c, hc, n', hr, he'⟩ := mem_side_edges he
-        obtain ⟨_, hne, hnamed, hread, _⟩ := h.edges hr e he'
-        exact ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread⟩
+        obtain ⟨_, hne, hnamed, hread, hstrict, _⟩ := h.edges hr e he'
+        exact ⟨hmem, hne, fun hn => sides_items hside' _ (conjuncts_items hc _ (hnamed hn)), hread,
+          hstrict⟩
       · intro db f b hc
         obtain ⟨side, hside, htrue⟩ := sides_true hc
         refine ⟨sideFor (sideNarrowing read s k side) i,
@@ -193,7 +192,7 @@ theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).
           simp only [sideFor, List.mem_filter, decide_eq_true_eq] at he
           obtain ⟨he, _⟩ := he
           obtain ⟨c, hc', n', hr, he'⟩ := mem_side_edges he
-          exact (h.edges hr e he').2.2.2.2 db f b (conjuncts_true htrue c hc')
+          exact (h.edges hr e he').2.2.2.2.2 db f b (conjuncts_true htrue c hc')
     · cases hd
   all_goals simp [readCondition] at hn
 

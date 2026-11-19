@@ -37,28 +37,30 @@ def read (s : Statement) (k : Nat) : Expr → Option (Nat × PValue × Affinity)
 theorem exprItem_facts {s : Statement} {k : Nat} {e : Expr} {m : Nat}
     (h : exprItem s k e = some m) :
     e.queries = [] ∧ (∀ j ∈ e.items, j = m) ∧ (s.item m).core = k ∧
-    (e.strict = true ∨ s.alwaysBound m = true) := by
+    (e.strict = true ∨ s.alwaysBound m = true) ∧ e.refs ≠ [] := by
   unfold exprItem at h
   split at h
   · cases h
-  · rename_i m' _
+  · rename_i m' hhead
     split at h
     · rename_i hok
       cases h
       simp only [Bool.and_eq_true, List.isEmpty_iff, List.all_eq_true, beq_iff_eq,
         Bool.or_eq_true] at hok
-      exact ⟨hok.1.1.1.1.1, hok.1.1.1.1.2, hok.1.1.1.2, hok.2⟩
+      refine ⟨hok.1.1.1.1.1, hok.1.1.1.1.2, hok.1.1.1.2, hok.2, fun hnil => ?_⟩
+      simp [Expr.items, hnil] at hhead
     · cases h
 
 /-- The theorem: a member's value in a binding's row of its item is the
 value the member, as written, has in the binding, so wherever the equality
 holds, the item's row gives the value it compares. The member is an item of
 its core, and an expression member is NULL wherever its columns are, or its
-item is no LEFT JOIN's. -/
+item is no LEFT JOIN's, so a member's value is NULL for a missing row
+unless every binding holds its item's row. -/
 theorem row_member_sound {s : Statement} {k : Nat} {member : Expr} {m : Nat} {v : PValue}
     {a : Affinity} (h : read s k member = some (m, v, a)) :
     (s.item m).core = k ∧ (∀ b sub, v.on (b m) = member.eval b sub) ∧
-    (v.strict = true ∨ s.alwaysBound m = true) := by
+    (v.on none = none ∨ s.alwaysBound m = true) := by
   cases member
   case col i c =>
     simp only [read] at h
@@ -72,7 +74,10 @@ theorem row_member_sound {s : Statement} {k : Nat} {member : Expr} {m : Nat} {v 
     simp only [read, Option.map_eq_some_iff] at h
     obtain ⟨m', hm', he⟩ := h
     cases he
-    obtain ⟨hq, hitems, hk, hst⟩ := exprItem_facts hm'
-    exact ⟨hk, fun b sub => (Expr.eval_rowBind _ hitems hq).symm, by simpa [PValue.strict] using hst⟩
+    obtain ⟨hq, hitems, hk, hst, hrefs⟩ := exprItem_facts hm'
+    refine ⟨hk, fun b sub => (Expr.eval_rowBind _ hitems hq).symm, ?_⟩
+    rcases hst with hst | hst
+    · exact Or.inl (Expr.eval_null _ hrefs hq hst fun _ _ _ => rfl)
+    · exact Or.inr hst
 
 end SqliveNarrowing.RowMember

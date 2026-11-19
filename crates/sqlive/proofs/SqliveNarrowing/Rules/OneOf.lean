@@ -228,7 +228,7 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
 subquery its partner isn't `m` and is among the items `named`. -/
 def SideFacts (s : Statement) (m : Nat) (named : List Nat) (side : Side) : Prop :=
   ∀ e ∈ side.edges, e.member = m ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (e.nested = false → e.partner ∈ named) ∧ (s.item e.partner).readable
+    (e.nested = false → e.partner ∈ named) ∧ (s.item e.partner).readable ∧ e.memberStrict s
 
 /-- The items an argument of COALESCE names are items the COALESCE names. -/
 theorem args_items {e arg : Expr} (h : arg ∈ args e) : ∀ j ∈ arg.items, j ∈ e.items := by
@@ -245,6 +245,26 @@ theorem args_items {e arg : Expr} (h : arg ∈ args e) : ∀ j ∈ arg.items, j 
     subst h
     exact fun j hj => hj
 
+/-- Each side an argument gives narrows the member. -/
+theorem argSide_narrows {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
+    (h : argSide s k m c aff arg = some side) : side.narrows = true := by
+  unfold argSide at h
+  split at h
+  · cases h; rfl
+  · obtain ⟨e', _, rfl⟩ := Option.map_eq_some_iff.mp h; rfl
+  · obtain ⟨e', _, rfl⟩ := Option.map_eq_some_iff.mp h; rfl
+
+/-- Each side an arm gives narrows the member. -/
+theorem armSide_narrows {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {side : Side}
+    (h : armSide s m c aff arm = some side) : side.narrows = true := by
+  unfold armSide at h
+  split at h
+  · cases h; rfl
+  · split at h
+    · cases h; rfl
+    · cases h
+  · cases h
+
 theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
     (h : argSide s k m c aff arg = some side) : SideFacts s m arg.items side := by
   intro e he
@@ -254,13 +274,14 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨_, _, _, _, _, _, _, hread, hmem, _, _, hnest⟩ := SubqueryEdge.edge_facts he'
+    obtain ⟨_, _, _, _, _, _, _, hread, hmem, hmv, _, hnest⟩ := SubqueryEdge.edge_facts he'
     simp only [Expr.col.injEq] at hmem
-    exact ⟨hmem.1.symm, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread⟩
+    exact ⟨hmem.1.symm, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
+      Or.inl (by rw [hmv]; rfl)⟩
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨hmem, _, _, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
+    obtain ⟨hmem, hmv, _, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
     have hpart : e.partner ∈ arg.items := by
       cases hr : arg.refs with
       | nil => exact absurd hr hrefs
@@ -268,7 +289,7 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
         have hp : p.1 ∈ arg.items := by simp [Expr.items, hr]
         rw [← hitems p.1 hp]
         exact hp
-    exact ⟨hmem, fun _ => by rw [hmem]; exact hne, fun _ => hpart, hread⟩
+    exact ⟨hmem, fun _ => by rw [hmem]; exact hne, fun _ => hpart, hread, Or.inl (by rw [hmv]; rfl)⟩
 
 /-- A side of an argument that gives the member's value holds. -/
 theorem argSide_holds {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
@@ -308,7 +329,7 @@ theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
       cases h
       simp only [List.mem_singleton] at he
       subst he
-      exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2.1⟩
+      exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2.1, Or.inl rfl⟩
     · cases h
   · cases h
 
@@ -396,9 +417,10 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
       (∀ {m c}, member = .col m c → ∀ {db f b}, isTrue (cd.eval b (evalQuery s db f b)) →
         ∃ x row, cellOf (b m) c = some x ∧ row ∈ evalQuery s db f b q ∧ row.cell 0 = some x) →
       n.terms = [] ∧ n.edges = [] ∧ ∀ d ∈ n.ors, (s.item d.item).core = k ∧
+        (∀ side ∈ d.sides, side.narrows = true) ∧
         (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
           (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-          (s.item e.partner).readable) ∧
+          (s.item e.partner).readable ∧ e.memberStrict s) ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b := by
     intro member q h hrow
     unfold compound at h
@@ -419,7 +441,9 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
         refine ⟨rfl, rfl, fun d hd => ?_⟩
         simp only [List.mem_singleton] at hd
         subst hd
-        refine ⟨hk, fun side hside => ?_, fun db f b hc => ?_⟩
+        refine ⟨hk, fun side hside => ?_, fun side hside => ?_, fun db f b hc => ?_⟩
+        · obtain ⟨arm, _, harm⟩ := (mapM_mem hsides).2 side hside
+          exact armSide_narrows harm
         · obtain ⟨arm, _, harm⟩ := (mapM_mem hsides).2 side hside
           exact armSide_facts cd.items harm
         · obtain ⟨x, row, hm, hrowq, hx⟩ := hrow hmember hc
@@ -436,9 +460,10 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
         ∃ x, member.eval b (evalQuery s db f b) = some x ∧
           other.eval b (evalQuery s db f b) = some x) →
       n.terms = [] ∧ n.edges = [] ∧ ∀ d ∈ n.ors, (s.item d.item).core = k ∧
+        (∀ side ∈ d.sides, side.narrows = true) ∧
         (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
           (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-          (s.item e.partner).readable) ∧
+          (s.item e.partner).readable ∧ e.memberStrict s) ∧
         ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b := by
     intro member other h hnamed hval
     unfold coalesced at h
@@ -459,11 +484,13 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
           refine ⟨rfl, rfl, fun d hd => ?_⟩
           simp only [List.mem_singleton] at hd
           subst hd
-          refine ⟨hk, fun side hside => ?_, fun db f b hc => ?_⟩
+          refine ⟨hk, fun side hside => ?_, fun side hside => ?_, fun db f b hc => ?_⟩
+          · obtain ⟨arg, _, harg⟩ := (mapM_mem hsides).2 side hside
+            exact argSide_narrows harg
           · obtain ⟨arg, hargm, harg⟩ := (mapM_mem hsides).2 side hside
             intro e he
-            obtain ⟨h1, h2, h3, h4⟩ := argSide_facts harg e he
-            exact ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4⟩
+            obtain ⟨h1, h2, h3, h4, h5⟩ := argSide_facts harg e he
+            exact ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4, h5⟩
           · obtain ⟨x, hm, ho⟩ := hval hc
             rw [hmember] at hm
             simp only [Expr.eval] at hm

@@ -37,6 +37,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.CteNames.resolve_outer
 #print axioms SqliveNarrowing.Whole.whole_sound
 #print axioms SqliveNarrowing.readCondition_sound
+#print axioms SqliveNarrowing.STerm.holds_none
+#print axioms SqliveNarrowing.Edge.HoldsIn.bound
+#print axioms SqliveNarrowing.Disjunction.HoldsIn.bound
 #print axioms SqliveNarrowing.result_mask
 #print axioms SqliveNarrowing.Writes.unjudged
 #print axioms SqliveNarrowing.unjudged_rows

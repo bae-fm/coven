@@ -129,6 +129,9 @@ structure Side where
 def Side.mayHoldOnNulls (side : Side) : Bool :=
   side.terms.any (·.mayHoldOnNulls) || side.edges.any (·.nulls)
 
+/-- Whether a side narrows its item: it has a term or an edge. -/
+def Side.narrows (side : Side) : Bool := !side.terms.isEmpty || !side.edges.isEmpty
+
 /-- An OR that narrows `item`: wherever the OR holds, one of its sides does
 (`Disjunction`). -/
 structure Disjunction where

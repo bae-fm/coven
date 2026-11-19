@@ -109,6 +109,28 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
       · cases h
         exact ⟨hmv, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl, rfl⟩
 
+/-- An edge's member value is NULL for a missing row, unless every binding
+holds the member's row. -/
+theorem edge_memberStrict {s : Statement} {k : Nat} {member other : Expr} {first : Bool}
+    {e : Edge} (h : edge s k member other first = some e) : e.memberStrict s := by
+  unfold edge at h
+  simp only [bind, Option.bind] at h
+  cases hmo : RowMember.read s k member with
+  | none => simp [hmo] at h
+  | some found =>
+    obtain ⟨m, mv, aff⟩ := found
+    obtain ⟨_, _, hnone⟩ := RowMember.row_member_sound hmo
+    simp only [hmo] at h
+    split at h
+    · cases h
+    cases hp : other.items.head? with
+    | none => simp [hp] at h
+    | some p =>
+      simp only [hp] at h
+      split at h
+      · cases h
+      repeat' (first | (split at h) | (cases h; exact hnone) | (cases h))
+
 /-- An edge's partner is an item its other side names. -/
 theorem edge_partner_mem {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) : e.partner ∈ other.items := by
@@ -204,12 +226,12 @@ theorem edge_sound : ReadCondition.Sound readCondition where
       rcases he with he | he
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => items_right _ (edge_partner_mem he), hread,
-          fun db f b hc => ?_⟩
+          edge_memberStrict he, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hl hr
       · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, fun _ => items_left _ (edge_partner_mem he), hread,
-          fun db f b hc => ?_⟩
+          edge_memberStrict he, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hr hl
     · cases h

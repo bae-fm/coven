@@ -87,9 +87,21 @@ that its partner's row in the binding gives. For a subquery's source, the
 partner's row is in a binding of the subquery's core under the same binding.
 Any other partner is an item the condition names, so a binding that holds a
 row of each item a condition names, as each binding a core keeps does of its
-items that no LEFT JOIN adds, holds a row of the partner.
-`readCondition_sound` proves that the narrowing a condition gives keeps the
-promise of whichever rule reads it.
+items that no LEFT JOIN adds, holds a row of the partner. An edge's member
+value is NULL where the member has no row, unless no LEFT JOIN adds the
+member. A reader that reads ORs promises that each side narrows its item with
+a term or an edge. `readCondition_sound` proves that the narrowing a condition
+gives keeps the promise of whichever rule reads it.
+
+The planner makes a LEFT JOIN an inner join's when a condition outside its ON
+narrows its item by a part that a row of NULLs fails. `holds_none` proves
+that such a term is false of a missing row. `HoldsIn.bound` proves that an
+edge that compares by `=`, true of a binding with no row of its member, has
+a member that no LEFT JOIN adds, or a partner outside a subquery that no LEFT
+JOIN adds and that the binding has no row of. `Disjunction.HoldsIn.bound`
+proves the same of an OR that a row of NULLs fails, through the side that
+holds. A binding a core keeps holds a row of each of its items that no LEFT
+JOIN adds, so where such a part holds, its item has a row.
 
 - **A condition on one item's own columns.** `term_sound` proves the promise
   for comparisons with a constant, IN lists, NULL tests, and AND and OR of

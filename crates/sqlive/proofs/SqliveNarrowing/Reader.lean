@@ -198,17 +198,25 @@ each of its terms true of the item's row and each of its edges holding. -/
 def Disjunction.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (d : Disjunction) : Prop :=
   ∃ side ∈ d.sides, (∀ t ∈ side.terms, t.holds (b d.item)) ∧ ∀ e ∈ side.edges, e.HoldsIn s db f b
 
+/-- Whether an edge's member value is NULL for a missing row, or its member
+is no item a LEFT JOIN adds, so every binding a core keeps holds its row:
+either way, an edge that compares by `=` holds of no binding of the core
+whose member has no row, unless its partner has none either. -/
+def Edge.memberStrict (s : Statement) (e : Edge) : Prop :=
+  e.memberValue.on none = none ∨ s.alwaysBound e.member = true
+
 /-- What a reader that reads a condition as ORs promises: it gives no term
 and no edge, and of each OR it gives, the item is one of core `k`'s, each
-side's edges are from that item to a partner readable alone that, outside a
-subquery, isn't the item and is an item the condition names, and wherever
-the condition holds, one side does. -/
+side narrows it, each side's edges are from that item to a partner readable
+alone that, outside a subquery, isn't the item and is an item the condition
+names, with a member value NULL for a missing row unless every binding holds
+the item's row, and wherever the condition holds, one side does. -/
 def ReadCondition.Disjoins (read : ReadCondition) : Prop :=
   ∀ {s k cd n}, read s k cd = some n → n.terms = [] ∧ n.edges = [] ∧
-    ∀ d ∈ n.ors, (s.item d.item).core = k ∧
+    ∀ d ∈ n.ors, (s.item d.item).core = k ∧ (∀ side ∈ d.sides, side.narrows = true) ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
         (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
-        (s.item e.partner).readable) ∧
+        (s.item e.partner).readable ∧ e.memberStrict s) ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b
 
 /-- What a reader promises of the narrowing it reads from a condition of
@@ -217,14 +225,85 @@ fuel `f`, each term holds of its item's row and each edge holds. Each term
 and edge is on an item of core `k`, and an edge's partner is readable alone
 and, outside a subquery, isn't its member and is an item the condition
 names, so a binding that holds a row of each item the condition names holds
-one of the partner. -/
+one of the partner. An edge's member value is NULL for a missing row, unless
+every binding holds the member's row. -/
 structure ReadCondition.Sound (read : ReadCondition) : Prop where
   terms : ∀ {s k cd n}, read s k cd = some n → ∀ i t, (i, t) ∈ n.terms →
     (s.item i).core = k ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)
   edges : ∀ {s k cd n}, read s k cd = some n → ∀ e ∈ n.edges,
     (s.item e.member).core = k ∧ (e.nested = false → e.partner ≠ e.member) ∧
-    (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧
+    (e.nested = false → e.partner ∈ cd.items) ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
     ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b
+
+/-! What makes a LEFT JOIN an inner join's: a part of a narrowing that a row
+of NULLs fails, true of a binding, says its item has a row there, unless an
+edge's partner, which every binding a core keeps holds a row of, has none. -/
+
+/-- A term a row of NULLs can't pass holds of no missing row. -/
+theorem STerm.holds_none {t : STerm} (h : t.mayHoldOnNulls = false) : t.holds none = false := by
+  induction t with
+  | compare => rfl
+  | inList => rfl
+  | null c n =>
+    simp only [STerm.mayHoldOnNulls, Bool.not_eq_false'] at h
+    simp [STerm.holds, cellOf, h]
+  | row => simp [STerm.mayHoldOnNulls] at h
+  | and l r ihl ihr =>
+    simp only [STerm.mayHoldOnNulls, Bool.and_eq_false_iff] at h
+    rcases h with h | h <;> simp [STerm.holds, ihl, ihr, h]
+  | or l r ihl ihr =>
+    simp only [STerm.mayHoldOnNulls, Bool.or_eq_false_iff] at h
+    simp [STerm.holds, ihl h.1, ihr h.2]
+
+/-- An edge that compares by `=`, holding of a binding with no row of its
+member, has a member every binding a core keeps holds a row of, or a partner
+outside a subquery that every such binding holds a row of and this one
+doesn't. -/
+theorem Edge.HoldsIn.bound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
+    (hh : e.HoldsIn s db f b) (hn : e.nulls = false) (hs : e.memberStrict s)
+    (hb : b e.member = none) :
+    s.alwaysBound e.member = true ∨
+      (e.nested = false ∧ s.alwaysBound e.partner = true ∧ b e.partner = none) := by
+  rcases hh with ⟨x, hx, _⟩ | ⟨hnulls, _⟩ | ⟨_, hnest, hab, hp⟩
+  · rcases hs with hs | hs
+    · rw [hb, hs] at hx
+      cases hx
+    · exact Or.inl hs
+  · rw [hn] at hnulls
+    cases hnulls
+  · exact Or.inr ⟨hnest, hab, hp⟩
+
+/-- An OR a row of NULLs can't pass, each of whose sides narrows its item
+with edges from it whose member value is NULL for a missing row unless every
+binding holds the item's row, holding of a binding with no row of its item,
+has an item every binding a core keeps holds a row of, or an edge whose
+partner outside a subquery every such binding holds a row of and this one
+doesn't. -/
+theorem Disjunction.HoldsIn.bound {s : Statement} {db : Db} {f : Nat} {b : Bind}
+    {d : Disjunction} (hh : d.HoldsIn s db f b) (hn : d.mayHoldOnNulls = false)
+    (hnarrows : ∀ side ∈ d.sides, side.narrows = true)
+    (hedges : ∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧ e.memberStrict s)
+    (hb : b d.item = none) :
+    s.alwaysBound d.item = true ∨ ∃ side ∈ d.sides, ∃ e ∈ side.edges,
+      e.nested = false ∧ s.alwaysBound e.partner = true ∧ b e.partner = none := by
+  obtain ⟨side, hside, hterms, hholds⟩ := hh
+  have hsn : side.mayHoldOnNulls = false := by
+    simp only [Disjunction.mayHoldOnNulls, List.any_eq_false] at hn
+    simpa using hn side hside
+  simp only [Side.mayHoldOnNulls, Bool.or_eq_false_iff, List.any_eq_false,
+    Bool.not_eq_true] at hsn
+  have hnar := hnarrows side hside
+  simp only [Side.narrows, Bool.or_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff] at hnar
+  rcases hnar with hnar | hnar
+  · obtain ⟨t, ht⟩ := List.exists_mem_of_ne_nil _ hnar
+    have := hterms t ht
+    rw [hb, STerm.holds_none (hsn.1 t ht)] at this
+    cases this
+  · obtain ⟨e, he⟩ := List.exists_mem_of_ne_nil _ hnar
+    obtain ⟨hmem, hstrict⟩ := hedges side hside e he
+    rcases (hholds e he).bound (hsn.2 e he) hstrict (by rw [hmem]; exact hb) with h | h
+    · exact Or.inl (hmem ▸ h)
+    · exact Or.inr ⟨side, hside, e, he, h⟩
 
 end SqliveNarrowing
