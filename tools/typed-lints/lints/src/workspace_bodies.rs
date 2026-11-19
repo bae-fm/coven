@@ -10,28 +10,28 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, DefIndex};
 use rustc_middle::ty::TyCtxt;
 
-use crate::owners::Owners;
+use crate::workspace_policy::WorkspacePolicy;
 
 /// Each definition of the workspace the compile sees: the crate's own, and
 /// those of the workspace's crates it depends on. `lint` reads their bodies,
 /// so the compile stops when it lacks them.
-pub(crate) fn workspace_definitions<'tcx>(
-    owners: &Owners<'tcx>,
-    tcx: TyCtxt<'tcx>,
+pub(crate) fn workspace_definitions(
+    workspace: &WorkspacePolicy,
+    tcx: TyCtxt<'_>,
     lint: &str,
 ) -> Vec<DefId> {
     let mut definitions =
         tcx.hir_crate_items(()).definitions().map(|id| id.to_def_id()).collect::<Vec<_>>();
-    definitions.extend(earlier_definitions(owners, tcx, lint));
+    definitions.extend(earlier_definitions(workspace, tcx, lint));
     definitions
 }
 
 /// Each function and closure of the workspace the compile sees whose body
 /// is production code, with MIR to read (`TyCtxt::optimized_mir`), for
 /// `lint`.
-pub(crate) fn workspace_bodies<'tcx>(
-    owners: &Owners<'tcx>,
-    tcx: TyCtxt<'tcx>,
+pub(crate) fn workspace_bodies(
+    workspace: &WorkspacePolicy,
+    tcx: TyCtxt<'_>,
     lint: &str,
 ) -> Vec<DefId> {
     let has_body = |id: DefId| {
@@ -42,21 +42,21 @@ pub(crate) fn workspace_bodies<'tcx>(
             DefKind::Closure => true,
             _ => false,
         };
-        callable && tcx.is_mir_available(id) && !owners.workspace.is_test_definition(tcx, id)
+        callable && tcx.is_mir_available(id) && !workspace.is_test_definition(tcx, id)
     };
     let mut bodies = tcx
         .hir_body_owners()
         .map(|id| id.to_def_id())
         .filter(|&id| has_body(id))
         .collect::<Vec<_>>();
-    bodies.extend(earlier_definitions(owners, tcx, lint).filter(|&id| has_body(id)));
+    bodies.extend(earlier_definitions(workspace, tcx, lint).filter(|&id| has_body(id)));
     bodies
 }
 
 /// Every definition of the workspace's crates the crate depends on. `lint`
 /// reads their bodies, so the compile stops when it lacks them.
-fn earlier_definitions<'tcx>(
-    owners: &Owners<'tcx>,
+pub(crate) fn earlier_definitions<'tcx>(
+    workspace: &WorkspacePolicy,
     tcx: TyCtxt<'tcx>,
     lint: &str,
 ) -> impl Iterator<Item = DefId> + use<'tcx> {
@@ -71,7 +71,7 @@ fn earlier_definitions<'tcx>(
         .crates(())
         .iter()
         .copied()
-        .filter(|krate| owners.is_workspace_item(krate.as_def_id()))
+        .filter(|krate| workspace.holds_file(tcx, tcx.def_span(krate.as_def_id())))
         .collect::<Vec<_>>();
     crates.into_iter().flat_map(move |krate| {
         (0..tcx.num_extern_def_ids(krate))

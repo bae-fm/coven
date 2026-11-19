@@ -28,6 +28,7 @@ mod method_takes_capability;
 mod owner_dependencies;
 mod owner_rules;
 mod owners;
+mod read_rule;
 mod reqwest_error_display;
 mod sqlite_outside_its_homes;
 mod task_state;
@@ -58,6 +59,7 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
         owner_dependencies::HANDLE_NOT_FROM_ITS_OWNER,
         owner_dependencies::SHARED_STATE_OUTSIDE_HANDLE,
     ]);
+    store.register_lints(read_rule::READ_RULE_LINTS);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
     }));
@@ -75,5 +77,8 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
     }));
     store.register_late_lint_pass(Box::new(move |tcx| {
         Box::new(owner_rules::OwnerRules::new(tcx, workspace_policy::for_compile(policy, tcx)))
+    }));
+    store.register_late_lint_pass(Box::new(move |tcx| {
+        Box::new(read_rule::ReadRule::new(tcx, workspace_policy::for_compile(policy, tcx)))
     }));
 }

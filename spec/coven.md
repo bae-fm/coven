@@ -14947,6 +14947,34 @@ the same on any platform.
     compile at a handle whose owner, in the crate being compiled, has no
     method that returns it, and at a type that two of the policy's
     capability, shared state, private state and handle rows name.
+    A workspace whose screens read live queries can state a read rule in its
+    policy's `read_rule`: a read does no work that its SQL can do. coven's own
+    policy states none. Eight lints hold the rule, one for each shape of such
+    work, so that a mark names the shape it keeps: `clippy::read_sort`,
+    `clippy::read_filter`, `clippy::read_group`, `clippy::read_aggregate`,
+    `clippy::read_pick`, `clippy::read_join`, `clippy::read_length_branch` and
+    `clippy::read_drop_row`. Each finds, in read code, a method of the
+    standard library, itertools or indexmap, by the definition its call
+    resolves to, or a loop or pattern, that works on a read's rows. Read code
+    is each function or closure whose inputs name one of the policy's read
+    types; each method of a type that holds a live query; each closure or
+    function that code passes to a method of a read type, of a live query or
+    of a type that holds one, or to a call beside a value of such a type; and
+    each function of the crate that read code calls or passes on. Test code
+    and the files the policy lists as plumbing are no read code. A row mapper
+    is a function or closure whose inputs name the row a statement hands its
+    mapper. When the mapper's result implements one of the policy's
+    `column_values`, such as rusqlite's `FromSql`, the mapper reads one
+    column, and the rows of its read are the collections that flow in the
+    same body from what the read returns. Any other mapper's result is a row
+    type, and a slice, collection or iterator of a row type holds rows. One
+    row, one optional value, a range, text and bytes hold no rows. Code that
+    only a live query's `process` runs, and no other read code reaches, may
+    sort, filter, group, count and pick among the one result `process`
+    passes it, so the lints find nothing there. A function that other crates
+    can call is never such code, since the compile cannot see their calls. A
+    mark sits on the narrowest item that takes one, a statement where it can,
+    and covers every finding of its shape in that item.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

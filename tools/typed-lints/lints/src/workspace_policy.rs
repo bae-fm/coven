@@ -12,19 +12,42 @@
 //! what it read to each lint's pass. Each pass names the file among the
 //! compile's inputs, so cargo lints the crate again when the file changes.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use clippy_utils::is_in_test_function;
 use clippy_utils::paths::{PathNS, lookup_path_str};
 use owner_construction_policy::{FILE_NAME, Policy, RAW_SQLITE_HANDLES};
 use rustc_attr_ir::CfgEntry;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LOCAL_CRATE};
+use rustc_hir::def_id::{CRATE_DEF_ID, CrateNum, DefId, LOCAL_CRATE};
 use rustc_hir::{HirId, ItemKind, Node, find_attr};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{FileName, Span, Symbol, sym};
 
 use crate::owner_rules::implemented_type;
+
+/// Which crates the compile loads are the workspace's: those whose root file
+/// is inside the workspace, as asked so far.
+pub(crate) struct WorkspaceCrates<'w> {
+    workspace: &'w WorkspacePolicy,
+    known: RefCell<FxHashMap<CrateNum, bool>>,
+}
+
+impl<'w> WorkspaceCrates<'w> {
+    pub(crate) fn new(workspace: &'w WorkspacePolicy) -> Self {
+        Self { workspace, known: RefCell::default() }
+    }
+
+    /// Whether `id` is declared in one of the workspace's crates.
+    pub(crate) fn declares(&self, tcx: TyCtxt<'_>, id: DefId) -> bool {
+        id.is_local()
+            || *self.known.borrow_mut().entry(id.krate).or_insert_with(|| {
+                self.workspace.holds_file(tcx, tcx.def_span(id.krate.as_def_id()))
+            })
+    }
+}
 
 /// The workspace's policy, and where the workspace and the crate being
 /// compiled are, for the paths the policy names.

@@ -1,7 +1,9 @@
 //! What the lints' tests share: compiling a fixture crate with the driver, as
 //! cargo runs it, and comparing a lint's findings with the lines of the
 //! fixture that end in `// finding` or hold `/* finding */`, the form a line
-//! that ends in an opening brace takes.
+//! that ends in an opening brace takes. A fixture that several lints check
+//! names the lints instead, without `clippy::`, in the comment that ends the
+//! line: `// read_filter read_aggregate`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -67,7 +69,8 @@ impl Fixture<'_> {
 /// Checks that `lint` finds, in the compile that wrote `diagnostics`, what
 /// each line of the fixture sources `marked` that ends in `// finding` or
 /// holds `/* finding */` holds, once for each `/* finding */` it holds, and
-/// nothing else; and that no mark went unfulfilled.
+/// what each line whose last comment names the lint (`// read_sort`) holds;
+/// and nothing else; and that no mark went unfulfilled.
 pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
     let mut found: Vec<(String, u64)> = Vec::new();
     for line in diagnostics.lines() {
@@ -93,12 +96,16 @@ pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
     }
     found.sort_unstable();
 
+    let name = lint.trim_start_matches("clippy::");
     let mut expected: Vec<(String, u64)> = Vec::new();
     for source in marked {
         let fixture =
             std::fs::read_to_string(Path::new(FIXTURES).join(source)).expect("the fixture reads");
         for (number, text) in (1..).zip(fixture.lines()) {
             let count = text.matches("/* finding */").count()
+                + text.rsplit_once("// ").map_or(0, |(_, comment)| {
+                    comment.split_whitespace().filter(|word| *word == name).count()
+                })
                 + usize::from(text.trim_end().ends_with("// finding"));
             expected.extend(std::iter::repeat_n((source.to_string(), number), count));
         }

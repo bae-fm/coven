@@ -209,7 +209,7 @@ impl<'tcx> Rules<'_, 'tcx> {
     /// workspace trait, in production code.
     fn methods(&self) -> Vec<Method<'tcx>> {
         let tcx = self.tcx;
-        workspace_definitions(self.owners, tcx, "clippy::owner_hands_out_dependency")
+        workspace_definitions(self.owners.workspace, tcx, "clippy::owner_hands_out_dependency")
             .into_iter()
             .filter(|&id| tcx.def_kind(id) == DefKind::AssocFn)
             .filter(|&id| !self.owners.workspace.is_test_definition(tcx, id))

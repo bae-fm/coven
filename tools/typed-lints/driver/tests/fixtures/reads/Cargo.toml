@@ -1,0 +1,4 @@
+# The root of the workspace of the read rule fixture, where the lints find its
+# policy file: base.rs, a crate of the workspace the checked crate depends
+# on, and src/lib.rs, the checked crate.
+[workspace]

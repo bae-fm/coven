@@ -28,13 +28,13 @@ use clippy_utils::paths::PathNS;
 use owner_construction_policy::FILE_NAME;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId};
+use rustc_hir::def_id::DefId;
 use rustc_middle::ty::{
     self, AliasTy, GenericArgKind, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt, TypingEnv,
     Unnormalized,
 };
 
-use crate::workspace_policy::{WorkspacePolicy, raw_sqlite_handles, resolve_row};
+use crate::workspace_policy::{WorkspaceCrates, WorkspacePolicy, raw_sqlite_handles, resolve_row};
 
 /// The types one of the policy's type rows names: ADTs, whatever their type
 /// arguments, and the types aliases stand for, as `Arc<dyn Clock>`, with
@@ -319,7 +319,7 @@ pub(crate) struct Owners<'tcx> {
     tcx: TyCtxt<'tcx>,
     pub(crate) workspace: &'static WorkspacePolicy,
     pub(crate) rows: OwnerRows<'tcx>,
-    workspace_crates: RefCell<FxHashMap<CrateNum, bool>>,
+    workspace_crates: WorkspaceCrates<'static>,
     /// Which type parameters of each type its fields hold.
     held_parameters: RefCell<FxHashMap<DefId, Option<Vec<bool>>>>,
     /// Whether each workspace type is an owner, `None` while the answer is
@@ -336,7 +336,7 @@ impl<'tcx> Owners<'tcx> {
             tcx,
             workspace,
             rows: OwnerRows::resolve(tcx, workspace),
-            workspace_crates: RefCell::default(),
+            workspace_crates: WorkspaceCrates::new(workspace),
             held_parameters: RefCell::default(),
             owners: RefCell::default(),
             shared: RefCell::default(),
@@ -346,12 +346,7 @@ impl<'tcx> Owners<'tcx> {
     /// Whether `id` is declared in one of the workspace's crates: one whose
     /// root file is inside the workspace.
     pub(crate) fn is_workspace_item(&self, id: DefId) -> bool {
-        if id.is_local() {
-            return true;
-        }
-        *self.workspace_crates.borrow_mut().entry(id.krate).or_insert_with(|| {
-            self.workspace.holds_file(self.tcx, self.tcx.def_span(id.krate.as_def_id()))
-        })
+        self.workspace_crates.declares(self.tcx, id)
     }
 
     /// The normalized type of a field, or of any type with its arguments.
