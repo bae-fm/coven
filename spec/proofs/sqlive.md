@@ -35,9 +35,10 @@ around it.
 sqlive's planner (`scope_plan.rs`). Each core's conditions give terms on one
 item's rows and edges between items; the planner reads the conditions that a
 row of NULLs fails first, holds back what a LEFT JOIN's ON says of other items
-until a WHERE condition makes the join an inner join's, passes a derived item's
-terms into its arms, and places the items so each takes values from items
-placed before it. A run binds each item's scope; a table's scope passes a row
+until a WHERE condition makes the join an inner join's, carries each item's
+terms on a column an equality compares to the item on the equality's other
+side, passes a derived item's terms into its arms, and places the items so
+each takes values from items placed before it. A run binds each item's scope; a table's scope passes a row
 that any item of the table passes.
 
 [Changes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Changes.lean) and
@@ -89,6 +90,17 @@ promise of whichever rule reads it.
   that a row of an arm that doesn't aggregate holds, in each column that is a
   bare column of one of the arm's items, that item's value. `renamed_sound`
   proves that a term true of the derived row is then true of the item's row.
+- **A condition carried across an equality.** `transfer_sound` proves that
+  when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
+  true of `a`'s row on `x`. The planner adds such a term to `a`'s own,
+  whichever of the two items it places first, so `JOIN b ON a.x = b.y WHERE
+  b.y = 5 AND a.z = 1` narrows `a` by `a.x = 5` too, though `a.z = 1` makes
+  `a` the item the planner places first. A derived item's own terms on a
+  column include what its arms say of it: `pulled_sound` proves that a row
+  of a derived item's query whose column isn't NULL passes, joined with OR
+  across the arms, the term of the item each arm passes the column on from,
+  when no arm aggregates or calls a window function. A LIMIT on the query
+  keeps only rows its arms give, so the term holds under one too.
 - **A view or FROM subquery read alone.** `view_sound` proves that a query
   whose arms sit in no other core returns the same rows under every binding
   around it, so a lookup that reads it alone reads the rows the statement
@@ -148,8 +160,8 @@ promise of whichever rule reads it.
 
 The theorems prove each rule's step. No theorem yet proves that the planner
 puts the steps together soundly: that the order in which it places items, the
-ON conditions it holds back, the terms it passes into derived items and the
-lookups of each join's partner give scopes outside of which a write leaves the
+ON conditions it holds back, the terms it carries across equalities, the terms
+it passes into derived items and the lookups of each join's partner give scopes outside of which a write leaves the
 result unchanged. The differential checks that composition against SQLite on
 every statement it generates.
 

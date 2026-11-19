@@ -26,7 +26,8 @@ items: one for each item. -/
 def Statement.fuel (s : Statement) : Nat := s.items.length + 1
 
 /-- Read core `k`'s conditions: those a row of NULLs fails first, as they
-make LEFT JOINs inner, which the others see; then pass each item's term into
+make LEFT JOINs inner, which the others see; then carry each item's terms on
+a compared column across the core's edges; then pass each item's term into
 it, when it is derived (`read_core`). -/
 def readCore (s : Statement) (st : PState) (k : Nat) : PState :=
   let c := s.core k
@@ -37,6 +38,7 @@ def readCore (s : Statement) (st : PState) (k : Nat) : PState :=
     match p with
     | .inner => st.narrow s.fuel n
     | .leftOn i => st.narrowOn s.fuel i n) st
+  let st := Transfer.carry s st k
   c.items.foldl (fun st i => PushDown.pushDown s s.fuel s.fuel st i (st.items i).term []) st
 
 /-- The items of `remaining` that wait: those taking a subquery's value from

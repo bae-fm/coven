@@ -7,6 +7,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.RowSubqueryEdge.row_subquery_edge_sound
 #print axioms SqliveNarrowing.PushDown.renamed_sound
 #print axioms SqliveNarrowing.PushDown.push_down_sound
+#print axioms SqliveNarrowing.Transfer.transfer_sound
+#print axioms SqliveNarrowing.Transfer.pulled_sound
 #print axioms SqliveNarrowing.View.view_sound
 #print axioms SqliveNarrowing.View.closed_eval
 #print axioms SqliveNarrowing.View.closed_sound

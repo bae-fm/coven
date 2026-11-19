@@ -4,6 +4,7 @@ import SqliveNarrowing.Rules.RowEdge
 import SqliveNarrowing.Rules.SubqueryEdge
 import SqliveNarrowing.Rules.RowSubqueryEdge
 import SqliveNarrowing.Rules.PushDown
+import SqliveNarrowing.Rules.Transfer
 import SqliveNarrowing.Rules.View
 import SqliveNarrowing.Rules.Limit
 import SqliveNarrowing.Rules.Whole
