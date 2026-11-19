@@ -563,8 +563,13 @@ fn gathering_statistics_on_a_library_sized_database() {
         connection.execute_batch(sql).unwrap();
         started.elapsed()
     };
-    let forget =
-        || fresh().execute_batch("DELETE FROM sqlite_stat1; DELETE FROM sqlite_stat4").unwrap();
+    // A fresh database has no statistics tables yet, so each run starts from
+    // none, as the first one does.
+    let forget = || {
+        fresh()
+            .execute_batch("DROP TABLE IF EXISTS sqlite_stat1; DROP TABLE IF EXISTS sqlite_stat4")
+            .unwrap()
+    };
     forget();
     let first = timed("PRAGMA optimize=0x10012");
     let unchanged = timed("PRAGMA optimize=0x10012");
