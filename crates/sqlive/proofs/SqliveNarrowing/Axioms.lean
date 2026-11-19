@@ -103,3 +103,10 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.outer_readable
 #print axioms SqliveNarrowing.relevant_of_all
 #print axioms SqliveNarrowing.queryTest_root
+#print axioms SqliveNarrowing.membershipScope_pushed
+#print axioms SqliveNarrowing.pushed_passes
+#print axioms SqliveNarrowing.partner_found
+#print axioms SqliveNarrowing.Limit.run_facts
+#print axioms SqliveNarrowing.item_passes
+#print axioms SqliveNarrowing.plan_kept_rows
+#print axioms SqliveNarrowing.plan_restricted

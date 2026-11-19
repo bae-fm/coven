@@ -577,12 +577,29 @@ a query whose every row matters (`relevant_of_all`), and no derived item
 reads the statement's own query, so its test keeps every row
 (`queryTest_root`).
 
-Whether these tests keep the promise `Kept` is the step that remains: whether
-the planned state's facts at a binding that matters, with the order the
-planner places items in, give each row of the binding its item's test: its
-memberships' and ORs' lookups, the edges passed into it, its LIMIT bound,
-and, for a LEFT JOIN item the planned state still holds an ON narrowing back
-for, a test its ON alone decides.
+[Kept.lean](../../crates/sqlive/proofs/SqliveNarrowing/Kept.lean) proves
+the promise for the bindings that matter. Each item's test (`planTest`) asks
+of its row what the item's scope asks, with the scopes of the items placed
+before it, and what each edge passed into the item asks. In a binding that
+matters, the planned state's facts hold (`plan_semTests`): each term holds,
+and each membership and each side of a kept OR holds. An edge's partner has
+its row in the binding or, for a subquery's source, in a binding of the
+subquery's core under it. The planner places each partner before its member,
+so by induction on the order the partner's row passes its test. That row is
+then a row of the partner's lookup that passes the partner's scope
+(`partner_found`), and the membership's scope passes the member's row. An
+edge passed into a derived item's arm passes because the binding's row is one
+the derived item's test keeps (`pushed_passes`, `membershipScope_pushed`). A
+row of an item a lookup reads alone is a row of the lookup: both databases
+hold a table row that passes the item's test, and both runs return a derived
+item's row at the same fuel. `plan_kept_rows` proves that each row of a
+binding that matters passes its test, and `plan_restricted` that such a
+binding holds no row only of an item the planned state still holds an ON
+narrowing back for.
+
+The step that remains is the promise for a LEFT JOIN item the planned state
+still holds an ON narrowing back for: that a row its ON holds for passes its
+test, which its ON alone decides.
 
 ## What the proofs don't cover
 
