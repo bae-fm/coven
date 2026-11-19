@@ -38,7 +38,7 @@ fn run(command: &mut Command) -> std::io::Error {
 #[cfg(not(unix))]
 fn run(command: &mut Command) -> std::io::Error {
     match command.status() {
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Ok(status) => std::process::exit(status.code().expect("Windows gives every exit a code")),
         Err(error) => error,
     }
 }
