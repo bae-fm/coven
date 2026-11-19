@@ -28,7 +28,7 @@ use crate::from_item::{read_item, Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
-use crate::scope_row::row_term;
+use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
@@ -867,7 +867,7 @@ pub(crate) fn read_condition<'a>(
         // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
         let narrowed = match term(connection, &column, condition)? {
             Some(term) => Some(term),
-            None => row_term(planner, core, item, condition, &read).map(ScopeTerm::Row),
+            None => item_row_term(planner, core, item, condition, &read).map(ScopeTerm::Row),
         };
         found.terms.extend(narrowed.map(|term| (item, term)));
     } else if or {

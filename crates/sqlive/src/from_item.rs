@@ -5,11 +5,11 @@
 use crate::derived::{read_derived_item, Ctes, Derived};
 use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
 use crate::scope_plan::{Planner, Source};
+use crate::scope_row::{row_term, RowExpression};
 use crate::scope_term::Affinity;
-use crate::select_syntax::{parts, text, Part};
+use crate::select_syntax::{parts, text, Functions, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{As, Expr, Name, QualifiedName, SelectTable};
-use std::sync::Arc;
 
 /// One of a FROM item's columns: its name, lowercase, when sqlive knows the
 /// name SQLite gives it, and what sqlive knows of its values.
@@ -24,24 +24,14 @@ pub(crate) enum ColumnValue {
     /// condition on the column narrows: a stored column whose collation is
     /// BINARY, or a derived item's column that passes such columns on.
     Compared(Affinity),
-    /// A generated column's values, which its expression gives (§4).
-    Generated(Arc<Generated>),
+    /// A generated column's values, which its expression gives: one whose
+    /// collation is BINARY and whose expression names only its table's
+    /// stored columns of BINARY collation (§4).
+    Generated(RowExpression),
     /// Values no condition narrows by: a column whose collation isn't
     /// BINARY, a generated column sqlive can't evaluate, or a column of a
     /// view read whole.
     Unknown,
-}
-
-/// A generated column whose collation is BINARY and whose expression names
-/// only its table's stored columns of BINARY collation.
-#[derive(Debug)]
-pub(crate) struct Generated {
-    /// The expression, as SQL that names the table's columns by bare names.
-    pub(crate) sql: String,
-    /// The column's affinity, which SQLite gives the expression's value.
-    pub(crate) affinity: Affinity,
-    /// The columns the expression names, lowercase, with their affinities.
-    pub(crate) columns: Vec<(String, Affinity)>,
 }
 
 /// A FROM item's columns.
@@ -211,6 +201,7 @@ pub(crate) fn read_item<'a>(
             // An ordinary table, or a view read only for its values: a view
             // read whole can show what the host's memory holds as well as
             // its tables.
+            let columns = columns(connection, planner.functions, &qualifier, &stored, ordinary)?;
             Ok(Some(item(
                 Source {
                     table: ordinary.then(|| stored.to_ascii_lowercase()),
@@ -221,7 +212,7 @@ pub(crate) fn read_item<'a>(
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },
-                columns(connection, &stored, ordinary)?,
+                columns,
                 None,
             )))
         }
@@ -279,11 +270,14 @@ fn in_main(name: &QualifiedName<'_>) -> bool {
     name.db_name.as_ref().is_none_or(|name| *name == "main")
 }
 
-/// A table's or a view's columns, in order, `ordinary` for a table. A view's
-/// comparisons happen inside SQLite, so sqlive gives none of them an affinity
-/// to narrow by.
+/// A table's or a view's columns, in order, `ordinary` for a table, which the
+/// statement names by `qualifier`. A view's comparisons happen inside SQLite,
+/// so sqlive gives none of them an affinity to narrow by. The connection's
+/// `functions` tell whether a generated column's calls repeat.
 pub(crate) fn columns(
     connection: &Connection,
+    functions: &Functions,
+    qualifier: &str,
     table: &str,
     ordinary: bool,
 ) -> rusqlite::Result<Columns> {
@@ -312,8 +306,8 @@ pub(crate) fn columns(
         for (position, affinity) in generated {
             let name = columns[position].name.as_deref().expect("a table's columns are named");
             let expression = expressions.iter().find(|(named, _)| **named == name);
-            if let Some(evaluated) =
-                expression.and_then(|(_, expr)| evaluated(&columns, expr, affinity))
+            if let Some(evaluated) = expression
+                .and_then(|(_, expr)| evaluated(functions, qualifier, &columns, expr, affinity))
             {
                 found.push((position, evaluated));
             }
@@ -329,42 +323,41 @@ pub(crate) fn columns(
         }
     };
     for (position, generated) in found {
-        columns[position].value = ColumnValue::Generated(Arc::new(generated));
+        columns[position].value = ColumnValue::Generated(generated);
     }
     Ok(Columns::Listed(columns))
 }
 
-/// The generated column of affinity `affinity` that `expr` gives, among the
-/// table's `columns`, when the expression names only columns sqlive compares
-/// and holds no COLLATE, which would give a comparison of its value another
-/// collation. SQLite allows a generated column's expression only columns of
-/// its own row and deterministic functions.
-fn evaluated(columns: &[Column], expr: &Expr<'_>, affinity: Affinity) -> Option<Generated> {
+/// The value of the generated column of affinity `affinity` that `expr`
+/// gives, among the table's `columns`, when the expression names only
+/// columns sqlive compares and holds no COLLATE, which would give a
+/// comparison of its value another collation. SQLite allows a generated
+/// column's expression only columns of its own row, by bare names.
+fn evaluated(
+    functions: &Functions,
+    qualifier: &str,
+    columns: &[Column],
+    expr: &Expr<'_>,
+    affinity: Affinity,
+) -> Option<RowExpression> {
     let mut found = Vec::new();
     parts(expr, &mut found);
-    let mut named: Vec<(String, Affinity)> = Vec::new();
-    for part in &found {
-        match part {
-            Part::Name(expr) => {
-                let name = match expr {
-                    Expr::Id(name) => Name(name.0),
-                    Expr::Name(name) => name.clone(),
-                    _ => return None,
-                };
-                let column = columns
-                    .iter()
-                    .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
-                let ColumnValue::Compared(compared) = column.value else {
-                    return None;
-                };
-                let name = column.name.clone().expect("a table's columns are named");
-                if !named.iter().any(|(listed, _)| *listed == name) {
-                    named.push((name, compared));
-                }
-            }
-            Part::Function(..) => {}
-            _ => return None,
-        }
+    if found.iter().any(|part| matches!(part, Part::Collation)) {
+        return None;
     }
-    Some(Generated { sql: text(expr), affinity, columns: named })
+    let term = row_term(functions, qualifier, expr, &found, &|name| {
+        let name = match name {
+            Expr::Id(name) => Name(name.0),
+            Expr::Name(name) => name.clone(),
+            _ => return None,
+        };
+        let column = columns
+            .iter()
+            .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
+        match column.value {
+            ColumnValue::Compared(compared) => Some((column.name.clone()?, compared)),
+            ColumnValue::Generated(_) | ColumnValue::Unknown => None,
+        }
+    })?;
+    Some(RowExpression { term, affinity })
 }

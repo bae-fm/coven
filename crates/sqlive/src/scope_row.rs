@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::row_scope::RowImage;
 use crate::scope_plan::Planner;
 use crate::scope_term::Affinity;
-use crate::select_syntax::Part;
+use crate::select_syntax::{Functions, Part};
 use crate::sql_value::SqlValue as Value;
 use sqlite3_parser::ast::Expr;
 
@@ -45,10 +45,18 @@ pub(crate) struct RowTerm {
     pub(crate) columns: Vec<(String, Affinity)>,
 }
 
+/// An expression over one table's row, with the affinity SQLite gives its
+/// value: an ORDER BY term's, which has none, or a generated column's own.
+#[derive(Clone, Debug)]
+pub(crate) struct RowExpression {
+    pub(crate) term: Arc<RowTerm>,
+    pub(crate) affinity: Affinity,
+}
+
 /// The term `expr`, a condition or a value whose names resolve to the table
 /// item `item` of `core`, gives, when SQLite can evaluate it row by row;
 /// `parts` are its parts.
-pub(crate) fn row_term(
+pub(crate) fn item_row_term(
     planner: &Planner,
     core: usize,
     item: usize,
@@ -57,6 +65,25 @@ pub(crate) fn row_term(
 ) -> Option<Arc<RowTerm>> {
     let from = &planner.items[item];
     from.source.table.as_ref()?;
+    row_term(planner.functions, &from.source.qualifier, expr, parts, &|name| {
+        let (_, column) = planner.resolve(core, name)?;
+        let affinity = from.columns.affinity(&column)?;
+        Some((column, affinity))
+    })
+}
+
+/// The term `expr` gives a table's rows, which the statement names by
+/// `qualifier`, when SQLite can evaluate it row by row: `column` gives the
+/// column, lowercase, and the affinity of each name in it, when sqlive
+/// compares that column's values, and the connection's `functions` tell
+/// whether each call repeats; `parts` are its parts.
+pub(crate) fn row_term(
+    functions: &Functions,
+    qualifier: &str,
+    expr: &Expr<'_>,
+    parts: &[Part<'_>],
+    column: &dyn Fn(&Expr<'_>) -> Option<(String, Affinity)>,
+) -> Option<Arc<RowTerm>> {
     let mut columns: Vec<(String, Affinity)> = Vec::new();
     for part in parts {
         match part {
@@ -66,14 +93,13 @@ pub(crate) fn row_term(
                 if matches!(name, Expr::DoublyQualified(..)) {
                     return None;
                 }
-                let (_, column) = planner.resolve(core, name)?;
-                let affinity = from.columns.affinity(&column)?;
+                let (column, affinity) = column(name)?;
                 if !columns.iter().any(|(named, _)| *named == column) {
                     columns.push((column, affinity));
                 }
             }
             Part::Function(name, arguments, window) => {
-                if *window || !planner.functions.repeats(name, *arguments) {
+                if *window || !functions.repeats(name, *arguments) {
                     return None;
                 }
             }
@@ -84,11 +110,7 @@ pub(crate) fn row_term(
     if columns.is_empty() {
         return None;
     }
-    Some(Arc::new(RowTerm {
-        sql: expr.to_string(),
-        qualifier: from.source.qualifier.clone(),
-        columns,
-    }))
+    Some(Arc::new(RowTerm { sql: expr.to_string(), qualifier: qualifier.to_owned(), columns }))
 }
 
 /// A run's condition: what it tests of a term, with the run's parameters.

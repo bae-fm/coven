@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::from_item::ColumnValue;
 use crate::row_scope::RowScope;
 use crate::scope_plan::{is_name, Planner};
-use crate::scope_row::{row_term, RowCondition, RowTerm, RowTest};
+use crate::scope_row::{item_row_term, RowCondition, RowExpression, RowTerm, RowTest};
 use crate::scope_term::{operand, Affinity, Operand};
 use crate::select_syntax::{order_term, parts, OrderTerm, Part};
 use crate::sql::unparenthesized;
@@ -64,10 +64,9 @@ pub(crate) enum SortKey {
     /// A stored column, lowercase, whose values sqlive compares itself.
     Column(String),
     /// An expression over the source's stored columns, whose value in a
-    /// changed row a write asks SQLite for, with the affinity SQLite gives
-    /// that value: a generated column's own, or none for an expression the
+    /// changed row a write asks SQLite for: a generated column's, or one the
     /// ORDER BY writes.
-    Expression { term: Arc<RowTerm>, affinity: Affinity },
+    Expression(RowExpression),
 }
 
 impl SortKey {
@@ -76,7 +75,9 @@ impl SortKey {
     fn null(&self, not: bool, parameters: &[Value]) -> RowScope {
         match self {
             Self::Column(column) => RowScope::Null { column: column.clone(), not },
-            Self::Expression { term, .. } => row(term, parameters, RowTest::Null { not }),
+            Self::Expression(RowExpression { term, .. }) => {
+                row(term, parameters, RowTest::Null { not })
+            }
         }
     }
 
@@ -90,7 +91,7 @@ impl SortKey {
                 ordering,
                 inclusive: false,
             },
-            Self::Expression { term, affinity } => row(
+            Self::Expression(RowExpression { term, affinity }) => row(
                 term,
                 parameters,
                 RowTest::Compare { ordering, value: value.clone(), affinity: *affinity },
@@ -232,14 +233,7 @@ fn sort_term(
         let from = &planner.items[item];
         let key = match from.columns.value(&column)? {
             ColumnValue::Compared(_) => SortKey::Column(column),
-            ColumnValue::Generated(generated) => SortKey::Expression {
-                term: Arc::new(RowTerm {
-                    sql: generated.sql.clone(),
-                    qualifier: from.source.qualifier.clone(),
-                    columns: generated.columns.clone(),
-                }),
-                affinity: generated.affinity,
-            },
+            ColumnValue::Generated(generated) => SortKey::Expression(generated.clone()),
             ColumnValue::Unknown => return None,
         };
         return Some((position, item, key));
@@ -259,8 +253,8 @@ fn sort_term(
     if !items.all(|other| other == Some(item)) {
         return None;
     }
-    let term = row_term(planner, core, item, sorted, &found)?;
-    Some((position, item, SortKey::Expression { term, affinity: Affinity::Blob }))
+    let term = item_row_term(planner, core, item, sorted, &found)?;
+    Some((position, item, SortKey::Expression(RowExpression { term, affinity: Affinity::Blob })))
 }
 
 /// The rows that sort at or before `last`, the values of a run's last row in

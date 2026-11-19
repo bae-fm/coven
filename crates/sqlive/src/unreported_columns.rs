@@ -824,7 +824,8 @@ impl Walk<'_> {
         if self.is_rowid(table, &column)? {
             return Ok(true);
         }
-        let columns = crate::from_item::columns(self.connection, table, true)?;
+        let columns =
+            crate::from_item::columns(self.connection, self.functions, items[item].0, table, true)?;
         Ok(matches!(columns.affinity(&column), Some(Affinity::Numeric | Affinity::Text)))
     }
 
