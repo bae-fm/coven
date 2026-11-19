@@ -20,6 +20,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.limit_sound
 #print axioms SqliveNarrowing.Limit.atOrBefore_passes
 #print axioms SqliveNarrowing.Limit.sortKey_value
+#print axioms SqliveNarrowing.Limit.sortedBefore_passes
+#print axioms SqliveNarrowing.Limit.runBound_passes
+#print axioms SqliveNarrowing.Limit.joined_passes
 #print axioms SqliveNarrowing.Pick.post_picks_any
 #print axioms SqliveNarrowing.Pick.fullyOrders_sound
 #print axioms SqliveNarrowing.Pick.bare_picks_any

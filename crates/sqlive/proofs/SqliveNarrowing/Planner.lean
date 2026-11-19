@@ -115,8 +115,9 @@ def plan (s : Statement) : Planned :=
   { state := st, order, sorted }
 
 /-- Each item's scope for a run whose last row's ORDER BY values are `last`,
-when it returned as many rows as its LIMIT (`scope_lookup::scopes`). -/
-def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :=
+run by run, when it returned as many rows as its LIMIT
+(`scope_lookup::scopes`). -/
+def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → RScope :=
   p.order.foldl (fun bound i =>
     let item := p.state.items i
     let scope := ((item.term.map STerm.bind).getD .all).both
@@ -136,11 +137,16 @@ def Planned.scopes (p : Planned) (last : Option (List Value)) : Nat → RScope :
       match sides.map sideScope with
       | [] => scope
       | first :: rest => scope.both (rest.foldl RScope.either first)) scope
+    -- A run's item looks up the rows of an earlier run's item through the
+    -- first of its memberships that takes values from it.
+    let lookup (j : Nat) : Option (RScope → RScope) :=
+      (item.memberships.find? (·.partner == j)).map fun m before =>
+        .joined m.column m.partner m.value ((bound m.partner).both before) m.nulls
     let scope := match p.sorted, last with
       | some sorted, some values =>
-        if sorted.item = i then
-          scope.both (Limit.atOrBefore i (sorted.terms.map fun (key, d, _) => (key, d)) values)
-        else scope
+        match Limit.runBound i lookup (sorted.runs.zip values) with
+        | some found => scope.both found
+        | none => scope
       | _, _ => scope
     fun j => if j = i then scope else bound j) fun _ => .all
 

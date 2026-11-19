@@ -154,14 +154,25 @@ promise of whichever rule reads it.
   a lookup reads alone.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
-  rows it returns. Each ORDER BY term sorts the sorted item's rows by a key:
-  one of its columns, which sqlive compares itself, or an expression over its
+  rows it returns. Each ORDER BY term sorts one item's rows by a key: one of
+  its columns, which sqlive compares itself, or an expression over its
   columns with no subquery, which sqlive asks SQLite to evaluate on each row
-  a write changes. `sortKey_value` proves that in a binding where the sorted item
-  has a row, the term's result column holds the key's value in that row.
-  `atOrBefore_passes` proves that the bound's scope passes exactly the rows
-  whose keys sort at or before the last row, NULL first ascending and last
-  descending.
+  a write changes. `sortKey_value` proves that in a binding where the term's
+  item has a row, the term's result column holds the key's value in that row.
+  The terms fall into runs of consecutive terms over one item.
+  `sortedBefore_passes` proves that a run's scope passes exactly the rows
+  whose keys sort before the last row's values of the run, NULL first
+  ascending and last descending, or tie with them and pass a given scope, and
+  `atOrBefore_passes` that the bound of a run passes exactly the rows whose
+  keys sort at or before those values. An item's bound is its first run's,
+  or, for each earlier run, a lookup of a row of that run's item that sorts
+  before the run's values, through the first of the item's memberships that
+  takes values from that item; an item without such a membership for each
+  earlier run has no bound. `runBound_passes` proves that in a binding whose
+  ORDER BY values sort at or before the last row's, each item's bound passes
+  its row, when each lookup passes the item's row wherever the partner's row
+  passes the lookup's scope, and `joined_passes` proves that a membership's
+  lookup does, in a binding where its edge holds.
 - **The rows SQLite picks.** A query that keeps some of its rows, by a LIMIT
   or an OFFSET or as a subquery whose first row a comparison takes, keeps the
   rows SQLite reads first, in the order of the plan it chooses.

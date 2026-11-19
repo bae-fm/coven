@@ -2,13 +2,17 @@ import SqliveNarrowing.Reader
 
 /-! Rule 6: a statement that is one SELECT ordered by its result columns,
 each a column or an expression over the columns of one of its tables, with a
-LIMIT and no OFFSET, depends only on that table's rows up to its last row when
-a run returns as many rows as its LIMIT (`scope_order.rs`). The table isn't a
+LIMIT and no OFFSET, depends only on its rows that sort at or before its last
+row when a run returns as many rows as its LIMIT (`scope_order.rs`). The
+ORDER BY's terms fall into runs, each of consecutive terms over one table.
+The table of the first run is bounded by its own terms. A later run's table
+is bounded by its own terms too, or by a row it joins of each earlier run's
+table that sorts before the last row's values of that run. No table is a
 LEFT JOIN's right side, and the SELECT neither groups, aggregates nor calls a
 window function, whose value in a row the rows after the last can change. -/
 namespace SqliveNarrowing.Limit
 
-/-- What an ORDER BY term sorts the sorted item's rows by (`SortKey`): one of
+/-- What an ORDER BY term sorts its item's rows by (`SortKey`): one of
 its columns, which sqlive compares itself, or an expression over its columns
 with no subquery, which sqlive asks SQLite to evaluate on each row a write
 changes. -/
@@ -17,17 +21,36 @@ inductive SortKey where
   | expr (e : Expr)
   deriving Repr
 
-/-- The key's value in the sorted item's row `r`. -/
+/-- The key's value in its item's row `r`. -/
 def SortKey.value (r : Row) : SortKey → Value
   | .column c => r.cell c
   | .expr e => e.eval (rowBind (some r)) noSubs
 
-structure SortedLimit where
-  /-- The item whose rows the order sorts. -/
+/-- Consecutive ORDER BY terms over one item (`SortRun`). -/
+structure SortRun where
   item : Nat
-  /-- Each ORDER BY term: its key, whether descending, and the result column
-  that returns it. -/
+  /-- Each term: its key, whether descending, and the result column that
+  returns it. -/
   terms : List (SortKey × Bool × Nat)
+  deriving Repr
+
+/-- The run's keys, each with whether it sorts descending. -/
+def SortRun.keys (run : SortRun) : List (SortKey × Bool) := run.terms.map fun (key, d, _) => (key, d)
+
+/-- The ORDER BY's terms, each with its item, as runs of consecutive terms
+over one item. -/
+def SortRun.group : List (Nat × SortKey × Bool × Nat) → List SortRun
+  | [] => []
+  | (i, term) :: rest =>
+    match group rest with
+    | run :: runs =>
+      if run.item = i then { run with terms := term :: run.terms } :: runs
+      else ⟨i, [term]⟩ :: run :: runs
+    | [] => [⟨i, [term]⟩]
+
+structure SortedLimit where
+  /-- The ORDER BY's runs, in order. -/
+  runs : List SortRun
   limit : Nat
   deriving Repr
 
@@ -43,8 +66,8 @@ def sortKey (s : Statement) (i : Nat) (e : Expr) : Option SortKey :=
   else none
 
 /-- The order and LIMIT of the root query, when a full run's last row bounds
-its sorted item's scope (`sorted_limit`); `st` is the state after the
-statement's conditions are read. -/
+the scopes of the items it sorts (`sorted_limit`); `st` is the state after
+the statement's conditions are read. -/
 def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let query := s.query s.root
   let [k] := query.arms | none
@@ -55,16 +78,12 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
   let terms ← query.orderBy.mapM fun (p, desc) => do
     let .expr e ← c.output[p]? | none
     let (i, _) ← e.refs.head?
+    if (s.item i).core ≠ k ∨ (s.table? i).isNone ∨ (st.items i).leftOn.isSome then none
     let position ← c.output.findIdx? fun
       | .expr e' => e' == e
       | _ => false
-    pure (i, e, desc, position)
-  let (i, _, _, _) ← terms.head?
-  if !terms.all (·.1 = i) then none
-  if (s.item i).core ≠ k ∨ (s.table? i).isNone ∨ (st.items i).leftOn.isSome then none
-  let terms ← terms.mapM fun (_, e, desc, position) => do
-    pure ((← sortKey s i e), desc, position)
-  pure { item := i, terms, limit := n }
+    pure (i, (← sortKey s i e), desc, position)
+  pure { runs := SortRun.group terms, limit := n }
 
 /-- The rows of item `i` whose key is NULL, or isn't when `not`. -/
 def SortKey.nullScope (i : Nat) (not : Bool) : SortKey → RScope
@@ -89,24 +108,50 @@ def SortKey.equalScope (i : Nat) (key : SortKey) : Value → RScope
   | none => key.nullScope i false
   | some x => key.compareScope i .eq x
 
-/-- The rows that sort before, if any value does, or that tie and pass
-`tied`. -/
-def orTied : Option RScope → RScope → RScope
-  | some before, tied => before.either tied
+/-- The rows either scope passes; `none` passes no row. -/
+def orTied : Option RScope → Option RScope → Option RScope
+  | some before, some tied => some (before.either tied)
+  | before, none => before
   | none, tied => tied
 
-/-- The rows of item `i` that sort at or before `last`, the ORDER BY's values
-of a run's last row: term by term, NULL first ascending and last descending; a
-row equal to `last` passes (`sorted_at_or_before`). -/
-def atOrBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value) : RScope :=
+/-- The rows of item `i` that sort before `last`, the ORDER BY's values of a
+run's last row, or tie with it and pass `tied`: term by term, NULL first
+ascending and last descending; `none` when no row does
+(`sorted_before`). -/
+def sortedBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value)
+    (tied : Option RScope) : Option RScope :=
   (terms.zip last).foldr (fun ((key, desc), v) scope =>
-    orTied (key.beforeScope i desc v) ((key.equalScope i v).both scope)) .all
+    orTied (key.beforeScope i desc v) (scope.map (key.equalScope i v).both)) tied
 
-/-- The last row's ORDER BY values, when the run returned as many rows as the
-LIMIT. -/
-def lastValues (sorted : SortedLimit) (rows : List Row) : Option (List Value) :=
+/-- The rows of item `i` that sort at or before `last`: a row equal to `last`
+passes. -/
+def atOrBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value) : RScope :=
+  (sortedBefore i terms last (some .all)).getD .all
+
+/-- Item `i`'s bound from the ORDER BY's runs, each paired with the last
+row's values of its terms, when an item of its runs (`SortedLimit::bound`):
+the first run over `i` at or before its values, or, for each earlier run, a
+row `i` joins of that run's item that sorts before them. `lookup j` gives
+the scope of `i`'s rows that join a row of `j` in `j`'s scope that passes a
+given scope too, or `none` when `i` takes no value from `j`, and then `i` has
+no bound. -/
+def runBound (i : Nat) (lookup : Nat → Option (RScope → RScope)) :
+    List (SortRun × List Value) → Option RScope
+  | [] => none
+  | (run, last) :: rest =>
+    if run.item = i then some (atOrBefore i run.keys last)
+    else do
+      let later ← runBound i lookup rest
+      let look ← lookup run.item
+      pure (match sortedBefore run.item run.keys last none with
+        | some before => (look before).either later
+        | none => later)
+
+/-- The last row's ORDER BY values, run by run, when the run returned as
+many rows as the LIMIT. -/
+def lastValues (sorted : SortedLimit) (rows : List Row) : Option (List (List Value)) :=
   if rows.length = sorted.limit then
-    rows.getLast?.map fun r => sorted.terms.map fun (_, _, p) => r.cell p
+    rows.getLast?.map fun r => sorted.runs.map fun run => run.terms.map fun (_, _, p) => r.cell p
   else none
 
 /-! The proof. An ORDER BY orders rows by a total preorder, and the model's
@@ -478,10 +523,18 @@ theorem compare_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) {op : Op}
     rcases hop with rfl | rfl | rfl <;>
       cases e.eval (rowBind (some r)) noSubs <;> simp [Op.apply, isTrue]
 
-theorem orTied_passes (rowsOf : Nat → List Row) (r : Row) (before : Option RScope) (tied : RScope) :
-    (orTied before tied).passes rowsOf r =
-      (((before.map (·.passes rowsOf r)).getD false) || tied.passes rowsOf r) := by
-  cases before <;> simp [orTied, passes_either]
+/-- Whether a scope that may pass no row passes `r`. -/
+def passesSome (rowsOf : Nat → List Row) (r : Row) (scope : Option RScope) : Bool :=
+  (scope.map (·.passes rowsOf r)).getD false
+
+theorem orTied_passes (rowsOf : Nat → List Row) (r : Row) (before tied : Option RScope) :
+    passesSome rowsOf r (orTied before tied) =
+      (passesSome rowsOf r before || passesSome rowsOf r tied) := by
+  cases before <;> cases tied <;> simp [orTied, passesSome, passes_either]
+
+theorem map_both_passes (rowsOf : Nat → List Row) (r : Row) (a : RScope) (scope : Option RScope) :
+    passesSome rowsOf r (scope.map a.both) = (a.passes rowsOf r && passesSome rowsOf r scope) := by
+  cases scope <;> simp [passesSome, passes_both]
 
 theorem before_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Bool)
     (v : Value) :
@@ -522,14 +575,18 @@ theorem equal_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : Sort
     cases hx : key.value r <;> simp [SortKey.equalScope, compare_passes _ _ _ heq, hx, Op.compare]
     exact Bool.eq_iff_iff.mpr (by simp)
 
-/-- The bound's scope passes a row of the sorted item when the row's values
-of the ORDER BY's keys sort at or before `last`. -/
-theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
-    (terms : List (SortKey × Bool)) (last : List Value) (hlen : last.length = terms.length) :
-    (atOrBefore i terms last).passes rowsOf r =
-      keyLe (terms.map (·.2)) (terms.map fun (key, _) => key.value r) last := by
+/-- The scope `sortedBefore` gives passes a row of item `i` when the row's
+values of the keys sort before `last`, or equal it and pass `tied`. -/
+theorem sortedBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
+    (terms : List (SortKey × Bool)) (last : List Value) (tied : Option RScope)
+    (hlen : last.length = terms.length) :
+    passesSome rowsOf r (sortedBefore i terms last tied) =
+      match keyCompare (terms.map (·.2)) (terms.map (·.1.value r)) last with
+      | .lt => true
+      | .eq => passesSome rowsOf r tied
+      | .gt => false := by
   induction terms generalizing last with
-  | nil => simp [atOrBefore, RScope.passes, keyLe, keyCompare]
+  | nil => simp [sortedBefore, keyCompare]
   | cons term terms ih =>
     cases last with
     | nil => simp at hlen
@@ -537,9 +594,44 @@ theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
       simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
       obtain ⟨key, d⟩ := term
       have hrest := ih vs hlen
-      simp only [atOrBefore, List.zip_cons_cons, List.foldr_cons] at hrest ⊢
-      rw [orTied_passes, passes_both, hrest, List.map_cons, List.map_cons, keyLe_cons,
-        before_passes, equal_passes (d := d)]
+      simp only [sortedBefore, List.zip_cons_cons, List.foldr_cons] at hrest ⊢
+      rw [orTied_passes, map_both_passes, hrest, List.map_cons, List.map_cons, keyCompare_cons]
+      have hb := before_passes rowsOf r i key d v
+      have he := equal_passes rowsOf r i key d v
+      simp only [passesSome] at hb ⊢
+      rw [hb, he]
+      cases dcmp d (key.value r) v <;>
+        cases keyCompare (terms.map (·.2)) (terms.map (·.1.value r)) vs <;>
+        simp [Ordering.then]
+
+theorem sortedBefore_isSome (i : Nat) (terms : List (SortKey × Bool)) (last : List Value)
+    {tied : Option RScope} (h : tied.isSome) : (sortedBefore i terms last tied).isSome := by
+  induction terms generalizing last with
+  | nil => simpa [sortedBefore] using h
+  | cons term terms ih =>
+    cases last with
+    | nil => simpa [sortedBefore] using h
+    | cons v vs =>
+      obtain ⟨key, d⟩ := term
+      have hrest := ih vs
+      simp only [sortedBefore, List.zip_cons_cons, List.foldr_cons] at hrest ⊢
+      obtain ⟨rest, hr⟩ := Option.isSome_iff_exists.mp hrest
+      rw [hr]
+      cases key.beforeScope i d v <;> simp [orTied]
+
+/-- The bound's scope passes a row of the sorted item when the row's values
+of the ORDER BY's keys sort at or before `last`. -/
+theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
+    (terms : List (SortKey × Bool)) (last : List Value) (hlen : last.length = terms.length) :
+    (atOrBefore i terms last).passes rowsOf r =
+      keyLe (terms.map (·.2)) (terms.map (·.1.value r)) last := by
+  have hsome := sortedBefore_isSome i terms last (tied := some .all) rfl
+  have h := sortedBefore_passes rowsOf r i terms last (some .all) hlen
+  obtain ⟨scope, hs⟩ := Option.isSome_iff_exists.mp hsome
+  simp only [atOrBefore, hs, Option.getD_some]
+  simp only [passesSome, hs, Option.map_some, Option.getD_some, RScope.passes] at h
+  rw [h, keyLe]
+  cases keyCompare (terms.map (·.2)) (terms.map (·.1.value r)) last <;> rfl
 
 /-- A key `sortKey` reads sorts the core's bindings as its result column
 does: in a binding where the sorted item has the row `r`, the result column's
@@ -564,5 +656,124 @@ theorem sortKey_value {s : Statement} {i : Nat} {e : Expr} {key : SortKey}
     cases h
     cases e <;> simp [SortKey.value, Expr.eval, cellOf, rowBind]
   · cases h
+
+/-! The bound of each item a run sorts. A key sorts at or before the last
+row's when its first run's values sort before that run's, or equal them and
+the rest sort at or before. So an item whose first run comes first sorts at
+or before that run's values, and an item after it does too, unless some
+earlier run's values sort before. -/
+
+theorem keyCompare_append (ds ds' : List Bool) (as as' bs bs' : List Value)
+    (ha : as.length = ds.length) (hb : bs.length = ds.length) :
+    keyCompare (ds ++ ds') (as ++ as') (bs ++ bs') =
+      (keyCompare ds as bs).then (keyCompare ds' as' bs') := by
+  induction ds generalizing as bs with
+  | nil =>
+    cases as <;> cases bs <;> simp_all [keyCompare, Ordering.then]
+  | cons d ds ih =>
+    cases as with
+    | nil => simp at ha
+    | cons a as =>
+      cases bs with
+      | nil => simp at hb
+      | cons b bs =>
+        simp only [List.length_cons, Nat.add_right_cancel_iff] at ha hb
+        rw [List.cons_append, List.cons_append, List.cons_append, keyCompare_cons,
+          keyCompare_cons, ih as bs ha hb, Ordering.then_assoc]
+
+/-- The runs' directions, in order. -/
+def runDirections (runs : List SortRun) : List Bool := runs.flatMap fun run => run.keys.map (·.2)
+
+/-- The ORDER BY's values of a binding whose items hold the rows `row`: each
+run's keys' values in its item's row. -/
+def runKey (row : Nat → Row) (runs : List SortRun) : List Value :=
+  runs.flatMap fun run => run.keys.map (·.1.value (row run.item))
+
+theorem runDirections_cons (run : SortRun) (runs : List SortRun) :
+    runDirections (run :: runs) = run.keys.map (·.2) ++ runDirections runs := by
+  simp [runDirections]
+
+theorem runKey_cons (row : Nat → Row) (run : SortRun) (runs : List SortRun) :
+    runKey row (run :: runs) = run.keys.map (·.1.value (row run.item)) ++ runKey row runs := by
+  simp [runKey]
+
+/-- An item's bound passes its row in a binding whose ORDER BY values sort at
+or before the last row's, when each lookup the bound makes passes the item's
+row wherever the partner's row passes the lookup's scope (`joined_passes`
+gives that of a membership). -/
+theorem runBound_passes (rowsOf : Nat → List Row) (row : Nat → Row) (i : Nat)
+    (lookup : Nat → Option (RScope → RScope))
+    (hlookup : ∀ j look, lookup j = some look → ∀ scope : RScope,
+      scope.passes rowsOf (row j) → (look scope).passes rowsOf (row i))
+    (runs : List (SortRun × List Value)) (hlen : ∀ p ∈ runs, p.2.length = p.1.terms.length)
+    (hle : keyLe (runDirections (runs.map (·.1))) (runKey row (runs.map (·.1)))
+      (runs.flatMap (·.2)))
+    {bound : RScope} (h : runBound i lookup runs = some bound) : bound.passes rowsOf (row i) := by
+  induction runs generalizing bound with
+  | nil => simp [runBound] at h
+  | cons p rest ih =>
+    obtain ⟨run, last⟩ := p
+    have hl : last.length = run.keys.length := by
+      simpa [SortRun.keys] using hlen (run, last) (by simp)
+    have hrest : ∀ p ∈ rest, p.2.length = p.1.terms.length := fun p hp => hlen p (by simp [hp])
+    rw [List.map_cons, runDirections_cons, runKey_cons, List.flatMap_cons] at hle
+    unfold keyLe at hle
+    rw [bne_iff_ne, keyCompare_append _ _ _ _ _ _ (by simp) (by simp [hl]), ne_eq,
+      ← ne_eq, then_ne_gt] at hle
+    by_cases hi : run.item = i
+    · subst hi
+      simp only [runBound, ↓reduceIte, Option.some.injEq] at h
+      subst h
+      rw [atOrBefore_passes _ _ _ _ _ hl, keyLe, bne_iff_ne]
+      rcases hle with h1 | ⟨h1, _⟩ <;> rw [h1] <;> simp
+    · simp only [runBound, hi, ↓reduceIte] at h
+      cases hlater : runBound i lookup rest with
+      | none => simp [hlater] at h
+      | some later =>
+        cases hlook : lookup run.item with
+        | none => simp [hlater, hlook] at h
+        | some look =>
+          simp only [hlater, hlook, Option.bind_eq_bind, Option.bind_some, Option.pure_def,
+            Option.some.injEq] at h
+          rcases hle with hlt | ⟨_, hge⟩
+          · have hb := sortedBefore_passes rowsOf (row run.item) run.item run.keys last none hl
+            rw [hlt] at hb
+            cases hs : sortedBefore run.item run.keys last none with
+            | none => rw [hs] at hb; simp [passesSome] at hb
+            | some before =>
+              rw [hs] at hb h
+              simp only at h
+              subst h
+              simp only [passesSome, Option.map_some, Option.getD_some] at hb
+              rw [passes_either, hlookup run.item look hlook before hb, Bool.true_or]
+          · have hpass := ih hrest (by unfold keyLe; exact bne_iff_ne.mpr hge) hlater
+            cases hs : sortedBefore run.item run.keys last none <;> rw [hs] at h <;>
+              simp only at h <;> subst h <;> simp [passes_either, hpass]
+
+/-- A membership's lookup passes the member's row in a binding where its edge
+holds, when the partner's row in the binding is among `rowsOf` the partner's
+rows and passes the lookup's scope. -/
+theorem joined_passes {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
+    (hnested : e.nested = false) (hholds : e.HoldsIn s db f b) {r r' : Row}
+    (hm : b e.member = some r) (hp : b e.partner = some r') (rowsOf : Nat → List Row)
+    (hr' : r' ∈ rowsOf e.partner) {scope : RScope} (hs : scope.passes rowsOf r') :
+    (RScope.joined e.column e.partner e.value scope e.nulls).passes rowsOf r := by
+  simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, List.any_eq_true]
+  rcases hholds with ⟨x, hx, hrow⟩ | ⟨hn, _, _, hx, hnone⟩ | ⟨_, _, _, hnone⟩
+  · rw [hnested] at hrow
+    simp only [Bool.false_eq_true, ↓reduceIte] at hrow
+    obtain ⟨r'', hr'', hv⟩ := hrow
+    rw [hp] at hr''
+    cases hr''
+    rw [hm] at hx
+    simp only [cellOf] at hx
+    refine ⟨Or.inl (by simp [hx]), r', hr', ?_, hs⟩
+    simp [hv, hx]
+  · rw [hm] at hx
+    simp only [cellOf] at hx
+    refine ⟨Or.inr hn, r', hr', ?_, hs⟩
+    simp [hnone r' hp, hx]
+  · rw [hp] at hnone
+    cases hnone
 
 end SqliveNarrowing.Limit
