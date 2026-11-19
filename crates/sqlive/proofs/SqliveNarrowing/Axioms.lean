@@ -77,3 +77,4 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_placedBefore
 #print axioms SqliveNarrowing.plan_restriction
 #print axioms SqliveNarrowing.Planned.bound_passes
+#print axioms SqliveNarrowing.readOrder_postorder

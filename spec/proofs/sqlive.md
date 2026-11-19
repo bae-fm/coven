@@ -458,6 +458,13 @@ each item's memberships, and the sides of each OR it keeps, take values from
 items the planner placed before it: the planner sets them only as it places
 the item, from the edges and sides whose partners it placed before, and no
 other step changes them.
+[ReadOrder.lean](../../crates/sqlive/proofs/SqliveNarrowing/ReadOrder.lean)
+states the order the planner reads cores in. A core sits below another when
+it is an arm of a query the other reads, as a derived item's or a subquery's,
+at any depth. `readOrder_postorder` proves that the planner reads no core
+twice, and reads every core below a core before the core itself: each core is
+an arm of one query, and one core reads each query, so the cores a core sits
+below lie on one chain.
 
 [Tests.lean](../../crates/sqlive/proofs/SqliveNarrowing/Tests.lean) states the
 tests the restriction takes from the planner's scopes. An item's row passes
