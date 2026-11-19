@@ -281,7 +281,9 @@ async fn live_queries_rerun_whenever_their_results_change() {
     // A write that reruns a query whose result stays the same counts against
     // the shape's bound.
     for (shape, percent) in WASTED_PERCENT {
-        let count = precision.get(&(shape, true)).copied().unwrap_or_default();
+        let count = *precision
+            .get(&(shape, true))
+            .unwrap_or_else(|| panic!("no narrowing {shape} query ran: raise SQLIVE_SCOPE_SEEDS"));
         assert!(
             count.wasted * 100 <= count.writes * percent,
             "{shape} queries reran with no change in {} of {} writes, over {percent}%",
