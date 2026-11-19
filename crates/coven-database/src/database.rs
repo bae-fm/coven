@@ -152,11 +152,10 @@ impl<M: Mode> Clone for StoreDatabase<M> {
 /// What the store's writer holds beside its open store.
 #[derive(Clone)]
 pub struct WriterParts {
-    /// The files this process is sending now, which coven's views read (§4).
-    transfers: crate::transfers_in_flight::TransfersInFlight,
-    /// The device's network as this process last heard of it, which
-    /// coven's views read (§4).
-    network: crate::network_facts::NetworkFacts,
+    /// The files this process is sending and downloading now, and the
+    /// device's network as this process last heard of it, which coven's
+    /// views read (§4).
+    facts: crate::memory_facts::ProcessFacts,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
     /// Told when a close finds a call holding the open store and waits for
     /// it to end.
@@ -599,21 +598,21 @@ impl StoreDatabase {
     /// The files this process is sending now: the upload worker marks each
     /// attempt, and coven's views read them (§4, §17.9).
     pub fn uploads_in_flight(&self) -> crate::InFlight {
-        self.writer.transfers.uploads()
+        self.writer.facts.uploads()
     }
 
     /// The files this process is downloading to keep whole now: each pin's
     /// download marks its attempt, and `coven_downloading` reads them (§4,
     /// §17.8).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
-        self.writer.transfers.downloads()
+        self.writer.facts.downloads()
     }
 
     /// The store's watch says the device's network is now `network`:
     /// coven's views show it, and a live query that read them runs again
     /// (§4, §6.7).
     pub fn record_network(&self, network: coven_foundation::network_watch::NetworkState) {
-        self.writer.network.set(network);
+        self.writer.facts.record_network(network);
     }
 
     /// Run app SQL and coven's steps, and commit its unsigned write record

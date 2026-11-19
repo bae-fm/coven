@@ -271,13 +271,11 @@ pub(crate) type Views<'a> =
 pub(crate) fn register_views(
     setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     device: DeviceId,
-    transfers: &crate::transfers_in_flight::TransfersInFlight,
-    network: &crate::network_facts::NetworkFacts,
+    facts: &crate::memory_facts::ProcessFacts,
     sync_functions: Option<&crate::SyncFunctions>,
 ) -> sqlive::rusqlite::Result<()> {
     register_device(setup, device)?;
-    transfers.register(setup)?;
-    network.register(setup)?;
+    facts.register(setup)?;
     match sync_functions {
         Some(sync_functions) => sync_functions.register(setup),
         None => Ok(()),

@@ -562,6 +562,9 @@ TransferWatch = "InFlight"
 # The files in flight one way, which the worker moving them marks as each
 # attempt starts and ends (§17.8, §17.9).
 InFlight = "TransfersInFlight"
+# A value the host keeps in memory, as one connection's transactions take
+# it at their snapshots, for the functions its setup registers (§4).
+SnapshotValue = "SnapshotValues"
 # Marks a store closing when its owner's scope ends, without holding its
 # lock, so a reopen in this process waits for its release (F.4).
 StoreClosingGuard = "LockRegistration"
@@ -1327,6 +1330,9 @@ tables = [
 # What a connection's setup registers on it, which `HostSql::open` makes as
 # it opens the connection.
 "crates/sqlive/src/connection_setup.rs" = ["Setup::new"]
+# One order per database, which its connections share, and each value a
+# connection's setup registers, which its transactions take (§4).
+"crates/sqlive/src/snapshot_values.rs" = ["CommitOrder::new", "SnapshotValues::value"]
 "crates/sqlive/src/connection.rs" = ["HostSql::open"]
 # Coven's policy for a connection's authorizer, whose state the connection
 # shares with the authorizer: one judging for the handle that holds the
@@ -1439,6 +1445,9 @@ tables = [
 # One per open store, which its connections' functions read and the
 # store's network follower tells (§4, §6.7).
 "crates/coven-database/src/network_facts.rs" = ["NetworkFacts::new"]
+# One per open store: the facts its connections' functions read at each
+# snapshot, shared by the transfers in flight and the network (§4).
+"crates/coven-database/src/memory_facts.rs" = ["SharedFacts::new", "ProcessFacts::new"]
 # One per open store, with each way's shared state, which its handles
 # share (§4).
 "crates/coven-database/src/transfers_in_flight.rs" = [

@@ -38,8 +38,7 @@ pub fn make_readable_objects(
         crate::coven_functions::register_views(
             setup,
             device,
-            &crate::transfers_in_flight::TransfersInFlight::new(observer.clone()),
-            &crate::network_facts::NetworkFacts::new(observer),
+            &crate::memory_facts::ProcessFacts::new(observer),
             Some(sync_functions),
         )
     })?;

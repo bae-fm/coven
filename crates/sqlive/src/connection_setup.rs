@@ -1,6 +1,7 @@
 //! What the host registers on a connection as it opens, before any statement
 //! runs: SQL functions and collations.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -8,11 +9,15 @@ use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 
 use crate::authorization::{FunctionCall, HostFunctions, Policy, SqlAuthorization};
+use crate::snapshot_values::{SnapshotValue, SnapshotValues};
 
 /// What a connection's setup may register.
 pub struct Setup<'a, P: Policy> {
     connection: &'a rusqlite::Connection,
     functions: HostFunctions<P>,
+    /// The values the host's functions read as each transaction's snapshot
+    /// saw them.
+    values: RefCell<SnapshotValues>,
 }
 
 impl<'a, P: Policy> Setup<'a, P> {
@@ -20,7 +25,16 @@ impl<'a, P: Policy> Setup<'a, P> {
         connection: &'a rusqlite::Connection,
         authorization: &SqlAuthorization<P>,
     ) -> Self {
-        Self { connection, functions: authorization.functions() }
+        Self {
+            connection,
+            functions: authorization.functions(),
+            values: RefCell::new(SnapshotValues::new()),
+        }
+    }
+
+    /// The values registered, which the connection's transactions take.
+    pub(crate) fn into_snapshot_values(self) -> SnapshotValues {
+        self.values.into_inner()
     }
 
     /// Run `register` on `connection`, a connection a test opened itself,
@@ -69,6 +83,16 @@ impl<'a, P: Policy> Setup<'a, P> {
     ) -> rusqlite::Result<()> {
         self.connection
             .create_scalar_function(name, arguments, flags, move |context| function(context))
+    }
+
+    /// A value the host keeps in memory, which `now` reads, for this
+    /// connection's functions to read as each transaction's snapshot saw it
+    /// (`snapshot_values.rs`).
+    pub fn snapshot_value<T: Clone + Send + 'static>(
+        &self,
+        now: impl Fn() -> T + Send + Sync + 'static,
+    ) -> SnapshotValue<T> {
+        self.values.borrow_mut().value(now)
     }
 
     /// Register `compare` as the order the collation `name` gives text.

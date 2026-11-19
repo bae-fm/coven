@@ -54,6 +54,7 @@ mod scope_row;
 mod scope_subquery;
 mod scope_term;
 mod select_syntax;
+mod snapshot_values;
 pub mod sql;
 mod sql_value;
 mod sqlite_path;
@@ -101,6 +102,7 @@ pub use scope_order::LastRow;
 pub(crate) use scope_plan::ScopePlan;
 pub use scope_row::RowCondition;
 pub use scope_term::Affinity;
+pub use snapshot_values::SnapshotValue;
 pub(crate) use sql_value::parameters;
 pub use sql_value::SqlValue;
 pub use sqlite_settings::{

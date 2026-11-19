@@ -81,15 +81,20 @@ impl<P: Policy> Database<P> {
         options: Options<'_, P>,
         prepare: impl FnOnce(&mut HostSql<P>) -> Result<T, E>,
     ) -> Result<(Self, T), E> {
+        // Every connection orders its commits and snapshots with the others
+        // (`snapshot_values.rs`).
+        let order = Arc::new(crate::snapshot_values::CommitOrder::new());
         let open = |read_only| {
-            HostSql::open(
+            let mut connection = HostSql::open(
                 path,
                 read_only,
                 (options.policy)(),
                 Arc::clone(&options.whole_views),
                 &options.settings,
                 options.setup,
-            )
+            )?;
+            connection.share_commit_order(Arc::clone(&order));
+            Ok::<_, PolicyError<P>>(connection)
         };
         // The watch starts at the main file's size as the writer opens. The
         // writer holds the watch from then on, so the watch gets the size

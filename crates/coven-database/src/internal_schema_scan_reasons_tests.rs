@@ -63,13 +63,7 @@ mod fixture {
         })
         .unwrap();
         sqlive::Setup::on_test_connection(&db, crate::app_policy::CovenPolicy::new(&[]), |setup| {
-            crate::transfers_in_flight::TransfersInFlight::new(
-                crate::store_failure::StoreHandle::recording_all(
-                    coven_foundation::task::HeardBugs::shared(),
-                ),
-            )
-            .register(setup)?;
-            crate::network_facts::NetworkFacts::new(
+            crate::memory_facts::ProcessFacts::new(
                 crate::store_failure::StoreHandle::recording_all(
                     coven_foundation::task::HeardBugs::shared(),
                 ),

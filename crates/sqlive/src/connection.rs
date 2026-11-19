@@ -106,6 +106,12 @@ pub struct HostSql<P: Policy> {
     /// commits change rows (§4).
     statistics: Option<crate::planner_statistics::ChangeWake>,
     streaming: std::cell::Cell<bool>,
+    /// The host's values that this connection's functions read as each
+    /// transaction's snapshot saw them (`snapshot_values.rs`).
+    snapshot_values: crate::snapshot_values::SnapshotValues,
+    /// Orders this connection's commits against the snapshots of the reads
+    /// beside it: the database's connections share it.
+    commit_order: Arc<crate::snapshot_values::CommitOrder>,
     #[cfg(any(test, feature = "test-utils"))]
     commit_points: std::cell::RefCell<Option<crate::test_records::CommitPointObserver>>,
     #[cfg(any(test, feature = "profiles"))]
@@ -188,7 +194,9 @@ impl<P: Policy> HostSql<P> {
         // SQLite parse and plan it again on its next use, once per row of a
         // commit's lookups.
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)?;
-        setup(&Setup::new(&connection, &authorization), &policy)?;
+        let registered = Setup::new(&connection, &authorization);
+        setup(&registered, &policy)?;
+        let snapshot_values = registered.into_snapshot_values();
         connection.authorizer(Some(authorization.callback()))?;
         let lookups = live_judging::LookupLimit::install(&mut connection)?;
         let db = Self {
@@ -209,6 +217,8 @@ impl<P: Policy> HostSql<P> {
             checkpointed_sizes: None,
             statistics: None,
             streaming: std::cell::Cell::new(false),
+            snapshot_values,
+            commit_order: Arc::new(crate::snapshot_values::CommitOrder::new()),
             #[cfg(any(test, feature = "test-utils"))]
             commit_points: std::cell::RefCell::new(None),
             #[cfg(any(test, feature = "profiles"))]
@@ -634,6 +644,12 @@ impl<P: Policy> HostSql<P> {
     /// their triggers' included, as SQLite counts them.
     pub fn changed_rows(&self) -> u64 {
         self.connection.total_changes()
+    }
+
+    /// Order this connection's commits and snapshots with `order`, which the
+    /// other connections to its database share.
+    pub(crate) fn share_commit_order(&mut self, order: Arc<crate::snapshot_values::CommitOrder>) {
+        self.commit_order = order;
     }
 
     /// Serve an open handle once opening succeeds (§4).

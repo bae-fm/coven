@@ -282,14 +282,12 @@ impl DatabaseBuilder {
         let observer = store_observer(self.directory.bugs());
         #[cfg(test)]
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
-        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
-        let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        let facts = crate::memory_facts::ProcessFacts::new(observer.clone());
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(
                 setup,
                 settings.device_id,
-                &transfers,
-                &network,
+                &facts,
                 self.sync_functions.as_ref(),
             )
         };
@@ -438,8 +436,7 @@ impl DatabaseBuilder {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: WriterParts {
-                transfers,
-                network,
+                facts,
                 file_tasks: Arc::new(tokio::sync::RwLock::new(())),
                 #[cfg(test)]
                 close_waits: Arc::new(Mutex::new(None)),
@@ -494,15 +491,13 @@ impl DatabaseBuilder {
         // Only the cache connection commits, and nothing subscribes to it.
         let observer = store_observer(self.directory.bugs());
         // A read-only handle transfers nothing: every file reads as waiting.
-        let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
         // Nor does it watch the network: none is known (api.md E4).
-        let network = crate::network_facts::NetworkFacts::new(observer.clone());
+        let facts = crate::memory_facts::ProcessFacts::new(observer.clone());
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(
                 setup,
                 settings.device_id,
-                &transfers,
-                &network,
+                &facts,
                 self.sync_functions.as_ref(),
             )
         };
@@ -642,18 +637,11 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
             let _lock = lock;
             let settings = directory.settings()?;
             let observer = store_observer(directory.bugs());
-            let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
-            let network = crate::network_facts::NetworkFacts::new(observer);
+            let facts = crate::memory_facts::ProcessFacts::new(observer);
             let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
                 // Sync computes a closed store's state from the facts in
                 // Rust, and no app SQL reads the view here.
-                crate::coven_functions::register_views(
-                    setup,
-                    settings.device_id,
-                    &transfers,
-                    &network,
-                    None,
-                )
+                crate::coven_functions::register_views(setup, settings.device_id, &facts, None)
             };
             let mut database = coven_only(&directory.database_path(), true, Some(&views))?;
             crate::store_call::outside_store(|call| {

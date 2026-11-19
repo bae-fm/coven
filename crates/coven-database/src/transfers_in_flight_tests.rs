@@ -73,6 +73,48 @@ async fn a_live_query_of_sending_runs_again_as_an_upload_starts_or_ends() {
     db.close().await.unwrap();
 }
 
+/// A read reads what is in flight as it stood at the read's snapshot, as it
+/// reads the tables. The app resumes uploads and the worker starts sending
+/// the file after the read's snapshot is fixed but before its statement
+/// runs: the read sees the file paused and not being sent, as it was at the
+/// snapshot, never paused and sent at once from two moments (§4).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_sees_what_was_in_flight_at_its_snapshot() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let (file, uploader, object) = queued(&db).await;
+    db.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
+    let runtime = tokio::runtime::Handle::current();
+    let worker = db.clone();
+    let (seen, sending) = db
+        .read(move |sql| {
+            runtime.block_on(worker.write(|sql| sql.set_uploads_paused(false)))?;
+            let sending = worker.uploads_in_flight().start(uploader, object, vec![file], PROGRESS);
+            let seen = sql.query_row(
+                "SELECT paused,sending,(SELECT count(*) FROM coven_sending) FROM coven_uploads",
+                [],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?, r.get::<_, i64>(2)?)),
+            )?;
+            Ok::<_, DbError>((seen, sending))
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen, (true, false, 0));
+    let now = db
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row(
+                "SELECT paused,sending FROM coven_uploads",
+                [],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(now, (false, true));
+    drop(sending);
+    db.close().await.unwrap();
+}
+
 /// A live query that reads none of what is being sent doesn't run again
 /// when an upload starts.
 #[tokio::test]
@@ -358,7 +400,8 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
 fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
     let handle = crate::store_failure::StoreHandle::recording_all(bugs.clone());
-    let transfers = super::TransfersInFlight::new(handle.clone());
+    let transfers =
+        super::TransfersInFlight::new(handle.clone(), crate::memory_facts::SharedFacts::new());
     let uploads = transfers.uploads();
     let object = ObjectId(uuid::Uuid::from_u128(1));
     let file = FileId(uuid::Uuid::from_u128(2));

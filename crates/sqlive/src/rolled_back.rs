@@ -33,9 +33,17 @@ impl<P: Policy> HostSql<P> {
         // consumer that can wait while a writer commits. Reading the schema
         // table also brings this connection's copy of the schema, and the
         // planner's statistics SQLite loads with it, up to the snapshot's,
-        // before the read prepares a statement.
+        // before the read prepares a statement. No commit runs between the
+        // pin and taking the host's values, so the read sees both as of one
+        // moment (`snapshot_values.rs`).
         let result = (|| {
-            self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0))?;
+            {
+                let _ordered = self.commit_order.reading();
+                self.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| {
+                    r.get::<_, i64>(0)
+                })?;
+                self.snapshot_values.take();
+            }
             read()
         })();
         drop(cookie);
@@ -101,6 +109,7 @@ impl<P: Policy> HostSql<P> {
     /// would keep reading its old snapshot, so the handle refuses every later
     /// call until the host opens the database again (§4).
     pub(super) fn roll_back(&self) -> rusqlite::Result<()> {
+        self.snapshot_values.forget();
         if self.connection.is_autocommit() {
             return Ok(());
         }

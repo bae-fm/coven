@@ -3801,8 +3801,9 @@ let moved = handle
   none fails the statement.
 - Whether a file is being sent now lasts only as long as the process, and is
   never stored. `coven_uploads.sending` and `coven_sending` read it from the
-  upload worker's memory, and a live query that reads either runs again each
-  time an upload starts or ends. So does whether a stored file is being
+  upload worker's memory as it stood at the read's snapshot, and a live query
+  that reads either runs again each time an upload starts or ends. So does
+  whether a stored file is being
   downloaded to keep whole, which `coven_downloading` reads, again as each
   download starts or ends. Only these views reach it: calling
   `_coven_sending`, `_coven_sending_objects` or `_coven_downloading_objects`
@@ -3811,10 +3812,11 @@ let moved = handle
   file waiting and none downloading.
 - The device's network is the same kind of fact. `coven_network`'s `usable`
   and `metered`, and `coven_uploads.metered`, read it from the store's watch
-  of the network (E5), and a live query that reads one runs again as the
-  network changes. The function behind them, `_coven_network`, refuses a
-  direct call in the same way. A read-only handle watches nothing: it shows
-  `usable` NULL and nothing metered, with the setting as stored.
+  of the network (E5), as it stood at the read's snapshot, and a live query
+  that reads one runs again as the network changes. The function behind
+  them, `_coven_network`, refuses a direct call in the same way. A read-only
+  handle watches nothing: it shows `usable` NULL and nothing metered, with
+  the setting as stored.
 - `coven_sync_state` and `coven_upload_phases` are the two views whose rows
   coven's own code computes. `coven_sync_state` reads the facts coven
   computes the sync state from and passes them to `_coven_sync_state`, which

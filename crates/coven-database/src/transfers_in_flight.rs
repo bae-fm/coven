@@ -3,17 +3,20 @@
 //! Nothing about them is stored: an attempt ends when its task does, a crash
 //! included, so a reopened store starts with none. App SQL reads them through
 //! coven's SQL functions, as `coven_uploads.sending` and the `coven_sending`
-//! and `coven_downloading` views, which name each file over an object, and a
-//! live query that reads one runs again as a transfer it shows starts or
-//! ends. How far each has got is progress no table holds: a `TransferWatch`
-//! hears it, by file, and how each ended (E7, E8).
+//! and `coven_downloading` views, which name each file over an object. A
+//! transaction reads which objects are in flight as its snapshot saw them
+//! (`memory_facts.rs`), and a live query that reads one runs again as a
+//! transfer it shows starts or ends. How far each has got is progress no
+//! table holds: a `TransferWatch` hears it, by file, and how each ended (E7,
+//! E8).
 
+use crate::memory_facts::{MemoryFacts, SharedFacts};
 use crate::store_failure::StoreHandle;
 use crate::transfer_watch::{changes_since, Heard, TransferChange, TransferEnd};
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::rusqlite::functions::FunctionFlags;
-use sqlive::Setup;
+use sqlive::{Setup, SnapshotValue};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -41,18 +44,26 @@ struct Direction {
     /// one's uploader's eight id bytes and then its own sixteen: what a view
     /// joins by index.
     objects: &'static str,
+    /// The objects in flight among the store's facts, by their uploaders.
+    facts: fn(&MemoryFacts) -> &BTreeMap<ObjectId, DeviceId>,
+    /// The same, to change.
+    facts_mut: fn(&mut MemoryFacts) -> &mut BTreeMap<ObjectId, DeviceId>,
 }
 
 const SENDING: Direction = Direction {
     read_as: &[("coven_uploads", "sending"), ("coven_sending", "")],
     contains: Some("_coven_sending"),
     objects: "_coven_sending_objects",
+    facts: |facts| &facts.sending,
+    facts_mut: |facts| &mut facts.sending,
 };
 
 const DOWNLOADING: Direction = Direction {
     read_as: &[("coven_downloading", "")],
     contains: None,
     objects: "_coven_downloading_objects",
+    facts: |facts| &facts.downloading,
+    facts_mut: |facts| &mut facts.downloading,
 };
 
 /// Coven's functions that read the files in flight, which app SQL reaches
@@ -68,10 +79,12 @@ pub(crate) struct TransfersInFlight {
 }
 
 impl TransfersInFlight {
-    pub(crate) fn new(observer: StoreHandle) -> Self {
+    /// No transfer in flight yet. Each start and end changes `facts` and
+    /// tells `observer`.
+    pub(crate) fn new(observer: StoreHandle, facts: SharedFacts) -> Self {
         Self {
-            uploads: InFlight::new(&SENDING, observer.clone()),
-            downloads: InFlight::new(&DOWNLOADING, observer),
+            uploads: InFlight::new(&SENDING, observer.clone(), facts.clone()),
+            downloads: InFlight::new(&DOWNLOADING, observer, facts),
         }
     }
 
@@ -85,16 +98,42 @@ impl TransfersInFlight {
     pub(crate) fn downloads(&self) -> InFlight {
         self.downloads.clone()
     }
+}
 
-    /// Register both ways' functions on a connection to the store's
-    /// database. None is deterministic; all are safe in coven's views.
-    pub(crate) fn register(
-        &self,
-        setup: &Setup<'_, crate::app_policy::CovenPolicy>,
-    ) -> sqlive::rusqlite::Result<()> {
-        self.uploads.register(setup)?;
-        self.downloads.register(setup)
+/// Register both ways' functions on a connection to the store's database,
+/// reading the objects in flight as each transaction's snapshot saw them.
+/// None is deterministic; all are safe in coven's views.
+pub(crate) fn register(
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    at_snapshot: &SnapshotValue<Arc<MemoryFacts>>,
+) -> sqlive::rusqlite::Result<()> {
+    register_direction(&SENDING, setup, at_snapshot)?;
+    register_direction(&DOWNLOADING, setup, at_snapshot)
+}
+
+fn register_direction(
+    direction: &'static Direction,
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    at_snapshot: &SnapshotValue<Arc<MemoryFacts>>,
+) -> sqlive::rusqlite::Result<()> {
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
+    if let Some(name) = direction.contains {
+        let facts = at_snapshot.clone();
+        setup.scalar_function(name, 1, flags, move |call| {
+            // Anything but an object id fails the statement.
+            let object = call.context().get::<ObjectId>(0)?;
+            Ok((direction.facts)(&facts.get()).contains_key(&object))
+        })?;
     }
+    let facts = at_snapshot.clone();
+    setup.scalar_function(direction.objects, 0, flags, move |_| {
+        let objects: Vec<String> = (direction.facts)(&facts.get())
+            .iter()
+            .map(|(object, device)| format!("{:016x}{}", device.0, object.0.simple()))
+            .collect();
+        serde_json::to_string(&objects)
+            .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
+    })
 }
 
 /// The stored objects this process is transferring one way. The worker
@@ -111,6 +150,9 @@ struct InFlightShared {
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
     observer: StoreHandle,
+    /// The store's facts, which hold each object in flight while one of its
+    /// attempts is, changed in the same step as `state`.
+    facts: SharedFacts,
     /// Tells each watch that a file started, moved or ended, after the state
     /// changed; a watch reads the change from the state.
     changed: watch::Sender<()>,
@@ -118,7 +160,8 @@ struct InFlightShared {
 
 #[derive(Default)]
 struct InFlightState {
-    /// Each object in flight, with its uploader and its attempts.
+    /// Each object in flight, with its attempts. Its uploader is among the
+    /// store's facts.
     objects: BTreeMap<ObjectId, Entry>,
     /// The next attempt's number, so an ended attempt is never taken for a
     /// later one of the same object.
@@ -134,7 +177,6 @@ struct InFlightState {
 }
 
 struct Entry {
-    device: DeviceId,
     /// Its attempts in flight, oldest first, each with the files it moves
     /// the object's bytes for and how far it has got. One pin can keep the
     /// same object twice at once: it stays in flight until both end, and
@@ -172,12 +214,13 @@ impl InFlightState {
 }
 
 impl InFlight {
-    fn new(direction: &'static Direction, observer: StoreHandle) -> Self {
+    fn new(direction: &'static Direction, observer: StoreHandle, facts: SharedFacts) -> Self {
         Self {
             shared: Arc::new(InFlightShared {
                 direction,
                 state: Mutex::new(InFlightState::default()),
                 observer,
+                facts,
                 changed: watch::channel(()).0,
             }),
         }
@@ -205,12 +248,16 @@ impl InFlight {
             let mut state = self.state();
             let attempt = state.next;
             state.next += 1;
-            let entry = state
-                .objects
-                .entry(object)
-                .or_insert_with(|| Entry { device, attempts: Vec::new() });
+            let entry =
+                state.objects.entry(object).or_insert_with(|| Entry { attempts: Vec::new() });
             entry.attempts.push((attempt, files, progress));
-            (attempt, entry.attempts.len() == 1)
+            let started = entry.attempts.len() == 1;
+            if started {
+                self.shared.facts.change(|facts| {
+                    (self.shared.direction.facts_mut)(facts).insert(object, device)
+                });
+            }
+            (attempt, started)
         };
         self.shared.changed.send_replace(());
         if started {
@@ -282,31 +329,6 @@ impl InFlight {
     fn changed(&self) {
         self.shared.observer.changed_without_write(self.shared.direction.read_as);
     }
-
-    fn register(
-        &self,
-        setup: &Setup<'_, crate::app_policy::CovenPolicy>,
-    ) -> sqlive::rusqlite::Result<()> {
-        let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
-        if let Some(name) = self.shared.direction.contains {
-            let owner = self.clone();
-            setup.scalar_function(name, 1, flags, move |call| {
-                // Anything but an object id fails the statement.
-                Ok(owner.state().objects.contains_key(&call.context().get::<ObjectId>(0)?))
-            })?;
-        }
-        let owner = self.clone();
-        setup.scalar_function(self.shared.direction.objects, 0, flags, move |_| {
-            let objects: Vec<String> = owner
-                .state()
-                .objects
-                .iter()
-                .map(|(object, entry)| format!("{:016x}{}", entry.device.0, object.0.simple()))
-                .collect();
-            serde_json::to_string(&objects)
-                .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
-        })
-    }
 }
 
 /// One attempt to transfer a stored object. Its worker ends it as its
@@ -361,6 +383,10 @@ impl Drop for Transferring {
             attempt.map(|(files, ended)| {
                 if ended {
                     state.objects.remove(&self.object);
+                    let shared = &self.owner.shared;
+                    shared
+                        .facts
+                        .change(|facts| (shared.direction.facts_mut)(facts).remove(&self.object));
                 }
                 state.ended(&files, self.end);
                 ended

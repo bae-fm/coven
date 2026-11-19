@@ -592,13 +592,27 @@ photo through an index: on a queue of 20,000 files, finding the albums of the
 three being sent took 0.02 ms, where counting `sending` over `coven_uploads`
 read every queued file, in 1 ms. A query that reads neither isn't run again.
 
+A read sees the files being sent as they stood at its snapshot, as it sees
+coven's tables. Ana resumes her uploads while a read that fixed its snapshot
+before the resume still runs, and the upload worker starts sending a photo
+before the read's statement gets to it. The read shows the photo paused and
+not being sent, as the store stood at its snapshot. If the read took the
+sending files from memory as its statement ran, it would show the photo
+paused, from its snapshot, and being sent, from after the resume, a state the
+store never held. So coven copies the files in flight as each read fixes its
+snapshot, while no write commits, and every statement of the read reads that
+copy. A write copies them as it begins, since no other write can commit before
+it ends. A read that fixes its snapshot while a write commits waits for that
+commit to finish.
+
 Which files are being downloaded to keep whole is the same kind of fact. Ben
 prepares a pin of an album of 12 tracks; the prepare downloads up to the
 download limit's number at once (§17.8). `coven_pins` lists none of them until
 the write committing the pin, and nothing stored says which are downloading
 now. `coven_downloading` lists
 each stored file this process is downloading to keep whole, for an app's pin,
-from the same memory. Its live query runs again as
+from the same memory and the same copy at each snapshot. Its live query runs
+again as
 each download starts or ends, and a reopened store lists none. A read that
 fetches a range into the cache isn't keeping a file whole, so it isn't listed.
 
@@ -628,7 +642,10 @@ network changes, as one reading `coven_sending` does as an upload starts.
 `coven_uploads.metered` says the same of each file the setting holds, as
 `paused` does for the pause. The network's facts come to SQL through a
 function of coven's, `_coven_network`, which refuses a direct call as the
-transfer functions do.
+transfer functions do. A read sees the network as it stood at its snapshot, in
+the same copy as the files in flight, so one row of `coven_upload_phases`
+never pairs a send that a better network let start with the network from
+before it.
 
 The sync state (§19.1) is one row of `coven_sync_state`: the state's kind,
 when sync last finished, the pending record that names the state, and the

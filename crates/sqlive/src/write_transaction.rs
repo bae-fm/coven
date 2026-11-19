@@ -41,14 +41,19 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
     ) -> Result<Self, PolicyError<P>> {
         database.batch("BEGIN IMMEDIATE")?;
         database.streaming.set(streaming);
-        Ok(Self {
+        let transaction = Self {
             database,
             open: Cell::new(true),
             operations: false,
             rows: false,
             cookie: false,
             hook_failure: Arc::new(Mutex::new(None)),
-        })
+        };
+        // The write holds the database's write lock from here, so no commit
+        // comes between its snapshot and the host's values it takes
+        // (`snapshot_values.rs`).
+        transaction.database.snapshot_values.take();
+        Ok(transaction)
     }
 
     /// Read the schema cookie once in this transaction, which runs no DDL
@@ -143,7 +148,13 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
             };
             #[cfg(any(test, feature = "test-utils"))]
             database.commit_point(crate::test_records::CommitPoint::Judged);
-            database.batch("COMMIT")?;
+            {
+                // No read fixes its snapshot while the commit runs
+                // (`snapshot_values.rs`).
+                let _ordered = database.commit_order.committing();
+                database.batch("COMMIT")?;
+            }
+            database.snapshot_values.forget();
             // The write took effect, whatever follows, so it returns as
             // committed. A panic telling the handle's live queries may have
             // left one untold of it, so it fails the handle, and the call
