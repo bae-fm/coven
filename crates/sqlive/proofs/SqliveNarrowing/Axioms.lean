@@ -50,3 +50,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.result_restricted
 #print axioms SqliveNarrowing.scoped_rows
 #print axioms SqliveNarrowing.limit_restricted
+#print axioms SqliveNarrowing.STerm.bind_passes
+#print axioms SqliveNarrowing.RScope.equalValues_passes
+#print axioms SqliveNarrowing.membershipScope_passes
+#print axioms SqliveNarrowing.sideScope_passes
+#print axioms SqliveNarrowing.scopeAt_passes
+#print axioms SqliveNarrowing.Planned.scopes_eq

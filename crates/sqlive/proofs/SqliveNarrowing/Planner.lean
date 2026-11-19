@@ -114,40 +114,58 @@ def plan (s : Statement) : Planned :=
   let (st, order) := ordered s st
   { state := st, order, sorted }
 
+/-- The scope a membership gives its member, with `bound` giving each item
+placed before it its scope: the member's values among those its partner's
+scope holds, when the scope says, or the rows whose value a row of the
+partner in its scope gives. -/
+def Planned.membershipScope (bound : Nat → RScope) (m : Edge) : RScope :=
+  let partner := bound m.partner
+  match m.memberValue, m.value with
+  | .column mc, .column c =>
+    match partner.equalValues c with
+    | some vs => .inVals mc vs.eraseDups
+    | none => .joined m.memberValue m.partner m.value partner m.nulls
+  | _, v => .joined m.memberValue m.partner v partner m.nulls
+
+/-- The scope one side of an OR gives its item: its terms, and the rows its
+edges join of their partners' scopes. -/
+def Planned.sideScope (bound : Nat → RScope) (side : Side) : RScope :=
+  side.edges.foldl (fun acc m => acc.both (.joined m.memberValue m.partner m.value (bound m.partner) m.nulls))
+    (side.terms.foldl (fun acc t => acc.both t.bind) .all)
+
+/-- How a run's item `i` looks up the rows of an earlier run's item `j`:
+through the first of its memberships that takes values from `j`. -/
+def Planned.lookupOf (p : Planned) (bound : Nat → RScope) (i j : Nat) : Option (RScope → RScope) :=
+  ((p.state.items i).memberships.find? (·.partner == j)).map fun m before =>
+    .joined m.memberValue m.partner m.value ((bound m.partner).both before) m.nulls
+
+/-- Item `i`'s scope for a run whose last row's ORDER BY values are `last`,
+with `bound` giving each item placed before it its scope: its terms, what
+its edges carry, its memberships, its ORs, and the LIMIT bound when the run
+returned as many rows as its LIMIT. -/
+def Planned.scopeAt (p : Planned) (last : Option (List (List Value))) (bound : Nat → RScope)
+    (i : Nat) : RScope :=
+  let item := p.state.items i
+  let scope := ((item.term.map STerm.bind).getD .all).both
+    ((item.carried.map STerm.bind).getD .all)
+  let scope := item.memberships.foldl (fun scope m => scope.both (membershipScope bound m)) scope
+  let scope := item.either.foldl (fun scope sides =>
+    match sides.map (sideScope bound) with
+    | [] => scope
+    | first :: rest => scope.both (rest.foldl RScope.either first)) scope
+  match p.sorted, last with
+  | some sorted, some values =>
+    match Limit.runBound i (p.lookupOf bound i) (sorted.runs.zip values) with
+    | some found => scope.both found
+    | none => scope
+  | _, _ => scope
+
 /-- Each item's scope for a run whose last row's ORDER BY values are `last`,
 run by run, when it returned as many rows as its LIMIT
 (`scope_lookup::scopes`). -/
 def Planned.scopes (p : Planned) (last : Option (List (List Value))) : Nat → RScope :=
   p.order.foldl (fun bound i =>
-    let item := p.state.items i
-    let scope := ((item.term.map STerm.bind).getD .all).both
-      ((item.carried.map STerm.bind).getD .all)
-    let scope := item.memberships.foldl (fun scope m =>
-      let partner := bound m.partner
-      match m.memberValue, m.value with
-      | .column mc, .column c =>
-        match partner.equalValues c with
-        | some vs => scope.both (.inVals mc vs.eraseDups)
-        | none => scope.both (.joined m.memberValue m.partner m.value partner m.nulls)
-      | _, v => scope.both (.joined m.memberValue m.partner v partner m.nulls)) scope
-    let sideScope (side : Side) : RScope :=
-      side.edges.foldl (fun acc m => acc.both (.joined m.memberValue m.partner m.value (bound m.partner) m.nulls))
-        (side.terms.foldl (fun acc t => acc.both t.bind) .all)
-    let scope := item.either.foldl (fun scope sides =>
-      match sides.map sideScope with
-      | [] => scope
-      | first :: rest => scope.both (rest.foldl RScope.either first)) scope
-    -- A run's item looks up the rows of an earlier run's item through the
-    -- first of its memberships that takes values from it.
-    let lookup (j : Nat) : Option (RScope → RScope) :=
-      (item.memberships.find? (·.partner == j)).map fun m before =>
-        .joined m.memberValue m.partner m.value ((bound m.partner).both before) m.nulls
-    let scope := match p.sorted, last with
-      | some sorted, some values =>
-        match Limit.runBound i lookup (sorted.runs.zip values) with
-        | some found => scope.both found
-        | none => scope
-      | _, _ => scope
+    let scope := p.scopeAt last bound i
     fun j => if j = i then scope else bound j) fun _ => .all
 
 /-- Each table's scope: the scopes of the items reading it, joined with OR;

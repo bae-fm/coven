@@ -317,8 +317,23 @@ with an ORDER BY, a LIMIT and no OFFSET, and its run returned as many rows as
 the LIMIT, the statement returns the same rows from both databases, as long as
 those bindings, and the bindings of every other query, keep the promise: the
 two runs return the same rows that sort at or before the last row, and
-`limit_sound` gives the same first rows. Whether the planner's scopes keep the
-promise, its LIMIT bound included, is the step that remains.
+`limit_sound` gives the same first rows.
+
+The promise rests on what makes a row pass the scope the planner gives an
+item. [Scopes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Scopes.lean)
+states it. `Planned.scopes_eq` proves that a placed item's scope reads the
+scopes of the items placed before it, which keep those scopes to the end.
+`scopeAt_passes` proves that the scope passes a row of which the item's terms
+and what its edges carry hold, that each of its memberships' scopes passes, that
+a side of each OR it keeps passes, and that its LIMIT bound passes.
+`membershipScope_passes` proves that a membership's scope passes a row whose
+value a row of the partner in the partner's scope gives, NULL only for an `IS`
+edge, through `equalValues_passes` when the partner's scope lists its values;
+`sideScope_passes` and `bind_passes` do the same for an OR's side and a term.
+Whether the planner's state gives each item terms, edges and ORs that hold of
+the bindings that matter, through the conditions it reads, the ON conditions it
+holds back, the terms it carries and passes into derived items, and the order
+it places items in, is the step that remains.
 
 ## What the proofs don't cover
 

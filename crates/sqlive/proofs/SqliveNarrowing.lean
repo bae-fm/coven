@@ -16,3 +16,4 @@ import SqliveNarrowing.Unjudged
 import SqliveNarrowing.Fuel
 import SqliveNarrowing.Filter
 import SqliveNarrowing.Restrict
+import SqliveNarrowing.Scopes
