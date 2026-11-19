@@ -14824,8 +14824,9 @@ the same on any platform.
    path. The checker reads two of them by name: F.2's rules on domains find
    a domain's writes in its owner's methods and follow the shared pointers
    that `shared_pointer_types` names to the owner. The read rule's rows
-   (`read_shapes`) are the typed lints' alone: the checker parses them, and
-   neither reads nor checks them, in check 4 or any rule, so a row such as
+   (`read_shapes`) are the typed lints' alone but for the plumbing paths:
+   the checker checks only that each path holds source (check 4), and
+   neither reads nor checks the type rows, so a row such as
    `std::cell::Cell` stands beside a type of coven's named `Cell`. The checker's
    rules match types by name, a path by its last part: a dependency's type
    goes by its name unless one of coven's has it. A path to such a type, as
@@ -14835,10 +14836,11 @@ the same on any platform.
    trait impls give it, so a type generic over its mode holds what any mode
    holds.
 4. The checker's check of the policy, before any rule: every member, file,
-   type and composition root the policy names must exist, so the policy can't
-   go stale. Each table the schema creates is in one domain. Each
-   counter the policy lists is a column the SQL only counts up, listed once
-   with what it numbers.
+   type and composition root that a row the checker reads names must exist, so
+   those rows can't go stale. The read rule's type rows are the typed lints',
+   so the checker holds only its plumbing paths to exist. Each table the
+   schema creates is in one domain. Each counter the policy lists is a column
+   the SQL only counts up, listed once with what it numbers.
 5. The visibility and file-size rules of F.5.
 6. `cargo doc` with broken links denied.
 7. Every crate built without test code, so an item only tests use shows up as

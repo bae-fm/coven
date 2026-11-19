@@ -489,7 +489,7 @@ fn a_row_naming_its_type_by_path_tells_a_dependency_s_type_by_its_crate() {
 }
 
 #[test]
-fn the_read_shapes_rows_are_the_typed_lints_and_the_checker_leaves_them() {
+fn the_read_shapes_type_rows_are_the_typed_lints_and_the_checker_leaves_them() {
     let rows = r#"
         [read_shapes]
         statement_rows = ["rusqlite::Row"]
@@ -498,12 +498,31 @@ fn the_read_shapes_rows_are_the_typed_lints_and_the_checker_leaves_them() {
         live_query_types = ["app::NoSuchLiveQuery"]
         value_stream_types = ["app::Watch"]
         kept_state_types = ["std::cell::Cell", "std::sync::Mutex"]
-        plumbing = ["crates/app/src/gone.rs"]
+        plumbing = ["crates/app/src/cells.rs"]
         rule = "the rule"
     "#;
     let files =
         vec![RustFile::fixture("crates/app/src/cells.rs", "pub struct Cell; struct Mutex;")];
     assert_eq!(stale(files, rows), Vec::<String>::new());
+}
+
+#[test]
+fn plumbing_names_a_file_or_directory_holding_source() {
+    let rows = r#"
+        [read_shapes]
+        statement_rows = []
+        column_values = []
+        plumbing = ["crates/app/src/cells.rs", "crates/app/src/moved/", "crates/app/src/gone.rs"]
+        rule = "the rule"
+    "#;
+    let files = vec![RustFile::fixture("crates/app/src/cells.rs", "")];
+    assert_eq!(
+        stale(files, rows),
+        [
+            "read_shapes.plumbing: crates/app/src/moved/ holds no source",
+            "read_shapes.plumbing: crates/app/src/gone.rs holds no source",
+        ]
+    );
 }
 
 #[test]
