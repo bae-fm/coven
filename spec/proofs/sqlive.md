@@ -522,6 +522,22 @@ when the planner has passed no edge into a derived item's arm yet and a
 derived item's row passes what its arms say of each column that isn't NULL:
 an edge an item with a row holds holds of the binding, so its partner has a
 row, and `transfer_sound` carries the partner's term to the member.
+[ReadPhase.lean](../../crates/sqlive/proofs/SqliveNarrowing/ReadPhase.lean)
+carries the invariant through every core the planner reads. The planner
+only adds to an item's term, with AND (`PState.TermGrows`), so the term an
+item holds when the planner passes it into the item's arms is true of every
+row the item's final term is true of. A binding of an arm whose row matters
+to the derived item holds, in each column the arm passes on, the value of a
+row that the derived item's test keeps (`relevant_cells`), so the term the
+planner passes in holds of the arm's item's row there, and
+`PState.Sem.pushDown` proves that passing a term into an arm keeps the
+invariant for such bindings. The planner reads a core after every core below
+it, so when it carries terms across a core's edges, it has passed nothing
+into its derived items' arms yet, and their items' terms hold of every
+binding the arms keep, as the carry needs. `PState.Sem.readCore` proves
+that reading a core keeps the invariant, and `plan_readSem` that the state
+after the planner reads every core says only what holds of each binding a
+core keeps, and of each binding below a core that matters.
 
 Whether these tests keep the promise `Kept` is the step that remains: whether
 the terms the planner carries and passes into derived items, the

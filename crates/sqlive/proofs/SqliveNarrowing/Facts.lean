@@ -120,12 +120,14 @@ theorem Statement.KeptIn.facts {s : Statement} (h : s.wellFormed = true) {Z : Db
 
 /-- An edge's fact at binding `b` of core `k`: it holds of `b`, its member
 value is NULL for a missing row unless every binding holds the member's row,
-a partner outside a subquery that no LEFT JOIN adds has a row in `b`, and a
-partner inside one sits in an arm of one of `k`'s subqueries. -/
+a partner outside a subquery that no LEFT JOIN adds has a row in `b`, a
+partner inside one sits in an arm of one of `k`'s subqueries, and a partner
+outside one is an item its own core lists. -/
 def Edge.Fact (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (e : Edge) : Prop :=
   e.HoldsIn s Z f b ∧ e.memberStrict s ∧
     (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
-    (e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms)
+    (e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms) ∧
+    (e.nested = false → e.partner ∈ (s.core (s.item e.partner).core).items)
 
 /-- An OR's fact at binding `b` of core `k`: it holds of `b`, each side
 narrows its item, and each side's edges are from its item with the
@@ -147,6 +149,13 @@ def Narrowing.Facts (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (n : Narrowi
   (∀ p ∈ n.terms, p.2.holds (b p.1) = true) ∧ (∀ e ∈ n.edges, e.Fact s Z f k b) ∧
     ∀ d ∈ n.ors, d.Fact s Z f k b
 
+/-- A core that lists conditions is in range. -/
+theorem Statement.cond_core_lt {s : Statement} {k : Nat} {x : Cond × Place}
+    (hx : x ∈ (s.core k).conds) : k < s.cores.length := by
+  refine Decidable.byContradiction fun hk => ?_
+  rw [s.core_out hk] at hx
+  cases hx
+
 /-- The narrowing a condition of core `k` gives is on items of `k`, and its
 facts hold at each binding `k` keeps that the condition holds of. -/
 theorem readCondition_facts {s : Statement} (h : s.wellFormed = true) {k : Nat} {cd : Cond}
@@ -163,6 +172,15 @@ theorem readCondition_facts {s : Statement} (h : s.wellFormed = true) {k : Nat} 
     exact hnamed j' col (by
       simp only [Core.refs, List.mem_append, List.mem_flatMap]
       exact Or.inl (Or.inl ⟨(cd, pl), hcd, hjc⟩)) hab
+  have hlisted : ∀ j, j ∈ cd.items → j ∈ (s.core (s.item j).core).items := by
+    intro j hj
+    obtain ⟨⟨j', col⟩, hjc, rfl⟩ := List.mem_map.mp hj
+    have hp : (j', col) ∈ (s.core k).refs := by
+      simp only [Core.refs, List.mem_append, List.mem_flatMap]
+      exact Or.inl (Or.inl ⟨(cd, pl), hcd, hjc⟩)
+    obtain ⟨k', _, hjk'⟩ := (s.wellFormed_parts h).refs k (s.cond_core_lt hcd) _ hp
+    rw [((s.wellFormed_parts h).items k' (s.core_lt hjk') j' hjk').2]
+    exact hjk'
   have hnest : ∀ e : Edge, e.NestedIn s cd.queries →
       e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms := by
     intro e hn hnt
@@ -170,7 +188,8 @@ theorem readCondition_facts {s : Statement} (h : s.wellFormed = true) {k : Nat} 
     exact ⟨q, Core.cond_queries hcd hq, harm⟩
   refine ⟨fun p hp => (hterms p.1 p.2 hp).2 Z f b hholds, fun e he => ?_, fun d hd => ?_⟩
   · obtain ⟨_, _, hpart, _, hstrict, hn, hh⟩ := hedges e he
-    exact ⟨hh Z f b hholds, hstrict, fun hnf hab => hbound _ (hpart hnf) hab, hnest e hn⟩
+    exact ⟨hh Z f b hholds, hstrict, fun hnf hab => hbound _ (hpart hnf) hab, hnest e hn,
+      fun hnf => hlisted _ (hpart hnf)⟩
   · obtain ⟨_, hnar, hsides, hh⟩ := hors d hd
     refine ⟨hh Z f b hholds, hnar, fun side hside e he => ?_⟩
     obtain ⟨hmem, _, hpart, _, hstrict, hn⟩ := hsides side hside e he
@@ -429,13 +448,6 @@ theorem PState.Sem.narrow {s : Statement} (h : s.wellFormed = true) {P : Cls}
     rw [hik i hi] at hb
     exact hs.row_of_fact hheld0 (hfacts Z f b hb) hi
 
-/-- A core that lists conditions is in range. -/
-theorem Statement.cond_core_lt {s : Statement} {k : Nat} {x : Cond × Place}
-    (hx : x ∈ (s.core k).conds) : k < s.cores.length := by
-  refine Decidable.byContradiction fun hk => ?_
-  rw [s.core_out hk] at hx
-  cases hx
-
 /-- Narrowing by a condition of the ON of the LEFT JOIN that adds `i` keeps
 the invariant: what it says of `i` holds where `i` has a row, the rest waits
 with what the state holds back for `i`, or narrows once `i` is inner. -/
@@ -594,14 +606,14 @@ theorem PState.Sem.addCarried {s : Statement} {P : Cls} {st : PState} (hs : st.S
   · exact ht Z f b r hb hr
 
 /-- Carrying terms across core `k`'s edges keeps the invariant, when the
-state has pushed no edge into a derived item's arm, and a derived item's row
-passes what its arms say of each of its columns that isn't NULL: each edge
+state has pushed no edge into a derived item's arm, and a row of a derived
+item of `k` passes what its arms say of each of its columns that isn't NULL: each edge
 an item with a row holds has its fact, whose partner then has a row, and a
 term true of the partner's row is true, renamed, of the member's. -/
 theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P)
     (hpushed : st.pushed = []) (k : Nat)
-    (hpull : ∀ Z f b i r y t, P Z f (s.item i).core b → b i = some r → r.cell y ≠ none →
-      Transfer.pulled s st i y = some t → t.holds (some r) = true) :
+    (hpull : ∀ Z f b i r y t, (s.item i).core = k → i ∈ (s.core k).items → P Z f k b →
+      b i = some r → r.cell y ≠ none → Transfer.pulled s st i y = some t → t.holds (some r) = true) :
     (Transfer.carry s st k).Sem s P := by
   unfold Transfer.carry
   refine foldl_invariant (P := PState.Sem s P) _ (fun x c hc hx => hx.addCarried ?_) st hs
@@ -609,7 +621,7 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
   intro Z f b r hb hbr
   rw [hi] at hb hbr
   have hmem : b e.member ≠ none := by rw [hbr]; simp
-  rcases hs.edges Z f b e he hb hmem with hp | ⟨hh, _, hpart, _⟩
+  rcases hs.edges Z f b e he hb hmem with hp | ⟨hh, _, hpart, _, hlist⟩
   · rw [hpushed] at hp
     cases hp
   have hpk : P Z f (s.item e.partner).core b := by rw [hcp, ← hcm]; exact hb
@@ -630,7 +642,9 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
     rw [hrp]
     rcases hu with hu | ⟨hnf, hu⟩
     · exact hs.terms Z f b e.partner rp hpk hrp u hu
-    · exact hpull Z f b e.partner rp y u hpk hrp (hcell hnf) hu
+    · have hlist' := hlist hn
+      rw [hcp] at hlist'
+      exact hpull Z f b e.partner rp y u hcp hlist' (by rw [← hcm]; exact hb) hrp (hcell hnf) hu
   have := Transfer.transfer_sound hv hm hn hh hut hr
   rwa [hbr] at this
 
