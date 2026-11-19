@@ -720,6 +720,24 @@ async fn a_lookup_compares_an_expression_with_the_joined_columns_affinity() {
     db.close();
 }
 
+/// The same join to a TEXT column: its affinity turns the expression's
+/// integer 5 into '5', so the lookup casts the value to TEXT.
+#[tokio::test]
+async fn a_lookup_compares_an_expression_with_a_text_columns_affinity() {
+    let db = TestDatabase::open("CREATE TABLE parents(id INTEGER PRIMARY KEY, label TEXT, kind TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, parent TEXT, note TEXT); INSERT INTO parents VALUES (1, '5', 'one'), (2, '6', 'other'); INSERT INTO children VALUES (1, '5', ''), (2, '6', '')");
+    follows(
+        &db,
+        "SELECT c.note FROM parents p JOIN children c ON c.parent = p.label + 0 WHERE p.kind = 'one'",
+        vec![],
+        &[
+            ("UPDATE children SET note = '.' WHERE id = 2", false),
+            ("UPDATE children SET note = '.' WHERE id = 1", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// A partner narrowed by a NULL test is looked up with the test in its
 /// condition, for the row's old and new values: credits on a deleted
 /// track wake nothing, and a credit moving onto a live track or off it
