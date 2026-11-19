@@ -1,12 +1,12 @@
 //! Rule 6 for each row around a subquery: a subquery of one table, ordered
 //! by expressions over its columns, with a LIMIT, that its own conditions
 //! and equalities with the row around it narrow, depends only on the rows of
-//! each window up to its LIMIT-th row. Its value in a result column, EXISTS
-//! and a comparison that takes no row's value from it narrow by the window.
-//! And the forms that keep its conditions' scope: an OFFSET, an order by a
-//! position or by a column sqlive doesn't compare, another condition on the
-//! row around it, and a comparison that takes its value as a value of its
-//! table. The writes move rows between windows, change a window's rows and
+//! each window up to its LIMIT-th row. Its value in a result column, EXISTS,
+//! a comparison that takes no row's value from it and one that takes its
+//! value as a value of its table narrow by the window. And the forms that
+//! keep its conditions' scope: an OFFSET, an order by a position or by a
+//! column sqlive doesn't compare, and another condition on the row around
+//! it. The writes move rows between windows, change a window's rows and
 //! delete the rows around it.
 
 use super::{
@@ -123,7 +123,9 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             conditions.push(cmp("<", col("x", "a"), Expr::Sub(query)));
         }
         Place::Taken => {
-            let query = Box::new(subquery(rng, inner, "c", false));
+            let returned = pick(rng, &["a", "b", "c", "id"]);
+            let hidden = rng.chance(70);
+            let query = Box::new(subquery(rng, inner, returned, hidden));
             conditions.push(if rng.chance(50) {
                 eq(col("x", "c"), Expr::Sub(query))
             } else {

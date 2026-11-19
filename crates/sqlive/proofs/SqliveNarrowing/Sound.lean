@@ -127,19 +127,17 @@ theorem narrowing_sound {s : Statement} (hwf : s.wellFormed = true) {db db' : Db
     have hscopes : s.tableScopes db = some (tableScope s ((plan s).itemScopes last)) := by
       rw [← hlast]
       simp [Statement.tableScopes, hwhole, Planned.lastOf]
-    have htab : ∀ i t, s.table? i = some t → i < s.items.length → ∀ r ∈ (db.mask s.reads).rows t,
-        (plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i r = true →
-        r ∈ (db'.mask s.reads).rows t := by
-      intro i t ht hi r hr' hst
-      have := scoped_rows hw hr hscopes hi ht
+    have htab : ∀ i t, s.table? i = some t → i < s.items.length →
+        ((db.mask s.reads).rows t).filter
+            ((plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i) =
+          ((db'.mask s.reads).rows t).filter
+            ((plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i) :=
+      fun i t ht hi => scoped_rows hw hr hscopes hi ht
         (G := (plan s).scopeTest ((plan s).scopes last) (lookupRows s (db'.mask s.reads)) i)
         (fun r hg => by
           simp only [Planned.scopeTest, Bool.and_eq_true] at hg
           simp only [Planned.itemScopes, Limit.passes_both, Bool.and_eq_true]
           exact hg.1)
-      have hmem := List.mem_filter.mpr ⟨hr', hst⟩
-      rw [this] at hmem
-      exact (List.mem_filter.mp hmem).1
     have hkept : ∀ f, (∀ f' ≤ f, Agree s (db.mask s.reads) (db'.mask s.reads)
         (planTest s (db'.mask s.reads) last) (planRel s (db'.mask s.reads) last) f') →
         Kept s (db.mask s.reads) (planTest s (db'.mask s.reads) last) (planLeft s)

@@ -537,12 +537,17 @@ windows is the one core of a window's subquery, whose bindings pass by
 write leaves holds fewer than LIMIT rows the core keeps under the binding
 around it, or the first LIMIT do (`count_first`). The window's scope enters
 only its table's scope, not the scopes that the lookups of other items read,
-so it changes no other item's test. A window's subquery is the source of no
-subquery's value that a comparison takes (`Window.takesValues`): such a
-comparison holds of a binding with some row of the subquery's core,
-wherever that row sorts, so `windowPasses_taken` proves that each binding of
-the core of a source whose value an edge or a side of an OR takes passes its
-windows, and the partner that the edge finds passes its test.
+so it changes no other item's test. A comparison that takes a subquery's
+value takes it from a binding of the subquery's core that gives a row the
+subquery returns: the edge reader promises such a binding
+(`Statement.GivesRow`), from `query_row_at`. `givesRow_count` proves that
+such a binding of a window's core sorts after fewer than LIMIT rows its core
+keeps, in the database it reads. `givesRow_windowTest` proves that it then
+passes the window in the database the write leaves: otherwise LIMIT rows
+sort before it there that pass the window, so pass their item's test, and
+the two databases hold the same rows that pass that test.
+`nested_windowPasses` gives these to the item an edge narrows, through
+`givesRow_windowPasses`, so the partner that the edge finds passes its test.
 `Planned.bound_passes` proves the LIMIT bound's part of the promise: in a
 binding of the statement's own core whose ORDER BY values sort at or before
 the last row's, the bound of each item the ORDER BY sorts passes the item's
@@ -741,10 +746,7 @@ refusals. A partner column of no affinity gives a member column of another
 affinity its values: SQLite compares a TEXT member with it as they are, and
 gives its values an INTEGER member's affinity, which leaves an integer as it
 is. The differential's column of no affinity holds integers, so it checks the
-INTEGER case, and a unit test checks the TEXT case against SQLite. A subquery's window narrows only a subquery whose value no comparison takes.
-For `cover.id = (SELECT r.id ... LIMIT 1)`, the edge reader's promise gives the
-comparison some row of the subquery's core, not one inside its window, so the
-model keeps that subquery's table as its conditions narrow it. The model has
+INTEGER case, and a unit test checks the TEXT case against SQLite. The model has
 no generated columns: sqlive sorts by a generated
 column's expression, which the model states as an expression term. The
 differential's tables hold no generated column: sqlive records no value of
@@ -804,7 +806,8 @@ back as one integer, which the model computes the same way. A subquery's
 ORDER BY term that its result doesn't return is a result column the model's
 query returns after the SQL's columns: SQLite allows no second column in a
 scalar subquery, and a subquery's value, EXISTS and a comparison with a
-subquery read only the first column.
+subquery read only the first column. The edge reader for a column compared
+with a subquery's value reads the first column the same way.
 
 SQLite's authorizer reports no read of the columns a USING or NATURAL join
 compares, nor of the columns that decide which rows a query whose rows SQLite

@@ -24,11 +24,11 @@ def Planned.windowPasses (p : Planned) (s : Statement) (Y : Db) (k : Nat) (b : B
     | some r => (p.windowScope j).passes (lookupRows s Y) r
     | none => true
 
-theorem plan_windows (s : Statement) : (plan s).windows = Window.windows s (plan s).state := rfl
+theorem plan_windows (s : Statement) : (plan s).windows = Window.windows s := rfl
 
 /-- A window of the planned state is the one `read` gives its query. -/
 theorem plan_window_read {s : Statement} {w : Window} (hw : w ∈ (plan s).windows) :
-    read s (plan s).state w.query = some w ∧ ReadFacts s (plan s).state w := by
+    read s w.query = some w ∧ ReadFacts s w := by
   rw [plan_windows] at hw
   obtain ⟨q, _, hq⟩ := List.mem_filterMap.mp hw
   obtain ⟨rfl, hf⟩ := read_facts hq
@@ -128,7 +128,7 @@ theorem keyAt_map {s : Statement} {c : Core} {i : Nat} (E : Bind → Nat → Lis
 
 /-- The window's keys sort a binding of its core as the subquery's ORDER BY
 does, and in the same directions. -/
-theorem window_keys {s : Statement} {st : PState} {w : Window} (hf : ReadFacts s st w)
+theorem window_keys {s : Statement} {w : Window} (hf : ReadFacts s w)
     (E : Bind → Nat → List Row) (b : Bind) :
     Limit.orderKey (s.query w.query) ((s.core w.core).outRow E b) =
         w.keys.map (fun (e, _) => e.eval (rowBind (b w.item)) noSubs) ∧
@@ -144,7 +144,7 @@ def windowKept (s : Statement) (w : Window) (o : Bind) (r : Row) : Bool :=
   (s.core w.core).conds.all fun (cd, _) => isTrue (cd.eval (o.set w.item (some r)) noSubs)
 
 /-- A window's core keeps under `o` the bindings of its item's rows it keeps. -/
-theorem window_bindings {s : Statement} {st : PState} {w : Window} (hf : ReadFacts s st w)
+theorem window_bindings {s : Statement} {w : Window} (hf : ReadFacts s w)
     {t : Nat} (ht : s.table? w.item = some t) (Z : Db) (E : Bind → Nat → List Row) (o : Bind) :
     coreBindings s Z E o w.core =
       ((Z.rows t).filter (windowKept s w o)).map fun r => o.set w.item (some r) := by
@@ -225,7 +225,7 @@ theorem partition_eval {s : Statement} {k i : Nat} {cd : Cond} {c : Nat}
 /-- Of a row the window's core keeps under `o`, another row sits in the same
 window exactly when the core keeps it too, and it holds no NULL in a
 partition column. -/
-theorem window_kept {s : Statement} {st : PState} {w : Window} (hf : ReadFacts s st w) {o : Bind}
+theorem window_kept {s : Statement} {w : Window} (hf : ReadFacts s w) {o : Bind}
     {r : Row} (hr : windowKept s w o r = true) :
     w.partition.all (fun c => (r.cell c).isSome) = true ∧
       ∀ r', (w.own.all (fun cd => isTrue (cd.eval (rowBind (some r')) noSubs)) &&
@@ -314,7 +314,7 @@ def windowTest (s : Statement) (w : Window) (o : Bind) (rows : List Row) (v : Li
 
 /-- The window's scope passes a row the core keeps under `o` exactly when
 fewer than LIMIT rows the core keeps sort before it. -/
-theorem window_passes {s : Statement} {st : PState} {w : Window} (hf : ReadFacts s st w) {o : Bind}
+theorem window_passes {s : Statement} {w : Window} (hf : ReadFacts s w) {o : Bind}
     {r : Row} (hr : windowKept s w o r = true) (rowsOf : Nat → List Row) :
     w.scope.passes rowsOf r = windowTest s w o (rowsOf w.item) (keyValues w.keys r) := by
   obtain ⟨hnull, hsame⟩ := window_kept hf hr
@@ -329,6 +329,13 @@ theorem keyCompare_lt_iff {ds : List Bool} {a b : List Value} :
     keyCompare ds a b = .lt ↔ keyLe ds b a = false := by
   simp only [keyLe, Limit.keyCompare_swap ds a b, bne_eq_false_iff_eq]
   cases keyCompare ds a b <;> simp [Ordering.swap]
+
+theorem keyCompare_lt_beq {ds : List Bool} (a b : List Value) :
+    (keyCompare ds a b == .lt) = !keyLe ds b a := by
+  cases h : keyLe ds b a
+  · simp [keyCompare_lt_iff.mpr h]
+  · have : keyCompare ds a b ≠ .lt := fun h' => by rw [keyCompare_lt_iff] at h'; rw [h'] at h; cases h
+    simp [this]
 
 theorem keyCompare_lt_of_le {ds : List Bool} {x a b : List Value} (hx : x.length = ds.length)
     (ha : a.length = ds.length) (hb : b.length = ds.length) (hlt : keyCompare ds x a = .lt)
@@ -346,6 +353,14 @@ theorem length_filter_mono {α : Type} {p p' : α → Bool} (h : ∀ a, p a = tr
     cases hx : p x <;> cases hx' : p' x <;> simp [hx, hx'] <;> try omega
     exact absurd (h x hx) (by simp [hx'])
 
+theorem length_filter_mono_mem {α : Type} {p p' : α → Bool} :
+    ∀ {l : List α}, (∀ a ∈ l, p a = true → p' a = true) → (l.filter p).length ≤ (l.filter p').length
+  | [], _ => Nat.le_refl _
+  | x :: xs, h => by
+    have ih := length_filter_mono_mem (l := xs) fun a ha => h a (List.mem_cons_of_mem _ ha)
+    cases hx : p x <;> cases hx' : p' x <;> simp [hx, hx'] <;> try omega
+    exact absurd (h x List.mem_cons_self hx) (by simp [hx'])
+
 /-- The window's test is closed downward: values that sort at or before
 values that pass it pass it. -/
 theorem windowTest_down {s : Statement} (w : Window) (o : Bind) (rows : List Row)
@@ -357,53 +372,83 @@ theorem windowTest_down {s : Statement} (w : Window) (o : Bind) (rows : List Row
   simp only [Bool.and_eq_true, beq_iff_eq] at h ⊢
   refine ⟨h.1, keyCompare_lt_of_le (by simp [keyValues]) (by simpa using ha) (by simpa using hb) h.2 hle⟩
 
+/-- Each of the first `n` elements in an order has fewer than `n` elements
+that sort before it. -/
+theorem take_sortBy_before {α : Type} {le : α → α → Bool} (total : ∀ a b, le a b || le b a)
+    (trans : ∀ a b c, le a b → le b c → le a c) (L : List α) {n : Nat} {x : α}
+    (hx : x ∈ (sortBy le L).take n) : (L.filter fun y => !le x y).length < n := by
+  let S := sortBy le L
+  have hS : S.Pairwise (le · ·) := Limit.pairwise_sortBy total trans L
+  have hlen : ∀ P : α → Bool, (L.filter P).length = (S.filter P).length := by
+    intro P
+    rw [← Limit.sortBy_filter total trans, Limit.length_sortBy]
+  have hrefl : ∀ a, le a a = true := fun a => by simpa using total a a
+  obtain ⟨j, hj, rfl⟩ := List.getElem_of_mem hx
+  have hj' := hj
+  simp only [List.length_take, Nat.lt_min] at hj'
+  obtain ⟨hjn, hjS⟩ := hj'
+  rw [List.getElem_take, hlen]
+  have hsplit : S = S.take j ++ S[j] :: S.drop (j + 1) := by
+    rw [← List.drop_eq_getElem_cons hjS, List.take_append_drop]
+  generalize S[j] = x at hsplit ⊢
+  have hpw := hS
+  rw [hsplit, List.pairwise_append, List.pairwise_cons] at hpw
+  have hafter : ∀ z ∈ x :: S.drop (j + 1), le x z = true := by
+    intro z hz
+    rcases List.mem_cons.mp hz with rfl | hz
+    · exact hrefl _
+    · exact hpw.2.1.1 z hz
+  rw [hsplit, List.filter_append, List.length_append]
+  have hnil : ((x :: S.drop (j + 1)).filter fun y => !le x y) = [] :=
+    List.filter_eq_nil_iff.mpr fun z hz => by simp [hafter z hz]
+  rw [hnil, List.length_nil, Nat.add_zero]
+  calc ((S.take j).filter _).length ≤ (S.take j).length := List.length_filter_le _ _
+    _ ≤ j := List.length_take_le _ _
+    _ < n := hjn
+
 /-- Of `n` rows or more, at least `n` have fewer than `n` rows that sort
 before them: the first `n` in their order. -/
 theorem count_first {α : Type} {le : α → α → Bool} (total : ∀ a b, le a b || le b a)
     (trans : ∀ a b c, le a b → le b c → le a c) (L : List α) {n : Nat} (hn : n ≤ L.length) :
     n ≤ (L.filter fun x => decide ((L.filter fun y => !le x y).length < n)).length := by
   let S := sortBy le L
-  have hS : S.Pairwise (le · ·) := Limit.pairwise_sortBy total trans L
   have hlen : ∀ P : α → Bool, (L.filter P).length = (S.filter P).length := by
     intro P
     rw [← Limit.sortBy_filter total trans, Limit.length_sortBy]
   rw [hlen]
-  have hrefl : ∀ a, le a a = true := fun a => by simpa using total a a
-  -- Each of the first `n` sorted rows has fewer than `n` rows before it.
-  have hfirst : ∀ j (hj : j < S.length), j < n →
-      (L.filter fun y => !le S[j] y).length < n := by
-    intro j hj hjn
-    rw [hlen]
-    have hsplit : S = S.take j ++ S[j] :: S.drop (j + 1) := by
-      rw [← List.drop_eq_getElem_cons hj, List.take_append_drop]
-    generalize S[j] = x at hsplit ⊢
-    have hpw := hS
-    rw [hsplit, List.pairwise_append, List.pairwise_cons] at hpw
-    have hafter : ∀ z ∈ x :: S.drop (j + 1), le x z = true := by
-      intro z hz
-      rcases List.mem_cons.mp hz with rfl | hz
-      · exact hrefl _
-      · exact hpw.2.1.1 z hz
-    rw [hsplit, List.filter_append, List.length_append]
-    have hnil : ((x :: S.drop (j + 1)).filter fun y => !le x y) = [] :=
-      List.filter_eq_nil_iff.mpr fun z hz => by simp [hafter z hz]
-    rw [hnil, List.length_nil, Nat.add_zero]
-    calc ((S.take j).filter _).length ≤ (S.take j).length := List.length_filter_le _ _
-      _ ≤ j := List.length_take_le _ _
-      _ < n := hjn
   have hlenS : n ≤ S.length := by rw [Limit.length_sortBy]; exact hn
   calc n = (S.take n).length := by rw [List.length_take]; omega
     _ = ((S.take n).filter fun x => decide ((L.filter fun y => !le x y).length < n)).length := by
         congr 1
         symm
-        apply List.filter_eq_self.mpr
-        intro x hx
-        obtain ⟨j, hj, rfl⟩ := List.getElem_of_mem hx
-        rw [List.getElem_take]
-        have hjn : j < n := by rw [List.length_take] at hj; omega
-        exact decide_eq_true (hfirst j (by rw [List.length_take] at hj; omega) hjn)
+        exact List.filter_eq_self.mpr fun x hx =>
+          decide_eq_true (take_sortBy_before total trans L hx)
     _ ≤ (S.filter fun x => decide ((L.filter fun y => !le x y).length < n)).length :=
         (List.take_sublist n S).filter _ |>.length_le
+
+/-- A binding of a window's core passes the planner's windows as its ORDER
+BY values pass the window's test. -/
+theorem plan_windowPasses {s : Statement} (hwf : s.wellFormed = true) {w : Window}
+    (hw : w ∈ (plan s).windows) {t : Nat} (ht : s.table? w.item = some t) (Y Z : Db)
+    (E : Bind → Nat → List Row) (o : Bind) :
+    ∀ b ∈ coreBindings s Z E o w.core, (plan s).windowPasses s Y w.core b =
+      windowTest s w o (Y.rows t) (Limit.orderKey (s.query w.query) ((s.core w.core).outRow E b)) := by
+  obtain ⟨_, hf⟩ := plan_window_read hw
+  have hkind : (s.item w.item).kind = .table t := by
+    unfold Statement.table? at ht
+    split at ht
+    · cases ht; assumption
+    · cases ht
+  have hlook : lookupRows s Y w.item = Y.rows t := by simp [lookupRows, hkind]
+  intro b hb
+  rw [window_bindings hf ht] at hb
+  obtain ⟨r, hr, rfl⟩ := List.mem_map.mp hb
+  have hkept := (List.mem_filter.mp hr).2
+  rw [(window_keys hf E _).1]
+  simp only [Planned.windowPasses, hf.items, List.all_cons, List.all_nil, Bool.and_true,
+    Bind.set, ↓reduceIte, plan_windowScope hwf hw]
+  rw [window_passes hf hkept, hlook]
+  rfl
 
 /-- The planner's windows restrict their subqueries' rows: a query with a
 binding that fails its window is a window's, whose bindings pass it by a
@@ -423,29 +468,13 @@ theorem plan_windowRows {s : Statement} (hwf : s.wellFormed = true) {X Y : Db}
   have hq : w.query = q := s.wellFormed_armOf hwf (by rw [hf.arms]; simp) hk
   subst hq
   obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp hf.table
-  have hkind : (s.item w.item).kind = .table t := by
-    unfold Statement.table? at ht
-    split at ht
-    · cases ht; assumption
-    · cases ht
-  have hlook : lookupRows s Y w.item = Y.rows t := by simp [lookupRows, hkind]
-  have hscope := plan_windowScope hwf hw
   have hdir := (window_keys hf (fun _ _ => []) Bind.empty).2
   have hklen : w.keys.length = (s.query w.query).orderBy.length := by
     simpa using congrArg List.length hdir
-  -- A binding of the window's core passes it as its ORDER BY values pass the test.
   have hpass : ∀ (Z : Db) (E : Bind → Nat → List Row) (o : Bind), ∀ b ∈ coreBindings s Z E o w.core,
       (plan s).windowPasses s Y w.core b =
-        windowTest s w o (Y.rows t) (Limit.orderKey (s.query w.query) ((s.core w.core).outRow E b)) := by
-    intro Z E o b hb
-    rw [window_bindings hf ht] at hb
-    obtain ⟨r, hr, rfl⟩ := List.mem_map.mp hb
-    have hkept := (List.mem_filter.mp hr).2
-    rw [(window_keys hf E _).1]
-    simp only [Planned.windowPasses, hf.items, List.all_cons, List.all_nil, Bool.and_true,
-      Bind.set, ↓reduceIte, hscope]
-    rw [window_passes hf hkept, hlook]
-    rfl
+        windowTest s w o (Y.rows t) (Limit.orderKey (s.query w.query) ((s.core w.core).outRow E b)) :=
+    fun Z E o => plan_windowPasses hwf hw ht Y Z E o
   refine ⟨hf.arms, hf.agg, hf.windowed, hf.distinct, hf.offset, hf.order,
     fun E E' b => by rw [(window_keys hf E b).1, (window_keys hf E' b).1],
     ⟨w.limit, hf.limit, fun o _ _ EX EY => ⟨windowTest s w o (Y.rows t), ?_, hpass X EX o,
@@ -495,37 +524,6 @@ theorem plan_windowRows {s : Statement} (hwf : s.wellFormed = true) {X Y : Db}
       exact congrArg (fun l : List Row => decide (l.length < w.limit))
         (List.filter_congr fun y _ => (hpt y).symm)
 
-/-! A subquery's source whose value a comparison takes has no window. -/
-
-/-- Each binding of the core of a subquery's source whose value the planned
-state takes passes its windows: `read` gives no window to such a core. -/
-theorem windowPasses_taken {s : Statement} (hwf : s.wellFormed = true) {p : Nat}
-    (htaken : ∀ i, (s.item i).core = (s.item p).core →
-      Window.takesValues s (plan s).state s.itemNumbers i = true)
-    (Y : Db) (b : Bind) : (plan s).windowPasses s Y (s.item p).core b = true := by
-  cases h : (plan s).windowPasses s Y (s.item p).core b with
-  | true => rfl
-  | false =>
-    obtain ⟨w, hw, hwi⟩ := windowPasses_false h
-    have hcore := ((s.wellFormed_parts hwf).items _ (s.core_lt hwi) _ hwi).2
-    have := (plan_window_read hw).2.takes
-    rw [htaken w.item hcore] at this
-    cases this
-
-theorem takesValues_edge {s : Statement} {st : PState} {items : List Nat} {i : Nat} {e : Edge}
-    (he : e ∈ st.edges) (hn : e.nested = true) (hc : (s.item e.partner).core = (s.item i).core) :
-    Window.takesValues s st items i = true := by
-  simp only [Window.takesValues, Bool.or_eq_true, List.any_eq_true]
-  exact Or.inl ⟨e, he, by simp [hn, hc]⟩
-
-theorem takesValues_side {s : Statement} {st : PState} {items : List Nat} {i j : Nat}
-    {sides : List Side} {side : Side} {e : Edge} (hj : j ∈ items) (hs : sides ∈ (st.items j).ors)
-    (hside : side ∈ sides) (he : e ∈ side.edges) (hn : e.nested = true)
-    (hc : (s.item e.partner).core = (s.item i).core) :
-    Window.takesValues s st items i = true := by
-  simp only [Window.takesValues, Bool.or_eq_true, List.any_eq_true]
-  exact Or.inr ⟨j, hj, sides, hs, side, hside, e, he, by simp [hn, hc]⟩
-
 /-- A LEFT JOIN's item has no window. -/
 theorem windowScope_left {s : Statement} {i : Nat}
     (hl : (s.item i).left = true) : (plan s).windowScope i = .all := by
@@ -555,5 +553,179 @@ theorem windowPasses_root {s : Statement} (hwf : s.wellFormed = true) {k : Nat}
     obtain ⟨p, hp, _⟩ := hf.parent
     rw [(s.wellFormed_parts hwf).rootOutside _ hk] at hp
     cases hp
+
+/-! A comparison takes a subquery's value from a binding inside its window. -/
+
+/-- A binding of a window's core that gives a row the subquery returns sorts
+after fewer than LIMIT rows its core keeps, in the database it reads. -/
+theorem givesRow_count {s : Statement} (hwf : s.wellFormed = true) {w : Window}
+    (hw : w ∈ (plan s).windows) {t : Nat} (ht : s.table? w.item = some t) {Z : Db} {g : Nat}
+    {o : Bind} {r0 : Row} (hr0 : windowKept s w o r0 = true)
+    (hrow : (s.core w.core).outRow (evalQuery s Z g) (o.set w.item (some r0)) ∈
+      evalQuery s Z (g + 1) o w.query) :
+    windowTest s w o (Z.rows t) (keyValues w.keys r0) = true := by
+  obtain ⟨_, hf⟩ := plan_window_read hw
+  let c := s.core w.core
+  let query := s.query w.query
+  let E := evalQuery s Z g
+  let ds := w.keys.map (·.2)
+  let le (a b : Row) : Bool := keyLe ds (Limit.orderKey query a) (Limit.orderKey query b)
+  have hdir := (window_keys hf E Bind.empty).2
+  have hkey : ∀ r, Limit.orderKey query (c.outRow E (o.set w.item (some r))) = keyValues w.keys r := by
+    intro r
+    rw [(window_keys hf E _).1]
+    simp [Bind.set, keyValues]
+  have hklen : ∀ r, (Limit.orderKey query r).length = ds.length := by
+    intro r; simp [Limit.orderKey, query, ds, hdir]
+  have hne : query.orderBy.isEmpty = false := by simpa using hf.order
+  have hrows : evalQuery s Z (g + 1) o w.query =
+      (sortBy le ((coreBindings s Z E o w.core).map (c.outRow E))).take w.limit := by
+    simp only [evalQuery, queryRows, hf.arms, List.map_cons, List.map_nil, combineAll_single]
+    unfold Core.result
+    simp only [hf.distinct, Bool.false_eq_true, ↓reduceIte]
+    rw [Core.rows_plain hf.agg hf.windowed]
+    simp only [Query.post, List.isEmpty_iff, hf.order, ↓reduceIte, hf.offset, Option.getD_none,
+      List.drop_zero, hf.limit, le, ds, ← hdir]
+    rfl
+  rw [hrows] at hrow
+  have hbefore := take_sortBy_before (le := le) (fun a b => Limit.keyLe_total _ _ _)
+    (fun a b c h1 h2 => Limit.keyLe_trans (hklen a) (hklen b) (hklen c) h1 h2) _ hrow
+  rw [window_bindings hf ht, List.map_map, List.filter_map, List.length_map, List.filter_filter]
+    at hbefore
+  simp only [windowTest, decide_eq_true_eq]
+  refine Nat.lt_of_le_of_lt (Nat.le_of_eq ?_) hbefore
+  congr 1
+  apply List.filter_congr
+  intro r _
+  simp only [Function.comp, le, hkey, keyCompare_lt_beq, Bool.and_comm]
+  rw [hkey r0]
+
+/-- A binding of a window's core that gives a row the subquery returns, in a
+database whose rows passing a test `G` are those of the database the write
+leaves, passes its window there, when every row the window passes in that
+database passes `G`: otherwise LIMIT rows that pass the window sort before
+it in both databases. -/
+theorem givesRow_windowTest {s : Statement} (hwf : s.wellFormed = true) {w : Window}
+    (hw : w ∈ (plan s).windows) {t : Nat} (ht : s.table? w.item = some t) {Z Y : Db} {g : Nat}
+    {o : Bind} {r0 : Row} (hr0 : windowKept s w o r0 = true)
+    (hrow : (s.core w.core).outRow (evalQuery s Z g) (o.set w.item (some r0)) ∈
+      evalQuery s Z (g + 1) o w.query)
+    {G : Row → Bool} (hG : (Z.rows t).filter G = (Y.rows t).filter G)
+    (hpass : ∀ r ∈ Y.rows t, windowKept s w o r = true →
+      windowTest s w o (Y.rows t) (keyValues w.keys r) = true → G r = true) :
+    windowTest s w o (Y.rows t) (keyValues w.keys r0) = true := by
+  have hZ := givesRow_count hwf hw ht hr0 hrow
+  obtain ⟨_, hf⟩ := plan_window_read hw
+  let ds := w.keys.map (·.2)
+  let kv := keyValues w.keys
+  let v := kv r0
+  have hkv : ∀ r, (kv r).length = ds.length := by intro r; simp [kv, keyValues, ds]
+  let before (x : List Value) (r : Row) : Bool := windowKept s w o r && keyCompare ds (kv r) x == .lt
+  apply Classical.byContradiction
+  intro hfail
+  simp only [windowTest, decide_eq_true_eq, Nat.not_lt] at hfail
+  -- The rows of the write's database that sort before `r0`, and of them the
+  -- first LIMIT, which pass the window.
+  let S := (Y.rows t).filter (before v)
+  have hS : w.limit ≤ S.length := hfail
+  have hcount := count_first (le := fun a b : Row => keyLe ds (kv a) (kv b))
+    (fun a b => Limit.keyLe_total _ _ _)
+    (fun a b c h1 h2 => Limit.keyLe_trans (hkv a) (hkv b) (hkv c) h1 h2) S hS
+  have hlt : ∀ x y, keyCompare ds x y = .lt ↔ keyLe ds y x = false := fun x y => keyCompare_lt_iff
+  -- A row of `S` passes the window exactly when fewer than LIMIT rows of `S`
+  -- sort before it, since a row before it sorts before `r0` too.
+  have hwin : ∀ x ∈ S, windowTest s w o (Y.rows t) (kv x) =
+      decide ((S.filter fun y => !keyLe ds (kv x) (kv y)).length < w.limit) := by
+    intro x hx
+    have hxv : keyCompare ds (kv x) v = .lt := by
+      have := (List.mem_filter.mp hx).2
+      simp only [before, Bool.and_eq_true, beq_iff_eq] at this
+      exact this.2
+    simp only [windowTest, S, List.filter_filter]
+    congr 3
+    apply List.filter_congr
+    intro y _
+    have hxv' : keyLe ds v (kv x) = false := (hlt _ _).mp hxv
+    have hxv2 : keyLe ds (kv x) v = true := by
+      have := Limit.keyLe_total ds (kv x) v
+      simpa [hxv'] using this
+    simp only [before, keyCompare_lt_beq]
+    cases hk : windowKept s w o y
+    · simp
+    · cases hy : keyLe ds (kv x) (kv y)
+      · cases h : keyLe ds v (kv y)
+        · rfl
+        · rw [Limit.keyLe_trans (hkv x) (hkv r0) (hkv y) hxv2 h] at hy
+          cases hy
+      · simp
+  have hpassS : w.limit ≤ (S.filter G).length := by
+    refine Nat.le_trans hcount (length_filter_mono_mem (fun x hx hP => ?_))
+    have hxY := (List.mem_filter.mp hx).1
+    have hxk : windowKept s w o x = true := by
+      have := (List.mem_filter.mp hx).2
+      simp only [before, Bool.and_eq_true] at this
+      exact this.1
+    refine hpass x hxY hxk ?_
+    rw [hwin x hx]
+    exact hP
+  have hYZ : (S.filter G).length ≤ ((Z.rows t).filter (before v)).length := by
+    have : S.filter G = ((Z.rows t).filter G).filter (before v) := by
+      rw [hG]
+      simp only [S, List.filter_filter, Bool.and_comm]
+    rw [this, List.filter_filter]
+    exact length_filter_mono (fun a h => by simp only [Bool.and_eq_true] at h; exact h.1) _
+  simp only [windowTest, decide_eq_true_eq] at hZ
+  have : ((Z.rows t).filter (before v)).length < w.limit := hZ
+  omega
+
+/-- A binding of a subquery's core that gives a row the subquery returns
+passes the planner's windows in the database the write leaves, when each
+window's table holds the same rows passing a test `G` in both databases, and
+each binding of the core there, under the same outer binding, that passes
+its windows holds a row of the window's table that passes `G`. -/
+theorem givesRow_windowPasses {s : Statement} (hwf : s.wellFormed = true) {Z Y : Db} {g : Nat}
+    {o b' : Bind} {k : Nat} (hb' : b' ∈ coreBindings s Z (evalQuery s Z g) o k)
+    (hgr : s.GivesRow Z g o k b')
+    (hsame : ∀ w ∈ (plan s).windows, w.core = k → ∀ t, s.table? w.item = some t →
+      ∃ G : Row → Bool, (Z.rows t).filter G = (Y.rows t).filter G ∧
+        ∀ b'' ∈ coreBindings s Y (evalQuery s Y g) o k, (plan s).windowPasses s Y k b'' = true →
+          ∀ r, b'' w.item = some r → G r = true) :
+    (plan s).windowPasses s Y k b' = true := by
+  cases h : (plan s).windowPasses s Y k b' with
+  | true => rfl
+  | false =>
+    exfalso
+    obtain ⟨w, hw, hwi⟩ := windowPasses_false h
+    obtain ⟨_, hf⟩ := plan_window_read hw
+    have hcore : w.core = k := by
+      have h1 : w.item ∈ (s.core w.core).items := by rw [hf.items]; simp
+      rw [← ((s.wellFormed_parts hwf).items _ (s.core_lt h1) _ h1).2,
+        ((s.wellFormed_parts hwf).items _ (s.core_lt hwi) _ hwi).2]
+    subst hcore
+    obtain ⟨q, hkq, himp⟩ := hgr
+    have hq : w.query = q := s.wellFormed_armOf hwf (k := w.core) (by rw [hf.arms]; simp) hkq
+    subst hq
+    obtain ⟨t, ht⟩ := Option.isSome_iff_exists.mp hf.table
+    have hb'' := hb'
+    rw [window_bindings hf ht] at hb''
+    obtain ⟨r0, hr0, rfl⟩ := List.mem_map.mp hb''
+    have hk0 := (List.mem_filter.mp hr0).2
+    have hrow := himp hf.arms hf.agg hf.windowed
+    have hkey : ∀ (E : Bind → Nat → List Row) r, Limit.orderKey (s.query w.query)
+        ((s.core w.core).outRow E (o.set w.item (some r))) = keyValues w.keys r := by
+      intro E r
+      rw [(window_keys hf E _).1]
+      simp [Bind.set, keyValues]
+    obtain ⟨G, hG, hGY⟩ := hsame w hw rfl t ht
+    have hpass : windowTest s w o (Y.rows t) (keyValues w.keys r0) = true := by
+      refine givesRow_windowTest hwf hw ht hk0 hrow hG fun r hr hkr htest => ?_
+      have hbY : o.set w.item (some r) ∈ coreBindings s Y (evalQuery s Y g) o w.core := by
+        rw [window_bindings hf ht]
+        exact List.mem_map.mpr ⟨r, List.mem_filter.mpr ⟨hr, hkr⟩, rfl⟩
+      refine hGY _ hbY ?_ r (by simp [Bind.set])
+      rw [plan_windowPasses hwf hw ht Y Y _ o _ hbY, hkey]
+      exact htest
+    rw [plan_windowPasses hwf hw ht Y Z _ o _ hb', hkey, hpass] at h
+    cases h
 
 end SqliveNarrowing

@@ -192,6 +192,13 @@ def OutCol.plain (subs : Bind → Subs) (kept : List Bind) (b : Bind) (j : Nat) 
   | .rowNumber partition orderBy => windowRowNumber subs partition orderBy kept b j
   | _ => none
 
+/-- A core's row of a binding, as a core that calls no window function makes
+it. -/
+def Core.outRow (c : Core) (E : Bind → Nat → List Row) (b : Bind) : Row :=
+  c.output.map fun o => match o with
+    | .expr e => e.eval b (E b)
+    | _ => none
+
 /-- A core's rows from the bindings it keeps. -/
 def Core.rows (c : Core) (subs : Bind → Subs) (kept : List Bind) : List Row :=
   if c.aggregated then

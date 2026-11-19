@@ -25,13 +25,12 @@
 //! columns, of the same kind, with no COLLATE and no NULLS FIRST or LAST, and
 //! no term is a position: Lean models an ORDER BY that writes its terms. The
 //! SELECT neither groups, calls an aggregate or window function, nor is
-//! DISTINCT, since there one row depends on many. No comparison takes the
-//! subquery's value as a value of its table (`scope_subquery.rs`): such a
-//! comparison narrows by every row of the table that its conditions keep,
-//! wherever it sorts, and a scope that left out the rows past each window
-//! would hide them from that comparison's lookups. The window narrows only
-//! the table's own scope: the lookups of other sources read the table's
-//! rows as its conditions narrow them.
+//! DISTINCT, since there one row depends on many. A comparison that takes the
+//! subquery's value (`scope_subquery.rs`) takes it from a row the subquery
+//! returns, which sits inside its window, so the window narrows the
+//! subquery's table there too. The window narrows only the table's own
+//! scope: the lookups of other sources read the table's rows as its
+//! conditions narrow them.
 
 use std::sync::Arc;
 
@@ -67,9 +66,7 @@ pub(crate) struct Window {
 }
 
 /// The window of `select`, a subquery whose one core is `core`, when its
-/// rows for each row around it are the first rows of a window and no
-/// comparison takes its value (`Planner::takes_values`, checked once the
-/// statement is read).
+/// rows for each row around it are the first rows of a window.
 pub(crate) fn read_window(
     connection: &Connection,
     planner: &Planner,
@@ -185,20 +182,6 @@ fn partition_column(
             _ => None,
         }
     })
-}
-
-impl Planner<'_> {
-    /// Whether a comparison takes the value of a subquery from `item`: an
-    /// edge, or a side of an OR, whose partner is `item` as a subquery's
-    /// source (`scope_subquery.rs`).
-    pub(crate) fn takes_values(&self, item: usize) -> bool {
-        let takes = |edge: &crate::scope_plan::Edge| edge.nested && edge.partner == item;
-        self.edges.iter().any(takes)
-            || self
-                .items
-                .iter()
-                .any(|found| found.ors.iter().flatten().any(|side| side.edges.iter().any(takes)))
-    }
 }
 
 impl Window {

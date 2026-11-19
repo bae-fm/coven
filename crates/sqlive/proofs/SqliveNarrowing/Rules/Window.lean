@@ -14,9 +14,9 @@ database the write leaves, as it asks a lookup; the run keeps no value.
 
 The subquery's every condition is one of the two kinds, so the rows its
 conditions keep under a binding around it are exactly that binding's window.
-Its ORDER BY names each term's column or expression, and its table is the
-source of no subquery's value: a comparison that takes the subquery's value
-reads its source's rows that its conditions keep, wherever they sort. -/
+Its ORDER BY names each term's column or expression. A comparison that takes
+the subquery's value takes it from a row the subquery returns
+(`Statement.GivesRow`), so from inside the window. -/
 namespace SqliveNarrowing.Window
 
 /-- A subquery whose rows for each binding around it are the first rows of a
@@ -62,14 +62,6 @@ def partitionOf (s : Statement) (k i : Nat) : Cond → Option Nat
   | .cmp .eq l r => (partitionColumn s k i l r false).orElse fun _ => partitionColumn s k i r l true
   | _ => none
 
-/-- Whether a planner state takes the value of a subquery from item `i`'s
-core: an edge, or a side of an OR of one of the items `items`, whose
-partner, as a subquery's source, is an item of that core. -/
-def takesValues (s : Statement) (st : PState) (items : List Nat) (i : Nat) : Bool :=
-  let nested (e : Edge) : Bool := e.nested && (s.item e.partner).core == (s.item i).core
-  st.edges.any nested || items.any fun j =>
-    (st.items j).ors.any fun sides => sides.any fun side => side.edges.any nested
-
 /-- The ORDER BY term at result column `pos` of core `c`, sorting item
 `i`'s rows, when it is an expression over `i`'s columns, each one sqlive
 narrows by. -/
@@ -102,21 +94,20 @@ def readCore (s : Statement) (q k i : Nat) (query : Query) : Option Window :=
 
 /-- The window of query `q`, when it is a subquery of the core around its
 one core, whose rows for each binding around it are the first rows of a
-window, and whose table no edge of the planned state `st` takes a subquery's
-value from (`read_window`). -/
-def read (s : Statement) (st : PState) (q : Nat) : Option Window :=
+window (`read_window`). -/
+def read (s : Statement) (q : Nat) : Option Window :=
   match (s.query q).arms with
   | [k] =>
     match (s.core k).parent, (s.core k).items with
     | some p, [i] =>
-      if (s.core p).subqueries.contains q && (s.table? i).isSome && !takesValues s st s.itemNumbers i
+      if (s.core p).subqueries.contains q && (s.table? i).isSome
       then readCore s q k i (s.query q) else none
     | _, _ => none
   | _ => none
 
 /-- The windows of a statement's subqueries. -/
-def windows (s : Statement) (st : PState) : List Window :=
-  (List.range s.queries.length).filterMap (read s st)
+def windows (s : Statement) : List Window :=
+  (List.range s.queries.length).filterMap (read s)
 
 /-! What the reader's checks say of the subquery. -/
 
@@ -198,12 +189,11 @@ theorem partitionOf_holds {s : Statement} {k i : Nat} {cd : Cond} {c : Nat}
   · cases h
 
 /-- What `read` checked of a window's subquery. -/
-structure ReadFacts (s : Statement) (st : PState) (w : Window) : Prop where
+structure ReadFacts (s : Statement) (w : Window) : Prop where
   arms : (s.query w.query).arms = [w.core]
   parent : ∃ p, (s.core w.core).parent = some p ∧ w.query ∈ (s.core p).subqueries
   items : (s.core w.core).items = [w.item]
   table : (s.table? w.item).isSome = true
-  takes : takesValues s st s.itemNumbers w.item = false
   limit : (s.query w.query).limit = some w.limit
   positive : 0 < w.limit
   offset : (s.query w.query).offset = none
@@ -222,8 +212,8 @@ structure ReadFacts (s : Statement) (st : PState) (w : Window) : Prop where
   partition : w.partition = (s.core w.core).conds.filterMap fun (cd, _) =>
     if ownCond s w.item cd then none else partitionOf s w.core w.item cd
 
-theorem read_facts {s : Statement} {st : PState} {q : Nat} {w : Window} (h : read s st q = some w) :
-    w.query = q ∧ ReadFacts s st w := by
+theorem read_facts {s : Statement} {q : Nat} {w : Window} (h : read s q = some w) :
+    w.query = q ∧ ReadFacts s w := by
   unfold read at h
   split at h
   · rename_i k harms
@@ -231,8 +221,8 @@ theorem read_facts {s : Statement} {st : PState} {q : Nat} {w : Window} (h : rea
     · rename_i p i hparent hitems
       split at h
       · rename_i hcheck
-        simp only [Bool.and_eq_true, List.contains_iff_mem, Bool.not_eq_true'] at hcheck
-        obtain ⟨⟨hsub, htable⟩, htakes⟩ := hcheck
+        simp only [Bool.and_eq_true, List.contains_iff_mem] at hcheck
+        obtain ⟨hsub, htable⟩ := hcheck
         unfold readCore at h
         split at h
         · cases h
@@ -251,7 +241,7 @@ theorem read_facts {s : Statement} {st : PState} {q : Nat} {w : Window} (h : rea
           rename_i hconds
           cases h
           simp only [Bool.not_eq_eq_eq_not, Bool.not_true, Bool.not_eq_false, List.all_eq_true] at hkeys hconds
-          refine ⟨rfl, harms, ⟨p, hparent, hsub⟩, hitems, htable, htakes, hlim, ?_, hok.2.1, ?_,
+          refine ⟨rfl, harms, ⟨p, hparent, hsub⟩, hitems, htable, hlim, ?_, hok.2.1, ?_,
             hok.2.2.2.2.1, hok.2.2.2.2.2.1, hok.2.2.2.2.2.2.1, hok.2.2.2.2.2.2.2, hkeys, rfl, ?_, rfl, rfl⟩
           · exact Nat.pos_of_ne_zero hok.1
           · intro he; exact hok.2.2.1 (by simp [he])

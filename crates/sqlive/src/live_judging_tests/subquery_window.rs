@@ -115,17 +115,46 @@ async fn a_window_of_two_holds_each_album_s_first_two_releases() {
     db.close();
 }
 
-/// A comparison that takes a subquery's value narrows by every release the
-/// subquery's conditions keep, so the subquery's window narrows nothing.
+/// A comparison that takes a subquery's value takes it from a row inside the
+/// subquery's window, so the window narrows the subquery's table there too.
 #[tokio::test]
-async fn a_subquery_whose_value_a_comparison_takes_keeps_every_release() {
+async fn a_subquery_whose_value_a_comparison_takes_narrows_to_its_window() {
     let db = TestDatabase::open(ALBUMS);
     follows(
         &db,
-        "SELECT a.id FROM albums AS a WHERE a.id = 1 AND a.title = (SELECT r.title \
+        "SELECT a.id FROM albums AS a WHERE a.id < 3 AND a.title = (SELECT r.title \
          FROM releases AS r WHERE r.album_id = a.id ORDER BY r.album_order, r.id LIMIT 1)",
         vec![],
-        &[("UPDATE releases SET title = 'x' WHERE id = 13", true)],
+        &[
+            ("UPDATE releases SET title = 'x' WHERE id = 13", false),
+            ("UPDATE releases SET title = 'one' WHERE id = 11", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// The covers a window shows come from each album's first release. A
+/// release that moves after its album's first changes no cover the window
+/// picks; a cover written for any release of a shown album still reruns it,
+/// since the covers' lookup reads every release of the album.
+#[tokio::test]
+async fn a_cover_picked_by_a_window_reruns_for_its_album_s_releases() {
+    let db = TestDatabase::open(&format!(
+        "{ALBUMS}; CREATE TABLE covers(id INTEGER PRIMARY KEY, file TEXT); \
+         INSERT INTO covers VALUES (11,'f11'),(12,'f12'),(21,'f21')"
+    ));
+    follows(
+        &db,
+        "SELECT c.file FROM albums AS a JOIN covers AS c ON c.id = (SELECT r.id FROM releases AS r \
+         WHERE r.album_id = a.id ORDER BY r.album_order, r.id LIMIT 1) WHERE a.id < 3",
+        vec![],
+        &[
+            ("UPDATE releases SET album_order = 5 WHERE id = 13", false),
+            ("UPDATE covers SET file = 'g12' WHERE id = 12", true),
+            ("UPDATE releases SET album_order = 0 WHERE id = 12", true),
+            ("UPDATE releases SET album_order = 7 WHERE id = 11", false),
+        ],
     )
     .await;
     db.close();

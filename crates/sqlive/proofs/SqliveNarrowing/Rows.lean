@@ -150,4 +150,57 @@ theorem mem_rows_plain {c : Core} (hc : c.aggregated = false) {subs : Bind → S
   obtain ⟨⟨b, j⟩, hb, rfl⟩ := hr
   exact ⟨b, List.fst_mem_of_mem_zipIdx hb, j, rfl⟩
 
+/-- A core that neither aggregates nor calls a window function makes each
+binding's row as `Core.outRow` does. -/
+theorem Core.plain_outRow {c : Core} (hw : c.windowed = false) (subs : Bind → Subs)
+    (kept : List Bind) (b : Bind) (j : Nat) :
+    c.output.map (OutCol.plain subs kept b j) = c.outRow subs b := by
+  unfold Core.outRow
+  apply List.map_congr_left
+  intro o ho
+  cases o with
+  | expr e => rfl
+  | rowNumber p ob =>
+    have : c.windowed = true := by
+      unfold Core.windowed
+      exact List.any_eq_true.mpr ⟨_, ho, rfl⟩
+    rw [hw] at this
+    cases this
+  | _ => rfl
+
+/-- A row of a one-arm query holds, at a position whose result column is
+`e`, NULL or `e`'s value in a binding the arm keeps; when the arm neither
+aggregates nor calls a window function, the row is that binding's. -/
+theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat} {e : Expr}
+    (ha : (s.query q).arms = [k]) (ho : (s.core k).output[i]? = some (.expr e)) {r : Row}
+    (hr : r ∈ evalQuery s db (f + 1) b q) :
+    r[i]? = some none ∨ ∃ b' ∈ coreBindings s db (evalQuery s db f) b k,
+      r[i]? = some (e.eval b' (evalQuery s db f b')) ∧
+      ((s.core k).aggregated = false → (s.core k).windowed = false →
+        r = (s.core k).outRow (evalQuery s db f) b') := by
+  simp only [evalQuery, queryRows, ha, List.map_cons, List.map_nil, combineAll_single] at hr
+  have hr := mem_result (mem_post hr)
+  unfold Core.rows at hr
+  split at hr
+  · rename_i hagg
+    simp only [List.mem_map] at hr
+    obtain ⟨g, hg, rfl⟩ := hr
+    simp only [List.getElem?_map, ho, Option.map_some, OutCol.aggregate]
+    split
+    · rename_i b' hlast
+      right
+      refine ⟨b', ?_, rfl, fun h => by rw [h] at hagg; cases hagg⟩
+      have hb : b' ∈ g := List.mem_of_getLast? hlast
+      split at hg
+      · simp only [List.mem_singleton] at hg
+        subst hg
+        exact hb
+      · exact mem_groupsOf hg hb
+    · left; rfl
+  · simp only [List.mem_map] at hr
+    obtain ⟨⟨b', j⟩, hb', rfl⟩ := hr
+    right
+    exact ⟨b', List.fst_mem_of_mem_zipIdx hb', by simp [List.getElem?_map, ho, OutCol.plain],
+      fun _ hw => Core.plain_outRow hw _ _ _ _⟩
+
 end SqliveNarrowing

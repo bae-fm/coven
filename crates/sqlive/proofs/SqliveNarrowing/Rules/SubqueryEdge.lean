@@ -5,7 +5,10 @@ import SqliveNarrowing.Reader
 ...)`, narrows the column's item to the rows whose column holds a value some
 row of `x` in its scope holds (`scope_subquery.rs`). The subquery is one
 SELECT whose one result column is a bare column of one of its own items,
-readable alone, of the member column's affinity or of none (`columnValue`). -/
+readable alone, of the member column's affinity or of none (`columnValue`).
+A comparison reads only the subquery's first column, so the model's
+subquery may return more columns after it: its ORDER BY terms that the SQL
+doesn't return. -/
 namespace SqliveNarrowing.SubqueryEdge
 
 /-- The column a condition compares and the subquery it compares with. -/
@@ -24,7 +27,7 @@ def compared : Cond → Option (Expr × Nat)
 query `q` returns. -/
 def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
   let [sub] := (s.query q).arms | none
-  let [.expr (.col p pc)] := (s.core sub).output | none
+  let some (OutCol.expr (Expr.col p pc)) := (s.core sub).output[0]? | none
   if (s.item p).core ≠ sub ∨ !(s.item p).readable then none
   let pa ← s.affinity p pc
   let .col m c := member | none
@@ -44,7 +47,7 @@ column's value. -/
 
 theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
     (h : edge s k member q = some e) :
-    ∃ sub pc c, (s.query q).arms = [sub] ∧ (s.core sub).output = [.expr (.col e.partner pc)] ∧
+    ∃ sub pc c, (s.query q).arms = [sub] ∧ (s.core sub).output[0]? = some (.expr (.col e.partner pc)) ∧
       (∀ r, e.value.eval r = r.cell pc) ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
       member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
       e.nested = true := by
@@ -198,17 +201,17 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
       | zero => simp [evalQuery] at hrowq
       | succ f' =>
         refine ⟨f', rfl, ?_⟩
-        rcases mem_query_single harms hout hrowq with hnone | ⟨b', hb', hrow'⟩
-        · subst hnone
-          simp [Row.cell] at hcell
-        · subst hrow'
-          simp only [Expr.eval, Row.cell, List.getElem?_cons_zero, Option.join_some] at hcell
+        rcases query_row_at harms hout hrowq with hnone | ⟨b', hb', hcell', hrow'⟩
+        · simp [Row.cell, hnone] at hcell
+        · simp only [Row.cell, hcell', Option.join_some, Expr.eval] at hcell
           cases hp : b' e.partner with
           | none => simp [hp, cellOf] at hcell
           | some r =>
             rw [hpcore]
-            refine ⟨b', hb', r, hp, ?_⟩
-            simp only [hp, cellOf] at hcell
-            simp [hval, hcell]
+            refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
+            · rw [← hrow' hagg hwin]
+              exact hrowq
+            · simp only [hp, cellOf] at hcell
+              simp [hval, hcell]
 
 end SqliveNarrowing.SubqueryEdge

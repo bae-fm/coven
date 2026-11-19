@@ -113,7 +113,7 @@ def plan (s : Statement) : Planned :=
   let st := s.readOrder.foldl (readCore s) (PState.initial s)
   let sorted := Limit.sortedLimit s st
   let (st, order) := ordered s st
-  { state := st, order, sorted, windows := Window.windows s st }
+  { state := st, order, sorted, windows := Window.windows s }
 
 /-- The scope item `i`'s window gives it: every row for an item no window
 sorts. -/

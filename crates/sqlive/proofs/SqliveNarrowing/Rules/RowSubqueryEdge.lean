@@ -122,36 +122,6 @@ theorem rowMemberTruth_true {vs : List Value} {rows : List (List Value)}
         (try rename_i t; cases t) <;> simp)
       exact ⟨r', by simp [hr'], heq⟩
 
-/-- A row of a one-arm query holds, at a position whose result column is
-`e`, NULL or `e`'s value in a binding the arm keeps. -/
-theorem query_row_at {s : Statement} {db : Db} {f : Nat} {b : Bind} {q k i : Nat} {e : Expr}
-    (ha : (s.query q).arms = [k]) (ho : (s.core k).output[i]? = some (.expr e)) {r : Row}
-    (hr : r ∈ evalQuery s db (f + 1) b q) :
-    r[i]? = some none ∨ ∃ b' ∈ coreBindings s db (evalQuery s db f) b k,
-      r[i]? = some (e.eval b' (evalQuery s db f b')) := by
-  simp only [evalQuery, queryRows, ha, List.map_cons, List.map_nil, combineAll_single] at hr
-  have hr := mem_result (mem_post hr)
-  unfold Core.rows at hr
-  split at hr
-  · simp only [List.mem_map] at hr
-    obtain ⟨g, hg, rfl⟩ := hr
-    simp only [List.getElem?_map, ho, Option.map_some, OutCol.aggregate]
-    split
-    · rename_i b' hlast
-      right
-      refine ⟨b', ?_, rfl⟩
-      have hb : b' ∈ g := List.mem_of_getLast? hlast
-      split at hg
-      · simp only [List.mem_singleton] at hg
-        subst hg
-        exact hb
-      · exact mem_groupsOf hg hb
-    · left; rfl
-  · simp only [List.mem_map] at hr
-    obtain ⟨⟨b', j⟩, hb', rfl⟩ := hr
-    right
-    exact ⟨b', List.fst_mem_of_mem_zipIdx hb', by simp [List.getElem?_map, ho, OutCol.plain]⟩
-
 /-- The theorem: a row value compared with a subquery's row, true of a
 binding, makes each pair's member column hold a value the pair's partner
 gives in a binding of the subquery's core under the same binding. -/
@@ -196,7 +166,7 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       have hvs : (vs.map (Expr.eval b (evalQuery s db (f' + 1) b)))[position]? =
           some (e.memberValue.on (b e.member)) := by
         simp [List.getElem?_map, hm, hmem, hmv, Expr.eval, PValue.on]
-      rcases query_row_at harms hout hrowq with hnull | ⟨b', hb', hcell⟩
+      rcases query_row_at harms hout hrowq with hnull | ⟨b', hb', hcell, hrow'⟩
       · obtain ⟨x, _, hx⟩ := rowEqTruth_at heq hvs hnull
         cases hx
       · obtain ⟨x, hx, hy⟩ := rowEqTruth_at heq hvs hcell
@@ -207,9 +177,11 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
         | none => simp [Expr.eval, hp, cellOf] at hy
         | some r =>
           rw [hpcore]
-          refine ⟨b', hb', r, hp, ?_⟩
-          simp only [Expr.eval, hp, cellOf] at hy
-          simp [hval, hy]
+          refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
+          · rw [← hrow' hagg hwin]
+            exact hrowq
+          · simp only [Expr.eval, hp, cellOf] at hy
+            simp [hval, hy]
     · cases h
 
 end SqliveNarrowing.RowSubqueryEdge

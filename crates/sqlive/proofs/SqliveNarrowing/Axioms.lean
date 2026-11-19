@@ -75,7 +75,12 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.window_passes
 #print axioms SqliveNarrowing.count_first
 #print axioms SqliveNarrowing.plan_windowRows
-#print axioms SqliveNarrowing.windowPasses_taken
+#print axioms SqliveNarrowing.givesRow_windowPasses
+#print axioms SqliveNarrowing.givesRow_windowTest
+#print axioms SqliveNarrowing.givesRow_count
+#print axioms SqliveNarrowing.nested_windowPasses
+#print axioms SqliveNarrowing.take_sortBy_before
+#print axioms SqliveNarrowing.query_row_at
 #print axioms SqliveNarrowing.STerm.bind_passes
 #print axioms SqliveNarrowing.RScope.equalValues_passes
 #print axioms SqliveNarrowing.membershipScope_passes

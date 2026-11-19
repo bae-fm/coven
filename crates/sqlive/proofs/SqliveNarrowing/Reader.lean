@@ -173,10 +173,19 @@ theorem mem_of_eraseDups_singleton {l : List Nat} {i : Nat} (h : l.eraseDups = [
 
 /-! The promise. -/
 
+/-- Whether `b'`, a binding of core `k` under `b` whose subqueries read fuel
+`f`, gives a row of a query `k` is an arm of, when that query is one SELECT
+that neither aggregates nor calls a window function: a comparison takes its
+value from a row the subquery returns, not from any binding of its core. -/
+def Statement.GivesRow (s : Statement) (db : Db) (f : Nat) (b : Bind) (k : Nat) (b' : Bind) : Prop :=
+  ∃ q, k ∈ (s.query q).arms ∧ ((s.query q).arms = [k] → (s.core k).aggregated = false →
+    (s.core k).windowed = false → (s.core k).outRow (evalQuery s db f) b' ∈ evalQuery s db (f + 1) b q)
+
 /-- An edge holds of a binding `b` whose conditions read subqueries with fuel
 `f`: the member's column holds a value `x`, and a row of the partner gives
 `x`: the partner's row in `b`, or, for a subquery's source, its row in a
-binding of the subquery's core under `b`. Or the edge compares by `IS`, the
+binding of the subquery's core under `b` that gives a row the subquery
+returns (`Statement.GivesRow`). Or the edge compares by `IS`, the
 member's column is NULL, and the partner's row in `b`, if it has one, gives
 NULL; the partner is no item a LEFT JOIN adds, so a binding a core keeps
 has its row. Or the partner's value isn't strict, `b` holds no row of the
@@ -186,7 +195,7 @@ def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Pro
   (∃ x, e.memberValue.on (b e.member) = some x ∧
     if e.nested then
       ∃ f', f = f' + 1 ∧ ∃ b' ∈ coreBindings s db (evalQuery s db f') b (s.item e.partner).core,
-        ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
+        s.GivesRow db f' b (s.item e.partner).core b' ∧ ∃ r, b' e.partner = some r ∧ e.value.eval r = some x
     else ∃ r, b e.partner = some r ∧ e.value.eval r = some x) ∨
   (e.nulls = true ∧ e.nested = false ∧ s.alwaysBound e.partner = true ∧
     e.memberValue.on (b e.member) = none ∧ ∀ r, b e.partner = some r → e.value.eval r = none) ∨

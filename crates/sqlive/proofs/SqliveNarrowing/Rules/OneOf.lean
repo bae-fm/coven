@@ -215,19 +215,20 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
     | zero => simp [evalQuery] at hrow
     | succ f' =>
       refine ⟨f', rfl, ?_⟩
-      rcases mem_query_single harms hout hrow with hnone | ⟨b', hb', hrow'⟩
-      · subst hnone
-        simp at hs
-      · subst hrow'
-        simp only [Expr.eval, Option.bind_some, List.head?_cons, Option.join_some] at hs
+      simp only [Option.bind_some, List.head?_eq_getElem?] at hs
+      rcases query_row_at harms hout hrow with hnone | ⟨b', hb', hcell, hrow'⟩
+      · simp [hnone] at hs
+      · simp only [hcell, Option.join_some, Expr.eval] at hs
         cases hp : b' e.partner with
         | none => simp [hp, cellOf] at hs
         | some r =>
           rw [hpcore]
-          refine ⟨b', hb', r, hp, ?_⟩
-          simp only [hp, cellOf] at hs
-          rw [hval]
-          exact hs
+          refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
+          · rw [← hrow' hagg hwin]
+            exact hrow
+          · simp only [hp, cellOf] at hs
+            rw [hval]
+            exact hs
 
 /-- What a side's edges say statically: each is from `m`, outside a
 subquery its partner isn't `m` and is among the items `named`, and inside
@@ -367,7 +368,8 @@ theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
 
 /-- A side of an arm that returned the member's value holds. -/
 theorem armSide_holds {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {side : Side}
-    (h : armSide s m c aff arm = some side) {db : Db} {f : Nat} {b : Bind} {x : Int}
+    (h : armSide s m c aff arm = some side) {q : Nat} (harm : arm ∈ (s.query q).arms)
+    (hlen : 2 ≤ (s.query q).arms.length) {db : Db} {f : Nat} {b : Bind} {x : Int}
     (hm : cellOf (b m) c = some x) {r : Row}
     (hr : r ∈ (s.core arm).rows (evalQuery s db f) (coreBindings s db (evalQuery s db f) b arm))
     (hx : r.cell 0 = some x) :
@@ -406,7 +408,7 @@ theorem armSide_holds {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
         | none => simp [hb, cellOf] at hx
         | some r' =>
           simp only [hp.1]
-          refine ⟨b', hb', r', hb, ?_⟩
+          refine ⟨b', hb', ⟨q, harm, fun h => by rw [h] at hlen; simp at hlen⟩, r', hb, ?_⟩
           simp only [hb, cellOf] at hx
           rw [columnValue_eval hvalue]
           exact hx
@@ -471,6 +473,7 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
       simp only [hmo] at h
       split at h
       · cases h
+      rename_i hlen
       cases hsides : (s.query q).arms.mapM (armSide s m c aff) with
       | none => simp [hsides] at h
       | some sides =>
@@ -490,7 +493,7 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
           | succ f' =>
             obtain ⟨arm, harm, hrows⟩ := arm_row hrowq
             obtain ⟨side, hside, hsome⟩ := (mapM_mem hsides).1 arm harm
-            obtain ⟨hterms, hedges⟩ := armSide_holds hsome hm hrows hx
+            obtain ⟨hterms, hedges⟩ := armSide_holds hsome harm (by omega) hm hrows hx
             exact ⟨side, hside, hterms, hedges⟩
   have coalesced_sound : ∀ {member other : Expr}, coalesced s k member other = some n →
       (∀ j ∈ other.items, j ∈ cd.items) → (∀ q ∈ other.queries, q ∈ cd.queries) →

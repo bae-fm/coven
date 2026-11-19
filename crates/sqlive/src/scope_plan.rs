@@ -210,8 +210,8 @@ pub(crate) struct Core {
     /// The item each name in its clauses resolves to, `None` for a name
     /// sqlive can't place.
     names: Vec<Option<usize>>,
-    /// The window of the subquery whose one core this is, until the order
-    /// shows whether a comparison takes the subquery's value.
+    /// The window of the subquery whose one core this is
+    /// (`scope_window.rs`).
     window: Option<Window>,
 }
 
@@ -373,10 +373,7 @@ impl Planner<'_> {
             crate::derived::push_down(&mut self, next, None, taken);
             order.push(next);
         }
-        let windows: Vec<Window> =
-            self.cores.iter_mut().filter_map(|core| core.window.take()).collect();
-        let windows =
-            windows.into_iter().filter(|window| !self.takes_values(window.item)).collect();
+        let windows = self.cores.iter_mut().filter_map(|core| core.window.take()).collect();
         let whole_names = self.whole_names;
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),

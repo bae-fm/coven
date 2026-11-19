@@ -440,13 +440,6 @@ theorem coreBindings_restricted {s : Statement} {X Y : Db} {EX EY : Bind → Nat
 
 /-! A query's rows that matter. -/
 
-/-- A core's row of a binding, as a core that calls no window function makes
-it. -/
-def Core.outRow (c : Core) (E : Bind → Nat → List Row) (b : Bind) : Row :=
-  c.output.map fun o => match o with
-    | .expr e => e.eval b (E b)
-    | _ => none
-
 /-- Whether a group of arm `k` of query `q` whose GROUP BY values are `key`
 can make a row that `rel q` keeps: some row `rel q` keeps holds, in each
 result column that is a bare column the GROUP BY lists, that column's value
