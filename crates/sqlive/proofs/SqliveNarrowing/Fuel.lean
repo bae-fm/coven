@@ -112,7 +112,7 @@ theorem Statement.wellFormed_nested {s : Statement} (h : s.wellFormed = true) {q
     (hq' : q' ∈ s.nestedQueries k) : q' < q := by
   simp only [Statement.wellFormed, Bool.and_eq_true, List.all_eq_true, List.mem_range,
     decide_eq_true_eq] at h
-  exact (h.1.1.1.1.2 q hq k hk).2 q' hq'
+  exact (h.1.1.1.1.1.1.1.2 q hq k hk).2 q' hq'
 
 /-- A query of a well-formed statement returns the same rows at every fuel
 past its number. -/

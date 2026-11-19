@@ -69,9 +69,12 @@ planner reads alone has a query that a lookup can read alone: its arms sit in
 no other core, or its query names nothing outside it. A LEFT JOIN's ON names
 only the item the join adds, items before it in the FROM, and items of the
 cores around its own. Every column a core's clauses name belongs to an item of
-the core or of a core around it. `whole_narrowing_sound` and `evalQuery_fuel`
-assume these facts, and the differential checks that every statement it
-generates has them.
+the core or of a core around it. The statement is a tree: each core lists each
+item once, one place reads each query, no core reads the statement's own
+query, and each core is an arm of one query, since the reader gives each FROM
+item, CTE reference and subquery a query of its own. `whole_narrowing_sound`
+and `evalQuery_fuel` assume these facts, and the differential checks that
+every statement it generates has them.
 
 ## Each rule's theorem
 
