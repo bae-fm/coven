@@ -33,6 +33,9 @@ pub(crate) struct WorkspacePolicy {
     root: PathBuf,
     /// The folder of the crate's package, the same way.
     package: PathBuf,
+    /// The folder the compile runs in, which a relative source file's name
+    /// starts from.
+    working_folder: PathBuf,
 }
 
 /// What the driver found when it looked for the workspace's policy: none
@@ -57,10 +60,13 @@ pub(crate) fn read() -> PolicyRead {
     let canonical = |folder: &Path| {
         folder.canonicalize().map_err(|error| format!("{}: {error}", folder.display()))
     };
+    let working_folder =
+        std::env::current_dir().map_err(|error| format!("the current folder: {error}"))?;
     Ok(Some(WorkspacePolicy {
         policy,
         root: canonical(root)?,
         package: canonical(&package)?,
+        working_folder,
         file,
     }))
 }
@@ -112,14 +118,7 @@ impl WorkspacePolicy {
     fn source_file(&self, tcx: TyCtxt<'_>, span: Span) -> Option<PathBuf> {
         let name = tcx.sess.source_map().span_to_filename(span.source_callsite());
         let local = name.into_local_path()?;
-        let absolute = if local.is_absolute() {
-            local
-        } else {
-            let folder = std::env::current_dir().unwrap_or_else(|error| {
-                tcx.dcx().fatal(format!("typed lints: the current folder: {error}"))
-            });
-            folder.join(local)
-        };
+        let absolute = if local.is_absolute() { local } else { self.working_folder.join(local) };
         let canonical = absolute.canonicalize().unwrap_or_else(|error| {
             tcx.dcx().fatal(format!("typed lints: {}: {error}", absolute.display()))
         });
