@@ -769,19 +769,6 @@ theorem orderFree_rows_perm {s : Statement} {db : Db} (hdb : db.Keyed) {k : Nat}
 /-! Every column of a table that a picked query, or a core whose rows follow
 the order SQLite reads them in, reads counts as read. -/
 
-theorem find?_pairs {f : Nat → List Nat} {l : List Nat} {t : Nat} (ht : t ∈ l) :
-    (l.map fun t => (t, f t)).find? (·.1 == t) = some (t, f t) := by
-  induction l with
-  | nil => cases ht
-  | cons u us ih =>
-    by_cases hu : u = t
-    · subst hu; simp
-    · have ht' : t ∈ us := by
-        rcases List.mem_cons.mp ht with h | h
-        · exact absurd h.symm hu
-        · exact h
-      simp [hu, ih ht']
-
 /-- Rule 7's theorem for a query whose rows SQLite picks, or a core whose rows
 follow the order SQLite reads its bindings in: a change to any column of a
 table that such a query or core reads reruns the statement, when the row
@@ -791,15 +778,13 @@ theorem picked_column_reruns {s : Statement} {scopeOf : Nat → Option RScope}
     (hread : ch.table ∈ s.itemNumbers.filterMap s.table?) (hpicked : ch.table ∈ s.pickedTables)
     {old new : Row} (hold : ch.old = some old) (hnew : ch.new = some new) {c : Nat}
     (hc : c < s.width ch.table) (hchanged : old.cell c ≠ new.cell c)
-    (hpasses : let passes (r : Row) := ((scopeOf ch.table).getD .all).passes (lookupRows s db') r
-      ch.old.any passes || ch.new.any passes) :
+    (hpasses : ch.old.any (scopePasses s scopeOf s.reads db' ch.table) ||
+      ch.new.any (scopePasses s scopeOf s.reads db' ch.table)) :
     reruns s scopeOf s.reads changes db' = true := by
   unfold reruns
   simp only [List.any_eq_true]
   refine ⟨ch, hch, ?_⟩
-  unfold Statement.reads
-  simp only
-  rw [find?_pairs (List.mem_eraseDups.mpr hread)]
+  rw [s.find?_reads hread]
   simp only [Bool.and_eq_true]
   refine ⟨?_, hpasses⟩
   rw [hold, hnew]

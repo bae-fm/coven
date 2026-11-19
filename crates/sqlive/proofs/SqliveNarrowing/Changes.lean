@@ -6,9 +6,13 @@ deletes a row, or changes a column the statement reads, and the row before
 or after passes the table's scope. The columns a statement reads are those
 its clauses name, and every column of a table it reads in a query whose rows
 SQLite picks or a compound or core whose rows follow the order SQLite reads
-its rows in (`unreported_columns.rs`). A join's lookups read the database the
-write leaves, as sqlive judges a write in the write's own transaction before
-it commits. -/
+its rows in (`unreported_columns.rs`). sqlive keeps of a changed row only
+the values a scope tests (`pre_update_changes.rs`), so the model tests the
+row masked to the columns the statement reads. A join's lookups read the
+database the write leaves, as sqlive judges a write in the write's own
+transaction before it commits; the model looks up in that database masked
+the same way, which gives the statement's rows unchanged
+(`Mask.result_mask`). -/
 namespace SqliveNarrowing
 
 /-- One row operation of a write: the row before and after, `none` where
@@ -197,6 +201,61 @@ def Statement.reads (s : Statement) : List (Nat × List Nat) :=
     let picked := if s.pickedTables.contains t then List.range (s.width t) else []
     (t, (named ++ picked).eraseDups)
 
+/-- Each element of `l` paired with its value under `f`: the pair of `t`
+is the first whose element is `t`. -/
+theorem find?_pairs {f : Nat → List Nat} {l : List Nat} {t : Nat} (ht : t ∈ l) :
+    (l.map fun t => (t, f t)).find? (·.1 == t) = some (t, f t) := by
+  induction l with
+  | nil => cases ht
+  | cons u us ih =>
+    by_cases hu : u = t
+    · subst hu; simp
+    · have ht' : t ∈ us := by
+        rcases List.mem_cons.mp ht with h | h
+        · exact absurd h.symm hu
+        · exact h
+      simp [hu, ih ht']
+
+/-- What `Statement.reads` names of a table an item reads: the columns the
+clauses name of it, and every column when a picked query or a core whose
+rows follow the order SQLite reads them in reads it. -/
+theorem Statement.find?_reads (s : Statement) {t : Nat}
+    (h : t ∈ s.itemNumbers.filterMap s.table?) :
+    s.reads.find? (·.1 == t) = some (t,
+      ((s.cores.flatMap Core.refs).filterMap (fun (i, c) =>
+          if s.table? i = some t then some c else none) ++
+        if s.pickedTables.contains t then List.range (s.width t) else []).eraseDups) := by
+  unfold Statement.reads
+  exact find?_pairs (List.mem_eraseDups.mpr h)
+
+/-- The values of the columns `columns` of row `r`, and NULL in every other
+column up to the greatest of them: what sqlive keeps of a row a write
+changes. Every row masks to a row of one width, so two rows mask to the same
+row exactly when they agree in each of `columns`. -/
+def maskRow (columns : List Nat) (r : Row) : Row :=
+  (List.range (columns.foldr max 0 + 1)).map fun c =>
+    if columns.contains c then r.cell c else none
+
+/-- The columns `reads` names of table `t`, or none. -/
+def readColumns (reads : List (Nat × List Nat)) (t : Nat) : List Nat :=
+  ((reads.find? (·.1 == t)).map (·.2)).getD []
+
+/-- What sqlive keeps of a database for a statement that reads the columns
+`reads` names: each row of a table the statement reads, in its slot and
+masked to the columns it reads of the table, and no row of any other
+table. -/
+def Db.mask (reads : List (Nat × List Nat)) (db : Db) : Db := fun t =>
+  match reads.find? (·.1 == t) with
+  | some (_, columns) => (db t).map (·.map (maskRow columns))
+  | none => []
+
+/-- Whether row `r` of table `t` passes the table's scope as sqlive tests it:
+on the values of the columns the statement reads, with lookups in what sqlive
+keeps of the database `db'` the write leaves. -/
+def scopePasses (s : Statement) (scopeOf : Nat → Option RScope)
+    (reads : List (Nat × List Nat)) (db' : Db) (t : Nat) (r : Row) : Bool :=
+  ((scopeOf t).getD .all).passes (lookupRows s (db'.mask reads)) (maskRow (readColumns reads t) r)
+
 /-- Whether a write's `changes`, leaving `db'`, rerun the statement, which
 reads the columns `reads` names of each table, given each table's scope. -/
 def reruns (s : Statement) (scopeOf : Nat → Option RScope)
@@ -205,8 +264,7 @@ def reruns (s : Statement) (scopeOf : Nat → Option RScope)
     match reads.find? (·.1 == ch.table) with
     | none => false
     | some (_, columns) =>
-      let scope := (scopeOf ch.table).getD .all
-      let passes (r : Row) := scope.passes (lookupRows s db') r
+      let passes := scopePasses s scopeOf reads db' ch.table
       changedIn columns ch.old ch.new && (ch.old.any passes || ch.new.any passes)
 
 end SqliveNarrowing

@@ -159,16 +159,17 @@ theorem joinItems_restrict (s : Statement) (c : Core) {R : Bind → Bind}
     exact flatMap_restrict (fun x => joinStep_restrict hset hon' x)
       (fun x => joinStep_restrict hset hon' x) h
 
-theorem groupsOf_map {key : Bind → List Value} {R : Bind → Bind} (hkey : ∀ x, key (R x) = key x)
-    (bs : List Bind) : groupsOf key (bs.map R) = (groupsOf key bs).map (·.map R) := by
+theorem groupsOf_map {key key' : Bind → List Value} {R : Bind → Bind}
+    (hkey : ∀ x, key' (R x) = key x)
+    (bs : List Bind) : groupsOf key' (bs.map R) = (groupsOf key bs).map (·.map R) := by
   unfold groupsOf
-  have hk : (bs.map R).map key = bs.map key := by
+  have hk : (bs.map R).map key' = bs.map key := by
     simp only [List.map_map]; exact List.map_congr_left fun x _ => hkey x
   rw [hk, List.map_map]
   apply List.map_congr_left
   intro k _
   simp only [Function.comp]
-  have key2 : ∀ l : List Bind, (l.map R).filter (fun b => key b == k) =
+  have key2 : ∀ l : List Bind, (l.map R).filter (fun b => key' b == k) =
       (l.filter fun b => key b == k).map R := by
     intro l
     induction l with
@@ -181,15 +182,18 @@ theorem groupsOf_map {key : Bind → List Value} {R : Bind → Bind} (hkey : ∀
 /-- The result columns' and GROUP BY's expressions of a core. -/
 def outExprs (c : Core) : List Expr := c.output.flatMap OutCol.exprs ++ c.groupBy
 
-theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
-    (hinv : ∀ e ∈ outExprs c, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x))
-    (L : List Bind) : c.rows subs (L.map R) = c.rows subs L := by
-  have hout : ∀ o ∈ c.output, ∀ e ∈ o.exprs, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
+/-- A core's rows from bindings mapped by `R`, with `subs'` for their
+subqueries, are its rows from the bindings, when `R` keeps the value of each
+expression of its result columns and GROUP BY. -/
+theorem rows_restrict {c : Core} {subs subs' : Bind → Subs} {R : Bind → Bind}
+    (hinv : ∀ e ∈ outExprs c, ∀ x, e.eval (R x) (subs' (R x)) = e.eval x (subs x))
+    (L : List Bind) : c.rows subs' (L.map R) = c.rows subs L := by
+  have hout : ∀ o ∈ c.output, ∀ e ∈ o.exprs, ∀ x, e.eval (R x) (subs' (R x)) = e.eval x (subs x) :=
     fun o ho e he => hinv e (by
       simp only [outExprs, List.mem_append, List.mem_flatMap]; exact Or.inl ⟨o, ho, he⟩)
-  have hgroup : ∀ e ∈ c.groupBy, ∀ x, e.eval (R x) (subs (R x)) = e.eval x (subs x) :=
+  have hgroup : ∀ e ∈ c.groupBy, ∀ x, e.eval (R x) (subs' (R x)) = e.eval x (subs x) :=
     fun e he => hinv e (by simp [outExprs, he])
-  have hg : ∀ g : List Bind, c.output.map (OutCol.aggregate subs (g.map R)) =
+  have hg : ∀ g : List Bind, c.output.map (OutCol.aggregate subs' (g.map R)) =
       c.output.map (OutCol.aggregate subs g) := by
     intro g
     apply List.map_congr_left
@@ -206,12 +210,12 @@ theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
       congr 1
       exact List.map_congr_left fun b _ => hout _ ho e (by simp [OutCol.exprs]) b
     | concat e orderBy =>
-      have hkey : ∀ x, (orderBy.map fun (e, _) => e.eval (R x) (subs (R x))) =
+      have hkey : ∀ x, (orderBy.map fun (e, _) => e.eval (R x) (subs' (R x))) =
           orderBy.map fun (e, _) => e.eval x (subs x) := fun x =>
         List.map_congr_left fun (e', d) hed =>
           hout _ ho e' (by simp only [OutCol.exprs, List.mem_cons, List.mem_map]
                            exact Or.inr ⟨(e', d), hed, rfl⟩) x
-      have hsort : sortBindings subs orderBy (g.map R) = (sortBindings subs orderBy g).map R := by
+      have hsort : sortBindings subs' orderBy (g.map R) = (sortBindings subs orderBy g).map R := by
         unfold sortBindings
         split
         · rfl
@@ -237,9 +241,9 @@ theorem rows_restrict {c : Core} {subs : Bind → Subs} {R : Bind → Bind}
     | expr e => exact hout _ ho e (by simp [OutCol.exprs]) b
     | rowNumber partition orderBy =>
       have hkey : ∀ exprs : List Expr, (∀ e ∈ exprs, e ∈ partition ++ orderBy.map (·.1)) →
-          ∀ x, windowKey subs exprs (R x) = windowKey subs exprs x := fun exprs hin x =>
+          ∀ x, windowKey subs' exprs (R x) = windowKey subs exprs x := fun exprs hin x =>
         List.map_congr_left fun e he => hout _ ho e (by simpa [OutCol.exprs] using hin e he) x
-      have hpeer : ∀ x y o, windowPeer subs partition orderBy (R x) (R y) o =
+      have hpeer : ∀ x y o, windowPeer subs' partition orderBy (R x) (R y) o =
           windowPeer subs partition orderBy x y o := by
         intro x y o
         simp only [windowPeer, hkey partition (fun e he => List.mem_append_left _ he),

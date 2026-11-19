@@ -23,7 +23,9 @@ theorem whole_sound {s : Statement} {reads : List (Nat × List Nat)} {changes : 
   simp only [List.any_eq_true]
   refine ⟨ch, hch, ?_⟩
   rw [hread]
-  simp only [hchanged, Option.getD_none, Bool.true_and]
-  cases hold : ch.old <;> cases hnew : ch.new <;> simp_all [changedIn, RScope.passes]
+  have hpass : ∀ r, scopePasses s (fun _ => none) reads db' ch.table r = true := fun r => by
+    simp [scopePasses, RScope.passes]
+  simp only [hchanged, Bool.true_and]
+  cases hold : ch.old <;> cases hnew : ch.new <;> simp_all [changedIn]
 
 end SqliveNarrowing.Whole

@@ -51,10 +51,13 @@ write as sqlive does. The write's row changes are one per row that each of its
 statements changed, as sqlive's pre-update hook records them. A change reruns
 the query when it inserts or deletes a row of a table the statement reads, or
 changes a column the statement reads, and the row before or after passes the
-table's scope. A join's lookups read the database the write leaves. The model
-takes the columns a statement reads to be the columns its clauses name, and
-every column of each table that a query whose rows SQLite picks reads; the
-differential checks that sqlive reads the same ones from SQLite.
+table's scope. sqlive keeps of a changed row only the values its scopes test,
+so the model tests the row masked to the columns the statement reads: their
+values, and NULL in every other column. A join's lookups read the database the
+write leaves, which the model masks the same way. The model takes the columns
+a statement reads to be the columns its clauses name, and every column of
+each table that a query whose rows SQLite picks reads; the differential checks
+that sqlive reads the same ones from SQLite.
 
 [WellFormed.lean](../../crates/sqlive/proofs/SqliveNarrowing/WellFormed.lean)
 states what the runner's JSON reader guarantees of every statement it reads
@@ -228,14 +231,29 @@ promise of whichever rule reads it.
 - **The whole read.** `whole_sound` proves that with no scope, every change of
   a column the statement reads runs the query again.
 
+## Putting the rules together
+
+The theorem the rules build toward, `narrowing_sound`, states that a write the
+judge lets pass leaves a well-formed statement's rows unchanged. The proof
+goes in steps, and each step that is proved has its own theorem.
+
+The first step shows that a statement's rows depend only on the columns it
+reads. [Mask.lean](../../crates/sqlive/proofs/SqliveNarrowing/Mask.lean)
+masks a database as sqlive keeps it: each row of a table the statement reads,
+masked to the columns the statement reads, and no row of any other table.
+`result_mask` proves that a statement whose cores list only items it has
+returns the same rows from the masked database as from the database. So the
+judge's lookups in the masked database read the rows the statement reads.
+
 ## What the proofs don't cover
 
-The theorems prove each rule's step. No theorem yet proves that the planner
-puts the steps together soundly: that the order in which it places items, the
-ON conditions it holds back, the terms it carries across equalities, the terms
-it passes into derived items and the lookups of each join's partner give scopes outside of which a write leaves the
-result unchanged. The differential checks that composition against SQLite on
-every statement it generates.
+The theorems prove each rule's step and the steps of putting them together
+that the section above names. No theorem yet proves the rest: that the order
+in which the planner places items, the ON conditions it holds back, the terms
+it carries across equalities, the terms it passes into derived items and the
+lookups of each join's partner give scopes outside of which a write leaves
+the result unchanged. The differential checks that composition against SQLite
+on every statement it generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
