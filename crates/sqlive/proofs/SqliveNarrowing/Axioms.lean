@@ -67,5 +67,6 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_pushed
 #print axioms SqliveNarrowing.plan_order
 #print axioms SqliveNarrowing.plan_nestedOK
+#print axioms SqliveNarrowing.plan_placedBefore
 #print axioms SqliveNarrowing.plan_restriction
 #print axioms SqliveNarrowing.Planned.bound_passes

@@ -13,7 +13,8 @@ the arm's binding pass the pushed edge. Each step keeps the memberships and
 pushed edges it found (`PState.Keeps`). The planner places each item once,
 and every item of every core (`plan_order`), which `Planned.scopes_eq`
 takes. An edge to a subquery's source has its partner in an arm of some
-core's subquery (`plan_nestedOK`). -/
+core's subquery (`plan_nestedOK`), and each item's memberships and kept ORs
+take values from items placed before it (`plan_placedBefore`). -/
 namespace SqliveNarrowing
 
 /-- Where a pushed edge comes from, in the state `st`: its member is an
@@ -437,17 +438,27 @@ theorem getD_find_mem {l : List Nat} {p1 p2 p3 : Nat → Bool} {first : Nat} {S 
       | some x => simpa [h1, h2, h3] using hl x (List.mem_of_find?_eq_some h3)
       | none => simpa [h1, h2, h3] using hfirst
 
+/-- The state after `ordered` places `next` with the items `order` placed
+before it. -/
+def ordered.placed (s : Statement) (st : PState) (order : List Nat) (next : Nat) : PState :=
+  let taken := st.edges.filter fun e => e.member == next && order.contains e.partner
+  let either := (st.items next).ors.filter fun sides =>
+    sides.all fun side => side.edges.all fun e => order.contains e.partner
+  let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
+  PushDown.pushDown s s.fuel s.fuel st next none taken
+
 /-- A step of placing items finds none left, or places one of those left. -/
-theorem ordered_go_step (s : Statement) (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat) :
+theorem ordered_go_place (s : Statement) (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat) :
     (all.filter (fun i => !order.contains i) = [] ∧ ordered.go s (fuel + 1) all st order waited = (st, order)) ∨
-    ∃ next st' waited', next ∈ all.filter (fun i => !order.contains i) ∧
-      ordered.go s (fuel + 1) all st order waited = ordered.go s fuel all st' (order ++ [next]) waited' := by
+    ∃ next waited', next ∈ all.filter (fun i => !order.contains i) ∧
+      ordered.go s (fuel + 1) all st order waited =
+        ordered.go s fuel all (ordered.placed s st order next) (order ++ [next]) waited' := by
   simp only [ordered.go]
   generalize hR : List.filter (fun i => !order.contains i) all = R
   cases R with
   | nil => exact Or.inl ⟨rfl, rfl⟩
   | cons r tail =>
-    refine Or.inr ⟨_, _, _, ?_, rfl⟩
+    refine Or.inr ⟨_, _, ?_, rfl⟩
     split
     · rename_i i _ hfind
       exact List.mem_of_find?_eq_some hfind
@@ -487,7 +498,7 @@ theorem ordered_go_order (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st
     have := List.filter_eq_nil_iff.mp hnil i hi
     simpa [ordered.go] using this
   | fuel + 1, all, st, order, waited, hnd => by
-    rcases ordered_go_step s fuel all st order waited with ⟨hnil, heq⟩ | ⟨next, st', waited', hnext, heq⟩
+    rcases ordered_go_place s fuel all st order waited with ⟨hnil, heq⟩ | ⟨next, waited', hnext, heq⟩
     · rw [heq]
       refine ⟨hnd, fun _ i hi => ?_⟩
       have := List.filter_eq_nil_iff.mp hnil i hi
@@ -501,7 +512,7 @@ theorem ordered_go_order (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st
           simp only [List.mem_singleton] at hb
           subst hb
           exact fun e => hnin (e ▸ ha)⟩
-      obtain ⟨h1, h2⟩ := ordered_go_order s fuel all st' (order ++ [next]) waited' hnd'
+      obtain ⟨h1, h2⟩ := ordered_go_order s fuel all _ (order ++ [next]) waited' hnd'
       exact ⟨h1, fun hlen => h2 (by have := remaining_shrinks hnext; omega)⟩
 
 /-- The planner places each item once, and every item of every core. -/
@@ -736,5 +747,188 @@ theorem plan_nestedOK (s : Statement) : (plan s).state.NestedOK s := by
   split at hn
   · cases hn; intro e he; cases he
   · cases hn
+
+
+/-! What each item takes values from. The planner sets an item's
+memberships and the ORs it keeps only as it places the item, from edges and
+sides whose partners it placed before (`plan_placedBefore`); no other step
+changes them. -/
+
+/-- `st'` holds the memberships and kept ORs `st` holds. -/
+def PState.SameLinks (st st' : PState) : Prop :=
+  ∀ i, (st'.items i).memberships = (st.items i).memberships ∧ (st'.items i).either = (st.items i).either
+
+theorem PState.SameLinks.refl (st : PState) : st.SameLinks st := fun _ => ⟨rfl, rfl⟩
+
+theorem PState.SameLinks.trans {a b c : PState} (hab : a.SameLinks b) (hbc : b.SameLinks c) :
+    a.SameLinks c := fun i => ⟨(hbc i).1.trans (hab i).1, (hbc i).2.trans (hab i).2⟩
+
+theorem PState.SameLinks.foldl {α : Type} {g : PState → α → PState}
+    (hg : ∀ (st : PState) (x : α), st.SameLinks (g st x)) :
+    ∀ (l : List α) (st : PState), st.SameLinks (l.foldl g st)
+  | [], st => PState.SameLinks.refl st
+  | x :: l, st => (hg st x).trans (PState.SameLinks.foldl hg l (g st x))
+
+theorem PState.sameLinks_update {st : PState} {i : Nat} {f : PItem → PItem}
+    (hm : (f (st.items i)).memberships = (st.items i).memberships)
+    (he : (f (st.items i)).either = (st.items i).either) : st.SameLinks (st.update i f) := by
+  intro j
+  simp only [PState.update]
+  split
+  · rename_i hji; subst hji; exact ⟨hm, he⟩
+  · exact ⟨rfl, rfl⟩
+
+theorem PState.sameLinks_addTerm (st : PState) (i : Nat) (t : STerm) : st.SameLinks (st.addTerm i t) :=
+  PState.sameLinks_update rfl rfl
+
+theorem PState.sameLinks_add (st : PState) (n : Narrowing) : st.SameLinks (st.add n).1 := by
+  simp only [PState.add]
+  exact (PState.SameLinks.foldl (fun st (x : Nat × STerm) => PState.sameLinks_addTerm st x.1 x.2) _ _).trans
+    ((PState.SameLinks.foldl (g := fun st (d : Disjunction) =>
+      st.update d.item fun p => { p with ors := p.ors ++ [d.sides] })
+      (fun st d => PState.sameLinks_update rfl rfl) _ _).trans (fun _ => ⟨rfl, rfl⟩))
+
+theorem PState.sameLinks_narrow : ∀ (fuel : Nat) (st : PState) (n : Narrowing),
+    st.SameLinks (PState.narrow fuel st n)
+  | 0, st, _ => PState.SameLinks.refl st
+  | fuel + 1, st, n => by
+    simp only [PState.narrow]
+    refine (PState.sameLinks_add st _).trans (PState.SameLinks.foldl (fun st' i => ?_) _ _)
+    split
+    · exact (PState.sameLinks_update rfl rfl).trans (PState.sameLinks_narrow fuel _ _)
+    · exact PState.SameLinks.refl _
+
+theorem PState.sameLinks_joinInner (fuel : Nat) (st : PState) (i : Nat) :
+    st.SameLinks (st.joinInner fuel i) := by
+  unfold PState.joinInner
+  split
+  · exact (PState.sameLinks_update rfl rfl).trans (PState.sameLinks_narrow fuel _ _)
+  · exact PState.SameLinks.refl _
+
+theorem PState.sameLinks_narrowOn (fuel : Nat) (st : PState) (i : Nat) (n : Narrowing) :
+    st.SameLinks (st.narrowOn fuel i n) := by
+  unfold PState.narrowOn
+  generalize n.split i = x
+  obtain ⟨own, others⟩ := x
+  simp only
+  refine (PState.sameLinks_add st own).trans ?_
+  split
+  · exact PState.sameLinks_update rfl rfl
+  · exact PState.sameLinks_narrow fuel _ _
+
+theorem Transfer.sameLinks_carry (s : Statement) (st : PState) (k : Nat) :
+    st.SameLinks (Transfer.carry s st k) :=
+  PState.SameLinks.foldl (fun st (x : Nat × STerm) => by
+    unfold Transfer.addCarried
+    exact PState.sameLinks_update rfl rfl) _ st
+
+theorem PushDown.sameLinks_pushDown (s : Statement) (narrowFuel : Nat) :
+    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm) (edges : List Edge),
+      st.SameLinks (PushDown.pushDown s narrowFuel fuel st item term edges)
+  | 0, st, _, _, _ => PState.SameLinks.refl st
+  | fuel + 1, st, item, term, edges => by
+    simp only [PushDown.pushDown]
+    split
+    · exact PState.SameLinks.refl st
+    · split
+      · exact PState.SameLinks.refl st
+      · refine PState.SameLinks.foldl (fun st0 arm => ?_) _ st
+        refine PState.SameLinks.foldl (fun st1 target => ?_) _ st0
+        refine PState.SameLinks.trans ?_ (PushDown.sameLinks_pushDown s narrowFuel fuel _ _ _ _)
+        have h2 : ∀ (renamed : Option STerm), st1.SameLinks (match renamed with
+            | some r => st1.addTerm target r
+            | none => st1) := by
+          intro renamed
+          cases renamed
+          · exact PState.SameLinks.refl st1
+          · exact PState.sameLinks_addTerm st1 target _
+        have hrec : ∀ (st2 : PState) (passed : List Edge),
+            st2.SameLinks { st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :=
+          fun _ _ _ => ⟨rfl, rfl⟩
+        split
+        · exact (h2 _).trans ((hrec _ _).trans (PState.sameLinks_joinInner _ _ _))
+        · exact (h2 _).trans (hrec _ _)
+
+theorem sameLinks_readCore (s : Statement) (st : PState) (k : Nat) :
+    st.SameLinks (readCore s st k) := by
+  unfold readCore
+  simp only
+  refine PState.SameLinks.trans ?_ (PState.SameLinks.foldl
+    (fun st i => PushDown.sameLinks_pushDown s _ _ st i _ _) _ _)
+  refine PState.SameLinks.trans ?_ (Transfer.sameLinks_carry s _ k)
+  refine PState.SameLinks.foldl (fun st x => ?_) _ st
+  obtain ⟨n, p⟩ := x
+  cases p
+  · exact PState.sameLinks_narrow _ _ _
+  · exact PState.sameLinks_narrowOn _ _ _ _
+
+/-- Whether each item placed in `order` takes its memberships' values and
+its kept ORs' sides' values from items placed before it, and each item not
+placed has no membership and keeps no OR. -/
+def PState.PlacedLinks (st : PState) (order : List Nat) : Prop :=
+  ∀ i, (i ∉ order → (st.items i).memberships = [] ∧ (st.items i).either = []) ∧
+    (∀ m ∈ (st.items i).memberships, ∃ pre post, order = pre ++ i :: post ∧ m.partner ∈ pre) ∧
+    ∀ sides ∈ (st.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
+      ∃ pre post, order = pre ++ i :: post ∧ e.partner ∈ pre
+
+theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Nat}
+    (h : st.PlacedLinks order) {next : Nat} (hnext : next ∉ order) :
+    (ordered.placed s st order next).PlacedLinks (order ++ [next]) := by
+  unfold ordered.placed
+  simp only
+  generalize hst' : st.update next _ = st'
+  have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
+    (st.edges.filter fun e => e.member == next && order.contains e.partner)
+  generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
+  have hext : ∀ {i x : Nat}, (∃ pre post, order = pre ++ i :: post ∧ x ∈ pre) →
+      ∃ pre post, order ++ [next] = pre ++ i :: post ∧ x ∈ pre := by
+    rintro i x ⟨pre, post, heq, hx⟩
+    exact ⟨pre, post ++ [next], by simp [heq], hx⟩
+  intro i
+  rw [(hsame i).1, (hsame i).2]
+  subst hst'
+  simp only [PState.update]
+  split
+  · rename_i hi
+    subst hi
+    obtain ⟨hm0, he0⟩ := (h i).1 hnext
+    refine ⟨fun hn => absurd (List.mem_append_right _ (List.mem_singleton_self i)) hn, ?_, ?_⟩
+    · intro m hm
+      simp only [hm0, List.nil_append, List.mem_filter, Bool.and_eq_true, beq_iff_eq,
+        List.contains_iff_mem] at hm
+      exact ⟨order, [], rfl, hm.2.2⟩
+    · intro sides hsides side hside e he
+      simp only [List.mem_filter, List.all_eq_true, List.contains_iff_mem] at hsides
+      exact ⟨order, [], rfl, hsides.2 side hside e he⟩
+  · rename_i hi
+    refine ⟨fun hn => (h i).1 (fun ho => hn (List.mem_append_left _ ho)),
+      fun m hm => hext ((h i).2.1 m hm), fun sides hs side hside e he => hext ((h i).2.2 sides hs side hside e he)⟩
+
+theorem ordered_go_placedLinks (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st : PState)
+    (order waited : List Nat), st.PlacedLinks order →
+    (ordered.go s fuel all st order waited).1.PlacedLinks (ordered.go s fuel all st order waited).2
+  | 0, _, _, _, _, h => h
+  | fuel + 1, all, st, order, waited, h => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', hnext, heq⟩
+    · rw [heq]; exact h
+    · rw [heq]
+      have hnin : next ∉ order := by
+        have := (List.mem_filter.mp hnext).2
+        simpa using this
+      exact ordered_go_placedLinks s fuel all _ _ _ (h.placed hnin)
+
+/-- Each item's memberships, and the sides of each OR it keeps, take values
+from items the planner placed before it. -/
+theorem plan_placedBefore (s : Statement) (i : Nat) :
+    (∀ m ∈ ((plan s).state.items i).memberships,
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ m.partner ∈ pre) ∧
+    ∀ sides ∈ ((plan s).state.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ e.partner ∈ pre := by
+  unfold plan ordered
+  simp only
+  refine (ordered_go_placedLinks s _ _ _ [] [] (fun j => ?_) i).2
+  have hsame := PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder (PState.initial s) j
+  rw [hsame.1, hsame.2]
+  simp [PState.initial]
 
 end SqliveNarrowing

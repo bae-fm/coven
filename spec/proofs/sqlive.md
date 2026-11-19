@@ -394,7 +394,11 @@ from the edges conditions give, and no step of the planner reads that list.
 a subquery's source has its partner in an arm of some core's subquery, as
 each condition's reader promises, because the planner changes only an
 edge's member when it passes the edge into a derived item's arm, and that
-each item's memberships are edges from it.
+each item's memberships are edges from it. `plan_placedBefore` proves that
+each item's memberships, and the sides of each OR it keeps, take values from
+items the planner placed before it: the planner sets them only as it places
+the item, from the edges and sides whose partners it placed before, and no
+other step changes them.
 
 [Tests.lean](../../crates/sqlive/proofs/SqliveNarrowing/Tests.lean) states the
 tests the restriction takes from the planner's scopes. An item's row passes
@@ -411,8 +415,9 @@ since one place reads each query.
 `Planned.bound_passes` proves the LIMIT bound's part of the promise: in a
 binding of the statement's own core whose ORDER BY values sort at or before
 the last row's, the bound of each item the ORDER BY sorts passes the item's
-row, when the binding holds a row of each such item that passes its scope
-and each membership between two such items holds of the binding. The ORDER
+row, when the binding holds a row of each such item and each membership of
+the item to another such item holds of the binding, with the partner's row
+passing the partner's scope. The ORDER
 BY sorts items of the statement's own core, which sits in no core, so no
 such membership takes a subquery's value (`plan_nestedOK`), and
 `joined_passes` gives each lookup the bound makes. The runs of the ORDER
