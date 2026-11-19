@@ -14,10 +14,10 @@
 //! argument or arm makes the comparison narrow nothing. The model states the
 //! rule as `OneOf.readCondition` in `crates/sqlive/proofs`.
 
+use crate::scope_edge::Member;
 use crate::scope_or::{Disjunction, Side};
-use crate::scope_plan::{is_name, Edge, Narrowing, PartnerValue, Planner, Subqueries};
-use crate::scope_term::{operand, Affinity, ScopeTerm};
-use crate::select_syntax::{parts, Part};
+use crate::scope_plan::{Narrowing, PartnerValue, Planner, Subqueries};
+use crate::scope_term::{operand, ScopeTerm};
 use crate::sql::unparenthesized;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, OneSelect, ResultColumn, Select, UnaryOperator};
@@ -67,85 +67,22 @@ fn constant(expr: &Expr<'_>) -> bool {
 }
 
 impl Planner<'_> {
-    /// The source of `core` and its column `member_expr` names, with the
-    /// column's affinity, when sqlive narrows by it.
-    fn member_column(
-        &self,
-        core: usize,
-        member_expr: &Expr<'_>,
-    ) -> Option<(usize, String, Affinity)> {
-        if !is_name(member_expr) {
-            return None;
-        }
-        let (member, column) = self.resolve(core, member_expr)?;
-        let item = &self.items[member];
-        if item.core != core || (item.source.table.is_none() && item.derived.is_none()) {
-            return None;
-        }
-        let affinity = item.columns.affinity(&column)?;
-        Some((member, column, affinity))
-    }
-
     /// The side a constant gives: the member column equal to it.
     fn constant_side(
         connection: &Connection,
-        column: &str,
-        affinity: Affinity,
+        member: &Member,
         expr: &Expr<'_>,
     ) -> rusqlite::Result<Option<Side>> {
-        Ok(operand(connection, expr, affinity)?.map(|operand| Side {
+        Ok(operand(connection, expr, member.affinity)?.map(|operand| Side {
             terms: vec![ScopeTerm::Compare {
-                column: column.to_owned(),
-                affinity,
+                column: member.column.clone(),
+                affinity: member.affinity,
                 operand,
                 ordering: Ordering::Equal,
                 inclusive: false,
             }],
             edges: Vec::new(),
         }))
-    }
-
-    /// The edge from `member`'s `column` to the one other source `value`
-    /// names, compared as an expression: `value` holds no subquery, no
-    /// COLLATE, no clock, no function the connection doesn't flag
-    /// deterministic and none that picks an argument, and sqlive reads the
-    /// source alone.
-    fn value_edge(
-        &self,
-        core: usize,
-        (member, column, affinity): (usize, &str, Affinity),
-        value: &Expr<'_>,
-    ) -> Option<Edge> {
-        let mut found = Vec::new();
-        parts(value, &mut found);
-        let mut partner = None;
-        for part in &found {
-            match part {
-                Part::Name(name) => {
-                    let (item, _) = self.resolve(core, name)?;
-                    if item == member || partner.is_some_and(|partner| partner != item) {
-                        return None;
-                    }
-                    partner = Some(item);
-                }
-                Part::Function(name, ..) if !picks_an_argument(name) => {}
-                _ => return None,
-            }
-        }
-        let partner = partner?;
-        if !self.functions.repeatable(&found) {
-            return None;
-        }
-        self.items[partner].source.from.as_ref()?;
-        Some(Edge {
-            member,
-            column: column.to_owned(),
-            affinity,
-            partner,
-            value: PartnerValue::Expression(value.to_string()),
-            nested: false,
-            nulls: false,
-        })
     }
 
     /// The disjunction `member_expr = other` gives, written in `core`, when
@@ -162,7 +99,7 @@ impl Planner<'_> {
         let Some(arguments) = arguments(other) else {
             return Ok(None);
         };
-        let Some((member, column, affinity)) = self.member_column(core, member_expr) else {
+        let Some(member) = self.member_column(core, member_expr) else {
             return Ok(None);
         };
         let mut sides = Vec::new();
@@ -176,10 +113,16 @@ impl Planner<'_> {
                     })
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] }),
                 argument if constant(argument) => {
-                    Self::constant_side(connection, &column, affinity, argument)?
+                    Self::constant_side(connection, &member, argument)?
                 }
+                // SQLite compares the member column with COALESCE's value,
+                // which has no affinity, by the column's affinity.
                 argument => self
-                    .value_edge(core, (member, &column, affinity), argument)
+                    .partner(core, member.item, argument)
+                    .and_then(|partner| {
+                        let value = PartnerValue::Expression(argument.to_string());
+                        self.edge_to(member.clone(), partner, value)
+                    })
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] }),
             };
             let Some(side) = side else {
@@ -188,7 +131,7 @@ impl Planner<'_> {
             sides.push(side);
         }
         Ok(Some(Narrowing {
-            ors: vec![Disjunction { item: member, sides }],
+            ors: vec![Disjunction { item: member.item, sides }],
             ..Narrowing::default()
         }))
     }
@@ -204,7 +147,7 @@ impl Planner<'_> {
         select: &Select<'_>,
         cores: &[usize],
     ) -> rusqlite::Result<Narrowing> {
-        let Some((member, column, affinity)) = self.member_column(core, member_expr) else {
+        let Some(member) = self.member_column(core, member_expr) else {
             return Ok(Narrowing::default());
         };
         let bodies = std::iter::once(&select.body.select)
@@ -218,9 +161,9 @@ impl Planner<'_> {
                 return Ok(Narrowing::default());
             };
             let side = if constant(returned) {
-                Self::constant_side(connection, &column, affinity, returned)?
+                Self::constant_side(connection, &member, returned)?
             } else {
-                self.arm_edge(arm, (member, &column, affinity), returned)
+                self.arm_edge(arm, member.clone(), returned)
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] })
             };
             let Some(side) = side else {
@@ -228,34 +171,9 @@ impl Planner<'_> {
             };
             sides.push(side);
         }
-        Ok(Narrowing { ors: vec![Disjunction { item: member, sides }], ..Narrowing::default() })
-    }
-
-    /// The edge from `member`'s `column` to the source of the arm `arm` whose
-    /// column `returned` names, of the column's affinity, which sqlive reads
-    /// alone.
-    fn arm_edge(
-        &self,
-        arm: usize,
-        (member, column, affinity): (usize, &str, Affinity),
-        returned: &Expr<'_>,
-    ) -> Option<Edge> {
-        if !is_name(returned) {
-            return None;
-        }
-        let (partner, partner_column) = self.resolve(arm, returned)?;
-        let item = &self.items[partner];
-        if item.core != arm || item.source.from.is_none() {
-            return None;
-        }
-        (item.columns.affinity(&partner_column)? == affinity).then(|| Edge {
-            member,
-            column: column.to_owned(),
-            affinity,
-            partner,
-            value: PartnerValue::Column(partner_column),
-            nested: true,
-            nulls: false,
+        Ok(Narrowing {
+            ors: vec![Disjunction { item: member.item, sides }],
+            ..Narrowing::default()
         })
     }
 }

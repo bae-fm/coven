@@ -10,6 +10,7 @@
 //! takes values from `x`, never the reverse, and `x` is placed before `col`'s
 //! source (`Planner::ordered`).
 
+use crate::scope_edge::Member;
 use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
@@ -50,8 +51,7 @@ fn values<'a>(compared: &'a Expr<'a>) -> Option<Vec<&'a Expr<'a>>> {
 impl Planner<'_> {
     /// The edge from the column `member_expr` names, written in `core`, to
     /// the source of the column `select` returns at `position` of `width`,
-    /// when `cores` are the cores `select` was read as. The column and the
-    /// source's column compare by BINARY with no conversion, as a join's do.
+    /// when `cores` are the cores `select` was read as.
     pub(crate) fn subquery_edge(
         &self,
         core: usize,
@@ -76,31 +76,31 @@ impl Planner<'_> {
                 ResultColumn::Star | ResultColumn::TableStar(_) => None,
             })
             .collect::<Option<_>>()?;
-        if returned.len() != width || !is_name(returned[position]) || !is_name(member_expr) {
+        if returned.len() != width {
             return None;
         }
-        let returned = returned[position];
-        let (partner, partner_column) = self.resolve(subquery, returned)?;
-        let items = &self.items;
-        // A source of the subquery's own, which sqlive can read alone.
-        if items[partner].core != subquery || items[partner].source.from.is_none() {
+        let member = self.member_column(core, member_expr)?;
+        self.arm_edge(subquery, member, returned[position])
+    }
+
+    /// The edge from `member` to the source of the core `arm` whose column
+    /// `returned` names, when `returned` is a bare column of one of the
+    /// arm's own sources, which sqlive can read alone, and of the member
+    /// column's affinity: the two columns then compare by BINARY with no
+    /// conversion, as a join's do.
+    pub(crate) fn arm_edge(&self, arm: usize, member: Member, returned: &Expr<'_>) -> Option<Edge> {
+        if !is_name(returned) {
             return None;
         }
-        let partner_affinity = items[partner].columns.affinity(&partner_column)?;
-        let (member, column) = self.resolve(core, member_expr)?;
-        if items[member].core != core
-            || (items[member].source.table.is_none() && items[member].derived.is_none())
-        {
+        let (partner, partner_column) = self.resolve(arm, returned)?;
+        let item = &self.items[partner];
+        if item.core != arm || item.source.from.is_none() {
             return None;
         }
-        let affinity = items[member].columns.affinity(&column)?;
-        if affinity != partner_affinity {
-            return None;
-        }
-        Some(Edge {
-            member,
-            column,
-            affinity,
+        (item.columns.affinity(&partner_column)? == member.affinity).then_some(Edge {
+            member: member.item,
+            column: member.column,
+            affinity: member.affinity,
             partner,
             value: PartnerValue::Column(partner_column),
             nested: true,

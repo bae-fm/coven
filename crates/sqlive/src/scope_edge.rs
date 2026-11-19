@@ -11,16 +11,45 @@ use crate::select_syntax::{parts, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
 
+/// A column of one of a core's sources that sqlive narrows by: a table's or
+/// a derived item's column that sqlive gives an affinity.
+#[derive(Clone)]
+pub(crate) struct Member {
+    pub(crate) item: usize,
+    pub(crate) column: String,
+    pub(crate) affinity: Affinity,
+}
+
 impl Planner<'_> {
+    /// The member column `member_expr`, written in `core`, names: a bare
+    /// column of one of the core's own sources that sqlive narrows by.
+    pub(crate) fn member_column(&self, core: usize, member_expr: &Expr<'_>) -> Option<Member> {
+        if !is_name(member_expr) {
+            return None;
+        }
+        let (item, column) = self.resolve(core, member_expr)?;
+        if self.items[item].core != core {
+            return None;
+        }
+        self.narrowed_column(item, column)
+    }
+
+    /// `item`'s `column` as a member column, when sqlive narrows by it.
+    pub(crate) fn narrowed_column(&self, item: usize, column: String) -> Option<Member> {
+        let found = &self.items[item];
+        if found.source.table.is_none() && found.derived.is_none() {
+            return None;
+        }
+        let affinity = found.columns.affinity(&column)?;
+        Some(Member { item, column, affinity })
+    }
+
     /// The edge `member_expr = other` gives, written in `core` with `other`
-    /// first when `first`, when `member_expr` is a column of one of the
-    /// core's sources and `other` reads columns of one other source only,
-    /// of this core or one it sits in, which sqlive can read alone; and when
-    /// SQLite compares them by BINARY, as sqlive does: the comparison takes
-    /// the collation of a COLLATE in either side, else of the first side
-    /// when that is a column. `other` holds no clock and no function the
-    /// connection doesn't flag deterministic: a lookup evaluates it again, and
-    /// would get another answer than the query did.
+    /// first when `first`, when `member_expr` is a member column and `other`
+    /// is a value of one other source (`partner`); and when SQLite compares
+    /// them by BINARY, as sqlive does: the comparison takes the collation of
+    /// a COLLATE in either side, else of the first side when that is a
+    /// column.
     pub(crate) fn edge(
         &self,
         core: usize,
@@ -28,30 +57,36 @@ impl Planner<'_> {
         other: &Expr<'_>,
         first: bool,
     ) -> Option<Edge> {
-        let edge = self.edge_between(core, member_expr, other, first)?;
-        let mut found = Vec::new();
-        parts(other, &mut found);
-        self.functions.repeatable(&found).then_some(edge)
+        let member = self.member_column(core, member_expr)?;
+        let partner = self.partner(core, member.item, other)?;
+        if is_name(other) {
+            let (_, partner_column) = self.resolve(core, other)?;
+            return self.column_edge(member, (partner, partner_column), first);
+        }
+        if first && is_name(stripped(other)) {
+            let (_, partner_column) = self.resolve(core, stripped(other))?;
+            // A column sqlive gives an affinity compares by BINARY: a
+            // table's, or a subquery's that passes such a column on.
+            self.items[partner].columns.affinity(&partner_column)?;
+        }
+        match unparenthesized(other) {
+            // A cast or COLLATE gives the expression an affinity or a
+            // collation of its own, which SQLite's comparison would use.
+            Expr::Cast { .. } | Expr::Collate(..) => None,
+            _ => self.edge_to(member, partner, PartnerValue::Expression(other.to_string())),
+        }
     }
 
-    fn edge_between(
-        &self,
-        core: usize,
-        member_expr: &Expr<'_>,
-        other: &Expr<'_>,
-        first: bool,
-    ) -> Option<Edge> {
-        if !is_name(member_expr) {
-            return None;
-        }
-        let (member, column) = self.resolve(core, member_expr)?;
-        if self.items[member].core != core {
-            return None;
-        }
+    /// The one source other than `member` whose columns `other`, written in
+    /// `core`, reads, of this core or one it sits in. `other` holds no
+    /// subquery, no COLLATE, no COALESCE or IFNULL, no clock and no function
+    /// the connection doesn't flag deterministic: a lookup evaluates it
+    /// again, and would get another answer than the query did.
+    pub(crate) fn partner(&self, core: usize, member: usize, other: &Expr<'_>) -> Option<usize> {
         let mut found = Vec::new();
         parts(other, &mut found);
         let mut partner = None;
-        for part in found {
+        for part in &found {
             let name = match part {
                 Part::Name(name) => name,
                 // COALESCE can return a value where the partner's columns
@@ -70,24 +105,7 @@ impl Planner<'_> {
             partner = Some(item);
         }
         let partner = partner?;
-        if is_name(other) {
-            let (_, partner_column) = self.resolve(core, other)?;
-            return self.column_edge((member, column), (partner, partner_column), first);
-        }
-        if first && is_name(stripped(other)) {
-            let (_, partner_column) = self.resolve(core, stripped(other))?;
-            // A column sqlive gives an affinity compares by BINARY: a
-            // table's, or a subquery's that passes such a column on.
-            self.items[partner].columns.affinity(&partner_column)?;
-        }
-        match unparenthesized(other) {
-            // A cast or COLLATE gives the expression an affinity or a
-            // collation of its own, which SQLite's comparison would use.
-            Expr::Cast { .. } | Expr::Collate(..) => None,
-            _ => self.edge_to(member, column, partner, |_| {
-                Some(PartnerValue::Expression(other.to_string()))
-            }),
-        }
+        self.functions.repeatable(&found).then_some(partner)
     }
 
     /// The edge `member.column = partner.column` gives, with `partner`'s
@@ -95,7 +113,7 @@ impl Planner<'_> {
     /// collation, which is BINARY when sqlive gives the column an affinity.
     pub(crate) fn column_edge(
         &self,
-        (member, column): (usize, String),
+        member: Member,
         (partner, partner_column): (usize, String),
         first: bool,
     ) -> Option<Edge> {
@@ -103,41 +121,34 @@ impl Planner<'_> {
         if first && partner_affinity.is_none() {
             return None;
         }
-        self.edge_to(member, column, partner, |affinity| match partner_affinity {
-            Some(partner_affinity) => {
-                (partner_affinity == affinity).then_some(PartnerValue::Column(partner_column))
-            }
+        let value = match partner_affinity {
+            Some(partner_affinity) => (partner_affinity == member.affinity)
+                .then_some(PartnerValue::Column(partner_column))?,
             // A column sqlive gives no affinity, as a view's or a
             // function's: a lookup compares it as the statement does, with
             // whatever affinity SQLite gives it.
-            None => Some(PartnerValue::Expression(format!(
+            None => PartnerValue::Expression(format!(
                 "{}.{}",
                 self.items[partner].source.qualifier,
                 crate::sql::identifier(&partner_column)
-            ))),
-        })
+            )),
+        };
+        self.edge_to(member, partner, value)
     }
 
-    /// The edge from `member`'s `column` to `partner`, whose rows give the
-    /// value `value` makes for the column's affinity: when sqlive narrows by
-    /// the column, and can read the partner alone.
-    fn edge_to(
+    /// The edge from `member` to `partner`, whose rows give `value`, when
+    /// sqlive can read the partner alone. A lookup compares an expression
+    /// `value` with the member column's affinity, as SQLite compares a
+    /// column with an expression.
+    pub(crate) fn edge_to(
         &self,
-        member: usize,
-        column: String,
+        member: Member,
         partner: usize,
-        value: impl FnOnce(Affinity) -> Option<PartnerValue>,
+        value: PartnerValue,
     ) -> Option<Edge> {
-        let items = &self.items;
-        if partner == member
-            || (items[member].source.table.is_none() && items[member].derived.is_none())
-        {
-            return None;
-        }
-        let affinity = items[member].columns.affinity(&column)?;
-        items[partner].source.from.as_ref()?;
-        let value = value(affinity)?;
-        Some(Edge { member, column, affinity, partner, value, nested: false, nulls: false })
+        self.items[partner].source.from.as_ref()?;
+        let Member { item, column, affinity } = member;
+        Some(Edge { member: item, column, affinity, partner, value, nested: false, nulls: false })
     }
 
     /// The edge `member_expr IS other` gives: the equality's, matching a NULL

@@ -390,10 +390,12 @@ impl Planner<'_> {
     /// for: `left.column = right.column`, with `left` the leftmost item
     /// before `right` that has the column (`using_left`).
     fn using_narrowing(&self, left: (usize, String), right: (usize, String)) -> Narrowing {
-        let edges = [
-            self.column_edge(left.clone(), right.clone(), false),
-            self.column_edge(right, left, true),
-        ];
+        let edges = [(left.clone(), right.clone(), false), (right, left, true)].map(
+            |((member, column), partner, first)| {
+                let member = self.narrowed_column(member, column)?;
+                self.column_edge(member, partner, first)
+            },
+        );
         Narrowing { edges: edges.into_iter().flatten().collect(), ..Narrowing::default() }
     }
 
