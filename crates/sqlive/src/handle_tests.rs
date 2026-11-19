@@ -1,6 +1,6 @@
 use super::*;
 use crate::tests::HeardBugs;
-use crate::TableRead;
+use crate::{RowScope, TableRead};
 use std::convert::Infallible;
 
 /// A handle whose host fails with text, reporting to `bugs`.
@@ -85,4 +85,71 @@ fn a_run_that_reads_an_unrecorded_table_panics() {
         subscription.finish(read("HIDDEN"))
     }));
     assert!(panicked.is_err());
+}
+
+/// A write learns the columns the live queries' scopes test from what the
+/// handle filed, which it files again only for the subscriptions whose
+/// tracking changed since: a run that begins keeps its previous run's
+/// columns, one that finishes brings its own, and a dropped subscription
+/// takes its columns out.
+#[test]
+fn scoped_columns_read_only_the_subscriptions_that_changed() {
+    let handle = text_handle(&Arc::<HeardBugs>::default());
+    let narrowed = |table: &str, column: &str| {
+        vec![TableRead {
+            table: table.into(),
+            columns: [column.to_owned()].into(),
+            scope: RowScope::equal(column.into(), vec![crate::SqlValue::Integer(1)]),
+            inserted_only: false,
+        }]
+    };
+    let entries_read = || std::mem::take(&mut lock_unpoisoned(&handle.state).entries_read);
+    let columns = |tables: &[(&str, &[&str])]| -> BTreeMap<String, BTreeSet<String>> {
+        tables
+            .iter()
+            .map(|(table, columns)| {
+                ((*table).to_owned(), columns.iter().map(|column| (*column).to_owned()).collect())
+            })
+            .collect()
+    };
+    let pages: Vec<CommitSubscription> = (0..200)
+        .map(|_| {
+            let page = handle.subscribe();
+            page.begin();
+            page.finish(narrowed("tracks", "release"));
+            page
+        })
+        .collect();
+    let albums = handle.subscribe();
+    albums.begin();
+    albums.finish(narrowed("Albums", "year"));
+    assert_eq!(
+        handle.scoped_columns(),
+        columns(&[("albums", &["year"]), ("tracks", &["release"])])
+    );
+    assert_eq!(entries_read(), 201);
+    assert_eq!(
+        handle.scoped_columns(),
+        columns(&[("albums", &["year"]), ("tracks", &["release"])])
+    );
+    assert_eq!(entries_read(), 0);
+
+    albums.begin();
+    assert_eq!(
+        handle.scoped_columns(),
+        columns(&[("albums", &["year"]), ("tracks", &["release"])])
+    );
+    assert_eq!(entries_read(), 1);
+    albums.finish(narrowed("albums", "artist"));
+    assert_eq!(
+        handle.scoped_columns(),
+        columns(&[("albums", &["artist"]), ("tracks", &["release"])])
+    );
+    assert_eq!(entries_read(), 1);
+
+    drop(albums);
+    assert_eq!(handle.scoped_columns(), columns(&[("tracks", &["release"])]));
+    drop(pages);
+    assert_eq!(handle.scoped_columns(), columns(&[]));
+    assert_eq!(entries_read(), 0);
 }

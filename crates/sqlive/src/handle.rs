@@ -7,9 +7,8 @@ use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
 use crate::read_index::{ReadIndex, SubscriptionId};
 use crate::read_set::{affected_by, past_row_limit};
-use crate::{
-    affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange, RowScope,
-};
+use crate::scoped_columns::ScopedColumns;
+use crate::{affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange};
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{Bug, BugSinkRef};
 use std::{
@@ -414,6 +413,9 @@ struct ObserverState {
     refiling: Arc<Mutex<Refiling>>,
     closed: bool,
     failure: Option<Failure>,
+    /// How many entries' tracking the handle has read to file them again.
+    #[cfg(test)]
+    entries_read: usize,
 }
 
 thread_local! {
@@ -443,20 +445,30 @@ fn half_changed(what: &'static str) -> Bug {
 }
 
 /// How a handle filed a subscription: waiting on reads at an epoch, or
-/// reading.
+/// reading, with the reads of its run before.
 enum Filing {
     Waiting { epoch: u64, reads: Arc<ReadSet> },
-    Reading,
+    Reading { previous: Arc<ReadSet> },
+}
+
+impl Filing {
+    /// The reads whose scopes a write records values for (`Tracking::scoped`).
+    fn scoped(&self) -> &ReadSet {
+        match self {
+            Self::Waiting { reads, .. } | Self::Reading { previous: reads } => reads,
+        }
+    }
 }
 
 /// A handle's subscriptions by how each tracked commits when the handle last
 /// filed it: those waiting on known reads by their reads, and those whose
-/// runs were reading.
+/// runs were reading; and the columns their scopes test.
 #[derive(Default)]
 struct Filed {
     filings: HashMap<SubscriptionId, Filing>,
     waiting: ReadIndex,
     reading: BTreeSet<SubscriptionId>,
+    scoped: ScopedColumns,
 }
 
 impl Filed {
@@ -468,22 +480,26 @@ impl Filed {
                 self.waiting.insert(id, reads);
                 Filing::Waiting { epoch: tracked.epoch, reads: Arc::clone(reads) }
             }
-            Tracking::Reading { .. } => {
+            Tracking::Reading { previous, .. } => {
                 self.reading.insert(id);
-                Filing::Reading
+                Filing::Reading { previous: Arc::clone(previous) }
             }
         };
+        self.scoped.add(filing.scoped());
         self.filings.insert(id, filing);
     }
 
     /// Take subscription `id` out.
     fn forget(&mut self, id: SubscriptionId) {
-        match self.filings.remove(&id) {
-            Some(Filing::Waiting { reads, .. }) => self.waiting.remove(id, &reads),
-            Some(Filing::Reading) => {
+        let Some(filing) = self.filings.remove(&id) else {
+            return;
+        };
+        self.scoped.remove(filing.scoped());
+        match filing {
+            Filing::Waiting { reads, .. } => self.waiting.remove(id, &reads),
+            Filing::Reading { .. } => {
                 self.reading.remove(&id);
             }
-            None => {}
         }
     }
 }
@@ -528,6 +544,10 @@ impl ObserverState {
         for id in changed.difference(&dropped) {
             if let Some(entry) = self.entries.get(id) {
                 self.filed.file(*id, &lock_unpoisoned(&entry.tracked));
+                #[cfg(test)]
+                {
+                    self.entries_read += 1;
+                }
             }
         }
         for id in dropped {
@@ -585,19 +605,6 @@ impl ObserverState {
             self.entries[&id].tell(id, changes, &crowded, Some((epoch, &positions)), verdicts);
         }
     }
-
-    /// The columns some subscription's scope tests, by table, all
-    /// lowercase (`Handle::scoped_columns`).
-    fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for entry in self.entries.values() {
-            let reads = Arc::clone(lock_unpoisoned(&entry.tracked).tracking.scoped());
-            for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
-                read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
-            }
-        }
-        tables
-    }
 }
 
 impl Drop for ObserverState {
@@ -636,6 +643,8 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
                 refiling: Arc::new(Mutex::new(Refiling::default())),
                 closed: false,
                 failure: None,
+                #[cfg(test)]
+                entries_read: 0,
             })),
             bugs,
             unrecorded: Arc::new(UnrecordedTables::new(unrecorded.iter().map(String::as_str))),
@@ -808,7 +817,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// any other table needs no values to wake the subscriptions that read
     /// it.
     pub fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.with_state(|state| state.scoped_columns())
+        self.with_state(|state| state.filed.scoped.columns())
     }
 
     /// What every call on the handle fails with: its failure, or
