@@ -32,6 +32,12 @@ pub struct Task {
 pub struct Query;
 pub struct Requests;
 pub struct Directory;
+/// Holds shared state only in a test build: no owner in production code.
+pub struct Probed {
+    value: u32,
+    #[cfg(feature = "test-utils")]
+    probe: AtomicU64,
+}
 /// Holds its clocks in a `Vec`, which keeps them behind a raw pointer.
 pub struct Clocks {
     clocks: Vec<SystemClock>,
@@ -57,6 +63,11 @@ impl Builder {
         let _ = Task { counter: Counter { count: AtomicU64::new(0) } }; // finding
         let _ = || SystemClock; // finding
         let _ = Clocks { clocks: Vec::new() }; // finding
+        let _ = Probed {
+            value: 1,
+            #[cfg(feature = "test-utils")]
+            probe: AtomicU64::new(0),
+        };
     }
 
     pub fn borrow(service: &Service, shared: &Shared, task: &Task) -> u32 {

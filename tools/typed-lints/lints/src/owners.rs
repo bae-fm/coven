@@ -525,12 +525,16 @@ impl<'tcx> Owners<'tcx> {
         held
     }
 
-    /// Each type the fields of `ty` hold, for a workspace ADT.
+    /// Each type the fields of `ty` hold, for a workspace ADT, but its
+    /// test-only fields: production code holds none of what they hold.
     pub(crate) fn field_parts(&self, ty: Ty<'tcx>, found: &mut dyn FnMut(Part<'tcx>)) {
         let ty::Adt(adt, args) = *ty.kind() else {
             return;
         };
         for field in adt.all_fields() {
+            if self.workspace.is_test_definition(self.tcx, field.did) {
+                continue;
+            }
             let field = self.normalize(field.ty(self.tcx, args));
             self.walk(field, false, false, &mut |held| {
                 if let Held::Part(part) = held {

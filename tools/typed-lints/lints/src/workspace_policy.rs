@@ -250,6 +250,7 @@ impl WorkspacePolicy {
                 matches!(
                     tcx.def_kind(item),
                     DefKind::Mod
+                        | DefKind::Field
                         | DefKind::Fn
                         | DefKind::AssocFn
                         | DefKind::Impl { .. }

@@ -14499,8 +14499,10 @@ places that start background work.
 
 - A type is an owner when what its fields hold, with its type arguments
   substituted, includes a capability, shared state, a handle or another owner
-  (F.2). The typed lint `clippy::built_outside_composition_root` (Appendix
-  F.6, check 11) reads that from the compiler's types.
+  (F.2). A field that only test builds compile counts for nothing, since
+  production code never holds what it holds. The typed lint
+  `clippy::built_outside_composition_root` (Appendix F.6, check 11) reads that
+  from the compiler's types.
 - Any owner construction outside a listed root fails the check, including
   construction of an owner's private representation. Code builds an owner, a
   construction-only capability or a handle where it writes the type's literal
