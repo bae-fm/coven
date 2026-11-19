@@ -69,8 +69,8 @@ planner reads alone has a query that a lookup can read alone: its arms sit in
 no other core, or its query names nothing outside it. A LEFT JOIN's ON names
 only the item the join adds, items before it in the FROM, and items of the
 cores around its own. Every column a core's clauses name belongs to an item of
-the core or of a core around it. The proof that puts the rules together
-assumes these facts, and the differential checks that every statement it
+the core or of a core around it. `whole_narrowing_sound` and `evalQuery_fuel`
+assume these facts, and the differential checks that every statement it
 generates has them.
 
 ## Each rule's theorem
@@ -233,19 +233,18 @@ promise of whichever rule reads it.
 
 ## Putting the rules together
 
-The theorem the rules build toward, `narrowing_sound`, states that a write the
-judge lets pass leaves a well-formed statement's rows unchanged. The proof
-goes in steps, and each step that is proved has its own theorem.
+Some steps of putting the rules together are proved, each with its own
+theorem.
 
-The first step shows that a statement's rows depend only on the columns it
-reads. [Mask.lean](../../crates/sqlive/proofs/SqliveNarrowing/Mask.lean)
+A statement's rows depend only on the columns it reads.
+[Mask.lean](../../crates/sqlive/proofs/SqliveNarrowing/Mask.lean)
 masks a database as sqlive keeps it: each row of a table the statement reads,
 masked to the columns the statement reads, and no row of any other table.
 `result_mask` proves that a statement whose cores list only items it has
 returns the same rows from the masked database as from the database. So the
 judge's lookups in the masked database read the rows the statement reads.
 
-The second step shows what a write the judge lets pass leaves unchanged.
+A write the judge lets pass leaves the rows each scope passes unchanged.
 [Unjudged.lean](../../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean)
 states a write's row changes as steps that each change one slot of a table,
 from the change's row before to its row after (`Writes`). A slot can change
@@ -255,35 +254,30 @@ different from where it started, the slot's first and last rows each fail the
 table's scope, as long as every change that changes a masked row has rows
 before and after that fail it. `unjudged_rows` puts the two together: when the
 judge lets a write pass, each masked table holds the same rows that pass the
-table's scope before and after the write, in the same order.
+table's scope before and after the write, in the same order. For a statement
+sqlive reads whole, the scope passes every row, so the masked tables are the
+same before and after, and `whole_narrowing_sound` proves that the write
+leaves the statement's rows unchanged.
 
-For a statement sqlive reads whole, the scope passes every row, so the masked
-tables are the same before and after, and `whole_narrowing_sound` proves the
-composed theorem: the write leaves the statement's rows unchanged. For any
-other statement, the steps still to prove show that the rows that pass the
-scopes decide the statement's rows. A row a scope leaves out fails a condition
-that every binding the statement keeps meets, so removing it changes no
-binding. A join's lookup finds its partner's row, because that row passes its
-own scope and so the write left its slot unchanged. For a derived partner,
-[Fuel.lean](../../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean) proves part
-of this already: `evalQuery_fuel` proves that a well-formed statement's query
-returns the same rows with any fuel past its number, and `lookupRows_derived`
-that a lookup of a derived item whose arms sit in no core reads the rows the
-statement reads of it. The planner's state keeps
-each term and edge tied to the condition it came from, through every step that
-holds back, carries or passes it on. Under a LIMIT, the sorted item's scope
-keeps every row that sorts at or before the last row, so `limit_sound` and
-`atOrBefore_passes` give the same first rows.
+A lookup of a derived item reads it alone, with more fuel than the statement
+has left where the item sits.
+[Fuel.lean](../../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean) proves that the
+extra fuel changes nothing: `evalQuery_fuel` proves that a well-formed statement's
+query returns the same rows with any fuel past its number, and
+`lookupRows_derived` that a lookup of a derived item whose arms sit in no core
+reads the rows the statement reads of it.
 
 ## What the proofs don't cover
 
 The theorems prove each rule's step and the steps of putting them together
-that the section above names. No theorem yet proves the rest: that the order
-in which the planner places items, the ON conditions it holds back, the terms
-it carries across equalities, the terms it passes into derived items and the
-lookups of each join's partner give scopes outside of which a write leaves
-the result unchanged. The differential checks that composition against SQLite
-on every statement it generates.
+that the section above names. For a statement sqlive doesn't read whole, no
+theorem yet proves that a write the judge lets pass leaves the statement's
+rows unchanged: that the order in which the planner places items, the ON
+conditions it holds back, the terms it carries across equalities, the terms
+it passes into derived items, the lookups of each join's partner and the
+LIMIT bound give scopes outside of which a write leaves the result unchanged.
+The differential checks that composition against SQLite on every statement it
+generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as

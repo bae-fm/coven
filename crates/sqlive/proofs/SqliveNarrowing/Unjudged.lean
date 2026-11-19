@@ -1,7 +1,7 @@
 import SqliveNarrowing.Mask
 import SqliveNarrowing.Judge
 
-/-! The composed proof's second step: a write the judge lets pass leaves
+/-! A write the judge lets pass leaves
 unchanged, in what sqlive keeps of each table (`Db.mask`), every row that
 passes the table's scope. A write's row changes take the database before it
 to the database after it one slot at a time (`Writes`), and each slot whose
@@ -217,8 +217,8 @@ theorem evalQuery_rows_congr {s : Statement} {db db' : Db} (h : ∀ t, db.rows t
       funext fun b => funext fun q => evalQuery_rows_congr h f b q
     simp only [evalQuery, queryRows, coreBindings, h, ih]
 
-/-- The composed theorem for a statement sqlive reads whole: a write the
-judge lets pass leaves its rows unchanged. -/
+/-- For a statement sqlive reads whole, a write the judge lets pass leaves
+its rows unchanged. -/
 theorem whole_narrowing_sound {s : Statement} (hwf : s.wellFormed = true)
     (hwhole : Whole.readsWhole s = true) {db db' : Db} {changes : List Change}
     (hw : Writes db changes db') (hr : s.reruns db changes db' = false) :

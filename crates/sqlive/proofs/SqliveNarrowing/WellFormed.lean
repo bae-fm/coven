@@ -2,8 +2,12 @@ import SqliveNarrowing.Rules.View
 
 /-! What the runner's JSON reader guarantees of every statement it reads
 (`Json.readStatement`), as one check the runner reports and the differential
-asserts. The composed proof assumes it: a statement the reader can't build
-is no statement sqlive runs. -/
+asserts: queries numbered after the queries their arms read, items in range
+and in the core that lists them, derived items readable alone where the
+planner reads them so, LEFT JOIN ONs that name earlier items, and column
+references to items in scope. `whole_narrowing_sound` uses it for its items
+in range, which make the masked database give the statement's rows
+(`result_mask`), and `evalQuery_fuel` for its query numbers. -/
 namespace SqliveNarrowing
 
 /-- The queries core `k` reads: its derived items' and its subqueries. -/

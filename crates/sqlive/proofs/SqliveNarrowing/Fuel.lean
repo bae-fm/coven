@@ -1,6 +1,6 @@
 import SqliveNarrowing.Mask
 
-/-! The composed proof's lookups read a derived item alone, with the fuel
+/-! A join's lookup reads a derived item alone, with the fuel
 `lookupRows` gives, while the statement reads the item's rows with whatever
 fuel is left where the item sits. A well-formed statement numbers each query
 after the queries its arms read, so a query returns the same rows at every
