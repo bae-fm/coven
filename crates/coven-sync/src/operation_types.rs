@@ -63,8 +63,12 @@ pub enum OperationKind {
     /// Publish a circle's deletion; its rows are taken out from that slot
     /// (§15.9).
     DeleteCircle,
-    /// Share storage and settle an invitation.
+    /// Share storage and settle an invitation: record the invite's share
+    /// and its end (§13.2).
     Invite,
+    /// Claim an approved join request's admission, which admits the member
+    /// or rebinds their pair, and registers the request's device (§13.2).
+    ApproveJoin,
     /// Look for a pairing's request, put its handover or marker in the
     /// request's place (§13.2).
     Pairing,
@@ -87,10 +91,8 @@ impl OperationKind {
             StoreChange::CreateStore { .. } => K::CreateStore,
             StoreChange::SetUpStorage { .. } => K::SetUpStorage,
             StoreChange::RenameStore { .. } => K::RenameStore,
-            StoreChange::AdmitMember { .. }
-            | StoreChange::RecoverMember { .. }
-            | StoreChange::AddInviteShare { .. }
-            | StoreChange::EndInviteShare { .. } => K::Invite,
+            StoreChange::AdmitMember { .. } | StoreChange::RecoverMember { .. } => K::ApproveJoin,
+            StoreChange::AddInviteShare { .. } | StoreChange::EndInviteShare { .. } => K::Invite,
             StoreChange::RemoveMember { .. } => K::RemoveMember,
             StoreChange::ChangeRole { .. } => K::SetRole,
             StoreChange::SetAccess { .. } => K::SetAccess,

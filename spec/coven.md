@@ -5422,8 +5422,8 @@ waits for her update, as any newer object does.
 A request that passes these checks waits for Ana's decision, with its
 confirmation number. Ana's approval is a step of a write (§4), with or
 without storage: the write journals the operation that binds Dan's pair,
-which `coven_operations` lists until her app acknowledges its outcome
-(§11.4). It doesn't check the approval against the slots her phone has
+which `coven_operations` lists as `ApproveJoin` until her app acknowledges
+its outcome (§11.4). It doesn't check the approval against the slots her phone has
 applied. Ben demoted Ana yesterday, and her phone has applied it; her app
 still shows Dan's request waiting, and approving it journals the binding.
 The pass refuses it, and her app shows the approval refused, with

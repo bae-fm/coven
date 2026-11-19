@@ -4,7 +4,7 @@
 
 use crate::{OperationKind, OperationRejection, SyncError};
 use coven_database::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
-use coven_database::{ChangeOutcome, FreshChangeOutcome, InviteOutcome, ListedOutcome};
+use coven_database::{ChangeOutcome, FreshChangeOutcome, ListedOutcome};
 use coven_merge::Slot;
 
 /// How an operation that claims an admin entry ended (§11.2): every kind
@@ -32,22 +32,17 @@ impl EntryOutcome {
     }
 }
 
-/// An entry's outcome in each listed outcome type that holds every way an
-/// entry ends.
-macro_rules! from_entry {
-    ($($listed:ty),*) => {$(
-        impl From<EntryOutcome> for $listed {
-            fn from(outcome: EntryOutcome) -> Self {
-                match outcome {
-                    EntryOutcome::Landed(slot) => Self::Landed(slot),
-                    EntryOutcome::Satisfied => Self::Satisfied,
-                    EntryOutcome::Rejected(reason) => Self::Rejected(reason),
-                }
-            }
+/// An entry's outcome in `ChangeOutcome`, the listed outcome type that
+/// holds every way an entry ends.
+impl From<EntryOutcome> for ChangeOutcome {
+    fn from(outcome: EntryOutcome) -> Self {
+        match outcome {
+            EntryOutcome::Landed(slot) => Self::Landed(slot),
+            EntryOutcome::Satisfied => Self::Satisfied,
+            EntryOutcome::Rejected(reason) => Self::Rejected(reason),
         }
-    )*};
+    }
 }
-from_entry!(ChangeOutcome, InviteOutcome);
 
 impl TryFrom<EntryOutcome> for FreshChangeOutcome {
     type Error = SyncError;
@@ -88,7 +83,7 @@ impl SettledByPass for FreshChangeOutcome {
 }
 
 #[cfg(test)]
-impl SettledByPass for InviteOutcome {
+impl SettledByPass for ChangeOutcome {
     fn settled(self) -> Result<(), SyncError> {
         match self {
             Self::Landed(_) | Self::Satisfied => Ok(()),
@@ -121,7 +116,8 @@ impl OperationKind {
             | K::RenameCircle
             | K::DeleteCircle
             | K::AddCircleMember
-            | K::RemoveCircleMember => Some(OutcomeType::Change),
+            | K::RemoveCircleMember
+            | K::ApproveJoin => Some(OutcomeType::Change),
             K::CreateCircle | K::ReplaceMemberKeys => Some(OutcomeType::FreshChange),
             K::Invite => Some(OutcomeType::Invite),
             K::StorageSetup => Some(OutcomeType::StorageSetup),
@@ -166,10 +162,10 @@ impl OperationKind {
         Ok(match self.outcome_type() {
             Some(OutcomeType::Change) => Some(ChangeOutcome::from(outcome).into()),
             Some(OutcomeType::FreshChange) => Some(FreshChangeOutcome::try_from(outcome)?.into()),
-            Some(OutcomeType::Invite) => Some(InviteOutcome::from(outcome).into()),
-            Some(OutcomeType::StorageSetup) => {
+            Some(OutcomeType::Invite | OutcomeType::StorageSetup) => {
                 return Err(coven_database::DbError::Invariant {
-                    what: "storage setup ends with its own outcome, never an entry's",
+                    what:
+                        "an invite or a storage setup ends with its own outcome, never an entry's",
                 }
                 .into())
             }

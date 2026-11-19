@@ -438,12 +438,12 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
                 Ok::<_, CovenError>(sql.query_row(
                     "SELECT kind,outcome FROM coven_operations WHERE operation=?1",
                     [binding.0],
-                    |r| Ok((r.get::<_, OperationKind>(0)?, r.get::<_, Option<InviteOutcome>>(1)?)),
+                    |r| Ok((r.get::<_, OperationKind>(0)?, r.get::<_, Option<ChangeOutcome>>(1)?)),
                 )?)
             })
             .await
             .unwrap();
-        assert_eq!(listed, (OperationKind::Invite, None));
+        assert_eq!(listed, (OperationKind::ApproveJoin, None));
         // The invite shows its approval under way, with the binding the
         // app's screen follows, and a second decision is refused.
         let open = owner.handle.read(Invite::list).await.unwrap();
@@ -456,8 +456,8 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
         assert!(matches!(again, Err(SyncError::InvitationChanged)), "{again:?}");
         assert_eq!(owner.rows().await.iter().filter(|(id, _)| id == "approval").count(), 1);
         owner.handle.start_sync().await.unwrap();
-        let bound: InviteOutcome = crate::tests::outcome(&owner.handle, Some(binding)).await;
-        assert!(matches!(bound, InviteOutcome::Landed(_)), "{bound:?}");
+        let bound: ChangeOutcome = crate::tests::outcome(&owner.handle, Some(binding)).await;
+        assert!(matches!(bound, ChangeOutcome::Landed(_)), "{bound:?}");
         _often = Some(control.check_often(Duration::ZERO));
     };
     let (result, ()) = join_with_response(joining, approve).await;

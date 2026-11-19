@@ -860,14 +860,14 @@ async fn a_stop_for_good_ends_this_devices_invites() {
             Ok::<_, DbError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [binding.0],
-                |row| row.get::<_, Option<InviteOutcome>>(0),
+                |row| row.get::<_, Option<ChangeOutcome>>(0),
             )?)
         })
         .await
         .unwrap();
     assert_eq!(
         outcome,
-        Some(InviteOutcome::Stopped(DeviceStop::Removed(coven_database::Removal::Device)))
+        Some(ChangeOutcome::Stopped(DeviceStop::Removed(coven_database::Removal::Device)))
     );
     for invite in [&approving, &waiting] {
         assert!(ana

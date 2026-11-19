@@ -398,7 +398,7 @@ impl SequenceSync {
         use crate::operation_outcome::SettledByPass as _;
         let request = request.clone();
         let steps = self.operation_steps();
-        let outcome: crate::InviteOutcome = self
+        let outcome: coven_database::ChangeOutcome = self
             .journal_and_pass(move |sql| steps.approve_join_request(sql, &request).map(Some))
             .await?
             .expect("an approval always journals its binding");
@@ -642,7 +642,7 @@ impl SequenceSync {
                     // binding's outcome, which `coven_operations` lists for the
                     // app that approved it; the invite ends as a decline does.
                     work.state = InviteState::Settled { share: None, end: None, refusal: None };
-                    let listed = OperationKind::Invite.listed_outcome(outcome)?;
+                    let listed = OperationKind::ApproveJoin.listed_outcome(outcome)?;
                     self.database
                         .finish_operation_advancing(binding, listed, work.update(&record)?)
                         .await?;

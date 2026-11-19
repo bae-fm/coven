@@ -3991,7 +3991,7 @@ let moved = handle
 | | `invite_id` | the invite's id, as canonical UUID text and read as `InviteId`, the id `Invite::id` carries |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
-| | `outcome` | NULL while it runs; then how it ended, read in the outcome type of its kind (E6): `ChangeOutcome` for `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`, `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember`; `FreshChangeOutcome` for `CreateCircle` and `ReplaceMemberKeys`; `InviteOutcome` for `Invite`; `StorageSetupOutcome` for `StorageSetup`. A type fails to read an outcome its kinds never end with |
+| | `outcome` | NULL while it runs; then how it ended, read in the outcome type of its kind (E6): `ChangeOutcome` for `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`, `DeleteCircle`, `AddCircleMember`, `RemoveCircleMember` and `ApproveJoin`; `FreshChangeOutcome` for `CreateCircle` and `ReplaceMemberKeys`; `InviteOutcome` for `Invite`; `StorageSetupOutcome` for `StorageSetup`. A type fails to read an outcome its kinds never end with |
 | | `outcome_kind` | NULL while it runs; then the variant of the outcome it ended with, in snake case: `landed`, `satisfied`, `rejected`, `stopped`, `cancelled`, `undone` or `sharing_refused` |
 | | `account` | for an invite that ended with a sharing refusal, the address it was to share with; NULL for every other outcome |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
@@ -6892,9 +6892,14 @@ pub enum OperationKind {
     ReplaceMemberKeys,
     /// Upload a snapshot, then claim its announcement (§16.2).
     WriteSnapshot,
-    /// Record the invite's share and grant it, approve or decline a join,
-    /// and settle the invite, recording its share's end (§13.2).
+    /// Record the invite's share and grant it, wait for a join request and
+    /// the app's decision, and settle the invite, recording its share's end
+    /// (§13.2).
     Invite,
+    /// Claim an approved join request's admission: the entry that admits the
+    /// new member, or rebinds a recovering member's pair, and registers the
+    /// request's device (§13.2).
+    ApproveJoin,
     /// Look for a pairing's request, and put its handover or its marker in the
     /// request's place (§13.2).
     Pairing,
@@ -6910,8 +6915,9 @@ pub type OperationError = SyncError;
 
 /// How an admin change an app's write journaled ended, for the kinds
 /// `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`,
-/// `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember`, as
-/// `coven_operations.outcome` holds it until a write acknowledges it (§11.4).
+/// `DeleteCircle`, `AddCircleMember`, `RemoveCircleMember` and `ApproveJoin`,
+/// as `coven_operations.outcome` holds it until a write acknowledges it
+/// (§11.4).
 pub enum ChangeOutcome {
     /// Its entry landed at this slot, which this device has applied.
     Landed(Slot),
@@ -6936,15 +6942,10 @@ pub enum FreshChangeOutcome {
     Stopped(DeviceStop),
 }
 
-/// How an operation of the kind `Invite` ended: the binding an approval
-/// journals, which ends as a `ChangeOutcome` does, or the invite itself,
-/// which `coven_operations` lists only once a sharing refusal ends it.
+/// How an invite ended, the kind `Invite`: `coven_operations` lists an
+/// invite only once a sharing refusal ends it. The binding its approval
+/// journals is an operation of the kind `ApproveJoin`.
 pub enum InviteOutcome {
-    Landed(Slot),
-    /// The applied state already admitted the request.
-    Satisfied,
-    Rejected(OperationRejection),
-    Stopped(DeviceStop),
     /// The invite ended because the provider refused to share the store for
     /// a reason only a person can fix (§13.2). The invite is gone from
     /// `coven_invites`; the outcome stays until a write acknowledges it, for
@@ -9158,9 +9159,10 @@ impl CovenWrite<'_> {
     ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
     /// Approves exactly this checked request, and returns
-    /// the operation that binds its pair, listed in `coven_operations` until
-    /// the app acknowledges its outcome (E6). The write journals it, offline
-    /// too, without checking it against the applied state: a pass checks it
+    /// the operation that binds its pair, listed in `coven_operations` under
+    /// the kind `ApproveJoin` until the app acknowledges its outcome (E6).
+    /// The write journals it, offline too, without checking it against the
+    /// applied state: a pass checks it
     /// after catching up, and a refusal, such as this admin's demotion, is
     /// the operation's outcome. A pass claims one admission: the entry adding
     /// the new member with the invite's role, or rebinding the existing

@@ -44,7 +44,8 @@ pub enum OperationRejection {
 
 /// How an admin change an app's write journaled ended, for the kinds
 /// `RenameStore`, `SetRole`, `RemoveMember`, `RemoveDevice`, `RenameCircle`,
-/// `DeleteCircle`, `AddCircleMember` and `RemoveCircleMember` (§11.4):
+/// `DeleteCircle`, `AddCircleMember`, `RemoveCircleMember` and
+/// `ApproveJoin` (§11.4):
 /// `coven_operations.outcome` holds it from the transaction that ends the
 /// operation's journal row until a write acknowledges it, so an outcome
 /// nobody awaited is still there to read.
@@ -82,24 +83,12 @@ pub enum FreshChangeOutcome {
     Stopped(DeviceStop),
 }
 
-/// How an operation of the kind `Invite` ended, as `coven_operations.outcome`
-/// holds it (§11.4, §13.2): the binding an approval journals, which ends as
-/// an admin change does, or the invite itself, which `coven_operations`
-/// lists only when a sharing refusal ends it.
+/// How an invite ended, the kind `Invite`, as `coven_operations.outcome`
+/// holds it (§11.4, §13.2): `coven_operations` lists an invite only once a
+/// sharing refusal ends it. Its approval's binding is an operation of its
+/// own, of the kind `ApproveJoin`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InviteOutcome {
-    /// The binding's entry landed at this slot, which this device has
-    /// applied.
-    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
-    /// The applied state already admitted the request, so the binding
-    /// claimed no slot (§11.2).
-    Satisfied,
-    /// The applied state refused the binding once this device had caught
-    /// up (§11.1).
-    Rejected(OperationRejection),
-    /// This device stopped for good before the binding ended, so it never
-    /// will here (§14.1).
-    Stopped(DeviceStop),
     /// The invite ended because the provider refused to share the store for
     /// a reason only a person can fix (§13.2). The invite is gone from
     /// `coven_invites`; the outcome stays until a write acknowledges it,
@@ -188,8 +177,9 @@ impl From<StorageSetupOutcome> for ListedOutcome {
 }
 
 /// How a listed operation of any kind ends once this installation stops for
-/// good (`operation::end`): landed at the slot its claim took, or stopped.
-/// Every kind's outcome type has both, encoded as here.
+/// good (`operation::end`) while it runs: landed at the slot its claim took,
+/// or stopped. The outcome type of every kind listed while it runs has both,
+/// encoded as here; an invite is listed only once it has ended.
 #[derive(serde::Serialize)]
 pub(crate) enum StopOutcome {
     /// Its claim landed at this slot.

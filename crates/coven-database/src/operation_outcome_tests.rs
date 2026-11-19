@@ -8,8 +8,9 @@ fn read<T: FromSql>(bytes: &[u8]) -> FromSqlResult<T> {
     T::column_result(ValueRef::Blob(bytes))
 }
 
-/// A stop for good ends a listed operation of any kind landed or stopped,
-/// without knowing its kind, so every kind's type reads both.
+/// A stop for good ends a running listed operation of any kind landed or
+/// stopped, without knowing its kind, so the type of every kind listed while
+/// it runs reads both. An invite is listed only once it has ended.
 #[test]
 fn every_kind_reads_the_outcomes_a_stop_writes() {
     let slot = coven_merge::Slot::new(7).unwrap();
@@ -20,8 +21,6 @@ fn every_kind_reads_the_outcomes_a_stop_writes() {
     assert_eq!(read::<ChangeOutcome>(&stopped).unwrap(), ChangeOutcome::Stopped(stop));
     assert_eq!(read::<FreshChangeOutcome>(&landed).unwrap(), FreshChangeOutcome::Landed(slot));
     assert_eq!(read::<FreshChangeOutcome>(&stopped).unwrap(), FreshChangeOutcome::Stopped(stop));
-    assert_eq!(read::<InviteOutcome>(&landed).unwrap(), InviteOutcome::Landed(slot));
-    assert_eq!(read::<InviteOutcome>(&stopped).unwrap(), InviteOutcome::Stopped(stop));
     assert_eq!(read::<StorageSetupOutcome>(&landed).unwrap(), StorageSetupOutcome::Landed(slot));
     assert_eq!(read::<StorageSetupOutcome>(&stopped).unwrap(), StorageSetupOutcome::Stopped(stop));
 }
@@ -42,4 +41,5 @@ fn a_kind_refuses_the_outcomes_it_never_ends_with() {
     let cancelled = ListedOutcome::StorageSetup(StorageSetupOutcome::Cancelled).encode();
     assert!(read::<ChangeOutcome>(&cancelled).is_err());
     assert!(read::<InviteOutcome>(&cancelled).is_err());
+    assert!(read::<InviteOutcome>(&satisfied).is_err());
 }
