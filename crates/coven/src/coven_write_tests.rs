@@ -81,6 +81,12 @@ async fn stopped(device: &crate::tests::Device) {
     device.stop_sync().await;
 }
 
+/// The name of the circle with this id.
+async fn circle_name(handle: &CovenHandle, id: CircleId) -> String {
+    let circles = handle.circles().list().await.unwrap();
+    circles.into_iter().find(|circle| circle.id == id).expect("the circle is listed").name
+}
+
 /// Ana renames Gifts with sync stopped. Her write journals the rename beside
 /// her app's row, and `coven_operations` lists it running; once sync runs it
 /// lands, and the write that marks her row done acknowledges it (§11.1,
@@ -103,7 +109,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
         .await
         .unwrap();
     assert_eq!(listed(ana, rename).await, Some((OperationKind::RenameCircle, None)));
-    assert_eq!(ana.circles().list().await.unwrap()[0].name, "Gifts");
+    assert_eq!(circle_name(ana, gifts).await, "Gifts");
     // It has no outcome to acknowledge yet.
     let running = ana.write(move |sql| Ok(sql.acknowledge_operation(rename)?)).await;
     assert!(
@@ -112,7 +118,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
     );
     ana.start_sync().await.unwrap();
     let slot = crate::tests::landed(ana, Some(rename)).await;
-    assert_eq!(ana.circles().list().await.unwrap()[0].name, "Presents");
+    assert_eq!(circle_name(ana, gifts).await, "Presents");
     assert_eq!(
         listed(ana, rename).await,
         Some((OperationKind::RenameCircle, Some(ChangeOutcome::Landed(slot))))
