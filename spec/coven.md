@@ -14497,8 +14497,9 @@ the same on any platform.
     toolchain and version of the lints' sources on each machine, and every
     checkout with the same sources runs that build (`tools/typed-lints/tool.sh`).
     The hook installs, fetches and builds none of these. Its check of the lints'
-    own code only checks that the compiler crates and clippy's source are in
-    place. Its clippy runs the driver that the machine already has for the
+    own code builds them against the compiler crates and clippy's source, and
+    when either is missing the build fails within seconds and names
+    `builds setup`. Its clippy runs the driver that the machine already has for the
     lints' sources and toolchain, and when the machine has none it fails at
     once and names `builds setup`, which builds the driver. The first lint,
     `clippy::reqwest_error_display`, finds code that prints a `reqwest::Error`

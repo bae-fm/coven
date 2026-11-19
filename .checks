@@ -23,9 +23,10 @@ check build-without-test-code *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.ca
 check rustdoc *.rs,Cargo.toml,Cargo.lock,rust-toolchain.toml,.cargo/** scripts/cargo.sh doc {crates} --no-deps --all-features --config build.rustdocflags=["-Drustdoc::broken_intra_doc_links","-Dwarnings"]
 
 # The typed lints (tools/typed-lints), a workspace of their own that builds
-# against the toolchain's compiler crates and clippy's source. The hook only
-# checks that both are in place (check-prepared.sh): a machine's setup runs
-# prepare-build.sh, which installs and downloads them.
+# against the toolchain's compiler crates and clippy's source. A machine's
+# setup runs prepare-build.sh, which installs and downloads them; without them
+# the hook's build fails in its first crates and names `builds setup`
+# (cargo.sh).
 check typed-lints-clippy tools/typed-lints/**,rust-toolchain.toml tools/typed-lints/cargo.sh clippy --all-targets -- -D warnings
 
 # Spec

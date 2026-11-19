@@ -10,8 +10,9 @@
 # when both are in place.
 #
 # It installs and downloads, so `builds setup` runs it (the `prepare` line of
-# .build-dirs), and CI before its checks; the commit hook's typed lints checks
-# run check-prepared.sh, which only reads.
+# .build-dirs), and CI before its checks. The commit hook's typed lints checks
+# never run it: without what it puts in place their build fails and names
+# `builds setup` (cargo.sh).
 set -eu
 cd "$(dirname "$0")"
 . ./toolchain.sh
