@@ -37,8 +37,7 @@ impl View {
         drop(requests);
     }
 
-    pub fn replace(&mut self, requests: Requests) {
-        // finding
+    pub fn replace(&mut self, /* finding */ requests: Requests) {
         self.requests = requests;
     }
 }
@@ -85,8 +84,7 @@ impl Record {
         Record { id }
     }
 
-    pub fn count(store_dir: &StoreDir) -> u64 {
-        // finding
+    pub fn count(/* finding */ store_dir: &StoreDir) -> u64 {
         0
     }
 
