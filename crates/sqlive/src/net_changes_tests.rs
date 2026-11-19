@@ -32,7 +32,12 @@ fn operation(
 }
 
 fn title(before: Option<SqlValue>, after: Option<SqlValue>) -> Vec<ColumnChange> {
-    vec![ColumnChange { column: "title".to_owned(), before, after }]
+    vec![ColumnChange::new("title".to_owned(), true, before, after)]
+}
+
+/// A change of `title` whose values the capture didn't keep.
+fn unkept_title() -> Vec<ColumnChange> {
+    vec![ColumnChange::new("title".to_owned(), false, None, None)]
 }
 
 fn finish(operations: Vec<RowOperation>) -> Vec<RowChange> {
@@ -118,8 +123,8 @@ fn a_row_changed_twice_is_one_change_from_its_first_row_to_its_last() {
 #[test]
 fn a_column_not_kept_counts_as_changed() {
     let changes = finish(vec![
-        operation(1, Some("a"), Some("a"), title(None, None), &[]),
-        operation(1, Some("a"), Some("a"), title(None, None), &[]),
+        operation(1, Some("a"), Some("a"), unkept_title(), &[]),
+        operation(1, Some("a"), Some("a"), unkept_title(), &[]),
     ]);
     assert_eq!(shown(&changes), [("title".to_owned(), Some("a".to_owned()), Some("a".to_owned()))]);
 }

@@ -14,7 +14,7 @@
 use crate::read_set::{RowChange, ValueKey};
 use crate::row_scope::RowImage;
 use crate::sql_value::SqlValue;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap};
+use std::collections::{btree_map, hash_map::Entry, BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// One operation on a row that a key names, as a capture saw it.
@@ -35,31 +35,34 @@ pub(crate) struct RowOperation {
     pub(crate) generated: Arc<[String]>,
 }
 
-/// One column an operation changed, with its value before and after where
-/// the capture kept it: the columns live queries read or test.
+/// One column an operation changed.
 pub(crate) struct ColumnChange {
     /// The column, lowercase.
     pub(crate) column: String,
-    /// Its value before the operation, if kept.
-    pub(crate) before: Option<SqlValue>,
-    /// Its value after the operation, if kept.
-    pub(crate) after: Option<SqlValue>,
+    /// What the capture kept of its values.
+    pub(crate) values: ColumnValues,
+}
+
+/// What a capture kept of a changed column's values.
+pub(crate) enum ColumnValues {
+    /// Its values, as the column is one live queries read or test: before
+    /// the change and after it, `None` on a side where there is no row.
+    Kept { before: Option<SqlValue>, after: Option<SqlValue> },
+    /// None of them, as the column is one no live query reads or tests.
+    Unkept,
 }
 
 impl ColumnChange {
     /// `column`'s change from `before` to `after`, with those values when
-    /// the capture keeps them and none when it doesn't.
+    /// the capture keeps them.
     pub(crate) fn new(
         column: String,
         kept: bool,
         before: Option<SqlValue>,
         after: Option<SqlValue>,
     ) -> Self {
-        if kept {
-            Self { column, before, after }
-        } else {
-            Self { column, before: None, after: None }
-        }
+        let values = if kept { ColumnValues::Kept { before, after } } else { ColumnValues::Unkept };
+        Self { column, values }
     }
 }
 
@@ -73,7 +76,7 @@ struct NetRow {
     after: Option<RowImage>,
     /// Each column an operation changed, with its kept value before the
     /// first operation that changed it and after the last.
-    columns: BTreeMap<String, (Option<SqlValue>, Option<SqlValue>)>,
+    columns: BTreeMap<String, ColumnValues>,
     generated: Arc<[String]>,
 }
 
@@ -82,7 +85,7 @@ struct NetRow {
 #[derive(Default)]
 pub(crate) struct NetRows {
     /// Each row's place in `rows`, by its table and key.
-    places: HashMap<(String, Vec<ValueKey>), usize>,
+    places: HashMap<(String, Vec<ValueKey<'static>>), usize>,
     rows: Vec<NetRow>,
     /// How many rows of each table `rows` holds.
     counts: HashMap<String, usize>,
@@ -92,25 +95,36 @@ impl NetRows {
     /// Fold `operation` into its row's net change.
     pub(crate) fn record(&mut self, operation: RowOperation) {
         let RowOperation { table, key, before, after, columns, generated } = operation;
-        let place = (table.clone(), key.iter().map(ValueKey::of).collect());
+        let place = (table.clone(), key.iter().map(|value| ValueKey::of(value).owned()).collect());
         match self.places.entry(place) {
             Entry::Occupied(place) => {
                 let row = &mut self.rows[*place.get()];
                 row.after = after;
                 for change in columns {
-                    // A column no earlier operation changed held, before this
-                    // one, the value it held before the transaction.
-                    row.columns.entry(change.column).or_insert((change.before, None)).1 =
-                        change.after;
+                    match (row.columns.entry(change.column), change.values) {
+                        // A column no earlier operation changed held, before
+                        // this one, the value it held before the transaction.
+                        (btree_map::Entry::Vacant(column), values) => {
+                            column.insert(values);
+                        }
+                        (
+                            btree_map::Entry::Occupied(mut column),
+                            ColumnValues::Kept { after, .. },
+                        ) => match column.get_mut() {
+                            ColumnValues::Kept { after: last, .. } => *last = after,
+                            ColumnValues::Unkept => {}
+                        },
+                        (btree_map::Entry::Occupied(mut column), ColumnValues::Unkept) => {
+                            column.insert(ColumnValues::Unkept);
+                        }
+                    }
                 }
             }
             Entry::Vacant(place) => {
                 place.insert(self.rows.len());
                 *self.counts.entry(table.clone()).or_default() += 1;
-                let columns = columns
-                    .into_iter()
-                    .map(|change| (change.column, (change.before, change.after)))
-                    .collect();
+                let columns =
+                    columns.into_iter().map(|change| (change.column, change.values)).collect();
                 self.rows.push(NetRow { table, key, before, after, columns, generated });
             }
         }
@@ -130,8 +144,13 @@ impl NetRows {
         self.rows.retain(|row| row.table != table);
         self.places.clear();
         for (place, row) in self.rows.iter().enumerate() {
-            self.places
-                .insert((row.table.clone(), row.key.iter().map(ValueKey::of).collect()), place);
+            self.places.insert(
+                (
+                    row.table.clone(),
+                    row.key.iter().map(|value| ValueKey::of(value).owned()).collect(),
+                ),
+                place,
+            );
         }
     }
 
@@ -146,7 +165,7 @@ impl NetRows {
             columns: row
                 .columns
                 .into_iter()
-                .map(|(column, (before, after))| ColumnChange { column, before, after })
+                .map(|(column, values)| ColumnChange { column, values })
                 .collect(),
             generated: row.generated,
         })
@@ -167,7 +186,13 @@ impl NetRows {
                     let mut changed = row
                         .columns
                         .into_iter()
-                        .filter(|(_, ends)| !matches!(ends, (Some(first), Some(last)) if same(first, last)))
+                        .filter(|(_, values)| {
+                            !matches!(
+                                values,
+                                ColumnValues::Kept { before: Some(first), after: Some(last) }
+                                    if ValueKey::same(first, last)
+                            )
+                        })
                         .map(|(column, _)| column)
                         .peekable();
                     if changed.peek().is_none() {
@@ -232,20 +257,6 @@ impl Captured {
         self.rows.finish(&mut changes);
         changes.extend(self.changes);
         changes
-    }
-}
-
-/// Whether two values are the same value: of one type, with the same bytes.
-/// An integer and a real that compare equal are not, since a query can tell
-/// them apart.
-fn same(left: &SqlValue, right: &SqlValue) -> bool {
-    match (left, right) {
-        (SqlValue::Null, SqlValue::Null) => true,
-        (SqlValue::Integer(left), SqlValue::Integer(right)) => left == right,
-        (SqlValue::Real(left), SqlValue::Real(right)) => left.to_bits() == right.to_bits(),
-        (SqlValue::Text(left), SqlValue::Text(right))
-        | (SqlValue::Blob(left), SqlValue::Blob(right)) => left == right,
-        _ => false,
     }
 }
 

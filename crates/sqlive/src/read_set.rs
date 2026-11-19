@@ -4,6 +4,7 @@
 use crate::row_scope::{RowImage, RowScope};
 use crate::scope_lookup::{Judging, Lookups, NoAnswer};
 use crate::sql_value::SqlValue;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Past this many row changes to one table, a write records only that the
@@ -130,8 +131,8 @@ pub(crate) fn affected_by<'a>(
 /// the lookup.
 #[derive(Default)]
 pub struct Answers {
-    partners: HashMap<(usize, ValueKey), bool>,
-    rows: HashMap<(String, Vec<ValueKey>), bool>,
+    partners: HashMap<(usize, ValueKey<'static>), bool>,
+    rows: HashMap<(String, Vec<ValueKey<'static>>), bool>,
 }
 
 impl Answers {
@@ -142,7 +143,7 @@ impl Answers {
     ) -> Result<bool, NoAnswer> {
         match judging {
             Judging::Partner(lookup, value) => {
-                let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value));
+                let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value).owned());
                 if let Some(found) = self.partners.get(&key) {
                     return Ok(*found);
                 }
@@ -151,7 +152,10 @@ impl Answers {
                 Ok(found)
             }
             Judging::Row(sql, parameters) => {
-                let key = (sql.to_owned(), parameters.iter().map(ValueKey::of).collect());
+                let key = (
+                    sql.to_owned(),
+                    parameters.iter().map(|value| ValueKey::of(value).owned()).collect(),
+                );
                 if let Some(found) = self.rows.get(&key) {
                     return Ok(*found);
                 }
@@ -163,24 +167,43 @@ impl Answers {
     }
 }
 
-/// A value as a hash key, by its type and bytes.
+/// A value by its type and bytes, as a hash key: two values are the same
+/// value exactly when their keys are equal. An integer and a real that
+/// compare equal are different values, which a query can tell apart.
 #[derive(Hash, PartialEq, Eq)]
-pub(crate) enum ValueKey {
+pub(crate) enum ValueKey<'a> {
     Null,
     Integer(i64),
     Real(u64),
-    Text(Vec<u8>),
-    Blob(Vec<u8>),
+    Text(Cow<'a, [u8]>),
+    Blob(Cow<'a, [u8]>),
 }
 
-impl ValueKey {
-    pub(crate) fn of(value: &SqlValue) -> Self {
+impl<'a> ValueKey<'a> {
+    /// The key of `value`, which borrows its bytes.
+    pub(crate) fn of(value: &'a SqlValue) -> Self {
         match value {
             SqlValue::Null => Self::Null,
             SqlValue::Integer(value) => Self::Integer(*value),
             SqlValue::Real(value) => Self::Real(value.to_bits()),
-            SqlValue::Text(value) => Self::Text(value.clone()),
-            SqlValue::Blob(value) => Self::Blob(value.clone()),
+            SqlValue::Text(value) => Self::Text(Cow::Borrowed(value)),
+            SqlValue::Blob(value) => Self::Blob(Cow::Borrowed(value)),
         }
+    }
+
+    /// The key with bytes of its own, to keep.
+    pub(crate) fn owned(self) -> ValueKey<'static> {
+        match self {
+            Self::Null => ValueKey::Null,
+            Self::Integer(value) => ValueKey::Integer(value),
+            Self::Real(bits) => ValueKey::Real(bits),
+            Self::Text(bytes) => ValueKey::Text(Cow::Owned(bytes.into_owned())),
+            Self::Blob(bytes) => ValueKey::Blob(Cow::Owned(bytes.into_owned())),
+        }
+    }
+
+    /// Whether `left` and `right` are the same value.
+    pub(crate) fn same(left: &SqlValue, right: &SqlValue) -> bool {
+        ValueKey::of(left) == ValueKey::of(right)
     }
 }
