@@ -8,8 +8,9 @@ fn the_walk_lists_the_held_files_of_every_subfolder() {
         std::fs::write(root.path().join(name), b"x").unwrap();
     }
     let mut listed = walk_files(root.path(), &|path| {
-        path.file_name().unwrap().to_string_lossy().starts_with("held")
-    });
+        Ok(path.file_name().unwrap().to_string_lossy().starts_with("held"))
+    })
+    .unwrap();
     listed.sort();
     let names: Vec<_> = listed
         .iter()
@@ -40,4 +41,12 @@ fn a_failure_naming_held_files_says_which_are_open() {
     let text = error.to_string();
     assert!(text.starts_with("remove store directory /stores/one: "), "{text}");
     assert!(text.ends_with("open files: /stores/one/db, /stores/one/log"), "{text}");
+}
+
+#[test]
+fn a_walk_that_cannot_read_a_file_fails_instead_of_skipping_it() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"x").unwrap();
+    let error = walk_files(root.path(), &|_| Err(io::Error::other("denied"))).unwrap_err();
+    assert_eq!(error.to_string(), "denied");
 }
