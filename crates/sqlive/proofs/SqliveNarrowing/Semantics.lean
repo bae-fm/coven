@@ -41,6 +41,10 @@ def Expr.eval (b : Bind) (sub : Subs) : Expr → Value
     | some x, some y => some (max x y)
     | _, _ => none
   | .sub q => ((sub q).head?.bind List.head?).join
+  | .coalesce l r =>
+    match l.eval b sub with
+    | some x => some x
+    | none => r.eval b sub
 
 def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
   | .cmp op l r => op.apply (l.eval b sub) (r.eval b sub)

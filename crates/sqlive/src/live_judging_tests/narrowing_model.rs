@@ -33,6 +33,8 @@ mod limit;
 mod mixed;
 #[path = "narrowing_model/nested_derived.rs"]
 mod nested_derived;
+#[path = "narrowing_model/one_of.rs"]
+mod one_of;
 #[path = "narrowing_model/or.rs"]
 mod or;
 #[path = "narrowing_model/push_down.rs"]
@@ -503,6 +505,12 @@ async fn is_edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn or_matches_lean() {
     differential("or", or::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn one_of_matches_lean() {
+    differential("one of", one_of::statement).await;
 }
 
 #[tokio::test]

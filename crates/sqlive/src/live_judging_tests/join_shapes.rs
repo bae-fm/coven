@@ -1,6 +1,6 @@
 //! Joins other than one column equal to another, each narrowing the joined
-//! table as the equality would: `IS` between two tables, and an OR whose
-//! sides each narrow the table.
+//! table as the equality would: `IS` between two tables, an OR whose sides
+//! each narrow the table, and COALESCE of several partners' values.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;
@@ -89,6 +89,27 @@ async fn an_or_with_a_side_naming_another_table_narrows_nothing_there() {
         ("UPDATE admins SET member = 1 WHERE id = 2", false),
         ("UPDATE admins SET member = 7 WHERE id = 1", true),
         ("UPDATE ops SET kind = 'y' WHERE id = 2", true),
+    ])
+    .await;
+    db.close();
+}
+
+/// A cover joined to COALESCE of the scan row's hash and a subquery's: a
+/// cover of a third hash wakes nothing, and one of either hash does.
+#[tokio::test]
+async fn a_coalesce_of_partners_narrows_by_each() {
+    let db = TestDatabase::open(
+        "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, hash TEXT);
+        CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT, url TEXT);
+        INSERT INTO scan VALUES (1,'/a',NULL),(2,'/b','h2'),(3,'/c','h3');
+        INSERT INTO covers VALUES (1,'h1','u1'),(2,'h2','u2'),(3,'h3','u3')",
+    );
+    follows(&db, "SELECT cv.url FROM scan c JOIN covers cv ON cv.hash = COALESCE(c.hash, (SELECT hash FROM scan WHERE path = '/b')) WHERE c.path = '/a' ORDER BY cv.id", vec![], &[
+        ("UPDATE covers SET url = 'v3' WHERE id = 3", false),
+        ("UPDATE covers SET url = 'v2' WHERE id = 2", true),
+        ("UPDATE scan SET hash = 'h1' WHERE id = 1", true),
+        ("UPDATE covers SET url = 'v1' WHERE id = 1", true),
+        ("UPDATE covers SET url = 'w3' WHERE id = 3", false),
     ])
     .await;
     db.close();

@@ -54,6 +54,12 @@ impl Planner<'_> {
         for part in found {
             let name = match part {
                 Part::Name(name) => name,
+                // COALESCE can return a value where the partner's columns
+                // are NULL, as for a LEFT JOIN's missing row, which no lookup
+                // finds (`scope_one_of.rs` reads a column equal to one).
+                Part::Function(name, ..) if crate::scope_one_of::picks_an_argument(name) => {
+                    return None
+                }
                 Part::Function(..) | Part::Clock => continue,
                 Part::Select(_) | Part::Subquery(_) | Part::Table | Part::Collation => return None,
             };

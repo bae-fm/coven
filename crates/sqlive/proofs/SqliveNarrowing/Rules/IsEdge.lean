@@ -52,7 +52,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     {v : Value} (hm : member.eval b sub = v) (ho : other.eval b sub = v) :
     e.HoldsIn s db f b := by
   obtain ⟨e', he', rfl, hleft⟩ := edge_facts h
-  obtain ⟨hmem, _, hn, hq, hitems, hrefs, _, _, hval⟩ := Edge.edge_facts he'
+  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval⟩ := Edge.edge_facts he'
   have hmv : cellOf (b e'.member) e'.column = v := by
     rw [hmem] at hm
     simpa [Expr.eval] using hm
@@ -67,7 +67,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     cases hb : b e'.partner with
     | none =>
       rw [other.eval_rowBind hitems hq, hb,
-        other.eval_null hrefs hq (fun _ _ _ => by simp [rowBind, cellOf])] at ho
+        other.eval_null hrefs hq hst (fun _ _ _ => by simp [rowBind, cellOf])] at ho
       cases ho
     | some r => exact ⟨r, rfl, hov r hb⟩
   | none => exact Or.inr ⟨rfl, hn, hleft, hmv, hov⟩
@@ -99,11 +99,11 @@ theorem is_edge_sound : ReadCondition.Sound readCondition where
       simp only [List.mem_append, Option.mem_toList] at he
       rcases he with he | he
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
-        obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
+        obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc).symm
       · obtain ⟨e', he', rfl, _⟩ := edge_facts he
-        obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
+        obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he'
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         exact edge_holds he rfl (hside hc)
     · cases h

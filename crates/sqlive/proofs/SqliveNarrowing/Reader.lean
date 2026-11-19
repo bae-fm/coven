@@ -28,6 +28,12 @@ theorem Expr.eval_congr (e : Expr) {b b' : Bind} {sub sub' : Subs}
       ihr (fun i c h => hb i c (by simp [Expr.refs, h]))
         (fun q h => hs q (by simp [Expr.queries, h]))]
   | sub q => simp [Expr.eval, hs q (by simp [Expr.queries])]
+  | coalesce l r ihl ihr =>
+    simp only [Expr.eval]
+    rw [ihl (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h])),
+      ihr (fun i c h => hb i c (by simp [Expr.refs, h]))
+        (fun q h => hs q (by simp [Expr.queries, h]))]
 
 theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
     (hb : ∀ i c, (i, c) ∈ cd.refs → cellOf (b i) c = cellOf (b' i) c)
@@ -102,23 +108,26 @@ theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by simp [Cond.queries, h]))]
   | not c ih => simp only [Cond.eval]; rw [ih hb hs]
 
-/-- An expression with a column and no subquery is NULL where every column
-it names is. -/
+/-- A strict expression with a column and no subquery is NULL where every
+column it names is. -/
 theorem Expr.eval_null (e : Expr) {b : Bind} {sub : Subs} (hr : e.refs ≠ [])
-    (hq : e.queries = []) (hn : ∀ i c, (i, c) ∈ e.refs → cellOf (b i) c = none) :
+    (hq : e.queries = []) (hst : e.strict = true)
+    (hn : ∀ i c, (i, c) ∈ e.refs → cellOf (b i) c = none) :
     e.eval b sub = none := by
   induction e with
   | col i c => exact hn i c (by simp [Expr.refs])
   | lit v => simp [Expr.refs] at hr
   | add l r ihl ihr | greatest l r ihl ihr =>
     simp only [Expr.queries, List.append_eq_nil_iff] at hq
+    simp only [Expr.strict, Bool.and_eq_true] at hst
     simp only [Expr.eval]
     by_cases hl : l.refs = []
     · have hr' : r.refs ≠ [] := by simpa [Expr.refs, hl] using hr
-      rw [ihr hr' hq.2 (fun i c h => hn i c (by simp [Expr.refs, h]))]
+      rw [ihr hr' hq.2 hst.2 (fun i c h => hn i c (by simp [Expr.refs, h]))]
       split <;> simp_all
-    · rw [ihl hl hq.1 (fun i c h => hn i c (by simp [Expr.refs, h]))]
+    · rw [ihl hl hq.1 hst.1 (fun i c h => hn i c (by simp [Expr.refs, h]))]
   | sub q => simp [Expr.queries] at hq
+  | coalesce l r => simp [Expr.strict] at hst
 
 /-- A condition naming one item's cells only, and no subquery, holds of a
 binding as it does of the binding where every item has that item's row. -/
@@ -172,6 +181,17 @@ def Edge.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (e : Edge) : Pro
 each of its terms true of the item's row and each of its edges holding. -/
 def Disjunction.HoldsIn (s : Statement) (db : Db) (f : Nat) (b : Bind) (d : Disjunction) : Prop :=
   ∃ side ∈ d.sides, (∀ t ∈ side.terms, t.holds (b d.item)) ∧ ∀ e ∈ side.edges, e.HoldsIn s db f b
+
+/-- What a reader that reads a condition as ORs promises: it gives no term
+and no edge, and of each OR it gives, the item is one of core `k`'s, each
+side's edges are from that item to a partner readable alone that, outside a
+subquery, isn't the item, and wherever the condition holds, one side does. -/
+def ReadCondition.Disjoins (read : ReadCondition) : Prop :=
+  ∀ {s k cd n}, read s k cd = some n → n.terms = [] ∧ n.edges = [] ∧
+    ∀ d ∈ n.ors, (s.item d.item).core = k ∧
+      (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b
 
 /-- What a reader promises of the narrowing it reads from a condition of
 core `k`: when the condition holds of a binding, with its subqueries read at

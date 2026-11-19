@@ -81,6 +81,8 @@ pub(super) enum Expr {
     /// `max(l, r)`: SQLite's scalar max, which is no aggregate.
     Greatest(Box<Expr>, Box<Expr>),
     Sub(Box<Query>),
+    /// `coalesce(l, r)`.
+    Coalesce(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone)]
@@ -384,6 +386,7 @@ impl Expr {
             Self::Add(left, right) => format!("({} + {})", left.sql(), right.sql()),
             Self::Greatest(left, right) => format!("max({}, {})", left.sql(), right.sql()),
             Self::Sub(query) => format!("({})", query.sql()),
+            Self::Coalesce(left, right) => format!("coalesce({}, {})", left.sql(), right.sql()),
         }
     }
 
@@ -394,13 +397,14 @@ impl Expr {
             Self::Add(left, right) => json!({"add": [left.json(), right.json()]}),
             Self::Greatest(left, right) => json!({"greatest": [left.json(), right.json()]}),
             Self::Sub(query) => json!({"query": query.json()}),
+            Self::Coalesce(left, right) => json!({"coalesce": [left.json(), right.json()]}),
         }
     }
 
     fn ambiguous(&self) -> bool {
         match self {
             Self::Col(..) | Self::Lit(_) => false,
-            Self::Add(left, right) | Self::Greatest(left, right) => {
+            Self::Add(left, right) | Self::Greatest(left, right) | Self::Coalesce(left, right) => {
                 left.ambiguous() || right.ambiguous()
             }
             Self::Sub(_) => true,

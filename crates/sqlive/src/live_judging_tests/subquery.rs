@@ -212,7 +212,7 @@ INSERT INTO x VALUES (1,1,'a','a'),(2,2,'b','b'),(9,9,'z','z');
 INSERT INTO y VALUES (1,1,'a','a'),(2,2,'b','b')",
     );
     for sql in [
-        "SELECT x.g FROM x WHERE x.k = (SELECT y.k FROM y UNION SELECT 5)",
+        "SELECT x.g FROM x WHERE x.k = (SELECT y.k + 1 FROM y UNION SELECT 5)",
         "SELECT x.g FROM x WHERE x.k = (SELECT max(y.k) FROM y)",
         "SELECT x.g FROM x WHERE x.k = (SELECT y.k + 1 FROM y WHERE y.id = 1)",
         "SELECT x.g FROM x WHERE x.k = (SELECT x.id)",
@@ -234,6 +234,48 @@ INSERT INTO y VALUES (1,1,'a','a'),(2,2,'b','b')",
         write(&db, "UPDATE x SET g = g || '.' WHERE id = 9");
         assert_eq!(next(&mut query).await.0, 2, "{sql}");
     }
+    db.close();
+}
+
+/// A column IN a compound narrows by each arm: a cover of a hash no arm
+/// returns wakes nothing, and one of either arm's hash does.
+#[tokio::test]
+async fn an_in_over_a_union_narrows_by_each_arm() {
+    for sql in [
+        "SELECT url FROM covers WHERE hash IN (SELECT hash FROM scan WHERE path = '/a' UNION ALL SELECT hash FROM scan WHERE path = '/b') ORDER BY id",
+        "SELECT url FROM covers WHERE hash IN (SELECT hash FROM scan WHERE path = '/a' UNION SELECT 'h2') ORDER BY id",
+    ] {
+        let db = TestDatabase::open(
+            "CREATE TABLE scan(id INTEGER PRIMARY KEY, path TEXT, hash TEXT);
+            CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT, url TEXT);
+            INSERT INTO scan VALUES (1,'/a','h1'),(2,'/b','h2'),(3,'/c','h3');
+            INSERT INTO covers VALUES (1,'h1','u1'),(2,'h2','u2'),(3,'h3','u3')",
+        );
+        follows(&db, sql, vec![], &[
+            ("UPDATE covers SET url = 'v3' WHERE id = 3", false),
+            ("UPDATE covers SET url = 'v1' WHERE id = 1", true),
+            ("UPDATE covers SET url = 'v2' WHERE id = 2", true),
+        ])
+        .await;
+        db.close();
+    }
+    // The write to `x` id 9, whose `k` no arm returns, wakes nothing.
+    let db = TestDatabase::open(
+        "CREATE TABLE x(id INTEGER PRIMARY KEY, k INTEGER, g TEXT);
+        CREATE TABLE y(id INTEGER PRIMARY KEY, k INTEGER);
+        INSERT INTO x VALUES (1,1,'a'),(5,5,'e'),(9,9,'z');
+        INSERT INTO y VALUES (1,1)",
+    );
+    follows(
+        &db,
+        "SELECT x.g FROM x WHERE x.k = (SELECT y.k FROM y UNION SELECT 5) ORDER BY x.id",
+        vec![],
+        &[
+            ("UPDATE x SET g = 'zz' WHERE id = 9", false),
+            ("UPDATE x SET g = 'aa' WHERE id = 1", true),
+        ],
+    )
+    .await;
     db.close();
 }
 

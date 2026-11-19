@@ -798,6 +798,10 @@ pub(crate) fn read_condition<'a>(
     if let Some((values, select)) = compared_subquery(condition) {
         let cores = subqueries.iter().find(|(read, _)| std::ptr::eq(*read, select));
         if let Some((_, cores)) = cores {
+            // A compound's rows are its arms' rows (`scope_one_of.rs`).
+            if let ([value], [_, _, ..]) = (&values[..], &cores[..]) {
+                return planner.compound(connection, core, value, select, cores);
+            }
             let width = values.len();
             let edges = values
                 .into_iter()
@@ -807,6 +811,14 @@ pub(crate) fn read_condition<'a>(
                 })
                 .collect();
             return Ok(Narrowing { edges, ..Narrowing::default() });
+        }
+    }
+    // A column equal to COALESCE of values narrows by each of them.
+    if let Expr::Binary(left, Operator::Equals, right) = crate::sql::unparenthesized(condition) {
+        for (member, other) in [(left, right), (right, left)] {
+            if let Some(found) = planner.coalesced(connection, core, member, other, subqueries)? {
+                return Ok(found);
+            }
         }
     }
     let mut read = Vec::new();

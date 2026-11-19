@@ -956,7 +956,14 @@ no function SQLite doesn't flag deterministic, as `random()` or an app function
 registered nondeterministic: a write's lookup evaluates it again and could get
 another answer than the query did, so such a join narrows nothing. A row value
 equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
-columns: SQLite gives it the truth of their AND, NULL included. An OR narrows a
+columns: SQLite gives it the truth of their AND, NULL included. An equality
+with COALESCE or IFNULL of such values narrows by each of them, since COALESCE
+returns one of its arguments: a value of one other table, a subquery's
+returned column or a constant. A lookup compares each value with the joined
+column's affinity, as SQLite gives it to COALESCE's value. An equality with
+any other expression that holds a COALESCE takes no values from the table it
+names: the COALESCE can give a value where that table's row is missing, as a
+LEFT JOIN's is, and no lookup finds a missing row. An OR narrows a
 table when each of its sides does, to the rows either side allows: Ben's
 import finds an artist by `a.discogs_id = t.dg OR a.id = t.dg + 100`, and an
 artist neither side names doesn't rerun it. Coven looks up each side's
@@ -1085,10 +1092,14 @@ even when that release isn't the album's first. Coven looks up the release of
 the cover, not the pick: running the pick once for each album the window shows
 would cost more as the window grows, and past 1,000 steps a lookup counts as a
 match. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
-`col IN (SELECT x.c ...)`, where the subquery is one SELECT, with no UNION or
-VALUES, whose single column is a bare column `x.c` of one of its own sources,
-and where both columns have the same affinity and compare by BINARY, as a
-join's do. A row value narrows the same way, as `(a, b) = (SELECT x.c, x.d
+`col IN (SELECT x.c ...)`, where the subquery's single column is a bare column
+`x.c` of one of its own sources, and where both columns have the same affinity
+and compare by BINARY, as a join's do. A subquery that combines SELECTs by
+UNION, INTERSECT or EXCEPT returns rows its SELECTs return, so it narrows by
+each of them when each returns such a column or a constant: `hash IN (SELECT
+hash FROM scan WHERE path = ?1 UNION ALL SELECT hash FROM scan WHERE path =
+?2)` narrows `hash` to the hashes of either path. One with VALUES narrows
+nothing. A row value narrows the same way, as `(a, b) = (SELECT x.c, x.d
 ...)` or `(a, b) IN (SELECT x.c, x.d ...)`: each pair narrows as that pair
 alone would, since the comparison holds only where every pair is equal. A
 subquery returning an expression, as `max(x.c)` or `x.c + 1`, or a
@@ -15014,6 +15025,7 @@ Write-ups explain each model and state its assumptions:
 | A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
 | An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
 | A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
+| A column equal to COALESCE of values, or equal to or IN a compound's rows, true of a binding, holds the value one argument or one arm gives | `one_of_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/OneOf.lean` | §4 |
 | An OR, true of a binding, makes one side of each OR coven reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Or.lean` | §4 |
 | `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/IsEdge.lean` | §4 |
 | A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |

@@ -62,7 +62,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
       | some pa =>
         simp only [hpa] at h
         cases member
-        case lit | add | greatest | sub => simp at h
+        case lit | add | greatest | sub | coalesce => simp at h
         case col m c =>
           simp only at h
           split at h

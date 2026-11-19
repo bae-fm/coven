@@ -16,7 +16,8 @@ them, the queries whose arms the cores are, and the conditions on each core's
 rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
 equality of each column it names with the column of that name of the leftmost
 item before it that has one, as SQLite compares them. A subquery is a query
-number, so an expression names it without nesting. A call of `max` with two
+number, so an expression names it without nesting. COALESCE of more than two
+arguments nests in its second. A call of `max` with two
 arguments is SQLite's scalar max, an expression of one row, which the aggregate
 `max` of one argument is not. A SELECT DISTINCT keeps the first of each set of
 its rows that are equal. A value is NULL or an integer, and
@@ -93,6 +94,16 @@ promise of whichever rule reads it.
   after them, and not as one of `conditionRules`. The planner keeps a
   disjunction for an item only when every partner of its sides' edges is
   placed before the item.
+- **A value that is one of several partners' values.** `one_of_sound` proves
+  that `m.c = COALESCE(a, b, ...)`, true of a binding, makes `m.c` hold the
+  value of one of the arguments, and that `m.c = (SELECT ...)` or `m.c IN
+  (SELECT ...)` over a compound makes it hold the value one arm returns in a
+  binding the arm keeps. Each argument or arm gives one side of a
+  disjunction: an edge, a subquery's edge or the column equal to a constant.
+  A COALESCE is the one expression that can be other than NULL where every
+  column it names is NULL, so an equality with any other expression over one
+  gives no edge. The rule gives disjunctions, so it is not one of
+  `conditionRules`: the model reads it before them, as sqlive does.
 - **A column compared with a subquery's value.** `subquery_edge_sound` proves
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's

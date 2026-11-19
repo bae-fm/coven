@@ -114,12 +114,8 @@ theorem mem_side_edges {read : ReadCondition} {s : Statement} {k : Nat} {side : 
 /-- The theorem: with `read` keeping the reader's promise, an OR true of a
 binding makes one side of each disjunction it reads hold: each term of the
 side true of the item's row, and each edge of it holding. -/
-theorem or_sound {read : ReadCondition} (h : read.Sound) {s : Statement} {k : Nat} {cd : Cond}
-    {n : Narrowing} (hn : readCondition read s k cd = some n) :
-    n.terms = [] ∧ n.edges = [] ∧ ∀ d ∈ n.ors, (s.item d.item).core = k ∧
-      (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
-        (e.nested = false → e.partner ≠ e.member) ∧ (s.item e.partner).readable) ∧
-      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b := by
+theorem or_sound {read : ReadCondition} (h : read.Sound) : (readCondition read).Disjoins := by
+  intro s k cd n hn
   cases cd
   case or l r =>
     simp only [readCondition, Option.some.injEq] at hn

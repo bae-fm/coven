@@ -299,6 +299,9 @@ partial def readExpr (schema : Schema) (j : Json) (k : Nat) (ctes : List (String
     pure (.greatest l (← readExpr schema r k ctes))
   else if let some q := field j "query" then
     pure (.sub (← readSelect schema q (some k) ctes))
+  else if let some (.arr #[l, r]) := field j "coalesce" then
+    let l ← readExpr schema l k ctes
+    pure (.coalesce l (← readExpr schema r k ctes))
   else lift (throw s!"unknown expression {j.compress}")
 
 partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : List (String × Json)) :

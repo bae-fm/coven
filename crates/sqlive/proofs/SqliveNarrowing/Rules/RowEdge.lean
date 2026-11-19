@@ -62,11 +62,11 @@ theorem row_edge_sound : ReadCondition.Sound readCondition where
         simp only [Cond.eval, isTrue, beq_iff_eq] at hc
         exact rowEqTruth_zip hc hpair
       rcases he with he | he
-      · obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
+      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hl hr
-      · obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
+      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact Edge.edge_holds he hr hl

@@ -595,6 +595,7 @@ proofs() {
             connection::live_judging::tests::narrowing_model::row_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::is_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::or_matches_lean \
+            connection::live_judging::tests::narrowing_model::one_of_matches_lean \
             connection::live_judging::tests::narrowing_model::subquery_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::row_subquery_edge_matches_lean \
             connection::live_judging::tests::narrowing_model::push_down_matches_lean \

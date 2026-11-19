@@ -457,7 +457,7 @@ theorem Expr.eval_of_not_bare {groupBy : List Expr} {b b' : Bind} {sub sub' : Su
   | col i c => simp [Expr.bare] at h; exact absurd h hg
   | sub q => simp [Expr.bare] at h; exact absurd h hg
   | lit _ => rfl
-  | add l r ihl ihr | greatest l r ihl ihr =>
+  | add l r ihl ihr | greatest l r ihl ihr | coalesce l r ihl ihr =>
     simp only [Expr.bare, hc, Bool.not_false, Bool.true_and, Bool.or_eq_false_iff] at h
     have hl : l.eval b sub = l.eval b' sub' := by
       by_cases hgl : l ∈ groupBy

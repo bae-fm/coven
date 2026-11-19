@@ -18,6 +18,9 @@ inductive Expr where
   | greatest (left right : Expr)
   /-- A scalar subquery: the first column of its first row, or NULL. -/
   | sub (query : Nat)
+  /-- `COALESCE(first, rest)`: `first`'s value, or `rest`'s when it is NULL.
+  A COALESCE of more arguments nests in `rest`. -/
+  | coalesce (first rest : Expr)
   deriving Repr, Inhabited, DecidableEq
 
 /-- A condition, in SQL's three-valued logic. -/
@@ -189,7 +192,7 @@ def Statement.affinity (s : Statement) (i c : Nat) : Option Affinity :=
 def Expr.refs : Expr → List (Nat × Nat)
   | .col i c => [(i, c)]
   | .lit _ => []
-  | .add l r | .greatest l r => l.refs ++ r.refs
+  | .add l r | .greatest l r | .coalesce l r => l.refs ++ r.refs
   | .sub _ => []
 
 /-- The items `e` names, in order, with repeats. -/
@@ -198,8 +201,16 @@ def Expr.items (e : Expr) : List Nat := e.refs.map (·.1)
 /-- The subqueries `e` holds. -/
 def Expr.queries : Expr → List Nat
   | .col .. | .lit _ => []
-  | .add l r | .greatest l r => l.queries ++ r.queries
+  | .add l r | .greatest l r | .coalesce l r => l.queries ++ r.queries
   | .sub q => [q]
+
+/-- Whether `e` is NULL wherever every column it names is NULL and its
+subqueries return NULL: every expression but COALESCE, which returns a later
+argument where an earlier one is NULL. -/
+def Expr.strict : Expr → Bool
+  | .col .. | .lit _ | .sub _ => true
+  | .add l r | .greatest l r => l.strict && r.strict
+  | .coalesce .. => false
 
 def Cond.refs : Cond → List (Nat × Nat)
   | .cmp _ l r => l.refs ++ r.refs

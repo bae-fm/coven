@@ -7,7 +7,10 @@ some row of the other holds, in its own scope (`Planner::edge_between`).
 The member is a column sqlive narrows by; the partner is readable alone,
 since a write's lookup reads it alone; a bare partner column has the
 member's affinity, and one written first has an affinity at all, so the
-equality compares by BINARY. Both directions of `a.x = b.y` are read. -/
+equality compares by BINARY. An expression partner is strict, NULL where
+the partner's columns are, so a missing partner row gives no value: a
+COALESCE gives none (`OneOf` reads a column equal to one). Both directions of
+`a.x = b.y` are read. -/
 namespace SqliveNarrowing.Edge
 
 /-- The edge `member = other` gives, written in core `k`, with `other` first
@@ -18,7 +21,7 @@ def edge (s : Statement) (k : Nat) (member other : Expr) (first : Bool) : Option
   let affinity ← s.affinity m c
   if !other.queries.isEmpty then none
   let p ← other.items.head?
-  if !other.items.all (· = p) ∨ p = m ∨ !(s.item p).readable then none
+  if !other.items.all (· = p) ∨ p = m ∨ !(s.item p).readable ∨ !other.strict then none
   let value ← match other with
     | .col _ pc =>
       match s.affinity p pc with
@@ -43,11 +46,11 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     (h : edge s k member other first = some e) :
     member = .col e.member e.column ∧ (s.item e.member).core = k ∧ e.nested = false ∧
     other.queries = [] ∧ (∀ j ∈ other.items, j = e.partner) ∧ other.refs ≠ [] ∧
-    e.partner ≠ e.member ∧ (s.item e.partner).readable ∧
+    other.strict = true ∧ e.partner ≠ e.member ∧ (s.item e.partner).readable ∧
     ∀ r, e.value.eval r = other.eval (rowBind (some r)) noSubs := by
   unfold edge at h
   cases member
-  case lit | add | greatest | sub => simp at h
+  case lit | add | greatest | sub | coalesce => simp at h
   case col m c =>
     simp only [bind, Option.bind] at h
     split at h
@@ -76,13 +79,14 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
         have hrefs : other.refs ≠ [] := by
           intro hnil
           simp [Expr.items, hnil] at hp
-        have hread : (s.item p).readable = true := by simpa using hbad.2.2
+        have hread : (s.item p).readable = true := by simpa using hbad.2.2.1
+        have hstrict : other.strict = true := by simpa using hbad.2.2.2
         split at h
         · rename_i j pc
           split at h
           · split at h
             · cases h
-              refine ⟨rfl, hk', rfl, hq, hitems, hrefs, hbad.2.1, hread, ?_⟩
+              refine ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, ?_⟩
               intro r
               have : j = p := hitems j (by simp [Expr.items, Expr.refs])
               subst this
@@ -91,16 +95,16 @@ theorem edge_facts {s : Statement} {k : Nat} {member other : Expr} {first : Bool
           · split at h
             · cases h
             · cases h
-              exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hbad.2.1, hread, fun r => rfl⟩
+              exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl⟩
         · cases h
-          exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hbad.2.1, hread, fun r => rfl⟩
+          exact ⟨rfl, hk', rfl, hq, hitems, hrefs, hstrict, hbad.2.1, hread, fun r => rfl⟩
 
 /-- An edge holds of a binding where its member equals its partner's value. -/
 theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool} {e : Edge}
     (h : edge s k member other first = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs}
     {x : Int} (hm : member.eval b sub = some x) (ho : other.eval b sub = some x) :
     e.HoldsIn s db f b := by
-  obtain ⟨hmem, _, hn, hq, hitems, hrefs, _, _, hval⟩ := edge_facts h
+  obtain ⟨hmem, _, hn, hq, hitems, hrefs, hst, _, _, hval⟩ := edge_facts h
   refine Or.inl ⟨x, ?_, ?_⟩
   · rw [hmem] at hm
     simpa [Expr.eval] using hm
@@ -108,7 +112,7 @@ theorem edge_holds {s : Statement} {k : Nat} {member other : Expr} {first : Bool
     rw [other.eval_rowBind hitems hq] at ho
     cases hb : b e.partner with
     | none =>
-      rw [hb, other.eval_null hrefs hq (fun _ _ _ => by simp [rowBind, cellOf])] at ho
+      rw [hb, other.eval_null hrefs hq hst (fun _ _ _ => by simp [rowBind, cellOf])] at ho
       cases ho
     | some r => exact ⟨r, rfl, by rw [hval, ← hb, ho]⟩
 
@@ -140,11 +144,11 @@ theorem edge_sound : ReadCondition.Sound readCondition where
           simp_all [Op.apply, Op.compare]
       simp only [List.mem_append, Option.mem_toList] at he
       rcases he with he | he
-      · obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := edge_facts he
+      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hl hr
-      · obtain ⟨_, hk, _, _, _, _, hne, hread, _⟩ := edge_facts he
+      · obtain ⟨_, hk, _, _, _, _, _, hne, hread, _⟩ := edge_facts he
         refine ⟨hk, fun _ => hne, hread, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
         exact edge_holds he hr hl
