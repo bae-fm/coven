@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 
 use crate::syntax::{is_test_only, RustFile};
 
-/// Each file's module paths. A file two crate roots declare, such as an
-/// example's `mod shared;` in two examples, is one module in each root's
-/// crate, so it has one path per root, as that root reaches it. The rules pass
-/// production code (`test_code::production_code`), which holds no test-only
-/// file or module declaration, so every path is a production module's.
+/// Each file's module paths. A file two crate roots declare, such as the
+/// file of `mod shared;` in two binaries or two examples, is one module in
+/// each root's crate, so it has one path per root, as that root reaches it.
+/// The files are production code (`test_code::production_code`) for most
+/// rules, and test code too where a rule resolves the names tests use
+/// (`CrateCode::whole`).
 pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<Vec<String>>> {
     let sources =
         files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
