@@ -50,20 +50,20 @@
 //! When the parser can't read the statement or a view it reads, the columns
 //! are unknown, and every column of every table counts as read.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::{declared_columns, main_object, read_view, MAIN_TABLES, ROWID_NAMES};
+use crate::schema_objects::{declared_columns, MAIN_TABLES, ROWID_NAMES};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{
-    aggregate_call, order_term, parts, parts_outside, window_call, window_parts, AggregateCall,
-    Functions, OrderTerm, Part,
+    aggregate_call, order_term, parts, parts_outside, window_call, AggregateCall, Functions,
+    OrderTerm, Part,
 };
+use crate::sql_walk::{Reads, Scope, Visit, Walk, Within};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
     As, CompoundOperator, Distinctness, Expr, FromClause, JoinConstraint, JoinOperator, JoinType,
-    Name, OneSelect, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn,
-    WindowDef,
+    Name, OneSelect, Over, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
 };
 
 /// The columns a statement's rows depend on beyond those the authorizer
@@ -113,215 +113,91 @@ pub(crate) fn unreported_columns(
     functions: &Functions,
     select: &Select<'_>,
 ) -> rusqlite::Result<UnreportedColumns> {
-    let mut walk = Walk {
-        connection,
-        functions,
-        views: BTreeMap::new(),
-        ctes: Vec::new(),
-        defined: Vec::new(),
-        within: None,
-        picked: Vec::new(),
-        found: Vec::new(),
-        unread: None,
-    };
+    let found = Found { connection, functions, picked: Vec::new(), found: Vec::new() };
+    let mut walk = Walk::new(connection, found);
     let reads = walk.select(select, false)?;
-    if let Some(why) = walk.unread {
-        return UnreportedColumns::unknown(connection, why);
+    if let Some(why) = walk.scope.unread() {
+        return UnreportedColumns::unknown(connection, why.to_owned());
     }
-    let run = walk.run(&reads);
+    let run = walk.scope.run(&reads);
     let counts =
         |within: &Option<Within>| within.as_ref().is_none_or(|within| run.contains(within));
     let mut found: ColumnSet = walk
+        .visit
         .found
         .iter()
         .filter(|(within, _)| counts(within))
         .map(|(_, column)| column.clone())
         .collect();
     let mut picked = BTreeSet::new();
-    for (_, reads) in walk.picked.iter().filter(|(within, _)| counts(within)) {
-        picked.extend(walk.tables(reads));
+    for (_, reads) in walk.visit.picked.iter().filter(|(within, _)| counts(within)) {
+        picked.extend(walk.scope.tables(reads));
     }
     for table in picked {
-        for column in walk.columns(&table)? {
+        for column in walk.visit.columns(&table)? {
             found.insert((table.to_ascii_lowercase(), column));
         }
     }
     Ok(UnreportedColumns::Known(found))
 }
 
-/// The CTE or view whose SQL the walk is reading, the innermost one: what
-/// the walk finds there counts only when the statement runs it.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Within {
-    /// A CTE, by its place in `Walk::defined`.
-    Cte(usize),
-    /// A view, by its name, lowercase.
-    View(String),
-}
-
-/// The tables a query reads, in its FROM, in the views it reads and in the
-/// queries inside it, and the CTEs it reads, whose own tables count too.
-#[derive(Clone, Default)]
-struct Reads {
-    /// Tables of the main schema, by their stored names.
-    tables: BTreeSet<String>,
-    /// CTEs, by their places in `Walk::defined`.
-    ctes: BTreeSet<usize>,
-    /// Views, by their names, lowercase, whose tables `tables` holds.
-    views: BTreeSet<String>,
-}
-
-impl Reads {
-    fn extend(&mut self, other: Self) {
-        self.tables.extend(other.tables);
-        self.ctes.extend(other.ctes);
-        self.views.extend(other.views);
-    }
-}
-
-struct Walk<'c> {
+/// What the walk finds of the columns the authorizer doesn't report, each
+/// with the CTE or view whose SQL holds it: what the walk finds there
+/// counts only when the statement runs it.
+struct Found<'c> {
     connection: &'c Connection,
     /// The connection's functions, which tell an aggregate call from a
     /// scalar one.
     functions: &'c Functions,
-    /// What each view read so far reads, by its name, lowercase, so a view
-    /// read twice is read once.
-    views: BTreeMap<String, Reads>,
-    /// The CTEs where the walk is: each one's name, lowercase, which a FROM
-    /// item's name means before any table or view of that name, and its place
-    /// in `defined`.
-    ctes: Vec<(String, usize)>,
-    /// What each CTE the walk has met reads. A CTE can name another defined
-    /// after it in the same WITH, so the walk reads every CTE's SELECT before
-    /// it follows the CTEs a query names.
-    defined: Vec<Reads>,
-    /// The CTE or view whose SQL the walk is reading now.
-    within: Option<Within>,
     /// What each query whose rows SQLite picks reads, and where it is.
     picked: Vec<(Option<Within>, Reads)>,
     /// The columns USING and NATURAL joins compare, and where each join is.
     found: Vec<(Option<Within>, (String, String))>,
-    /// Why the parser couldn't read a view the statement reads.
-    unread: Option<String>,
 }
 
-impl Walk<'_> {
-    /// Read `select`, a subquery whose first row an expression takes when
-    /// `first_row`, and note it when SQLite picks its rows.
-    fn select(&mut self, select: &Select<'_>, first_row: bool) -> rusqlite::Result<Reads> {
-        let outer = self.ctes.len();
-        let ctes = select.with.iter().flat_map(|with| with.ctes.iter());
-        for cte in ctes.clone() {
-            let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
-            self.ctes.push((name, self.defined.len()));
-            self.defined.push(Reads::default());
-        }
-        for (position, cte) in ctes.enumerate() {
-            let place = self.ctes[outer + position].1;
-            let around = self.within.replace(Within::Cte(place));
-            let reads = self.select(cte.select, false);
-            self.within = around;
-            self.defined[place] = reads?;
-        }
-        let mut reads = Reads::default();
-        // A compound's ORDER BY sorts by its result columns; a single
-        // SELECT's can name its core's columns too.
-        let order_by = match select.body.compounds {
-            None => select.order_by.unwrap_or_default(),
-            Some(_) => &[],
-        };
-        let arms = std::iter::once(&select.body.select)
-            .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
-        for arm in arms {
-            reads.extend(self.core(arm, order_by)?);
-        }
-        for term in select.order_by.iter().flat_map(|terms| terms.iter()) {
-            reads.extend(self.expr(&term.expr)?);
-        }
-        if let Some(limit) = select.limit {
-            reads.extend(self.expr(&limit.expr)?);
-            if let Some(offset) = &limit.offset {
-                reads.extend(self.expr(offset)?);
-            }
-        }
-        if (select.limit.is_some() || first_row) && !self.fully_orders(select)?
-            || self.compound_follows_order(select)?
+impl Visit for Found<'_> {
+    /// Note `select` when SQLite picks its rows.
+    fn select(
+        &mut self,
+        scope: &Scope<'_>,
+        select: &Select<'_>,
+        first_row: bool,
+        reads: &Reads,
+    ) -> rusqlite::Result<()> {
+        if (select.limit.is_some() || first_row) && !self.fully_orders(scope, select)?
+            || self.compound_follows_order(scope, select)?
         {
-            self.picked.push((self.within.clone(), reads.clone()));
+            self.picked.push((scope.within(), reads.clone()));
         }
-        self.ctes.truncate(outer);
-        Ok(reads)
+        Ok(())
     }
 
-    /// Read one core, sorted by `order_by` when it is the query's only one,
-    /// and note it when its rows follow the order SQLite reads its rows in.
+    /// Note `core` when its rows follow the order SQLite reads its rows in.
     fn core(
         &mut self,
+        scope: &Scope<'_>,
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
-    ) -> rusqlite::Result<Reads> {
-        let mut reads = Reads::default();
-        match core {
-            OneSelect::Values(rows) => {
-                for expr in rows.iter().flat_map(|row| row.iter()) {
-                    reads.extend(self.expr(expr)?);
-                }
-            }
-            OneSelect::Select {
-                columns,
-                from,
-                where_clause,
-                group_by,
-                having,
-                window_clause,
-                ..
-            } => {
-                for column in columns.iter() {
-                    if let ResultColumn::Expr(expr, _) = column {
-                        reads.extend(self.expr(expr)?);
-                    }
-                }
-                if let Some(from) = from {
-                    reads.extend(self.from(from)?);
-                }
-                for expr in where_clause.iter().copied().chain(having.iter().copied()) {
-                    reads.extend(self.expr(expr)?);
-                }
-                for expr in group_by.iter().flat_map(|exprs| exprs.iter()) {
-                    reads.extend(self.expr(expr)?);
-                }
-                let mut found = Vec::new();
-                for definition in window_clause.iter().flat_map(|windows| windows.iter()) {
-                    window_parts(&definition.window, &mut found);
-                }
-                reads.extend(self.selects(&found)?);
-                if self.follows_order(core, order_by)? || self.distinct_follows_order(core)? {
-                    self.picked.push((self.within.clone(), reads.clone()));
-                }
-            }
+        reads: &Reads,
+    ) -> rusqlite::Result<()> {
+        if self.follows_order(scope, core, order_by)? || self.distinct_follows_order(scope, core)? {
+            self.picked.push((scope.within(), reads.clone()));
         }
-        Ok(reads)
+        Ok(())
     }
 
-    /// Each FROM item, then each USING or NATURAL join's columns: a USING
-    /// column of the joined table and of the leftmost item before the join
-    /// that has it, which SQLite compares it with, and every column of each
-    /// table before the join or joined for a NATURAL join, which compares the
-    /// columns the two sides share.
-    fn from(&mut self, from: &FromClause<'_>) -> rusqlite::Result<Reads> {
-        let items: Vec<&SelectTable<'_>> = from
-            .select
-            .into_iter()
-            .chain(from.joins.iter().flatten().map(|join| &join.table))
-            .collect();
-        let mut reads = Reads::default();
-        for item in &items {
-            reads.extend(self.item(item)?);
-        }
+    /// Each USING or NATURAL join's columns: a USING column of the joined
+    /// table and of the leftmost item before the join that has it, which
+    /// SQLite compares it with, and every column of each table before the
+    /// join or joined for a NATURAL join, which compares the columns the two
+    /// sides share.
+    fn from(
+        &mut self,
+        scope: &Scope<'_>,
+        from: &FromClause<'_>,
+        items: &[&SelectTable<'_>],
+    ) -> rusqlite::Result<()> {
         for (position, join) in from.joins.iter().flatten().enumerate() {
-            if let Some(JoinConstraint::On(expr)) = &join.constraint {
-                reads.extend(self.expr(expr)?);
-            }
             // The items before the join's own, which sits after the first.
             let (before, joined) = (&items[..=position], items[position + 1]);
             if matches!(
@@ -329,10 +205,9 @@ impl Walk<'_> {
                 JoinOperator::TypedJoin(Some(kind)) if kind.contains(JoinType::NATURAL)
             ) {
                 for item in before.iter().chain([&joined]) {
-                    if let Some((table, columns)) = self.table(item)? {
+                    if let Some((table, columns)) = self.table(scope, item)? {
                         for column in columns {
-                            self.found
-                                .push((self.within.clone(), (table.to_ascii_lowercase(), column)));
+                            self.found.push((scope.within(), (table.to_ascii_lowercase(), column)));
                         }
                     }
                 }
@@ -341,15 +216,15 @@ impl Walk<'_> {
             let Some(JoinConstraint::Using(names)) = &join.constraint else { continue };
             for name in names.iter() {
                 let column = crate::sql::name(name.0).to_ascii_lowercase();
-                self.table_column(joined, &column)?;
+                self.table_column(scope, joined, &column)?;
                 // Past an item whose columns this doesn't know, any table
                 // after it could be the one compared.
                 let mut known = true;
                 for item in before {
-                    match self.has_column(item, &column)? {
+                    match self.has_column(scope, item, &column)? {
                         Some(false) => {}
                         Some(true) => {
-                            self.table_column(item, &column)?;
+                            self.table_column(scope, item, &column)?;
                             if known {
                                 break;
                             }
@@ -359,23 +234,34 @@ impl Walk<'_> {
                 }
             }
         }
-        Ok(reads)
+        Ok(())
     }
+}
 
+impl Found<'_> {
     /// The table `item` reads directly, and its columns, lowercase.
-    fn table(&self, item: &SelectTable<'_>) -> rusqlite::Result<Option<(String, Vec<String>)>> {
+    fn table(
+        &self,
+        scope: &Scope<'_>,
+        item: &SelectTable<'_>,
+    ) -> rusqlite::Result<Option<(String, Vec<String>)>> {
         let SelectTable::Table(name, ..) = item else { return Ok(None) };
-        let Some(table) = self.object(name, &["table"])? else { return Ok(None) };
+        let Some(table) = scope.object(name, &["table"])? else { return Ok(None) };
         let columns = self.columns(&table)?;
         Ok(Some((table, columns)))
     }
 
     /// Count `column` of the table `item` reads directly, when it has one.
-    fn table_column(&mut self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<()> {
-        if let Some((table, columns)) = self.table(item)? {
+    fn table_column(
+        &mut self,
+        scope: &Scope<'_>,
+        item: &SelectTable<'_>,
+        column: &str,
+    ) -> rusqlite::Result<()> {
+        if let Some((table, columns)) = self.table(scope, item)? {
             if columns.iter().any(|found| found == column) {
                 let column = (table.to_ascii_lowercase(), column.to_owned());
-                self.found.push((self.within.clone(), column));
+                self.found.push((scope.within(), column));
             }
         }
         Ok(())
@@ -384,10 +270,15 @@ impl Walk<'_> {
     /// Whether `item` has a column named `column`, when this knows: a table
     /// or a view of the main schema, or a subquery whose result columns
     /// SQLite names by their aliases or the columns they name.
-    fn has_column(&self, item: &SelectTable<'_>, column: &str) -> rusqlite::Result<Option<bool>> {
+    fn has_column(
+        &self,
+        scope: &Scope<'_>,
+        item: &SelectTable<'_>,
+        column: &str,
+    ) -> rusqlite::Result<Option<bool>> {
         let names = match item {
             SelectTable::Table(name, ..) => {
-                let Some(object) = self.object(name, &["table", "view"])? else {
+                let Some(object) = scope.object(name, &["table", "view"])? else {
                     return Ok(None);
                 };
                 self.columns(&object)?
@@ -401,130 +292,13 @@ impl Walk<'_> {
         Ok(Some(names.iter().any(|found| found == column)))
     }
 
-    fn item(&mut self, item: &SelectTable<'_>) -> rusqlite::Result<Reads> {
-        match item {
-            SelectTable::Table(name, ..) => {
-                if let Some(place) = self.cte(name) {
-                    return Ok(Reads { ctes: BTreeSet::from([place]), ..Reads::default() });
-                }
-                let view = match self.main(name)? {
-                    Some((table, kind)) if kind == "table" => {
-                        return Ok(Reads { tables: BTreeSet::from([table]), ..Reads::default() });
-                    }
-                    Some((view, _)) => view,
-                    None => return Ok(Reads::default()),
-                };
-                let name = view.to_ascii_lowercase();
-                if let Some(reads) = self.views.get(&name) {
-                    return Ok(reads.clone());
-                }
-                let connection = self.connection;
-                // A view's SELECT names no CTE of the statement.
-                let ctes = std::mem::take(&mut self.ctes);
-                let around = self.within.replace(Within::View(name.clone()));
-                let read = read_view(connection, &view, |_, select| self.select(select, false));
-                self.within = around;
-                self.ctes = ctes;
-                match read? {
-                    Ok(mut reads) => {
-                        reads.views.insert(name.clone());
-                        self.views.insert(name, reads.clone());
-                        Ok(reads)
-                    }
-                    Err(why) => {
-                        self.unread.get_or_insert(why);
-                        Ok(Reads::default())
-                    }
-                }
-            }
-            SelectTable::TableCall(_, args, _) => {
-                let mut reads = Reads::default();
-                for arg in args.iter().flat_map(|args| args.iter()) {
-                    reads.extend(self.expr(arg)?);
-                }
-                Ok(reads)
-            }
-            SelectTable::Select(select, _) => self.select(select, false),
-            SelectTable::Sub(from, _) => self.from(from),
-        }
-    }
-
-    fn expr(&mut self, expr: &Expr<'_>) -> rusqlite::Result<Reads> {
-        let mut found = Vec::new();
-        parts(expr, &mut found);
-        self.selects(&found)
-    }
-
-    fn selects(&mut self, found: &[Part<'_>]) -> rusqlite::Result<Reads> {
-        let mut reads = Reads::default();
-        for part in found {
-            match part {
-                Part::Select(select) => reads.extend(self.select(select, false)?),
-                Part::Subquery(select) => reads.extend(self.select(select, true)?),
-                _ => {}
-            }
-        }
-        Ok(reads)
-    }
-
-    /// The place in `defined` of the CTE that `name` names where the walk
-    /// is, the innermost of that name.
-    fn cte(&self, name: &QualifiedName<'_>) -> Option<usize> {
-        if name.db_name.is_some() {
-            return None;
-        }
-        self.ctes.iter().rev().find(|(cte, _)| name.name == cte.as_str()).map(|(_, place)| *place)
-    }
-
-    /// The CTEs and views a query that reads `reads` runs: those it reads,
-    /// and those each of them reads.
-    fn run(&self, reads: &Reads) -> BTreeSet<Within> {
-        let mut run = BTreeSet::new();
-        let mut waiting: Vec<Within> = reads
-            .ctes
-            .iter()
-            .map(|place| Within::Cte(*place))
-            .chain(reads.views.iter().map(|view| Within::View(view.clone())))
-            .collect();
-        while let Some(within) = waiting.pop() {
-            if run.contains(&within) {
-                continue;
-            }
-            let read = match &within {
-                Within::Cte(place) => &self.defined[*place],
-                Within::View(view) => &self.views[view],
-            };
-            waiting.extend(read.ctes.iter().map(|place| Within::Cte(*place)));
-            waiting.extend(read.views.iter().map(|view| Within::View(view.clone())));
-            run.insert(within);
-        }
-        run
-    }
-
-    /// The tables `reads` reads, with those of the CTEs it reads and of the
-    /// CTEs those read.
-    fn tables(&self, reads: &Reads) -> BTreeSet<String> {
-        let mut tables = reads.tables.clone();
-        let mut followed = BTreeSet::new();
-        let mut waiting: Vec<usize> = reads.ctes.iter().copied().collect();
-        while let Some(place) = waiting.pop() {
-            if !followed.insert(place) {
-                continue;
-            }
-            let cte = &self.defined[place];
-            tables.extend(cte.tables.iter().cloned());
-            waiting.extend(cte.ctes.iter().copied());
-        }
-        tables
-    }
-
     /// Whether `select`'s ORDER BY tells every two of its rows apart. The
     /// query is one SELECT, and either it calls an aggregate function in its
     /// result columns with no GROUP BY and no window, so it returns one row,
     /// or it has no DISTINCT, neither groups nor calls an aggregate or window
     /// function, each of its FROM items is a table of the main schema, and
     /// its ORDER BY sorts by the rowid of each one.
-    fn fully_orders(&self, select: &Select<'_>) -> rusqlite::Result<bool> {
+    fn fully_orders(&self, scope: &Scope<'_>, select: &Select<'_>) -> rusqlite::Result<bool> {
         if select.body.compounds.is_some() {
             return Ok(false);
         }
@@ -562,7 +336,7 @@ impl Walk<'_> {
         {
             return Ok(false);
         }
-        let Some(items) = self.table_items(from.as_ref())? else { return Ok(false) };
+        let Some(items) = self.table_items(scope, from.as_ref())? else { return Ok(false) };
         let mut sorted = Vec::new();
         for term in order_by {
             sorted.push(match order_term(columns, &term.expr) {
@@ -579,11 +353,15 @@ impl Walk<'_> {
     /// compare equal, the one SQLite reads first, and one of its result
     /// columns can hold values that compare equal and differ: it is no column
     /// whose equal values are the same (`returns_exactly`).
-    fn distinct_follows_order(&self, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
+    fn distinct_follows_order(
+        &self,
+        scope: &Scope<'_>,
+        core: &OneSelect<'_>,
+    ) -> rusqlite::Result<bool> {
         let OneSelect::Select { distinctness: Some(Distinctness::Distinct), .. } = core else {
             return Ok(false);
         };
-        Ok(!self.returns_exactly(core)?)
+        Ok(!self.returns_exactly(scope, core)?)
     }
 
     /// Whether `select` combines its arms by UNION, INTERSECT or EXCEPT, which
@@ -591,7 +369,11 @@ impl Walk<'_> {
     /// SQLite reads them in decides, and a result column of an arm can hold
     /// values that compare equal and differ: it is no column whose equal values
     /// are the same (`returns_exactly`).
-    fn compound_follows_order(&self, select: &Select<'_>) -> rusqlite::Result<bool> {
+    fn compound_follows_order(
+        &self,
+        scope: &Scope<'_>,
+        select: &Select<'_>,
+    ) -> rusqlite::Result<bool> {
         let Some(compounds) = &select.body.compounds else { return Ok(false) };
         if compounds.iter().all(|compound| compound.operator == CompoundOperator::UnionAll) {
             return Ok(false);
@@ -599,7 +381,7 @@ impl Walk<'_> {
         let arms = std::iter::once(&select.body.select)
             .chain(compounds.iter().map(|compound| &compound.select));
         for arm in arms {
-            if !self.returns_exactly(arm)? {
+            if !self.returns_exactly(scope, arm)? {
                 return Ok(true);
             }
         }
@@ -609,9 +391,9 @@ impl Walk<'_> {
     /// Whether each result column of `core` is a column whose equal values
     /// are the same (`compares_exactly`) of one of its FROM items, each a
     /// table.
-    fn returns_exactly(&self, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
+    fn returns_exactly(&self, scope: &Scope<'_>, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
         let OneSelect::Select { columns, from, .. } = core else { return Ok(false) };
-        let Some(items) = self.table_items(from.as_ref())? else { return Ok(false) };
+        let Some(items) = self.table_items(scope, from.as_ref())? else { return Ok(false) };
         for column in columns.iter() {
             let ResultColumn::Expr(expr, _) = column else { return Ok(false) };
             if !self.compares_exactly(&items, expr)? {
@@ -625,6 +407,7 @@ impl Walk<'_> {
     /// columns by, with its table, when each is a table of the main schema.
     fn table_items<'a>(
         &self,
+        scope: &Scope<'_>,
         from: Option<&'a FromClause<'a>>,
     ) -> rusqlite::Result<Option<Vec<(&'a str, String)>>> {
         let mut items = Vec::new();
@@ -634,7 +417,7 @@ impl Walk<'_> {
         for item in listed {
             let SelectTable::Table(name, alias, _) = item else { return Ok(None) };
             // A CTE's name names no table (`main`).
-            let Some(table) = self.object(name, &["table"])? else { return Ok(None) };
+            let Some(table) = scope.object(name, &["table"])? else { return Ok(None) };
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0,
                 None => name.name.0,
@@ -686,6 +469,7 @@ impl Walk<'_> {
     /// of the core's FROM items, each a table.
     fn follows_order(
         &self,
+        scope: &Scope<'_>,
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
     ) -> rusqlite::Result<bool> {
@@ -746,7 +530,7 @@ impl Walk<'_> {
         let windows: Vec<&Over<'_>> = stopped.iter().filter_map(|expr| window_call(expr)).collect();
         let calls: Vec<AggregateCall<'_>> =
             stopped.into_iter().filter_map(|expr| aggregate_call(expr, self.functions)).collect();
-        let items = self.table_items(from.as_ref())?;
+        let items = self.table_items(scope, from.as_ref())?;
         // A window numbers or reads the rows of each partition in the order
         // its ORDER BY sorts them, and among those that sort the same in the
         // order SQLite reads them; in a core that aggregates, it reads the
@@ -893,28 +677,6 @@ impl Walk<'_> {
             )?
             .query_row([table], |row| row.get(0))?;
         Ok(!indexed && matches!(&keys[..], [key] if key.eq_ignore_ascii_case(column)))
-    }
-
-    /// The stored name of the main schema's object that `name` names, when
-    /// its type is one of `kinds`, `table` or `view`.
-    fn object(&self, name: &QualifiedName<'_>, kinds: &[&str]) -> rusqlite::Result<Option<String>> {
-        Ok(self
-            .main(name)?
-            .filter(|(_, found)| kinds.contains(&found.as_str()))
-            .map(|(stored, _)| stored))
-    }
-
-    /// The stored name and the type, `table` or `view`, of the main schema's
-    /// object that `name` names. A name of another schema reads no table of
-    /// the app's, and a CTE's name none of the schema's objects.
-    fn main(&self, name: &QualifiedName<'_>) -> rusqlite::Result<Option<(String, String)>> {
-        if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
-            return Ok(None);
-        }
-        if self.cte(name).is_some() {
-            return Ok(None);
-        }
-        main_object(self.connection, &name.name)
     }
 
     /// A table's columns, lowercase.

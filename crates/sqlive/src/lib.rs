@@ -57,6 +57,7 @@ mod select_syntax;
 mod snapshot_values;
 pub mod sql;
 mod sql_value;
+mod sql_walk;
 mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
