@@ -15126,6 +15126,7 @@ Write-ups explain each model and state its assumptions:
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
 | A write the judge lets pass leaves each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
+| A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
 
 ## Appendix H. Errors and statuses

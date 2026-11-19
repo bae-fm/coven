@@ -264,7 +264,12 @@ other statement, the steps still to prove show that the rows that pass the
 scopes decide the statement's rows. A row a scope leaves out fails a condition
 that every binding the statement keeps meets, so removing it changes no
 binding. A join's lookup finds its partner's row, because that row passes its
-own scope and so the write left its slot unchanged. The planner's state keeps
+own scope and so the write left its slot unchanged. For a derived partner,
+[Fuel.lean](../../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean) proves part
+of this already: `evalQuery_fuel` proves that a well-formed statement's query
+returns the same rows with any fuel past its number, and `lookupRows_derived`
+that a lookup of a derived item whose arms sit in no core reads the rows the
+statement reads of it. The planner's state keeps
 each term and edge tied to the condition it came from, through every step that
 holds back, carries or passes it on. Under a LIMIT, the sorted item's scope
 keeps every row that sorts at or before the last row, so `limit_sound` and

@@ -38,3 +38,5 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Writes.unjudged
 #print axioms SqliveNarrowing.unjudged_rows
 #print axioms SqliveNarrowing.whole_narrowing_sound
+#print axioms SqliveNarrowing.evalQuery_fuel
+#print axioms SqliveNarrowing.lookupRows_derived

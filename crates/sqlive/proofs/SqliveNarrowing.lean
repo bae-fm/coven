@@ -13,3 +13,4 @@ import SqliveNarrowing.Rules.Pick
 import SqliveNarrowing.WellFormed
 import SqliveNarrowing.Mask
 import SqliveNarrowing.Unjudged
+import SqliveNarrowing.Fuel
