@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
-use crate::database_boundary::RAW_SQLITE_HANDLES;
 use crate::finding::Finding;
 use crate::made_here::{callback_argument_made_here, returns_made_here};
 use crate::owner_graph::OwnerGraph;
@@ -95,6 +94,10 @@ impl OwnerMethod {
     }
 }
 
+/// rusqlite's raw handles, by name: no callable of the database's homes
+/// returns one, and none reachable outside its crate takes one.
+const RAW_SQLITE_HANDLES: [&str; 3] = ["Connection", "Session", "Transaction"];
+
 pub(crate) fn find_owner_dependency_leaks(
     files: &[RustFile],
     policy: &Policy,
@@ -106,7 +109,7 @@ pub(crate) fn find_owner_dependency_leaks(
     // (`type_identity.rs`).
     let raw = RAW_SQLITE_HANDLES
         .iter()
-        .map(|(name, _)| {
+        .map(|name| {
             if graph.types.contains_key(*name) {
                 format!("rusqlite::{name}")
             } else {

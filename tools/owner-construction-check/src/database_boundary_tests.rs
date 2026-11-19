@@ -9,105 +9,12 @@ fn policy() -> Policy {
         capability = "SQLite"
         schema = "crates/app-database/src/schema.rs"
         table_macros = ["app_tables", "app_audience_tables"]
-        rusqlite_reexport = "app-database"
 
         [[capabilities]]
         name = "SQLite"
         homes = ["crates/app-database/src/"]
         "#,
     )
-}
-
-fn kinds(path: &str, source: &str) -> BTreeSet<String> {
-    let policy = policy();
-    find_database_boundary_violations(
-        &CrateCode::fixture(&[RustFile::fixture(path, source)], &[], &policy),
-        &policy,
-    )
-    .into_iter()
-    .map(|violation| {
-        violation.message.trim_end_matches(" is confined to crates/app-database/src/").to_string()
-    })
-    .collect()
-}
-
-#[test]
-fn sqlite_connection_is_rejected_outside_the_database_crate() {
-    assert_eq!(
-        kinds(
-            "crates/app-sync/src/leak.rs",
-            r#"
-            use rusqlite::Connection;
-            fn leak(conn: &Connection) { conn.execute("DELETE FROM notes", []).unwrap(); }
-            "#,
-        ),
-        BTreeSet::from(["raw SQLite connection".to_string()]),
-    );
-}
-
-/// The API re-exports the database crate's `rusqlite` so a host can name the
-/// types its own SQL uses. That path names the database crate, not SQLite.
-#[test]
-fn the_apis_reexport_of_the_database_crates_rusqlite_is_allowed() {
-    assert!(kinds("crates/app/src/lib.rs", "pub use app_database::rusqlite;").is_empty());
-}
-
-#[test]
-fn every_raw_sqlite_ownership_path_is_rejected() {
-    assert_eq!(
-        kinds(
-            "crates/app-sync/src/leak.rs",
-            r#"
-            use rusqlite::{Connection as SqlConnection, Transaction};
-            use rusqlite::session::Session;
-            use rusqlite::*;
-            use rusqlite as sqlite;
-            fn qualified() -> rusqlite::Result<()> {
-                let _ = rusqlite::Connection::open_in_memory()?;
-                Ok(())
-            }
-            "#,
-        ),
-        BTreeSet::from(
-            [
-                "raw SQLite connection",
-                "raw SQLite crate import",
-                "raw SQLite session",
-                "raw SQLite transaction",
-                "raw SQLite wildcard import",
-            ]
-            .map(str::to_string)
-        ),
-    );
-}
-
-#[test]
-fn the_database_crate_owns_raw_sqlite() {
-    assert!(kinds(
-        "crates/app-database/src/transaction.rs",
-        r#"
-        use rusqlite::{Connection, Transaction};
-        fn transact(connection: &Connection, transaction: &Transaction<'_>) {}
-        "#,
-    )
-    .is_empty());
-}
-
-#[test]
-fn host_sql_and_query_values_are_allowed_outside_the_database_crate() {
-    assert!(kinds(
-        "crates/app/src/rows.rs",
-        r#"
-        fn read(context: SqlRead<'_>) -> rusqlite::Result<String> {
-            context.query_row(
-                "SELECT body FROM notes WHERE id = ?1",
-                rusqlite::params!["note-id"],
-                |row: &rusqlite::Row<'_>| row.get(0),
-            )
-        }
-        "#,
-    )
-    .is_empty());
 }
 
 #[test]
@@ -225,7 +132,7 @@ fn table_macros_are_read_from_every_file_of_the_schema_module() {
 }
 
 #[test]
-fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
+fn own_table_sql_inside_macro_calls_is_rejected() {
     let files = vec![
         RustFile::fixture(
             "crates/app-database/src/schema.rs",
@@ -242,7 +149,6 @@ fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
             r#"
             fn leak(sql: SqlWrite<'_>, id: &str) {
                 sql.execute(&format!("DELETE FROM _app_writes WHERE id = '{id}'"), []).unwrap();
-                let connections = vec![rusqlite::Connection::open_in_memory()];
             }
             macro_rules! wipe {
                 ($sql:expr) => { $sql.execute("DELETE FROM _app_writes", []) };
@@ -270,8 +176,7 @@ fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
         violations,
         vec![
             (3, "SQL on the database's own table _app_writes".to_string()),
-            (4, "raw SQLite connection".to_string()),
-            (9, "SQL on the database's own table _app_writes".to_string()),
+            (8, "SQL on the database's own table _app_writes".to_string()),
         ],
     );
 }

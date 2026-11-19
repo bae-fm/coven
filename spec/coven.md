@@ -14699,6 +14699,14 @@ the same on any platform.
     function's future on the executor of the language that called it, which
     runs none of the app's runtimes. coven exports nothing through uniffi; an
     app whose bridge does lists its runs in its own policy.
+    `clippy::sqlite_outside_its_homes` keeps SQLite in the homes of the
+    capability the policy's `[database]` names (F.2). Outside them, production
+    code names nothing through rusqlite or libsqlite3-sys themselves except
+    SQL value conversions and the errors and results they report; it names no
+    raw handle, a connection, transaction, savepoint or session, by any path;
+    and it holds none, even in a value whose type the compiler infers, such as
+    a closure's parameter. A home may hand on what its work needs, such as a
+    query's row, which code anywhere names through the home's crate.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

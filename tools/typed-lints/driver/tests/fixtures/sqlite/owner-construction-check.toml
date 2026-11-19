@@ -1,0 +1,10 @@
+# The SQLite capability of the fixture under src/: only src/store.rs reaches
+# SQLite directly.
+test_support_features = ["test-utils"]
+
+[database]
+capability = "SQLite"
+
+[[capabilities]]
+name = "SQLite"
+homes = ["src/store.rs"]

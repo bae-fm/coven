@@ -626,9 +626,6 @@ table_macros = [
     "coven_forgetting_tables",
     "coven_losses_tables",
 ]
-# The API re-exports sqlive's `rusqlite`, through coven-database, so a host can name the
-# types its own SQL uses.
-rusqlite_reexport = "sqlive"
 # An open write: a function or closure taking one runs inside the write its
 # caller opened, so a domain's tables are written there or in its owner's
 # methods (F.2).
@@ -1875,13 +1872,12 @@ kind = "randomness"
 crates = ["rand", "rand_core", "getrandom"]
 paths = ["OsRng", "thread_rng", "ThreadRng"]
 
+# SQLite's homes. The typed lint clippy::sqlite_outside_its_homes keeps
+# rusqlite's items and raw handles in them; the database rule keeps SQL on
+# coven's own tables there.
 [[capabilities]]
 name = "SQLite"
 homes = ["crates/coven-database/src/", "crates/sqlive/src/"]
-
-[[capabilities.gates]]
-kind = "SQLite library (rusqlite / libsqlite3-sys)"
-crates = ["rusqlite", "libsqlite3_sys"]
 
 [[capabilities]]
 name = "OS keychain"

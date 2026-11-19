@@ -52,7 +52,7 @@ pub(crate) fn stale_rows(
     stale.extend(overlapping_state_rows(policy));
     stale.extend(undeclared_types(crate_files, graph, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
-    stale.extend(invalid_database(code, workspace, graph, policy));
+    stale.extend(invalid_database(code, graph, policy));
     stale.extend(invalid_read_shapes(crate_files, code, graph, policy));
     stale
 }
@@ -541,23 +541,13 @@ fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<S
 /// is the schema's, so a new table is placed when it lands and none goes
 /// unguarded. The schema's tables are those its table macros declare and those
 /// a `CREATE TABLE` in the crates' SQL files makes.
-fn invalid_database(
-    code: &CrateCode,
-    workspace: &Workspace,
-    graph: &OwnerGraph,
-    policy: &Policy,
-) -> Vec<String> {
+fn invalid_database(code: &CrateCode, graph: &OwnerGraph, policy: &Policy) -> Vec<String> {
     let Some(database) = &policy.database else {
         return Vec::new();
     };
     let mut stale = Vec::new();
     if !policy.capabilities.iter().any(|capability| capability.name == database.capability) {
         stale.push(format!("database: capability {} is not in capabilities", database.capability));
-    }
-    if let Some(package) = &database.rusqlite_reexport {
-        if !member_packages(workspace).contains(package) {
-            stale.push(format!("database: rusqlite_reexport {package} is not a workspace member"));
-        }
     }
     stale.extend(invalid_domains(code, database, &graph.owners));
     let mut schema = code

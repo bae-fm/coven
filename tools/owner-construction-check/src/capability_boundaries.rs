@@ -455,31 +455,6 @@ fn expression_path(node: &syn::ExprPath) -> Option<Vec<String>> {
 }
 
 fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
-    // SQL value conversions, and the errors and column types they report,
-    // acquire no connection or other capability. rusqlite exports `ToSql` both
-    // at its root and from `types`.
-    if segments.first().is_some_and(|name| name == "rusqlite") {
-        let path: Vec<_> = segments.iter().map(String::as_str).collect();
-        if matches!(
-            path.as_slice(),
-            ["rusqlite", "ToSql" | "Result" | "Error", ..]
-                | [
-                    "rusqlite",
-                    "types",
-                    "FromSql"
-                        | "FromSqlError"
-                        | "FromSqlResult"
-                        | "ToSql"
-                        | "ToSqlOutput"
-                        | "Type"
-                        | "Value"
-                        | "ValueRef",
-                    ..
-                ]
-        ) {
-            return false;
-        }
-    }
     let first_is_gated_crate = (is_import || segments.len() >= 2)
         && segments.first().is_some_and(|first| gate.crates.iter().any(|name| first == name));
     first_is_gated_crate || holds_any(segments, &gate.path_patterns)

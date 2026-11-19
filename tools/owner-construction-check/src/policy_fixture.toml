@@ -100,10 +100,6 @@ paths = ["OsRng", "thread_rng", "ThreadRng"]
 name = "SQLite"
 homes = ["crates/app-database/src/"]
 
-[[capabilities.gates]]
-kind = "SQLite library (rusqlite / libsqlite3-sys)"
-crates = ["rusqlite", "libsqlite3_sys"]
-
 [[capabilities]]
 name = "OS keychain"
 homes = ["crates/app-crypto/src/custody/"]

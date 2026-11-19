@@ -52,7 +52,7 @@ impl_lint_pass!(AsyncExportOffRuntime => [ASYNC_EXPORT_OFF_RUNTIME]);
 impl AsyncExportOffRuntime {
     pub(crate) fn new(tcx: TyCtxt<'_>) -> Self {
         let runs = workspace_policy(tcx)
-            .and_then(|policy| policy.async_exports.as_ref())
+            .and_then(|workspace| workspace.policy.async_exports.as_ref())
             .map(|exports| {
                 exports
                     .runs

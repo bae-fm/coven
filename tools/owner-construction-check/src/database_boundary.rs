@@ -1,10 +1,11 @@
 //! The SQLite capability (Appendix F.2): nothing outside the database's homes
-//! gets the SQLite connection; it asks the database owner to run a write.
+//! writes SQL on the database's own tables; it asks the database owner to run
+//! the work. The typed lint `clippy::sqlite_outside_its_homes` keeps SQLite
+//! itself, its raw handles among it, in the same homes.
 //!
-//! Outside the homes of the policy's database capability, naming a raw
-//! rusqlite handle — connection, session or transaction — is the violation, as
-//! is writing SQL that names one of the tables the database's schema module
-//! declares. rusqlite's values, results and parameter macros stay allowed.
+//! Outside the homes of the policy's database capability, writing SQL that
+//! names one of the tables the database's schema module declares is the
+//! violation.
 //!
 //! Each table the policy places in a domain belongs to that domain, which
 //! keeps the table's schema and every write to it in its homes, in every file,
@@ -45,41 +46,27 @@ use crate::finding::Finding;
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::Span;
-use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::crate_code::CrateCode;
-use crate::macros::{parse_macro_body, token_paths, token_strings, unparsed_tokens};
+use crate::macros::{parse_macro_body, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
 use crate::schema_views::SchemaViews;
 use crate::sql_statements::{line_of, statements, Creation, Statement};
 use crate::syntax::{type_name, RustFile};
 use owner_construction_policy::{describe_homes, Domain, Policy};
 
-/// rusqlite's raw handles. Only the database crate holds one.
-pub(crate) const RAW_SQLITE_HANDLES: &[(&str, &str)] = &[
-    ("Connection", "raw SQLite connection"),
-    ("Session", "raw SQLite session"),
-    ("Transaction", "raw SQLite transaction"),
-];
-
 pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Policy) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     let homes = policy.database_homes();
     let confined_to = describe_homes(homes);
     let tables = collect_schema_table_names(&code.written, policy);
-    let reexporting_crate = policy
-        .database
-        .as_ref()
-        .and_then(|database| database.rusqlite_reexport.as_deref())
-        .map(|package| package.replace('-', "_"));
     let domains = Domains::of(policy, schema_views(code), code);
     for file in &code.expanded {
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
             in_database: homes.iter().any(|home| file.relative_path.starts_with(home.as_str())),
             confined_to: &confined_to,
-            reexporting_crate: reexporting_crate.as_deref(),
             tables: &tables,
             violations: &mut violations,
         };
@@ -156,7 +143,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
 
 fn confined_remedy(confined_to: &str) -> String {
     format!(
-        "ask the database owner to run the work; raw SQLite and SQL on the database's own tables live in {confined_to}"
+        "ask the database owner to run the work; SQL on the database's own tables lives in {confined_to}"
     )
 }
 
@@ -676,13 +663,11 @@ impl<'ast, F: FnMut(&syn::LitStr, &[Scope])> Visit<'ast> for SqlLiterals<F> {
 
 struct DatabaseBoundaryVisitor<'a> {
     path: &'a str,
-    /// Whether the file is in one of the database's homes, where raw handles
-    /// and SQL on the database's own tables belong.
+    /// Whether the file is in one of the database's homes, where SQL on the
+    /// database's own tables belongs.
     in_database: bool,
     /// The database's homes, as findings name them.
     confined_to: &'a str,
-    /// The crate, as Rust names it, whose `rusqlite` re-export may be imported.
-    reexporting_crate: Option<&'a str>,
     tables: &'a BTreeSet<String>,
     violations: &'a mut BTreeSet<Finding>,
 }
@@ -716,40 +701,10 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
         visit::visit_attribute(self, node);
     }
 
-    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        let mut capabilities = BTreeSet::new();
-        collect_forbidden_sqlite_imports(
-            &node.tree,
-            self.reexporting_crate,
-            false,
-            false,
-            &mut capabilities,
-        );
-        for capability in capabilities {
-            self.record(capability, node.span());
-        }
-        visit::visit_item_use(self, node);
-    }
-
-    fn visit_path(&mut self, node: &'ast syn::Path) {
-        if let Some(capability) = forbidden_sqlite_path(node) {
-            self.record(capability, node.span());
-        }
-        visit::visit_path(self, node);
-    }
-
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if let Some(capability) = forbidden_sqlite_path(&node.path) {
-            self.record(capability, node.span());
-        }
         match parse_macro_body(node) {
             Some(body) => body.visit(self),
             None => {
-                for path in token_paths(unparsed_tokens(node)) {
-                    if let Some(capability) = forbidden_sqlite_segments(&path.segments) {
-                        self.record(capability, path.span);
-                    }
-                }
                 for string in token_strings(unparsed_tokens(node)) {
                     self.check_sql(&string);
                 }
@@ -864,76 +819,6 @@ fn schema_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'
         return None;
     }
     tables.iter().find(|table| words.iter().any(|word| word == table.as_str())).map(String::as_str)
-}
-
-/// `under_database`: the import goes through the policy's re-exporting crate,
-/// whose `rusqlite` re-export names that crate, not SQLite.
-fn collect_forbidden_sqlite_imports(
-    tree: &syn::UseTree,
-    reexporting_crate: Option<&str>,
-    under_rusqlite: bool,
-    under_database: bool,
-    capabilities: &mut BTreeSet<&'static str>,
-) {
-    match tree {
-        syn::UseTree::Path(path) => collect_forbidden_sqlite_imports(
-            &path.tree,
-            reexporting_crate,
-            under_rusqlite || path.ident == "rusqlite",
-            under_database || reexporting_crate.is_some_and(|name| path.ident == name),
-            capabilities,
-        ),
-        syn::UseTree::Name(name) => {
-            record_import(&name.ident, under_rusqlite, under_database, capabilities);
-        }
-        syn::UseTree::Rename(rename) => {
-            record_import(&rename.ident, under_rusqlite, under_database, capabilities);
-        }
-        syn::UseTree::Group(group) => {
-            for item in &group.items {
-                collect_forbidden_sqlite_imports(
-                    item,
-                    reexporting_crate,
-                    under_rusqlite,
-                    under_database,
-                    capabilities,
-                );
-            }
-        }
-        syn::UseTree::Glob(_) if under_rusqlite => {
-            capabilities.insert("raw SQLite wildcard import");
-        }
-        syn::UseTree::Glob(_) => {}
-    }
-}
-
-fn record_import(
-    ident: &syn::Ident,
-    under_rusqlite: bool,
-    under_database: bool,
-    capabilities: &mut BTreeSet<&'static str>,
-) {
-    if under_rusqlite {
-        if let Some((_, kind)) = RAW_SQLITE_HANDLES.iter().find(|(handle, _)| ident == handle) {
-            capabilities.insert(*kind);
-        }
-    } else if ident == "rusqlite" && !under_database {
-        capabilities.insert("raw SQLite crate import");
-    }
-}
-
-fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
-    forbidden_sqlite_segments(
-        &path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>(),
-    )
-}
-
-/// A raw handle named anywhere after `rusqlite` in a path.
-fn forbidden_sqlite_segments(segments: &[String]) -> Option<&'static str> {
-    let rusqlite = segments.iter().position(|segment| segment == "rusqlite")?;
-    segments[rusqlite + 1..].iter().find_map(|segment| {
-        RAW_SQLITE_HANDLES.iter().find(|(handle, _)| segment == handle).map(|(_, kind)| *kind)
-    })
 }
 
 #[cfg(test)]

@@ -139,17 +139,6 @@ fn the_keychain_is_rejected_outside_custody_even_inside_app_crypto() {
 }
 
 #[test]
-fn sqlite_beneath_rusqlite_is_rejected_outside_app_database() {
-    assert_eq!(
-        kinds(
-            "crates/app-sync/src/leak.rs",
-            "fn open() { unsafe { libsqlite3_sys::sqlite3_initialize(); } }",
-        ),
-        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string)),
-    );
-}
-
-#[test]
 fn runtime_construction_is_rejected_outside_composition_roots() {
     let violations = violations(
         "crates/app-sync/src/transfer.rs",
@@ -438,43 +427,6 @@ fn a_macro_rules_body_is_read_where_it_is_invoked() {
         BTreeSet::from(["filesystem", "system clock", "thread or future spawn"])
     );
     assert!(found.iter().all(|finding| finding.line == 7), "{found:?}");
-}
-
-#[test]
-fn rusqlite_is_used_only_by_the_database_crate() {
-    let source = "use rusqlite::Connection; fn open() { let _ = Connection::open_in_memory(); }";
-    assert_eq!(
-        kinds("crates/app-storage/src/leak.rs", source),
-        BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string))
-    );
-    assert!(kinds("crates/app-database/src/sqlite.rs", source).is_empty());
-}
-
-#[test]
-fn sql_value_conversions_are_allowed_without_allowing_database_access() {
-    let path = "crates/app-foundation/src/uuid_text.rs";
-    assert!(kinds(
-        path,
-        r#"
-        use rusqlite::ToSql;
-        use rusqlite::types::{FromSql, FromSqlResult, FromSqlError, ToSqlOutput, Value, ValueRef};
-        use rusqlite::types::{ToSql as Bind, Type};
-        fn bind() -> rusqlite::Result<ToSqlOutput<'static>> { todo!() }
-        impl rusqlite::types::ToSql for Key { fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> { todo!() } }
-        fn refuse(index: usize) -> rusqlite::Error {
-            rusqlite::Error::InvalidColumnType(index, String::new(), rusqlite::types::Type::Null)
-        }
-    "#
-    )
-    .is_empty());
-    for source in [
-        "use rusqlite::Connection;",
-        "use rusqlite::ffi;",
-        "use rusqlite::types::*;",
-        "fn open() { rusqlite::Connection::open_in_memory(); }",
-    ] {
-        assert!(!kinds(path, source).is_empty(), "{source}");
-    }
 }
 
 #[test]

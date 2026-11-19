@@ -289,7 +289,6 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
         capability = "SQLite"
         schema = "crates/app-foundation/src/schema.rs"
         table_macros = ["app_tables", "missing_tables"]
-        rusqlite_reexport = "app-missing"
         [[capabilities]]
         name = "SQLite"
         homes = ["crates/app-foundation/src/"]
@@ -297,7 +296,6 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
     assert_eq!(
         stale(vec![schema], rows),
         [
-            "database: rusqlite_reexport app-missing is not a workspace member",
             "database: the schema module under crates/app-foundation/src/schema.rs declares macro_rules! missing_tables 0 times, not once",
             "database: schema table macro unlisted_tables is missing from table_macros",
         ]

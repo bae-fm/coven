@@ -22,6 +22,7 @@ extern crate rustc_span;
 mod async_export_off_runtime;
 mod finding;
 mod reqwest_error_display;
+mod sqlite_outside_its_homes;
 mod workspace_policy;
 
 use clippy_config::Conf;
@@ -37,11 +38,15 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
     store.register_lints(&[
         reqwest_error_display::REQWEST_ERROR_DISPLAY,
         async_export_off_runtime::ASYNC_EXPORT_OFF_RUNTIME,
+        sqlite_outside_its_homes::SQLITE_OUTSIDE_ITS_HOMES,
     ]);
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
     }));
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(async_export_off_runtime::AsyncExportOffRuntime::new(tcx))
+    }));
+    store.register_late_lint_pass(Box::new(|tcx| {
+        Box::new(sqlite_outside_its_homes::SqliteOutsideItsHomes::new(tcx))
     }));
 }

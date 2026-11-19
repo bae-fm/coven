@@ -639,10 +639,6 @@ pub struct Database {
     /// The schema module's macros that list its tables.
     #[serde(default)]
     pub table_macros: Vec<String>,
-    /// A crate whose `rusqlite` re-export other crates may import: that path
-    /// names the crate, not SQLite.
-    #[serde(default)]
-    pub rusqlite_reexport: Option<String>,
     /// The tables, grouped by the part of the workspace that writes them.
     #[serde(default)]
     pub domains: Vec<Domain>,
