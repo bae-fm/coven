@@ -597,22 +597,16 @@ binding that matters passes its test, and `plan_restricted` that such a
 binding holds no row only of an item the planned state still holds an ON
 narrowing back for.
 
-The step that remains is the promise for a LEFT JOIN item the planned state
-still holds an ON narrowing back for: that a row its ON holds for passes its
-test, which its ON alone decides.
-
 ## What the proofs don't cover
 
 The theorems prove each rule's step and the steps of putting them together
 that the section above names. For a statement sqlive doesn't read whole, no
-theorem yet proves that a write the judge lets pass leaves the statement's
-rows unchanged: that the order in which the planner places items, the ON
-conditions it holds back, the terms it carries across equalities, the terms
-it passes into derived items, the lookups of each join's partner and the
-LIMIT bound give scopes that keep the promise `agree_of_kept` and
-`limit_restricted` take. The
-differential checks that composition against SQLite on every statement it
-generates.
+theorem proves that a write the judge lets pass leaves the statement's rows
+unchanged. The proofs give the promise `agree_of_kept` and `limit_restricted`
+take for every binding that matters, but not for a LEFT JOIN item the
+planned state still holds an ON narrowing back for: that a row the item's ON
+holds for passes the item's test. The differential checks that composition
+against SQLite on every statement it generates.
 
 The model leaves out text, real and blob values, collations and the
 conversions an affinity makes: sqlive's checks that refuse them are modelled as
