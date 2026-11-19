@@ -24,6 +24,8 @@ use rustc_hir::{HirId, ItemKind, Node, find_attr};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{FileName, Span, Symbol, sym};
 
+use crate::owner_rules::implemented_type;
+
 /// The workspace's policy, and where the workspace and the crate being
 /// compiled are, for the paths the policy names.
 pub(crate) struct WorkspacePolicy {
@@ -226,10 +228,8 @@ impl WorkspacePolicy {
                 _ => None,
             })
             .filter(|&implementation| tcx.is_automatically_derived(implementation))
-            .filter_map(|implementation| {
-                tcx.type_of(implementation).instantiate_identity().skip_norm_wip().ty_adt_def()
-            })
-            .filter_map(|adt| adt.did().as_local())
+            .filter_map(|implementation| implemented_type(tcx, implementation))
+            .filter_map(DefId::as_local)
             .any(|adt| self.is_test_code(tcx, tcx.local_def_id_to_hir_id(adt)))
     }
 
@@ -333,12 +333,7 @@ fn configured_out(tcx: TyCtxt<'_>, path: &str) -> bool {
         let holds = |scope: DefId| {
             scopes.contains(&scope)
                 || matches!(tcx.def_kind(scope), DefKind::Impl { .. })
-                    && tcx
-                        .type_of(scope)
-                        .instantiate_identity()
-                        .skip_norm_wip()
-                        .ty_adt_def()
-                        .is_some_and(|adt| scopes.contains(&adt.did()))
+                    && implemented_type(tcx, scope).is_some_and(|adt| scopes.contains(&adt))
         };
         return stripped
             .iter()

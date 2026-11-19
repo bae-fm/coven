@@ -114,9 +114,13 @@ impl<'tcx> OwnerRules<'tcx> {
     }
 }
 
-/// The type an impl is for, when it is an ADT.
+/// The type a callable's impl is for, when it is an ADT.
 pub(crate) fn impl_type(tcx: TyCtxt<'_>, callable: DefId) -> Option<DefId> {
-    let implementation = tcx.impl_of_assoc(callable)?;
+    implemented_type(tcx, tcx.impl_of_assoc(callable)?)
+}
+
+/// The type an impl is for, when it is an ADT.
+pub(crate) fn implemented_type(tcx: TyCtxt<'_>, implementation: DefId) -> Option<DefId> {
     tcx.type_of(implementation)
         .instantiate_identity()
         .skip_norm_wip()
