@@ -28,7 +28,7 @@ use rustc_lint::{LateContext, LateLintPass, declare_tool_lint, impl_lint_pass};
 use rustc_middle::ty::{TyCtxt, TypeckResults};
 
 use crate::finding::Finding;
-use crate::workspace_policy::{resolve_row, workspace_policy};
+use crate::workspace_policy::{WorkspacePolicy, resolve_row};
 
 declare_tool_lint! {
     /// An async function that uniffi exports and that calls none of the
@@ -50,8 +50,8 @@ pub(crate) struct AsyncExportOffRuntime {
 impl_lint_pass!(AsyncExportOffRuntime => [ASYNC_EXPORT_OFF_RUNTIME]);
 
 impl AsyncExportOffRuntime {
-    pub(crate) fn new(tcx: TyCtxt<'_>) -> Self {
-        let runs = workspace_policy(tcx)
+    pub(crate) fn new(tcx: TyCtxt<'_>, workspace: Option<&WorkspacePolicy>) -> Self {
+        let runs = workspace
             .and_then(|workspace| workspace.policy.async_exports.as_ref())
             .map(|exports| {
                 exports

@@ -25,7 +25,7 @@
 //! Test code answers to none of this: a test may open its own connection.
 
 use clippy_utils::paths::{PathNS, lookup_path_str};
-use owner_construction_policy::describe_homes;
+use owner_construction_policy::{Capability, RAW_SQLITE_HANDLES, describe_homes};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -35,7 +35,7 @@ use rustc_middle::ty::{self, GenericArgKind, Ty, TyCtxt};
 use rustc_span::Span;
 
 use crate::finding::Finding;
-use crate::workspace_policy::{WorkspacePolicy, workspace_policy};
+use crate::workspace_policy::WorkspacePolicy;
 
 declare_tool_lint! {
     /// Production code outside the SQLite capability's homes that names an
@@ -49,15 +49,6 @@ declare_tool_lint! {
 /// The crates that are SQLite, as Rust names them: rusqlite, and the C
 /// library's bindings beneath it.
 const SQLITE_CRATES: [&str; 2] = ["rusqlite", "libsqlite3_sys"];
-
-/// rusqlite's raw handles, each by its definition's path and as findings name
-/// it.
-const RAW_HANDLES: [(&str, &str); 4] = [
-    ("rusqlite::Connection", "connection"),
-    ("rusqlite::Transaction", "transaction"),
-    ("rusqlite::Savepoint", "savepoint"),
-    ("rusqlite::session::Session", "session"),
-];
 
 /// rusqlite's SQL value conversions, and the errors, results and column types
 /// they report: no database stands behind them.
@@ -77,8 +68,9 @@ const VALUE_CONVERSIONS: [&str; 10] = [
 /// The lint's pass: what the crate being compiled resolves SQLite's items to,
 /// the homes, and the bodies that already hold a finding.
 pub(crate) struct SqliteOutsideItsHomes {
-    workspace: Option<&'static WorkspacePolicy>,
-    homes: &'static [String],
+    /// The workspace's policy and the database's capability, when the
+    /// policy names one.
+    database: Option<(&'static WorkspacePolicy, &'static Capability)>,
     raw_handles: Vec<(DefId, &'static str)>,
     value_conversions: FxHashSet<DefId>,
     /// The bodies, by their owner, that hold a path that named SQLite.
@@ -90,10 +82,11 @@ pub(crate) struct SqliteOutsideItsHomes {
 impl_lint_pass!(SqliteOutsideItsHomes => [SQLITE_OUTSIDE_ITS_HOMES]);
 
 impl SqliteOutsideItsHomes {
-    pub(crate) fn new(tcx: TyCtxt<'_>) -> Self {
-        let workspace = workspace_policy(tcx);
-        let homes = workspace.map_or(&[][..], |workspace| workspace.policy.database_homes());
-        let raw_handles = RAW_HANDLES
+    pub(crate) fn new(tcx: TyCtxt<'_>, workspace: Option<&'static WorkspacePolicy>) -> Self {
+        let database = workspace.and_then(|workspace| {
+            workspace.policy.database_capability().map(|capability| (workspace, capability))
+        });
+        let raw_handles = RAW_SQLITE_HANDLES
             .iter()
             .flat_map(|&(path, kind)| {
                 lookup_path_str(tcx, PathNS::Type, path).into_iter().map(move |id| (id, kind))
@@ -104,8 +97,7 @@ impl SqliteOutsideItsHomes {
             .flat_map(|path| lookup_path_str(tcx, PathNS::Type, path))
             .collect();
         Self {
-            workspace,
-            homes,
+            database,
             raw_handles,
             value_conversions,
             named: FxHashSet::default(),
@@ -117,13 +109,10 @@ impl SqliteOutsideItsHomes {
     /// `span`, answers to the lint: production code outside the homes, in a
     /// workspace whose policy names the database's capability.
     fn answers(&self, cx: &LateContext<'_>, id: HirId, span: Span) -> Option<String> {
-        let workspace = self.workspace?;
-        if self.homes.is_empty() {
-            return None;
-        }
+        let (workspace, capability) = self.database?;
         let path = workspace.relative_path(cx.tcx, span)?;
-        let in_home = self.homes.iter().any(|home| path.starts_with(home.as_str()));
-        (!in_home && !workspace.is_test_code(cx.tcx, id)).then(|| describe_homes(self.homes))
+        (!capability.holds(&path) && !workspace.is_test_code(cx.tcx, id))
+            .then(|| describe_homes(&capability.homes))
     }
 
     /// Which raw handle `id` is, if it is one, or builds, as a struct's

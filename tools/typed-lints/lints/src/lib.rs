@@ -35,6 +35,9 @@ pub use clippy_lints::declared_lints;
 /// Registers clippy's lint passes, then these lints and their passes.
 pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
     clippy_lints::register_lint_passes(store, conf);
+    // Read once for the compile, as clippy reads its `Conf`.
+    let policy: &'static workspace_policy::PolicyRead =
+        Box::leak(Box::new(workspace_policy::read()));
     store.register_lints(&[
         reqwest_error_display::REQWEST_ERROR_DISPLAY,
         async_export_off_runtime::ASYNC_EXPORT_OFF_RUNTIME,
@@ -43,10 +46,16 @@ pub fn register_lint_passes(store: &mut LintStore, conf: &'static Conf) {
     store.register_late_lint_pass(Box::new(|tcx| {
         Box::new(reqwest_error_display::ReqwestErrorDisplay::new(tcx))
     }));
-    store.register_late_lint_pass(Box::new(|tcx| {
-        Box::new(async_export_off_runtime::AsyncExportOffRuntime::new(tcx))
+    store.register_late_lint_pass(Box::new(move |tcx| {
+        Box::new(async_export_off_runtime::AsyncExportOffRuntime::new(
+            tcx,
+            workspace_policy::for_compile(policy, tcx),
+        ))
     }));
-    store.register_late_lint_pass(Box::new(|tcx| {
-        Box::new(sqlite_outside_its_homes::SqliteOutsideItsHomes::new(tcx))
+    store.register_late_lint_pass(Box::new(move |tcx| {
+        Box::new(sqlite_outside_its_homes::SqliteOutsideItsHomes::new(
+            tcx,
+            workspace_policy::for_compile(policy, tcx),
+        ))
     }));
 }

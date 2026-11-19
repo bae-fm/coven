@@ -8,11 +8,11 @@
 //! `[workspace]` table. A workspace with no policy file there gives the lints
 //! that read one nothing to check.
 //!
-//! The driver reads the file once per compile, and names it among the
+//! The driver reads the file once, when it registers the lints, and hands
+//! what it read to each lint's pass. Each pass names the file among the
 //! compile's inputs, so cargo lints the crate again when the file changes.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use clippy_utils::is_in_test_function;
 use clippy_utils::paths::{PathNS, lookup_path_str};
@@ -27,35 +27,58 @@ use rustc_span::{Span, Symbol, sym};
 /// compiled are, for the paths the policy names.
 pub(crate) struct WorkspacePolicy {
     pub(crate) policy: Policy,
+    /// The policy file.
+    file: PathBuf,
     /// The workspace's root, with every link in it followed.
     root: PathBuf,
     /// The folder of the crate's package, the same way.
     package: PathBuf,
 }
 
-/// The workspace's policy, if it has one. A policy file that can't be read
-/// stops the compile.
-pub(crate) fn workspace_policy(tcx: TyCtxt<'_>) -> Option<&'static WorkspacePolicy> {
-    static POLICY: OnceLock<Option<WorkspacePolicy>> = OnceLock::new();
-    POLICY
-        .get_or_init(|| {
-            let package = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR")?);
-            let root = package.ancestors().find(|folder| declares_workspace(folder))?;
-            let path = root.join(FILE_NAME);
-            if !path.exists() {
-                return None;
-            }
-            tcx.sess.file_depinfo.borrow_mut().insert(Symbol::intern(&path.to_string_lossy()));
-            let policy = Policy::read(root)
-                .unwrap_or_else(|error| tcx.dcx().fatal(format!("typed lints: {error}")));
-            let canonical = |folder: &Path| {
-                folder.canonicalize().unwrap_or_else(|error| {
-                    tcx.dcx().fatal(format!("typed lints: {}: {error}", folder.display()))
-                })
-            };
-            Some(WorkspacePolicy { policy, root: canonical(root), package: canonical(&package) })
-        })
+/// What the driver found when it looked for the workspace's policy: none
+/// when the crate's workspace has no policy file, and why when the file is
+/// there and could not be read.
+pub(crate) type PolicyRead = Result<Option<WorkspacePolicy>, String>;
+
+/// Looks for the policy of the workspace that holds the crate being compiled
+/// and reads it.
+pub(crate) fn read() -> PolicyRead {
+    let Some(package) = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let Some(root) = package.ancestors().find(|folder| declares_workspace(folder)) else {
+        return Ok(None);
+    };
+    let file = root.join(FILE_NAME);
+    if !file.exists() {
+        return Ok(None);
+    }
+    let policy = Policy::read(root).map_err(|error| error.to_string())?;
+    let canonical = |folder: &Path| {
+        folder.canonicalize().map_err(|error| format!("{}: {error}", folder.display()))
+    };
+    Ok(Some(WorkspacePolicy {
+        policy,
+        root: canonical(root)?,
+        package: canonical(&package)?,
+        file,
+    }))
+}
+
+/// The policy a lint's pass checks the crate against, if the workspace has
+/// one, named among the compile's inputs. A policy file that could not be
+/// read stops the compile.
+pub(crate) fn for_compile<'a>(
+    read: &'a PolicyRead,
+    tcx: TyCtxt<'_>,
+) -> Option<&'a WorkspacePolicy> {
+    let workspace = read
         .as_ref()
+        .unwrap_or_else(|error| tcx.dcx().fatal(format!("typed lints: {error}")))
+        .as_ref()?;
+    let file = Symbol::intern(&workspace.file.to_string_lossy());
+    tcx.sess.file_depinfo.borrow_mut().insert(file);
+    Some(workspace)
 }
 
 /// Whether the `Cargo.toml` in `folder` has a `[workspace]` table.
@@ -82,13 +105,25 @@ impl WorkspacePolicy {
         )
     }
 
-    /// The source file `span` is written in, with every link followed.
+    /// The source file `span` is written in, with every link followed: none
+    /// for code no file holds, such as what a procedural macro writes from
+    /// nothing it was given. A source file the compile read that can't be
+    /// found again stops the compile.
     fn source_file(&self, tcx: TyCtxt<'_>, span: Span) -> Option<PathBuf> {
         let name = tcx.sess.source_map().span_to_filename(span.source_callsite());
         let local = name.into_local_path()?;
-        let absolute =
-            if local.is_absolute() { local } else { std::env::current_dir().ok()?.join(local) };
-        absolute.canonicalize().ok()
+        let absolute = if local.is_absolute() {
+            local
+        } else {
+            let folder = std::env::current_dir().unwrap_or_else(|error| {
+                tcx.dcx().fatal(format!("typed lints: the current folder: {error}"))
+            });
+            folder.join(local)
+        };
+        let canonical = absolute.canonicalize().unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!("typed lints: {}: {error}", absolute.display()))
+        });
+        Some(canonical)
     }
 
     /// Whether the code at `id` is test code, as the structural checker

@@ -22,6 +22,15 @@ use serde::{Deserialize, Deserializer};
 /// The policy file's name, at the root of the workspace it describes.
 pub const FILE_NAME: &str = "owner-construction-check.toml";
 
+/// rusqlite's raw handles, each by the path that defines it and as findings
+/// name it: only the homes of the database's capability hold one.
+pub const RAW_SQLITE_HANDLES: [(&str, &str); 4] = [
+    ("rusqlite::Connection", "connection"),
+    ("rusqlite::Transaction", "transaction"),
+    ("rusqlite::Savepoint", "savepoint"),
+    ("rusqlite::session::Session", "session"),
+];
+
 /// The groups of rules a policy selects. A workspace runs exactly the ones it
 /// lists, so it can adopt them one at a time.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
@@ -752,15 +761,16 @@ impl Policy {
             .any(|root| root.path == path && root.owner == owner && root.method == method)
     }
 
-    /// The homes of the database's capability: where raw SQLite handles and
-    /// SQL on the database's internal tables are allowed.
+    /// The database's capability, whose homes alone hold raw SQLite handles
+    /// and SQL on the database's internal tables.
+    pub fn database_capability(&self) -> Option<&Capability> {
+        let database = self.database.as_ref()?;
+        self.capabilities.iter().find(|capability| capability.name == database.capability)
+    }
+
+    /// The homes of the database's capability.
     pub fn database_homes(&self) -> &[String] {
-        self.database
-            .as_ref()
-            .and_then(|database| {
-                self.capabilities.iter().find(|capability| capability.name == database.capability)
-            })
-            .map_or(&[], |capability| capability.homes.as_slice())
+        self.database_capability().map_or(&[], |capability| capability.homes.as_slice())
     }
 
     /// Whether the callable `callable` of `path` is listed as taking a raw

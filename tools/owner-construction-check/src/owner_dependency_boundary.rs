@@ -34,7 +34,7 @@ use crate::syntax::{
     visibility_crosses_owner, RustFile,
 };
 use crate::type_identity::TypeIdentity;
-use owner_construction_policy::Policy;
+use owner_construction_policy::{Policy, RAW_SQLITE_HANDLES};
 
 struct OwnerMethod {
     path: String,
@@ -94,10 +94,6 @@ impl OwnerMethod {
     }
 }
 
-/// rusqlite's raw handles, by name: no callable of the database's homes
-/// returns one, and none reachable outside its crate takes one.
-const RAW_SQLITE_HANDLES: [&str; 3] = ["Connection", "Session", "Transaction"];
-
 pub(crate) fn find_owner_dependency_leaks(
     files: &[RustFile],
     policy: &Policy,
@@ -105,12 +101,14 @@ pub(crate) fn find_owner_dependency_leaks(
 ) -> Vec<Finding> {
     let identity = &graph.identity;
     let methods = collect_owner_methods(files, &policy.shared_pointer_types, identity);
-    // A rusqlite handle goes by its path where a workspace type has its name
-    // (`type_identity.rs`).
+    // A rusqlite handle goes by its name, or by its path where a workspace
+    // type has its name (`type_identity.rs`). No callable of the database's
+    // homes returns one, and none reachable outside its crate takes one.
     let raw = RAW_SQLITE_HANDLES
         .iter()
+        .filter_map(|(path, _)| path.rsplit("::").next())
         .map(|name| {
-            if graph.types.contains_key(*name) {
+            if graph.types.contains_key(name) {
                 format!("rusqlite::{name}")
             } else {
                 name.to_string()
