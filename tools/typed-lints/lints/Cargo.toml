@@ -5,6 +5,13 @@ edition = "2024"
 license = "Apache-2.0"
 publish = false
 
+# The lints' tests run them in the driver, as cargo runs it (../driver/tests).
+# This crate has no tests of its own, and a test binary of it would not find
+# the compiler's libLLVM, which the driver's build script locates.
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 clippy_config = { path = "../clippy/clippy_config" }
 clippy_lints = { path = "../clippy/clippy_lints" }
