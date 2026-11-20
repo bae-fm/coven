@@ -107,11 +107,10 @@ pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
                 .and_then(|spans| spans.iter().find(|span| span["is_primary"] == true))
                 .expect("a finding has a primary span");
             let file = primary["file_name"].as_str().expect("a file name");
-            let source = marked
-                .iter()
-                .find(|source| file.ends_with(*source))
-                .map_or_else(|| file.to_string(), |source| source.to_string());
-            found.push((source, primary["line_start"].as_u64().expect("a line number")));
+            found.push((
+                marked_source(file, marked),
+                primary["line_start"].as_u64().expect("a line number"),
+            ));
         }
     }
     found.sort_unstable();
@@ -132,6 +131,19 @@ pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
     }
     expected.sort_unstable();
     assert_eq!(found, expected, "the lines that hold findings, then the fixture's:\n{diagnostics}");
+}
+
+/// The fixture source of <marked> that the file <file> of a diagnostic is, or
+/// <file> itself when it is none. rustc writes a module's file with the
+/// platform's separator after the folder it was given with `/`
+/// (`dependencies/src\database.rs` on Windows), so the comparison reads both
+/// separators as `/`.
+pub fn marked_source(file: &str, marked: &[&str]) -> String {
+    let file = file.replace('\\', "/");
+    marked
+        .iter()
+        .find(|source| file.ends_with(*source))
+        .map_or(file.clone(), |source| source.to_string())
 }
 
 /// A folder of the test's own for the compiled fixtures.

@@ -8,7 +8,7 @@
 
 mod support;
 
-use support::{Fixture, assert_findings_marked, extern_library, out_dir};
+use support::{Fixture, assert_findings_marked, extern_library, marked_source, out_dir};
 
 #[test]
 fn finds_what_owners_hand_out_and_nothing_else() {
@@ -42,4 +42,15 @@ fn finds_what_owners_hand_out_and_nothing_else() {
     ] {
         assert_findings_marked(lint, &diagnostics, marked);
     }
+}
+
+#[test]
+fn a_module_file_rustc_writes_with_a_backslash_is_the_marked_fixture() {
+    let marked = ["dependencies/src/lib.rs", "dependencies/src/database.rs"];
+    let on_windows =
+        "D:\\a\\coven\\tools\\typed-lints\\driver/tests/fixtures\\dependencies/src\\database.rs";
+    assert_eq!(marked_source(on_windows, &marked), "dependencies/src/database.rs");
+    let on_unix = "/work/driver/tests/fixtures/dependencies/src/lib.rs";
+    assert_eq!(marked_source(on_unix, &marked), "dependencies/src/lib.rs");
+    assert_eq!(marked_source("other.rs", &marked), "other.rs");
 }
