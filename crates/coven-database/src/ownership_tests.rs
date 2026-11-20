@@ -83,7 +83,7 @@ async fn an_owner_declaration_change_refuses_to_open() {
     assert!(
         matches!(
             crate::tests::database_error(error),
-            DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }) if table == "rows"
+            DbError::Schema(crate::SchemaError::WritePermissionChanged { table }) if table == "rows"
         ),
         "a changed owner declaration"
     );

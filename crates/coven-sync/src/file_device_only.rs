@@ -54,8 +54,10 @@ pub enum DeviceOnlyError {
     /// them failed: no record of the file here (`FileAbsent`), as for a
     /// file of a circle this member was never in; one not in the cloud
     /// (`NotInCloud`); an app file (`NamespaceKind`); a file of a circle
-    /// this member has left (`NotInCircle`); or another member's row of an
-    /// `owner_only` table referencing it (`NotOwner`).
+    /// this member has left (`NotInCircle`); another member's row of an
+    /// `owner_only` table referencing it (`NotOwner`); or, for a member who
+    /// isn't an admin, a row of an `admin_only` table referencing it
+    /// (`NotAdmin`).
     #[error(transparent)]
     Database(DbError),
     /// Downloading a file failed.

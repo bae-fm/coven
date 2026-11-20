@@ -861,7 +861,7 @@ async fn starts_from_declaring_owner_only_the_device_registered_otherwise_fails(
     assert!(matches!(
         error,
         OpenError::Migration(MigrationError::Failed { version: 2, name: "owner", ref source })
-            if matches!(**source, DbError::Schema(SchemaError::OwnerOnlyChanged { ref table }) if table == "notes")
+            if matches!(**source, DbError::Schema(SchemaError::WritePermissionChanged { ref table }) if table == "notes")
     ));
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);

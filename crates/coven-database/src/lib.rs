@@ -59,8 +59,10 @@ mod migration_snapshot;
 mod migration_state;
 mod reported_engine_errors;
 pub use load_step::LoadStep;
+mod open_error;
 mod open_step;
 mod ownership;
+mod permission;
 pub use open_step::OpenStep;
 mod object_removals;
 mod pending;
@@ -178,13 +180,14 @@ pub use database::{
     StagedFiles, StoreDatabase, Writer,
 };
 pub use declaration::{
-    Binding, FileColumn, Namespace, Provenance, RowIdentity, SyncedTable, BOUND_FILE_LIMIT,
+    Binding, FileColumn, Namespace, Provenance, RowIdentity, SyncedTable, WritePermission,
+    BOUND_FILE_LIMIT,
 };
 pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};
 pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuthorship};
-pub use error::{sqlite_error_is_disk, CovenSchemaError, DbError, MigrationError, OpenError};
+pub use error::{sqlite_error_is_disk, DbError};
 pub use file_location::{FileLocation, FileLocationKey};
 pub use file_queue::{FileUpload, UnsentWork, UploadCompletion, UploadProgress, UploadQueueState};
 pub use file_ref::{FilePlace, FileRef, LocalFileError, LocalFileStream, Located};
@@ -198,6 +201,7 @@ pub use migration::{
     OldWrites,
 };
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
+pub use open_error::{CovenSchemaError, MigrationError, OpenError};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use schema_error::SchemaError;

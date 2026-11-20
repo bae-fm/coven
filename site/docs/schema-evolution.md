@@ -47,7 +47,7 @@ together with the app's table declarations:
 | --- | --- |
 | adds only new tables or new columns | addition |
 | adds an index, a constraint or a foreign key, or anything else | breaking |
-| changes a table's `owner_only` declaration | breaking |
+| changes a table's `owner_only` or `admin_only` declaration | breaking |
 | drops or renames a table or column | breaking |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
 | changes only local tables, or views | neither: they don't sync |

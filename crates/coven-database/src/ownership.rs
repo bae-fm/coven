@@ -161,12 +161,10 @@ pub(crate) fn visit<E: From<DbError>>(
     ).map_err(Hosted::into_inner)
 }
 
-/// Whether a synced table restricts direct writes to each row's owner.
+/// Whether a synced table restricts direct writes to each row's owner, so
+/// that its rows' creations decide who may change them.
 pub(crate) fn owner_table(schema: &crate::write_schema::WriteSchema, table: &str) -> bool {
-    schema
-        .declarations
-        .iter()
-        .any(|declaration| declaration.owner_only && declaration.name.eq_ignore_ascii_case(table))
+    schema.permission(table) == crate::WritePermission::Owner
 }
 
 /// Carry an audience's creations across a table rename (§18.4).

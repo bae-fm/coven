@@ -35,8 +35,9 @@ pub struct DeviceOnlyCopy {
 /// The record of `file` once this device may make it device-only (§17.3):
 /// its record is here and in the cloud, of a user namespace; this device's
 /// member is in its audience; and it may change every row referencing it,
-/// which an `owner_only` table's rows another member created refuse. An
-/// admin gets no exception, as with any row (§9.6).
+/// which an `owner_only` table's rows another member created refuse, as
+/// does every row of an `admin_only` table for a member who isn't an admin.
+/// An admin gets no exception on an owned row, as with any change (§9.6).
 pub(crate) fn permitted(
     db: &StoreSql,
     call: &StoreCall<'_>,
@@ -50,7 +51,7 @@ pub(crate) fn permitted(
         return Err(DbError::NotInCloud { file });
     }
     crate::write_commit::check_membership(db, device, &record.audience)?;
-    let mut owners = crate::judge::Owners::new(
+    let mut permissions = crate::permission::Permissions::new(
         db,
         call,
         schema,
@@ -64,12 +65,8 @@ pub(crate) fn permitted(
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )? {
         let row = RowId { table, key, audience: record.audience.clone() };
-        if let Some(owner) = owners.foreign_owner(&row)? {
-            return Err(DbError::NotOwner {
-                key: crate::RowKey::decode(&row.key)?,
-                table: row.table,
-                owner,
-            });
+        if let Some(denial) = permissions.denial(&row)? {
+            return Err(crate::permission::refusal(&row, &denial.failure())?);
         }
     }
     Ok(record)

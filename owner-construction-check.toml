@@ -342,11 +342,11 @@ task_types = [
     "coven_database::migration_snapshot::MigrationSnapshot",
     "coven_database::migration_hidden::Hidden",
     # The judging of one write: the schema it was authored under, one child
-    # row through its steps, the owners of the rows it changes, and where its
-    # original records are read, on the connection that judges it (§9.6).
+    # row through its steps, who may change the rows it changes, and where
+    # its original records are read, on the connection that judges it (§9.6).
     "coven_database::judge_view::Authoring",
     "coven_database::judge_view::ChildView",
-    "coven_database::judge::Owners",
+    "coven_database::permission::Permissions",
     "coven_database::judge::Originals",
     # One received write's interpretation, admitting its parts on the
     # connection that stages it (§9.5, §9.6).
@@ -885,7 +885,7 @@ tables = [
     "_coven_columns",
     "_coven_constraints",
     "_coven_foreign_keys",
-    "_coven_owner_tables",
+    "_coven_write_permissions",
 ]
 
 [[database.domains]]

@@ -32,8 +32,10 @@ pub struct FolderCopy {
 impl FileDatabase {
     /// Each file as its record stands, once this device may make it
     /// device-only (§17.3): in the cloud, of a user namespace, in an
-    /// audience this device's member is in, and referenced by no row of an
-    /// `owner_only` table another member created. Read in one committed
+    /// audience this device's member is in, and referenced by no row this
+    /// device's member may not change: a row of an `owner_only` table another
+    /// member created, or, unless the member is an admin, a row of an
+    /// `admin_only` table. Read in one committed
     /// state; the write switching the files checks again.
     pub async fn device_only_files(&self, files: Vec<FileId>) -> Result<Vec<FileRef>, DbError> {
         self.database

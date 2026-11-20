@@ -17,8 +17,23 @@ pub(crate) enum AudienceSource {
     Both { column: String, foreign_key: String },
 }
 
-/// A synced table's key, audience, file references, shared triggers and whether only
-/// each row's original creator writes it directly (E2).
+/// Who may change a synced table's rows directly (§9.6, E2). Shared-trigger
+/// targets count as direct changes; an exact foreign-key action of an
+/// authorized change may still reach any row.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WritePermission {
+    /// Every member.
+    #[default]
+    Anyone,
+    /// Only the member whose write originally created the row.
+    Owner,
+    /// Only a member who is an admin in the state just before the write's
+    /// slot, whoever created the row.
+    Admin,
+}
+
+/// A synced table's key, audience, file references, shared triggers and who
+/// may change its rows directly (E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyncedTable {
     pub(crate) name: String,
@@ -27,7 +42,7 @@ pub struct SyncedTable {
     pub(crate) audience: AudienceSource,
     pub(crate) files: Vec<FileColumn>,
     pub(crate) shared_triggers: Vec<String>,
-    pub(crate) owner_only: bool,
+    pub(crate) permission: WritePermission,
 }
 
 impl SyncedTable {
@@ -46,9 +61,9 @@ impl SyncedTable {
         &self.key
     }
 
-    /// Whether direct writes are restricted to each row's original creator.
-    pub fn is_owner_only(&self) -> bool {
-        self.owner_only
+    /// Who may change the table's rows directly.
+    pub fn write_permission(&self) -> WritePermission {
+        self.permission
     }
 
     /// The root audience column, including when inheritance was also declared.
@@ -90,17 +105,27 @@ impl SyncedTable {
             audience: AudienceSource::Store,
             files: Vec::new(),
             shared_triggers: Vec::new(),
-            owner_only: false,
+            permission: WritePermission::Anyone,
         }
     }
 
     /// Only each row's original creating member may directly update or
     /// delete it (§9.6). Shared-trigger targets count as direct writes;
     /// foreign-key actions from authorized changes may still reach the row.
-    /// No app owner column is needed. Changing this declaration for an
-    /// existing table is a breaking schema change (§18.1).
+    /// No app owner column is needed. Changing a table's write permission
+    /// is a breaking schema change (§18.1).
     pub fn owner_only(mut self) -> Self {
-        self.owner_only = true;
+        self.permission = WritePermission::Owner;
+        self
+    }
+
+    /// Only a member who is an admin as of the write's slot may directly
+    /// insert, update or delete its rows, whoever created them (§9.6).
+    /// Shared-trigger targets count as direct writes; foreign-key actions
+    /// from authorized changes may still reach the row. Changing a table's
+    /// write permission is a breaking schema change (§18.1).
+    pub fn admin_only(mut self) -> Self {
+        self.permission = WritePermission::Admin;
         self
     }
 

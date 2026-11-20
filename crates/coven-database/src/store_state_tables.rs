@@ -27,6 +27,16 @@ pub(crate) fn device_member(db: &StoreSql, device: DeviceId) -> Result<Option<Me
         .pop())
 }
 
+/// Whether `member` is an active admin in the counted state.
+pub(crate) fn is_admin(db: &StoreSql, member: MemberId) -> Result<bool, DbError> {
+    let role = db
+        .query("SELECT role FROM _coven_members WHERE member=?1 AND removed=0", [member], |r| {
+            stored::<coven_format::admin::MemberRole>(r, 0, Type::Text)
+        })?
+        .pop();
+    Ok(role == Some(coven_format::admin::MemberRole::Admin))
+}
+
 /// A public key pair as the membership tables hold it: the signing key at
 /// `signing`, the sealing key in the column after it.
 fn member_keys(row: &Row<'_>, signing: usize) -> sqlive::rusqlite::Result<MemberPublicKeys> {

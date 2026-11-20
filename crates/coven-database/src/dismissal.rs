@@ -180,7 +180,7 @@ fn cascade_deletes(
     device: DeviceId,
     changes: &mut BTreeMap<RowId, RowChange>,
 ) -> Result<(), DbError> {
-    let mut owners = crate::judge::Owners::new(
+    let mut permissions = crate::permission::Permissions::new(
         database,
         call,
         schema,
@@ -189,7 +189,7 @@ fn cascade_deletes(
     )?;
     let mut roots = Vec::new();
     for row in changes.keys() {
-        roots.push((owners.foreign_owner(row)?.is_some(), row.clone()));
+        roots.push((permissions.denial(row)?.is_some(), row.clone()));
     }
     // Selecting a child as well must not turn an authorized cascade into a
     // direct delete of someone else's row. Start every permitted root first.

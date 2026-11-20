@@ -105,8 +105,9 @@ pub enum LossCause {
         sources: Vec<ChangeId>,
     },
     /// A member's row change without permission: a direct change of another
-    /// member's owned row, or a foreign-key effect the receiver could not
-    /// derive exactly from an authorized direct change (§9.6).
+    /// member's owned row, a non-admin's direct change of an admin table's
+    /// row, or a foreign-key effect the receiver could not derive exactly
+    /// from an authorized direct change (§9.6).
     NotAuthorized {
         /// The write whose row change this is, even for an empty delete.
         write: WriteId,
@@ -124,6 +125,10 @@ pub enum AuthorizationFailure {
         /// The member whose write created the row.
         owner: MemberId,
     },
+    /// The row's table is limited to admins, its author was no admin in the
+    /// state just before the write's slot, and the change was not an exact
+    /// foreign-key effect of an authorized change.
+    NotAdmin,
     /// A derived change differs from the schema's effect of authorized
     /// direct changes in its write, or has no authorized root.
     InvalidForeignKeyEffect,
@@ -136,12 +141,14 @@ impl Wire for AuthorizationFailure {
                 owner.put(out)
             }
             Self::InvalidForeignKeyEffect => 1u8.put(out),
+            Self::NotAdmin => 2u8.put(out),
         }
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         match u8::get(input)? {
             0 => Ok(Self::NotOwner { owner: Wire::get(input)? }),
             1 => Ok(Self::InvalidForeignKeyEffect),
+            2 => Ok(Self::NotAdmin),
             tag => Err(Error::UnknownTag { field: "authorization failure", tag }),
         }
     }

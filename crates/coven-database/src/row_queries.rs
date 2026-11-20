@@ -45,11 +45,16 @@ pub(crate) fn register_schema(
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
     // The declarations a later open or migration compares against (§18.3).
-    database.execute("DELETE FROM _coven_owner_tables", [])?;
-    for declaration in tables.iter().filter(|d| d.owner_only) {
+    database.execute("DELETE FROM _coven_write_permissions", [])?;
+    for declaration in tables {
+        let Some(permission) = registered_permission(declaration.permission) else {
+            continue;
+        };
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
-        database
-            .execute("INSERT INTO _coven_owner_tables(table_name) VALUES(?1)", [&table.name])?;
+        database.execute(
+            "INSERT INTO _coven_write_permissions(table_name,permission) VALUES(?1,?2)",
+            [&table.name, permission],
+        )?;
     }
     crate::file_table::register(database, schema, tables)?;
     for declaration in &crate::file_table::synced(tables) {
@@ -160,10 +165,20 @@ pub(crate) fn merge_column(database: &StoreSql, id: i64, into: i64) -> Result<()
     Ok(())
 }
 
-/// The first registered synced table whose `owner_only` declaration differs
-/// from the one last registered. A table never registered has no earlier
+/// How `_coven_write_permissions` names a permission; a table anyone may
+/// change has no row there.
+fn registered_permission(permission: crate::WritePermission) -> Option<&'static str> {
+    match permission {
+        crate::WritePermission::Anyone => None,
+        crate::WritePermission::Owner => Some("owner"),
+        crate::WritePermission::Admin => Some("admin"),
+    }
+}
+
+/// The first registered synced table whose write permission differs from
+/// the one last registered. A table never registered has no earlier
 /// declaration to change.
-pub(crate) fn owner_declaration_changed(
+pub(crate) fn permission_changed(
     database: &StoreSql,
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
@@ -172,13 +187,13 @@ pub(crate) fn owner_declaration_changed(
         let Some(table) = schema.tables.get(&declaration.name.to_ascii_lowercase()) else {
             continue;
         };
-        let (registered, owner): (bool, bool) = database.query_row(
+        let (registered, permission): (bool, Option<String>) = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1 AND synced=1),
-                    EXISTS(SELECT 1 FROM _coven_owner_tables WHERE table_name=?1)",
+                    (SELECT permission FROM _coven_write_permissions WHERE table_name=?1)",
             [&table.name],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if registered && owner != declaration.owner_only {
+        if registered && permission.as_deref() != registered_permission(declaration.permission) {
             return Ok(Some(table.name.clone()));
         }
     }

@@ -1595,6 +1595,10 @@ pub enum DbError {
     /// The write directly changed another member's row (§9.6). The
     /// transaction, including its upload record, did not commit.
     NotOwner { table: String, key: RowKey, owner: MemberId },
+    /// The write directly changed a row of an admin table, and this device's
+    /// member isn't an admin in the state it has applied (§9.6). Nothing
+    /// committed.
+    NotAdmin { table: String, key: RowKey },
     /// The write's foreign-key actions on a row are not the schema's exact
     /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
@@ -1914,9 +1918,9 @@ pub enum SchemaError {
     MissingTable { table: String },
     /// Two declarations name one table (E2).
     DuplicateTable { table: String },
-    /// A table's `owner_only` declaration changed without a breaking
-    /// migration (§9.6, §18.1).
-    OwnerOnlyChanged { table: String },
+    /// A table's write permission (`owner_only`, `admin_only` or neither)
+    /// changed without a breaking migration (§9.6, §18.1).
+    WritePermissionChanged { table: String },
     /// A table declares both `audience_column` and `audience_from` (E2).
     TwoAudiences { table: String },
     /// A declared file column isn't in the table (E2).
@@ -3106,10 +3110,10 @@ handle.setup_oauth_storage(
 - Each synced table declares its kind of key ([§9.2](coven.md#92-keys-and-unique-values)),
   how its rows get their audience ([§15](coven.md#15-circles)), and which of its
   columns reference a file ([§17](coven.md#17-files)). It may restrict direct writes to
-  each row's original creator with `owner_only()`
-  ([§9.6](coven.md#96-owner-tables)).
-- Owner tables use the same foreign-key actions, unique constraints, CHECKs
-  and shared triggers as other synced tables. Opening and schema raises
+  each row's original creator with `owner_only()`, or to admins with
+  `admin_only()` ([§9.6](coven.md#96-owner-and-admin-tables)).
+- Owner and admin tables use the same foreign-key actions, unique
+  constraints, CHECKs and shared triggers as other synced tables. Opening and schema raises
   enforce the ordinary schema rules, including SET DEFAULT's refusal; no
   owner-column or owner-specific RESTRICT requirement is added.
 - A table declares at most one of `audience_column` and `audience_from`;
@@ -3124,6 +3128,17 @@ pub enum RowIdentity {
     SharedKey,
 }
 
+/// Who may change a synced table's rows directly (§9.6). The later of
+/// `owner_only` and `admin_only` decides; a table with neither is `Anyone`.
+pub enum WritePermission {
+    /// Every member.
+    Anyone,
+    /// Only the member whose write created the row.
+    Owner,
+    /// Only a member who is an admin just before the write's slot.
+    Admin,
+}
+
 impl SyncedTable {
     /// The table name exactly as supplied to the declaration.
     pub fn name(&self) -> &str;
@@ -3134,8 +3149,8 @@ impl SyncedTable {
     /// The declared primary-key columns, in order; defaults to `id`.
     pub fn get_key_columns(&self) -> &[String];
 
-    /// Whether direct writes are restricted to each row's original creator.
-    pub fn is_owner_only(&self) -> bool;
+    /// Who may change the table's rows directly.
+    pub fn write_permission(&self) -> WritePermission;
 
     /// The root audience column, including when inheritance was also declared.
     /// Opening refuses a declaration with both audience sources.
@@ -3165,6 +3180,12 @@ impl SyncedTable {
     /// it. Shared-trigger targets count as direct writes; exact foreign-key
     /// consequences are verified separately (§9.6). No app owner column is needed.
     pub fn owner_only(self) -> Self;
+
+    /// Only a member who is an admin as of the write's slot may directly
+    /// insert, update or delete its rows, whoever created them. Shared-trigger
+    /// targets count as direct writes; exact foreign-key consequences are
+    /// verified separately (§9.6).
+    pub fn admin_only(self) -> Self;
 
     /// Root audience column: bind Audience or CircleId; NULL and
     /// noncanonical text are refused (§15).
@@ -3404,8 +3425,10 @@ pub struct FileRef { /* private fields */ }
 impl CovenHandle {
     /// Runs one write: the app's SQL and coven's steps, in one transaction.
     /// A statement or shared trigger targeting another owner's row refuses
-    /// the transaction with DbError::NotOwner (§9.6). Authorized foreign-key
-    /// actions may change that row under the declared schema.
+    /// the transaction with DbError::NotOwner, and one targeting an admin
+    /// table's row while this device's member is no admin refuses it with
+    /// DbError::NotAdmin (§9.6). Authorized foreign-key actions may change
+    /// that row under the declared schema.
     pub async fn write<F, R, E>(&self, write: F) -> Result<R, E>
     where
         F: FnOnce(CovenWrite<'_>) -> Result<R, E> + Send + 'static,
@@ -4624,6 +4647,9 @@ pub enum RowAuthorizationFailure {
     /// A direct target belongs to this member, or a foreign target had no
     /// valid foreign-key derivation from an authorized direct change.
     NotOwner { owner: MemberId },
+    /// A direct target is in an admin table, and the write's author wasn't
+    /// an admin just before its slot.
+    NotAdmin,
     /// The proposed derived payload differs from the reconstructed schema effect.
     InvalidForeignKeyEffect,
 }
@@ -7593,7 +7619,7 @@ impl CovenHandle {
     /// each copy is written under a temporary name in its final folder and
     /// renamed once synced. The member must be in each file's audience and
     /// may change every row referencing it (`NotInCircle` for a member who
-    /// left the file's circle, `NotOwner`); a file of a circle the member was
+    /// left the file's circle, `NotOwner`, `NotAdmin`); a file of a circle the member was
     /// never in has no record here (`FileAbsent`). Only cloud files of user
     /// namespaces qualify (`NotInCloud`, `NamespaceKind`). Each name is
     /// written as one rule, the same on every platform, makes it valid on
@@ -7842,7 +7868,7 @@ pub enum DeviceOnlyError {
     Path(CopyPathError),
     /// This device may not make a file device-only, or the write failed:
     /// `FileAbsent`, `NotInCloud`, `NamespaceKind`, `NotInCircle`,
-    /// `NotOwner`, `CopyPathTaken`, or the database failing.
+    /// `NotOwner`, `NotAdmin`, `CopyPathTaken`, or the database failing.
     Database(DbError),
     /// Downloading a file failed.
     Download { file: FileId, error: FileReadError },

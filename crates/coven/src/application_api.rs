@@ -55,7 +55,7 @@ pub use coven_database::{
     RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead,
     SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError,
     ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile,
-    WriteBatch, WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
+    WriteBatch, WriteFailure, WriteId, WritePermission, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_format::admin::StoreChange;

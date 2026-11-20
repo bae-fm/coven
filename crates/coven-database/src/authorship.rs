@@ -565,7 +565,9 @@ pub(crate) fn check(
     // The loaded rows are still the snapshot's staged values.
     let loaded = BTreeSet::from([audience.clone()]);
     let store = crate::merge_store::MergeStore::from_snapshot(db, call, &schema.schema, &loaded);
-    for declaration in schema.declarations.iter().filter(|d| d.owner_only) {
+    for declaration in
+        schema.declarations.iter().filter(|d| d.permission == crate::WritePermission::Owner)
+    {
         let rows = db.query(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 AND table_name=?2",
             params![audience, declaration.name],

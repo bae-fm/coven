@@ -1,6 +1,8 @@
 use super::*;
 use crate::LocalFileError;
+use crate::OpenError;
 use coven_foundation::files::FileError;
+use coven_foundation::files::SettingsError;
 
 fn bug() -> Bug {
     Bug::new("read the bytes", "the read panicked")

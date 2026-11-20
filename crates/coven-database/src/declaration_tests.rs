@@ -8,7 +8,7 @@ fn declaration_getters_expose_defaults_without_opening_a_database() {
     assert_eq!(table.name(), "Notes");
     assert_eq!(table.identity(), &RowIdentity::IndependentUuid);
     assert_eq!(table.get_key_columns(), ["id"]);
-    assert!(!table.is_owner_only());
+    assert_eq!(table.write_permission(), WritePermission::Anyone);
     assert_eq!(table.get_audience_column(), None);
     assert_eq!(table.get_audience_from(), None);
     assert!(table.file_columns().is_empty());
@@ -38,7 +38,8 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
     assert_eq!(table.name(), "Attachments");
     assert_eq!(table.identity(), &RowIdentity::SharedKey);
     assert_eq!(table.get_key_columns(), ["Note", "Attachment"]);
-    assert!(table.is_owner_only());
+    assert_eq!(table.write_permission(), WritePermission::Owner);
+    assert_eq!(table.clone().admin_only().write_permission(), WritePermission::Admin);
     assert_eq!(table.get_audience_column(), None);
     assert_eq!(table.get_audience_from(), Some("Note"));
     assert_eq!(table.shared_triggers(), ["RecordInsert", "RecordUpdate", "RecordInsert"]);

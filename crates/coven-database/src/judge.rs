@@ -17,9 +17,10 @@
 //! changed has exactly their combined effect as its net change, and a row
 //! whose steps cause actions has its net change where its steps end (Lean
 //! `Admission.checkSteps`, `applied_root_ends_where_steps_end`). These hold
-//! for every row, owned or not. A failure names the row's owner when the
-//! author may not change the row itself, and an invalid foreign-key effect
-//! otherwise (`Admission.guard`).
+//! for every row, whoever may change it. A failure names why the author may
+//! not change the row itself (its owner, or that its table is limited to
+//! admins) when it may not, and an invalid foreign-key effect otherwise
+//! (`Admission.guard`).
 
 use crate::judge_view::{Authoring, ChildView};
 use crate::sqlite::StoreSql;
@@ -31,7 +32,6 @@ use coven_format::merge_fields;
 use coven_format::value::Value;
 use coven_format::write::{Half, OriginalRow, PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
-use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Change, ColumnValue, Operation, RowId};
 pub(crate) use place::Place;
 use sqlive::rusqlite::params;
@@ -310,7 +310,13 @@ pub(crate) fn judge(
         .flat_map(|(row, sequence)| chain(row, *sequence))
         .map(|(row, _)| row)
         .collect();
-    let mut owners = Owners::new(db, call, schema, header.position.device, header.schema_version)?;
+    let mut permissions = crate::permission::Permissions::new(
+        db,
+        call,
+        schema,
+        header.position.device,
+        header.schema_version,
+    )?;
     let mut rows = BTreeMap::new();
     for (row, shape) in &shapes {
         let derived: Vec<u32> = shape
@@ -320,14 +326,14 @@ pub(crate) fn judge(
             .filter(|sequence| actions.contains_key(&(row.clone(), *sequence)))
             .collect();
         let direct = shape.normalized || derived.len() < shape.steps.len();
-        let owner = owners.foreign_owner(row)?;
-        let refuse = || match owner {
-            Some(owner) => AuthorizationFailure::NotOwner { owner },
+        let denial = permissions.denial(row)?;
+        let refuse = || match denial {
+            Some(denial) => denial.failure(),
             None => AuthorizationFailure::InvalidForeignKeyEffect,
         };
         let mut check = Ok(());
-        // A direct target needs the author's own permission (`statement_authorized`).
-        if direct && owner.is_some() {
+        // A direct target needs the author's own permission (`statement_allowed`).
+        if direct && denial.is_some() {
             check = Err(refuse());
         }
         // An action's steps justify effects on other rows only when the row's
@@ -339,7 +345,7 @@ pub(crate) fn judge(
         for sequence in derived {
             let chain = chain(row, sequence);
             // Every action reaches an authorized direct root (`derived_roots_authorized`).
-            if check.is_ok() && owners.foreign_owner(&chain[0].0)?.is_some() {
+            if check.is_ok() && permissions.denial(&chain[0].0)?.is_some() {
                 check = Err(refuse());
             }
             chains.push((sequence, chain));
@@ -451,74 +457,6 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
         };
     }
     Some(effect)
-}
-
-/// Each row's owner, as the selected creations and the counted membership
-/// name them, for one check of a write's rows.
-pub(crate) struct Owners<'a> {
-    database: &'a StoreSql,
-    schema: &'a WriteSchema,
-    version: u32,
-    current: u32,
-    device: DeviceId,
-    member: Option<MemberId>,
-    known: BTreeMap<RowId, Option<MemberId>>,
-}
-
-impl<'a> Owners<'a> {
-    pub(crate) fn new(
-        db: &'a StoreSql,
-        call: &'a StoreCall<'a>,
-        schema: &'a WriteSchema,
-        device: DeviceId,
-        version: u32,
-    ) -> Result<Self, DbError> {
-        Ok(Self {
-            database: db,
-            schema,
-            version,
-            current: crate::transaction_constants::schema_version(db, call)?,
-            device,
-            member: crate::store_state_tables::device_member(db, device)?,
-            known: BTreeMap::new(),
-        })
-    }
-
-    /// The member who owns this row when it is not the author (Lean
-    /// `!allowed`): an owner table's row another member created. A row no
-    /// write has created yet is new, and its creation is the author's.
-    pub(crate) fn foreign_owner(&mut self, row: &RowId) -> Result<Option<MemberId>, DbError> {
-        if let Some(owner) = self.known.get(row) {
-            return Ok(*owner);
-        }
-        let owner = self.lookup(row)?;
-        self.known.insert(row.clone(), owner);
-        Ok(owner)
-    }
-
-    fn lookup(&self, row: &RowId) -> Result<Option<MemberId>, DbError> {
-        let db = self.database;
-        let Some(table) = crate::source_names::table(db, self.version, &row.table, self.current)?
-        else {
-            return Ok(None);
-        };
-        if !crate::ownership::owner_table(self.schema, &table) {
-            return Ok(None);
-        }
-        let current = RowId { table, ..row.clone() };
-        let Some(creation) = crate::ownership::creation(db, &current)? else {
-            return Ok(None);
-        };
-        // A device's own creations are its member's, even before its
-        // registration acquires a slot.
-        if creation.creator.write.device == self.device {
-            return Ok(None);
-        }
-        // Every applied write's device is registered before it applies.
-        let owner = crate::store_state_tables::device_member(db, creation.creator.write.device)?
-            .ok_or(DbError::Invariant { what: "an applied write's device has a member" })?;
-        Ok((self.member != Some(owner)).then_some(owner))
-    }
 }
 
 /// The admission stored for one original row change, if judged.

@@ -143,7 +143,7 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
         "INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
          INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
          INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
-         INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;",
+         INSERT INTO _coven_write_permissions SELECT DISTINCT 'table_' || i,'owner' FROM fixture;",
     )
     .unwrap();
 }

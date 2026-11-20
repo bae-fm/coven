@@ -35,6 +35,7 @@ fn frozen_change_decoding_refuses_parent_maps() {
             },
         },
         LossCause::NotAuthorized { write, reason: AuthorizationFailure::InvalidForeignKeyEffect },
+        LossCause::NotAuthorized { write, reason: AuthorizationFailure::NotAdmin },
         original.cause.clone(),
     ] {
         let mut loss = original.clone();
@@ -299,12 +300,13 @@ fn unauthorized_losses_round_trip_with_their_reason() {
     let empty = test_utils::oracle();
     let mut loss = test_utils::excluded_loss();
     let write = test_utils::write().header.position;
-    let (mut encoder, mut decoder) = encoder(2);
+    let (mut encoder, mut decoder) = encoder(3);
     for reason in [
         crate::loss::AuthorizationFailure::NotOwner {
             owner: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(7)),
         },
         crate::loss::AuthorizationFailure::InvalidForeignKeyEffect,
+        crate::loss::AuthorizationFailure::NotAdmin,
     ] {
         loss.cause = LossCause::NotAuthorized { write, reason };
         loss.generation += 1;

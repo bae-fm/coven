@@ -221,6 +221,10 @@ hold.
   ones the lower slot wins. Judged by what each author had seen, Ana and Ben
   removing each other offline would both pass and leave no admin; in slot order
   the first removal counts and the second is refused.
+- **Changes to an admin table** (§9.6) are changes to data, but whether their
+  author may make them depends on the author's role just before their slot,
+  the same state admin entries are judged against. An admin demoted before
+  her write's slot can't change the table, whatever she had seen.
 
 So only authorized members change membership, and at least one admin always
 remains (§10). The Lean models assume the cryptography is secure; they don't prove it.
@@ -3744,9 +3748,9 @@ doesn't, when the database opens and after migrating.
   | merged      | 3 attachments          | 2                  |
 
   A local trigger writing a local table counts 3 on every device.
-- **Owner tables.** For owner permissions (§9.6), a shared trigger's targets are
-  direct changes, even when a foreign-key action fired it, unless a step equals a
-  foreign-key action's exact effect.
+- **Owner and admin tables.** For owner and admin permissions (§9.6), a shared
+  trigger's targets are direct changes, even when a foreign-key action fired it,
+  unless a step equals a foreign-key action's exact effect.
 - **A trigger on `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status` or
   `coven_retry_effect` runs after the change.** Run before it, a trigger
@@ -3885,15 +3889,24 @@ as written, and a later replacement of the cell doesn't clear it.
   cut-off, or a part ignored by a reset, creates no lost value itself; a change
   that depends on it and would otherwise apply does.
 
-#### 9.6 Owner tables
+#### 9.6 Owner and admin tables
 
-A table can be declared `owner_only()`
-([api.md E2](api.md#e2-declaring-synced-tables)). A row's owner is the member who
-created it. Only the owner may update or delete it directly. Tables without the
-declaration have no owner restriction.
+A table can be declared `owner_only()` or `admin_only()`
+([api.md E2](api.md#e2-declaring-synced-tables)). The declaration says who may
+change the table's rows directly:
 
-This is for authenticity, not secrecy: "Ana rated this" really was Ana. A change
-to someone else's owned row is refused on every device and recorded as lost.
+- In an *owner table*, a row's owner is the member who created it. Only the
+  owner may update or delete it directly.
+- In an *admin table*, only a member who is an admin just before the write's
+  slot may insert, update or delete its rows directly, whoever created them.
+
+Every member may change the rows of a table with neither declaration. A table
+has at most one of the two: the later call replaces the earlier one.
+
+This is for authenticity, not secrecy: "Ana rated this" really was Ana, and a
+setting of the whole library that only admins may change was changed by an
+admin. A change that the declaration forbids is refused on every device and
+recorded as lost.
 
 Foreign-key actions caused by someone else's authorized change still apply. Ben
 deletes a track while Ana's review points at it. With cascade, Ben's write records
@@ -3916,6 +3929,17 @@ member who created the row, never from an app column the app could change.
   value, schema conversion and snapshots. Renaming a table or key doesn't make the
   migration's author the row's creator.
 
+**Who counts as an admin.** A write's author counts as an admin when their
+member holds the admin role in the state just before the write's slot: the state
+that admin entries are judged against (§10.2), not the state the author had
+read. Ana, an admin, sets her library's ratings to hearts on her laptop while
+offline. Ben demotes her in slot 40, and her write lands in slot 42. Every device
+refuses her change and records it as lost, though she made it as an admin. Her
+laptop checks the write at commit against the slots it has applied. Once it
+applies slot 40, it applies its queued writes again (§6.2) and records the same
+loss. A member promoted in slot 41 may change the table in every write that
+lands after slot 41.
+
 **Checking a write.** An insert over an existing or removed shared key counts as
 an update for this permission. Direct changes are the write's own statements and
 its shared triggers. Every direct change is checked, even when its effect combines
@@ -3924,17 +3948,19 @@ the row that fired it.
 
 - **At commit,** the author's device checks its own write the way receivers will.
   A change they would refuse refuses the whole local transaction with
-  `DbError::NotOwner` or `DbError::InvalidForeignKeyEffect`, leaving its rows and
-  upload queue unchanged.
+  `DbError::NotOwner`, `DbError::NotAdmin` or `DbError::InvalidForeignKeyEffect`,
+  leaving its rows and upload queue unchanged.
 - **On receipt,** an unauthorized row change becomes a frozen lost value (§9.5)
-  naming the owner; the write's other changes still apply. Changes that used its
+  naming the owner, or saying that only an admin may change the row; the
+  write's other changes still apply. Changes that used its
   data are dropped by §9.5's rule. This is separate from the whole-write checks of
   signature and membership (§7.1, §14.1).
 
 **Foreign-key effects on owned rows.** A foreign-key action derived from an
 authorized direct change in the same write may update or delete another member's
-row. That includes chains of cascade and set null actions, on deletes and on
-updates of the referenced key. Receivers don't trust the write's labels for this.
+row, or an admin table's row when its author is no admin. That includes chains
+of cascade and set null actions, on deletes and on updates of the referenced
+key. Receivers don't trust the write's labels for this.
 They recompute the whole effect from the original schema, the write's direct
 changes and the verified authoring inputs; a claimed label of direct or derived, a
 target, a generation, a set of values or a list of causes counts for nothing.
@@ -3947,8 +3973,9 @@ write leaves their keys, which the actions' steps need not name (below). A row
 whose steps cause actions must have its net change where its steps end, since
 those steps are what the actions rest on. Without this on every row, whether a
 cascaded row falls with its cause would depend on whether its table has an
-owner. A failure on another member's row names that member, as `NotOwner`. On
-a row nobody owns, or the author's own, it is `InvalidForeignKeyEffect`.
+owner. A failure on another member's row names that member, as `NotOwner`, and
+one on an admin table's row whose author is no admin is `NotAdmin`. On any other
+row it is `InvalidForeignKeyEffect`.
 
 **Edge cases.**
 
@@ -4049,15 +4076,16 @@ a row nobody owns, or the author's own, it is `InvalidForeignKeyEffect`.
   surviving changes are replayed: the row's earlier generation and values return,
   unless an independent surviving change or a removal rule keeps them out. A
   combined row change loses if any contributing cause loses.
-- **Ordinary rules still apply.** Owner tables follow every schema and removal
-  rule. Unique and CHECK conflicts can take owned rows out, and shared triggers
-  can cause such conflicts through their authorized targets. Every row taken out
-  has its ordinary lost-value record naming the causes, and comes back when the
-  last cause goes. The `SET DEFAULT` refusal (§9.1) applies. Ownership adds no
-  other schema restriction.
-- **Every device decides the same.** Owner permissions and verified foreign-key
-  effects are checked on every device from the same authenticated inputs,
-  including after a reload.
+- **Ordinary rules still apply.** Owner and admin tables follow every schema and
+  removal rule. Unique and CHECK conflicts can take their rows out, and shared
+  triggers can cause such conflicts through their authorized targets. Every row
+  taken out has its ordinary lost-value record naming the causes, and comes back
+  when the last cause goes. The `SET DEFAULT` refusal (§9.1) applies. Neither
+  declaration adds another schema restriction.
+- **Every device decides the same.** Owner and admin permissions and verified
+  foreign-key effects are checked on every device from the same authenticated
+  inputs, including after a reload. Each device applies slots in order, so each
+  judges a write against the same roles.
 
 ---
 
@@ -4101,6 +4129,7 @@ device, which is how coven notices a restored backup posing as the original
 | Replace a member's keys | that member, or an admin (§12.3) |
 | Set a member's provider access | that member; an admin may set another member's S3 access |
 | Create a circle | any member, who becomes its first member |
+| Change a row of an admin table | an admin, as of the write's slot (§9.6) |
 | Rename a circle, add or remove its members, rotate or delete it | its members only; an admin outside it can't |
 
 A store may have several admins. The store always keeps at least one: removing
@@ -8785,8 +8814,10 @@ laptop.
   Ben, removed from Gifts, keeps the records he had (§15.8), and naming one
   is `NotInCircle` (§15.6). The member must also be able to change every row
   referencing the file: a row of an `owner_only` table another member
-  created refuses the call (`NotOwner`, §9.6). It isn't tied to the device
-  that uploaded the file, and an admin gets no exception, as with any row.
+  created refuses the call (`NotOwner`, §9.6), and so does a row of an
+  `admin_only` table when the member isn't an admin (`NotAdmin`). It isn't
+  tied to the device that uploaded the file, and an admin gets no exception
+  on an owned row, as with any change.
   Coven checks before downloading anything, and again in the write.
 - **Only cloud files, of a user namespace.** A file on one device only has no
   stored bytes to download (`NotInCloud`). An app file is kept in coven's own
@@ -10181,7 +10212,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 |---|---|
 | adds only new tables with their own indexes, constraints and triggers, or new columns without new constraints | addition |
 | adds an index, constraint (including a foreign key) or trigger to an existing synced table, or anything else | breaking |
-| changes an existing table's `owner_only` declaration | breaking (so declarations are compared too, not only SQLite's schema) |
+| changes an existing table's write permission: `owner_only()`, `admin_only()` or neither | breaking (so declarations are compared too, not only SQLite's schema) |
 | adds, removes or changes a file reference column, write-once included, on an existing synced table | breaking, like a foreign key: receivers check its cells as references (§17.2) |
 | changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
@@ -15167,10 +15198,11 @@ Write-ups explain each model and state its assumptions:
 | Later claims, updates, deletion, re-adding and audience moves keep the creator | `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | A creation still in the queue is provisional: among the creations a device holds, it picks the owner every receiver picks once its queued creations land, and a published creation owns the key before every queued one, so queued changes are checked against that owner | `provisional_owner_lands`, `published_owner_first` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | A kept foreign-key effect on an owned row traces back to an authorized direct change in the same write | `derived_root_authorized` | `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.6 |
+| A kept direct change of an admin table's row was written by a member who was an admin just before the write's slot, whoever created the row. A member demoted before the slot has the change refused with that cause, while the write's other changes apply; a member promoted before it has the change kept | `statement_admin`, `every_applied_statement_admin`, `demoted_loss`, `demoted_keeps_unrelated`, `promoted_applies` | `proofs/merge/CovenMerge/OwnerAdmission.lean`; `proofs/merge/CovenMerge/OwnerFilterExamples.lean` | §9.6 |
 | An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | An action's delete carries exactly the values its replaced setters wrote: a delete with any other old values is refused | `delete_old_mismatch_refused` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | A column read in full was a reference when its setter wrote it: every cell of a state, in a column the state's schema reads as a reference, was set by a write that wrote it as one. Counting a write keeps this when each reference column it sets was one under its own version (its own version, additions since, or a converter that keeps references); an addition keeps it; a breaking migration's write keeps it at the new version, since it sets every column whose references change in every present row; dropping tables and columns keeps it | `write_keeps`, `addition_fits`, `addition_keeps`, `migration_keeps`, `drop_keeps` | `proofs/merge/CovenMerge/ReferenceSetters.lean` | §9.6, §18.4 |
-| Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
+| Owner and admin authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | A shared reference's parent is the row its values key where the write's earlier steps leave that key, a move's two steps included, whether the row's own update or an ancestor's move made them: every author view consistent with the steps holds it there, at that incarnation, or nowhere after a delete, so the parent the receiver records is the one the author's capture names. A row of the key the write changed at no step of its own leaves that parent standing unless it is the row the last step names, the setter's parent, or, where the reference would name none, a row the reference could name: a removed row a move carries beside the shown one leaves it placed. Where no step touched the key and the action changes the reference, or such a row could have moved the key where the reference looks, two such views capture different parents, and the receiver refuses | `Place.place_settles`, `Place.place_sound`, `Place.resolve_sound`, `Place.recorded_sound`, `Place.aside_placed`, `Place.untouched_views_differ`, `Place.unstepped_views_differ`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 | A net change's reference names the row its values key where the whole write's steps leave that key, at the incarnation the write's own record of that row leaves it at: every author view consistent with the steps and the rows changed at no step captures that parent for the net change, resolved as an action's is. It is not the parent an action's step names: a parent deleted and added again in the write keeps its incarnation in its net change, and a deferred reference's parent can be added after the action | `Place.net_sound`, `Place.readded_net_differs`, `Place.deferred_net_differs`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyPlace.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
@@ -15566,7 +15598,7 @@ maps them are with each provider in Appendix E.
 | `DbError::StoreFailed` | an earlier bug may have left the handle's state wrong; the call whose work hit it returned it as `DbError::Bug`, or the bug sink heard it; every later call on that handle fails with it until the store is reopened | api.md E15 |
 | `DbError::StatisticsFailed` | checking or gathering the planner's statistics while the store stayed open failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::UpkeepThread` | the system refused a thread of coven's upkeep, the one that checkpoints a WAL or the one that keeps the planner's statistics, so the store did not open | §4 |
-| `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
+| `DbError::NotOwner`, `DbError::NotAdmin`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner or admin rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
 | `DbError::NotRegistered` | a synced write on a store a join published, before the state it has applied registers its device | §7.1, §13.4 |
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |

@@ -53,10 +53,11 @@ pub enum SchemaError {
         /// The repeated table.
         table: String,
     },
-    /// A synced table's `owner_only` declaration changed without a breaking
-    /// migration to raise the schema (§18.3).
-    #[error("synced table {table} changed its owner_only declaration without a migration")]
-    OwnerOnlyChanged {
+    /// A synced table's write permission (`owner_only`, `admin_only` or
+    /// neither) changed without a breaking migration to raise the schema
+    /// (§18.3).
+    #[error("synced table {table} changed who may write it without a migration")]
+    WritePermissionChanged {
         /// The table whose declaration changed.
         table: String,
     },

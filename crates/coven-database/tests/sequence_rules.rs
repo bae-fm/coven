@@ -1,5 +1,6 @@
 //! Shared-sequence rules exercised through the database API.
 use coven_database::*;
+use coven_format::admin::MemberRole;
 use coven_format::{
     sequence::SlotHeader,
     value::Value,
@@ -84,14 +85,17 @@ impl PendingValue for Pending {
     }
 }
 async fn open(owned: bool) -> (tempfile::TempDir, StoreDatabase) {
+    let table = SyncedTable::new("items", RowIdentity::SharedKey);
+    open_table(if owned { table.owner_only() } else { table }).await
+}
+/// A store whose one synced table is `items`, declared as `table`.
+async fn open_table(table: SyncedTable) -> (tempfile::TempDir, StoreDatabase) {
     let dir = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
     let store =
         StoreDirectories::new(dir.path().into(), coven_foundation::task::HeardBugs::shared())
             .create_store_dir(StoreId(ids.new_id()), &ids)
             .unwrap();
-    let table = SyncedTable::new("items", RowIdentity::SharedKey);
-    let table = if owned { table.owner_only() } else { table };
     let db = DatabaseBuilder::new(store)
         .synced_tables(vec![table])
         .migrations(vec![Migration::addition(
@@ -537,6 +541,77 @@ async fn the_first_counted_creation_keeps_the_owner() {
             .any(|loss| matches!(loss.replaced_by, Replacement::NotAuthorized { .. })));
         db.close().await.unwrap();
     }
+}
+
+/// Members `10` and `20`, each with the device of the same number and the
+/// role `roles` gives.
+fn members(roles: [MemberRole; 2]) -> StoreState {
+    let mut state = StoreState::default();
+    for ((device, seed), role) in [(10, 1), (20, 2)].into_iter().zip(roles) {
+        state.members.insert(
+            member(device),
+            StoreMember {
+                keys: coven_format::test_utils::keys_from_seed(seed).public_keys(),
+                access: Some(coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: format!("fixture-{device}"),
+                }),
+                role,
+                removed: false,
+                joined: Joined {
+                    person: None,
+                    circle: CircleId(uuid::Uuid::from_bytes([seed; 16])),
+                },
+            },
+        );
+        state.devices.insert(
+            DeviceId(device as u64),
+            StoreDevice {
+                member: member(device),
+                name: format!("device-{device}"),
+                state: DeviceState::Active,
+            },
+        );
+    }
+    state
+}
+
+/// An admin-only table takes each write by its author's role in the state
+/// just before the write's slot (§9.6). Member 10 starts an admin and member
+/// 20 a member; then 10 is demoted and 20 promoted. Each write was made
+/// before its author's role changed, and each counts by its slot.
+#[tokio::test]
+async fn an_admin_only_table_judges_each_write_by_its_authors_role_before_its_slot() {
+    use coven_format::admin::StoreChange;
+    use MemberRole::{Admin, Member};
+    let (_temp, db) =
+        open_table(SyncedTable::new("items", RowIdentity::SharedKey).admin_only()).await;
+    let fixture = StoreChange::AddDevice { name: "fixture".into(), replaces: None };
+    admin(&db, 1, fixture, members([Admin, Member])).await;
+    apply(&db, 2, vec![insert(10, 1, 1, "admin", "first")]).await.unwrap();
+    apply(&db, 3, vec![insert(20, 1, 2, "member", "second")]).await.unwrap();
+    assert_eq!(rows(&db).await, [("admin".into(), "first".into())]);
+    let demote = StoreChange::ChangeRole { member: member(10), role: Member };
+    admin(&db, 4, demote, members([Member, Member])).await;
+    let promote = StoreChange::ChangeRole { member: member(20), role: Admin };
+    admin(&db, 5, promote, members([Member, Admin])).await;
+    // Neither write read the role changes: 10 made hers before her
+    // demotion, 20 his before his promotion.
+    apply(&db, 6, vec![insert(10, 2, 3, "demoted", "third")]).await.unwrap();
+    apply(&db, 7, vec![insert(20, 2, 4, "promoted", "fourth")]).await.unwrap();
+    assert_eq!(
+        rows(&db).await,
+        [("admin".into(), "first".into()), ("promoted".into(), "fourth".into())]
+    );
+    let lost = db.lost_values().await.unwrap();
+    assert_eq!(lost.len(), 2, "{lost:?}");
+    assert!(
+        lost.iter().all(|loss| matches!(
+            loss.replaced_by,
+            Replacement::NotAuthorized { reason: RowAuthorizationFailure::NotAdmin, .. }
+        )),
+        "{lost:?}"
+    );
+    db.close().await.unwrap();
 }
 
 struct NoSnapshotEvidence;

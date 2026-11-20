@@ -1213,8 +1213,9 @@ record.
   execution sources, each naming the lost value's key and audience. Then come
   the foreign-key causes, which are changes of the lost value's own write (§9.6).
 - **Unauthorized (4).** `reason` is `0 | owner:MemberId` for a change of that
-  member's owned row, or `1` for a foreign-key effect not derived exactly from
-  authorized changes.
+  member's owned row, `1` for a foreign-key effect not derived exactly from
+  authorized changes, or `2` for a change of an admin table's row by an author
+  who wasn't an admin just before the write's slot.
 - Resets create no lost-value records (§19.4).
 
 **Generations.**

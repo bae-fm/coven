@@ -90,6 +90,9 @@ pub enum RowAuthorizationFailure {
         /// The member whose write created the row.
         owner: coven_foundation::id_source::MemberId,
     },
+    /// A direct target is in a table limited to admins, and the write's
+    /// author was no admin in the state just before its slot.
+    NotAdmin,
     /// The proposed derived payload differs from the reconstructed schema effect.
     InvalidForeignKeyEffect,
 }
@@ -196,6 +199,9 @@ impl LostValue {
                 reason: match reason {
                     coven_format::loss::AuthorizationFailure::NotOwner { owner } => {
                         RowAuthorizationFailure::NotOwner { owner }
+                    }
+                    coven_format::loss::AuthorizationFailure::NotAdmin => {
+                        RowAuthorizationFailure::NotAdmin
                     }
                     coven_format::loss::AuthorizationFailure::InvalidForeignKeyEffect => {
                         RowAuthorizationFailure::InvalidForeignKeyEffect

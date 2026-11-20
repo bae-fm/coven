@@ -7,7 +7,6 @@ use crate::sqlite::StoreSql;
 use crate::store_call::StoreCall;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_format::loss::AuthorizationFailure;
 use coven_format::snapshot_rows::ChangeVerdict;
 use coven_format::write::WriteRecord;
 
@@ -31,15 +30,7 @@ pub(crate) fn judge_own_write(
         .filter_map(|(row, checked)| Some((row, checked.derived, checked.check.as_ref().err()?)))
         .min_by_key(|(_, derived, _)| *derived);
     if let Some((row, _, failure)) = refused {
-        let (table, key) = (row.table.clone(), crate::RowKey::decode(&row.key)?);
-        return Err(match failure {
-            AuthorizationFailure::NotOwner { owner } => {
-                DbError::NotOwner { table, key, owner: *owner }
-            }
-            AuthorizationFailure::InvalidForeignKeyEffect => {
-                DbError::InvalidForeignKeyEffect { table, key }
-            }
-        });
+        return Err(crate::permission::refusal(row, failure)?);
     }
     for (row, checked) in &judgement.rows {
         let verdict = if checked.derived {

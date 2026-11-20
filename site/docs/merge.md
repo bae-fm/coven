@@ -382,3 +382,22 @@ Ben's delete causes. Ben can never edit Ana's review directly.
 
 [Members and profiles](/docs/profiles) uses an owner table to keep each
 member's profile in that member's hands.
+
+### Admin tables
+
+A table declared `admin_only()` takes direct changes only from admins, whoever
+created the row. An app keeps a setting of the whole library there, such as
+which rating system the library shows.
+
+```rust
+SyncedTable::new("library_settings", RowIdentity::SharedKey).admin_only()
+```
+
+Each device judges a write by its author's role just before the write's slot,
+not by the role the author had when they made it. Ana changes the setting
+offline while she is an admin, and Ben demotes her before her write lands:
+every device refuses her change and keeps it as a lost value
+(`Replacement::NotAuthorized` with `RowAuthorizationFailure::NotAdmin`). On the
+author's own device, a write by a member who isn't an admin fails with
+`DbError::NotAdmin` and commits nothing. Foreign-key actions caused by an
+authorized change still apply, as they do on owner tables.

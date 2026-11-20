@@ -3,6 +3,7 @@ use crate::snapshot_write::tests::stream;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::{RowIdentity, StoreDatabase, SyncedTable};
+use coven_format::loss::AuthorizationFailure;
 use coven_foundation::id_source::{MemberId, SequentialIds};
 use coven_merge::Audience;
 

@@ -3,7 +3,7 @@
 The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
 [claims and application (§5)](../coven.md#5-the-sequence),
 [unique claims (§9.2)](../coven.md#92-keys-and-unique-values),
-[owner selection (§9.6)](../coven.md#96-owner-tables),
+[owner selection (§9.6)](../coven.md#96-owner-and-admin-tables),
 [admin prefixes (§10)](../coven.md#10-members-roles-and-devices),
 [cut-offs (§14.1)](../coven.md#141-the-cut-off),
 [audience keys and revocation (§12)](../coven.md#12-keys-and-encryption),

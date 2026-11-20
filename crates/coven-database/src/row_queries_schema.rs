@@ -1,14 +1,17 @@
-//! The definitions the synced schema registers: the tables whose rows have
-//! owners, and each table's columns, unique constraints and foreign keys by
-//! stable id.
+//! The definitions the synced schema registers: who may change each
+//! table's rows, and each table's columns, unique constraints and foreign
+//! keys by stable id.
 
 macro_rules! coven_schema_definitions_tables {
     ($visit:ident) => {
+        // Each synced table that limits who changes its rows, as last
+        // registered: a later open or migration compares against it (§18.3).
         $visit!(
-            _coven_owner_tables,
+            _coven_write_permissions,
             "
-            CREATE TABLE _coven_owner_tables (
-                table_name TEXT PRIMARY KEY NOT NULL
+            CREATE TABLE _coven_write_permissions (
+                table_name TEXT PRIMARY KEY NOT NULL,
+                permission TEXT NOT NULL CHECK(permission IN ('owner','admin'))
             ) STRICT, WITHOUT ROWID;
         "
         );

@@ -79,11 +79,10 @@ pub(crate) fn run<'a>(
     let mut before = Schema::read(database, &files)?;
     let removed = crate::published::removal_losses_before_migrating(database, call, &before)?;
     let mut capture = MigrationCapture::new(database, call, tables)?;
-    // Changing an existing table's owner declaration or file references is
+    // Changing an existing table's write permission or file references is
     // breaking (§18.1): the raise captures the state before any statement
     // runs.
-    let declared = crate::row_queries::owner_declaration_changed(database, &before, tables)?
-        .is_some()
+    let declared = crate::row_queries::permission_changed(database, &before, tables)?.is_some()
         || crate::file_table::changed(database, &before, tables)?.is_some();
     if declared {
         capture.capture_now(&before)?;
@@ -320,10 +319,8 @@ fn check_starts_from(
     schema.validate(starts)?;
     crate::schema::validate_local_keys(database, &schema, starts)?;
     if migration.version == current + 1 {
-        if let Some(table) =
-            crate::row_queries::owner_declaration_changed(database, &schema, starts)?
-        {
-            return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }));
+        if let Some(table) = crate::row_queries::permission_changed(database, &schema, starts)? {
+            return Err(DbError::Schema(crate::SchemaError::WritePermissionChanged { table }));
         }
         if let Some(table) = crate::file_table::changed(database, &schema, starts)? {
             return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }));

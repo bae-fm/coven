@@ -48,8 +48,8 @@ fn checked_schema(sql: &StoreSql, tables: &[SyncedTable]) -> Result<Schema, Open
     schema.validate(tables)?;
     crate::schema::validate_local_keys(sql, &schema, tables)?;
     crate::sqlite::check_followed_triggers(sql)?;
-    if let Some(table) = crate::row_queries::owner_declaration_changed(sql, &schema, tables)? {
-        return Err(DbError::Schema(crate::SchemaError::OwnerOnlyChanged { table }).into());
+    if let Some(table) = crate::row_queries::permission_changed(sql, &schema, tables)? {
+        return Err(DbError::Schema(crate::SchemaError::WritePermissionChanged { table }).into());
     }
     if let Some(table) = crate::file_table::changed(sql, &schema, tables)? {
         return Err(DbError::Schema(crate::SchemaError::FileColumnsChanged { table }).into());

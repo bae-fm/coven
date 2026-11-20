@@ -84,6 +84,15 @@ impl WriteSchema {
             .find(|f| f.column.eq_ignore_ascii_case(column))
     }
 
+    /// Who may change the synced table's rows directly; anyone for a table
+    /// that doesn't sync.
+    pub(crate) fn permission(&self, table: &str) -> crate::WritePermission {
+        self.declarations
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(table))
+            .map_or(crate::WritePermission::Anyone, |d| d.permission)
+    }
+
     /// A declared namespace by name.
     pub(crate) fn namespace(&self, name: &str) -> Option<&crate::Namespace> {
         self.namespaces.iter().find(|n| n.name == name)
