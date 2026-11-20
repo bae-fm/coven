@@ -1,16 +1,31 @@
 import CovenMerge.Boundary
 import CovenStorage.RowAuthorship
 
-/-! Opt-in owner tables. The creating write is retained identity evidence,
-shared by every incarnation and audience copy of one logical row. Authentication
-and conflict selection of that identity are admission obligations. -/
+/-! Per-table write permission: anyone, each row's owner, or an admin. The
+creating write is retained identity evidence, shared by every incarnation and
+audience copy of one logical row. Whether a write's author was an admin comes
+from the sequence state just before the write's slot. Authentication and
+conflict selection of that identity, and the role, are admission obligations. -/
 namespace CovenMerge.Ownership
+
+/-- Who may change a table's rows directly (§9.6). -/
+inductive Permission where
+  /-- Any member. -/
+  | anyone
+  /-- The member whose write created the row. -/
+  | owner
+  /-- A member who is an admin as of the write's slot. -/
+  | admin
+  deriving DecidableEq, Repr
 
 structure Policy (W Row Table Member : Type) where
   table : Row → Table
-  owned : Table → Bool
+  permission : Table → Permission
   creator : Row → W
   author : W → Member
+  /-- Whether the write's author was an admin in the sequence state just
+  before its slot (`CovenSequence.Authority.isAdmin` of that ledger). -/
+  admin : W → Bool
 
 variable {W Row Col Table Member K : Type}
   [DecidableEq W] [DecidableEq Member]
@@ -18,13 +33,20 @@ variable {W Row Col Table Member K : Type}
 def owner (P : Policy W Row Table Member) (r : Row) : Member := P.author (P.creator r)
 
 def allowed (P : Policy W Row Table Member) (w : W) (r : Row) : Bool :=
-  !P.owned (P.table r) || decide (P.author w = owner P r)
+  match P.permission (P.table r) with
+  | .anyone => true
+  | .owner => decide (P.author w = owner P r)
+  | .admin => P.admin w
 
 theorem opt_out (P : Policy W Row Table Member) (w : W) (r : Row)
-    (h : P.owned (P.table r) = false) : allowed P w r = true := by simp [allowed, h]
+    (h : P.permission (P.table r) = .anyone) : allowed P w r = true := by simp [allowed, h]
 
-theorem creator_allowed (P : Policy W Row Table Member) (r : Row) :
-    allowed P (P.creator r) r = true := by simp [allowed, owner]
+/-- A row's creator may change it unless its table is limited to admins. -/
+theorem creator_allowed (P : Policy W Row Table Member) (r : Row)
+    (h : P.permission (P.table r) ≠ .admin) :
+    allowed P (P.creator r) r = true := by
+  unfold allowed
+  cases hp : P.permission (P.table r) <;> simp_all [owner]
 
 /-- Moves and reinsertions cannot replace the creator. Different merge states
 are deliberately absent from the owner calculation. -/
@@ -32,8 +54,27 @@ theorem owner_fixed (P : Policy W Row Table Member) (a b : Row)
     (same : P.creator a = P.creator b) : owner P a = owner P b := by simp [owner, same]
 
 theorem non_owner_denied (P : Policy W Row Table Member) (w : W) (r : Row)
-    (owned : P.owned (P.table r) = true) (other : P.author w ≠ owner P r) :
+    (owned : P.permission (P.table r) = .owner) (other : P.author w ≠ owner P r) :
     allowed P w r = false := by simp [allowed, owned, other]
+
+/-- On an admin table, a write whose author was no admin as of its slot may
+not change a row, whoever created it. -/
+theorem non_admin_denied (P : Policy W Row Table Member) (w : W) (r : Row)
+    (limited : P.permission (P.table r) = .admin) (member : P.admin w = false) :
+    allowed P w r = false := by simp [allowed, limited, member]
+
+/-- On an admin table, a write whose author was an admin as of its slot may
+change any row, whoever created it. -/
+theorem admin_allowed (P : Policy W Row Table Member) (w : W) (r : Row)
+    (limited : P.permission (P.table r) = .admin) (admin : P.admin w = true) :
+    allowed P w r = true := by simp [allowed, limited, admin]
+
+/-- Rows of one table with one creation give every write the same answer. -/
+theorem allowed_fixed (P : Policy W Row Table Member) (w : W) (a b : Row)
+    (creation : P.creator a = P.creator b) (table : P.table a = P.table b) :
+    allowed P w a = allowed P w b := by
+  unfold allowed owner
+  rw [creation, table]
 
 /-- Snapshot verification supplies the same owner enforced by the filter.
 The policy's authors come from authenticated write identities; creation
@@ -55,10 +96,18 @@ theorem accepted_owner_matches_filter {Key Payload Digest Signature : Type}
 /-- Ownership refusals use the same row-change identity as other losses. -/
 inductive Cause (W Member Row : Type) where
   | notOwner (owner : Member)
+  | notAdmin
   | foreignKey
   | move (protectedRow : Row) (owner : Member)
   | dependency (sources : List (W × Row))
   deriving DecidableEq, Repr
+
+/-- Why a write may not change a row directly: the row's owner, or that
+its table is limited to admins. -/
+def refusal (P : Policy W Row Table Member) (r : Row) : Cause W Member Row :=
+  match P.permission (P.table r) with
+  | .admin => .notAdmin
+  | _ => .notOwner (owner P r)
 
 structure Loss (W Row Col Member : Type) extends LossRecord W Row Col (Cause W Member Row) where
   write : W

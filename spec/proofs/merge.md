@@ -1,8 +1,8 @@
 # Proof of convergence
 
-Owner tables restrict direct writes. Schema-derived foreign-key changes are
-verified against authorized direct causes; ordinary constraint losses still
-apply to owned rows. [B18](#b18-owner-tables-and-row-authenticity) states the
+Owner and admin tables restrict direct writes. Schema-derived foreign-key
+changes are verified against authorized direct causes; ordinary constraint
+losses still apply to the rows of both. [B18](#b18-owner-tables-and-row-authenticity) states the
 checked permissions, causal records, restoration, and SQL boundary.
 
 - This document proves the convergence guarantee of [§2.2](../coven.md#22-convergence) for the merge of [§8](../coven.md#8-merging)
@@ -751,8 +751,9 @@ cannot cause an owned row to disappear. A foreign key, CHECK, unique contest
 or audience rule can remove it under the ordinary schema and merge rules.
 There is no owner-specific delete trial, removal-set veto or schema predicate.
 
-**Identity and direct permission.** `Policy` opts tables in and derives each
-row's owner from its original creating write's authenticated member.
+**Identity and direct permission.** `Policy` gives each table a `Permission`:
+any member, each row's owner, or an admin. It derives each row's owner from
+its original creating write's authenticated member.
 The creator is supplied by the applied sequence's first counted creation,
 ordered by slot and then write number; [the sequence ownership
 proof](sequence/CovenSequence/Owners.lean) establishes that choice and its
@@ -768,6 +769,25 @@ trigger. A derived label grants no permission by itself. `Evidence` separates th
 proposed payload from the receiver's `Execution`, which supplies actual direct
 targets, schema consequences and each row's complete derivation. The latter
 is reconstructed, never taken from an unverified sender label.
+
+**Admin tables.** `Policy.admin` says whether a write's author was an admin
+in the sequence state just before the write's slot: `Authority.isAdmin` of
+the ledger that [the sequence proof](sequence/CovenSequence/Authority.lean)
+judges admin entries against (`applied_membership_authorized`). Like the
+creator, it is an input to this model. `allowed` lets a write change an admin
+table's row directly exactly when its author was an admin then, whoever
+created the row (`non_admin_denied`, `admin_allowed`).
+`Admission.statement_allowed` proves that every kept statement or trigger
+target passes its table's permission, and `statement_admin` and
+`every_applied_statement_admin` state it for admin tables. A refused change
+names `notAdmin` as its cause instead of an owner (`refusal`). Foreign-key
+actions follow the rule they follow on owned rows: the exact consequence of
+an authorized direct change needs no permission of its own.
+`FilterExamples.demoted_loss` refuses the changes that a member demoted
+before their slots made to an admin table's row. The same changes survive as
+under the owner rule (`demoted_same_base`, `demoted_keeps_unrelated`).
+`promoted_applies` keeps them once the member was promoted before their
+slots.
 
 **Exact foreign-key consequences.** `ForeignKey.evaluate` starts at a direct
 change in this same write, checked against its target's owner. Each subsequent
@@ -1072,6 +1092,8 @@ halves, keeping its original creation. `refused_iff` proves a move is permitted 
 writer may change every present row the declared audience parent carries,
 the root included; `carried_foreign_refuses` refuses Ben's move of his own
 album while it carries Ana's track (`Album.foreign_track_refuses`).
+`copy_denied` refuses a copy wherever its original row's permission refuses
+the writer, a non-admin's copy of an admin table's row included.
 `copy_refused` proves such a copy fails `Admission.check` whatever origin a
 sender proposes, and its loss names the original owner; `admitted_permitted`
 proves admitted copies mean a permitted move.

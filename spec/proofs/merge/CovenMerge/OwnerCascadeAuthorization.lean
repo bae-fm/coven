@@ -65,9 +65,10 @@ def provenance : DataDependency.Authored history where
 
 def policy : Policy Write Row Row Member where
   table := id
-  owned _ := true
+  permission _ := .owner
   creator := creator
   author | .review => .ana | _ => .ben
+  admin _ := false
 
 def received : List Write := [.track, .review, .erase]
 

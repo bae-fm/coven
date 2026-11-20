@@ -89,9 +89,10 @@ def coalescedEvidence (proposed : Effect Nat Nat Nat) :
 
 def coalescedPolicy : Policy Nat Nat Nat Nat where
   table := id
-  owned r := decide (r = 1)
+  permission r := if r = 1 then .owner else .anyone
   creator := id
   author := id
+  admin _ := false
 
 theorem incomplete_coalescing_refused :
     Admission.check coalescedPolicy
@@ -120,9 +121,10 @@ def state : St Nat Nat Nat where
 
 def policy : Policy Nat Nat Nat Nat where
   table := id
-  owned r := decide (r ≠ 0)
+  permission r := if r ≠ 0 then .owner else .anyone
   creator := id
   author := id
+  admin _ := false
 
 theorem direct_permissions :
     allowed policy 0 0 = true ∧ allowed policy 0 1 = false ∧ owner policy 1 = 1 ∧

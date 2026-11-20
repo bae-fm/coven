@@ -19,9 +19,9 @@ states each theorem's assumptions and the runner's JSON cases.
 
 The merge package proves cell and generation convergence, removal-rule
 agreement, including over a snapshot install's region, per-change data
-dependence, owner permissions and value accounting.
-It accepts sequence admission, creator identity and unique-claim ranks as
-inputs. A timestamp choosing a cell is distinct from the slot order choosing
+dependence, owner and admin permissions and value accounting.
+It accepts sequence admission, creator identity, each write's author's role
+before its slot and unique-claim ranks as inputs. A timestamp choosing a cell is distinct from the slot order choosing
 an owner or unique claimant.
 
 The sqlive package proves each rule by which a live query narrows its

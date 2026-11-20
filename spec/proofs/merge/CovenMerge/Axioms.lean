@@ -174,6 +174,9 @@ open CovenMerge
 #print axioms Ownership.owner_fixed
 #print axioms Ownership.accepted_owner_matches_filter
 #print axioms Ownership.non_owner_denied
+#print axioms Ownership.non_admin_denied
+#print axioms Ownership.admin_allowed
+#print axioms Ownership.allowed_fixed
 #print axioms Ownership.guard_recorded
 #print axioms Ownership.excluded_recorded
 #print axioms Ownership.converges
@@ -228,6 +231,11 @@ open CovenMerge
 #print axioms Ownership.FilterExamples.per_change_keeps_unrelated
 #print axioms Ownership.FilterExamples.non_owner_loss
 #print axioms Ownership.FilterExamples.dependent_loss
+#print axioms Ownership.FilterExamples.demoted_same_base
+#print axioms Ownership.FilterExamples.demoted_loss
+#print axioms Ownership.FilterExamples.demoted_keeps_unrelated
+#print axioms Ownership.FilterExamples.promoted_retained
+#print axioms Ownership.FilterExamples.promoted_applies
 #print axioms Ownership.CascadeAuthorization.valid
 #print axioms Ownership.CascadeAuthorization.causal
 #print axioms Ownership.CascadeAuthorization.before_delete
@@ -251,6 +259,10 @@ open CovenMerge
 #print axioms Ownership.ForeignKey.roots_mem_sources
 #print axioms Ownership.Admission.statement_authorized
 #print axioms Ownership.Admission.every_applied_statement_authorized
+#print axioms Ownership.Admission.direct_allowed
+#print axioms Ownership.Admission.statement_allowed
+#print axioms Ownership.Admission.statement_admin
+#print axioms Ownership.Admission.every_applied_statement_admin
 #print axioms Ownership.Admission.dropped_contributing_root_no_effect
 #print axioms Ownership.CascadeAuthorization.trigger_cannot_claim_foreign
 #print axioms Ownership.ForeignKeyExamples.coalesced_actions_keep_both_causes
@@ -323,6 +335,7 @@ open CovenMerge
 #print axioms Ownership.Moves.refused_iff
 #print axioms Ownership.Moves.carried_foreign_refuses
 #print axioms Ownership.Moves.copy_refused
+#print axioms Ownership.Moves.copy_denied
 #print axioms Ownership.Moves.admitted_permitted
 #print axioms Ownership.Moves.Album.foreign_track_refuses
 #print axioms Ownership.SnapshotAuthors.own_writes_signers

@@ -49,24 +49,43 @@ def check (P : Policy W Row Table Member) (E : Evidence W Row Payload)
   | .foreign d => (!(((E.execution w).directPayload r).isSome) || allowed P w r) &&
       (E.payload w r).any fun value => verifies ((E.execution w).schema) (direct P E w) d r value
 
+/-- A kept direct change passes its table's permission. -/
+theorem direct_allowed (P : Policy W Row Table Member) (E : Evidence W Row Payload)
+    (w : W) (r : Row) (origin : (E.execution w).origin r = .direct)
+    (kept : check P E w r = true) : allowed P w r = true := by
+  simp only [check, origin, Bool.and_eq_true] at kept
+  exact kept.1
+
 theorem direct_authorized (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) (origin : (E.execution w).origin r = .direct)
-    (owned : P.owned (P.table r) = true) (kept : check P E w r = true) :
+    (owned : P.permission (P.table r) = .owner) (kept : check P E w r = true) :
     P.author w = owner P r := by
-  exact (by simpa [check, origin, allowed, owned] using kept :
-    P.author w = owner P r ∧ E.payload w r = (E.execution w).directPayload r).1
+  simpa [allowed, owned] using direct_allowed P E w r origin kept
 
-/-- Coalescing an owned row with an FK action does not hide a direct edit.
-Every actual statement/trigger target must still pass its own permission. -/
-theorem statement_authorized (P : Policy W Row Table Member) (E : Evidence W Row Payload)
+/-- Coalescing a row with an FK action does not hide a direct edit. Every
+actual statement/trigger target must still pass its own permission. -/
+theorem statement_allowed (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) (target : ((E.execution w).directPayload r).isSome = true)
-    (owned : P.owned (P.table r) = true) (kept : check P E w r = true) :
-    P.author w = owner P r := by
+    (kept : check P E w r = true) : allowed P w r = true := by
   cases origin : (E.execution w).origin r with
-  | direct => exact direct_authorized P E w r origin owned kept
+  | direct => exact direct_allowed P E w r origin kept
   | foreign d =>
     simp only [check, origin, Bool.and_eq_true] at kept
-    simpa [target, allowed, owned] using kept.1
+    simpa [target] using kept.1
+
+theorem statement_authorized (P : Policy W Row Table Member) (E : Evidence W Row Payload)
+    (w : W) (r : Row) (target : ((E.execution w).directPayload r).isSome = true)
+    (owned : P.permission (P.table r) = .owner) (kept : check P E w r = true) :
+    P.author w = owner P r := by
+  simpa [allowed, owned] using statement_allowed P E w r target kept
+
+/-- A kept statement or trigger target of an admin table was written by an
+admin as of the write's slot, whoever created the row. -/
+theorem statement_admin (P : Policy W Row Table Member) (E : Evidence W Row Payload)
+    (w : W) (r : Row) (target : ((E.execution w).directPayload r).isSome = true)
+    (limited : P.permission (P.table r) = .admin) (kept : check P E w r = true) :
+    P.admin w = true := by
+  simpa [allowed, limited] using statement_allowed P E w r target kept
 
 theorem derived_exact (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (w : W) (r : Row) (d : Derivation Row) (origin : (E.execution w).origin r = .foreign d)
@@ -208,7 +227,7 @@ def guard (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (D : Dependencies W Row) (prior : W → Row → Option (Cause W Member Row)) (w : W) (r : Row) :
     Option (Cause W Member Row) :=
   if !check P E w r then
-    some (if !allowed P w r then .notOwner (owner P r) else .foreignKey)
+    some (if !allowed P w r then refusal P r else .foreignKey)
   else if (prior w r).isSome then prior w r
   else if dropped D (seed P E prior) (w, r) then
     some (.dependency ((D.sources w r).filter (dropped D (seed P E prior))))
@@ -248,7 +267,7 @@ theorem every_applied_direct_authorized (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W Row Table Member)
     (E : Evidence W Row Payload) (D : Dependencies W Row) (prior : W → Row → Option (Cause W Member Row))
     (w : W) (r : Row) (ch : Change Col) (origin : (E.execution w).origin r = .direct)
-    (owned : P.owned (P.table r) = true)
+    (owned : P.permission (P.table r) = .owner)
     (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
     P.author w = owner P r :=
   direct_authorized P E w r origin owned (applied_checked M valid p P E D prior w r ch applied)
@@ -258,10 +277,25 @@ theorem every_applied_statement_authorized (M : Writes W Row Col) (valid : Valid
     (E : Evidence W Row Payload) (D : Dependencies W Row)
     (prior : W → Row → Option (Cause W Member Row))
     (w : W) (r : Row) (ch : Change Col)
-    (target : ((E.execution w).directPayload r).isSome = true) (owned : P.owned (P.table r) = true)
+    (target : ((E.execution w).directPayload r).isSome = true)
+    (owned : P.permission (P.table r) = .owner)
     (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
     P.author w = owner P r :=
   statement_authorized P E w r target owned (applied_checked M valid p P E D prior w r ch applied)
+
+/-- **Only admins change an admin table directly.** Every statement or
+trigger target of an admin table that enters the filtered history, on every
+device, was written by a member who was an admin as of the write's slot. -/
+theorem every_applied_statement_admin (M : Writes W Row Col) (valid : Valid M)
+    (p : DataDependency.Authored M) (P : Policy W Row Table Member)
+    (E : Evidence W Row Payload) (D : Dependencies W Row)
+    (prior : W → Row → Option (Cause W Member Row))
+    (w : W) (r : Row) (ch : Change Col)
+    (target : ((E.execution w).directPayload r).isSome = true)
+    (limited : P.permission (P.table r) = .admin)
+    (applied : (DataDependency.effective M valid p (base (guard P E D prior))).chg w r = some ch) :
+    P.admin w = true :=
+  statement_admin P E w r target limited (applied_checked M valid p P E D prior w r ch applied)
 
 theorem every_applied_derived_exact (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W Row Table Member)

@@ -299,10 +299,11 @@ private def runAdmission (j : Json) : Except String Json := do
       (path[0]?.map .direct)
   let P : Policy Nat Nat Nat Nat := {
     table := fun r => ((rows.find? (·.1 == r)).map (·.2.1)).getD 0
-    owned := fun t => owned.contains t
+    permission := fun t => if owned.contains t then .owner else .anyone
     creator := fun r => r + 1
     author := fun w => if w == 0 then writer else
-      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0 }
+      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0
+    admin := fun _ => false }
   let origin : Nat → Origin Nat := fun r =>
     match (derived.find? fun (path, _) => path.back? == some r).bind (derivation ·.1) with
     | some d => .foreign d
@@ -375,10 +376,11 @@ private def runReceive (j : Json) : Except String Json := do
       | some _, none => none) start
   let P : Policy Nat Nat Nat Nat := {
     table := fun r => ((rows.find? (·.1 == r)).map (·.2.1)).getD 1000000
-    owned := fun t => owned.contains t
+    permission := fun t => if owned.contains t then .owner else .anyone
     creator := fun r => r + 1
     author := fun w => if w == 0 then writer else
-      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0 }
+      ((rows.find? (·.1 == w - 1)).map (·.2.2)).getD 0
+    admin := fun _ => false }
   -- A path that names no schema consequence still marks the row derived;
   -- its unevaluable certificate fails the check, as an unrooted cycle would.
   let origin : Nat → Origin Nat := fun r =>
@@ -416,6 +418,7 @@ private def runReceive (j : Json) : Except String Json := do
   let causeJson : Option (Cause Nat Nat Nat) → Json
     | none => Json.null
     | some (.notOwner owner) => Json.mkObj [("kind", "notOwner"), ("owner", toJson owner)]
+    | some .notAdmin => Json.mkObj [("kind", "notAdmin")]
     | some .foreignKey => Json.mkObj [("kind", "foreignKey")]
     | some (.move _ owner) => Json.mkObj [("kind", "move"), ("owner", toJson owner)]
     | some (.dependency sources) => Json.mkObj [("kind", "dependency"),

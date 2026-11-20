@@ -42,9 +42,10 @@ def provenance : DataDependency.Authored history where
 
 def policy : Policy Write Bool Bool Nat where
   table := id
-  owned r := !r
+  permission r := if r then .anyone else .owner
   creator _ := .create
   author | .create | .dependent => 0 | .intrude | .concurrent => 1
+  admin _ := false
 
 def permission (w : Write) (r : Bool) : Option (Cause Write Nat Bool) :=
   if allowed policy w r then none else some (.notOwner (owner policy r))
@@ -141,5 +142,86 @@ theorem dependent_loss :
     else none).map (fun l => l.cause) = some (.dependency [(.intrude, false)])
   rw [dep, sources]
   rfl
+
+/-! The same writes when row `false` is in a table limited to admins. Member
+1 writes `.intrude` and `.concurrent`. Demoted before their slots, member 1's
+changes of that row are refused as a non-admin's, whoever created the row; promoted
+before them, they apply. -/
+
+def adminPolicy (promoted : Bool) : Policy Write Bool Bool Nat :=
+  { policy with
+    permission := fun r => if r then .anyone else .admin
+    admin := fun w => decide (policy.author w = 0) || promoted }
+
+def adminPermission (promoted : Bool) (w : Write) (r : Bool) : Option (Cause Write Nat Bool) :=
+  if allowed (adminPolicy promoted) w r then none else some (refusal (adminPolicy promoted) r)
+
+/-- Demoted, member 1 may change row `false` exactly where the owner rule let
+it: so the same changes survive. -/
+theorem demoted_same_base : base (adminPermission false) = base permission := by
+  funext w r; cases w <;> cases r <;> rfl
+
+theorem demoted_loss :
+    (loss history valid provenance (adminPermission false) values first .intrude false).map
+      (fun l => l.cause) = some .notAdmin := by
+  simp [loss, adminPermission, first, history, allowed, adminPolicy, policy, refusal, changeLoss]
+
+theorem demoted_keeps_unrelated :
+    (merged history valid provenance (adminPermission false) first).cell false () = some .create ∧
+    (merged history valid provenance (adminPermission false) first).cell true () =
+      some .concurrent := by
+  simp only [merged, demoted_same_base]
+  exact per_change_keeps_unrelated
+
+/-- Promoted, every write may change both rows. -/
+theorem promoted_base : base (adminPermission true) = fun _ _ => true := by
+  funext w r; cases w <;> cases r <;> rfl
+
+abbrev promotedEvidence :=
+  DataDependency.authoredState history valid provenance (base (adminPermission true))
+
+theorem promoted_retained (w : Write) (r : Bool) :
+    DataDependency.retained promotedEvidence w r = true := by
+  have create (r : Bool) : DataDependency.retained promotedEvidence .create r = true := by
+    rw [DataDependency.retained_eq]; cases r <;> rfl
+  have intrude (r : Bool) : DataDependency.retained promotedEvidence .intrude r = true := by
+    rw [DataDependency.retained_eq]
+    cases r
+    · change ([Write.create, .create].all (fun a => DataDependency.retained promotedEvidence a false)) = true
+      simp [create]
+    · change ([Write.create, .create].all (fun a => DataDependency.retained promotedEvidence a true)) = true
+      simp [create]
+  cases w with
+  | create => exact create r
+  | intrude => exact intrude r
+  | dependent =>
+    rw [DataDependency.retained_eq]
+    cases r
+    · change ([Write.create, .intrude].all (fun a => DataDependency.retained promotedEvidence a false)) = true
+      simp [create, intrude]
+    · change ([Write.create, .create].all (fun a => DataDependency.retained promotedEvidence a true)) = true
+      simp [create]
+  | concurrent =>
+    rw [DataDependency.retained_eq]
+    cases r
+    · change ([Write.create, .create].all (fun a => DataDependency.retained promotedEvidence a false)) = true
+      simp [create]
+    · change ([Write.create, .create].all (fun a => DataDependency.retained promotedEvidence a true)) = true
+      simp [create]
+
+theorem promoted_applies :
+    loss history valid provenance (adminPermission true) values first .intrude false = none ∧
+    (merged history valid provenance (adminPermission true) first).cell false () =
+      some .concurrent := by
+  constructor
+  · have independent : DataDependency.dependsOnDropped promotedEvidence .intrude false = false :=
+      DataDependency.retained_not_dependent _ _ _ (promoted_retained .intrude false)
+    simp only [loss, first, List.mem_cons, reduceCtorEq, true_or, or_true, ↓reduceIte, history,
+      Option.bind_some, adminPermission, allowed, adminPolicy, policy]
+    change (if DataDependency.dependsOnDropped promotedEvidence .intrude false then _ else none) = none
+    rw [independent]
+    rfl
+  · simp only [merged, Data.merged, DataDependency.effective, promoted_retained]
+    decide
 
 end CovenMerge.Ownership.FilterExamples

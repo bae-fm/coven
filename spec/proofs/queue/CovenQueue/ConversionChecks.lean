@@ -25,7 +25,7 @@ open CovenMerge.Ownership CovenMerge.Ownership.Admission
 variable {W Row Table Member Payload : Type}
   [DecidableEq W] [DecidableEq Row] [DecidableEq Member] [DecidableEq Payload]
 
-/-- The guard keeps a change exactly when its owner and foreign-key checks
+/-- The guard keeps a change exactly when its permission and foreign-key checks
 pass, no earlier verdict dropped it, and none of its sources was dropped. -/
 theorem guard_none_iff (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     (D : Dependencies W Row) (prior : W → Row → Option (Cause W Member Row)) (w : W) (r : Row) :
@@ -43,9 +43,10 @@ def checkedLosses (P : Policy W Row Table Member) (E : Evidence W Row Payload)
     Nat → Option (CovenMerge.LossCause Nat) :=
   fun r => (guard P E D prior w (row r)).map cause
 
-/-- **A change that fails its owner or foreign-key check never reaches the
-converter.** It stays frozen with its original values, naming the member who
-owns the row when the owner check failed and the foreign key otherwise. -/
+/-- **A change that fails its permission or foreign-key check never reaches
+the converter.** It stays frozen with its original values, naming why its
+author may not change the row (the member who owns it, or that its table is
+limited to admins) when the permission failed, and the foreign key otherwise. -/
 theorem failed_check_frozen (f : List Nat → List Nat) (P : Policy W Row Table Member)
     (E : Evidence W Row Payload) (D : Dependencies W Row)
     (prior : W → Row → Option (Cause W Member Row)) (w : W) (row : Nat → Row)
@@ -53,12 +54,12 @@ theorem failed_check_frozen (f : List Nat → List Nat) (P : Policy W Row Table 
     (original : ch.content = .values values) (failed : check P E w (row ch.row) = false) :
     (convertChange f (checkedLosses P E D prior w row cause) ch).content =
       .frozen (cause (if allowed P w (row ch.row) then .foreignKey
-        else .notOwner (owner P (row ch.row)))) values := by
+        else refusal P (row ch.row))) values := by
   apply dependent_change_not_converted f _ ch values _ original
   cases ha : allowed P w (row ch.row) <;> simp [checkedLosses, Admission.guard, failed, ha]
 
 /-- **Only a change that passes every check reaches the converter.** A change
-the conversion leaves unfrozen passed its owner and foreign-key checks, had no
+the conversion leaves unfrozen passed its permission and foreign-key checks, had no
 earlier verdict, and depends on no dropped source; its values are the
 converter's output. -/
 theorem converted_passed_checks (f : List Nat → List Nat) (P : Policy W Row Table Member)

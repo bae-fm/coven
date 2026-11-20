@@ -209,9 +209,10 @@ def evidence : Evidence Nat Nat (Effect Nat Nat Nat) where
 
 def policy : Policy Nat Nat Nat Nat where
   table := id
-  owned r := decide (r = 1)
+  permission r := if r = 1 then .owner else .anyone
   creator r := r
   author w := if w = 1 then 1 else 0
+  admin _ := false
 
 /-- Without the condition both changes pass: the note's NULL is the exact
 consequence of a deletion the merge never applies, since the track's net

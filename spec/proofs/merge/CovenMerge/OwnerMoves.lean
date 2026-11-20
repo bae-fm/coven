@@ -8,7 +8,7 @@ which no receiver classifies as a foreign-key action. A copy keeps its
 original creation, so its owner is the original row's owner.
 
 * `refused_iff`: a move is permitted exactly when every row it carries is
-  one its writer may change. Carrying, not the root, decides: Ben's own album
+  one its writer may change, under each row's table's permission. Carrying, not the root, decides: Ben's own album
   cannot carry Ana's track (`Album.foreign_track_refuses`).
 * `copy_refused`: each such copy fails `Admission.check` and its loss names
   the original owner, whatever origin a sender proposes for it.
@@ -36,47 +36,57 @@ def permitted (P : Policy W Row Table Member) (w : W) (s : MoveState Row Member 
 theorem refused_iff (P : Policy W Row Table Member) (w : W) (s : MoveState Row Member Audience)
     (root : Row) :
     permitted P w s root = false ↔
-      ∃ r ∈ s.rows, moved s root r = true ∧ P.owned (P.table r) = true ∧ P.author w ≠ owner P r := by
-  simp only [permitted, List.all_eq_false, allowed]
+      ∃ r ∈ s.rows, moved s root r = true ∧ allowed P w r = false := by
+  simp only [permitted, List.all_eq_false]
   constructor
   · rintro ⟨r, mem, h⟩
     refine ⟨r, mem, ?_⟩
-    cases hm : moved s root r <;> cases ho : P.owned (P.table r) <;>
-      simp_all
-  · rintro ⟨r, mem, hm, ho, other⟩
-    exact ⟨r, mem, by simp [hm, ho, other]⟩
+    cases hm : moved s root r <;> cases ha : allowed P w r <;> simp_all
+  · rintro ⟨r, mem, hm, ha⟩
+    exact ⟨r, mem, by simp [hm, ha]⟩
 
 /-- A carried row of another member refuses the move, even when the root
 is the mover's own row. -/
 theorem carried_foreign_refuses (P : Policy W Row Table Member) (w : W)
     (s : MoveState Row Member Audience) (root r : Row) (mem : r ∈ s.rows)
     (present : s.present r = true) (carriedRow : carried s.rows s.parent root r = true)
-    (owned : P.owned (P.table r) = true) (other : P.author w ≠ owner P r) :
+    (owned : P.permission (P.table r) = .owner) (other : P.author w ≠ owner P r) :
     permitted P w s root = false :=
-  (refused_iff P w s root).mpr ⟨r, mem, by simp [moved, present, carriedRow], owned, other⟩
+  (refused_iff P w s root).mpr
+    ⟨r, mem, by simp [moved, present, carriedRow], non_owner_denied P w r owned other⟩
+
+/-- A copy keeps its original row's creation and table, so the check
+refuses it exactly where it refuses the original row. -/
+theorem copy_denied (P : Policy W Row Table Member) (E : Evidence W Row Payload) (w : W)
+    (r c : Row) (creation : P.creator c = P.creator r) (table : P.table c = P.table r)
+    (denied : allowed P w r = false)
+    (target : ((E.execution w).directPayload c).isSome = true) :
+    check P E w c = false := by
+  have same : allowed P w c = false := by rw [allowed_fixed P w c r creation table]; exact denied
+  cases h : check P E w c
+  · rfl
+  · rw [statement_allowed P E w c target h] at same
+    cases same
 
 /-- **A copy of another member's row is refused.** The copy `c` of row `r`
 keeps `r`'s creation and table, and is a direct target of the move. Whatever
 origin is proposed for it, it fails the check and its loss names `r`'s owner. -/
 theorem copy_refused (P : Policy W Row Table Member) (E : Evidence W Row Payload) (w : W)
     (r c : Row) (creation : P.creator c = P.creator r) (table : P.table c = P.table r)
-    (owned : P.owned (P.table r) = true) (other : P.author w ≠ owner P r)
+    (owned : P.permission (P.table r) = .owner) (other : P.author w ≠ owner P r)
     (target : ((E.execution w).directPayload c).isSome = true) :
     check P E w c = false ∧
       ∀ D prior, Admission.guard P E D prior w c = some (.notOwner (owner P r)) := by
   have same : owner P c = owner P r := owner_fixed P c r creation
   have denied : allowed P w c = false :=
     non_owner_denied P w c (by rw [table]; exact owned) (by rw [same]; exact other)
-  have refused : check P E w c = false := by
-    cases h : check P E w c
-    · rfl
-    · exact absurd (statement_authorized P E w c target (by rw [table]; exact owned) h)
-        (by rw [same]; exact other)
+  have refused := copy_denied P E w r c creation table
+    (non_owner_denied P w r owned other) target
   refine ⟨refused, fun D prior => ?_⟩
-  simp [Admission.guard, refused, denied, same]
+  simp [Admission.guard, refused, denied, refusal, table, owned, same]
 
 /-- **Admitted copies mean a permitted move.** If the copy of every moved
-row passes the check, no moved row belongs to another member. -/
+row passes the check, the mover may change every moved row. -/
 theorem admitted_permitted (P : Policy W Row Table Member) (E : Evidence W Row Payload) (w : W)
     (s : MoveState Row Member Audience) (root : Row) (copy : Row → Row)
     (creation : ∀ r, P.creator (copy r) = P.creator r) (table : ∀ r, P.table (copy r) = P.table r)
@@ -84,8 +94,8 @@ theorem admitted_permitted (P : Policy W Row Table Member) (E : Evidence W Row P
     (admitted : ∀ r ∈ s.rows, moved s root r = true → check P E w (copy r) = true) :
     permitted P w s root = true := by
   cases h : permitted P w s root
-  · obtain ⟨r, mem, isMoved, owned, other⟩ := (refused_iff P w s root).mp h
-    have := (copy_refused P E w r (copy r) (creation r) (table r) owned other (target r isMoved)).1
+  · obtain ⟨r, mem, isMoved, denied⟩ := (refused_iff P w s root).mp h
+    have := copy_denied P E w r (copy r) (creation r) (table r) denied (target r isMoved)
     rw [admitted r mem isMoved] at this
     cases this
   · rfl
@@ -98,9 +108,10 @@ Ben's and Ana's. -/
 
 def policy : Policy Nat Nat Nat Nat where
   table := id
-  owned _ := true
+  permission _ := .owner
   creator := id
   author r := if r = 1 then 1 else 0
+  admin _ := false
 
 def family (anaTrack : Bool) : MoveState Nat Nat Nat where
   rows := if anaTrack then [0, 1] else [0]
