@@ -133,13 +133,20 @@ pub fn assert_findings_marked(lint: &str, diagnostics: &str, marked: &[&str]) {
     assert_eq!(found, expected, "the lines that hold findings, then the fixture's:\n{diagnostics}");
 }
 
+/// <path> with `/` as its only separator and no `\\?\` prefix. On Windows,
+/// rustc and cargo write one path with both separators (a module's file
+/// after the folder it was given with `/`, as `dependencies/src\database.rs`;
+/// the dep-info's `D:\a\coven/tests\reads`) and some with the `\\?\`
+/// prefix, so a comparison of paths reads each through this.
+pub fn slash_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    path.strip_prefix("//?/").map_or(path.clone(), str::to_string)
+}
+
 /// The fixture source of <marked> that the file <file> of a diagnostic is, or
-/// <file> itself when it is none. rustc writes a module's file with the
-/// platform's separator after the folder it was given with `/`
-/// (`dependencies/src\database.rs` on Windows), so the comparison reads both
-/// separators as `/`.
+/// <file> itself when it is none, read through `slash_path`.
 pub fn marked_source(file: &str, marked: &[&str]) -> String {
-    let file = file.replace('\\', "/");
+    let file = slash_path(file);
     marked
         .iter()
         .find(|source| file.ends_with(*source))

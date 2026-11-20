@@ -15,7 +15,7 @@ mod support;
 
 use std::path::Path;
 
-use support::{FIXTURES, Fixture, extern_library, out_dir};
+use support::{FIXTURES, Fixture, extern_library, out_dir, slash_path};
 
 /// The read rule's lints, each named as the fixture's comments name it.
 const LINTS: [&str; 13] = [
@@ -102,6 +102,16 @@ fn stops_a_compile_whose_earlier_crate_has_no_record() {
     );
 }
 
+/// Whether the dep-info <dep_info> lists <input> as an input, by the line
+/// `<input>:` that rustc writes for each, whatever separators it uses.
+pub fn dep_info_names_input(dep_info: &str, input: &Path) -> bool {
+    let input = slash_path(&input.display().to_string());
+    dep_info
+        .lines()
+        .filter_map(|line| line.strip_suffix(':'))
+        .any(|listed| slash_path(listed) == input)
+}
+
 #[test]
 fn names_the_workspaces_policy_file_among_the_compiles_inputs() {
     let out_dir = out_dir("read_rule_policy_input");
@@ -111,8 +121,24 @@ fn names_the_workspaces_policy_file_among_the_compiles_inputs() {
         .expect("the compile wrote its dep-info");
     let policy = Path::new(FIXTURES).join("reads/owner-construction-check.toml");
     assert!(
-        dep_info.lines().any(|line| line == format!("{}:", policy.display())),
+        dep_info_names_input(&dep_info, &policy),
         "the dep-info names no {}:\n{dep_info}",
         policy.display()
     );
+}
+
+#[test]
+fn reads_a_windows_dep_info_with_mixed_separators_and_a_verbatim_prefix() {
+    let dep_info = "D:\\a\\coven\\target/tmp\\reads_base.d: \\\\?\\D:\\a\\coven\\clippy.toml D:\\a\\coven\\driver/tests/fixtures\\reads/base.rs\n\
+\\\\?\\D:\\a\\coven\\clippy.toml:\n\
+D:\\a\\coven\\driver/tests/fixtures\\reads\\owner-construction-check.toml:\n";
+    assert!(dep_info_names_input(
+        dep_info,
+        Path::new("D:\\a\\coven\\driver/tests/fixtures/reads/owner-construction-check.toml")
+    ));
+    assert!(dep_info_names_input(dep_info, Path::new("D:/a/coven/clippy.toml")));
+    assert!(!dep_info_names_input(
+        dep_info,
+        Path::new("D:/a/coven/driver/tests/fixtures/reads/base.rs")
+    ));
 }
