@@ -20,10 +20,9 @@ pub(crate) enum AudienceSource {
 /// Who may change a synced table's rows directly (§9.6, E2). Shared-trigger
 /// targets count as direct changes; an exact foreign-key action of an
 /// authorized change may still reach any row.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WritePermission {
     /// Every member.
-    #[default]
     Anyone,
     /// Only the member whose write originally created the row.
     Owner,
