@@ -132,6 +132,9 @@ struct FilesInner<M: FilesMode = Writer> {
     /// How many pins' downloads wait for the network now, for a test.
     #[cfg(test)]
     pub(crate) held_downloads: tokio::sync::watch::Sender<usize>,
+    /// How many reads wait for a coming connection now, for a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    reads_awaiting_connection: tokio::sync::watch::Sender<usize>,
     /// How many reads have found another read of the same stored bytes
     /// holding their lock, for a test.
     #[cfg(test)]
@@ -246,6 +249,8 @@ impl<M: FilesMode> FilesInner<M> {
             hold_wake: Notify::new(),
             #[cfg(test)]
             held_downloads: tokio::sync::watch::channel(0).0,
+            #[cfg(any(test, feature = "test-utils"))]
+            reads_awaiting_connection: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             shared_reads: tokio::sync::watch::channel(0).0,
             upload_wake: Arc::new(Notify::new()),
@@ -674,7 +679,7 @@ impl<M: FilesMode> FilesInner<M> {
                 return Ok(());
             }
             #[cfg(test)]
-            let _held = HeldDownload::new(&self.held_downloads);
+            let _held = Waiting::new(&self.held_downloads);
             tokio::select! {
                 () = woken => {}
                 () = network.changed() => {}
@@ -701,22 +706,23 @@ impl FilesInner {
         Ok(())
     }
 }
-/// A pin's download counted as waiting for the network while it waits.
-#[cfg(test)]
-struct HeldDownload<'a>(&'a tokio::sync::watch::Sender<usize>);
+/// A wait counted in a test's count of such waits while it waits: a pin's
+/// download waiting for the network, or a read for a coming connection.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) struct Waiting<'a>(&'a tokio::sync::watch::Sender<usize>);
 
-#[cfg(test)]
-impl<'a> HeldDownload<'a> {
-    fn new(held: &'a tokio::sync::watch::Sender<usize>) -> Self {
-        held.send_modify(|held| *held += 1);
-        Self(held)
+#[cfg(any(test, feature = "test-utils"))]
+impl<'a> Waiting<'a> {
+    pub(crate) fn new(waiting: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        waiting.send_modify(|waiting| *waiting += 1);
+        Self(waiting)
     }
 }
 
-#[cfg(test)]
-impl Drop for HeldDownload<'_> {
+#[cfg(any(test, feature = "test-utils"))]
+impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        self.0.send_modify(|held| *held -= 1);
+        self.0.send_modify(|waiting| *waiting -= 1);
     }
 }
 

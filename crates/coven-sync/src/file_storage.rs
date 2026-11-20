@@ -103,6 +103,8 @@ impl<M: FilesMode> FilesInner<M> {
             if !matches!(state, StorageState::Connecting) {
                 return Ok(state);
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            let _waiting = crate::files::Waiting::new(&self.reads_awaiting_connection);
             tokio::select! {
                 () = closing => {}
                 changed = changes.changed() => {
@@ -122,6 +124,15 @@ pub(super) fn connected(state: StorageState) -> Result<Arc<dyn Storage>, FileRea
         StorageState::Connected(storage) => Ok(storage),
         StorageState::Connecting | StorageState::Released => Err(FileReadError::NoStorage),
         StorageState::Closed => Err(DbError::StoreClosed.into()),
+    }
+}
+
+impl<M: FilesMode> Files<M> {
+    /// Follow how many reads wait for a coming connection now, for a test
+    /// that goes on once a read waits.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn reads_awaiting_connection(&self) -> watch::Receiver<usize> {
+        self.inner.reads_awaiting_connection.subscribe()
     }
 }
 

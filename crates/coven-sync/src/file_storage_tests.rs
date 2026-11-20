@@ -15,12 +15,14 @@ async fn a_read_while_a_connection_is_coming_waits_for_it() {
     let file = f.uploaded("waiting", vec![5; CHUNK]).await;
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let coming = f.files.expect_connection();
+    let mut waiting_reads = f.files.reads_awaiting_connection();
     let files = f.files.clone();
     let reading =
         tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
-    while f.files.inner.storage.receiver_count() == 0 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(HANG_GUARD, waiting_reads.wait_for(|reads| *reads == 1))
+        .await
+        .expect("the read waits for the connection")
+        .unwrap();
     assert!(!reading.is_finished(), "the read answered while a connection was coming");
     f.files.set_storage(Some(f.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
     let bytes = tokio::time::timeout(HANG_GUARD, reading).await.unwrap().unwrap();
@@ -57,12 +59,14 @@ async fn a_read_waiting_for_an_attempt_that_ends_without_storage_fails() {
     let file = f.uploaded("ended", vec![7; CHUNK]).await;
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let coming = f.files.expect_connection();
+    let mut waiting_reads = f.files.reads_awaiting_connection();
     let files = f.files.clone();
     let reading =
         tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
-    while f.files.inner.storage.receiver_count() == 0 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(HANG_GUARD, waiting_reads.wait_for(|reads| *reads == 1))
+        .await
+        .expect("the read waits for the connection")
+        .unwrap();
     drop(coming);
     let read = tokio::time::timeout(HANG_GUARD, reading).await.unwrap().unwrap();
     assert!(matches!(read, Err(FileReadError::NoStorage)), "{read:?}");
@@ -77,13 +81,15 @@ async fn closing_ends_a_waiting_read_with_store_closed() {
     let file = f.uploaded("closing", vec![8; CHUNK]).await;
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let _coming = f.files.expect_connection();
+    let mut waiting_reads = f.files.reads_awaiting_connection();
     let files = f.files.clone();
     let waiting = file.clone();
     let reading =
         tokio::spawn(async move { files.read_file(&waiting, &FileLease::for_test().await).await });
-    while f.files.inner.storage.receiver_count() == 0 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(HANG_GUARD, waiting_reads.wait_for(|reads| *reads == 1))
+        .await
+        .expect("the read waits for the connection")
+        .unwrap();
     f.files.close().await;
     let read = tokio::time::timeout(HANG_GUARD, reading).await.unwrap().unwrap();
     assert!(matches!(read, Err(FileReadError::Database(DbError::StoreClosed))), "{read:?}");
@@ -100,12 +106,14 @@ async fn a_dropped_waiting_read_leaves_no_waiter_and_holds_no_lock() {
     let file = f.uploaded("dropped", vec![9; CHUNK]).await;
     f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
     let _coming = f.files.expect_connection();
+    let mut waiting_reads = f.files.reads_awaiting_connection();
     let files = f.files.clone();
     let reading =
         tokio::spawn(async move { files.read_file(&file, &FileLease::for_test().await).await });
-    while f.files.inner.storage.receiver_count() == 0 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(HANG_GUARD, waiting_reads.wait_for(|reads| *reads == 1))
+        .await
+        .expect("the read waits for the connection")
+        .unwrap();
     reading.abort();
     assert!(reading.await.unwrap_err().is_cancelled());
     assert_eq!(f.files.inner.storage.receiver_count(), 0, "a waiter outlived its read");

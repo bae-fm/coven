@@ -775,6 +775,14 @@ impl CovenHandle {
         self.database.test_fail_device_id_in_use(fail).await
     }
 
+    /// Follow how many reads of files wait for the connection that is coming,
+    /// in application tests: a test that checks a read waits goes on once
+    /// one does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_reads_awaiting_connection(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.files.reads_awaiting_connection()
+    }
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_queued_writes(
