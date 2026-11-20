@@ -62,6 +62,9 @@ async fn failed_setup_claim_keeps_the_running_connection() {
         })
         .await;
     assert!(f.setup().await.is_err());
+    // The failed setup lets the held passes run again; storage keeps
+    // refusing until they have taken what is ready.
+    f.handle.test_parked().await;
     f.storage.set_faults(Faults::none()).await;
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_original_connection_uploads(&f).await;
@@ -83,6 +86,9 @@ async fn a_setup_whose_claim_panics_lets_the_held_passes_run_again() {
         })
         .await;
     let failed = f.setup().await.unwrap_err();
+    // The held passes run again; storage keeps panicking until they have
+    // taken what is ready.
+    f.handle.test_parked().await;
     f.storage.set_faults(Faults::none()).await;
     assert!(matches!(&failed, StorageSetupError::Bug(_)), "{failed:?}");
     assert_original_connection_uploads(&f).await;
