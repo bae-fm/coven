@@ -617,15 +617,18 @@ async fn a_reconnect_with_another_key_records_set_access_before_committing_it() 
         })
         .await;
     let (failed, steps) = reconnect_with(&f, "new-key").await;
+    eprintln!("DIAG0 failed={failed:?} pending={:?}", f.handle.pending().await);
     assert!(failed.is_err(), "{failed:?}");
     assert!(steps.contains(&StorageSetupStep::RecordingAccess), "{steps:?}");
     assert_eq!(custody_key(&f), "member-key");
+    eprintln!("DIAG1 pending={:?}", f.handle.pending().await);
     assert_eq!(f.handle.restore_code().await.unwrap(), code);
 
     // Past its point of no return, the setup finishes once sync starts and
     // the app retries the refused entry.
     f.storage.set_faults(Faults::none()).await;
     let pending = f.handle.pending().await.unwrap();
+    eprintln!("DIAG failed={failed:?} steps={steps:?} pending={pending:?} next={next}");
     let set_access = |subject: &coven_sync::PendingSubject| {
         matches!(
             subject,
