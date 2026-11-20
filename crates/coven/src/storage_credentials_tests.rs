@@ -622,8 +622,12 @@ async fn a_reconnect_with_another_key_records_set_access_before_committing_it() 
     assert_eq!(custody_key(&f), "member-key");
     assert_eq!(f.handle.restore_code().await.unwrap(), code);
 
-    // Past its point of no return, the setup finishes once sync starts and
-    // the app retries the refused entry.
+    // Past its point of no return, the failed setup starts sync, whose
+    // connection attempt tries the refused entry again. Stopping sync ends
+    // that attempt while storage still refuses the claim; with sync running,
+    // the attempt could claim the entry once storage stops refusing it,
+    // before this test looks for it.
+    stop(&f).await;
     f.storage.set_faults(Faults::none()).await;
     let pending = f.handle.pending().await.unwrap();
     let set_access = |subject: &coven_sync::PendingSubject| {
