@@ -856,11 +856,11 @@ async fn starts_and_last_pass(f: &Fixture) -> (i64, Option<Vec<u8>>) {
         .unwrap()
 }
 
-/// Dan's key is refused, so his start holds on a failure only new
-/// credentials clear. He stops sync and starts it again: the second start
-/// holds for the same reason and ends the way the first did, yet it still
-/// writes the row, which counts it, so an app's trigger that clears its
-/// record of a failed start hears it (E5).
+/// Dan's key is refused, so his start fails on a failure only new
+/// credentials clear. He stops sync and starts it again, a new connection,
+/// which tries the key again: it is refused the same way and ends as the
+/// first did, yet it still writes the row, which counts it, so an app's
+/// trigger that clears its record of a failed start hears it (E5).
 #[tokio::test]
 async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
     let f = stopped_fixture().await;
@@ -871,8 +871,14 @@ async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
     last_pass(&f.handle, failed).await;
     effect_becomes(&f, RetryEffect::Failed).await;
     let (_, held) = starts_and_last_pass(&f).await;
+    let attempts = *f.connector.attempts.borrow();
     f.handle.stop_sync().await.unwrap();
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
     f.handle.start_sync().await.unwrap();
+    // The new connection's attempt is a pass the row lets run, and the
+    // refusal holds it again. Waiting for the attempt skips the effect the
+    // start itself leaves, which still holds from the first failure.
+    f.connector.attempts.subscribe().wait_for(|made| *made > attempts).await.unwrap();
     effect_becomes(&f, RetryEffect::Failed).await;
     assert_eq!(starts_and_last_pass(&f).await, (before + 2, held));
     f.handle.close().await.unwrap();
