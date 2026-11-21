@@ -568,7 +568,11 @@ async fn rows_of(handle: &CovenHandle) -> Vec<String> {
 /// updated and opens Household again with a breaking migration. Its migration
 /// write would record the slot she had applied, zero, and Ana's device would
 /// refuse it as it refuses the app's own writes; the open makes none, as the
-/// first open of a joining installation makes none (§18.4).
+/// first open of a joining installation makes none (§18.4). The test reads
+/// the open's queue, not Ana's pass: once Carol's first load starts reading
+/// the circle she queues the rebuild's marker at version 2, which Ana's app at
+/// version 1 waits on for an update, and Carol's passes publish it when they
+/// run.
 #[tokio::test]
 async fn a_breaking_migration_on_a_joined_store_not_yet_loaded_makes_no_migration_write() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -590,11 +594,11 @@ async fn a_breaking_migration_on_a_joined_store_not_yet_loaded_makes_no_migratio
         .open(store, |_| {})
         .await
         .unwrap();
+    assert_eq!(handle.test_queued_writes().await.unwrap(), Vec::new());
     owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     handle.start_sync().await.unwrap();
     let answer = handle.retry_now().await.unwrap().await;
     assert!(matches!(answer, RetryOutcome::Synced { .. }), "{answer:?}");
-    owner.pass_now().await;
     handle.close().await.unwrap();
     owner.close().await;
 }
