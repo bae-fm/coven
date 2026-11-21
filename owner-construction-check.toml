@@ -1216,7 +1216,9 @@ tables = [
     "blocking",
     "spawn_owned",
     "spawn_completing",
+    "spawn_completing_boxed",
     "blocking_completing",
+    "blocking_completing_boxed",
 ]
 "crates/coven-foundation/src/progress.rs" = [
     # Where an owner reports each run of one kind of operation, made with

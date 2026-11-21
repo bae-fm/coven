@@ -339,6 +339,16 @@ pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     bugs: BugSinkRef,
     work: impl Future<Output = Result<T, E>> + Send + 'static,
 ) -> CompletingTask<Result<T, E>> {
+    spawn_completing_boxed(operation, bugs, Box::pin(work))
+}
+
+/// [`spawn_completing`] with its work as one boxed type, so tokio's spawn and
+/// the task's harness are built once per result type, not once per call site.
+fn spawn_completing_boxed<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: Pin<Box<dyn Future<Output = Result<T, E>> + Send>>,
+) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
     let heard = bugs.clone();
     #[cfg(any(test, feature = "test-utils"))]
@@ -370,6 +380,17 @@ pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     operation: &'static str,
     bugs: BugSinkRef,
     work: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> CompletingTask<Result<T, E>> {
+    blocking_completing_boxed(operation, bugs, Box::new(work))
+}
+
+/// [`blocking_completing`] with its work as one boxed type, so tokio's
+/// `spawn_blocking`, the channel and the harness are built once per result
+/// type, not once per call site.
+fn blocking_completing_boxed<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: Box<dyn FnOnce() -> Result<T, E> + Send>,
 ) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
     let heard = bugs.clone();
