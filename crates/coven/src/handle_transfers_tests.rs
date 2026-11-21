@@ -166,10 +166,14 @@ async fn a_file_sent_in_one_request_shows_its_bytes_going() {
     handle.set_uploads_paused(false).await.unwrap();
     let mut heard = Vec::new();
     hear_until(&mut watch, file.id(), &mut heard, reached(total)).await;
-    assert_eq!(
-        heard[0],
-        Heard::Moved(TransferProgress { bytes_transferred: 0, bytes_total: total }),
-        "the total is known before any byte goes"
+    // The watch coalesces what the reader is slow to take, so the 0-byte
+    // value may never be heard; whatever is heard shows the total, and
+    // the bytes never go back.
+    let moved_so_far = moved(&heard);
+    assert!(moved_so_far.windows(2).all(|pair| pair[0] <= pair[1]), "{moved_so_far:?}");
+    assert!(
+        heard.iter().filter_map(|now| now.moved()).all(|now| now.bytes_total == total),
+        "the total is known from the first value heard"
     );
     // Held for its reply, the photo is still being sent.
     let sending = handle
