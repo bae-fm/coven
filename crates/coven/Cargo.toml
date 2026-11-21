@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-test-utils = ["coven-storage/test-utils", "coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
+# The in-memory keychain and installation an app's tests and previews use, without the rest of the test support.
+in-memory-keychain = ["coven-crypto/in-memory-keychain", "coven-foundation/in-memory-keychain"]
+test-utils = ["in-memory-keychain", "coven-storage/test-utils", "coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
 # Development tools outside the sync protocol, such as emptying an S3 prefix
 # (api.md E14). Never needed by an app's release build.
 dev-tools = ["coven-storage/dev-tools"]

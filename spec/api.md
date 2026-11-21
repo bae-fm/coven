@@ -703,8 +703,11 @@ impl Clock for SystemClock {
 
 /// Installations for application tests, built in place of `Coven::new`: an
 /// isolated in-memory keychain and a network the test drives. The network
-/// starts usable and unmetered; each installation has its own.
-#[cfg(feature = "test-utils")]
+/// starts usable and unmetered; each installation has its own. Coven's
+/// in-memory-keychain feature builds these and `HeardBugs`, so an app's debug
+/// build can use them without the rest of the test-utils feature, which
+/// includes it.
+#[cfg(feature = "in-memory-keychain")]
 impl Coven {
     /// An installation with its stores under `app_dir`, no device-only
     /// entries and none of the person's entries. Its bug sink is a
@@ -11366,10 +11369,10 @@ pub struct LoggedBugs;
 /// gives coven. The test takes each bug it expects; a bug left untaken when
 /// the sink drops fails the test, so a bug no test expected never passes
 /// unseen.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "in-memory-keychain")]
 pub struct HeardBugs { /* private */ }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "in-memory-keychain")]
 impl HeardBugs {
     /// A sink that has heard nothing yet, to share with coven.
     pub fn shared() -> std::sync::Arc<Self>;

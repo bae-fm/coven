@@ -425,7 +425,7 @@ where
 #[path = "coven_device_secrets.rs"]
 mod device_secrets;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 #[path = "test_utils.rs"]
 mod test_utils;
 

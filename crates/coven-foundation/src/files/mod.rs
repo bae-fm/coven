@@ -38,7 +38,7 @@ mod settings;
 #[cfg(any(test, feature = "test-utils"))]
 mod tree_copy;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 pub use atomic_file::read_existing;
 pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter, WriterFolder};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};

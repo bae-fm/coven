@@ -166,7 +166,7 @@ impl BugSink for LoggedBugs {
 /// reporter would: the sink a test gives coven. A test that expects a bug
 /// takes it; one left untaken when the sink drops fails the test, so a bug
 /// no test expected never passes unseen.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 pub struct HeardBugs {
     heard: std::sync::Mutex<Vec<Bug>>,
     /// Told of each bug as it is heard.
@@ -176,10 +176,10 @@ pub struct HeardBugs {
 }
 
 /// What a test runs as [`HeardBugs`] hears its next bug.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 type ReportHook = Box<dyn FnOnce(&Bug) + Send>;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 impl HeardBugs {
     /// A sink that has heard nothing yet, to share with coven.
     pub fn shared() -> std::sync::Arc<Self> {
@@ -217,7 +217,7 @@ impl HeardBugs {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
         tracing::error!(
@@ -234,7 +234,7 @@ impl BugSink for HeardBugs {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 impl Drop for HeardBugs {
     fn drop(&mut self) {
         let untaken = self.take();

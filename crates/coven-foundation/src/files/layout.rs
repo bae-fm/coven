@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 use crate::files::DirectoryCreationError;
 
 use crate::files::protection::Protection;
@@ -270,7 +270,7 @@ impl StoreDirectories {
     }
 
     /// Publish a directory fixture without initializing member custody.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "in-memory-keychain"))]
     pub fn create_store_dir(
         &self,
         id: StoreId,

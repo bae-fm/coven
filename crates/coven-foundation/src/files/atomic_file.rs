@@ -625,7 +625,7 @@ pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
 
 /// The complete file at `path`, which must exist, for a test reading back
 /// bytes it saved with [`replace`].
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 pub fn read_existing(path: &Path) -> Result<Vec<u8>, FileError> {
     read_optional(path)?
         .ok_or_else(|| FileError::at("read file", path, io::ErrorKind::NotFound.into()))

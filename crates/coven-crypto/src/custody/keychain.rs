@@ -492,6 +492,6 @@ fn by_store(codes: Vec<(StoreId, SecretBytes)>) -> Vec<(StoreId, PersonRestoreCo
 #[path = "keychain_tests.rs"]
 mod tests;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 #[path = "keychain_test_utils.rs"]
 mod test_utils;

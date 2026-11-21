@@ -20,7 +20,7 @@ rules = [
 tools = ["owner-construction-policy", "owner-construction-check"]
 
 # These are the features only tests turn on.
-test_support_features = ["test-utils", "profiles"]
+test_support_features = ["test-utils", "in-memory-keychain", "profiles"]
 
 # coven re-exports the API at its root and keeps every module private (F.5).
 api_crate = "coven"

@@ -167,10 +167,10 @@ impl FileBudget {
 }
 
 /// The places of a budget a test's installation has.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 const TEST_PLACES: usize = 64;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 impl FileBudget {
     /// A budget of 64 places, as an installation made for a test has, with
     /// no other budget's work competing for them.

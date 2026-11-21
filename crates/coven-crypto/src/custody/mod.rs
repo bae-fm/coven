@@ -5,11 +5,11 @@ use coven_foundation::files::StoreFile;
 use std::sync::Arc;
 
 mod app_secrets;
-#[cfg(any(target_os = "android", test, feature = "test-utils"))]
+#[cfg(any(target_os = "android", test, feature = "in-memory-keychain"))]
 mod block_store;
 #[cfg(target_os = "android")]
 mod block_store_jni;
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 mod block_store_test_utils;
 mod error;
 mod key_session;

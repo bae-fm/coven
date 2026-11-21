@@ -82,7 +82,7 @@ impl<A: BlockStoreApi> BlockStore<A> {
         Self { api }
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "in-memory-keychain"))]
     pub(crate) fn api(&self) -> &A {
         &self.api
     }

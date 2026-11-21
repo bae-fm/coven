@@ -47,7 +47,8 @@ tempfile.workspace = true
 coven-foundation = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = ["coven-foundation/test-utils"]
+in-memory-keychain = ["coven-foundation/in-memory-keychain"]
+test-utils = ["in-memory-keychain", "coven-foundation/test-utils"]
 
 [lints]
 workspace = true

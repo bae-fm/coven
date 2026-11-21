@@ -453,6 +453,7 @@ impl Keychain {
     /// Save a person entry's copy in a second keychain group, as an app that
     /// moved to a new group can find its old copy beside the new one.
     /// Requires an in-memory iCloud keychain.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn write_in_another_group(&self, account: &str, bytes: &[u8]) {
         self.with_memory(|memory| match &memory.person {
             MemoryPerson::ICloud(entries) => {

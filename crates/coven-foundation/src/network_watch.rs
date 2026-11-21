@@ -30,7 +30,7 @@ mod winrt;
 
 #[cfg(any(
     test,
-    feature = "test-utils",
+    feature = "in-memory-keychain",
     target_vendor = "apple",
     target_os = "android",
     target_os = "linux",
@@ -65,7 +65,7 @@ impl NetworkState {
 // Only the platforms coven watches, and a test's network, say anything.
 #[cfg(any(
     test,
-    feature = "test-utils",
+    feature = "in-memory-keychain",
     target_vendor = "apple",
     target_os = "android",
     target_os = "linux",
@@ -84,7 +84,7 @@ pub(crate) struct UsableNetwork {
 /// network that appears.
 #[cfg(any(
     test,
-    feature = "test-utils",
+    feature = "in-memory-keychain",
     target_vendor = "apple",
     target_os = "android",
     target_os = "linux",
@@ -98,7 +98,7 @@ pub(crate) struct NetworkSink {
 
 #[cfg(any(
     test,
-    feature = "test-utils",
+    feature = "in-memory-keychain",
     target_vendor = "apple",
     target_os = "android",
     target_os = "linux",
@@ -199,10 +199,10 @@ pub enum NetworkSource {
     /// What the platform this runs on says (api.md E5).
     Platform,
     /// A network a test drives (api.md E1 `network`).
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "in-memory-keychain"))]
     Test(TestNetwork),
     /// A platform that refuses the watch with this error.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "in-memory-keychain"))]
     Refused(NetworkWatchError),
 }
 
@@ -301,9 +301,9 @@ impl NetworkWatch {
                 windows
             )))]
             NetworkSource::Platform => Ok(Self::unwatched()),
-            #[cfg(any(test, feature = "test-utils"))]
+            #[cfg(any(test, feature = "in-memory-keychain"))]
             NetworkSource::Test(network) => Ok(Self::without_platform(network.subscribe())),
-            #[cfg(any(test, feature = "test-utils"))]
+            #[cfg(any(test, feature = "in-memory-keychain"))]
             NetworkSource::Refused(error) => Err(error.clone()),
         }
     }
@@ -360,20 +360,20 @@ impl NetworkView {
 
 /// A network a test drives in place of the platform's (api.md E1
 /// `network`): clones drive the same network.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 #[derive(Clone)]
 pub struct TestNetwork {
     state: Arc<Mutex<TestNetworkState>>,
 }
 
 /// What a test's network says, and how many networks it has named.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 struct TestNetworkState {
     sink: NetworkSink,
     named: u64,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "in-memory-keychain"))]
 impl TestNetwork {
     /// The network as the platform would describe it as the store opens.
     pub fn new(usable: bool, metered: bool) -> Self {
