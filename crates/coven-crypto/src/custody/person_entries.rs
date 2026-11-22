@@ -253,7 +253,7 @@ impl std::fmt::Debug for PersonRestoreCode {
     target_os = "ios",
     target_os = "android",
     test,
-    feature = "test-utils"
+    feature = "in-memory-keychain"
 ))]
 pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
     match account.split_once(':') {
