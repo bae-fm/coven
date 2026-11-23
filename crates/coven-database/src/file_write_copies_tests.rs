@@ -315,6 +315,42 @@ async fn a_device_only_switch_refuses_an_earlier_opens_reservation_at_the_same_p
     db.close().await.unwrap();
 }
 
+/// When a write rolls back two device-only switches, it releases them in
+/// one observable change.
+#[tokio::test]
+async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let (file, location) = stored_track(&db).await;
+    let other = share_into(&db, 2, CIRCLE, file).await;
+    let first_folder = tempfile::tempdir().unwrap();
+    let second_folder = tempfile::tempdir().unwrap();
+    let first = prepare_device_only(&db, file, location.clone(), first_folder.path()).await;
+    let second = prepare_device_only(&db, other, location, second_folder.path()).await;
+    let mut placed = db.subscribe(|sql| {
+        Ok::<_, DbError>(sql.query_row(
+            "SELECT count(*) FROM coven_device_only_placed",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?)
+    });
+    assert_eq!(placed.next_inline().await.unwrap().unwrap(), 2);
+    let notices = db.collect_commit_notices();
+    let error = db
+        .write(move |sql| {
+            sql.make_device_only(first)?;
+            sql.make_device_only(second)?;
+            Err::<(), _>(DbError::NotInCloud { file })
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::NotInCloud { file: refused } if refused == file));
+    assert_eq!(notices.pending_notices_for("coven_device_only_placed"), 1);
+    assert!(placed.is_marked_for_rerun());
+    assert_eq!(placed.next_inline().await.unwrap().unwrap(), 0);
+    db.close().await.unwrap();
+}
+
 /// Ana makes the store's track device-only on her laptop. Gifts' file over
 /// the same bytes is its own record: it stays stored at the same location,
 /// and once her switch is published the stored bytes are still no deletion

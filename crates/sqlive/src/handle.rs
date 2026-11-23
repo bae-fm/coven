@@ -303,6 +303,17 @@ impl CommitSubscription {
         self.shared.entry.state.send_modify(|state| state.changed = false);
     }
 
+    /// Count the notices naming `table` that this subscription kept since
+    /// its run began.
+    #[cfg(feature = "test-utils")]
+    pub fn pending_notices_for(&self, table: &str) -> usize {
+        let tracked = lock_unpoisoned(&self.shared.entry.tracked);
+        let Tracking::Reading { commits, .. } = &tracked.tracking else {
+            panic!("a run must begin before counting its notices");
+        };
+        commits.iter().filter(|changes| changes.iter().any(|change| change.table == table)).count()
+    }
+
     /// Wait on nothing, whatever this subscription was doing: its query
     /// ended on a bug, so what its run read is unknown (E15).
     pub fn stop(&self) {

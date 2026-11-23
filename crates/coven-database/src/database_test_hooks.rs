@@ -9,6 +9,13 @@ use crate::store_call::StoreCall;
 pub(crate) type StagingRemoval = coven_foundation::task::CompletingTask<Result<(), DbError>>;
 
 impl StoreDatabase {
+    /// Keep each notice the store sends from now on for a test to inspect.
+    pub(crate) fn collect_commit_notices(&self) -> sqlive::CommitSubscription {
+        let notices = self.observer.subscribe();
+        notices.begin();
+        notices
+    }
+
     /// Run `gate` where released files' bytes are about to go, after the
     /// writer is free, so a test can stall that disk work.
     pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
