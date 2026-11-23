@@ -423,27 +423,60 @@ impl CopyPaths {
         Self { reservation: self.reservation.clone(), paths: std::mem::take(&mut self.paths) }
     }
 
-    /// Let the store remove these copies. A later call at the same path
-    /// holds an independent reservation.
-    pub(crate) fn release(&self, facts: &SharedFacts, observer: &StoreHandle) {
-        if self.paths.is_empty() {
-            return;
+    fn owned_copy<'a>(
+        &self,
+        copies: &'a mut BTreeMap<String, ReservedCopy>,
+        path: &str,
+    ) -> Option<&'a mut ReservedCopy> {
+        match copies.get_mut(path) {
+            Some(copy) => {
+                if copy.belongs_to(self) {
+                    return Some(copy);
+                }
+                tracing::warn!(
+                    %path,
+                    reservation = ?Arc::as_ptr(&self.reservation),
+                    current = ?Arc::as_ptr(&copy.reservation),
+                    "A different reservation owns the copy path",
+                );
+                None
+            }
+            None => {
+                tracing::warn!(
+                    %path,
+                    reservation = ?Arc::as_ptr(&self.reservation),
+                    "The copy path has no reservation",
+                );
+                None
+            }
         }
-        let changed = facts.change(|facts| {
-            let mut changed = false;
-            for path in &self.paths {
-                if let Some(copy) =
-                    facts.reserved_copies.get(path).filter(|copy| copy.belongs_to(self))
-                {
+    }
+}
+
+/// Release the copies that one dropped call or one write held. A live
+/// query sees every release in the batch at the same snapshot.
+pub(crate) fn release_reservations(
+    facts: &SharedFacts,
+    observer: &StoreHandle,
+    reservations: &[CopyPaths],
+) {
+    if reservations.iter().all(|reservation| reservation.paths.is_empty()) {
+        return;
+    }
+    let changed = facts.change(|facts| {
+        let mut changed = false;
+        for reservation in reservations {
+            for path in &reservation.paths {
+                if let Some(copy) = reservation.owned_copy(&mut facts.reserved_copies, path) {
                     changed |= copy.held();
                     facts.reserved_copies.remove(path);
                 }
             }
-            changed
-        });
-        if changed {
-            observer.changed_without_write(&PLACED_VIEW);
         }
+        changed
+    });
+    if changed {
+        observer.changed_without_write(&PLACED_VIEW);
     }
 }
 
@@ -475,9 +508,7 @@ impl CopyNames {
         let changed = self.facts.change(|facts| {
             let mut changed = false;
             for path in &paths.paths {
-                if let Some(copy) =
-                    facts.reserved_copies.get_mut(path).filter(|copy| copy.belongs_to(&paths))
-                {
+                if let Some(copy) = paths.owned_copy(&mut facts.reserved_copies, path) {
                     copy.state = CopyReservationState::Abandoned;
                     changed = true;
                 }
@@ -492,7 +523,8 @@ impl CopyNames {
 
 impl Drop for CopyNames {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.paths).release(&self.facts, &self.observer);
+        let reservation = lock_unpoisoned(&self.paths);
+        release_reservations(&self.facts, &self.observer, std::slice::from_ref(&*reservation));
     }
 }
 

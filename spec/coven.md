@@ -8813,8 +8813,9 @@ laptop.
   before the write the next open removes them (Appendix C.3). While the call
   runs it reserves its copies, so no other write's removal takes them or the
   folders they lie in. Each call releases its own reservations by their
-  identity, even when another call reuses a path after cleanup. If the app
-  drops the call instead, it stops waiting
+  identity, even when another call reuses a path after cleanup. When a
+  write ends, a live query sees it release all its reservations together.
+  If the app drops the call instead, it stops waiting
   at once, but a step already under way finishes with its record: making a
   folder, creating a copy's file, writing a run of its bytes, or renaming
   the copy to its path. The step keeps the call's copies reserved until it

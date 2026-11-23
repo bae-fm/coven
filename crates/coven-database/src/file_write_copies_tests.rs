@@ -240,14 +240,25 @@ async fn stored_track(db: &crate::StoreDatabase) -> (FileId, crate::FileLocation
 /// copy of its bytes and switch the file to it, in a write not yet
 /// published.
 async fn make_device_only(db: &crate::StoreDatabase, track: FileId, location: crate::FileLocation) {
-    let owner = crate::FileDatabase::new(db.clone());
     let music = tempfile::tempdir().unwrap();
-    let path = music.path().join("track.flac");
+    let prepared = prepare_device_only(db, track, location, music.path()).await;
+    db.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
+}
+
+/// Place the track's copy and prepare its switch into one write.
+async fn prepare_device_only(
+    db: &crate::StoreDatabase,
+    track: FileId,
+    location: crate::FileLocation,
+    music: &std::path::Path,
+) -> crate::PreparedDeviceOnly {
+    let owner = crate::FileDatabase::new(db.clone());
+    let path = music.join("track.flac");
     let reservation = owner
         .record_copies(vec![crate::FolderCopy {
             file: track,
             path: path.clone(),
-            temporary: music.path().join(".coven-1.download"),
+            temporary: music.join(".coven-1.download"),
             folders: vec![],
         }])
         .await
@@ -256,7 +267,7 @@ async fn make_device_only(db: &crate::StoreDatabase, track: FileId, location: cr
     owner
         .place_copy(
             &coven_foundation::files::CopyFolder::open(
-                music.path().to_owned(),
+                music.to_owned(),
                 coven_foundation::task::HeardBugs::shared(),
             )
             .await
@@ -275,14 +286,33 @@ async fn make_device_only(db: &crate::StoreDatabase, track: FileId, location: cr
             .flush()
             .await
             .unwrap();
-    let prepared = owner
+    owner
         .prepared_device_only(
             reservation,
             vec![crate::DeviceOnlyCopy { file: track, location, path, hashes: hashes.finish() }],
             flushed,
         )
-        .unwrap();
-    db.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
+        .unwrap()
+}
+
+/// A new open can place another copy at the same path. A write from that
+/// open refuses the earlier preparation and leaves its own copy there.
+#[tokio::test]
+async fn a_device_only_switch_refuses_an_earlier_opens_reservation_at_the_same_path() {
+    let store = TestStore::new();
+    let music = tempfile::tempdir().unwrap();
+    let db = open(&store, Provenance::UserProvided).await;
+    let (file, location) = stored_track(&db).await;
+    let earlier = prepare_device_only(&db, file, location.clone(), music.path()).await;
+    db.close().await.unwrap();
+
+    let db = open(&store, Provenance::UserProvided).await;
+    let current = prepare_device_only(&db, file, location, music.path()).await;
+    let error = db.write(move |sql| sql.make_device_only(earlier)).await.unwrap_err();
+    assert!(matches!(error, DbError::PreparedElsewhere));
+    db.write(move |sql| sql.make_device_only(current)).await.unwrap();
+    assert_eq!(record(&db, file).place, crate::file_location::Place::DeviceOnly(store.device()));
+    db.close().await.unwrap();
 }
 
 /// Ana makes the store's track device-only on her laptop. Gifts' file over

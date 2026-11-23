@@ -104,10 +104,8 @@ impl ProcessFacts {
     }
 
     /// Release the reservations a device-only switch brought into its write.
-    pub(crate) fn release_copies(&self, reservations: Vec<CopyPaths>) {
-        for paths in reservations {
-            paths.release(&self.facts, &self.observer);
-        }
+    pub(crate) fn release_copies(&self, reservations: &[CopyPaths]) {
+        copies::release_reservations(&self.facts, &self.observer, reservations);
     }
 
     /// The reserved copy paths as they stand now, for a caller under the writer.
