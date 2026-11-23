@@ -327,13 +327,14 @@ async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
     let second_folder = tempfile::tempdir().unwrap();
     let first = prepare_device_only(&db, file, location.clone(), first_folder.path()).await;
     let second = prepare_device_only(&db, other, location, second_folder.path()).await;
-    let mut placed = db.subscribe(|sql| {
+    let count_placed = |sql: crate::SqlReadContext<'_>| {
         Ok::<_, DbError>(sql.query_row(
             "SELECT count(*) FROM coven_device_only_placed",
             [],
             |row| row.get::<_, i64>(0),
         )?)
-    });
+    };
+    let mut placed = db.subscribe(count_placed);
     assert_eq!(placed.next_inline().await.unwrap().unwrap(), 2);
     let notices = db.collect_commit_notices();
     let error = db
@@ -347,7 +348,7 @@ async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
     assert!(matches!(error, DbError::NotInCloud { file: refused } if refused == file));
     assert_eq!(notices.pending_notices_for("coven_device_only_placed"), 1);
     assert!(placed.is_marked_for_rerun());
-    assert_eq!(placed.next_inline().await.unwrap().unwrap(), 0);
+    assert_eq!(db.read(count_placed).await.unwrap(), 0);
     db.close().await.unwrap();
 }
 
