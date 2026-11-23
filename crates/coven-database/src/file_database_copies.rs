@@ -17,6 +17,7 @@ use coven_foundation::{
 use sqlive::rusqlite::functions::FunctionFlags;
 use sqlive::rusqlite::params;
 use sqlive::{Setup, SnapshotValue};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -245,7 +246,7 @@ pub(crate) fn register_copy_paths(
             facts
                 .reserved_copies
                 .iter()
-                .filter_map(|(path, state)| (*state == CopyReservationState::Held).then_some(path))
+                .filter_map(|(path, copy)| copy.held().then_some(path))
                 .collect()
         },
     ];
@@ -303,13 +304,22 @@ pub struct PreparedDeviceOnly {
 impl PreparedDeviceOnly {
     /// The copies' paths, as the store reserving them records them.
     pub(crate) fn paths(&self) -> Vec<String> {
-        lock_unpoisoned(&self.reservation.names.paths).clone()
+        lock_unpoisoned(&self.reservation.names.paths).paths.clone()
+    }
+
+    /// Whether this store still holds this call's reservation at every path.
+    pub(crate) fn held_in(&self, copies: &BTreeMap<String, ReservedCopy>) -> bool {
+        let paths = lock_unpoisoned(&self.reservation.names.paths);
+        paths
+            .paths
+            .iter()
+            .all(|path| copies.get(path).is_some_and(|copy| copy.belongs_to(&paths) && copy.held()))
     }
 
     /// The switches, and the copies' paths, for the write making them;
     /// the reservation's release is the write's from here.
-    pub(crate) fn take(mut self) -> (Vec<DeviceOnlyCopy>, Vec<String>) {
-        let paths = std::mem::take(&mut *lock_unpoisoned(&self.reservation.names.paths));
+    pub(crate) fn take(mut self) -> (Vec<DeviceOnlyCopy>, CopyPaths) {
+        let paths = lock_unpoisoned(&self.reservation.names.paths).take();
         (std::mem::take(&mut self.copies), paths)
     }
 
@@ -380,9 +390,61 @@ impl Drop for CopyReservation {
 /// A reservation still held for a switch, or held only while a disk step
 /// finishes after the call has been dropped.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CopyReservationState {
+enum CopyReservationState {
     Held,
     Abandoned,
+}
+
+/// The call reserving one path, and whether it can still switch its copy.
+#[derive(Clone)]
+pub(crate) struct ReservedCopy {
+    reservation: Arc<()>,
+    state: CopyReservationState,
+}
+
+impl ReservedCopy {
+    fn belongs_to(&self, paths: &CopyPaths) -> bool {
+        Arc::ptr_eq(&self.reservation, &paths.reservation)
+    }
+
+    fn held(&self) -> bool {
+        self.state == CopyReservationState::Held
+    }
+}
+
+/// The paths one call reserved, with the identity of that reservation.
+pub(crate) struct CopyPaths {
+    reservation: Arc<()>,
+    paths: Vec<String>,
+}
+
+impl CopyPaths {
+    fn take(&mut self) -> Self {
+        Self { reservation: self.reservation.clone(), paths: std::mem::take(&mut self.paths) }
+    }
+
+    /// Let the store remove these copies. A later call at the same path
+    /// holds an independent reservation.
+    pub(crate) fn release(&self, facts: &SharedFacts, observer: &StoreHandle) {
+        if self.paths.is_empty() {
+            return;
+        }
+        let changed = facts.change(|facts| {
+            let mut changed = false;
+            for path in &self.paths {
+                if let Some(copy) =
+                    facts.reserved_copies.get(path).filter(|copy| copy.belongs_to(self))
+                {
+                    changed |= copy.held();
+                    facts.reserved_copies.remove(path);
+                }
+            }
+            changed
+        });
+        if changed {
+            observer.changed_without_write(&PLACED_VIEW);
+        }
+    }
 }
 
 /// The copies one call is writing, kept out of removals until the last of
@@ -391,54 +453,46 @@ pub(crate) struct CopyNames {
     facts: SharedFacts,
     observer: StoreHandle,
     /// Until a write takes them to release once it has decided.
-    paths: Mutex<Vec<String>>,
+    paths: Mutex<CopyPaths>,
 }
 
 impl CopyNames {
     pub(crate) fn new(facts: SharedFacts, observer: StoreHandle, paths: Vec<String>) -> Self {
+        let reservation = Arc::new(());
+        let copy =
+            ReservedCopy { reservation: reservation.clone(), state: CopyReservationState::Held };
         facts.change(|facts| {
-            facts
-                .reserved_copies
-                .extend(paths.iter().cloned().map(|path| (path, CopyReservationState::Held)));
+            facts.reserved_copies.extend(paths.iter().cloned().map(|path| (path, copy.clone())));
         });
-        Self { facts, observer, paths: Mutex::new(paths) }
+        Self { facts, observer, paths: Mutex::new(CopyPaths { reservation, paths }) }
     }
 
     fn abandon(&self) {
         let paths = lock_unpoisoned(&self.paths);
-        if paths.is_empty() {
+        if paths.paths.is_empty() {
             return;
         }
-        self.facts.change(|facts| {
-            for path in paths.iter() {
-                facts.reserved_copies.insert(path.clone(), CopyReservationState::Abandoned);
+        let changed = self.facts.change(|facts| {
+            let mut changed = false;
+            for path in &paths.paths {
+                if let Some(copy) =
+                    facts.reserved_copies.get_mut(path).filter(|copy| copy.belongs_to(&paths))
+                {
+                    copy.state = CopyReservationState::Abandoned;
+                    changed = true;
+                }
             }
+            changed
         });
-        self.observer.changed_without_write(&PLACED_VIEW);
+        if changed {
+            self.observer.changed_without_write(&PLACED_VIEW);
+        }
     }
 }
 
 impl Drop for CopyNames {
     fn drop(&mut self) {
-        release(&self.facts, &self.observer, &lock_unpoisoned(&self.paths));
-    }
-}
-
-/// Let the store remove these copies. A live query stops listing them as
-/// placed as soon as their reservation ends, regardless of disk cleanup.
-pub(crate) fn release(facts: &SharedFacts, observer: &StoreHandle, paths: &[String]) {
-    if paths.is_empty() {
-        return;
-    }
-    let changed = facts.change(|facts| {
-        let mut changed = false;
-        for path in paths {
-            changed |= facts.reserved_copies.remove(path) == Some(CopyReservationState::Held);
-        }
-        changed
-    });
-    if changed {
-        observer.changed_without_write(&PLACED_VIEW);
+        lock_unpoisoned(&self.paths).release(&self.facts, &self.observer);
     }
 }
 

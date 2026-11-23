@@ -29,8 +29,8 @@ use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, Stag
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 
 /// Choose, under the writer that just committed, every recorded removal
-/// outside `active`, and every copy that has neither switched nor been
-/// protected from removal. Its read sees only committed records:
+/// outside `active`, each copy whose switch lost, and each unswitched
+/// copy that no reservation protects. Its read sees only committed records:
 /// after a failed rollback the writer still holds a transaction and the read
 /// is refused, so uncommitted records never name bytes to remove.
 pub(crate) fn choose(

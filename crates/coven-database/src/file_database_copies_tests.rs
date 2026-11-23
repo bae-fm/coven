@@ -5,6 +5,33 @@ use crate::{
     Provenance,
 };
 
+/// A failed call can still be dropping its reservation after cleanup
+/// removes its copy record and another call reserves the path.
+#[tokio::test]
+async fn releasing_an_old_copy_keeps_the_new_reservation_at_its_path() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let owner = FileDatabase::new(db.clone());
+    let music = tempfile::tempdir().unwrap();
+    let path = music.path().join("track.flac");
+    let copy = |file, name| FolderCopy {
+        file: FileId(uuid::Uuid::from_u128(file)),
+        path: path.clone(),
+        temporary: music.path().join(name),
+        folders: Vec::new(),
+    };
+    let first = owner.record_copies(vec![copy(1, ".coven-1.download")]).await.unwrap();
+    owner.abandon_copies(vec![path.clone()]).await.unwrap();
+    let second = copy(2, ".coven-2.download");
+    let writing = owner.record_copies(vec![second.clone()]).await.unwrap();
+    std::fs::write(&second.temporary, b"part of the second copy").unwrap();
+    drop(first);
+    db.write(|_| Ok(())).await.unwrap();
+    assert!(second.temporary.exists());
+    drop(writing);
+    db.close().await.unwrap();
+}
+
 /// A crash before a call's switch leaves its copies recorded: opening
 /// removes the one still being written and the one placed, and the folder
 /// the call made for them, and keeps a folder that was there (§17.3,

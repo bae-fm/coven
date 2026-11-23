@@ -645,7 +645,7 @@ impl StoreDatabase {
                 // decided: a write that rolled back leaves their bytes to the
                 // removals its cleanup chooses.
                 inner.release_file_reservations(&files.take_brought());
-                inner.facts.release_copies(&files.take_held_copies());
+                inner.facts.release_copies(files.take_held_copies());
                 #[cfg(any(test, feature = "test-utils"))]
                 call.write_checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
                 result.unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))

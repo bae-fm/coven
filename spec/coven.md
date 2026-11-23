@@ -8812,7 +8812,9 @@ laptop.
   local. Each copy and folder is recorded before it exists, so after a crash
   before the write the next open removes them (Appendix C.3). While the call
   runs it reserves its copies, so no other write's removal takes them or the
-  folders they lie in. If the app drops the call instead, it stops waiting
+  folders they lie in. Each call releases its own reservations by their
+  identity, even when another call reuses a path after cleanup. If the app
+  drops the call instead, it stops waiting
   at once, but a step already under way finishes with its record: making a
   folder, creating a copy's file, writing a run of its bytes, or renaming
   the copy to its path. The step keeps the call's copies reserved until it
@@ -13139,10 +13141,11 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
+  `coven_upload_phases`, `coven_sending`, `coven_downloading`,
+  `coven_upload_pause`, `coven_network`,
   `coven_device_only_downloading`, `coven_device_only_placed`,
   `coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
-  `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
+  `coven_file_reads`, `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
   `coven_circle_members` ([api.md E4](api.md#e4-reading)). Each reads every
   table it reads through a column, in a join or a subquery: SQLite names the
   view to the authorizer for each column the view reads, and when a statement

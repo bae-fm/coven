@@ -8,7 +8,9 @@
 //! (sqlive's `snapshot_values.rs`), and coven's functions read what it took:
 //! a statement never joins the tables of one moment to facts of another.
 
-use crate::database::file_database::copies::{self, CopyDownload, CopyNames, CopyReservationState};
+use crate::database::file_database::copies::{
+    self, CopyDownload, CopyNames, CopyPaths, ReservedCopy,
+};
 use crate::network_facts::{NetworkFact, NetworkFacts};
 use crate::store_failure::StoreHandle;
 use crate::transfers_in_flight::TransfersInFlight;
@@ -29,7 +31,7 @@ pub(crate) struct MemoryFacts {
     /// The destination paths this process is downloading device-only copies to.
     pub(crate) copy_downloads: BTreeSet<String>,
     /// The paths of copies still reserved to make files device-only.
-    pub(crate) reserved_copies: BTreeMap<String, CopyReservationState>,
+    pub(crate) reserved_copies: BTreeMap<String, ReservedCopy>,
     /// The device's network.
     pub(crate) network: NetworkFact,
 }
@@ -102,14 +104,16 @@ impl ProcessFacts {
     }
 
     /// Release the reservations a device-only switch brought into its write.
-    pub(crate) fn release_copies(&self, paths: &[String]) {
-        copies::release(&self.facts, &self.observer, paths);
+    pub(crate) fn release_copies(&self, reservations: Vec<CopyPaths>) {
+        for paths in reservations {
+            paths.release(&self.facts, &self.observer);
+        }
     }
 
     /// The reserved copy paths as they stand now, for a caller under the writer.
     pub(crate) fn with_reserved_copies<R>(
         &self,
-        read: impl FnOnce(&BTreeMap<String, CopyReservationState>) -> R,
+        read: impl FnOnce(&BTreeMap<String, ReservedCopy>) -> R,
     ) -> R {
         read(&self.facts.now().reserved_copies)
     }

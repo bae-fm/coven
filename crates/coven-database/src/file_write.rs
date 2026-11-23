@@ -169,7 +169,7 @@ pub(crate) struct WriteFiles<'a> {
     brought: RefCell<Vec<crate::file_removals::OwnedFile>>,
     /// The copies a prepared device-only switch brought into this write,
     /// released once its transaction has decided (§17.3).
-    held_copies: RefCell<Vec<String>>,
+    held_copies: RefCell<Vec<crate::database::file_database::copies::CopyPaths>>,
     /// The new files this write made over a file it stages, by that file:
     /// they keep its bytes and share its upload once it is queued (§17.2).
     copies: RefCell<BTreeMap<FileId, Vec<FileId>>>,
@@ -271,7 +271,9 @@ impl<'a> WriteFiles<'a> {
 
     /// The copies a prepared switch brought into this write, which no
     /// removal skips once its transaction has decided.
-    pub(crate) fn take_held_copies(&self) -> Vec<String> {
+    pub(crate) fn take_held_copies(
+        &self,
+    ) -> Vec<crate::database::file_database::copies::CopyPaths> {
         std::mem::take(&mut self.held_copies.borrow_mut())
     }
 }
