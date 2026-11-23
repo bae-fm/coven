@@ -181,7 +181,9 @@ impl Files {
         let copies: Vec<FolderCopy> = plan
             .files
             .iter()
-            .map(|path| FolderCopy {
+            .zip(&refs)
+            .map(|(path, file)| FolderCopy {
+                file: file.id(),
                 path: path.clone(),
                 temporary: path
                     .with_file_name(format!(".coven-{}.download", self.inner.ids.new_id())),
@@ -279,6 +281,7 @@ async fn download(
     let mut before = 0;
     for (file, copy) in files.iter().zip(copies) {
         check(cancel)?;
+        let _downloading = handle.inner.database.downloading_copy(copy)?;
         report.begin(DeviceOnlyStep::Downloading { file: file.id(), before, all }, file.size());
         let mut done = 0;
         let download = |error| DeviceOnlyError::Download { file: file.id(), error };

@@ -16,21 +16,22 @@ async fn opening_removes_what_a_crashed_call_made() {
     let owner = FileDatabase::new(db.clone());
     let music = tempfile::tempdir().unwrap();
     let album = music.path().join("Album");
-    let copy = |name: &str, temporary: &str| FolderCopy {
+    let copy = |file, name: &str, temporary: &str| FolderCopy {
+        file: FileId(uuid::Uuid::from_u128(file)),
         path: album.join(name),
         temporary: album.join(temporary),
         folders: vec![album.clone()],
     };
     let reservation = owner
         .record_copies(vec![
-            copy("one.flac", ".coven-1.download"),
-            copy("two.flac", ".coven-2.download"),
+            copy(1, "one.flac", ".coven-1.download"),
+            copy(2, "two.flac", ".coven-2.download"),
         ])
         .await
         .unwrap();
     assert!(matches!(
         owner
-            .record_copies(vec![copy("one.flac", ".coven-3.download")])
+            .record_copies(vec![copy(3, "one.flac", ".coven-3.download")])
             .await,
         Err(DbError::CopyPathTaken { path }) if path == album.join("one.flac")
     ));
@@ -67,7 +68,8 @@ async fn abandoning_leaves_a_copy_the_person_changed() {
     let owner = FileDatabase::new(db.clone());
     let music = tempfile::tempdir().unwrap();
     let album = music.path().join("Album");
-    let copies = ["one.flac", "two.flac"].map(|name| FolderCopy {
+    let copies = [(1, "one.flac"), (2, "two.flac")].map(|(file, name)| FolderCopy {
+        file: FileId(uuid::Uuid::from_u128(file)),
         path: album.join(name),
         temporary: album.join(format!(".coven-{name}.download")),
         folders: vec![album.clone()],
@@ -110,6 +112,7 @@ async fn the_next_write_removes_what_a_dropped_call_made() {
     std::fs::create_dir(&theirs).unwrap();
     let reservation = owner
         .record_copies(vec![FolderCopy {
+            file: FileId(uuid::Uuid::from_u128(1)),
             path: album.join("one.flac"),
             temporary: album.join(".coven-1.download"),
             folders: vec![theirs.clone(), album.clone()],
@@ -150,6 +153,7 @@ async fn reopen_waits_for_a_copy_reservation_after_its_database_owner_drops() {
     let temporary = music.path().join(".coven-1.download");
     let reservation = owner
         .record_copies(vec![FolderCopy {
+            file: FileId(uuid::Uuid::from_u128(1)),
             path: music.path().join("one.flac"),
             temporary: temporary.clone(),
             folders: Vec::new(),
@@ -182,6 +186,7 @@ async fn a_closing_store_lets_a_failing_call_remove_its_copies() {
     let (path, temporary) = (music.path().join("one.flac"), music.path().join(".coven-1.download"));
     let reservation = owner
         .record_copies(vec![FolderCopy {
+            file: FileId(uuid::Uuid::from_u128(1)),
             path: path.clone(),
             temporary: temporary.clone(),
             folders: Vec::new(),
@@ -210,8 +215,8 @@ async fn a_closing_store_lets_a_failing_call_remove_its_copies() {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
-           SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
+        "INSERT INTO _coven_copies(path,file,temporary,state,size,modified_at)
+           SELECT 'path_' || i,member,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
              CASE WHEN i%4!=0 THEN i END,CASE WHEN i%4!=0 THEN zeroblob(13) END FROM fixture;
          INSERT INTO _coven_copy_folders SELECT 'folder_' || (i%7),'path_' || i,i%2 FROM fixture;",
     )

@@ -8,7 +8,7 @@ fn notes() -> Vec<SyncedTable> {
 
 const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
 
-const VIEWS: [&str; 20] = [
+const VIEWS: [&str; 22] = [
     "coven_upload_pause",
     "coven_cache_bytes",
     "coven_library_bytes",
@@ -17,6 +17,8 @@ const VIEWS: [&str; 20] = [
     "coven_upload_queue",
     "coven_sending",
     "coven_downloading",
+    "coven_device_only_downloading",
+    "coven_device_only_placed",
     "coven_pins",
     "coven_pin_requests",
     "coven_moves",
@@ -97,6 +99,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
     for statement in [
         "SELECT * FROM _coven_file_uploads",
         "SELECT * FROM _coven_members",
+        "SELECT * FROM _coven_copies",
         // A table counted without a view in the statement.
         "SELECT count(*) FROM _coven_members",
         "SELECT * FROM coven_uploads JOIN _coven_pending",
@@ -105,6 +108,11 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(matches!(error, DbError::InternalTable { .. }), "{statement}: {error:?}");
     }
+    let error = db
+        .read(|sql| Ok(sql.query("SELECT _coven_copy_download_paths()", [], |_| Ok(()))?))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::StatementForbidden { .. }), "{error:?}");
     db.close().await.unwrap();
 }
 

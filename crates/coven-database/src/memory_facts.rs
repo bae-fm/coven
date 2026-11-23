@@ -1,19 +1,21 @@
 //! What app SQL reads of this process's memory, which no table holds (§4):
-//! the stored objects it is sending, those it is downloading to keep whole
-//! (`transfers_in_flight.rs`), and the device's network as it last heard of
+//! the stored objects it is sending, those it is downloading for pins
+//! (`transfers_in_flight.rs`), the copies it is downloading to make files
+//! device-only, and the device's network as it last heard of
 //! it (`network_facts.rs`). All of them are one value, which each change
 //! replaces under one lock. Each transaction on a connection to the store's
 //! database takes that value as its snapshot is fixed, while no commit runs
 //! (sqlive's `snapshot_values.rs`), and coven's functions read what it took:
 //! a statement never joins the tables of one moment to facts of another.
 
+use crate::database::file_database::copies::{self, CopyDownload};
 use crate::network_facts::{NetworkFact, NetworkFacts};
 use crate::store_failure::StoreHandle;
 use crate::transfers_in_flight::TransfersInFlight;
 use coven_foundation::id_source::{DeviceId, ObjectId};
 use coven_foundation::locks::lock_unpoisoned;
 use sqlive::Setup;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 /// The facts at one moment.
@@ -24,6 +26,8 @@ pub(crate) struct MemoryFacts {
     /// Each stored object this process is downloading to keep whole, by its
     /// uploader.
     pub(crate) downloading: BTreeMap<ObjectId, DeviceId>,
+    /// The destination paths this process is downloading device-only copies to.
+    pub(crate) copy_downloads: BTreeSet<String>,
     /// The device's network.
     pub(crate) network: NetworkFact,
 }
@@ -54,6 +58,7 @@ impl SharedFacts {
 #[derive(Clone)]
 pub(crate) struct ProcessFacts {
     facts: SharedFacts,
+    observer: StoreHandle,
     /// The files this process is sending and downloading now.
     transfers: TransfersInFlight,
     /// The device's network as this process last heard of it.
@@ -67,7 +72,8 @@ impl ProcessFacts {
         let facts = SharedFacts::new();
         Self {
             transfers: TransfersInFlight::new(observer.clone(), facts.clone()),
-            network: NetworkFacts::new(observer, facts.clone()),
+            network: NetworkFacts::new(observer.clone(), facts.clone()),
+            observer,
             facts,
         }
     }
@@ -81,6 +87,11 @@ impl ProcessFacts {
     /// download marks them.
     pub(crate) fn downloads(&self) -> crate::InFlight {
         self.transfers.downloads()
+    }
+
+    /// Mark one device-only copy as downloading for the returned guard's scope.
+    pub(crate) fn downloading_copy(&self, path: String) -> Result<CopyDownload, crate::DbError> {
+        CopyDownload::start(self.facts.clone(), self.observer.clone(), path)
     }
 
     /// The store's watch says the network is now `network`.
@@ -98,6 +109,7 @@ impl ProcessFacts {
         let facts = self.facts.clone();
         let at_snapshot = setup.snapshot_value(move || facts.now());
         crate::transfers_in_flight::register(setup, &at_snapshot)?;
-        crate::network_facts::register(setup, &at_snapshot)
+        crate::network_facts::register(setup, &at_snapshot)?;
+        copies::register_downloads(setup, at_snapshot)
     }
 }

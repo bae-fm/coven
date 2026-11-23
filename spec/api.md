@@ -3873,6 +3873,14 @@ let moved = handle
   directly, or in the app's own view or trigger, fails with
   `StatementForbidden`. A read-only handle transfers nothing, and shows every
   file waiting and none downloading.
+- `coven_device_only_downloading` lists the files this process is downloading
+  to make device-only. A live query runs again when the download starts or ends.
+  App SQL reaches `_coven_copy_download_paths` only through this view.
+  `coven_device_only_placed` lists files with a copy coven has placed in the
+  chosen folder and recorded in the database. The placement transaction moves
+  the copy from one view to the other. Each view lists a file once, even when
+  concurrent calls prepare it at different paths. A read-only handle lists
+  placed copies and has no downloads of its own.
 - The device's network is the same kind of fact. `coven_network`'s `usable`
   and `metered`, and `coven_uploads.metered`, read it from the store's watch
   of the network (E5), as it stood at the read's snapshot, and a live query
@@ -4002,6 +4010,8 @@ let moved = handle
 | `coven_sending`: each queued file this process is sending now, one per upload in flight | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
+| `coven_device_only_downloading`: each file this process is downloading to make device-only (E8) | `file` | the file's id |
+| `coven_device_only_placed`: each file whose placed copy still waits for its switch to device-only (E8) | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
 | `coven_cache_bytes`: each namespace the app has declared in this store, including one that a later version no longer declares, and its cache on this device ([§17.8](coven.md#178-cache-and-pinning)) | `namespace` | the namespace's name |
 | | `budget` | its budget in bytes, declared or since set (`set_cache_budget`) |
@@ -7488,8 +7498,12 @@ while let Some(changes) = watch.next().await {
 - `prepare_device_only` brings cloud files back to this device, into a folder
   the person picks, reporting each file's bytes and the call's as they
   download, and a write's `make_device_only` step switches them all to
-  device-only here ([§17.3](coven.md#173-staging-a-file)). A failure or a
-  cancel before that write removes everything the call made.
+  device-only here ([§17.3](coven.md#173-staging-a-file)). The app reads
+  `coven_device_only_downloading` and `coven_device_only_placed` in a live
+  query to show each file's state, and takes byte progress from the call.
+  The switch and the removal of an abandoned copy each take that copy out
+  of the placed view. A failure or a cancel before the switch removes
+  everything the call made.
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no

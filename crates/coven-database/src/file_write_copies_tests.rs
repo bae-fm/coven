@@ -245,6 +245,7 @@ async fn make_device_only(db: &crate::StoreDatabase, track: FileId, location: cr
     let path = music.path().join("track.flac");
     let reservation = owner
         .record_copies(vec![crate::FolderCopy {
+            file: track,
             path: path.clone(),
             temporary: music.path().join(".coven-1.download"),
             folders: vec![],

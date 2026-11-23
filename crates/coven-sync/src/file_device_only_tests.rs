@@ -5,6 +5,60 @@ use super::*;
 use crate::files::file_device_only::DeviceOnlyPoint;
 use coven_foundation::files::RelativePath;
 
+/// A live query joins the copy states by file while a call is preparing
+/// copies, after it finishes, and after its copies are abandoned.
+#[tokio::test]
+async fn a_live_query_shows_placed_copies_and_the_current_device_only_download() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let first = f.original("first", &vec![61; CHUNK + 7]).await;
+    let second = f.original("second", &vec![62; CHUNK + 7]).await;
+    f.drain().await;
+    let second = f.database.file_ref(second.id()).await.unwrap();
+    let music = tempfile::tempdir().unwrap();
+    let mut rows: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT f.id,p.file IS NOT NULL,d.file IS NOT NULL FROM files AS f
+             LEFT JOIN coven_device_only_placed AS p ON p.file=f.file
+             LEFT JOIN coven_device_only_downloading AS d ON d.file=f.file ORDER BY f.id",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?)),
+        )?)
+    });
+    let expected = |first, second, downloading| {
+        [("first".to_owned(), first, false), ("second".to_owned(), second, downloading)]
+    };
+    assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(false, false, false));
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_read(f.path(&second), observed, resumed).await;
+    let (_cancel, cancel) = tokio::sync::watch::channel(false);
+    let call = f.files.prepare_device_only(
+        music.path(),
+        vec![
+            (first.id(), RelativePath::new(["first.flac"]).unwrap()),
+            (second.id(), RelativePath::new(["second.flac"]).unwrap()),
+        ],
+        &cancel,
+        tokio::sync::watch::channel(None).0,
+    );
+    tokio::pin!(call);
+    tokio::select! {
+        result = &mut call => panic!("the second download was not held: {result:?}"),
+        result = held => result.unwrap(),
+    }
+    assert!(rows.is_marked_for_rerun());
+    assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(true, false, true));
+    resume.send(()).unwrap();
+    let prepared = call.await.unwrap();
+    assert!(rows.is_marked_for_rerun());
+    assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(true, true, false));
+    prepared.abandon().await.unwrap();
+    assert!(rows.is_marked_for_rerun());
+    assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(false, false, false));
+    f.close().await;
+}
+
 /// The app drops the call's future while a copy, renamed to its path, is
 /// not yet recorded placed. The step finishes holding the copy's name, so
 /// the next write's removal can't take the copy's record from under it, and

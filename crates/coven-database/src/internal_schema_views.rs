@@ -18,7 +18,7 @@
 /// `internal_schema_pending.rs`, `internal_schema_sync_status.rs`,
 /// `internal_schema_retry_effect.rs`), and the sizes of the store's own
 /// files (`local_bytes_schema.rs`).
-pub(crate) const READABLE: [&str; 26] = [
+pub(crate) const READABLE: [&str; 28] = [
     super::FILES,
     "coven_file_reads",
     "coven_user_files",
@@ -28,6 +28,8 @@ pub(crate) const READABLE: [&str; 26] = [
     "coven_network",
     "coven_sending",
     "coven_downloading",
+    "coven_device_only_downloading",
+    "coven_device_only_placed",
     "coven_cache_bytes",
     "coven_library_bytes",
     "coven_archive_bytes",
@@ -190,6 +192,15 @@ pub(super) const SCHEMA: &str = concat!(
         FROM json_each(_coven_downloading_objects()) AS j
         CROSS JOIN _coven_stored_files AS f
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
+    // A move's active downloads, looked up by their reserved paths. The
+    // placement commit takes a copy out of this view and adds it to the
+    // placed view at the same snapshot, even before the worker drops its
+    // download guard. Two calls can prepare the same file at different paths.
+    "CREATE VIEW coven_device_only_downloading(file) AS
+        SELECT DISTINCT c.file FROM json_each(_coven_copy_download_paths()) AS j
+        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='writing';",
+    "CREATE VIEW coven_device_only_placed(file) AS
+        SELECT DISTINCT c.file FROM _coven_copies AS c WHERE c.state='placed';",
     // Each namespace's cache on this device, in bytes (§17.8): its budget,
     // its chunks and headers (`cached`), which the budget counts, its
     // pinned whole copies (`pinned`), which it doesn't, and the partial

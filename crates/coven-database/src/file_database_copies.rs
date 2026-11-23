@@ -4,7 +4,9 @@
 //! removal of what a failing call made.
 
 use super::{BytesWriting, FileDatabase, StoreDatabase};
+use crate::memory_facts::{MemoryFacts, SharedFacts};
 use crate::sqlite::StoreSql;
+use crate::store_failure::StoreHandle;
 use crate::{DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{BugSinkRef, CarriesBug, TaskFailed};
@@ -12,7 +14,9 @@ use coven_foundation::{
     files::{Flushed, ObservedFile},
     id_source::FileId,
 };
+use sqlive::rusqlite::functions::FunctionFlags;
 use sqlive::rusqlite::params;
+use sqlive::{Setup, SnapshotValue};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +25,8 @@ use std::sync::{Arc, Mutex};
 /// folders the call makes on its path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderCopy {
+    /// The file whose bytes the copy holds.
+    pub file: FileId,
     /// Where the copy goes.
     pub path: PathBuf,
     /// The name its bytes are written under until they are whole and synced.
@@ -30,6 +36,12 @@ pub struct FolderCopy {
 }
 
 impl FileDatabase {
+    /// List a reserved copy's path as downloading until the guard drops or
+    /// the copy is placed. The view reads the file from the copy's record.
+    pub fn downloading_copy(&self, copy: &FolderCopy) -> Result<CopyDownload, DbError> {
+        self.database.writer.facts.downloading_copy(text(&copy.path)?.to_owned())
+    }
+
     /// Each file as its record stands, once this device may make it
     /// device-only (§17.3): in the cloud, of a user namespace, in an
     /// audience this device's member is in, and referenced by no row this
@@ -133,14 +145,13 @@ impl StoreDatabase {
                     for copy in &copies {
                         let path = text(&copy.path)?;
                         if db.execute(
-                            "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
+                            "INSERT INTO _coven_copies(path,file,temporary,state)
+                             VALUES(?1,?2,?3,'writing')
                              ON CONFLICT(path) DO NOTHING",
-                            params![path, text(&copy.temporary)?],
+                            params![path, copy.file, text(&copy.temporary)?],
                         )? != 1
                         {
-                            return Err(DbError::CopyPathTaken {
-                                path: copy.path.clone(),
-                            });
+                            return Err(DbError::CopyPathTaken { path: copy.path.clone() });
                         }
                         for folder in &copy.folders {
                             db.execute(
@@ -220,6 +231,51 @@ impl StoreDatabase {
             inner.finish_removals(Ok::<_, DbError>(()), chosen)
         })
         .await
+    }
+}
+
+/// The function app SQL reaches only through the device-only download view.
+pub(crate) const DOWNLOAD_PATHS: &str = "_coven_copy_download_paths";
+const DOWNLOAD_VIEW: [(&str, &str); 1] = [("coven_device_only_downloading", "")];
+
+/// Register the download paths as they stood at each transaction's snapshot.
+pub(crate) fn register_downloads(
+    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
+    at_snapshot: SnapshotValue<Arc<MemoryFacts>>,
+) -> sqlive::rusqlite::Result<()> {
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
+    setup.scalar_function(DOWNLOAD_PATHS, 0, flags, move |_| {
+        serde_json::to_string(&at_snapshot.get().copy_downloads)
+            .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
+    })
+}
+
+/// One active download to a device-only copy. Dropping it clears the
+/// in-memory fact, including when preparing the copy fails or is cancelled.
+pub struct CopyDownload {
+    facts: SharedFacts,
+    observer: StoreHandle,
+    path: String,
+}
+
+impl CopyDownload {
+    pub(crate) fn start(
+        facts: SharedFacts,
+        observer: StoreHandle,
+        path: String,
+    ) -> Result<Self, DbError> {
+        if !facts.change(|facts| facts.copy_downloads.insert(path.clone())) {
+            return Err(DbError::Invariant { what: "only one download writes a reserved copy" });
+        }
+        observer.changed_without_write(&DOWNLOAD_VIEW);
+        Ok(Self { facts, observer, path })
+    }
+}
+
+impl Drop for CopyDownload {
+    fn drop(&mut self) {
+        self.facts.change(|facts| facts.copy_downloads.remove(&self.path));
+        self.observer.changed_without_write(&DOWNLOAD_VIEW);
     }
 }
 

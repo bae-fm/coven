@@ -260,6 +260,8 @@ task_types = [
     "coven_database::database::file_database::copies::PreparedDeviceOnly",
     # The copies one call making files device-only is writing (§17.3).
     "coven_database::database::file_database::copies::CopyReservation",
+    # One device-only download while its copy is being written (§17.3).
+    "coven_database::database::file_database::copies::CopyDownload",
     # Which of them removals skip, until the last of the call's
     # reservation and the steps it runs drops (§17.3).
     "coven_database::database::file_database::copies::CopyNames",

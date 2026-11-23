@@ -78,6 +78,13 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
             "the files being downloaded to keep whole, one per download in flight, from this process's memory",
         ),
         (
+            "coven_device_only_downloading",
+            "SELECT * FROM coven_device_only_downloading",
+            "j" | "coven_device_only_downloading",
+        ) => Some("the paths of copies in flight, from this process's memory, and their files"),
+        ("coven_device_only_placed", "SELECT * FROM coven_device_only_placed", "coven_device_only_placed") =>
+            Some("the view lists the files of every placed copy awaiting its switch"),
+        (
             "coven_upload_phases",
             "SELECT * FROM coven_upload_phases",
             "one" | "s" | "r" | "w" | "z" | "x" | "y",

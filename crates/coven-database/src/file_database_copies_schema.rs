@@ -5,7 +5,7 @@ macro_rules! coven_device_only_copies_tables {
     ($visit:ident) => {
         // Each copy coven writes into a folder the person picked, to make a
         // cloud file device-only (§17.3), recorded before any of its bytes
-        // exist: its path, the temporary name its bytes are written under,
+        // exist: its file, its path, the temporary name its bytes are written under,
         // and where it stands. `writing` and `placed` copies belong to a call
         // that hasn't switched its files; `kept` ones are originals this
         // device records; a `lost` one's switch lost to another device's, and
@@ -17,6 +17,7 @@ macro_rules! coven_device_only_copies_tables {
             "
             CREATE TABLE _coven_copies (
                 path TEXT PRIMARY KEY NOT NULL,
+                file TEXT NOT NULL,
                 temporary TEXT NOT NULL UNIQUE,
                 state TEXT NOT NULL CHECK(state IN ('writing','placed','kept','lost')),
                 size INTEGER CHECK(size>=0),
@@ -24,7 +25,7 @@ macro_rules! coven_device_only_copies_tables {
                 CHECK((state='writing')=(size IS NULL)),
                 CHECK((size IS NULL)=(modified_at IS NULL))
             ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_copies_state ON _coven_copies(state);
+            CREATE INDEX _coven_copies_state ON _coven_copies(state,file);
             -- A kept copy is forgotten with the last original recorded at
             -- its path: the file stays, the person's (§17.3).
             CREATE TRIGGER _coven_copy_forgotten AFTER DELETE ON _coven_user_files

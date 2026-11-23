@@ -163,8 +163,8 @@ pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
 pub use database::file_database::{
-    CacheReservation, CopyReservation, FileDatabase, FolderCopy, LocalEvidence, PreparedDeviceOnly,
-    PreparedPin,
+    CacheReservation, CopyDownload, CopyReservation, FileDatabase, FolderCopy, LocalEvidence,
+    PreparedDeviceOnly, PreparedPin,
 };
 pub use database::file_retention::FileCandidate;
 #[cfg(any(test, feature = "test-utils"))]

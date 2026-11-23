@@ -479,12 +479,14 @@ another mode, opening fails with `WalUnavailable`.
 Some of that bookkeeping decides what the app shows: the files its rows
 reference, where each is and where a read here takes its bytes from, which
 files are still waiting to upload, why, and what each upload is doing, which
-files each move to the cloud holds, which files this device keeps
+files each move to the cloud holds, which copies coven is downloading or
+has placed for a move to this device, which files this device keeps
 pinned, how many bytes each namespace's cache holds, what can't proceed, how
 sync is going, how the app's admin operations ended, who the members are, and
 which circles this member is in.
-So the app's SQL can read it through sixteen views, `coven_uploads`,
+So the app's SQL can read it through eighteen views, `coven_uploads`,
 `coven_upload_phases`, `coven_sending`, `coven_downloading`,
+`coven_device_only_downloading`, `coven_device_only_placed`,
 `coven_upload_pause`, `coven_network`, `coven_cache_bytes`, `coven_sync_state`,
 `coven_invites`, `coven_operations`, `coven_file_reads`, `coven_user_files`,
 `coven_members`, `coven_devices`, `coven_circles` and `coven_circle_members`,
@@ -627,6 +629,12 @@ or trigger, with `StatementForbidden`: a live query learns that it read them
 from the views' columns, and would never run again otherwise. A read-only
 handle transfers nothing, so it shows every file waiting and none
 downloading.
+
+`coven_device_only_downloading` lists the files this process is downloading
+into a folder the person chose (§17.3). Its live queries run again as
+each download starts or ends. Only the view reads which copies are
+in flight, through `_coven_copy_download_paths`. The transaction that
+records a copy at its final path moves it into `coven_device_only_placed`.
 
 What a file waits for lasts, and is in `coven_uploads`: the pause, a retry
 wait, and its pending record. Whether uploads are paused is also its own view,
@@ -8720,7 +8728,12 @@ laptop.
   preparing reports, a few times a second, which track it is downloading,
   how many of that track's bytes are down, and how many of the album's:
   Ben's app draws a bar for Make Local, not a spinner. The report is the
-  call's own, held in memory.
+  call's own, held in memory. Ben's app can also join each track to
+  `coven_device_only_downloading` and `coven_device_only_placed` in a live
+  query. When coven records track 1 at its final path, the query shows it as
+  placed. As coven downloads track 2, the query shows track 2 downloading
+  and later tracks waiting. The placed view lists track 1 until coven
+  keeps its copy as an original or removes its copy record during cleanup.
 - **A write that removes a file's last reference can't switch it.** If Ben's
   write also deleted the only row naming a track, the copy it keeps as that
   track's original would name no file. Such a write is refused with
@@ -13122,6 +13135,7 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
+  `coven_device_only_downloading`, `coven_device_only_placed`,
   `coven_cache_bytes`, `coven_sync_state`, `coven_invites`, `coven_operations`,
   `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
   `coven_circle_members` ([api.md E4](api.md#e4-reading)). Each reads every
@@ -13204,7 +13218,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only, or a reset may still bring such a record back (§17.11); `coven_user_files` lists all but the hash of those whose record is here (§17.3) |
 | `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored and no reset can switch it back (§17.11); a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash, and of each file a reset may still put back on this device only (§17.11); files over the same bytes share one copy (§17.3) |
-| `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
+| `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its file id, its path, the temporary name coven writes it under, and whether coven is writing it, placed it, kept it as an original, or lost its switch to another device's, with its size and modification time once placed (§17.3) |
 | `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |
 | `_coven_file_columns` | the declared file reference columns and whether each is write-once, as last registered; opening compares the declarations with them (§18.1) |
 | `_coven_file_references` | each reference this device has to a file: the file, and the row's table, key and column, from any audience's merged cells and the lost values removal rules didn't take out; a record goes with its last one (§17.2) |

@@ -468,6 +468,13 @@ impl PolicyState {
             {
                 Some("reading what is being transferred outside coven_uploads, coven_sending and coven_downloading")
             }
+            Function { function_name }
+                if function_name.eq_ignore_ascii_case(
+                    crate::database::file_database::copies::DOWNLOAD_PATHS,
+                ) && !action.accessor.is_some_and(crate::internal_schema::app_readable) =>
+            {
+                Some("direct reads of device-only download paths")
+            }
             // The same holds for the network, which changes with no write.
             Function { function_name }
                 if crate::network_facts::FUNCTIONS

@@ -108,6 +108,8 @@ async fn only_the_spec_tables_are_created() {
                 ("view".into(), "coven_cache_bytes".into()),
                 ("view".into(), "coven_circle_members".into()),
                 ("view".into(), "coven_circles".into()),
+                ("view".into(), "coven_device_only_downloading".into()),
+                ("view".into(), "coven_device_only_placed".into()),
                 ("view".into(), "coven_devices".into()),
                 ("view".into(), "coven_downloading".into()),
                 ("view".into(), "coven_file_reads".into()),

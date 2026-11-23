@@ -118,8 +118,9 @@ impl FileWrite<'_> {
             let path = crate::database::file_database::copies::text(&copy.path)?;
             let (size, modified_at) = db
                 .query(
-                    "SELECT size,modified_at FROM _coven_copies WHERE path=?1 AND state='placed'",
-                    [path],
+                    "SELECT size,modified_at FROM _coven_copies
+                     WHERE path=?1 AND file=?2 AND state='placed'",
+                    (path, copy.file),
                     |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
                 )?
                 .pop()
