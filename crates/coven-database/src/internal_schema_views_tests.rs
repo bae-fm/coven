@@ -108,11 +108,12 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(matches!(error, DbError::InternalTable { .. }), "{statement}: {error:?}");
     }
-    let error = db
-        .read(|sql| Ok(sql.query("SELECT _coven_copy_download_paths()", [], |_| Ok(()))?))
-        .await
-        .unwrap_err();
-    assert!(matches!(error, DbError::StatementForbidden { .. }), "{error:?}");
+    for statement in ["SELECT _coven_copy_download_paths()", "SELECT _coven_reserved_copy_paths()"]
+    {
+        let error =
+            db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
+        assert!(matches!(error, DbError::StatementForbidden { .. }), "{error:?}");
+    }
     db.close().await.unwrap();
 }
 

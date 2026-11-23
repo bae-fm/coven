@@ -140,7 +140,7 @@ impl StoreDatabase {
             .collect::<Result<Vec<_>, _>>()?;
         let writing = BytesWriting::of(self).await;
         self.call(move |inner| {
-            inner.access.with_writer(|writer, _| {
+            let names = inner.access.with_writer(|writer, _| {
                 writer.transaction(|db: &StoreSql| {
                     for copy in &copies {
                         let path = text(&copy.path)?;
@@ -164,16 +164,9 @@ impl StoreDatabase {
                 })?;
                 // Registered under the writer, so no write's removal
                 // runs between the records and the registration.
-                lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
-                Ok::<_, DbError>(())
+                Ok::<_, DbError>(inner.facts.reserve_copies(paths))
             })?;
-            Ok(CopyReservation {
-                names: Arc::new(CopyNames {
-                    copying: inner.copying.clone(),
-                    paths: Mutex::new(paths),
-                }),
-                writing: Some(Arc::new(writing)),
-            })
+            Ok(CopyReservation { names: Arc::new(names), writing: Some(Arc::new(writing)) })
         })
         .await
     }
@@ -234,20 +227,37 @@ impl StoreDatabase {
     }
 }
 
-/// The function app SQL reaches only through the device-only download view.
-pub(crate) const DOWNLOAD_PATHS: &str = "_coven_copy_download_paths";
+/// The functions app SQL reaches only through the device-only copy views.
+pub(crate) const FUNCTIONS: [&str; 2] =
+    ["_coven_copy_download_paths", "_coven_reserved_copy_paths"];
 const DOWNLOAD_VIEW: [(&str, &str); 1] = [("coven_device_only_downloading", "")];
+const PLACED_VIEW: [(&str, &str); 1] = [("coven_device_only_placed", "")];
 
-/// Register the download paths as they stood at each transaction's snapshot.
-pub(crate) fn register_downloads(
+/// Register the copy paths as they stood at each transaction's snapshot.
+pub(crate) fn register_copy_paths(
     setup: &Setup<'_, crate::app_policy::CovenPolicy>,
     at_snapshot: SnapshotValue<Arc<MemoryFacts>>,
 ) -> sqlive::rusqlite::Result<()> {
+    type Paths = fn(&MemoryFacts) -> Vec<&String>;
+    let paths: [Paths; 2] = [
+        |facts| facts.copy_downloads.iter().collect(),
+        |facts| {
+            facts
+                .reserved_copies
+                .iter()
+                .filter_map(|(path, state)| (*state == CopyReservationState::Held).then_some(path))
+                .collect()
+        },
+    ];
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
-    setup.scalar_function(DOWNLOAD_PATHS, 0, flags, move |_| {
-        serde_json::to_string(&at_snapshot.get().copy_downloads)
-            .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
-    })
+    for (function, paths) in FUNCTIONS.into_iter().zip(paths) {
+        let at_snapshot = at_snapshot.clone();
+        setup.scalar_function(function, 0, flags, move |_| {
+            serde_json::to_string(&paths(&at_snapshot.get()))
+                .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
+        })?;
+    }
+    Ok(())
 }
 
 /// One active download to a device-only copy. Dropping it clears the
@@ -361,19 +371,74 @@ impl CopyReservation {
     }
 }
 
+impl Drop for CopyReservation {
+    fn drop(&mut self) {
+        self.names.abandon();
+    }
+}
+
+/// A reservation still held for a switch, or held only while a disk step
+/// finishes after the call has been dropped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyReservationState {
+    Held,
+    Abandoned,
+}
+
 /// The copies one call is writing, kept out of removals until the last of
 /// its reservation and the steps it runs drops.
-struct CopyNames {
-    /// The copies the store that recorded them keeps out of removals; a
-    /// closed store's records stay for its next open.
-    copying: Arc<Mutex<std::collections::BTreeSet<String>>>,
+pub(crate) struct CopyNames {
+    facts: SharedFacts,
+    observer: StoreHandle,
     /// Until a write takes them to release once it has decided.
     paths: Mutex<Vec<String>>,
 }
 
+impl CopyNames {
+    pub(crate) fn new(facts: SharedFacts, observer: StoreHandle, paths: Vec<String>) -> Self {
+        facts.change(|facts| {
+            facts
+                .reserved_copies
+                .extend(paths.iter().cloned().map(|path| (path, CopyReservationState::Held)));
+        });
+        Self { facts, observer, paths: Mutex::new(paths) }
+    }
+
+    fn abandon(&self) {
+        let paths = lock_unpoisoned(&self.paths);
+        if paths.is_empty() {
+            return;
+        }
+        self.facts.change(|facts| {
+            for path in paths.iter() {
+                facts.reserved_copies.insert(path.clone(), CopyReservationState::Abandoned);
+            }
+        });
+        self.observer.changed_without_write(&PLACED_VIEW);
+    }
+}
+
 impl Drop for CopyNames {
     fn drop(&mut self) {
-        crate::database::release_copies(&self.copying, &lock_unpoisoned(&self.paths));
+        release(&self.facts, &self.observer, &lock_unpoisoned(&self.paths));
+    }
+}
+
+/// Let the store remove these copies. A live query stops listing them as
+/// placed as soon as their reservation ends, regardless of disk cleanup.
+pub(crate) fn release(facts: &SharedFacts, observer: &StoreHandle, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let changed = facts.change(|facts| {
+        let mut changed = false;
+        for path in paths {
+            changed |= facts.reserved_copies.remove(path) == Some(CopyReservationState::Held);
+        }
+        changed
+    });
+    if changed {
+        observer.changed_without_write(&PLACED_VIEW);
     }
 }
 

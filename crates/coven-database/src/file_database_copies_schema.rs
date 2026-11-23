@@ -1,6 +1,19 @@
 //! The copies coven writes into folders the person picked to make cloud files
 //! device-only, and the folders it makes for them (§17.3).
 
+// Each view looks up the copy records for paths this process holds. The
+// placement transaction takes a copy out of the download view and adds it
+// to the placed view, even before the download guard drops. Two calls can
+// prepare one file at different paths, so each view lists distinct files.
+pub(super) const VIEWS: &str = "
+    CREATE VIEW coven_device_only_downloading(file) AS
+        SELECT DISTINCT c.file FROM json_each(_coven_copy_download_paths()) AS j
+        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='writing';
+    CREATE VIEW coven_device_only_placed(file) AS
+        SELECT DISTINCT c.file FROM json_each(_coven_reserved_copy_paths()) AS j
+        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='placed';
+";
+
 macro_rules! coven_device_only_copies_tables {
     ($visit:ident) => {
         // Each copy coven writes into a folder the person picked, to make a
@@ -25,7 +38,7 @@ macro_rules! coven_device_only_copies_tables {
                 CHECK((state='writing')=(size IS NULL)),
                 CHECK((size IS NULL)=(modified_at IS NULL))
             ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_copies_state ON _coven_copies(state,file);
+            CREATE INDEX _coven_copies_state ON _coven_copies(state);
             -- A kept copy is forgotten with the last original recorded at
             -- its path: the file stays, the person's (§17.3).
             CREATE TRIGGER _coven_copy_forgotten AFTER DELETE ON _coven_user_files

@@ -3815,7 +3815,7 @@ let moved = handle
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads sixteen views of coven's own tables
+- *Coven's state in SQL.* App SQL reads eighteen views of coven's own tables
   and ten tables, `coven_files`, `coven_pins`, `coven_pin_requests`,
   `coven_moves`, `coven_upload_queue`, `coven_pending`, `coven_sync_status`,
   `coven_retry_effect`, `coven_library_bytes` and `coven_archive_bytes`, in
@@ -3875,12 +3875,14 @@ let moved = handle
   file waiting and none downloading.
 - `coven_device_only_downloading` lists the files this process is downloading
   to make device-only. A live query runs again when the download starts or ends.
-  App SQL reaches `_coven_copy_download_paths` only through this view.
   `coven_device_only_placed` lists files with a copy coven has placed in the
-  chosen folder and recorded in the database. The placement transaction moves
-  the copy from one view to the other. Each view lists a file once, even when
-  concurrent calls prepare it at different paths. A read-only handle lists
-  placed copies and has no downloads of its own.
+  chosen folder and still reserves for a switch. The placement transaction
+  moves the copy from one view to the other. The placed view reads placement
+  from the database and reservations from the process's snapshot. Each view
+  lists a file once, even when concurrent calls prepare it at different paths.
+  App SQL reaches `_coven_copy_download_paths` and `_coven_reserved_copy_paths`
+  only through these views. A read-only handle reserves and downloads no
+  copies, so both views are empty.
 - The device's network is the same kind of fact. `coven_network`'s `usable`
   and `metered`, and `coven_uploads.metered`, read it from the store's watch
   of the network (E5), as it stood at the read's snapshot, and a live query
@@ -3916,7 +3918,7 @@ let moved = handle
   connection a test opened itself, outside any store, as every store makes
   it: the ten tables above, `coven_sync_status` and `coven_retry_effect`
   with their one row, `coven_library_bytes` with its rows at no bytes, and
-  the sixteen views. The function also makes the
+  the eighteen views. The function also makes the
   tables of coven's own that the views read or that the test writes below
   fill, all empty. The function registers coven's SQL functions there too,
   `coven_key`, `coven_file_device` and `coven_path_text` among them, with
@@ -7501,9 +7503,8 @@ while let Some(changes) = watch.next().await {
   device-only here ([§17.3](coven.md#173-staging-a-file)). The app reads
   `coven_device_only_downloading` and `coven_device_only_placed` in a live
   query to show each file's state, and takes byte progress from the call.
-  The switch and the removal of an abandoned copy each take that copy out
-  of the placed view. A failure or a cancel before the switch removes
-  everything the call made.
+  A copy leaves the placed view when the switch commits or its reservation
+  ends. A failure or a cancel before the switch removes everything the call made.
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no

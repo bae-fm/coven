@@ -436,7 +436,7 @@ impl DatabaseBuilder {
             observer: observer.clone(),
             closing: Arc::new(lock.closing_guard()),
             writer: WriterParts {
-                facts,
+                facts: facts.clone(),
                 file_tasks: Arc::new(tokio::sync::RwLock::new(())),
                 #[cfg(test)]
                 close_waits: Arc::new(Mutex::new(None)),
@@ -465,7 +465,7 @@ impl DatabaseBuilder {
                 open_inputs,
                 clock,
                 ids,
-                copying: Arc::new(Mutex::new(BTreeSet::new())),
+                facts,
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),
                 #[cfg(test)]

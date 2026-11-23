@@ -192,15 +192,6 @@ pub(super) const SCHEMA: &str = concat!(
         FROM json_each(_coven_downloading_objects()) AS j
         CROSS JOIN _coven_stored_files AS f
             ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
-    // A move's active downloads, looked up by their reserved paths. The
-    // placement commit takes a copy out of this view and adds it to the
-    // placed view at the same snapshot, even before the worker drops its
-    // download guard. Two calls can prepare the same file at different paths.
-    "CREATE VIEW coven_device_only_downloading(file) AS
-        SELECT DISTINCT c.file FROM json_each(_coven_copy_download_paths()) AS j
-        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='writing';",
-    "CREATE VIEW coven_device_only_placed(file) AS
-        SELECT DISTINCT c.file FROM _coven_copies AS c WHERE c.state='placed';",
     // Each namespace's cache on this device, in bytes (§17.8): its budget,
     // its chunks and headers (`cached`), which the budget counts, its
     // pinned whole copies (`pinned`), which it doesn't, and the partial

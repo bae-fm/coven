@@ -622,7 +622,7 @@ again as
 each download starts or ends, and a reopened store lists none. A read that
 fetches a range into the cache isn't keeping a file whole, so it isn't listed.
 
-App SQL reaches what is being transferred only through these three views. The
+App SQL reaches uploads and pin downloads in flight through these three views. The
 functions behind them, `_coven_sending`, `_coven_sending_objects` and
 `_coven_downloading_objects`, refuse a direct call, or one in the app's own view
 or trigger, with `StatementForbidden`: a live query learns that it read them
@@ -635,6 +635,11 @@ into a folder the person chose (§17.3). Its live queries run again as
 each download starts or ends. Only the view reads which copies are
 in flight, through `_coven_copy_download_paths`. The transaction that
 records a copy at its final path moves it into `coven_device_only_placed`.
+The placed view reads that record while the call holds its reservation.
+App SQL reaches the reservations only through this view, which reads
+`_coven_reserved_copy_paths`. A live query stops showing an abandoned copy
+as soon as the app drops the call, even when a disk step still holds the
+copy to finish its work.
 
 What a file waits for lasts, and is in `coven_uploads`: the pause, a retry
 wait, and its pending record. Whether uploads are paused is also its own view,
@@ -8733,7 +8738,7 @@ laptop.
   query. When coven records track 1 at its final path, the query shows it as
   placed. As coven downloads track 2, the query shows track 2 downloading
   and later tracks waiting. The placed view lists track 1 until coven
-  keeps its copy as an original or removes its copy record during cleanup.
+  keeps its copy as an original or releases the copy's reservation.
 - **A write that removes a file's last reference can't switch it.** If Ben's
   write also deleted the only row naming a track, the copy it keeps as that
   track's original would name no file. Such a write is refused with

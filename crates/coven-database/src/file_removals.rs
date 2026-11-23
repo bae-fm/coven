@@ -29,19 +29,19 @@ use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, Stag
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
 
 /// Choose, under the writer that just committed, every recorded removal
-/// outside `active`, and every copy that isn't kept outside `copying`, the
-/// copies of calls still running. Its read sees only committed records:
+/// outside `active`, and every copy that has neither switched nor been
+/// protected from removal. Its read sees only committed records:
 /// after a failed rollback the writer still holds a transaction and the read
 /// is refused, so uncommitted records never name bytes to remove.
 pub(crate) fn choose(
     writer: &StoreSql,
     call: &StoreCall<'_>,
     active: &BTreeSet<OwnedFile>,
-    copying: &BTreeSet<String>,
+    copy_is_protected: &dyn Fn(&str) -> bool,
 ) -> Chosen {
     crate::transaction_constants::read_with_constants(writer, call, || {
         let mut released = pending(writer, active)?;
-        released.extend(copies(writer, &Copies::Settled(copying))?);
+        released.extend(copies(writer, &Copies::Settled(copy_is_protected))?);
         Ok(released)
     })
 }
@@ -58,7 +58,7 @@ pub(crate) fn choose_copies(writer: &StoreSql, call: &StoreCall<'_>, paths: &[St
 enum Copies<'a> {
     /// Each copy whose switch lost, and each one a call left unswitched,
     /// failing or dropped, except those of the calls still running.
-    Settled(&'a BTreeSet<String>),
+    Settled(&'a dyn Fn(&str) -> bool),
     /// These copies, which their failing call left unswitched.
     Of(&'a [String]),
 }
@@ -75,7 +75,7 @@ fn copies(db: &StoreSql, which: &Copies<'_>) -> Chosen {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
     };
     let rows: Vec<Row> = match which {
-        Copies::Settled(copying) => db
+        Copies::Settled(copy_is_protected) => db
             .query(
                 "SELECT path,temporary,state,size,modified_at FROM _coven_copies
                  WHERE state IN ('writing','placed','lost') ORDER BY path",
@@ -83,7 +83,7 @@ fn copies(db: &StoreSql, which: &Copies<'_>) -> Chosen {
                 read,
             )?
             .into_iter()
-            .filter(|row| row.2 == "lost" || !copying.contains(&row.0))
+            .filter(|row| row.2 == "lost" || !copy_is_protected(&row.0))
             .collect(),
         Copies::Of(paths) => {
             let mut rows = Vec::new();
@@ -324,7 +324,7 @@ pub(crate) fn finish_at_open(
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
     // Nothing is staging or copying before the first write runs.
-    let released = choose(writer, call, &BTreeSet::new(), &BTreeSet::new())?;
+    let released = choose(writer, call, &BTreeSet::new(), &|_| false)?;
     let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
         if let Err(error) = writer.transaction(|db| forget(db, call, &removed)) {

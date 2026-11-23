@@ -6,7 +6,7 @@ use crate::files::file_device_only::DeviceOnlyPoint;
 use coven_foundation::files::RelativePath;
 
 /// A live query joins the copy states by file while a call is preparing
-/// copies, after it finishes, and after its copies are abandoned.
+/// copies, after it finishes, and after the app drops the prepared copies.
 #[tokio::test]
 async fn a_live_query_shows_placed_copies_and_the_current_device_only_download() {
     let f = Fixture::new(Provenance::UserProvided).await;
@@ -53,7 +53,8 @@ async fn a_live_query_shows_placed_copies_and_the_current_device_only_download()
     let prepared = call.await.unwrap();
     assert!(rows.is_marked_for_rerun());
     assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(true, true, false));
-    prepared.abandon().await.unwrap();
+    drop(prepared);
+    assert!(music.path().join("first.flac").exists());
     assert!(rows.is_marked_for_rerun());
     assert_eq!(rows.next_inline().await.unwrap().unwrap(), expected(false, false, false));
     f.close().await;

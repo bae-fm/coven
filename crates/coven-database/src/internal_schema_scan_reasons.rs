@@ -82,8 +82,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
             "SELECT * FROM coven_device_only_downloading",
             "j" | "coven_device_only_downloading",
         ) => Some("the paths of copies in flight, from this process's memory, and their files"),
-        ("coven_device_only_placed", "SELECT * FROM coven_device_only_placed", "coven_device_only_placed") =>
-            Some("the view lists the files of every placed copy awaiting its switch"),
+        ("coven_device_only_placed", "SELECT * FROM coven_device_only_placed", "j" | "coven_device_only_placed") =>
+            Some("the reserved paths from this process's memory, and the files of their placed copies"),
         (
             "coven_upload_phases",
             "SELECT * FROM coven_upload_phases",

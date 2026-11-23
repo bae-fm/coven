@@ -80,7 +80,14 @@ impl FileWrite<'_> {
         &self,
         prepared: crate::PreparedDeviceOnly,
     ) -> Result<(), DbError> {
-        super::held_here(self.files.copying, &prepared.paths())?;
+        let paths = prepared.paths();
+        use crate::database::file_database::copies::CopyReservationState;
+        let held = self.files.facts.with_reserved_copies(|copies| {
+            paths.iter().all(|path| copies.get(path) == Some(&CopyReservationState::Held))
+        });
+        if !held {
+            return Err(DbError::PreparedElsewhere);
+        }
         let (copies, paths) = prepared.take();
         self.files.held_copies.borrow_mut().extend(paths);
         self.make_device_only(copies)

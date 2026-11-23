@@ -8,7 +8,7 @@
 //! (sqlive's `snapshot_values.rs`), and coven's functions read what it took:
 //! a statement never joins the tables of one moment to facts of another.
 
-use crate::database::file_database::copies::{self, CopyDownload};
+use crate::database::file_database::copies::{self, CopyDownload, CopyNames, CopyReservationState};
 use crate::network_facts::{NetworkFact, NetworkFacts};
 use crate::store_failure::StoreHandle;
 use crate::transfers_in_flight::TransfersInFlight;
@@ -28,6 +28,8 @@ pub(crate) struct MemoryFacts {
     pub(crate) downloading: BTreeMap<ObjectId, DeviceId>,
     /// The destination paths this process is downloading device-only copies to.
     pub(crate) copy_downloads: BTreeSet<String>,
+    /// The paths of copies still reserved to make files device-only.
+    pub(crate) reserved_copies: BTreeMap<String, CopyReservationState>,
     /// The device's network.
     pub(crate) network: NetworkFact,
 }
@@ -94,6 +96,24 @@ impl ProcessFacts {
         CopyDownload::start(self.facts.clone(), self.observer.clone(), path)
     }
 
+    /// Reserve the copy paths under the writer that recorded them.
+    pub(crate) fn reserve_copies(&self, paths: Vec<String>) -> CopyNames {
+        CopyNames::new(self.facts.clone(), self.observer.clone(), paths)
+    }
+
+    /// Release the reservations a device-only switch brought into its write.
+    pub(crate) fn release_copies(&self, paths: &[String]) {
+        copies::release(&self.facts, &self.observer, paths);
+    }
+
+    /// The reserved copy paths as they stand now, for a caller under the writer.
+    pub(crate) fn with_reserved_copies<R>(
+        &self,
+        read: impl FnOnce(&BTreeMap<String, CopyReservationState>) -> R,
+    ) -> R {
+        read(&self.facts.now().reserved_copies)
+    }
+
     /// The store's watch says the network is now `network`.
     pub(crate) fn record_network(&self, network: coven_foundation::network_watch::NetworkState) {
         self.network.set(network);
@@ -110,6 +130,6 @@ impl ProcessFacts {
         let at_snapshot = setup.snapshot_value(move || facts.now());
         crate::transfers_in_flight::register(setup, &at_snapshot)?;
         crate::network_facts::register(setup, &at_snapshot)?;
-        copies::register_downloads(setup, at_snapshot)
+        copies::register_copy_paths(setup, at_snapshot)
     }
 }

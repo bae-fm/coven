@@ -13,6 +13,23 @@ use crate::sqlite::StoreSql;
 use crate::{DbError, SyncedTable};
 use sqlive::{Owner, Policy, PolicyAction, Refresh};
 
+// App SQL reaches these functions only through coven's own views. A live
+// query depends on the view, which is what the process marks as changed.
+const VIEW_ONLY_FUNCTIONS: [(&[&str], &str); 3] = [
+    (
+        &crate::transfers_in_flight::FUNCTIONS,
+        "reading what is being transferred outside coven_uploads, coven_sending and coven_downloading",
+    ),
+    (
+        &crate::database::file_database::copies::FUNCTIONS,
+        "direct reads of device-only copy paths",
+    ),
+    (
+        &crate::network_facts::FUNCTIONS,
+        "reading the network outside coven_network and coven_uploads",
+    ),
+];
+
 /// Coven's rules for the statements a connection prepares. A judgment
 /// changes several fields of the state together, so `judge` holds the
 /// state's lock for the whole judgment.
@@ -456,33 +473,15 @@ impl PolicyState {
             {
                 Some("shadowing a shared trigger")
             }
-            // Coven reruns a live query when a transfer starts or ends only
-            // if the query reads the transfer columns of coven_uploads,
-            // coven_sending or coven_downloading. If app SQL calls these
-            // functions anywhere else, coven never reruns that query.
             Function { function_name }
-                if crate::transfers_in_flight::FUNCTIONS
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(function_name))
-                    && !action.accessor.is_some_and(crate::internal_schema::app_readable) =>
+                if !action.accessor.is_some_and(crate::internal_schema::app_readable) =>
             {
-                Some("reading what is being transferred outside coven_uploads, coven_sending and coven_downloading")
-            }
-            Function { function_name }
-                if function_name.eq_ignore_ascii_case(
-                    crate::database::file_database::copies::DOWNLOAD_PATHS,
-                ) && !action.accessor.is_some_and(crate::internal_schema::app_readable) =>
-            {
-                Some("direct reads of device-only download paths")
-            }
-            // The same holds for the network, which changes with no write.
-            Function { function_name }
-                if crate::network_facts::FUNCTIONS
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(function_name))
-                    && !action.accessor.is_some_and(crate::internal_schema::app_readable) =>
-            {
-                Some("reading the network outside coven_network and coven_uploads")
+                VIEW_ONLY_FUNCTIONS.iter().find_map(|(names, reason)| {
+                    names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(function_name))
+                        .then_some(*reason)
+                })
             }
             _ => None,
         };

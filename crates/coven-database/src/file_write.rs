@@ -12,7 +12,6 @@ use crate::{
     DbError,
 };
 use coven_format::value::Value;
-use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
     files::StagedName,
     id_source::{DeviceId, FileId, IdSource},
@@ -22,20 +21,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
 };
-
-/// Refuse prepared work unless this store still holds each name it
-/// brings: work prepared by another open store, or by this one before it
-/// closed, isn't held here (`PreparedElsewhere`).
-fn held_here<'n, T: Ord + 'n>(
-    held: &std::sync::Mutex<BTreeSet<T>>,
-    names: impl IntoIterator<Item = &'n T>,
-) -> Result<(), DbError> {
-    let held = lock_unpoisoned(held);
-    if names.into_iter().any(|name| !held.contains(name)) {
-        return Err(DbError::PreparedElsewhere);
-    }
-    Ok(())
-}
 
 /// A staged file queued to trail in its write's move, kept with the
 /// location its upload goes to.
@@ -172,9 +157,8 @@ pub(crate) struct WriteFiles<'a> {
     /// The names of copies reserved in this store, such as staged app bytes
     /// and prepared cache files, not yet committed or released.
     reservations: &'a crate::reserved_names::ReservedNames,
-    /// The paths of copies calls making files device-only reserve in this
-    /// store, not yet switched or released (§17.3).
-    copying: &'a std::sync::Mutex<BTreeSet<String>>,
+    /// The facts that hold the paths reserved for a device-only switch (§17.3).
+    facts: &'a crate::memory_facts::ProcessFacts,
     /// The files the write's steps stage: app bytes `put_staged` brings,
     /// and users' originals.
     staged: RefCell<Vec<StagedFile>>,
@@ -244,7 +228,7 @@ impl<'a> WriteFiles<'a> {
         device: DeviceId,
         ids: &'a dyn IdSource,
         reservations: &'a crate::reserved_names::ReservedNames,
-        copying: &'a std::sync::Mutex<BTreeSet<String>>,
+        facts: &'a crate::memory_facts::ProcessFacts,
         app_before_commit: Option<&'a crate::before_commit::BeforeCommit>,
     ) -> Self {
         Self {
@@ -252,7 +236,7 @@ impl<'a> WriteFiles<'a> {
             device,
             ids,
             reservations,
-            copying,
+            facts,
             staged: RefCell::new(Vec::new()),
             existing: RefCell::new(Vec::new()),
             brought: RefCell::new(Vec::new()),

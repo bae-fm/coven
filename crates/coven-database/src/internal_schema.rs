@@ -278,6 +278,7 @@ pub(crate) fn initial_schema() -> String {
     sql.push_str(&pins::source());
     sql.push_str(upload_queue::TRIGGERS);
     sql.push_str(pending::SOURCE);
+    sql.push_str(file_database_copies_schema::VIEWS);
     sql.push_str(views::SCHEMA);
     sql
 }
@@ -359,6 +360,7 @@ pub(crate) fn readable_schema() -> String {
         sql.push_str(followed.table);
     }
     sql.push_str(pending::SOURCE);
+    sql.push_str(file_database_copies_schema::VIEWS);
     sql.push_str(views::SCHEMA);
     sql
 }

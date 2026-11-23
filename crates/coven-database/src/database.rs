@@ -3,10 +3,13 @@
 //! drops, while another open waits for their release.
 
 use crate::store_call::StoreCall;
-use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
+#[cfg(test)]
+use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::locks::{read_unpoisoned, write_unpoisoned};
 use coven_foundation::task::{blocking_completing, CarriesBug};
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::{Arc, RwLock};
 
 #[path = "file_database.rs"]
 pub(crate) mod file_database;
@@ -192,12 +195,11 @@ pub struct DatabaseInner {
     /// write that names them, which no write's removal takes (Appendix C.3):
     /// staged app bytes and cache files. Shared with what holds them, so
     /// letting one go never takes the store's own lock. Each change under
-    /// its lock, and `copying`'s, is whole before it can panic, so both are
-    /// taken as they are (E15).
+    /// its lock is whole before it can panic, so the lock is taken as it is (E15).
     staging: Arc<crate::reserved_names::ReservedNames>,
-    /// The paths of the copies the calls making files device-only are
-    /// writing now, which no other write's removal takes (§17.3).
-    copying: Arc<Mutex<BTreeSet<String>>>,
+    /// The process facts, including the copy reservations used by writes
+    /// and removals (§17.3).
+    facts: crate::memory_facts::ProcessFacts,
     /// Runs where released files' bytes are about to go, after the writer is
     /// free, so a test can stall that disk work.
     #[cfg(test)]
@@ -408,7 +410,7 @@ impl DatabaseInner {
                 self.access.device,
                 self.ids.as_ref(),
                 &self.staging,
-                &self.copying,
+                &self.facts,
                 self.before_commit.as_deref(),
             );
             let result =
@@ -458,25 +460,17 @@ impl DatabaseInner {
     }
 }
 
-/// Let `paths` go from the copies a store keeps out of removals, once the
-/// write that brought them has decided (§17.3).
-pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
-    let mut held = lock_unpoisoned(copying);
-    for path in paths {
-        held.remove(path);
-    }
-}
-
 /// The removals the write that just ran under `writer` released, chosen
-/// with the staging and copying sets held (Appendix C.3).
+/// against the staging names and a snapshot of the copy reservations (Appendix C.3).
 fn released(
     writer: &StoreSql,
     call: &StoreCall<'_>,
     inner: &DatabaseInner,
 ) -> crate::file_removals::Chosen {
     inner.staging.with_names(|active| {
-        let copying = lock_unpoisoned(&inner.copying);
-        crate::file_removals::choose(writer, call, active, &copying)
+        inner.facts.with_reserved_copies(|copies| {
+            crate::file_removals::choose(writer, call, active, &|path| copies.contains_key(path))
+        })
     })
 }
 
@@ -651,7 +645,7 @@ impl StoreDatabase {
                 // decided: a write that rolled back leaves their bytes to the
                 // removals its cleanup chooses.
                 inner.release_file_reservations(&files.take_brought());
-                release_copies(&inner.copying, &files.take_held_copies());
+                inner.facts.release_copies(&files.take_held_copies());
                 #[cfg(any(test, feature = "test-utils"))]
                 call.write_checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
                 result.unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
