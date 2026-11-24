@@ -92,7 +92,7 @@ pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
 pub use pairing_types::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use pending::{
-    FileMissingReason, FileSourceFailure, HolderDevice, KeyHolder, LocalFailure, PendingReason,
+    FileMissingReason, FileSourceFailure, KeyHolder, LocalFailure, NamedDevice, PendingReason,
     PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
 };
 pub use refusal::Refusal;

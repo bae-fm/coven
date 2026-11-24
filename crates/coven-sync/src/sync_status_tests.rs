@@ -3,7 +3,7 @@ use crate::{
     DeviceIdEvidence, FileMissingReason, FileSourceFailure, Prerequisite, ProviderAccessAction,
     Refusal, RequiredUpdate,
 };
-use crate::{HolderDevice, KeyHolder, PendingSubject, UploadPhase, UploadWait};
+use crate::{KeyHolder, NamedDevice, PendingSubject, UploadPhase, UploadWait};
 use coven_database::{
     EntryTarget, OperationRejection, PassMove, Removal, TransferHolds, UnsentWork, WriteCutoff,
 };
@@ -167,12 +167,17 @@ fn member() -> MemberId {
     MemberId(uuid::Uuid::from_u128(1))
 }
 
+/// The device that wrote a key replacement.
+pub(crate) fn replacer() -> NamedDevice {
+    NamedDevice { id: DeviceId(2), name: "Carol's laptop".into() }
+}
+
 /// A member that holds the key and reads its audience, with a phone.
 pub(super) fn holder() -> KeyHolder {
     KeyHolder {
         member: member(),
         reads_audience: true,
-        devices: vec![HolderDevice { id: DeviceId(1), name: "Carol's phone".into() }],
+        devices: vec![NamedDevice { id: DeviceId(1), name: "Carol's phone".into() }],
     }
 }
 
@@ -226,7 +231,7 @@ fn reasons() -> Vec<PendingReason> {
         PendingReason::Removed(Removal::Device),
         PendingReason::Removed(Removal::Member),
         PendingReason::Removed(Removal::NeverAdmitted),
-        PendingReason::MemberKeysReplaced { member: member() },
+        PendingReason::MemberKeysReplaced { member: member(), by: Some(replacer()) },
     ];
     for answered in [false, true] {
         reasons.extend(failures().into_iter().map(|failure| PendingReason::Storage {
@@ -729,7 +734,7 @@ fn cases() -> Vec<(Facts, TransferHolds)> {
         ),
         (
             StatusFailure::DeviceIdInUse(DeviceIdEvidence::Replaced),
-            PendingReason::MemberKeysReplaced { member: member() },
+            PendingReason::MemberKeysReplaced { member: member(), by: Some(replacer()) },
         ),
     ];
     for (failure, _) in &standing {

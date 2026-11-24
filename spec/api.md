@@ -5992,7 +5992,13 @@ pub enum SyncError {
     DeviceIdInUse(DeviceIdEvidence),
     /// Held signing credentials are no longer current for this stable id.
     /// Sending stops; restoring with current keys registers a new device.
-    MemberKeysReplaced { member: MemberId },
+    MemberKeysReplaced {
+        member: MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<NamedDevice>,
+    },
     /// No storage is connected for a call that requires it.
     NoStorage,
     /// The provider refused or failed the call.
@@ -6242,7 +6248,13 @@ pub enum PendingReason {
     /// This installation is not in the store (§13.2, §14.1).
     Removed(Removal),
     /// Sending needs this stable member's current credentials (§14.1).
-    MemberKeysReplaced { member: MemberId },
+    MemberKeysReplaced {
+        member: MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<NamedDevice>,
+    },
 }
 
 pub enum Retry {
@@ -6599,7 +6611,13 @@ pub enum ResetReason {
     DeviceIdInUse,
     /// This member's keys were replaced with a pair this device doesn't hold
     /// (§12.3).
-    MemberKeysReplaced { member: MemberId },
+    MemberKeysReplaced {
+        member: MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<NamedDevice>,
+    },
 }
 
 /// What Syncing is doing, as `Syncing` names it (§19.1): the first of what the
@@ -6626,11 +6644,12 @@ pub struct KeyHolder {
     /// audience, and a member of the audience has to add it back first.
     pub reads_audience: bool,
     /// Its active devices, as the applied history names them.
-    pub devices: Vec<HolderDevice>,
+    pub devices: Vec<NamedDevice>,
 }
 
-/// An active device of a `KeyHolder`, with the name it was added under.
-pub struct HolderDevice { pub id: DeviceId, pub name: String }
+/// A device of the store, with the name it was added under: an active device
+/// of a `KeyHolder`, or the device that replaced a member's keys.
+pub struct NamedDevice { pub id: DeviceId, pub name: String }
 
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a

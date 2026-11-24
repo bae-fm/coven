@@ -100,7 +100,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     )
     .await;
     assert!(
-        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member })) if *member == carol),
+        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member, .. })) if *member == carol),
         "{:?}",
         restored.as_ref().err()
     );
@@ -122,12 +122,12 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     handle.test_last_pass().wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
     let stopped = handle.circles().create("Garden").await;
     assert!(
-        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),
+        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member, .. }) if *member == carol),
         "{stopped:?}"
     );
     assert!(matches!(
         handle.restore_code().await,
-        Err(SyncError::MemberKeysReplaced { member }) if member == carol
+        Err(SyncError::MemberKeysReplaced { member, .. }) if member == carol
     ));
     handle.close().await.unwrap();
     // A code holding the prepared pair restores Carol on a new device.

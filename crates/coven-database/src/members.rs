@@ -61,7 +61,7 @@ use crate::store_state_tables::{circle, device_member, member};
 pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>, DbError> {
     let me = device_member(db, device)?;
     let members = db.query(
-        "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members WHERE removed=0
+        "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members WHERE removed=0
          ORDER BY member",
         [],
         crate::store_state_tables::stored_member,

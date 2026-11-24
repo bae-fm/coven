@@ -188,7 +188,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     lost.test_last_pass().wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
     let stopped = lost.circles().create("Garden").await;
     assert!(
-        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),
+        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member, .. }) if *member == carol),
         "{stopped:?}"
     );
     lost.close().await.unwrap();
@@ -207,7 +207,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     )
     .await;
     assert!(
-        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member })) if *member == carol),
+        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member, .. })) if *member == carol),
         "{:?}",
         restored.as_ref().err()
     );

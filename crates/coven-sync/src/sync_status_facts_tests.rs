@@ -637,13 +637,22 @@ fn a_removed_or_replaced_device_names_which_and_what_it_never_sent() {
         SyncState::NeedsReset { reason: ResetReason::DeviceIdInUse, unsent }
     );
     let keys = Facts {
-        records: vec![record(PendingReason::MemberKeysReplaced { member })],
+        records: vec![record(PendingReason::MemberKeysReplaced {
+            member,
+            by: Some(crate::sync_status::tests::replacer()),
+        })],
         unsent,
         ..connected()
     };
     assert_eq!(
         keys.state(),
-        SyncState::NeedsReset { reason: ResetReason::MemberKeysReplaced { member }, unsent }
+        SyncState::NeedsReset {
+            reason: ResetReason::MemberKeysReplaced {
+                member,
+                by: Some(crate::sync_status::tests::replacer())
+            },
+            unsent
+        }
     );
     // A removal outranks a reset, as it did.
     let both = Facts {

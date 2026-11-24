@@ -53,6 +53,7 @@ pub(crate) fn registered(store: &TestStore, joined: Joined) -> StoreState {
         member(7),
         StoreMember {
             keys: crate::tests::keys(7),
+            keys_by: coven_foundation::id_source::DeviceId(1),
             access: None,
             role: MemberRole::Member,
             removed: false,

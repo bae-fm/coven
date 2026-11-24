@@ -2,9 +2,9 @@
 
 use crate::OperationRejection;
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
-use coven_database::DbError;
+use coven_database::{DbError, StoreState};
 use coven_foundation::files::{FileError, ObservationError, StoreLockError};
-use coven_foundation::id_source::KeyId;
+use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{StorageError, StorageFailure};
 use std::sync::Arc;
@@ -130,10 +130,14 @@ pub enum SyncError {
     /// Held signing credentials are no longer current for this stable id, or
     /// an object was fixed under credentials that are no longer current.
     /// Sending stops; it never re-signs an old object with newer keys (§14.1).
-    #[error("member {member:?} has newer keys; held credentials cannot send")]
+    #[error("member {member:?} has newer keys, written by {by:?}; held credentials cannot send")]
     MemberKeysReplaced {
         /// The stable member whose keys were replaced.
         member: coven_foundation::id_source::MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<crate::NamedDevice>,
     },
     /// This call needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
@@ -241,6 +245,19 @@ impl From<DbError> for SyncError {
 }
 
 impl SyncError {
+    /// `member`'s keys were replaced: the applied `state` binds a pair other
+    /// than the one the caller holds, and names the device that wrote it.
+    /// Every member's binding is written by a registered device, which the
+    /// state keeps after removal, so a state without one is damaged.
+    pub(crate) fn keys_replaced(state: &StoreState, member: MemberId) -> Self {
+        let id = state.members[&member].keys_by;
+        let device = state.devices.get(&id).expect("the device that bound a member's keys");
+        Self::MemberKeysReplaced {
+            member,
+            by: Some(crate::NamedDevice { id, name: device.name.clone() }),
+        }
+    }
+
     /// `operation` failed, and a later step (a rollback, closing another
     /// owner) failed too; neither failure is hidden.
     pub fn cleanup(operation: SyncError, cleanup: SyncError) -> Self {
@@ -263,8 +280,8 @@ impl SyncError {
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Removed(removal) => PendingReason::Removed(*removal),
-            SyncError::MemberKeysReplaced { member } => {
-                PendingReason::MemberKeysReplaced { member: *member }
+            SyncError::MemberKeysReplaced { member, by } => {
+                PendingReason::MemberKeysReplaced { member: *member, by: by.clone() }
             }
             SyncError::KeyUnavailable { audience, key } => PendingReason::KeyUnavailable {
                 audience: audience.clone(),

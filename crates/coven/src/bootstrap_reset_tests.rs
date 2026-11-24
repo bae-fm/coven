@@ -604,7 +604,7 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
         let reset =
             network.reopen(&carol).reset_device(carol.store, "Carol's laptop", |_| ()).await;
         assert!(
-            matches!(&reset, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member: found })) if *found == member),
+            matches!(&reset, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member: found, .. })) if *found == member),
             "{:?}",
             reset.as_ref().err()
         );

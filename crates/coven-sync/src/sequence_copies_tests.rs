@@ -125,7 +125,7 @@ async fn a_stuck_reader_finds_a_late_circle_copy_and_reads_on() {
         [crate::KeyHolder {
             member: carol.identity.member(),
             reads_audience: true,
-            devices: vec![crate::HolderDevice { id: carol.sync.device, name }],
+            devices: vec![crate::NamedDevice { id: carol.sync.device, name }],
         }]
     );
 

@@ -20,6 +20,7 @@ macro_rules! coven_store_state_tables {
                 member TEXT PRIMARY KEY NOT NULL CHECK(length(member)=36),
                 signing BLOB NOT NULL CHECK(length(signing)=32),
                 sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                keys_by BLOB NOT NULL CHECK(length(keys_by)=8),
                 access BLOB,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),
                 removed INTEGER NOT NULL CHECK(removed IN (0,1)),

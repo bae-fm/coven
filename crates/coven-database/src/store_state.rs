@@ -155,6 +155,11 @@ pub struct StoreMember {
     /// The current public pair: the signing key that verifies this member's
     /// objects in this view and the sealing key copies go to (§10, §12.1).
     pub keys: MemberPublicKeys,
+    /// The device that wrote the entry that bound `keys` to this member: the
+    /// store's creator's first device for slot 1, the admitting or recovering
+    /// device for an admission or recovery, the replacing device for a key
+    /// replacement (§12.3).
+    pub keys_by: DeviceId,
     /// Current access after the applied slot, `None` for the store's creator
     /// until Set up storage records it (§10.3). Revocation also reads
     /// superseded access from the retained administrative objects (§14.2).

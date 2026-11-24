@@ -327,7 +327,7 @@ async fn an_old_restore_code_cannot_register_after_its_keys_were_replaced() {
     let count = laptop.storage.request_count();
     let result = laptop.sync.register_device("Ana's laptop".into(), None).await;
     assert!(
-        matches!(result, Err(SyncError::MemberKeysReplaced { member }) if member == ana.identity.member()),
+        matches!(result, Err(SyncError::MemberKeysReplaced { member, .. }) if member == ana.identity.member()),
         "{result:?}"
     );
     assert!(laptop.sync.database.current_claim().await.unwrap().is_none());

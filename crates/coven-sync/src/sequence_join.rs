@@ -134,7 +134,7 @@ impl SequenceSync {
                 Bootstrap::Keys(ring) => ring,
                 // The joining pair was bound and then replaced (§12.3).
                 Bootstrap::Replaced => {
-                    return Err(SyncError::MemberKeysReplaced { member: member.member() })
+                    return Err(SyncError::MemberKeysReplaced { member: member.member(), by: None })
                 }
                 Bootstrap::Missing(_) | Bootstrap::Empty => {
                     if request.pending(self.storage.as_ref()).await? {
@@ -146,7 +146,10 @@ impl SequenceSync {
                     match self.bootstrap_keys(&mut session, &member, Some(&mut scan)).await? {
                         Bootstrap::Keys(ring) => ring,
                         Bootstrap::Replaced => {
-                            return Err(SyncError::MemberKeysReplaced { member: member.member() })
+                            return Err(SyncError::MemberKeysReplaced {
+                                member: member.member(),
+                                by: None,
+                            })
                         }
                         Bootstrap::Missing(_) | Bootstrap::Empty => {
                             return Ok(JoinOutcome::Declined)

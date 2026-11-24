@@ -115,7 +115,7 @@ pub enum SyncState {
 
 /// Why this installation can't send under its keys or id, as `NeedsReset`
 /// names it (§19.3, §12.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResetReason {
     /// A reset or restore registered another installation in this one's place
     /// (§19.3).
@@ -129,6 +129,10 @@ pub enum ResetReason {
     MemberKeysReplaced {
         /// The member whose held keys were replaced.
         member: MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<crate::NamedDevice>,
     },
 }
 
@@ -240,7 +244,7 @@ mod with_cause {
 
 /// The states that name a cause, as the model's `State.named` lists them;
 /// removed and needs reset name the removal or reset reason instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Named {
     SignedOut,
     NoAccess,
@@ -255,7 +259,7 @@ enum Named {
 
 impl Named {
     /// Its place among the states, as `SyncState::rank` orders them.
-    fn rank(self) -> u8 {
+    fn rank(&self) -> u8 {
         match self {
             Self::Failed => 3,
             Self::StorageFull => 6,
@@ -347,7 +351,7 @@ impl SyncState {
             Self::NoAccess(_) => Named::NoAccess.rank(),
             Self::SignedOut { .. } => Named::SignedOut.rank(),
             Self::UpdateNeeded(_) => Named::UpdateNeeded.rank(),
-            Self::NeedsReset { reason, .. } => Named::NeedsReset(*reason).rank(),
+            Self::NeedsReset { reason, .. } => Named::NeedsReset(reason.clone()).rank(),
             Self::Removed { removal, .. } => Named::Removed(*removal).rank(),
             Self::NotSynced => 14,
         }
@@ -422,8 +426,11 @@ impl PendingReason {
             }),
             Self::UpdateRequired(_) => Some(Named::UpdateNeeded),
             Self::Removed(removal) => Some(Named::Removed(*removal)),
-            Self::MemberKeysReplaced { member } => {
-                Some(Named::NeedsReset(ResetReason::MemberKeysReplaced { member: *member }))
+            Self::MemberKeysReplaced { member, by } => {
+                Some(Named::NeedsReset(ResetReason::MemberKeysReplaced {
+                    member: *member,
+                    by: by.clone(),
+                }))
             }
             Self::Refused(_) | Self::FileUnavailable(_) | Self::Original { .. } => {
                 Some(Named::Failed)

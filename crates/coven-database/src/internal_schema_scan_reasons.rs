@@ -163,7 +163,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ),
         (
             "members.rs",
-            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members WHERE removed=0 ORDER BY member",
+            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members WHERE removed=0 ORDER BY member",
             "_coven_members",
         ) => Some("the member list returns every current member"),
         (

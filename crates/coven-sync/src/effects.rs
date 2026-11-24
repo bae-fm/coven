@@ -178,6 +178,7 @@ pub(crate) fn checked_change(
                 *author,
                 StoreMember {
                     keys: *admin,
+                    keys_by: writer,
                     access: None,
                     role: MemberRole::Admin,
                     removed: false,
@@ -245,6 +246,7 @@ pub(crate) fn checked_change(
                 *id,
                 StoreMember {
                     keys: *keys,
+                    keys_by: writer,
                     access: Some(access.clone()),
                     role: *role,
                     removed: false,
@@ -286,6 +288,7 @@ pub(crate) fn checked_change(
             }
             let recovered = next.members.get_mut(id).expect("checked target");
             recovered.keys = *keys;
+            recovered.keys_by = writer;
             recovered.joined = Joined { person: None, circle: circle.circle };
             if let Some(access) = access {
                 recovered.access = Some(access.clone());
@@ -345,7 +348,9 @@ pub(crate) fn checked_change(
             if !fresh(state, keys) {
                 return Err(OperationRejection::KeysAlreadyUsed);
             }
-            next.members.get_mut(id).expect("checked target").keys = *keys;
+            let replaced = next.members.get_mut(id).expect("checked target");
+            replaced.keys = *keys;
+            replaced.keys_by = writer;
             next.bound_keys.insert(*keys);
         }
         AddDevice { name, replaces } => {

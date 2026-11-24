@@ -156,7 +156,7 @@ async fn a_stale_code_or_another_stores_code_changes_nothing() {
     let old = before.device.unwrap();
     let refused = restore(network.reopen(&replaced.carol), store, &replaced.stale).await;
     assert!(
-        matches!(&refused, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member })) if *member == replaced.member),
+        matches!(&refused, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member, .. })) if *member == replaced.member),
         "{:?}",
         refused.as_ref().err()
     );

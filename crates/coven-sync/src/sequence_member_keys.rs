@@ -46,7 +46,7 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
         {
             Ok(())
         }
-        Some(_) => Err(SyncError::MemberKeysReplaced { member: identity.member() }),
+        Some(_) => Err(SyncError::keys_replaced(&session.history.state, identity.member())),
     }
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn registered(
     if member.keys != held.keys().public_keys()
         && held.candidate().map(|keys| keys.public_keys()) != Some(member.keys)
     {
-        return Err(SyncError::MemberKeysReplaced { member: id });
+        return Err(SyncError::keys_replaced(applied, id));
     }
     Ok(id)
 }
@@ -249,9 +249,9 @@ impl SequenceSync {
             if current == Some(candidate) {
                 // The binding applied: install its pair, keeping the previous
                 // one for copies that name it (§12.3). Code custody still owns the pause.
-                let installed = identity
-                    .activate(&candidate)
-                    .ok_or(SyncError::MemberKeysReplaced { member: identity.member() })?;
+                let installed = identity.activate(&candidate).ok_or_else(|| {
+                    SyncError::keys_replaced(&session.history.state, identity.member())
+                })?;
                 self.member.persist(&installed)?;
                 self.database
                     .advance_operation(MemberKeysWork::RefreshingCode.update(&record)?)

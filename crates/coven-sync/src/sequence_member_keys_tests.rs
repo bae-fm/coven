@@ -65,8 +65,12 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
     assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);
     assert_eq!(rows(&ben.sync.database).await.len(), 2);
     let result = laptop.sync.pass().await;
+    let ana_device_name =
+        ana.database().store_state().await.unwrap().devices[&ana.sync.device].name.clone();
     assert!(
-        matches!(result, Err(SyncError::MemberKeysReplaced { member }) if member == ana.identity.member()),
+        matches!(&result, Err(SyncError::MemberKeysReplaced { member, by })
+            if *member == ana.identity.member()
+                && *by == Some(NamedDevice { id: ana.sync.device, name: ana_device_name.clone() })),
         "{result:?}"
     );
     for device in [&ana, &ben, &laptop] {
@@ -100,6 +104,34 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
     phone.sync.register_device("Ben's new phone".into(), None).await.unwrap();
     assert!(matches!(ben.sync.pass().await, Err(SyncError::MemberKeysReplaced { .. })));
     for device in [&ana, &ben, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// The device that wrote a member's replacement is the one the stopped
+/// installation names, not the device that first bound the member (§12.3).
+#[tokio::test]
+async fn a_stopped_device_names_the_device_that_replaced_its_pair() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let before = ben.database().store_state().await.unwrap();
+    assert_eq!(before.members[&ana.identity.member()].keys_by, ana.sync.device);
+    let keys = coven_format::test_utils::keys_from_seed(12).public_keys();
+    ben.sync.replace_member_keys_for(ana.identity.member(), keys).await.unwrap();
+    let after = ben.database().store_state().await.unwrap();
+    assert_eq!(after.members[&ana.identity.member()].keys_by, ben.sync.device);
+    let result = ana.sync.pass().await;
+    let name = after.devices[&ben.sync.device].name.clone();
+    assert_ne!(name, before.devices[&ana.sync.device].name);
+    assert!(
+        matches!(&result, Err(SyncError::MemberKeysReplaced { by, .. })
+            if *by == Some(NamedDevice { id: ben.sync.device, name: name.clone() })),
+        "{result:?}"
+    );
+    for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
 }
@@ -327,7 +359,7 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
         ana.database().close().await.unwrap();
     } else {
         assert!(
-            matches!(result, Err(SyncError::MemberKeysReplaced { member }) if member == ana.identity.member()),
+            matches!(result, Err(SyncError::MemberKeysReplaced { member, .. }) if member == ana.identity.member()),
             "{result:?}"
         );
         assert_eq!(identity.keys().public_keys(), active);
@@ -569,7 +601,7 @@ async fn a_replaced_pair_restores_as_replaced_past_a_floor() {
     let laptop = group.newcomer(old.clone(), group.storage.for_device()).await;
     let restored = laptop.sync.unlock().await;
     assert!(
-        matches!(&restored, Err(SyncError::MemberKeysReplaced { member }) if *member == old.member()),
+        matches!(&restored, Err(SyncError::MemberKeysReplaced { member, .. }) if *member == old.member()),
         "{restored:?}"
     );
     for device in [&ana, &laptop] {

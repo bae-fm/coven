@@ -20,6 +20,7 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
         member(seed),
         StoreMember {
             keys: keys(seed),
+            keys_by: coven_foundation::id_source::DeviceId(1),
             access: Some(access(seed)),
             role,
             removed,
@@ -513,6 +514,7 @@ async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
         member(1),
         StoreMember {
             keys: keys(1),
+            keys_by: coven_foundation::id_source::DeviceId(1),
             access: None,
             role: MemberRole::Admin,
             removed: false,

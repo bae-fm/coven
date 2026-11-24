@@ -4913,7 +4913,11 @@ for a member who lost everything (§13.3).
 - **The old sealing key is retired.** Copies sealed to it stay exposure, although
   the member is still active, so keys copied to it need replacing.
 - **Old-key writes stop counting** from the replacement's slot (§14.1). A device
-  still holding the replaced keys can't send, and reports `MemberKeysReplaced`.
+  still holding the replaced keys can't send, and reports `MemberKeysReplaced`,
+  naming the device that wrote the replacement and the name it was added under,
+  so the app can tell the member which of their devices made the new code. A
+  restore with an old code reports it without a device: that installation has
+  not read the replacement.
 
 Ana replaces her own keys:
 
@@ -13208,7 +13212,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | Table | Holds |
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before a joined store has loaded, the name its invite carried, as set by the slot the invite names (§13.2) |
-| `_coven_members` | each member of the applied history, removed ones too: their pair, role and storage access, and the facts of their latest admission, or of slot 1 for the store's creator, the person's name (none after a recovery) and the circle it made, which the joining write reads as a device of theirs registers (§10.3, §13.2); `coven_members` shows none of those facts |
+| `_coven_members` | each member of the applied history, removed ones too: their pair and the device that wrote the entry that bound it, role and storage access, and the facts of their latest admission, or of slot 1 for the store's creator, the person's name (none after a recovery) and the circle it made, which the joining write reads as a device of theirs registers (§10.3, §13.2); `coven_members` shows none of those facts |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
 | `_coven_queued_dismissals` | the rows each waiting write's dismissals name, recorded with the write, so a slot finds the rows each waiting write changes without reading its record (§6.2) |

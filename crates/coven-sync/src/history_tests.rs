@@ -84,6 +84,7 @@ fn sequence_key_selection_matches_lean() {
                 id,
                 StoreMember {
                     keys: public,
+                    keys_by: DeviceId(1),
                     access: Some(crate::sequence_sync::tests::access("fixture")),
                     role: MemberRole::Member,
                     removed: id == member(2) && matches!(mode, 1 | 4),
@@ -232,6 +233,7 @@ fn key_holders_are_the_current_members_with_a_copy_for_their_current_pair() {
             id,
             StoreMember {
                 keys: *public,
+                keys_by: DeviceId(1),
                 access: Some(crate::sequence_sync::tests::access("fixture")),
                 role: MemberRole::Member,
                 // Member 6 was removed.
@@ -856,6 +858,7 @@ fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
             id,
             StoreMember {
                 keys: public,
+                keys_by: DeviceId(1),
                 access: Some(crate::sequence_sync::tests::access("fixture")),
                 role: MemberRole::Member,
                 removed,

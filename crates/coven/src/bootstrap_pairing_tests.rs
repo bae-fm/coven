@@ -420,7 +420,7 @@ async fn keys_replaced_after_approval_fail_the_restore() {
     };
     let (result, _guard) = join_with_response(joining, responding).await;
     assert!(
-        matches!(&result, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member }))
+        matches!(&result, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member, .. }))
             if *member == scene.owner.member.member()),
         "{:?}",
         result.err()

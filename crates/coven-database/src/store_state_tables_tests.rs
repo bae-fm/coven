@@ -34,6 +34,7 @@ fn fill_members(db: &sqlive::rusqlite::Connection) {
     for (index, id) in ids.iter().enumerate() {
         let member = crate::StoreMember {
             keys: crate::tests::keys(1),
+            keys_by: coven_foundation::id_source::DeviceId(1),
             access: None,
             role: coven_format::admin::MemberRole::Member,
             removed: index % 2 == 0,
@@ -90,7 +91,7 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
-("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members", "_coven_members") =>
+("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members", "_coven_members") =>
     Some("store_state() returns the complete member map"),
 ("store_state_tables.rs", "SELECT signing,sealing FROM _coven_bound_keys", "_coven_bound_keys") =>
     Some("store_state() returns every registered key pair"),

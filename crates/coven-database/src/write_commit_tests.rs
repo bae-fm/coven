@@ -41,6 +41,7 @@ fn leave_circle(db: &StoreDatabase) {
                 member,
                 crate::store_state::StoreMember {
                     keys: crate::tests::keys(2),
+                    keys_by: coven_foundation::id_source::DeviceId(1),
                     access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "other-access-key".into(),
                     }),

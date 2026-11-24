@@ -1,8 +1,8 @@
 //! Authenticated administrative history, indexed by its counted slots.
 
 use crate::{
-    effects, snapshot_object::RoutedKey, CutOffRefusal, HolderDevice, KeyHolder,
-    OperationRejection, Refusal, SyncError,
+    effects, snapshot_object::RoutedKey, CutOffRefusal, KeyHolder, NamedDevice, OperationRejection,
+    Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
 use coven_database::{
@@ -792,7 +792,7 @@ impl History {
                     .devices
                     .iter()
                     .filter(|(_, device)| device.member == *member && device.active())
-                    .map(|(id, device)| HolderDevice { id: *id, name: device.name.clone() })
+                    .map(|(id, device)| NamedDevice { id: *id, name: device.name.clone() })
                     .collect(),
             })
             .collect()

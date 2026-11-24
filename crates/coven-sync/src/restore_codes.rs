@@ -30,7 +30,7 @@ pub(crate) fn member_code(
     // installs it; a retired pair never is.
     let selected = identity
         .activate(&current)
-        .ok_or(SyncError::MemberKeysReplaced { member: identity.member() })?;
+        .ok_or_else(|| SyncError::keys_replaced(state, identity.member()))?;
     Ok(RestoreCode {
         store: store.id,
         member: identity.member(),

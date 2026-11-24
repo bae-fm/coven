@@ -35,12 +35,14 @@ pub struct KeyHolder {
     /// member of the audience has to add it back first.
     pub reads_audience: bool,
     /// The member's active devices, as the applied history names them.
-    pub devices: Vec<HolderDevice>,
+    pub devices: Vec<NamedDevice>,
 }
 
-/// An active device of a `KeyHolder`.
+/// A device of the store, by its id and the name it was added under: an
+/// active device of a `KeyHolder`, or the device that replaced a member's
+/// keys.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HolderDevice {
+pub struct NamedDevice {
     /// The device.
     pub id: DeviceId,
     /// The name it was added under.
@@ -343,6 +345,10 @@ pub enum PendingReason {
     MemberKeysReplaced {
         /// The member whose held keys were replaced.
         member: MemberId,
+        /// The device that wrote the replacement, once this installation has
+        /// applied it: none when the error came before, as an old restore code
+        /// opening a store whose history it has not read.
+        by: Option<NamedDevice>,
     },
 }
 

@@ -48,7 +48,7 @@ fn member_keys(row: &Row<'_>, signing: usize) -> sqlive::rusqlite::Result<Member
 }
 
 /// A `_coven_members` row, read as
-/// `SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person`.
+/// `SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by`.
 /// A fact that doesn't
 /// decode is `DamagedDatabase`.
 pub(crate) fn stored_member(row: &Row<'_>) -> sqlive::rusqlite::Result<(MemberId, StoreMember)> {
@@ -57,6 +57,7 @@ pub(crate) fn stored_member(row: &Row<'_>) -> sqlive::rusqlite::Result<(MemberId
         member(row, 0)?,
         StoreMember {
             keys: member_keys(row, 1)?,
+            keys_by: row.get(8)?,
             role: stored(row, 3, Type::Text)?,
             removed: stored(row, 4, Type::Integer)?,
             access: stored::<Option<Vec<u8>>>(row, 5, Type::Blob)?
@@ -159,7 +160,7 @@ pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
         .pop();
     state.members = database
         .query(
-            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person FROM _coven_members",
+            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members",
             [],
             stored_member,
         )?
@@ -206,8 +207,8 @@ pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
 }
 /// The statement that stores one member, with the values [`member_values`] binds.
 pub(crate) const INSERT_MEMBER: &str =
-    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person)
-     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)";
+    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by)
+     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)";
 
 /// `member`'s values for [`INSERT_MEMBER`], in the order its placeholders take them.
 pub(crate) fn member_values<'a>(
@@ -226,6 +227,7 @@ pub(crate) fn member_values<'a>(
             .map(|access| serde_json::to_vec(access).expect("member access encoding")),
         member.joined.circle,
         member.joined.person.as_deref(),
+        member.keys_by,
     )
 }
 

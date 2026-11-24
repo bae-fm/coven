@@ -683,10 +683,8 @@ fn access_and_lasting_local_failures_require_app_action() {
     assert_eq!(retry(PendingReason::Removed(coven_database::Removal::Device)), Retry::Never);
     // This installation never sends again with a retired pair; restoring
     // with the current keys is a new installation (§13.1).
-    assert_eq!(
-        retry(PendingReason::MemberKeysReplaced { member: MemberId(uuid::Uuid::from_u128(3)) }),
-        Retry::Never
-    );
+    let member = MemberId(uuid::Uuid::from_u128(3));
+    assert_eq!(retry(PendingReason::MemberKeysReplaced { member, by: None }), Retry::Never);
 }
 
 #[test]

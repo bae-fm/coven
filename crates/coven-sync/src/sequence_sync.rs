@@ -502,7 +502,7 @@ impl SequenceSync {
             if current != member.keys().public_keys()
                 && member.candidate().map(|keys| keys.public_keys()) != Some(current)
             {
-                return Err(SyncError::MemberKeysReplaced { member: device.member });
+                return Err(SyncError::keys_replaced(&session.history.state, device.member));
             }
         }
         self.state.registered(

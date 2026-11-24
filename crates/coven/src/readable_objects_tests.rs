@@ -270,7 +270,13 @@ fn a_recorded_last_pass_and_pending_record_give_each_pending_state() {
     let member = crate::MemberId(uuid::Uuid::from_bytes([5; 16]));
     let replaced = crate::PendingRecord::new(
         crate::PendingSubject::Slot(crate::Slot::new(3).unwrap()),
-        crate::PendingReason::MemberKeysReplaced { member },
+        crate::PendingReason::MemberKeysReplaced {
+            member,
+            by: Some(crate::NamedDevice {
+                id: coven_foundation::id_source::DeviceId(9),
+                name: "Ana's phone".into(),
+            }),
+        },
     );
     super::record_pending(&connection, &replaced).unwrap();
     assert_eq!(

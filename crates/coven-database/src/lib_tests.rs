@@ -102,6 +102,7 @@ impl TestStore {
                 let mut state = crate::store_state_tables::read(db)?;
                 state.members.entry(member).or_insert(crate::store_state::StoreMember {
                     keys: crate::tests::keys(seed),
+                    keys_by: coven_foundation::id_source::DeviceId(1),
                     access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: format!("fixture-key-{seed}"),
                     }),
@@ -133,6 +134,7 @@ impl TestStore {
                 let mut state = crate::store_state_tables::read(db)?;
                 state.members.entry(member).or_insert(crate::store_state::StoreMember {
                     keys: crate::tests::keys(1),
+                    keys_by: coven_foundation::id_source::DeviceId(1),
                     access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "fixture-access-key".into(),
                     }),

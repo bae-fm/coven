@@ -305,7 +305,7 @@ async fn a_restore_whose_member_keys_were_replaced_ends_and_removes_its_installa
     owner.sync().await;
     let resumed = resume(&install, &owner).await;
     assert!(
-        matches!(resumed, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member }))
+        matches!(resumed, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member, .. }))
             if member == owner.member.member()),
         "{resumed:?}"
     );

@@ -503,6 +503,7 @@ async fn the_first_counted_creation_keeps_the_owner() {
                 member(device),
                 StoreMember {
                     keys: coven_format::test_utils::keys_from_seed(seed).public_keys(),
+                    keys_by: coven_foundation::id_source::DeviceId(1),
                     access: Some(coven_format::MemberAccess::S3AccessKey {
                         access_key_id: format!("fixture-{device}"),
                     }),
@@ -552,6 +553,7 @@ fn members(roles: [MemberRole; 2]) -> StoreState {
             member(device),
             StoreMember {
                 keys: coven_format::test_utils::keys_from_seed(seed).public_keys(),
+                keys_by: coven_foundation::id_source::DeviceId(1),
                 access: Some(coven_format::MemberAccess::S3AccessKey {
                     access_key_id: format!("fixture-{device}"),
                 }),

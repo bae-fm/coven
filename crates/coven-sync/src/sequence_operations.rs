@@ -282,7 +282,11 @@ impl SequenceSync {
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner.resume_administration(&mut session, &mut ring, &member).await?;
             if let Request::Change(StoreChange::AddDevice { .. }) = &request {
-                super::sequence_bootstrap::restorable(owner.admission(&session, &member), &member)?;
+                super::sequence_bootstrap::restorable(
+                    owner.admission(&session, &member),
+                    &member,
+                    &session.history.state,
+                )?;
                 // A registration journaled before a restart has just ended:
                 // landed, this device is registered and needs no other.
                 if session.history.state.device_acts_for(&owner.device, &member.member()) {

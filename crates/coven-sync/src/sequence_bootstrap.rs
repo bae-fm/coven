@@ -97,7 +97,7 @@ impl SequenceSync {
                     return Err(SyncError::KeyUnavailable { audience: Audience::Store, key })
                 }
                 Bootstrap::Replaced => {
-                    return Err(SyncError::MemberKeysReplaced { member: member.member() })
+                    return Err(SyncError::MemberKeysReplaced { member: member.member(), by: None })
                 }
                 Bootstrap::Empty => {
                     return Err(StorageFailure::NotFound
@@ -494,7 +494,7 @@ impl SequenceSync {
             admission @ (MemberBinding::Replaced | MemberBinding::Removed)
                 if self.pair_bound(session, member) =>
             {
-                restorable(admission, member)
+                restorable(admission, member, &session.history.state)
             }
             _ => Ok(()),
         }
@@ -506,11 +506,12 @@ impl SequenceSync {
 pub(crate) fn restorable(
     admission: MemberBinding,
     member: &MemberIdentity,
+    state: &coven_database::StoreState,
 ) -> Result<(), SyncError> {
     match admission {
         MemberBinding::Bound { .. } => Ok(()),
         MemberBinding::Removed => Err(SyncError::Removed(coven_database::Removal::Member)),
-        MemberBinding::Replaced => Err(SyncError::MemberKeysReplaced { member: member.member() }),
+        MemberBinding::Replaced => Err(SyncError::keys_replaced(state, member.member())),
         MemberBinding::Absent => Err(SyncError::Rejected(crate::OperationRejection::TargetGone(
             crate::EntryTarget::Member(member.member()),
         ))),

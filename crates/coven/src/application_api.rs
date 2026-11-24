@@ -145,11 +145,11 @@ pub use coven_sync::{
     Circle, CircleMemberInfo, CutOffRefusal, DamagedObject, DeviceIdEvidence, DeviceInfo,
     DeviceState, DeviceStop, EntryTarget, FileMissingReason, FileSourceFailure, Invite,
     InviteAccess, InviteLifetime, InviteStage, JoinRequest, LastPass, LocalFailure, MemberInfo,
-    OperationError, OperationId, OperationKind, OperationRejection, PassFailure, PendingReason,
-    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal, Removal,
-    RequiredUpdate, ResetReason, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
-    SyncActivity, SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus,
-    SyncWait, UndoCause, WriteCutoff,
+    NamedDevice, OperationError, OperationId, OperationKind, OperationRejection, PassFailure,
+    PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
+    Removal, RequiredUpdate, ResetReason, Retry, RetryAnswer, RetryEffect, RetryOutcome,
+    StatusFailure, SyncActivity, SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState,
+    SyncStatus, SyncWait, UndoCause, WriteCutoff,
 };
 pub use coven_sync::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,

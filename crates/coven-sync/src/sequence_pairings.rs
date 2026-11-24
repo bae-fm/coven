@@ -230,8 +230,9 @@ pub(crate) fn approve_request(
             .active_member(&work.member)
             .ok_or(SyncError::Removed(coven_database::Removal::Member))?
             .keys;
-        let selected =
-            held.activate(&current).ok_or(SyncError::MemberKeysReplaced { member: work.member })?;
+        let selected = held
+            .activate(&current)
+            .ok_or_else(|| SyncError::keys_replaced(&applied, work.member))?;
         let sealing = decode_request(&stored)?.keys.sealing;
         let handover =
             Handover::seal(work.member, selected.keys(), &sealing, &work.path(store))?.encode();
