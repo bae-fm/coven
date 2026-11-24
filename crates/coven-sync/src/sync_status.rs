@@ -132,7 +132,7 @@ pub enum ResetReason {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<crate::NamedDevice>,
+        by: Option<crate::ReplacingDevice>,
     },
 }
 

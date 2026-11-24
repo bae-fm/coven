@@ -168,8 +168,11 @@ fn member() -> MemberId {
 }
 
 /// The device that wrote a key replacement.
-pub(crate) fn replacer() -> NamedDevice {
-    NamedDevice { id: DeviceId(2), name: "Carol's laptop".into() }
+pub(crate) fn replacer() -> crate::ReplacingDevice {
+    crate::ReplacingDevice {
+        device: NamedDevice { id: DeviceId(2), name: "Carol's laptop".into() },
+        member: member(),
+    }
 }
 
 /// A member that holds the key and reads its audience, with a phone.

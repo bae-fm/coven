@@ -4914,10 +4914,11 @@ for a member who lost everything (§13.3).
   the member is still active, so keys copied to it need replacing.
 - **Old-key writes stop counting** from the replacement's slot (§14.1). A device
   still holding the replaced keys can't send, and reports `MemberKeysReplaced`,
-  naming the device that wrote the replacement and the name it was added under,
-  so the app can tell the member which of their devices made the new code. A
-  restore with an old code reports it without a device: that installation has
-  not read the replacement.
+  naming the device that wrote the replacement, the name it was added under and
+  the member it belongs to, so the app can tell the member which of their devices
+  made the new code. An error that stops before the installation has read the
+  replacement, such as a restore whose old code cannot open the store, names no
+  device.
 
 Ana replaces her own keys:
 

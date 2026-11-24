@@ -5997,7 +5997,7 @@ pub enum SyncError {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<NamedDevice>,
+        by: Option<ReplacingDevice>,
     },
     /// No storage is connected for a call that requires it.
     NoStorage,
@@ -6253,7 +6253,7 @@ pub enum PendingReason {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<NamedDevice>,
+        by: Option<ReplacingDevice>,
     },
 }
 
@@ -6616,7 +6616,7 @@ pub enum ResetReason {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<NamedDevice>,
+        by: Option<ReplacingDevice>,
     },
 }
 
@@ -6647,9 +6647,12 @@ pub struct KeyHolder {
     pub devices: Vec<NamedDevice>,
 }
 
-/// A device of the store, with the name it was added under: an active device
-/// of a `KeyHolder`, or the device that replaced a member's keys.
+/// A device of the store, with the name it was added under.
 pub struct NamedDevice { pub id: DeviceId, pub name: String }
+
+/// The device that wrote a member's key replacement, with the member it
+/// belongs to: the replaced member's own device, or an admin's (§12.3).
+pub struct ReplacingDevice { pub device: NamedDevice, pub member: MemberId }
 
 /// What waiting to sync waits for, as `WaitingToSync` names it: what holds
 /// every transfer, the pass's and each file's alike, first; then, for a

@@ -70,7 +70,7 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
     assert!(
         matches!(&result, Err(SyncError::MemberKeysReplaced { member, by })
             if *member == ana.identity.member()
-                && *by == Some(NamedDevice { id: ana.sync.device, name: ana_device_name.clone() })),
+                && by.as_ref().is_some_and(|by| by.device == NamedDevice { id: ana.sync.device, name: ana_device_name.clone() } && by.member == ana.identity.member())),
         "{result:?}"
     );
     for device in [&ana, &ben, &laptop] {
@@ -128,7 +128,7 @@ async fn a_stopped_device_names_the_device_that_replaced_its_pair() {
     assert_ne!(name, before.devices[&ana.sync.device].name);
     assert!(
         matches!(&result, Err(SyncError::MemberKeysReplaced { by, .. })
-            if *by == Some(NamedDevice { id: ben.sync.device, name: name.clone() })),
+            if by.as_ref().is_some_and(|by| by.device == NamedDevice { id: ben.sync.device, name: name.clone() } && by.member == ben.identity.member())),
         "{result:?}"
     );
     for device in [&ana, &ben] {

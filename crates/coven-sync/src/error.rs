@@ -137,7 +137,7 @@ pub enum SyncError {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<crate::NamedDevice>,
+        by: Option<crate::ReplacingDevice>,
     },
     /// This call needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
@@ -248,13 +248,21 @@ impl SyncError {
     /// `member`'s keys were replaced: the applied `state` binds a pair other
     /// than the one the caller holds, and names the device that wrote it.
     /// Every member's binding is written by a registered device, which the
-    /// state keeps after removal, so a state without one is damaged.
+    /// state keeps after removal; a state without one is a bug.
     pub(crate) fn keys_replaced(state: &StoreState, member: MemberId) -> Self {
-        let id = state.members[&member].keys_by;
-        let device = state.devices.get(&id).expect("the device that bound a member's keys");
-        Self::MemberKeysReplaced {
-            member,
-            by: Some(crate::NamedDevice { id, name: device.name.clone() }),
+        let writer = state.members.get(&member).and_then(|bound| {
+            let device = state.devices.get(&bound.keys_by)?;
+            Some(crate::ReplacingDevice {
+                device: crate::NamedDevice { id: bound.keys_by, name: device.name.clone() },
+                member: device.member,
+            })
+        });
+        match writer {
+            Some(by) => Self::MemberKeysReplaced { member, by: Some(by) },
+            None => Self::Bug(coven_foundation::task::Bug::new(
+                "name the device that replaced a member's keys",
+                "a member's keys are written by a device the state keeps",
+            )),
         }
     }
 

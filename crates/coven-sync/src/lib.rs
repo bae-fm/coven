@@ -93,7 +93,8 @@ pub use operation_types::*;
 pub use pairing_types::{AddDevice, AddDeviceEnd, AddDeviceId, AddDeviceRequest, AddDeviceStatus};
 pub use pending::{
     FileMissingReason, FileSourceFailure, KeyHolder, LocalFailure, NamedDevice, PendingReason,
-    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
+    PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, ReplacingDevice,
+    RequiredUpdate, Retry,
 };
 pub use refusal::Refusal;
 pub use restore_codes::{location_code, read_connection, read_location, RestoreCodes};

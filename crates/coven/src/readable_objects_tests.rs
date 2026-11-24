@@ -272,9 +272,12 @@ fn a_recorded_last_pass_and_pending_record_give_each_pending_state() {
         crate::PendingSubject::Slot(crate::Slot::new(3).unwrap()),
         crate::PendingReason::MemberKeysReplaced {
             member,
-            by: Some(crate::NamedDevice {
-                id: coven_foundation::id_source::DeviceId(9),
-                name: "Ana's phone".into(),
+            by: Some(crate::ReplacingDevice {
+                device: crate::NamedDevice {
+                    id: coven_foundation::id_source::DeviceId(9),
+                    name: "Ana's phone".into(),
+                },
+                member,
             }),
         },
     );

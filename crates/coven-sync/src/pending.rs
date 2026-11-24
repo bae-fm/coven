@@ -49,6 +49,17 @@ pub struct NamedDevice {
     pub name: String,
 }
 
+/// The device that wrote a member's key replacement, and the member it
+/// belongs to: the replaced member's own device when they made the new keys
+/// themselves, an admin's when an admin did (§12.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacingDevice {
+    /// The device and the name it was added under.
+    pub device: NamedDevice,
+    /// The member the device belongs to.
+    pub member: MemberId,
+}
+
 /// One local first unmet condition, identified by its subject (§19.1, E5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingRecord {
@@ -348,7 +359,7 @@ pub enum PendingReason {
         /// The device that wrote the replacement, once this installation has
         /// applied it: none when the error came before, as an old restore code
         /// opening a store whose history it has not read.
-        by: Option<NamedDevice>,
+        by: Option<ReplacingDevice>,
     },
 }
 
