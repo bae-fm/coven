@@ -186,26 +186,35 @@ fn some_plan() -> Arc<ScopePlan> {
     Arc::new(ScopePlan::build(&connection, "SELECT 1", &statement, &whole).unwrap())
 }
 
-/// What a second caller did while the first was building the plan.
+/// What a second caller did first while another was building the plan.
 #[derive(Debug, PartialEq, Eq)]
-enum Second {
+enum Step {
     Waited,
     Built,
 }
 
-/// Ask `plans` for one plan from two threads: `first` builds it and ends only
-/// once the second caller, which would build `plan`, waits for it or builds
-/// its own. The second caller's first step, what it got, and how often it
-/// built.
-fn second_caller_during(
+/// What two callers that needed one plan at once got.
+struct TwoCallers {
+    /// The first caller's result, or its panic.
+    first: std::thread::Result<rusqlite::Result<Arc<ScopePlan>>>,
+    /// The second caller's first step, what it got, and how often it built.
+    step: Step,
+    second: Arc<ScopePlan>,
+    second_builds: usize,
+}
+
+/// Ask `plans` for one plan from two threads: the first caller's build ends
+/// as `first` does, and only once the second caller waits for it or builds a
+/// plan of its own.
+fn two_callers(
     plans: &ScopePlans,
     first: impl FnOnce() -> rusqlite::Result<Arc<ScopePlan>> + Send,
-) -> (Second, Arc<ScopePlan>, usize) {
+) -> TwoCallers {
     let (did, second_did) = std::sync::mpsc::channel();
     let (began, building) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
     let waited = did.clone();
-    plans.on_next_wait(move || waited.send(Second::Waited).unwrap());
+    plans.on_next_wait(move || waited.send(Step::Waited).unwrap());
     let plan = some_plan();
     std::thread::scope(|scope| {
         let builder = scope.spawn(move || {
@@ -220,18 +229,16 @@ fn second_caller_during(
             let mut builds = 0;
             let got = plans.plan(1, TITLES, || {
                 builds += 1;
-                did.send(Second::Built).unwrap();
+                did.send(Step::Built).unwrap();
                 Ok(plan)
             });
             (got.unwrap(), builds)
         });
         let step = second_did.recv().unwrap();
         release.send(()).unwrap();
-        // The first build may fail or panic; what the second caller then gets
-        // is what the test asks.
-        drop(builder.join());
-        let (got, builds) = second.join().unwrap();
-        (step, got, builds)
+        let first = builder.join();
+        let (second, second_builds) = second.join().unwrap();
+        TwoCallers { first, step, second, second_builds }
     })
 }
 
@@ -240,31 +247,37 @@ fn second_caller_during(
 #[test]
 fn two_first_runs_at_once_build_a_plan_once() {
     let plans = ScopePlans::new();
-    let first = some_plan();
-    let built = Arc::clone(&first);
-    let (step, got, builds) = second_caller_during(&plans, move || Ok(built));
-    assert_eq!((step, builds), (Second::Waited, 0));
-    assert!(Arc::ptr_eq(&got, &first));
+    let plan = some_plan();
+    let built = Arc::clone(&plan);
+    let callers = two_callers(&plans, move || Ok(built));
+    assert!(Arc::ptr_eq(&callers.first.unwrap().unwrap(), &plan));
+    assert_eq!((callers.step, callers.second_builds), (Step::Waited, 0));
+    assert!(Arc::ptr_eq(&callers.second, &plan));
 }
 
-/// A build that fails wakes the caller waiting for it, which builds the plan
-/// itself.
+/// A build that fails gives its caller the failure and wakes the caller
+/// waiting for it, which builds the plan itself.
 #[test]
 fn a_failed_build_leaves_the_plan_to_the_waiting_caller() {
     let plans = ScopePlans::new();
-    let (step, got, builds) =
-        second_caller_during(&plans, || Err(rusqlite::Error::QueryReturnedNoRows));
-    assert_eq!((step, builds), (Second::Waited, 1));
+    let callers = two_callers(&plans, || Err(rusqlite::Error::QueryReturnedNoRows));
+    assert_eq!(callers.first.unwrap().map(drop).unwrap_err(), rusqlite::Error::QueryReturnedNoRows);
+    assert_eq!((callers.step, callers.second_builds), (Step::Waited, 1));
     let kept = plans.plan(1, TITLES, || unreachable!("the plan is kept")).unwrap();
-    assert!(Arc::ptr_eq(&kept, &got));
+    assert!(Arc::ptr_eq(&kept, &callers.second));
 }
 
-/// A build that panics wakes the caller waiting for it, too.
+/// A build that panics panics in its caller and wakes the caller waiting for
+/// it, too.
 #[test]
 fn a_panicking_build_leaves_the_plan_to_the_waiting_caller() {
     let plans = ScopePlans::new();
-    let (step, _got, builds) = second_caller_during(&plans, || panic!("the build broke"));
-    assert_eq!((step, builds), (Second::Waited, 1));
+    let callers = two_callers(&plans, || panic!("the build broke"));
+    let panic = callers.first.map(drop).unwrap_err();
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the build broke"));
+    assert_eq!((callers.step, callers.second_builds), (Step::Waited, 1));
+    let kept = plans.plan(1, TITLES, || unreachable!("the plan is kept")).unwrap();
+    assert!(Arc::ptr_eq(&kept, &callers.second));
 }
 
 /// A run still on an older schema leaves the newer schema's plans kept.
