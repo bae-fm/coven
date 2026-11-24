@@ -11541,6 +11541,18 @@ bare spinner.
 - Before loading anything, coven checks storage and unlocks the member and store
   keys. A missing setting, an unavailable key or a failed connection leaves the
   damaged files in place and returns its typed error.
+- **The reset's sign-in.** On Dropbox and OneDrive a reset connects through a
+  sign-in the app holds on the builder, or else through the one the store kept.
+  Say Dropbox refuses the sign-in Carol's laptop kept, and its one refresh
+  fails too. Every retry with that sign-in would fail the same way, so the
+  reset fails with `OAuthError::Reauthorize`, as a join does (§13.2). The
+  store's recorded location names the provider, and no reset moves it: the app
+  reads it with `Coven::storage_config`, Carol signs in to Dropbox, and the app
+  calls again. The new sign-in reaches the store's custody only once loading
+  has read storage through it, so a sign-in to the wrong account changes
+  nothing. With no sign-in kept and none held, the reset fails with
+  `Reauthorize` too, or with `OAuthError::Unavailable` when the app configured
+  no sign-in.
 
 **The new device loads beside the old one.** Coven keeps every handle out of the
 store for the whole reset. It loads storage under the fresh id in a hidden
@@ -11602,7 +11614,8 @@ laptop in place from her current restore code instead (§13.1).
   removes the record, so the old installation is the store again, then the
   kept entry and the new installation.
 - **Resuming.** `CovenBuilder::resume_replacement` finishes a replacement past
-  its record from what it kept, with neither the code nor a new sign-in;
+  its record from what it kept, with neither the code nor a new sign-in unless
+  the provider refuses the kept one (above);
   calling `reset_device` or `restore_device` again finishes it too. A connected
   reset whose kept record is gone is refused with `NoUnfinishedReplacement`, as
   a restore's is, not finished under an empty device name. There is no separate
@@ -11899,9 +11912,9 @@ token passes through the app:
 - Coven uses a token until the provider rejects it with HTTP 401. It then
   refreshes once, commits the new token, and retries that one request once. If
   the refresh fails or the retry is rejected again, the caller gets the failure.
-  When the provider refuses a join's kept sign-in that way, the call gets
-  `OAuthError::Reauthorize` instead, the answer that asks the person to sign in
-  (§13.2).
+  When the provider refuses that way a sign-in an earlier call kept for a
+  join, a restore or a reset, the call gets `OAuthError::Reauthorize` instead,
+  the answer that asks the person to sign in (§13.2, §19.3).
   Every part of coven that uses storage follows this same rule.
 
 Storage setup records the signed-in member's account label in their location:

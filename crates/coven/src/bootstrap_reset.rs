@@ -12,29 +12,47 @@ mod copy;
 /// loads beside the old one, which stays in place until the member's keys
 /// have been checked and the load is complete. The new device names the old
 /// id as the one it replaces (§13.1). Only the old database's operation
-/// journal is read for owed provider cleanup and open invites.
+/// journal is read for owed provider cleanup and open invites. On Dropbox
+/// and OneDrive it connects through a sign-in the builder holds, else the
+/// one the store kept; the provider refusing the kept one ends the call with
+/// `OAuthError::Reauthorize`.
 pub(crate) async fn reset_device(
-    mut builder: CovenBuilder,
+    builder: CovenBuilder,
     store: StoreId,
     device_name: &str,
     status: impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = builder.directories.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
-    // A store that never set up storage has nothing in storage to load, and
-    // its creation names the device a reset would replace (§19.3).
-    if coven_storage::recorded_config(&directory).map_err(SyncError::from)?.is_none() {
-        return Err(SyncError::NoStorage.into());
-    }
-    let data = coven_sync::read_connection(&directory, &keychain)?.ok_or(SyncError::NoStorage)?;
-    // The held sign-in refreshes in this session until the new device
-    // publishes it, like any bootstrap's (§20.2).
-    let sign_in = match &data.credentials {
-        StorageCredentials::OAuth(tokens) => {
-            Some(coven_sync::SessionSignIn::new(tokens.clone(), builder.oauth_exchange()))
+    let (data, sign_in) = connection(&builder, &directory, &keychain)?;
+    match sign_in {
+        ResetSignIn::Kept(kept) => {
+            let provider = data.location.provider();
+            let reset =
+                reset_through(builder, store, keychain, data, Some(kept), device_name, status);
+            kept_sign_in_refused(provider, reset.await)
         }
-        _ => None,
-    };
+        ResetSignIn::Held(held) => {
+            reset_through(builder, store, keychain, data, Some(held), device_name, status).await
+        }
+        ResetSignIn::None => {
+            reset_through(builder, store, keychain, data, None, device_name, status).await
+        }
+    }
+}
+
+/// Reset `store` through `data`, with the sign-in it connects through on
+/// Dropbox and OneDrive.
+async fn reset_through(
+    mut builder: CovenBuilder,
+    store: StoreId,
+    keychain: Arc<StoreKeychain>,
+    data: ConnectionCredentials,
+    sign_in: Option<Arc<SessionSignIn>>,
+    device_name: &str,
+    status: impl Fn(BootstrapStatus),
+) -> Result<CovenHandle, BootstrapError> {
+    let directory = builder.directories.store_dir(&store);
     // One custody instance per key kind reads now and keeps them at publication.
     let identity = CovenBuilder::make_session(
         std::mem::replace(
@@ -98,6 +116,59 @@ pub(crate) async fn reset_device(
         &never,
     )
     .await
+}
+
+/// The sign-in a reset on Dropbox or OneDrive connects through. It refreshes
+/// in this session until the new device publishes it, like any bootstrap's
+/// (§20.2).
+enum ResetSignIn {
+    /// An S3 key or the Apple account: nothing signs in.
+    None,
+    /// The new sign-in the builder holds.
+    Held(Arc<SessionSignIn>),
+    /// The sign-in the store kept, which a refusal can't fix: only a new one
+    /// can.
+    Kept(Arc<SessionSignIn>),
+}
+
+/// The store's recorded location with the credentials a reset reaches it
+/// with: on Dropbox and OneDrive a sign-in the builder holds, else the one
+/// the store kept, and with neither the call needs a sign-in; any other
+/// provider's credentials from the store's custody. A store that never set
+/// up storage has nothing in storage to load, and its creation names the
+/// device a reset would replace (§19.3).
+fn connection(
+    builder: &CovenBuilder,
+    directory: &StoreDir,
+    keychain: &StoreKeychain,
+) -> Result<(ConnectionCredentials, ResetSignIn), BootstrapError> {
+    let location = coven_storage::recorded_config(directory)
+        .map_err(SyncError::from)?
+        .ok_or(SyncError::NoStorage)?;
+    let provider = location.provider();
+    if provider.signs_in_with_oauth() && builder.authentication.is_some() {
+        let held = account_sign_in(builder, provider)?;
+        let data = ConnectionCredentials {
+            location,
+            credentials: StorageCredentials::OAuth(held.tokens()?),
+        };
+        data.validate().map_err(SyncError::from)?;
+        return Ok((data, ResetSignIn::Held(held)));
+    }
+    let data = match coven_sync::read_connection(directory, keychain)? {
+        Some(data) => data,
+        None if provider.signs_in_with_oauth() => {
+            return Err(sign_in_missing(builder, provider).into())
+        }
+        None => return Err(SyncError::NoStorage.into()),
+    };
+    let sign_in = match &data.credentials {
+        StorageCredentials::OAuth(tokens) => {
+            ResetSignIn::Kept(SessionSignIn::new(tokens.clone(), builder.oauth_exchange()))
+        }
+        _ => ResetSignIn::None,
+    };
+    Ok((data, sign_in))
 }
 
 /// Carry provider cleanup from the replaced installation's journal and

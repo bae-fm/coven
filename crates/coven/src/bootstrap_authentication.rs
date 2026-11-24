@@ -49,15 +49,36 @@ impl SignInCustody {
         provider: CloudProvider,
         result: Result<T, BootstrapError>,
     ) -> Result<T, BootstrapError> {
-        match (result, self) {
-            (
-                Err(BootstrapError::Sync(SyncError::Storage(error))),
-                Self::Device { kept: true, .. },
-            ) if error.failure() == StorageFailure::Authentication => {
-                Err(OAuthError::Reauthorize(provider).into())
-            }
-            (result, _) => result,
+        match self {
+            Self::Device { kept: true, .. } => kept_sign_in_refused(provider, result),
+            _ => result,
         }
+    }
+}
+
+/// A call that connected through a sign-in an earlier call kept, which the
+/// provider refused even after its one refresh, needs a new sign-in: it ends
+/// with `OAuthError::Reauthorize`, as when none is kept (§13.2, §19.3).
+pub(super) fn kept_sign_in_refused<T>(
+    provider: CloudProvider,
+    result: Result<T, BootstrapError>,
+) -> Result<T, BootstrapError> {
+    match result {
+        Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::Authentication =>
+        {
+            Err(OAuthError::Reauthorize(provider).into())
+        }
+        result => result,
+    }
+}
+
+/// Why a call that connects through a sign-in has none: the app can sign in
+/// and call again, or it configured no sign-in.
+pub(super) fn sign_in_missing(builder: &CovenBuilder, provider: CloudProvider) -> OAuthError {
+    match builder.signs_in() {
+        true => OAuthError::Reauthorize(provider),
+        false => OAuthError::Unavailable(provider),
     }
 }
 
@@ -85,11 +106,7 @@ pub(super) async fn join_sign_in(
     let kept = builder.authentication.is_none();
     let tokens = if kept {
         if credentials.write(|keychains| keychains.storage_credentials())?.is_none() {
-            return Err(match builder.signs_in() {
-                true => OAuthError::Reauthorize(provider),
-                false => OAuthError::Unavailable(provider),
-            }
-            .into());
+            return Err(sign_in_missing(builder, provider).into());
         }
         credentials.tokens()?
     } else {

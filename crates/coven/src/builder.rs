@@ -401,7 +401,11 @@ impl CovenBuilder {
     /// `StoreLockError::ReplacementUnfinished` until this call, or
     /// `resume_replacement`, finishes it. An interrupted call resumes with the
     /// same fresh id. A replacement `restore_device` began is refused with
-    /// `StoreLockError::ReplacementUnfinished`, changing nothing. The returned
+    /// `StoreLockError::ReplacementUnfinished`, changing nothing. On Dropbox
+    /// and OneDrive it connects through a sign-in this builder holds, or else
+    /// the one the store kept; with neither, or a kept one the provider
+    /// refuses even after its one refresh, it fails with
+    /// `OAuthError::Reauthorize`. The returned
     /// handle's `device_reset()` names the old and new ids. `on_status` hears
     /// how far the new device has come, as the other bootstrap calls report
     /// it.

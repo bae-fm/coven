@@ -1642,7 +1642,14 @@ tables = [
 ]
 # Opening an installed store opens its database owner.
 "crates/coven/src/bootstrap_status.rs" = ["open_installation"]
-"crates/coven/src/bootstrap_reset.rs" = ["reset_device"]
+"crates/coven/src/bootstrap_reset.rs" = [
+    "reset_device",
+    # A reset connects through the builder's held sign-in, or else the one
+    # the store kept (§19.3).
+    "connection",
+    # The reset itself, through the sign-in its call chose.
+    "reset_through",
+]
 "crates/coven/src/builder.rs" = [
     "CovenBuilder::authenticate",
     "CovenBuilder::connector",

@@ -2735,6 +2735,12 @@ impl CovenBuilder {
     /// every reset.
     /// A store that never set up storage has nothing to load: the call fails
     /// with `NoStorage`, changing nothing.
+    /// On Dropbox and OneDrive it connects through a sign-in this builder
+    /// holds, or else the one the store kept; with neither, or a kept one the
+    /// provider refuses even after its one refresh, it fails with
+    /// `OAuthError::Reauthorize`, and a reset past its record stays
+    /// unfinished. The store's recorded location (`storage_config`) names the
+    /// provider to sign in to (§19.3).
     /// Checks storage and keys, then loads beside the old copy, which moves
     /// aside only once loading is complete. Saved member keys that history
     /// has replaced fail with MemberKeysReplaced and change nothing. Just

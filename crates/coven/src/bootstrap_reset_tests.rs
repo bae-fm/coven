@@ -454,6 +454,88 @@ async fn a_reset_stopped_after_registering_is_finished_by_resuming() {
     assert_eq!(f.app.readable_stores().await[0].unfinished, None);
 }
 
+/// Ana's laptop stopped its reset on Dropbox after registering, and Dropbox
+/// now refuses the sign-in the store kept, which can't be refreshed.
+/// Finishing the reset asks for a new sign-in with `OAuthError::Reauthorize`
+/// and leaves it unfinished. Once she signs in to Dropbox again, finishing it
+/// connects through that sign-in, which the store keeps (§19.3).
+#[tokio::test]
+async fn a_reset_whose_kept_sign_in_is_refused_finishes_after_a_new_one() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+    let config = StorageConfig::Dropbox {
+        account_label: None,
+        location: coven_storage::DropboxLocation::SharedFolder { namespace_id: "reset".into() },
+        folder_label: None,
+    };
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .location(config.clone())
+            .clock(clock.clone())
+            .transfer_limits(1024 * 1024, 64 * 1024)
+            .build()
+            .unwrap(),
+    );
+    let connector = crate::tests::Connector::new(storage.clone());
+    let sign_in = crate::authentication::SignIn::new().await;
+    let reopen = || sign_in.configure(builder(&app, &clock, &connector));
+    let directory = app.create_closed_store("Reset", Arc::new(UuidIds)).await.unwrap();
+    let store = directory.id();
+    let handle = reopen().open(store, |_| ()).await.unwrap();
+    let access = config.oauth_access().unwrap();
+    handle.authenticate(access).await.unwrap();
+    handle.setup_oauth_storage(config, |_| {}).await.unwrap();
+    synced(&handle).await;
+    handle
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('kept','uploaded')", [])?;
+            Ok::<_, CovenError>(())
+        })
+        .await
+        .unwrap();
+    wait_for_sent(&handle).await;
+    handle.close().await.unwrap();
+    assert!(matches!(
+        reopen().interrupt_after_registering().reset_device(store, "Ana's laptop", |_| ()).await,
+        Err(BootstrapError::Cancelled)
+    ));
+    let decided = directory.unfinished_replacement().unwrap().unwrap();
+    let custody = app.store_keychain(store);
+    let kept = || {
+        let bytes = custody.storage_credentials().unwrap().unwrap();
+        match StorageCredentials::decode(bytes.as_bytes()).unwrap() {
+            StorageCredentials::OAuth(tokens) => tokens,
+            _ => panic!("OAuth credentials"),
+        }
+    };
+    // Without a refresh token, the provider's rejection can't be refreshed.
+    let mut refused = kept();
+    refused.access_token = SecretText::new("refused-access".into());
+    refused.refresh_token = None;
+    custody.set_storage_credentials(&StorageCredentials::OAuth(refused).encode().unwrap()).unwrap();
+    storage.reject_access_token("refused-access").await;
+    let (_, cancel) = watch::channel(false);
+    let asked = reopen().resume_replacement(store, |_| (), &cancel).await;
+    assert!(
+        matches!(
+            asked,
+            Err(BootstrapError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
+        ),
+        "{asked:?}"
+    );
+    assert_eq!(directory.unfinished_replacement().unwrap(), Some(decided.clone()));
+    let mut signed_in = reopen();
+    signed_in.authenticate(access).await.unwrap();
+    let new_sign_in = format!("access-{}", sign_in.request_count() - 1);
+    let handle = signed_in.resume_replacement(store, |_| (), &cancel).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
+    assert_eq!(notes(&handle).await, ["kept"]);
+    handle.close().await.unwrap();
+    assert_eq!(kept().access_token.as_str(), new_sign_in);
+    assert_eq!(directory.unfinished_replacement().unwrap(), None);
+}
+
 /// A connected reset stopped after its record keeps the device name it was
 /// given in the keychain. With that entry lost, resuming refuses, as a
 /// restore's resume does, and registers nothing: the fresh device is never
