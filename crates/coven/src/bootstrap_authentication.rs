@@ -6,17 +6,26 @@ use super::*;
 use coven_storage::{OAuthTokens, ProviderAuth};
 use coven_sync::{DeviceCredentials, SessionSignIn};
 
-/// The session sign-in for a bootstrap connection to `provider`.
-pub(super) fn account_sign_in(
+/// The sign-in the builder holds for `location`'s provider, with its tokens,
+/// checked to be credentials `location` takes.
+pub(super) fn held_sign_in(
     builder: &CovenBuilder,
-    provider: CloudProvider,
-) -> Result<Arc<SessionSignIn>, BootstrapError> {
+    location: &StorageConfig,
+) -> Result<(Arc<SessionSignIn>, OAuthTokens), BootstrapError> {
+    let provider = location.provider();
     if !builder.signs_in() {
         return Err(OAuthError::Unavailable(provider).into());
     }
     let held = builder.authentication.as_ref().ok_or(OAuthError::Reauthorize(provider))?;
     crate::authentication::check_provider(held, provider)?;
-    Ok(held.clone())
+    let tokens = held.tokens()?;
+    ConnectionCredentials {
+        location: location.clone(),
+        credentials: StorageCredentials::OAuth(tokens.clone()),
+    }
+    .validate()
+    .map_err(SyncError::from)?;
+    Ok((held.clone(), tokens))
 }
 
 /// Where a bootstrap connection's sign-in refreshes when the provider rejects
@@ -110,14 +119,7 @@ pub(super) async fn join_sign_in(
         }
         credentials.tokens()?
     } else {
-        let held = account_sign_in(builder, provider)?;
-        let tokens = held.tokens()?;
-        ConnectionCredentials {
-            location: location.clone(),
-            credentials: StorageCredentials::OAuth(tokens.clone()),
-        }
-        .validate()
-        .map_err(SyncError::from)?;
+        let (held, tokens) = held_sign_in(builder, location)?;
         if let Some(invited) = invited {
             // One read of the provider's identity API, before anything of
             // this sign-in is kept or used to accept the share.

@@ -147,12 +147,9 @@ fn connection(
         .ok_or(SyncError::NoStorage)?;
     let provider = location.provider();
     if provider.signs_in_with_oauth() && builder.authentication.is_some() {
-        let held = account_sign_in(builder, provider)?;
-        let data = ConnectionCredentials {
-            location,
-            credentials: StorageCredentials::OAuth(held.tokens()?),
-        };
-        data.validate().map_err(SyncError::from)?;
+        let (held, tokens) = held_sign_in(builder, &location)?;
+        let data =
+            ConnectionCredentials { location, credentials: StorageCredentials::OAuth(tokens) };
         return Ok((data, ResetSignIn::Held(held)));
     }
     let data = match coven_sync::read_connection(directory, keychain)? {

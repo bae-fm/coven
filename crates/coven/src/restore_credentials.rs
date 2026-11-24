@@ -39,9 +39,8 @@ pub(super) fn restore_connection(
             .into())
         }
         (CloudProvider::CloudKit, None) => StorageCredentials::CloudKit,
-        (provider, None) => {
-            let held = account_sign_in(builder, provider)?;
-            let tokens = held.tokens()?;
+        (_, None) => {
+            let (held, tokens) = held_sign_in(builder, &location)?;
             sign_in = Some(held);
             StorageCredentials::OAuth(tokens)
         }
