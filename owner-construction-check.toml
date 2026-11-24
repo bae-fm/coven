@@ -457,6 +457,9 @@ task_types = [
     "sqlive::connection::write_transaction::WriteTransaction",
     # A reader a call reserves from a database until the lease drops.
     "sqlive::database::read_pool::Reader",
+    # One build of a statement's scope plan, which the callers that need the
+    # plan wait for until the build drops (§4).
+    "sqlive::connection::app_statements::PlanBuild",
     "coven_database::write_rows::AppView",
     "coven_database::merge_store::MergeStore",
     "coven_database::merge_store::WriteMetadata",

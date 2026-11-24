@@ -7,62 +7,143 @@
 //! each authorization context, and what it read is kept beside it: a later
 //! use from the cache is judged and recorded exactly as that first one was.
 //!
-//! What a kept statement lets a live query narrow depends on its SQL and the
-//! schema alone, so a database's connections share one map of those plans:
-//! once one reader built a statement's plan, the others use it.
+//! What a kept statement lets a live query narrow depends on its SQL, the
+//! schema, and the SQL functions and whole views its connection was set up
+//! with. A database sets each of its connections up alike, so they share one
+//! map of those plans, and one of them builds each plan for all.
 
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
 use crate::{ReadFrame, ScopePlan};
-use panic_as_error::locks::lock_unpoisoned;
+use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// How many app statements' reads a connection keeps, in every context
 /// together, and how many statements' plans a database keeps: more than an
 /// app runs, but bounded for SQL built with values in its text.
 const RECORDED: usize = 512;
 
-/// What each kept statement lets a live query narrow, by its SQL, for the
-/// one schema the plans were built against. A database's connections share
-/// one; a connection opened outside a database keeps its own.
-pub(crate) struct ScopePlans(Mutex<KeptPlans>);
+/// What each kept statement lets a live query narrow, by its SQL and the
+/// schema it was built against. A database's connections share one; a
+/// connection opened outside a database keeps its own.
+pub(crate) struct ScopePlans {
+    kept: Mutex<KeptPlans>,
+    /// Woken as each build ends, for the callers waiting for its plan.
+    ended: Condvar,
+    /// What a test runs as the next caller waits.
+    #[cfg(test)]
+    next_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
 
-struct KeptPlans {
-    schema: Option<i64>,
-    plans: HashMap<String, Arc<ScopePlan>>,
+/// Each statement's plan by its SQL, under the schema cookie it was built
+/// against.
+struct KeptPlans(BTreeMap<i64, HashMap<String, Kept>>);
+
+enum Kept {
+    /// A connection builds the plan now.
+    Building,
+    Built(Arc<ScopePlan>),
+}
+
+impl KeptPlans {
+    /// Say that `sql`'s plan against `schema` is being built. The first plan
+    /// of a schema drops those of every earlier one, whose last readers are
+    /// ending, and leaves a later schema's kept. Once the map holds
+    /// [`RECORDED`] statements, every built plan goes.
+    fn begin(&mut self, schema: i64, sql: &str) {
+        if !self.0.contains_key(&schema) {
+            self.0 = self.0.split_off(&schema);
+        }
+        if self.0.values().map(HashMap::len).sum::<usize>() >= RECORDED {
+            for plans in self.0.values_mut() {
+                plans.retain(|_, kept| matches!(kept, Kept::Building));
+            }
+        }
+        self.0.entry(schema).or_default().insert(sql.to_owned(), Kept::Building);
+    }
+
+    /// End a build of `sql`'s plan against `schema`, keeping what it built,
+    /// unless a later schema dropped that one meanwhile.
+    fn end(&mut self, schema: i64, sql: &str, built: Option<Arc<ScopePlan>>) {
+        let Some(plans) = self.0.get_mut(&schema) else { return };
+        match built {
+            Some(plan) => {
+                plans.insert(sql.to_owned(), Kept::Built(plan));
+            }
+            None => {
+                plans.remove(sql);
+            }
+        }
+    }
 }
 
 impl ScopePlans {
     /// A map that holds no plan yet.
     pub(crate) fn new() -> Self {
-        Self(Mutex::new(KeptPlans { schema: None, plans: HashMap::new() }))
+        Self {
+            kept: Mutex::new(KeptPlans(BTreeMap::new())),
+            ended: Condvar::new(),
+            #[cfg(test)]
+            next_wait: Mutex::new(None),
+        }
     }
 
-    /// The plan of `sql` built against `schema`, if one was kept.
-    fn get(&self, schema: i64, sql: &str) -> Option<Arc<ScopePlan>> {
-        let kept = lock_unpoisoned(&self.0);
-        kept.plans.get(sql).filter(|_| kept.schema == Some(schema)).cloned()
+    /// The plan of `sql` against `schema`, which `build` builds when none is
+    /// kept. One caller builds a plan at a time: the others wait for it, and
+    /// one of them builds it when that build fails or panics. Builds of
+    /// different plans run beside each other.
+    fn plan(
+        &self,
+        schema: i64,
+        sql: &str,
+        build: impl FnOnce() -> rusqlite::Result<Arc<ScopePlan>>,
+    ) -> rusqlite::Result<Arc<ScopePlan>> {
+        let mut kept = lock_unpoisoned(&self.kept);
+        loop {
+            match kept.0.get(&schema).and_then(|plans| plans.get(sql)) {
+                Some(Kept::Built(plan)) => return Ok(Arc::clone(plan)),
+                Some(Kept::Building) => {
+                    #[cfg(test)]
+                    if let Some(run) = lock_unpoisoned(&self.next_wait).take() {
+                        run();
+                    }
+                    kept = wait_unpoisoned(&self.ended, kept);
+                }
+                None => break,
+            }
+        }
+        kept.begin(schema, sql);
+        drop(kept);
+        let mut building = PlanBuild { plans: self, schema, sql, built: None };
+        let plan = build()?;
+        building.built = Some(Arc::clone(&plan));
+        Ok(plan)
     }
 
-    /// Keep `plan`, `sql`'s plan built against `schema`. Plans built against
-    /// another schema are dropped first, and all of them once the map holds
-    /// [`RECORDED`] statements. A connection still reading an older schema
-    /// drops the newer plans too, and the next run on the newer schema builds
-    /// them again.
-    fn keep(&self, schema: i64, sql: &str, plan: &Arc<ScopePlan>) {
-        let mut kept = lock_unpoisoned(&self.0);
-        if kept.schema != Some(schema) {
-            kept.plans.clear();
-            kept.schema = Some(schema);
-        }
-        if kept.plans.len() >= RECORDED {
-            kept.plans.clear();
-        }
-        kept.plans.insert(sql.to_owned(), Arc::clone(plan));
+    /// Run `run` as the next caller waits for a plan being built.
+    #[cfg(test)]
+    fn on_next_wait(&self, run: impl FnOnce() + Send + 'static) {
+        assert!(lock_unpoisoned(&self.next_wait).replace(Box::new(run)).is_none());
+    }
+}
+
+/// One plan's build, which ends as it drops, whether it built the plan,
+/// failed or panicked, and wakes the callers waiting for it.
+struct PlanBuild<'a> {
+    plans: &'a ScopePlans,
+    schema: i64,
+    sql: &'a str,
+    built: Option<Arc<ScopePlan>>,
+}
+
+impl Drop for PlanBuild<'_> {
+    fn drop(&mut self) {
+        lock_unpoisoned(&self.plans.kept).end(self.schema, self.sql, self.built.take());
+        self.plans.ended.notify_all();
     }
 }
 
@@ -210,14 +291,7 @@ impl<P: Policy> HostSql<P> {
         let AppStatement::Cached { schema, .. } = statement else {
             return self.build_scope_plan(sql, statement);
         };
-        if let Some(plan) = self.app_statements.plans.get(*schema, sql) {
-            return Ok(plan);
-        }
-        // Built outside the map's lock, so the other connections' runs don't
-        // wait for it; two first runs at once each build it.
-        let plan = self.build_scope_plan(sql, statement)?;
-        self.app_statements.plans.keep(*schema, sql, &plan);
-        Ok(plan)
+        self.app_statements.plans.plan(*schema, sql, || self.build_scope_plan(sql, statement))
     }
 
     fn build_scope_plan(

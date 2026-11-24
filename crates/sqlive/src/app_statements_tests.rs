@@ -1,5 +1,8 @@
+use super::ScopePlans;
 use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions, TestRead};
 use crate::triggered_inserts::SCHEMA as TRIGGERED;
+use crate::ScopePlan;
+use std::sync::Arc;
 
 fn notes() -> TestDatabase {
     open("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)", "notes")
@@ -153,9 +156,9 @@ fn plans_built_on_each_reader(db: &TestDatabase, counter: &crate::ConnectionWork
     counter.take().scope_plans_built
 }
 
-/// A statement's scope plan depends on its SQL and the schema alone, so
-/// the database's readers share it: two readers running the same live
-/// query's statement build its plan once, and later runs build none.
+/// A database's readers share a statement's scope plan: two readers running
+/// the same live query's statement build its plan once, and later runs build
+/// none.
 #[test]
 fn readers_share_a_statements_scope_plan() {
     let (db, counter) = note_of_title();
@@ -173,6 +176,106 @@ fn a_schema_change_builds_a_scope_plan_again() {
     db.host(|writer| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
     assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
     db.close();
+}
+
+/// A plan of some statement, for tests of the map that keeps plans.
+fn some_plan() -> Arc<ScopePlan> {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let statement = connection.prepare("SELECT 1").unwrap();
+    let whole = crate::WholeViews::new([]);
+    Arc::new(ScopePlan::build(&connection, "SELECT 1", &statement, &whole).unwrap())
+}
+
+/// What a second caller did while the first was building the plan.
+#[derive(Debug, PartialEq, Eq)]
+enum Second {
+    Waited,
+    Built,
+}
+
+/// Ask `plans` for one plan from two threads: `first` builds it and ends only
+/// once the second caller, which would build `plan`, waits for it or builds
+/// its own. The second caller's first step, what it got, and how often it
+/// built.
+fn second_caller_during(
+    plans: &ScopePlans,
+    first: impl FnOnce() -> rusqlite::Result<Arc<ScopePlan>> + Send,
+) -> (Second, Arc<ScopePlan>, usize) {
+    let (did, second_did) = std::sync::mpsc::channel();
+    let (began, building) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let waited = did.clone();
+    plans.on_next_wait(move || waited.send(Second::Waited).unwrap());
+    let plan = some_plan();
+    std::thread::scope(|scope| {
+        let builder = scope.spawn(move || {
+            plans.plan(1, TITLES, || {
+                began.send(()).unwrap();
+                released.recv().unwrap();
+                first()
+            })
+        });
+        building.recv().unwrap();
+        let second = scope.spawn(move || {
+            let mut builds = 0;
+            let got = plans.plan(1, TITLES, || {
+                builds += 1;
+                did.send(Second::Built).unwrap();
+                Ok(plan)
+            });
+            (got.unwrap(), builds)
+        });
+        let step = second_did.recv().unwrap();
+        release.send(()).unwrap();
+        // The first build may fail or panic; what the second caller then gets
+        // is what the test asks.
+        drop(builder.join());
+        let (got, builds) = second.join().unwrap();
+        (step, got, builds)
+    })
+}
+
+/// Two first runs of a statement at the same moment build its plan once: the
+/// second waits for the first's build and uses it.
+#[test]
+fn two_first_runs_at_once_build_a_plan_once() {
+    let plans = ScopePlans::new();
+    let first = some_plan();
+    let built = Arc::clone(&first);
+    let (step, got, builds) = second_caller_during(&plans, move || Ok(built));
+    assert_eq!((step, builds), (Second::Waited, 0));
+    assert!(Arc::ptr_eq(&got, &first));
+}
+
+/// A build that fails wakes the caller waiting for it, which builds the plan
+/// itself.
+#[test]
+fn a_failed_build_leaves_the_plan_to_the_waiting_caller() {
+    let plans = ScopePlans::new();
+    let (step, got, builds) =
+        second_caller_during(&plans, || Err(rusqlite::Error::QueryReturnedNoRows));
+    assert_eq!((step, builds), (Second::Waited, 1));
+    let kept = plans.plan(1, TITLES, || unreachable!("the plan is kept")).unwrap();
+    assert!(Arc::ptr_eq(&kept, &got));
+}
+
+/// A build that panics wakes the caller waiting for it, too.
+#[test]
+fn a_panicking_build_leaves_the_plan_to_the_waiting_caller() {
+    let plans = ScopePlans::new();
+    let (step, _got, builds) = second_caller_during(&plans, || panic!("the build broke"));
+    assert_eq!((step, builds), (Second::Waited, 1));
+}
+
+/// A run still on an older schema leaves the newer schema's plans kept.
+#[test]
+fn an_older_schemas_run_leaves_the_newer_plans_kept() {
+    let plans = ScopePlans::new();
+    let newer = plans.plan(2, TITLES, || Ok(some_plan())).unwrap();
+    let older = plans.plan(1, TITLES, || Ok(some_plan())).unwrap();
+    assert!(!Arc::ptr_eq(&older, &newer));
+    let kept = plans.plan(2, TITLES, || unreachable!("the plan is kept")).unwrap();
+    assert!(Arc::ptr_eq(&kept, &newer));
 }
 
 /// What one app statement whose triggers reach a view costs through sqlive,

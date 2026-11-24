@@ -1750,12 +1750,16 @@ how the app receives them.
 - **What a live query's statement narrows.** Coven reads from each statement
   of a live query which rows of each table the query depends on, by the rules
   above, the first time a live query runs it. What it reads depends on the
-  statement's text and the schema alone, so the database's connections share
-  it: what one connection read, the others use, and a schema change reads it
-  again. Kept by each connection alone, it would cost Ben's import pane again
-  on each reader the pane first runs on. The pane's 24 statements took 2 s to
-  read in a debug build, so each of his first switches between candidates
-  waited 2 s. Two first runs at the same moment on two readers each read it.
+  statement's text, the schema, and the SQL functions and the views read whole
+  that the connection was set up with. Coven sets up every connection of a
+  database alike, so they share what each one reads, and a schema change reads
+  it again. Kept by each connection alone, it would cost Ben's import pane
+  again on each reader the pane first runs on. The pane's 22 statements took
+  2 s to read in a debug build, so each of his first switches between
+  candidates waited 2 s. When two readers first run a statement at the same
+  moment, one reads it and the other waits for what that one reads, since
+  reading it twice would only take more of the processor. When that reading
+  fails, the waiting reader reads the statement itself.
 - **A bulk write's statements aren't kept.** SQLite decides how a statement
   deletes as it prepares it, and empties a table in one step only where no
   pre-update hook watches. Kept, a bulk write's `DELETE FROM queue` would empty
