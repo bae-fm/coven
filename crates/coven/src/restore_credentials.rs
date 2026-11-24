@@ -21,7 +21,6 @@ pub(super) fn restore_connection(
         }
         (carried, supplied) => carried.or(supplied),
     };
-    let mut sign_in = None;
     let credentials = match (location.provider(), s3_credentials) {
         (CloudProvider::S3, Some(keys)) => StorageCredentials::S3(keys),
         (CloudProvider::S3, None) => {
@@ -40,12 +39,11 @@ pub(super) fn restore_connection(
         }
         (CloudProvider::CloudKit, None) => StorageCredentials::CloudKit,
         (_, None) => {
-            let (held, tokens) = held_sign_in(builder, &location)?;
-            sign_in = Some(held);
-            StorageCredentials::OAuth(tokens)
+            let (data, held) = held_connection(builder, location)?;
+            return Ok((data, Some(held)));
         }
     };
     let data = ConnectionCredentials { location, credentials };
     data.validate().map_err(SyncError::from)?;
-    Ok((data, sign_in))
+    Ok((data, None))
 }

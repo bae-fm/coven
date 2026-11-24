@@ -21,7 +21,7 @@ use tokio::sync::watch;
 #[path = "bootstrap_authentication.rs"]
 mod authentication;
 use authentication::{
-    connect_storage, held_sign_in, join_sign_in, kept_sign_in_refused, provider_auth,
+    connect_storage, held_connection, join_sign_in, kept_sign_in_refused, provider_auth,
     sign_in_missing, SignInCustody,
 };
 use coven_sync::SessionSignIn;
