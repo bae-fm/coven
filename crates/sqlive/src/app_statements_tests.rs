@@ -118,6 +118,63 @@ fn a_schema_change_prepares_again() {
     db.close();
 }
 
+/// A live query's statement that reads one note's title.
+const TITLES: &str = "SELECT title FROM notes WHERE id = ?1";
+
+/// A database with the note `TITLES` reads, and a counter of its connections'
+/// work.
+fn note_of_title() -> (TestDatabase, crate::ConnectionWorkCounter) {
+    let db = notes();
+    db.write_app(|sql| sql.app_execute(INSERT, ["1"])).unwrap();
+    let counter = crate::ConnectionWorkCounter::new();
+    db.track_work(&counter);
+    (db, counter)
+}
+
+/// Run `TITLES` as a live query's statement on each of `db`'s two readers,
+/// holding both at once so that each run is on a reader of its own, and
+/// return the scope plans the runs built.
+fn plans_built_on_each_reader(db: &TestDatabase, counter: &crate::ConnectionWorkCounter) -> usize {
+    db.with_database(|database| {
+        let (first, second) = (database.reader(), database.reader());
+        for reader in [&first, &second] {
+            let title = reader.host(|reader| {
+                reader.live_read(
+                    &mut |_reads, _lookups| Ok(()),
+                    |reader| -> Result<String, TestError> {
+                        Ok(reader
+                            .app_query_row(crate::Recorded::Yes, TITLES, ["1"], |r| r.get(0))?)
+                    },
+                )
+            });
+            assert_eq!(title.unwrap(), "title");
+        }
+    });
+    counter.take().scope_plans_built
+}
+
+/// A statement's scope plan depends on its SQL and the schema alone, so
+/// the database's readers share it: two readers running the same live
+/// query's statement build its plan once, and later runs build none.
+#[test]
+fn readers_share_a_statements_scope_plan() {
+    let (db, counter) = note_of_title();
+    assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
+    assert_eq!(plans_built_on_each_reader(&db, &counter), 0);
+    db.close();
+}
+
+/// A schema change drops the plans kept against the old schema: the next
+/// run builds the statement's plan again, for every reader.
+#[test]
+fn a_schema_change_builds_a_scope_plan_again() {
+    let (db, counter) = note_of_title();
+    assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
+    db.host(|writer| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
+    assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
+    db.close();
+}
+
 /// What one app statement whose triggers reach a view costs through sqlive,
 /// against plain SQLite preparing it each time and from its cache. Run
 /// explicitly.

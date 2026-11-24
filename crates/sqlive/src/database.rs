@@ -84,14 +84,18 @@ impl<P: Policy> Database<P> {
         // Every connection orders its commits and snapshots with the others
         // (`snapshot_values.rs`).
         let order = Arc::new(crate::snapshot_values::CommitOrder::new());
+        // A statement's scope plan depends on its SQL and the schema alone,
+        // so the connections share the plans they build (§4).
+        let plans = Arc::new(crate::connection::ScopePlans::new());
         let open = |read_only| {
-            let mut connection = HostSql::open(
+            let mut connection = HostSql::open_sharing(
                 path,
                 read_only,
                 (options.policy)(),
                 Arc::clone(&options.whole_views),
                 &options.settings,
                 options.setup,
+                Arc::clone(&plans),
             )?;
             connection.share_commit_order(Arc::clone(&order));
             Ok::<_, PolicyError<P>>(connection)

@@ -6,32 +6,90 @@
 //! SQLite prepares it, so a statement is prepared afresh the first time in
 //! each authorization context, and what it read is kept beside it: a later
 //! use from the cache is judged and recorded exactly as that first one was.
+//!
+//! What a kept statement lets a live query narrow depends on its SQL and the
+//! schema alone, so a database's connections share one map of those plans:
+//! once one reader built a statement's plan, the others use it.
 
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
 use crate::{ReadFrame, ScopePlan};
+use panic_as_error::locks::lock_unpoisoned;
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// How many app statements' reads a connection keeps, in every context
-/// together: more than an app runs, but bounded for SQL built with values in
-/// its text.
+/// together, and how many statements' plans a database keeps: more than an
+/// app runs, but bounded for SQL built with values in its text.
 const RECORDED: usize = 512;
 
-#[derive(Default)]
+/// What each kept statement lets a live query narrow, by its SQL, for the
+/// one schema the plans were built against. A database's connections share
+/// one; a connection opened outside a database keeps its own.
+pub(crate) struct ScopePlans(Mutex<KeptPlans>);
+
+struct KeptPlans {
+    schema: Option<i64>,
+    plans: HashMap<String, Arc<ScopePlan>>,
+}
+
+impl ScopePlans {
+    /// A map that holds no plan yet.
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(KeptPlans { schema: None, plans: HashMap::new() }))
+    }
+
+    /// The plan of `sql` built against `schema`, if one was kept.
+    fn get(&self, schema: i64, sql: &str) -> Option<Arc<ScopePlan>> {
+        let kept = lock_unpoisoned(&self.0);
+        kept.plans.get(sql).filter(|_| kept.schema == Some(schema)).cloned()
+    }
+
+    /// Keep `plan`, `sql`'s plan built against `schema`. Plans built against
+    /// another schema are dropped first, and all of them once the map holds
+    /// [`RECORDED`] statements. A connection still reading an older schema
+    /// drops the newer plans too, and the next run on the newer schema builds
+    /// them again.
+    fn keep(&self, schema: i64, sql: &str, plan: &Arc<ScopePlan>) {
+        let mut kept = lock_unpoisoned(&self.0);
+        if kept.schema != Some(schema) {
+            kept.plans.clear();
+            kept.schema = Some(schema);
+        }
+        if kept.plans.len() >= RECORDED {
+            kept.plans.clear();
+        }
+        kept.plans.insert(sql.to_owned(), Arc::clone(plan));
+    }
+}
+
 pub(super) struct AppStatements {
     /// The schema the kept statements were prepared against.
     schema: Cell<Option<i64>>,
     /// What each statement read when it was prepared in each context.
     reads: RefCell<HashMap<AppContext, HashMap<String, ReadFrame>>>,
-    /// What each kept statement lets a live query narrow.
-    plans: RefCell<HashMap<String, Arc<ScopePlan>>>,
+    /// What each kept statement lets a live query narrow, shared with the
+    /// database's other connections.
+    plans: Arc<ScopePlans>,
     /// Statements prepared afresh, for tests of the cache.
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fresh: Cell<usize>,
+}
+
+impl AppStatements {
+    /// No statement kept yet, with the plans of `plans`.
+    pub(super) fn new(plans: Arc<ScopePlans>) -> Self {
+        Self {
+            schema: Cell::new(None),
+            reads: RefCell::new(HashMap::new()),
+            plans,
+            #[cfg(any(test, feature = "test-utils"))]
+            fresh: Cell::new(0),
+        }
+    }
 }
 
 impl<P: Policy> HostSql<P> {
@@ -53,7 +111,6 @@ impl<P: Policy> HostSql<P> {
             // judged as it would be now.
             self.connection.flush_prepared_statement_cache();
             self.app_statements.reads.borrow_mut().clear();
-            self.app_statements.plans.borrow_mut().clear();
             self.app_statements.schema.set(Some(schema));
         }
         let recorded = self
@@ -64,7 +121,10 @@ impl<P: Policy> HostSql<P> {
             .and_then(|statements| statements.get(sql).cloned());
         if let Some(reads) = recorded {
             self.authorization.replay_reads(&reads);
-            return Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?));
+            return Ok(AppStatement::Cached {
+                statement: self.connection.prepare_cached(sql)?,
+                schema,
+            });
         }
         #[cfg(any(test, feature = "test-utils"))]
         self.app_statements.fresh.set(self.app_statements.fresh.get() + 1);
@@ -78,7 +138,7 @@ impl<P: Policy> HostSql<P> {
         }
         recorded.entry(context).or_default().insert(sql.to_owned(), reads);
         drop(recorded);
-        Ok(AppStatement::Cached(self.connection.prepare_cached(sql)?))
+        Ok(AppStatement::Cached { statement: self.connection.prepare_cached(sql)?, schema })
     }
 
     /// What `statement` lets the live query reading it narrow; `None`
@@ -141,29 +201,35 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// What `statement`, prepared from `sql`, lets a live query narrow, kept
-    /// beside a kept statement while the schema stays.
+    /// for the database beside a kept statement while the schema stays.
     pub(super) fn scope_plan(
         &self,
         sql: &str,
         statement: &AppStatement<'_>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
-        let kept = matches!(statement, AppStatement::Cached(_));
-        if kept {
-            if let Some(plan) = self.app_statements.plans.borrow().get(sql) {
-                return Ok(Arc::clone(plan));
-            }
+        let AppStatement::Cached { schema, .. } = statement else {
+            return self.build_scope_plan(sql, statement);
+        };
+        if let Some(plan) = self.app_statements.plans.get(*schema, sql) {
+            return Ok(plan);
         }
-        let plan = Arc::new(self.authorization.unrecorded(|| {
-            ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
-        })?);
-        if kept {
-            let mut plans = self.app_statements.plans.borrow_mut();
-            if plans.len() >= RECORDED {
-                plans.clear();
-            }
-            plans.insert(sql.to_owned(), Arc::clone(&plan));
-        }
+        // Built outside the map's lock, so the other connections' runs don't
+        // wait for it; two first runs at once each build it.
+        let plan = self.build_scope_plan(sql, statement)?;
+        self.app_statements.plans.keep(*schema, sql, &plan);
         Ok(plan)
+    }
+
+    fn build_scope_plan(
+        &self,
+        sql: &str,
+        statement: &AppStatement<'_>,
+    ) -> rusqlite::Result<Arc<ScopePlan>> {
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| work.scope_plans_built += 1);
+        Ok(Arc::new(self.authorization.unrecorded(|| {
+            ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
+        })?))
     }
 }
 
@@ -180,7 +246,11 @@ pub(super) enum StepsOf {
 
 /// An app statement, kept prepared or prepared for this use alone.
 pub(super) enum AppStatement<'connection> {
-    Cached(CachedStatement<'connection>),
+    /// Kept prepared, against the schema `schema`.
+    Cached {
+        statement: CachedStatement<'connection>,
+        schema: i64,
+    },
     Fresh(Statement<'connection>),
 }
 
@@ -188,7 +258,7 @@ impl<'connection> std::ops::Deref for AppStatement<'connection> {
     type Target = Statement<'connection>;
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Cached(statement) => statement,
+            Self::Cached { statement, .. } => statement,
             Self::Fresh(statement) => statement,
         }
     }
@@ -197,7 +267,7 @@ impl<'connection> std::ops::Deref for AppStatement<'connection> {
 impl std::ops::DerefMut for AppStatement<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            Self::Cached(statement) => statement,
+            Self::Cached { statement, .. } => statement,
             Self::Fresh(statement) => statement,
         }
     }

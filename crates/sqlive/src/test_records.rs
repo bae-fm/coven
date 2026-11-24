@@ -6,8 +6,8 @@ use panic_as_error::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// The work a connection counts: its commits, its reads of the schema
-/// cookie, and the steps of the statements it runs for the app and for live
-/// queries' lookups.
+/// cookie, the steps of the statements it runs for the app and for live
+/// queries' lookups, and the scope plans it builds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionWork {
     /// Successful durable transaction commits, unchanged transactions'
@@ -32,6 +32,8 @@ pub struct ConnectionWork {
     /// Questions about a changed row that ran past `LOOKUP_STEPS` and
     /// stopped, each of which reran a live query.
     pub stopped_questions: usize,
+    /// Scope plans built for a live query's statement (`scope_plan.rs`).
+    pub scope_plans_built: usize,
 }
 
 /// Where connections count their work. Clones count into the same place.

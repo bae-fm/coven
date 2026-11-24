@@ -1747,6 +1747,15 @@ how the app receives them.
   for a change once, not before each statement. An app statement whose
   triggers read a view of six tables took 16 µs to prepare and runs from the
   cache in about 3 µs.
+- **What a live query's statement narrows.** Coven reads from each statement
+  of a live query which rows of each table the query depends on, by the rules
+  above, the first time a live query runs it. What it reads depends on the
+  statement's text and the schema alone, so the database's connections share
+  it: what one connection read, the others use, and a schema change reads it
+  again. Kept by each connection alone, it would cost Ben's import pane again
+  on each reader the pane first runs on. The pane's 24 statements took 2 s to
+  read in a debug build, so each of his first switches between candidates
+  waited 2 s. Two first runs at the same moment on two readers each read it.
 - **A bulk write's statements aren't kept.** SQLite decides how a statement
   deletes as it prepares it, and empties a table in one step only where no
   pre-update hook watches. Kept, a bulk write's `DELETE FROM queue` would empty

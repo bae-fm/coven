@@ -502,7 +502,10 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, titles);
     let live = counter.take();
-    assert_eq!(live, once);
+    // The live run also builds the statement's scope plan, which a one-shot
+    // read has no use for.
+    assert_eq!(live.scope_plans_built, 1);
+    assert_eq!(crate::ConnectionWork { scope_plans_built: 0, ..live }, once);
     drop(query);
     db.close();
 }

@@ -37,6 +37,7 @@ pub use statement_profiles::ProfiledStatement;
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "test_hooks.rs"]
 mod test_hooks;
+pub(crate) use app_statements::ScopePlans;
 use app_statements::StepsOf;
 pub use event_capture::Operation;
 pub use schema_cookie::CookieScope;
@@ -158,7 +159,8 @@ impl<P: Policy> HostSql<P> {
     /// A connection to the database at `path`, for reading only when
     /// `read_only`, whose authorizer asks `policy` after its own rules and
     /// treats `whole_views` as a live query's whole reads. `setup` registers
-    /// what the connection needs, given its policy, before any SQL runs.
+    /// what the connection needs, given its policy, before any SQL runs. The
+    /// connection keeps its statements' scope plans for itself.
     pub fn open(
         path: &Path,
         read_only: bool,
@@ -166,6 +168,21 @@ impl<P: Policy> HostSql<P> {
         whole_views: Arc<crate::WholeViews>,
         settings: &crate::SqliteSettings,
         setup: &dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
+    ) -> Result<Self, PolicyError<P>> {
+        let plans = Arc::new(ScopePlans::new());
+        Self::open_sharing(path, read_only, policy, whole_views, settings, setup, plans)
+    }
+
+    /// [`Self::open`], keeping its statements' scope plans in `plans`, which
+    /// the database's other connections share.
+    pub(crate) fn open_sharing(
+        path: &Path,
+        read_only: bool,
+        policy: P,
+        whole_views: Arc<crate::WholeViews>,
+        settings: &crate::SqliteSettings,
+        setup: &dyn Fn(&Setup<'_, P>, &P) -> rusqlite::Result<()>,
+        plans: Arc<ScopePlans>,
     ) -> Result<Self, PolicyError<P>> {
         let policy = Arc::new(policy);
         let authorization = SqlAuthorization::new(whole_views, Arc::clone(&policy));
@@ -208,7 +225,7 @@ impl<P: Policy> HostSql<P> {
             authorization,
             policy,
             lookups,
-            app_statements: app_statements::AppStatements::default(),
+            app_statements: app_statements::AppStatements::new(plans),
             cookie: schema_cookie::SchemaCookie::default(),
             handle: None,
             observation: None,
