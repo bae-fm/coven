@@ -807,3 +807,39 @@ sqlive_compose::read!(Opaque { doc: json<Vec<Elsewhere>> }, r#"SELECT json_group
     )
     .unwrap();
 }
+
+#[test]
+fn a_column_that_cannot_name_a_field_fails() {
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::read!(Odd, r#"SELECT p.name AS "my col" FROM people AS p"#);
+sqlive_compose::read!(Selfish, r#"SELECT p.name AS "self" FROM people AS p"#);
+"##,
+    ));
+    assert_eq!(
+        errors,
+        [
+            "src/lib.rs:2:1: Odd returns my col, which can't name a Rust field: give the column another name with AS",
+            "src/lib.rs:3:1: Selfish returns self, which can't name a Rust field: give the column another name with AS",
+        ]
+    );
+}
+
+#[test]
+fn a_parent_row_that_is_no_alias_is_a_bad_argument() {
+    let people = manifest_of("people", PEOPLE, &[]);
+    let errors = messages(compile(
+        "tracker",
+        &[(
+            "src/lib.rs",
+            r##"
+sqlive_compose::read!(Numbered, r#"SELECT c.id, @people::CommentAuthor(parent: 1) AS a FROM comments AS c"#);
+"##,
+        )],
+        &[&people],
+    ));
+    assert_eq!(
+        errors,
+        ["src/lib.rs:2:1: the spread of people::CommentAuthor binds parent to a value that is not the form it takes"]
+    );
+}

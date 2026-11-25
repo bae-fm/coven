@@ -7,8 +7,8 @@ use super::error::Cause;
 use super::header::{Declared, Header, RustType};
 use super::json;
 use super::lex::Token;
-use super::model::{strict_type, Field, Reading};
-use super::spread::{Placed, Registry};
+use super::model::{strict_type, Field, FieldName, Reading};
+use super::spread::{Place, Placed, Registry};
 
 /// A result item and the result columns it gives.
 struct Span<'a> {
@@ -17,7 +17,7 @@ struct Span<'a> {
     width: usize,
     /// The fragment it spreads, when it is `alias.*` of a table spread or a
     /// value spread's alias.
-    spread: Option<&'a Placed>,
+    spread: Option<(&'a Placed, &'a str)>,
 }
 
 /// Each field of the call's type, in the order of the result items.
@@ -34,8 +34,9 @@ pub(crate) fn fields(
     let nullable_from = nullable_items(core);
     let mut fields: Vec<Field> = Vec::new();
     for span in &spans {
-        if let Some(spread) = span.spread {
-            let field = spread_field(header, core, &nullable_from, span, spread, registry)?;
+        if let Some((spread, alias)) = span.spread {
+            let field =
+                spread_field(header, core, &nullable_from, span, (spread, alias), registry)?;
             push(header, &mut fields, field)?;
             continue;
         }
@@ -74,7 +75,10 @@ pub(crate) fn fields(
 
 fn push(header: &Header, fields: &mut Vec<Field>, field: Field) -> Result<(), Cause> {
     if fields.iter().any(|other| other.name == field.name) {
-        return Err(Cause::DuplicateColumn { concerns: header.name.clone(), column: field.name });
+        return Err(Cause::DuplicateColumn {
+            concerns: header.name.clone(),
+            column: field.name.as_str().to_owned(),
+        });
     }
     fields.push(field);
     Ok(())
@@ -88,19 +92,19 @@ fn spans<'a>(
     columns: usize,
     placed: &'a [Placed],
 ) -> Result<Vec<Span<'a>>, Cause> {
-    let spread_of = |item: &Item| -> Option<&'a Placed> {
-        match &item.kind {
-            ItemKind::QualifiedStar(qualifier) => placed.iter().find(|spread| {
-                spread.parent.is_none() && spread.alias.as_deref() == Some(qualifier.as_str())
-            }),
-            ItemKind::Subquery => placed.iter().find(|spread| {
-                spread.parent.is_some() && item.alias.is_some() && spread.alias == item.alias
-            }),
-            _ => None,
-        }
+    let spread_of = |item: &Item| -> Option<(&'a Placed, &'a str)> {
+        placed.iter().find_map(|spread| {
+            let alias = spread.alias.as_deref()?;
+            let named = match (&item.kind, &spread.place) {
+                (ItemKind::QualifiedStar(qualifier), Place::Table) => qualifier == alias,
+                (ItemKind::Subquery, Place::Value { .. }) => item.alias.as_deref() == Some(alias),
+                _ => false,
+            };
+            named.then_some((spread, alias))
+        })
     };
     let width_of = |item: &Item| match (spread_of(item), &item.kind) {
-        (Some(spread), ItemKind::QualifiedStar(_)) => Some(spread.record.width),
+        (Some((spread, _)), ItemKind::QualifiedStar(_)) => Some(spread.record.width),
         (_, ItemKind::Star | ItemKind::QualifiedStar(_)) => None,
         _ => Some(1),
     };
@@ -129,34 +133,31 @@ fn spread_field(
     core: &Core,
     nullable_from: &[bool],
     span: &Span<'_>,
-    spread: &Placed,
+    (spread, alias): (&Placed, &str),
     registry: &Registry,
 ) -> Result<Field, Cause> {
-    let is_value = spread.parent.is_some();
-    let nullable = if is_value {
-        !spread.record.one_row
-    } else {
-        let qualifier = spread.alias.as_deref();
-        core.from
+    let nullable = match &spread.place {
+        Place::Value { .. } => !spread.record.one_row,
+        Place::Table => core
+            .from
             .iter()
             .zip(nullable_from)
-            .any(|(from, &nullable)| nullable && from.qualifier.as_deref() == qualifier)
+            .any(|(from, &nullable)| nullable && from.qualifier.as_deref() == Some(alias)),
     };
-    if nullable && spread.record.presence.is_none() {
-        return Err(Cause::NoPresence {
+    let path = registry.code_path(&spread.record.path);
+    if syn::parse_str::<syn::Path>(&path).is_err() {
+        return Err(Cause::BadPath { concerns: header.name.clone(), path });
+    }
+    let (ty, reading) = if nullable {
+        let presence = spread.record.presence.ok_or_else(|| Cause::NoPresence {
             concerns: header.name.clone(),
             fragment: spread.record.path.clone(),
-        });
-    }
-    let path = registry.code_path(&spread.record.path);
-    let name = span.item.alias.clone().or_else(|| spread.alias.clone()).unwrap_or_default();
-    let ty = if nullable { format!("Option<{path}>") } else { path.clone() };
-    Ok(Field {
-        name,
-        ty: RustType(ty),
-        reading: Reading::Spread { path, presence: spread.record.presence },
-        column: span.start,
-    })
+        })?;
+        (format!("Option<{path}>"), Reading::MissingSpread { path, presence })
+    } else {
+        (path.clone(), Reading::Spread { path, presence: spread.record.presence })
+    };
+    Ok(Field { name: field_name(header, alias)?, ty: RustType(ty), reading, column: span.start })
 }
 
 /// The field for the result column `column`, which comes from `item`.
@@ -221,7 +222,16 @@ fn column_field(
             })
         }
     };
-    Ok(Field { name: column.name.clone(), ty, reading, column: position })
+    let name = field_name(header, &column.name)?;
+    Ok(Field { name, ty, reading, column: position })
+}
+
+/// The name of the field for the column or spread `name`.
+fn field_name(header: &Header, name: &str) -> Result<FieldName, Cause> {
+    FieldName::new(name).ok_or_else(|| Cause::BadIdentifier {
+        concerns: header.name.clone(),
+        name: name.to_owned(),
+    })
 }
 
 /// For each FROM item, whether a LEFT, RIGHT or FULL join gives its columns

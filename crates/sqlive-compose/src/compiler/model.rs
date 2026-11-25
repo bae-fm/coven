@@ -17,17 +17,49 @@ pub(crate) enum Reading {
         /// writes it.
         path: String,
         /// The position, from the field's column, of the fragment's first
-        /// column that can't be NULL, which tells a row from the NULLs of a
-        /// missing row. Only a field that can be missing reads it.
+        /// column that can't be NULL, which a fragment that holds this one
+        /// reports as its own.
         presence: Option<usize>,
     },
+    /// The columns of a fragment that can be missing: they are all NULL then.
+    MissingSpread {
+        /// The Rust path of the fragment's type, as the call's own code
+        /// writes it.
+        path: String,
+        /// The position, from the field's column, of the fragment's first
+        /// column that can't be NULL, which tells a row from the NULLs of a
+        /// missing row.
+        presence: usize,
+    },
+}
+
+/// The name of a field: one that Rust reads as an identifier, raw when it is
+/// a keyword.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FieldName(String);
+
+impl FieldName {
+    /// The name `name`, when it can be an identifier.
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        let bare = name.strip_prefix("r#").unwrap_or(name);
+        let mut characters = bare.chars();
+        let starts = characters.next().is_some_and(|first| first.is_alphabetic() || first == '_');
+        let rest = characters.all(|next| next.is_alphanumeric() || next == '_');
+        let reserved = matches!(bare, "_" | "self" | "Self" | "super" | "crate");
+        (starts && rest && !reserved).then(|| Self(name.to_owned()))
+    }
+
+    /// The name as text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// One field of a generated row or fragment type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Field {
     /// The field's name.
-    pub(crate) name: String,
+    pub(crate) name: FieldName,
     /// The field's Rust type.
     pub(crate) ty: RustType,
     /// How it reads its column.

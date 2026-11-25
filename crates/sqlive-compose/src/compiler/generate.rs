@@ -6,22 +6,27 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use super::header::{FieldType, Header, Parameter, RustType, Shape};
-use super::model::{Field, Reading};
+use super::model::{Field, FieldName, Reading};
 
 const GENERATED: &str = "::sqlive_compose::generated";
 
-/// An identifier for `name`, raw when `name` is a Rust keyword.
+/// The identifier of a field's name, raw when the name is a keyword.
+fn field_ident(name: &FieldName) -> Ident {
+    syn::parse_str::<Ident>(name.as_str())
+        .unwrap_or_else(|_| Ident::new_raw(name.as_str(), proc_macro2::Span::call_site()))
+}
+
+/// The identifier of a name the header's parser read as one.
 fn ident(name: &str) -> Ident {
-    syn::parse_str::<Ident>(name)
-        .unwrap_or_else(|_| Ident::new_raw(name, proc_macro2::Span::call_site()))
+    field_ident(&FieldName::new(name).expect("the header's parser read an identifier"))
 }
 
 fn rust_type(ty: &RustType) -> TokenStream {
-    ty.0.parse().unwrap_or_else(|_| quote!(compile_error!("the type is not Rust")))
+    ty.0.parse().expect("a type the header's parser read, or one the compiler wrote")
 }
 
 fn path(tail: &str) -> TokenStream {
-    format!("{GENERATED}::{tail}").parse().unwrap_or_default()
+    format!("{GENERATED}::{tail}").parse().expect("a path of constants")
 }
 
 /// The expression that reads `field` from `row`, the column at `offset` plus
@@ -37,17 +42,22 @@ fn read_field(field: &Field) -> TokenStream {
             let json = path("json_column");
             quote!(#json(row, offset + #column)?)
         }
-        Reading::Spread { path: fragment, presence } => {
-            let fragment: TokenStream = fragment.parse().unwrap_or_default();
-            if field.ty.is_option() {
-                let at = column + presence.unwrap_or_default();
-                let is_null = path("is_null");
-                quote!(if #is_null(row, offset + #at)? { None } else { Some(#fragment::read(row, offset + #column)?) })
-            } else {
-                quote!(#fragment::read(row, offset + #column)?)
-            }
+        Reading::Spread { path: fragment, .. } => {
+            let fragment = fragment_path(fragment);
+            quote!(#fragment::read(row, offset + #column)?)
+        }
+        Reading::MissingSpread { path: fragment, presence } => {
+            let fragment = fragment_path(fragment);
+            let at = column + presence;
+            let is_null = path("is_null");
+            quote!(if #is_null(row, offset + #at)? { None } else { Some(#fragment::read(row, offset + #column)?) })
         }
     }
+}
+
+/// The path of a fragment's type, which the columns' compile checked is one.
+fn fragment_path(path: &str) -> syn::Path {
+    syn::parse_str(path).expect("a fragment path that the compile of the columns checked")
 }
 
 fn row_type() -> TokenStream {
@@ -92,7 +102,7 @@ fn shapes(shapes: &[Shape]) -> TokenStream {
 pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let name = ident(&header.name);
     let doc = format!("The columns of `{}`.", header.name);
-    let names: Vec<Ident> = fields.iter().map(|field| ident(&field.name)).collect();
+    let names: Vec<Ident> = fields.iter().map(|field| field_ident(&field.name)).collect();
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
@@ -129,7 +139,7 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
         header.parameters.iter().map(|Parameter { ty, .. }| rust_type(ty)).collect();
     let bound: Vec<String> =
         header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
-    let names: Vec<Ident> = fields.iter().map(|field| ident(&field.name)).collect();
+    let names: Vec<Ident> = fields.iter().map(|field| field_ident(&field.name)).collect();
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();

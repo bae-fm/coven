@@ -1,10 +1,10 @@
 use super::{fragment, read};
 use crate::compiler::header::{parse, CallKind, RustType};
-use crate::compiler::model::{Field, Reading};
+use crate::compiler::model::{Field, FieldName, Reading};
 use quote::quote;
 
 fn field(name: &str, ty: &str, reading: Reading, column: usize) -> Field {
-    Field { name: name.into(), ty: RustType(ty.into()), reading, column }
+    Field { name: FieldName::new(name).unwrap(), ty: RustType(ty.into()), reading, column }
 }
 
 #[test]
@@ -32,4 +32,12 @@ fn a_read_binds_its_request_by_name() {
     assert!(code.contains("(\":a\" , & self . a as"), "{code}");
     assert!(code.contains("(\":b\" , & self . b as"), "{code}");
     syn::parse_file(&code).unwrap();
+}
+
+#[test]
+fn a_name_that_cannot_be_an_identifier_is_refused() {
+    for name in ["my col", "self", "", "1st", "a-b"] {
+        assert_eq!(FieldName::new(name), None, "{name}");
+    }
+    assert!(FieldName::new("type").is_some() && FieldName::new("r#type").is_some());
 }

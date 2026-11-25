@@ -1,4 +1,4 @@
-use super::{empty_relation, expand, spread_paths, with_ctes, without_parent, Registry};
+use super::{empty_relation, expand, spread_paths, with_ctes, without_parent, Place, Registry};
 use crate::compiler::header::{Parameter, Relation, RustType};
 use crate::compiler::model::Record;
 
@@ -66,7 +66,7 @@ fn a_value_spread_binds_its_parameters_and_its_parent_row() {
         expansion.sql,
         "SELECT i.title, (SELECT count(*) AS unread FROM comments AS c WHERE c.issue_id = i.id AND c.author_id = :me) AS unread FROM issues AS i"
     );
-    assert_eq!(expansion.placed[0].parent.as_deref(), Some("i"));
+    assert!(matches!(&expansion.placed[0].place, Place::Value { parent } if parent == "i"));
 }
 
 #[test]

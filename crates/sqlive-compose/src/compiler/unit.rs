@@ -12,7 +12,7 @@ use super::lex;
 use super::model::{Field, Reading, Record};
 use super::rename;
 use super::source::Call;
-use super::spread::{self, Placed, Registry};
+use super::spread::{self, Place, Placed, Registry};
 
 /// What compiling a call needs of the crate it is in.
 pub(crate) struct Context<'a> {
@@ -124,6 +124,7 @@ fn presence(fields: &[Field]) -> Option<usize> {
         _ if field.ty.is_option() => None,
         Reading::Value | Reading::Json => Some(field.column),
         Reading::Spread { presence, .. } => presence.map(|inner| field.column + inner),
+        Reading::MissingSpread { .. } => None,
     })
 }
 
@@ -142,7 +143,12 @@ pub(crate) fn fragment_path(crate_name: &str, module: &[String], name: &str) -> 
 /// beside a FROM item that reads the parent's table, never in FROM itself.
 fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause> {
     for spread in placed {
-        let Some(table) = &spread.record.parent else { continue };
+        let (Some(table), Place::Value { parent }) = (&spread.record.parent, &spread.place) else {
+            if spread.record.parent.is_some() {
+                return Err(Cause::MissingParent { fragment: spread.record.path.clone() });
+            }
+            continue;
+        };
         if let Some(alias) = &spread.alias {
             let in_from = from.iter().any(|item| {
                 item.table.is_none() && item.qualifier.as_deref() == Some(alias.as_str())
@@ -151,7 +157,6 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
                 return Err(Cause::ParentSpreadInFrom { fragment: spread.record.path.clone() });
             }
         }
-        let parent = spread.parent.clone().unwrap_or_default();
         let reads = from.iter().any(|item| {
             item.qualifier.as_deref() == Some(parent.as_str())
                 && item.table.as_deref().is_some_and(|read| read.eq_ignore_ascii_case(table))
@@ -159,7 +164,7 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
         if !reads {
             return Err(Cause::WrongParentTable {
                 fragment: spread.record.path.clone(),
-                alias: parent,
+                alias: parent.clone(),
                 table: table.clone(),
             });
         }

@@ -308,6 +308,22 @@ pub enum Cause {
         /// What the SQL builds.
         built: String,
     },
+    /// A column or spread has a name that can't be a field's.
+    #[error("{concerns} returns {name}, which can't name a Rust field: give the column another name with AS")]
+    BadIdentifier {
+        /// The call's name.
+        concerns: String,
+        /// The name.
+        name: String,
+    },
+    /// A dependency's manifest names a fragment by a path that isn't Rust's.
+    #[error("{concerns} spreads a fragment at {path}, which is no Rust path")]
+    BadPath {
+        /// The call's name.
+        concerns: String,
+        /// The path.
+        path: String,
+    },
     /// Fragments spread each other in a circle.
     #[error("{first} spreads itself: {}", chain.join(", "))]
     Cycle {
