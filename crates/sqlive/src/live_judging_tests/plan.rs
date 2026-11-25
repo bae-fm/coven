@@ -537,6 +537,7 @@ async fn a_nul_ends_the_statement_the_plan_reads() {
     for sql in [
         "SELECT value FROM items WHERE deleted=0 -- \0\n AND id=1",
         "SELECT value FROM items WHERE deleted=0 -- \0\n AND id=$past",
+        "SELECT value FROM items WHERE deleted=0 -- \0\n '",
     ] {
         follows(
             &db,

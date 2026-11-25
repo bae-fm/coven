@@ -24,6 +24,12 @@ impl Token {
     }
 }
 
+/// The text SQLite reads of `sql`: it stops at the first NUL, inside a comment
+/// too.
+pub(crate) fn up_to_nul(sql: &str) -> &str {
+    sql.split_once('\0').map_or(sql, |(read, _)| read)
+}
+
 /// The tokens of `sql`, without its comments and whitespace.
 pub fn tokens(sql: &str) -> rusqlite::Result<Vec<Token>> {
     let scanned = crate::token_scan::scan(sql)?;

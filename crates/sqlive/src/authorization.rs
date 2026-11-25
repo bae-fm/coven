@@ -454,7 +454,10 @@ impl<P: Policy> SqlAuthorization<P> {
         reads.end(scopes);
     }
 
-    pub(crate) fn check_sql(&self, sql: &str) -> rusqlite::Result<()> {
+    /// The text SQLite reads of the app's `sql`, once its tokens pass the
+    /// rules and the policy.
+    pub(crate) fn check_sql<'s>(&self, sql: &'s str) -> rusqlite::Result<&'s str> {
+        let sql = crate::sql::up_to_nul(sql);
         // FTS prepares PRAGMA data_version itself. Permit that internal read,
         // while keeping direct app PRAGMAs outside the SQL capability.
         let tokens = crate::sql::tokens(sql)?;
@@ -466,7 +469,8 @@ impl<P: Policy> SqlAuthorization<P> {
             rusqlite::Error::UserFunctionError(Box::new(
                 crate::Error::<P::Failure, P::Refusal>::Refused(refusal),
             ))
-        })
+        })?;
+        Ok(sql)
     }
 
     pub(crate) fn app_result<T>(&self, result: rusqlite::Result<T>) -> rusqlite::Result<T> {

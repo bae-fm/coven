@@ -461,7 +461,7 @@ impl<P: Policy> HostSql<P> {
     /// Prepare the app statement `sql`, judged as an app statement is, and
     /// drop it unrun: what preparing it tells the policy is the result.
     pub fn prepare_app(&self, sql: &str) -> rusqlite::Result<()> {
-        self.authorization.check_sql(sql)?;
+        let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         self.authorization.app_result(self.connection.prepare(sql)).map(drop)
     }
@@ -469,7 +469,7 @@ impl<P: Policy> HostSql<P> {
     /// Run the app's statement `sql` with `params`, judged as the app's,
     /// returning the rows it changed.
     pub fn app_execute<Q: Params>(&self, sql: &str, params: Q) -> rusqlite::Result<usize> {
-        self.authorization.check_sql(sql)?;
+        let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         let mut statement = self.authorization.app_result(self.app_statement(sql))?;
         let _scope = self.authorization.step();
@@ -498,7 +498,7 @@ impl<P: Policy> HostSql<P> {
         sql: &str,
         mut each: impl FnMut(&str, &mut dyn FnMut() -> rusqlite::Result<()>) -> rusqlite::Result<()>,
     ) -> rusqlite::Result<()> {
-        self.authorization.check_sql(sql)?;
+        let sql = self.authorization.check_sql(sql)?;
         let mut batch = Batch::new(&self.connection, sql);
         loop {
             self.begin_app_statement()?;
@@ -586,7 +586,7 @@ impl<P: Policy> HostSql<P> {
         params: Q,
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
-        self.authorization.check_sql(sql)?;
+        let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
         let result = (|| {

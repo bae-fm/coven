@@ -98,7 +98,7 @@ fn app(
     authorization: &SqlAuthorization<Recording>,
     sql: &str,
 ) -> Result<(), Error> {
-    authorization.check_sql(sql)?;
+    let sql = authorization.check_sql(sql)?;
     authorization.begin_app_call();
     authorization.app_result(connection.prepare(sql)).map(drop).map_err(Error::from)
 }
@@ -108,6 +108,15 @@ fn forbidden(result: Result<(), Error>) -> Option<&'static str> {
         Err(crate::Error::StatementForbidden { operation }) => Some(operation),
         Err(error) => panic!("expected a refusal, received {error:?}"),
         Ok(()) => None,
+    }
+}
+
+#[test]
+fn app_sql_ends_at_its_first_nul() {
+    let policy = Arc::new(Recording::default());
+    let (connection, authorization) = plain(&policy);
+    for sql in ["SELECT x FROM local -- \0\n '", "SELECT x FROM local \0 '"] {
+        assert_eq!(forbidden(app(&connection, &authorization, sql)), None, "{sql:?}");
     }
 }
 

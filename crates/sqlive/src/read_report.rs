@@ -174,6 +174,7 @@ pub fn read_report(
     sql: &str,
     whole: &crate::WholeViews,
 ) -> rusqlite::Result<ReadReport> {
+    let sql = crate::sql::up_to_nul(sql);
     let statement = connection.prepare(sql)?;
     Ok(ReadReport::of(&ScopePlan::build(connection, sql, &statement, whole)?))
 }
