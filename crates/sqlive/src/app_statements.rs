@@ -229,12 +229,13 @@ impl<P: Policy> HostSql<P> {
     pub(super) fn live_scope_plan(
         &self,
         sql: &str,
-        statement: &AppStatement<'_>,
+        statement: &Statement<'_>,
+        schema: Option<i64>,
     ) -> rusqlite::Result<Option<Arc<crate::ScopePlan>>> {
         if !self.authorization.capturing_reads() {
             return Ok(None);
         }
-        self.scope_plan(sql, statement).map(Some)
+        self.scope_plan(sql, statement, schema).map(Some)
     }
 
     /// End the app statement begun last: each table it read in the scope
@@ -283,23 +284,27 @@ impl<P: Policy> HostSql<P> {
         result
     }
 
-    /// What `statement`, prepared from `sql`, lets a live query narrow, kept
-    /// for the database beside a kept statement while the schema stays.
+    /// What `statement`, prepared from `sql`, lets a live query narrow. When
+    /// `schema` names the schema the statement was prepared against, the plan
+    /// is kept for the database while the schema stays; the plan depends on
+    /// the SQL and the schema alone, so an app statement and a host statement
+    /// of the same text share it.
     pub(super) fn scope_plan(
         &self,
         sql: &str,
-        statement: &AppStatement<'_>,
+        statement: &Statement<'_>,
+        schema: Option<i64>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
-        let AppStatement::Cached { schema, .. } = statement else {
+        let Some(schema) = schema else {
             return self.build_scope_plan(sql, statement);
         };
-        self.app_statements.plans.plan(*schema, sql, || self.build_scope_plan(sql, statement))
+        self.app_statements.plans.plan(schema, sql, || self.build_scope_plan(sql, statement))
     }
 
     fn build_scope_plan(
         &self,
         sql: &str,
-        statement: &AppStatement<'_>,
+        statement: &Statement<'_>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let plan = self.authorization.unrecorded(|| {
             ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
@@ -337,6 +342,16 @@ pub(super) enum AppStatement<'connection> {
         schema: i64,
     },
     Fresh(Statement<'connection>),
+}
+
+impl AppStatement<'_> {
+    /// The schema a kept statement was prepared against.
+    pub(super) fn schema(&self) -> Option<i64> {
+        match self {
+            Self::Cached { schema, .. } => Some(*schema),
+            Self::Fresh(_) => None,
+        }
+    }
 }
 
 impl<'connection> std::ops::Deref for AppStatement<'connection> {

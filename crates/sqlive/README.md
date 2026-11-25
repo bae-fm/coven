@@ -147,6 +147,11 @@ write changes another release's tracks. A statement with a `LIMIT` narrows
 further once a run returns as many rows as the limit. A one-shot read records
 nothing, because nothing runs it again.
 
+A live query's host statement, one that reads tables the app's SQL can't,
+narrows the same way when the query runs it with `HostSql::host_live_read`.
+`HostSql::query` and `for_each` run a host statement that depends on every row
+of each table it reads.
+
 ## Checking SQL against a schema
 
 A build tool can check SQL before the program runs. `SchemaProbe::open` makes a

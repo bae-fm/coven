@@ -745,6 +745,11 @@ can't parse the statement, or a view it reads, coven counts every column of
 every table as read, so every write runs the query again. A one-shot read records none of this:
 nothing runs it again.
 
+A live query of coven's own, one that follows a table app SQL can't read, runs a statement of
+coven's own. Coven reads that statement as it reads an app's, so it narrows by the same rules and
+the query runs again only for a write that changes a row the statement read. A statement of coven's
+own that a live query runs through any other call reads each table it names whole.
+
 Coven reads a statement's SQL to work out what it depends on when a live query
 first runs it. The more a statement joins, the longer that takes, so coven logs
 at debug level how many FROM items and SELECTs it read in each statement, and how

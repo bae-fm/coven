@@ -9,6 +9,8 @@ mod bulk_write;
 mod database_file;
 #[path = "event_capture.rs"]
 mod event_capture;
+#[path = "host_live_read.rs"]
+mod host_live_read;
 #[path = "live_judging.rs"]
 mod live_judging;
 #[path = "page_cache.rs"]
@@ -584,51 +586,81 @@ impl<P: Policy> HostSql<P> {
         recorded: Recorded,
         sql: &str,
         params: Q,
-        mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
+        each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
-            let parameters = crate::parameters(&self.connection, &statement, params)?;
-            let plan = self.live_scope_plan(sql, &statement)?;
-            // A run that returns as many rows as its LIMIT depends only on the
-            // rows up to its last one (§4).
-            let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
-            let mut last = None;
-            let result = self.counting_steps(&mut statement, StepsOf::AppRead, |statement| {
-                let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
-                let mut returned = 0;
-                loop {
-                    let row = {
-                        let _scope = self.authorization.step();
-                        self.authorization.app_result(rows.next())?
-                    };
-                    let Some(row) = row else { return Ok(()) };
-                    returned += 1;
-                    if let Some(last_row) =
-                        last_row.as_ref().filter(|found| found.limit == returned)
-                    {
-                        last = Some(last_row.values(row)?);
-                    }
-                    if !each(row)? {
-                        return Ok(());
-                    }
-                }
-            });
-            self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
-            #[cfg(any(test, feature = "test-utils"))]
-            if recorded == Recorded::Yes {
-                if let Some(log) = self.statement_log.borrow().as_ref() {
-                    log.push(statement.expanded_sql().expect("prepared SQL"));
-                }
-            }
-            #[cfg(not(any(test, feature = "test-utils")))]
-            let _ = recorded;
-            result
+            let schema = statement.schema();
+            self.run_rows(
+                recorded,
+                Some(StepsOf::AppRead),
+                sql,
+                &mut statement,
+                schema,
+                params,
+                each,
+            )
         })();
         self.authorization.app_result(result)
+    }
+
+    /// Run the prepared `statement`, made from `sql`, and hand `each` its
+    /// rows in order until they end or `each` answers false, under the
+    /// authorizer's step scope, counting its steps as `steps` when it gives
+    /// them. In a live query's read, each table it read
+    /// is recorded in the scope its plan gives this run: a plan kept against
+    /// `schema` is shared with the database's other connections.
+    fn run_rows<Q: Params>(
+        &self,
+        recorded: Recorded,
+        steps: Option<StepsOf>,
+        sql: &str,
+        statement: &mut rusqlite::Statement<'_>,
+        schema: Option<i64>,
+        params: Q,
+        mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()> {
+        let parameters = crate::parameters(&self.connection, statement, params)?;
+        let plan = self.live_scope_plan(sql, statement, schema)?;
+        // A run that returns as many rows as its LIMIT depends only on the
+        // rows up to its last one (§4).
+        let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
+        let mut last = None;
+        let mut run = |statement: &mut rusqlite::Statement<'_>| {
+            let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
+            let mut returned = 0;
+            loop {
+                let row = {
+                    let _scope = self.authorization.step();
+                    self.authorization.app_result(rows.next())?
+                };
+                let Some(row) = row else { return Ok(()) };
+                returned += 1;
+                if let Some(last_row) = last_row.as_ref().filter(|found| found.limit == returned) {
+                    last = Some(last_row.values(row)?);
+                }
+                if !each(row)? {
+                    return Ok(());
+                }
+            }
+        };
+        let result = match steps {
+            Some(steps) => self.counting_steps(statement, steps, run),
+            None => run(statement),
+        };
+        self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
+        #[cfg(any(test, feature = "test-utils"))]
+        if recorded == Recorded::Yes {
+            if let Some(log) = self.statement_log.borrow().as_ref() {
+                log.push(statement.expanded_sql().expect("prepared SQL"));
+            }
+        }
+        #[cfg(not(any(test, feature = "test-utils")))]
+        let _ = recorded;
+        result
     }
 
     /// Wake `checkpoints` after each commit this writer makes (§4).
