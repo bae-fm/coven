@@ -57,6 +57,36 @@ async fn a_live_pin_answer_follows_coven_pins() {
     db.close().await.unwrap();
 }
 
+/// A pin answer for some files runs again for a change to those files' pins,
+/// not for another file's, and repeats a file's answer as often as it is
+/// requested.
+#[tokio::test]
+async fn a_live_pin_answer_ignores_the_pins_of_other_files() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let watched = stage(&db, b"bytes".to_vec(), true).await.unwrap();
+    let other = db
+        .staged_write::<_, _, _, _, crate::DbError>(
+            |batch| Ok(batch.put_file("files", b"others".to_vec(), crate::Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    complete_uploads(&db).await;
+    let mut live = db.subscribe_files_pinned::<DbError>(vec![watched, watched]);
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), [Some(false), Some(false)]);
+    let other = db.file_ref(other).await.unwrap();
+    crate::database::file_database::tests::pin_whole(&db, &other, "whole").await.unwrap();
+    assert!(!live.is_marked_for_rerun());
+    let watched = db.file_ref(watched).await.unwrap();
+    crate::database::file_database::tests::pin_whole(&db, &watched, "watched").await.unwrap();
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), [Some(true), Some(true)]);
+    db.close().await.unwrap();
+}
+
 /// Requested files whose sizes add past `u64::MAX` are refused naming the
 /// running total and the size that did not fit, not a stand-in maximum.
 #[tokio::test]

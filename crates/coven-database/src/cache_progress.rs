@@ -89,18 +89,18 @@ pub(crate) fn pin_progress(
 /// this call agree. It reads no merge state, so a live query of it reruns
 /// only for those tables' changes.
 pub(crate) fn files_pinned(db: &StoreSql, files: &[FileId]) -> Result<Vec<Option<bool>>, DbError> {
-    files
-        .iter()
-        .map(|file| {
-            let (known, pinned): (bool, bool) = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=?1),
-                        EXISTS(SELECT 1 FROM coven_pins WHERE file=?1)",
-                [file],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            Ok(known.then_some(pinned))
-        })
-        .collect()
+    // The requested files as a JSON array of their canonical texts, which one
+    // statement reads a row of for each element, repeats included.
+    let listed =
+        serde_json::to_string(&files.iter().map(|file| file.0.to_string()).collect::<Vec<_>>())
+            .map_err(|_unencodable| DbError::Invariant { what: "file ids encode as JSON" })?;
+    Ok(db.host_live_read(
+        "SELECT EXISTS(SELECT 1 FROM main.coven_files WHERE id=j.value),
+                EXISTS(SELECT 1 FROM coven_pins WHERE file=j.value)
+         FROM json_each(?1) AS j ORDER BY j.key",
+        [listed],
+        |r| r.get::<_, bool>(0)?.then(|| r.get::<_, bool>(1)).transpose(),
+    )?)
 }
 
 impl StoreDatabase {
