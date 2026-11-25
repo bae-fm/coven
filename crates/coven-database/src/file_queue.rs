@@ -155,9 +155,11 @@ macro_rules! unsent_counts {
 pub(crate) use unsent_counts;
 
 pub(crate) fn unsent(db: &StoreSql) -> Result<UnsentWork, DbError> {
-    Ok(db.query_row(concat!("SELECT ", unsent_counts!()), [], |r| {
+    db.host_live_read(concat!("SELECT ", unsent_counts!()), [], |r| {
         Ok(UnsentWork { writes: r.get::<_, i64>(0)? as u64, files: r.get::<_, i64>(1)? as u64 })
-    })?)
+    })?
+    .pop()
+    .ok_or(DbError::Invariant { what: "a statement of counts returns its row" })
 }
 
 pub(crate) fn state(db: &StoreSql) -> Result<UploadQueueState, DbError> {
