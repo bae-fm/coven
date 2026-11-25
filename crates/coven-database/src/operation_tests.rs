@@ -19,3 +19,32 @@ async fn app_statements_cannot_write_the_journal() {
     )
     .await;
 }
+
+/// The follow of one kind's operations lists them oldest first, runs again
+/// for a row of that kind, and leaves a row of another kind alone.
+#[tokio::test]
+async fn the_follow_of_one_kind_ignores_the_journal_rows_of_other_kinds() {
+    use crate::tests::{next, TestStore};
+    use crate::{DbError, NewOperation};
+    let operation = |kind: &str| NewOperation {
+        kind: kind.into(),
+        data: b"opaque sync data".to_vec(),
+        started_by: "coven".into(),
+        pauses_writes: false,
+    };
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut pairing = db.subscribe_operations_of_kind::<DbError>("pairing");
+    assert!(next(&mut pairing).await.is_empty());
+    db.start_operation(operation("invite")).await.unwrap();
+    assert!(!pairing.is_marked_for_rerun());
+    let first = db.start_operation(operation("pairing")).await.unwrap();
+    assert!(pairing.is_marked_for_rerun());
+    let rows = next(&mut pairing).await;
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [first]);
+    assert_eq!(rows, db.operations_of_kind("pairing").await.unwrap());
+    let second = db.start_operation(operation("pairing")).await.unwrap();
+    let rows = next(&mut pairing).await;
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), [first, second]);
+    db.close().await.unwrap();
+}

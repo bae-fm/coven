@@ -305,7 +305,7 @@ pub(crate) fn read(db: &StoreSql) -> Result<Vec<OperationRecord>, DbError> {
 }
 
 pub(crate) fn of_kind(db: &StoreSql, kind: &str) -> Result<Vec<OperationRecord>, DbError> {
-    Ok(db.query(
+    Ok(db.host_live_read(
         "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id",
         [kind],
         record,
