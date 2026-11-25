@@ -10,15 +10,9 @@ use super::model::{Field, FieldName, Reading};
 
 const GENERATED: &str = "::sqlive_compose::generated";
 
-/// The identifier of a field's name, raw when the name is a keyword.
-fn field_ident(name: &FieldName) -> Ident {
-    syn::parse_str::<Ident>(name.as_str())
-        .unwrap_or_else(|_| Ident::new_raw(name.as_str(), proc_macro2::Span::call_site()))
-}
-
 /// The identifier of a name the header's parser read as one.
 fn ident(name: &str) -> Ident {
-    field_ident(&FieldName::new(name).expect("the header's parser read an identifier"))
+    FieldName::new(name).expect("the header's parser read an identifier").ident()
 }
 
 fn rust_type(ty: &RustType) -> TokenStream {
@@ -102,7 +96,7 @@ fn shapes(shapes: &[Shape]) -> TokenStream {
 pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let name = ident(&header.name);
     let doc = format!("The columns of `{}`.", header.name);
-    let names: Vec<Ident> = fields.iter().map(|field| field_ident(&field.name)).collect();
+    let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
@@ -139,7 +133,7 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
         header.parameters.iter().map(|Parameter { ty, .. }| rust_type(ty)).collect();
     let bound: Vec<String> =
         header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
-    let names: Vec<Ident> = fields.iter().map(|field| field_ident(&field.name)).collect();
+    let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();

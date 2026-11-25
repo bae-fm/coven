@@ -33,25 +33,27 @@ pub(crate) enum Reading {
     },
 }
 
-/// The name of a field: one that Rust reads as an identifier, raw when it is
-/// a keyword.
+/// The name of a field: an identifier, raw when the name is a keyword.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FieldName(String);
+pub(crate) struct FieldName(syn::Ident);
 
 impl FieldName {
-    /// The name `name`, when it can be an identifier.
+    /// The name `name`, when Rust reads it, or reads it after `r#`, as an
+    /// identifier.
     pub(crate) fn new(name: &str) -> Option<Self> {
-        let bare = name.strip_prefix("r#").unwrap_or(name);
-        let mut characters = bare.chars();
-        let starts = characters.next().is_some_and(|first| first.is_alphabetic() || first == '_');
-        let rest = characters.all(|next| next.is_alphanumeric() || next == '_');
-        let reserved = matches!(bare, "_" | "self" | "Self" | "super" | "crate");
-        (starts && rest && !reserved).then(|| Self(name.to_owned()))
+        let bare = syn::parse_str::<syn::Ident>(name);
+        let raw = || syn::parse_str::<syn::Ident>(&format!("r#{name}"));
+        bare.or_else(|_| raw()).ok().map(Self)
     }
 
-    /// The name as text.
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    /// The name as an identifier.
+    pub(crate) fn ident(&self) -> syn::Ident {
+        self.0.clone()
+    }
+
+    /// The name as written in Rust: with `r#` when it is raw.
+    pub(crate) fn as_text(&self) -> String {
+        self.0.to_string()
     }
 }
 

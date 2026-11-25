@@ -77,7 +77,7 @@ fn push(header: &Header, fields: &mut Vec<Field>, field: Field) -> Result<(), Ca
     if fields.iter().any(|other| other.name == field.name) {
         return Err(Cause::DuplicateColumn {
             concerns: header.name.clone(),
-            column: field.name.as_str().to_owned(),
+            column: field.name.as_text(),
         });
     }
     fields.push(field);

@@ -36,8 +36,9 @@ fn a_read_binds_its_request_by_name() {
 
 #[test]
 fn a_name_that_cannot_be_an_identifier_is_refused() {
-    for name in ["my col", "self", "", "1st", "a-b"] {
+    for name in ["my col", "self", "", "1st", "a-b", "\u{0301}a", "\u{00b7}"] {
         assert_eq!(FieldName::new(name), None, "{name}");
     }
     assert!(FieldName::new("type").is_some() && FieldName::new("r#type").is_some());
+    assert!(FieldName::new("a\u{0301}\u{00b7}").is_some());
 }
