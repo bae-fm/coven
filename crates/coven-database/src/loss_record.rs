@@ -28,7 +28,7 @@ pub(crate) fn select_listed() -> String {
 }
 
 pub(crate) fn lost_values(sql: &StoreSql) -> Result<Vec<crate::LostValue>, DbError> {
-    let records = sql.query(&format!("{SELECT} ORDER BY l.id"), [], read)?;
+    let records = sql.host_live_read(&format!("{SELECT} ORDER BY l.id"), [], read)?;
     records.into_iter().map(crate::LostValue::from_record).collect()
 }
 
