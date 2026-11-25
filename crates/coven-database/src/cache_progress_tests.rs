@@ -87,6 +87,37 @@ async fn a_live_pin_answer_ignores_the_pins_of_other_files() {
     db.close().await.unwrap();
 }
 
+/// A pin progress follow reads the cache's coverage of the requested files,
+/// as the one-shot call does, and runs again for a change to the cache's
+/// entries of those files, not another file's.
+#[tokio::test]
+async fn a_live_pin_progress_ignores_the_cache_entries_of_other_files() {
+    use crate::database::file_database::cache::tests::stored_second;
+    use crate::database::file_database::{tests::stored, FileDatabase};
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let size = 2 * 64 * 1024;
+    let watched = stored(&db, vec![5; size]).await;
+    let other = stored_second(&db, vec![6; size]).await;
+    let mut live = db.subscribe_pin_progress::<DbError>(vec![watched.clone()]);
+    let empty = PinProgress {
+        files_completed: 0,
+        files_total: 1,
+        bytes_cached: 0,
+        bytes_total: size as u64,
+    };
+    assert_eq!(live.next_inline().await.unwrap().unwrap(), empty);
+    let owner = FileDatabase::new(db.clone());
+    let name = |name: &str| coven_foundation::files::FileName::new(name).unwrap();
+    owner.cache_range(&other, 0, 1, name("other"), vec![2; 100]).await.unwrap();
+    assert!(!live.is_marked_for_rerun());
+    owner.cache_range(&watched, 0, 1, name("watched"), vec![2; 100]).await.unwrap();
+    let progress = live.next_inline().await.unwrap().unwrap();
+    assert!(progress.bytes_cached > 0);
+    assert_eq!(progress, db.pin_progress(vec![watched.clone()]).await.unwrap());
+    db.close().await.unwrap();
+}
+
 /// Requested files whose sizes add past `u64::MAX` are refused naming the
 /// running total and the size that did not fit, not a stand-in maximum.
 #[tokio::test]

@@ -162,6 +162,11 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
             "opening reconstructs authenticated administrative history once; passes retain the result",
         ),
         (
+            "cache_progress.rs",
+            "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=json_extract(j.value,'$.namespace') AND object_path=json_extract(j.value,'$.object') AND chunk=?3), coalesce((SELECT sum(size-chunks*?2) FROM _coven_cache WHERE namespace=json_extract(j.value,'$.namespace') AND object_path=json_extract(j.value,'$.object') AND chunk>=0),0), EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=json_extract(j.value,'$.namespace') AND object_path=json_extract(j.value,'$.object') AND chunk=?3 AND checked_hash=unhex(json_extract(j.value,'$.hash'))) FROM json_each(?1) AS j ORDER BY j.key",
+            "j",
+        ) => Some("the requested files, which the statement's one JSON parameter lists"),
+        (
             "members.rs",
             "SELECT m.member,m.signing,m.sealing,m.role,m.removed,m.access,m.joined_circle,m.joined_person,m.keys_by, d.device,d.name,d.state, (SELECT x.member FROM _coven_devices x WHERE x.device=?1) FROM _coven_members m LEFT JOIN _coven_devices d ON d.member=m.member WHERE m.removed=0 ORDER BY m.member,d.device",
             "m",
