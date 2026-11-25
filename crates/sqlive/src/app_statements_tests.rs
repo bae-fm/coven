@@ -178,6 +178,76 @@ fn a_schema_change_builds_a_scope_plan_again() {
     db.close();
 }
 
+/// What a live run of `sql`, or a one-shot read of it, counts over two tables.
+async fn work_of_plan(sql: &'static str, live: bool) -> crate::ConnectionWork {
+    let db = TestDatabase::open(
+        "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, album TEXT);
+         CREATE TABLE tracks(id INTEGER PRIMARY KEY, release TEXT, title TEXT)",
+    );
+    let counter = crate::ConnectionWorkCounter::new();
+    db.track_work(&counter);
+    let titles = move |sqlite: TestRead<'_>| -> Result<Vec<String>, QueryError> {
+        Ok(sqlite.query(sql, [], |r| r.get::<_, String>(0))?)
+    };
+    if live {
+        let mut query = db.subscribe(titles);
+        next(&mut query).await;
+        drop(query);
+    } else {
+        db.read_app(titles).unwrap();
+    }
+    let work = counter.take();
+    db.close();
+    work
+}
+
+const ALBUM_TITLES: &str =
+    "SELECT t.title FROM tracks t JOIN releases r ON t.release = r.id WHERE r.album = 'x'";
+
+/// The equality of the join gives an edge each way.
+#[tokio::test]
+async fn a_live_run_counts_the_size_of_its_plan() {
+    let work = work_of_plan(ALBUM_TITLES, true).await;
+    assert_eq!(
+        (
+            work.scope_plans_built,
+            work.scope_plan_sources,
+            work.scope_plan_cores,
+            work.scope_plan_edges
+        ),
+        (1, 2, 1, 2)
+    );
+}
+
+#[tokio::test]
+async fn a_one_shot_read_counts_no_plan() {
+    let work = work_of_plan(ALBUM_TITLES, false).await;
+    assert_eq!(
+        (
+            work.scope_plans_built,
+            work.scope_plan_sources,
+            work.scope_plan_cores,
+            work.scope_plan_edges
+        ),
+        (0, 0, 0, 0)
+    );
+}
+
+/// The planner stops at the NATURAL join, after it read `tracks`.
+#[tokio::test]
+async fn a_plan_that_stops_counts_what_it_read_before() {
+    let work = work_of_plan("SELECT title FROM tracks NATURAL JOIN releases", true).await;
+    assert_eq!(
+        (
+            work.scope_plans_built,
+            work.scope_plan_sources,
+            work.scope_plan_cores,
+            work.scope_plan_edges
+        ),
+        (1, 1, 1, 0)
+    );
+}
+
 /// A plan of some statement, for tests of the map that keeps plans.
 fn some_plan() -> Arc<ScopePlan> {
     let connection = rusqlite::Connection::open_in_memory().unwrap();

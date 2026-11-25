@@ -15,6 +15,7 @@
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
+use crate::scope_plan::ScopePlanSize;
 use crate::{ReadFrame, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
@@ -299,11 +300,19 @@ impl<P: Policy> HostSql<P> {
         sql: &str,
         statement: &AppStatement<'_>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
-        #[cfg(any(test, feature = "test-utils"))]
-        self.record_work(|work| work.scope_plans_built += 1);
-        Ok(Arc::new(self.authorization.unrecorded(|| {
+        let plan = self.authorization.unrecorded(|| {
             ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
-        })?))
+        })?;
+        let ScopePlanSize { sources, cores, edges } = plan.size;
+        tracing::debug!(sources, cores, edges, "sqlive built a scope plan");
+        #[cfg(any(test, feature = "test-utils"))]
+        self.record_work(|work| {
+            work.scope_plans_built += 1;
+            work.scope_plan_sources += sources;
+            work.scope_plan_cores += cores;
+            work.scope_plan_edges += edges;
+        });
+        Ok(Arc::new(plan))
     }
 }
 

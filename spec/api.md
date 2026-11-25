@@ -3983,7 +3983,9 @@ let moved = handle
   ([§4](coven.md#4-writing-locally)). A test that runs the same read, or the
   same write beside the same live query, over a small table and a large one
   fails when its steps grow with the table. The app's statements count in
-  writes and migrations too.
+  writes and migrations too. `test_track_work` also counts the scope plans
+  coven builds, each of which says what one statement lets its live query
+  narrow, and the sources, cores and edges they hold (`WorkCounts`).
 
 | View | Column | Holds |
 |---|---|---|
@@ -4599,6 +4601,17 @@ pub struct WorkCounts {
     /// Steps of coven's lookups judging whether a write changed rows a
     /// live query joins (§4).
     pub lookup_steps: usize,
+    /// Scope plans coven built for live queries' statements: what each
+    /// statement lets its live query narrow (§4).
+    pub scope_plans_built: usize,
+    /// Sources those plans read: the items of each FROM, those of the
+    /// subqueries, CTEs and views read as their own included.
+    pub scope_plan_sources: usize,
+    /// SELECT cores those plans read.
+    pub scope_plan_cores: usize,
+    /// Edges those plans found between their sources: the equalities by
+    /// which one source takes values from another.
+    pub scope_plan_edges: usize,
 }
 
 #[cfg(feature = "test-utils")]

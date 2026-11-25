@@ -505,7 +505,16 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     // The live run also builds the statement's scope plan, which a one-shot
     // read has no use for.
     assert_eq!(live.scope_plans_built, 1);
-    assert_eq!(crate::ConnectionWork { scope_plans_built: 0, ..live }, once);
+    assert_eq!(
+        crate::ConnectionWork {
+            scope_plans_built: 0,
+            scope_plan_sources: 0,
+            scope_plan_cores: 0,
+            scope_plan_edges: 0,
+            ..live
+        },
+        once
+    );
     drop(query);
     db.close();
 }

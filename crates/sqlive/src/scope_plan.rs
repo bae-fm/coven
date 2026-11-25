@@ -53,6 +53,17 @@ pub(crate) struct ScopePlan {
     /// report, or unknown when the parser can't read the statement
     /// (`unreported_columns.rs`).
     unreported: Arc<UnreportedColumns>,
+    pub(crate) size: ScopePlanSize,
+}
+
+/// How much of a statement the planner read to build its plan, up to where
+/// it stopped, if it did: what it holds before it passes edges into
+/// subqueries, CTEs and views as it orders the sources.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ScopePlanSize {
+    pub(crate) sources: usize,
+    pub(crate) cores: usize,
+    pub(crate) edges: usize,
 }
 
 impl ScopePlan {
@@ -67,6 +78,7 @@ impl ScopePlan {
             Ok(Self {
                 sources: None,
                 unreported: Arc::new(UnreportedColumns::unknown(connection, why.to_owned())?),
+                size: ScopePlanSize::default(),
             })
         };
         let Some(sql) = number_parameters(sql, statement)? else {
@@ -85,9 +97,11 @@ impl ScopePlan {
             return unread("the statement isn't one SELECT the parser reads");
         }
         let functions = Functions::read(connection)?;
+        let (sources, size) = Sources::read(connection, select, whole, &functions)?;
         Ok(Self {
-            sources: Sources::read(connection, select, whole, &functions)?,
+            sources,
             unreported: Arc::new(unreported_columns(connection, &functions, select)?),
+            size,
         })
     }
 
@@ -224,12 +238,13 @@ pub(crate) enum Place {
 }
 
 impl Sources {
+    /// The sources of `select`, and how much of it the planner read.
     fn read(
         connection: &Connection,
         select: &Select<'_>,
         whole: &WholeViews,
         functions: &Functions,
-    ) -> rusqlite::Result<Option<Self>> {
+    ) -> rusqlite::Result<(Option<Self>, ScopePlanSize)> {
         let mut planner = Planner {
             items: Vec::new(),
             cores: Vec::new(),
@@ -241,15 +256,20 @@ impl Sources {
             declared_ctes: 0,
             whole_names: Some(BTreeSet::new()),
         };
-        let Some(cores) = read_select(connection, &mut planner, select, None, &Ctes::default())?
-        else {
-            return Ok(None);
+        let read = read_select(connection, &mut planner, select, None, &Ctes::default())?;
+        let size = ScopePlanSize {
+            sources: planner.items.len(),
+            cores: planner.cores.len(),
+            edges: planner.edges.len(),
+        };
+        let Some(cores) = read else {
+            return Ok((None, size));
         };
         let sorted = match cores[..] {
             [core] => sorted_limit(connection, &planner, select, core)?,
             _ => None,
         };
-        Ok(Some(planner.ordered(sorted)))
+        Ok((Some(planner.ordered(sorted)), size))
     }
 }
 

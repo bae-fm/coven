@@ -37,6 +37,17 @@ pub struct WorkCounts {
     /// query joins: each asks whether a partner row in its scope holds a
     /// changed row's value (§4).
     pub lookup_steps: usize,
+    /// Scope plans built for live queries' statements: what each statement
+    /// lets its live query narrow (§4).
+    pub scope_plans_built: usize,
+    /// Sources those plans read: the items of each FROM, those of the
+    /// subqueries, CTEs and views read as their own included.
+    pub scope_plan_sources: usize,
+    /// SELECT cores those plans read.
+    pub scope_plan_cores: usize,
+    /// Edges those plans found between their sources: the equalities by
+    /// which one source takes values from another.
+    pub scope_plan_edges: usize,
 }
 
 /// The work coven counts beside its connections'.
@@ -82,6 +93,10 @@ impl WorkCounter {
             app_read_statements: connections.app_read_statements,
             app_write_steps: connections.app_write_steps,
             lookup_steps: connections.lookup_steps,
+            scope_plans_built: connections.scope_plans_built,
+            scope_plan_sources: connections.scope_plan_sources,
+            scope_plan_cores: connections.scope_plan_cores,
+            scope_plan_edges: connections.scope_plan_edges,
         }
     }
 
@@ -95,3 +110,7 @@ impl WorkCounter {
         update(&mut lock_unpoisoned(&self.store));
     }
 }
+
+#[cfg(test)]
+#[path = "work_counts_tests.rs"]
+mod tests;
