@@ -49,7 +49,7 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     fn fail(&mut self, cause: Cause) {
-        self.errors.push(CompileError { location: None, concerns: String::new(), cause });
+        self.errors.push(CompileError::Crate { cause });
     }
 
     /// The calls of the module file at `path`, whose child modules' files

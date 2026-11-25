@@ -368,30 +368,55 @@ fn sqlite_message(error: &sqlive::SqliteError) -> String {
     }
 }
 
-/// A failure of one macro call, or of the schema's setup.
+/// A failure of the compile.
 #[derive(Debug)]
-pub struct CompileError {
-    /// The call's place, or `None` for the schema's setup, which no call
-    /// holds.
-    pub location: Option<Location>,
-    /// The call's name, or empty for the schema's setup.
-    pub concerns: String,
-    /// Why.
-    pub cause: Cause,
+pub enum CompileError {
+    /// A failure of one macro call.
+    Call {
+        /// The call's place.
+        location: Location,
+        /// The call's name.
+        concerns: String,
+        /// Why.
+        cause: Cause,
+    },
+    /// A failure that belongs to no call: the schema's setup, a source file or
+    /// a dependency's manifest.
+    Crate {
+        /// Why.
+        cause: Cause,
+    },
+}
+
+impl CompileError {
+    /// The call's place, when a call failed.
+    pub fn location(&self) -> Option<&Location> {
+        match self {
+            Self::Call { location, .. } => Some(location),
+            Self::Crate { .. } => None,
+        }
+    }
+
+    /// Why it failed.
+    pub fn cause(&self) -> &Cause {
+        match self {
+            Self::Call { cause, .. } | Self::Crate { cause } => cause,
+        }
+    }
 }
 
 impl fmt::Display for CompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.location {
-            Some(location) => write!(formatter, "{location}: {}", self.cause),
-            None => write!(formatter, "{}", self.cause),
+        match self {
+            Self::Call { location, cause, .. } => write!(formatter, "{location}: {cause}"),
+            Self::Crate { cause } => write!(formatter, "{cause}"),
         }
     }
 }
 
 impl std::error::Error for CompileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
+        Some(self.cause())
     }
 }
 

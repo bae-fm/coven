@@ -37,8 +37,8 @@ pub(crate) fn compile(
     call: &Call,
     header: &Header,
 ) -> Result<Compiled, CompileError> {
-    let fail = |cause: Cause| CompileError {
-        location: Some(call.location.clone()),
+    let fail = |cause: Cause| CompileError::Call {
+        location: call.location.clone(),
         concerns: header.name.clone(),
         cause,
     };

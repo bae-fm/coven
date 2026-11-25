@@ -12,8 +12,7 @@ use super::{model, source, Input, Output};
 /// Compile the crate `input` describes, or return every error.
 pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     let walked = source::walk(input.source_reader)?;
-    let setup_error =
-        |cause: Cause| vec![CompileError { location: None, concerns: String::new(), cause }];
+    let setup_error = |cause: Cause| vec![CompileError::Crate { cause }];
     let probe = input.setup.probe().map_err(|error| setup_error(Cause::Setup(error)))?;
     let mut registry = Registry::new(&input.crate_name);
     for text in &input.manifests {
@@ -73,9 +72,8 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
         }
     }
     if !errors.is_empty() {
-        errors.sort_by_key(|error| {
-            error.location.as_ref().map(|at| (at.file.clone(), at.line, at.column))
-        });
+        errors
+            .sort_by_key(|error| error.location().map(|at| (at.file.clone(), at.line, at.column)));
         return Err(errors);
     }
     let manifest = serde_json::to_string_pretty(&manifest)
@@ -88,7 +86,7 @@ fn walked_read(walked: Walked) -> Vec<String> {
 }
 
 fn error_of(call: &Call, concerns: &str, cause: Cause) -> CompileError {
-    CompileError { location: Some(call.location.clone()), concerns: concerns.to_owned(), cause }
+    CompileError::Call { location: call.location.clone(), concerns: concerns.to_owned(), cause }
 }
 
 /// The order to compile the calls in.
