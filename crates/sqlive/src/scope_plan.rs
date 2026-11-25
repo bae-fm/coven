@@ -512,9 +512,9 @@ pub(crate) fn read_select<'a>(
     for term in select.order_by.iter().flat_map(|terms| terms.iter()) {
         parts(&term.expr, &mut found);
     }
-    // A single core's ORDER BY can name its sources. A compound's matches
-    // its terms to result columns instead, whose SELECTs are read where
-    // they are.
+    // A single core's ORDER BY can name its sources. SQLite matches each
+    // term of a compound's to a result column instead, and refuses one that
+    // holds a SELECT or `x IN table`.
     let order = match cores[..] {
         [core] => {
             if planner.names_hidden(core, &found) {
@@ -522,12 +522,6 @@ pub(crate) fn read_select<'a>(
             }
             planner.note_names(core, &found);
             Some(core)
-        }
-        _ if found
-            .iter()
-            .any(|part| matches!(part, Part::Select(_) | Part::Subquery(_) | Part::Table(_))) =>
-        {
-            return Ok(None)
         }
         _ => None,
     };
