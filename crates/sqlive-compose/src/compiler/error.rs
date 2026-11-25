@@ -152,7 +152,7 @@ pub enum Cause {
     },
     /// A bare column name that more than one FROM item of different joins
     /// could give.
-    #[error("{concerns} names the column {column} with no table, and more than one FROM item could give it")]
+    #[error("{concerns} names the column {column} with no table, and more than one FROM item could give it, so the header must declare {column}")]
     UnplacedColumn {
         /// The call's name.
         concerns: String,

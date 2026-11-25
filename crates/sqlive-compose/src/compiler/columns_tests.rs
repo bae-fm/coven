@@ -70,3 +70,19 @@ fn two_columns_with_one_name_fail() {
         compile_lib(r##"sqlive_compose::fragment!(Same { a: i64 }, r#"SELECT 1 AS a, 2 AS a"#);"##);
     assert_eq!(messages(output), ["src/lib.rs:1:1: Same returns the column a twice"]);
 }
+
+#[test]
+fn a_bare_column_that_two_items_could_give_needs_a_declaration() {
+    let lib = |declaration: &str| {
+        format!(
+            r##"sqlive_compose::fragment!(Twice {declaration}, r#"
+    SELECT name FROM people AS a LEFT JOIN people AS b ON b.id = a.id
+"#);"##
+        )
+    };
+    assert_eq!(
+        messages(compile_lib(&lib(""))),
+        ["src/lib.rs:1:1: Twice names the column name with no table, and more than one FROM item could give it, so the header must declare name"]
+    );
+    assert_eq!(types_of(&lib("{ name: String }"), "Twice"), ["name: String"]);
+}

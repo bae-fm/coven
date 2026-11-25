@@ -173,7 +173,15 @@ fn column_field(
     // SQLite names the origin of a compound's first SELECT only.
     let origin = if core.compound { None } else { column.origin.as_ref() };
     let nullable = origin.is_some_and(|origin| !origin.not_null)
-        || joins_with_nulls(core, nullable_from, item, origin, &column.name, header)?
+        || joins_with_nulls(
+            core,
+            nullable_from,
+            item,
+            origin,
+            &column.name,
+            header,
+            declared.is_some(),
+        )?
         || item.kind == ItemKind::Subquery;
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {
@@ -239,6 +247,7 @@ fn joins_with_nulls(
     origin: Option<&sqlive::ColumnOrigin>,
     column: &str,
     header: &Header,
+    declared: bool,
 ) -> Result<bool, Cause> {
     let qualifier = match &item.kind {
         ItemKind::Column { qualifier, .. } => qualifier.clone(),
@@ -263,6 +272,8 @@ fn joins_with_nulls(
         [] => Ok(false),
         [only] => Ok(only),
         [first, ..] if nullable.iter().all(|&flag| flag == first) => Ok(first),
+        // The header's declaration says what the compiler can't tell.
+        _ if declared => Ok(false),
         _ => {
             Err(Cause::UnplacedColumn { concerns: header.name.clone(), column: column.to_owned() })
         }
