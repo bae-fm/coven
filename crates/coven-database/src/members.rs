@@ -56,7 +56,7 @@ pub struct CircleMemberInfo {
     pub is_self: bool,
 }
 
-use crate::store_state_tables::{circle, device_member, member};
+use crate::store_state_tables::{circle, member};
 
 /// Every active member with each device they registered, and the member the
 /// local device registered under, as one statement: a member without a device
@@ -121,24 +121,32 @@ pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, Db
     )?)
 }
 
-/// A circle's members who remain in the store; none for an absent or deleted circle.
+/// A circle's members who remain in the store; none for an absent or deleted
+/// circle. One statement, which also reads the member the local device
+/// registered under.
 pub(crate) fn circle_members(
     db: &StoreSql,
     device: DeviceId,
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {
-    let me = device_member(db, device)?;
-    let members = db.query(
-        "SELECT m.member FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
-         WHERE m.circle=?1 AND s.removed=0
+    let members = db.host_live_read(
+        "SELECT m.member,(SELECT x.member FROM _coven_devices x WHERE x.device=?1)
+         FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
+         WHERE m.circle=?2 AND s.removed=0
            AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)
          ORDER BY m.member",
-        [circle],
-        |r| member(r, 0),
+        (device, circle),
+        |r| {
+            let me = match r.get_ref(1)? {
+                sqlive::rusqlite::types::ValueRef::Null => None,
+                _ => Some(member(r, 1)?),
+            };
+            Ok((member(r, 0)?, me))
+        },
     )?;
     Ok(members
         .into_iter()
-        .map(|member| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
+        .map(|(member, me)| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
         .collect())
 }
 

@@ -589,3 +589,35 @@ async fn the_circles_follow_runs_again_only_for_the_local_members_circles() {
     assert!(crate::tests::next(&mut circles).await.is_empty());
     db.close().await.unwrap();
 }
+
+/// The follow of one circle's members lists them as the one-shot read does,
+/// and runs again for a change to that circle's members but not another
+/// circle's.
+#[tokio::test]
+async fn the_circle_members_follow_runs_again_only_for_its_circle() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    let gifts = CircleId(uuid::Uuid::from_u128(7));
+    let mut members = db.subscribe_circle_members::<DbError>(gifts);
+    let listed = crate::tests::next(&mut members).await;
+    assert_eq!(listed, db.circle_members(gifts).await.unwrap());
+    assert_eq!(listed.len(), 2);
+    let mut state = db.store_state().await.unwrap();
+    let other = CircleId(uuid::Uuid::from_u128(9));
+    state.circles.insert(
+        other,
+        StoreCircle { name: "Trips".into(), members: [member(1), member(2)].into(), base: 0 },
+    );
+    let fixture_change = || coven_format::admin::StoreChange::DeleteCircle {
+        circle: CircleId(uuid::Uuid::from_u128(8)),
+    };
+    db.admin_fixture(fixture_change(), state.clone(), None).await.unwrap();
+    assert!(!members.is_marked_for_rerun());
+    state.circles.get_mut(&gifts).unwrap().members.remove(&member(2));
+    db.admin_fixture(fixture_change(), state, None).await.unwrap();
+    assert!(members.is_marked_for_rerun());
+    let listed = crate::tests::next(&mut members).await;
+    assert_eq!(listed, [CircleMemberInfo { member: member(1), is_self: true }]);
+    db.close().await.unwrap();
+}
