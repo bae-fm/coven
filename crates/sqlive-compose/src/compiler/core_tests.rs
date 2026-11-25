@@ -28,8 +28,11 @@ fn result_columns_are_classified() {
 #[test]
 fn from_items_know_their_alias_table_and_join() {
     let sql = "WITH c AS (SELECT 1 AS x) SELECT 1 FROM issues i LEFT JOIN (SELECT 1) AS sub ON 1 JOIN people AS p USING (id), c";
-    let from: Vec<_> =
-        core(sql).from.into_iter().map(|item| (item.qualifier, item.table, item.join)).collect();
+    let from: Vec<_> = core(sql)
+        .from
+        .iter()
+        .map(|item| (item.qualifier.clone(), item.table().map(str::to_owned), item.join))
+        .collect();
     assert_eq!(
         from,
         [

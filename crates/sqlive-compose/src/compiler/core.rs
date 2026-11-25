@@ -27,15 +27,31 @@ pub(crate) struct FromItem {
     pub(crate) qualifier: Option<String>,
     /// The alias the SQL gives it, lowercase.
     pub(crate) alias: Option<String>,
-    /// The table or CTE it reads, lowercase, when it names one.
-    pub(crate) table: Option<String>,
+    /// What it reads.
+    pub(crate) source: Source,
     /// How it joins.
     pub(crate) join: Join,
-    /// The index of the token that names its table, when the item names a
-    /// table with no schema in front of the name.
-    pub(crate) at_table: Option<usize>,
-    /// Whether a schema's name qualifies its table.
-    pub(crate) qualified: bool,
+}
+
+/// What a FROM item reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// A table or CTE by its name alone, lowercase, at the token `at`.
+    Table { name: String, at: usize },
+    /// A table that a schema's name qualifies.
+    Qualified { name: String },
+    /// A subquery or a table function.
+    Derived,
+}
+
+impl FromItem {
+    /// The table or CTE it reads, lowercase, when it names one.
+    pub(crate) fn table(&self) -> Option<&str> {
+        match &self.source {
+            Source::Table { name, .. } | Source::Qualified { name } => Some(name),
+            Source::Derived => None,
+        }
+    }
 }
 
 /// What a result column is.
@@ -380,14 +396,7 @@ fn from_item(
     end: usize,
     join: Join,
 ) -> (FromItem, Option<usize>) {
-    let mut item = FromItem {
-        qualifier: None,
-        alias: None,
-        table: None,
-        join,
-        at_table: None,
-        qualified: false,
-    };
+    let mut item = FromItem { qualifier: None, alias: None, source: Source::Derived, join };
     let token = &tokens[index];
     let mut next = index + 1;
     if token.is_symbol(sql, '(') {
@@ -400,15 +409,13 @@ fn from_item(
             let Some(table) = tokens.get(next + 1).and_then(|table| table.name(sql)) else {
                 return (item, None);
             };
-            item.table = Some(table);
-            item.qualified = true;
+            item.source = Source::Qualified { name: table };
             next += 2;
         } else if after.is_some_and(|after| after.is_symbol(sql, '(')) {
             let Some(close) = matching(sql, tokens, next) else { return (item, None) };
             next = close + 1;
         } else {
-            item.table = Some(name);
-            item.at_table = Some(index);
+            item.source = Source::Table { name, at: index };
         }
     } else {
         return (item, None);
@@ -417,7 +424,7 @@ fn from_item(
         item.alias = Some(alias);
         next += used;
     }
-    item.qualifier = item.alias.clone().or_else(|| item.table.clone());
+    item.qualifier = item.alias.clone().or_else(|| item.table().map(str::to_owned));
     (item, Some(next))
 }
 

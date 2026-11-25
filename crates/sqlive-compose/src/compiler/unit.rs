@@ -7,7 +7,7 @@ use super::columns;
 use super::core::{self, all_from_items};
 use super::error::{Cause, CompileError, Warning};
 use super::generate;
-use super::header::{CallKind, Header};
+use super::header::{Header, HeaderKind};
 use super::lex;
 use super::model::{Field, Reading, Record};
 use super::rename;
@@ -45,15 +45,18 @@ pub(crate) fn compile(
     let crate_path = context.crate_name.replace('-', "_");
     let prefix = format!("{crate_path}__{}", header.name);
     let relation_names: Vec<String> =
-        header.relations.iter().map(|relation| relation.name.clone()).collect();
+        header.relations().iter().map(|relation| relation.name.clone()).collect();
     let renamed = rename::rename(&header.sql, &prefix, &relation_names);
     let expansion =
-        spread::expand(context.registry, &header.name, header.parent.is_some(), &renamed)
+        spread::expand(context.registry, &header.name, header.parent().is_some(), &renamed)
             .map_err(&fail)?;
     let sql = expansion.sql.as_str();
-    let standing: Vec<String> =
-        header.relations.iter().map(|relation| spread::empty_relation(&prefix, relation)).collect();
-    let prepared_sql = match &header.parent {
+    let standing: Vec<String> = header
+        .relations()
+        .iter()
+        .map(|relation| spread::empty_relation(&prefix, relation))
+        .collect();
+    let prepared_sql = match header.parent() {
         Some(table) => spread::with_ctes(&standing, &spread::without_parent(sql, table)),
         None => spread::with_ctes(&standing, sql),
     };
@@ -63,7 +66,7 @@ pub(crate) fn compile(
         context.probe.prepare(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))?;
     check_parameters(header, &prepared).map_err(&fail)?;
     let outline = core::outline(&prepared_sql, &tokens);
-    if header.parent.is_some() && prepared.columns.len() != 1 {
+    if header.parent().is_some() && prepared.columns.len() != 1 {
         return Err(fail(Cause::ParentColumns {
             concerns: header.name.clone(),
             width: prepared.columns.len(),
@@ -84,7 +87,7 @@ pub(crate) fn compile(
         sqlive::ReadReport::Whole { why } => {
             return Err(fail(Cause::Unanalyzable { concerns: header.name.clone(), why }));
         }
-        sqlive::ReadReport::Entries(entries) if header.kind == CallKind::Read => {
+        sqlive::ReadReport::Entries(entries) if header.is_read() => {
             for entry in entries {
                 if let sqlive::ReadRows::Whole { why } = entry.rows {
                     warnings.push(Warning {
@@ -98,13 +101,13 @@ pub(crate) fn compile(
         }
         sqlive::ReadReport::Entries(_) => {}
     }
-    let (code, record) = match header.kind {
-        CallKind::Fragment => {
+    let (code, record) = match &header.kind {
+        HeaderKind::Fragment { parent, relations } => {
             let record = Record {
                 path: fragment_path(context.crate_name, &call.module, &header.name),
                 parameters: header.parameters.clone(),
-                parent: header.parent.clone(),
-                relations: header.relations.clone(),
+                parent: parent.clone(),
+                relations: relations.clone(),
                 sql: sql.to_owned(),
                 width: prepared.columns.len(),
                 presence: presence(&fields),
@@ -112,7 +115,7 @@ pub(crate) fn compile(
             };
             (generate::fragment(header, &fields), Some(record))
         }
-        CallKind::Read => (generate::read(header, sql, &fields), None),
+        HeaderKind::Read => (generate::read(header, sql, &fields), None),
     };
     Ok(Compiled { code, record, warnings })
 }
@@ -151,7 +154,7 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
         };
         if let Some(alias) = &spread.alias {
             let in_from = from.iter().any(|item| {
-                item.table.is_none() && item.qualifier.as_deref() == Some(alias.as_str())
+                item.table().is_none() && item.qualifier.as_deref() == Some(alias.as_str())
             });
             if in_from {
                 return Err(Cause::ParentSpreadInFrom { fragment: spread.record.path.clone() });
@@ -159,7 +162,7 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
         }
         let reads = from.iter().any(|item| {
             item.qualifier.as_deref() == Some(parent.as_str())
-                && item.table.as_deref().is_some_and(|read| read.eq_ignore_ascii_case(table))
+                && item.table().is_some_and(|read| read.eq_ignore_ascii_case(table))
         });
         if !reads {
             return Err(Cause::WrongParentTable {

@@ -267,9 +267,7 @@ fn joins_with_nulls(
     let Some(origin) = origin else { return Ok(false) };
     let reads = |from: &FromItem| match &qualifier {
         Some(qualifier) => from.qualifier.as_deref() == Some(qualifier.as_str()),
-        None => {
-            from.table.as_deref().is_some_and(|table| table.eq_ignore_ascii_case(&origin.table))
-        }
+        None => from.table().is_some_and(|table| table.eq_ignore_ascii_case(&origin.table)),
     };
     let nullable: Vec<bool> = core
         .from

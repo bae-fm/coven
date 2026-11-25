@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use super::core::{all_from_items, matching};
+use super::core::{all_from_items, matching, Source};
 use super::lex::{self, Token};
 
 /// A CTE the SQL declares.
@@ -40,23 +40,20 @@ pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
         edits.push((tokens[cte.at].range.clone(), renamed(prefix, &cte.name)));
     }
     for item in all_from_items(sql, &tokens) {
-        let Some(table) = item.table.as_ref().filter(|table| names.contains(*table)) else {
-            continue;
-        };
-        if item.qualified || item.at_table.is_none() {
+        let Source::Table { name: table, at } = &item.source else { continue };
+        if !names.contains(table) {
             continue;
         }
-        let at = item.at_table.unwrap_or_default();
         let inside_own_body = declared
             .iter()
-            .any(|cte| !cte.recursive && cte.name == *table && cte.body.contains(&at));
+            .any(|cte| !cte.recursive && cte.name == *table && cte.body.contains(at));
         if inside_own_body {
             continue;
         }
-        let original = tokens[at].text(sql);
+        let original = tokens[*at].text(sql);
         let new = renamed(prefix, table);
         let text = if item.alias.is_some() { new } else { format!("{new} AS {original}") };
-        edits.push((tokens[at].range.clone(), text));
+        edits.push((tokens[*at].range.clone(), text));
     }
     lex::apply(sql, &edits)
 }

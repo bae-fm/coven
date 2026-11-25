@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::{Cause, CompileError, Location};
-use super::header::{CallKind, Header};
+use super::header::Header;
 use super::source::{Call, Walked};
 use super::spread::{spread_paths, Registry};
 use super::unit::{self, fragment_path};
@@ -111,7 +111,7 @@ fn order(
     let own: BTreeMap<String, usize> = calls
         .iter()
         .enumerate()
-        .filter(|(_, (_, header))| header.kind == CallKind::Fragment)
+        .filter(|(_, (_, header))| !header.is_read())
         .map(|(position, (call, header))| {
             (fragment_path(crate_name, &call.module, &header.name), position)
         })
@@ -133,7 +133,7 @@ fn order(
     }
     // A read is compiled after every fragment, in the order it is written.
     let (fragments, reads): (Vec<usize>, Vec<usize>) =
-        order.compile.iter().partition(|&&position| calls[position].1.kind == CallKind::Fragment);
+        order.compile.iter().partition(|&&position| !calls[position].1.is_read());
     order.compile = fragments.into_iter().chain(reads).collect();
     order
 }

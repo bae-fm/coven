@@ -1,5 +1,4 @@
 use super::walk;
-use crate::compiler::header::CallKind;
 use std::collections::BTreeMap;
 use std::io;
 
@@ -29,21 +28,16 @@ fn calls_are_found_in_every_module_with_their_place() {
                 call.name.as_str(),
                 call.module.join("::"),
                 call.location.to_string(),
-                call.header.as_ref().unwrap().kind,
+                call.header.as_ref().unwrap().is_read(),
             )
         })
         .collect();
     assert_eq!(
         found,
         [
-            ("Page", "page".to_owned(), "src/page.rs:2:3".to_owned(), CallKind::Read),
-            (
-                "Deep",
-                "nested::deep".to_owned(),
-                "src/nested/deep.rs:1:1".to_owned(),
-                CallKind::Fragment
-            ),
-            ("C", "inline".to_owned(), "src/lib.rs:4:14".to_owned(), CallKind::Fragment),
+            ("Page", "page".to_owned(), "src/page.rs:2:3".to_owned(), true),
+            ("Deep", "nested::deep".to_owned(), "src/nested/deep.rs:1:1".to_owned(), false),
+            ("C", "inline".to_owned(), "src/lib.rs:4:14".to_owned(), false),
         ]
     );
     assert_eq!(

@@ -39,7 +39,7 @@ fn a_parent_row_with_a_json_shape() {
         ),
     )
     .unwrap();
-    assert_eq!(header.parent.as_deref(), Some("issues"));
+    assert_eq!(header.parent(), Some("issues"));
     assert_eq!(header.declarations[0].declared, Declared::Json(RustType("Vec<Label>".into())));
     assert_eq!(header.shapes[0].name, "Label");
     assert_eq!(header.shapes[0].fields[1], ("photo".into(), FieldType::Hex));
@@ -52,14 +52,14 @@ fn relations_list_each_column_with_its_strict_type() {
         quote!(LabelUse with chosen(issue_id TEXT), other(a INTEGER, b BLOB) { uses: i64 }, r#"SELECT 1"#),
     )
     .unwrap();
-    assert_eq!(header.relations.len(), 2);
+    assert_eq!(header.relations().len(), 2);
     assert_eq!(
-        header.relations[1].columns,
+        header.relations()[1].columns,
         [("a".into(), "INTEGER".into()), ("b".into(), "BLOB".into())]
     );
     let without_braces =
         parse(CallKind::Fragment, quote!(Rows with chosen(issue_id TEXT), r#"SELECT 1"#)).unwrap();
-    assert_eq!(without_braces.relations.len(), 1);
+    assert_eq!(without_braces.relations().len(), 1);
 }
 
 #[test]

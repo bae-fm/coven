@@ -43,11 +43,11 @@ impl RustType {
         Self(normal)
     }
 
-    /// The type inside, when this is `Option<…>`.
-    pub(crate) fn option_inner(&self) -> Option<RustType> {
+    /// The type inside, when this is `wrapper<…>`.
+    fn inside(&self, wrapper: &str) -> Option<RustType> {
         let Ok(Type::Path(path)) = syn::parse_str::<Type>(&self.0) else { return None };
         let segment = path.path.segments.last()?;
-        if segment.ident != "Option" {
+        if segment.ident != wrapper {
             return None;
         }
         let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else { return None };
@@ -57,18 +57,14 @@ impl RustType {
         }
     }
 
+    /// The type inside, when this is `Option<…>`.
+    pub(crate) fn option_inner(&self) -> Option<RustType> {
+        self.inside("Option")
+    }
+
     /// The type inside, when this is `Vec<…>`.
     pub(crate) fn vec_inner(&self) -> Option<RustType> {
-        let Ok(Type::Path(path)) = syn::parse_str::<Type>(&self.0) else { return None };
-        let segment = path.path.segments.last()?;
-        if segment.ident != "Vec" {
-            return None;
-        }
-        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else { return None };
-        match arguments.args.first()? {
-            syn::GenericArgument::Type(inner) => Some(Self::of(inner)),
-            _ => None,
-        }
+        self.inside("Vec")
     }
 
     /// Whether the type can hold NULL: it is `Option<…>`.
@@ -124,17 +120,47 @@ pub(crate) struct Shape {
     pub(crate) fields: Vec<(String, FieldType)>,
 }
 
+/// What a call is, with what only that kind of call has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HeaderKind {
+    /// A fragment, which may read a parent row of a table and relations.
+    Fragment { parent: Option<String>, relations: Vec<Relation> },
+    /// A read.
+    Read,
+}
+
 /// A parsed call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Header {
-    pub(crate) kind: CallKind,
+    pub(crate) kind: HeaderKind,
     pub(crate) name: String,
     pub(crate) parameters: Vec<Parameter>,
-    pub(crate) parent: Option<String>,
-    pub(crate) relations: Vec<Relation>,
     pub(crate) declarations: Vec<Declaration>,
     pub(crate) shapes: Vec<Shape>,
     pub(crate) sql: String,
+}
+
+impl Header {
+    /// The table of the parent row a fragment reads.
+    pub(crate) fn parent(&self) -> Option<&str> {
+        match &self.kind {
+            HeaderKind::Fragment { parent, .. } => parent.as_deref(),
+            HeaderKind::Read => None,
+        }
+    }
+
+    /// The relations a fragment reads.
+    pub(crate) fn relations(&self) -> &[Relation] {
+        match &self.kind {
+            HeaderKind::Fragment { relations, .. } => relations,
+            HeaderKind::Read => &[],
+        }
+    }
+
+    /// Whether the call is a read.
+    pub(crate) fn is_read(&self) -> bool {
+        self.kind == HeaderKind::Read
+    }
 }
 
 /// Why a call's tokens aren't a header.
@@ -218,16 +244,11 @@ fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
     if !input.is_empty() {
         return Err(input.error("nothing follows the SQL"));
     }
-    Ok(Header {
-        kind,
-        name: name.to_string(),
-        parameters,
-        parent,
-        relations,
-        declarations,
-        shapes,
-        sql: sql.value(),
-    })
+    let kind = match kind {
+        CallKind::Fragment => HeaderKind::Fragment { parent, relations },
+        CallKind::Read => HeaderKind::Read,
+    };
+    Ok(Header { kind, name: name.to_string(), parameters, declarations, shapes, sql: sql.value() })
 }
 
 fn relation(input: ParseStream<'_>) -> syn::Result<Relation> {
