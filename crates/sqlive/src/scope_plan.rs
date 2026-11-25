@@ -67,8 +67,9 @@ pub struct ScopePlanSize {
     pub sources: usize,
     /// SELECT cores.
     pub cores: usize,
-    /// Edges between the sources: the equalities by which one source takes
-    /// values from another, each way counted on its own.
+    /// Edges between the sources: each an equality that the rows of one
+    /// source meet with a value of another's, by which the planner narrows
+    /// it. A join's equality gives an edge each way, and an OR's sides none.
     pub edges: usize,
 }
 

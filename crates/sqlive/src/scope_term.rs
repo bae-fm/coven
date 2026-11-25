@@ -90,19 +90,21 @@ impl ScopeTerm {
                 test: RowTest::Holds,
             }))),
             Self::Truth { condition, ordering, inclusive, is, operand } => {
-                let value = operand.value(values, Affinity::Numeric);
+                let value = operand.known(values);
                 let passes = |truth: Option<i64>| match (truth, &value) {
-                    (None, value) => *is && matches!(value, Value::Null),
-                    (Some(_), Value::Null) => false,
-                    (Some(truth), value) => {
-                        compare(&Value::Integer(truth), value).is_some_and(|found| {
+                    // Which truths pass depends on the run's value, so each
+                    // can.
+                    (_, None) => true,
+                    (None, Some(value)) => *is && matches!(value, Value::Null),
+                    (Some(_), Some(Value::Null)) => false,
+                    (Some(truth), Some(value)) => compare(&Value::Integer(truth), value)
+                        .is_some_and(|found| {
                             if *is {
                                 found.is_eq()
                             } else {
                                 found == *ordering || (*inclusive && found.is_eq())
                             }
-                        })
-                    }
+                        }),
                 };
                 let mut scope = None;
                 for (truth, holds) in [(Some(1), true), (Some(0), false), (None, false)] {
@@ -352,14 +354,22 @@ pub(crate) enum Operand {
 }
 
 impl Operand {
-    /// The value for a run bound to `values`, where a column of `affinity`
-    /// is compared with it.
-    pub(crate) fn value(&self, values: RunValues<'_>, affinity: Affinity) -> Value {
+    /// The value for a run bound to `values`, or `None` for a parameter that
+    /// no run binds.
+    fn known(&self, values: RunValues<'_>) -> Option<Value> {
         match (self, values) {
-            (Self::Constant(value), _) => value.clone(),
-            (Self::Parameter(index), RunValues::Run(parameters)) => parameters[*index].clone(),
-            (Self::Parameter(_), RunValues::Any) => affinity.any_value(),
+            (Self::Constant(value), _) => Some(value.clone()),
+            (Self::Parameter(index), RunValues::Run(parameters)) => {
+                Some(parameters[*index].clone())
+            }
+            (Self::Parameter(_), RunValues::Any) => None,
         }
+    }
+
+    /// The value for a run bound to `values`, where a column of `affinity`
+    /// is compared with it: one the comparison binds when no run says which.
+    pub(crate) fn value(&self, values: RunValues<'_>, affinity: Affinity) -> Value {
+        self.known(values).unwrap_or_else(|| affinity.any_value())
     }
 }
 
@@ -368,8 +378,11 @@ impl Operand {
 pub(crate) enum RunValues<'a> {
     /// A run's parameters.
     Run(&'a [Value]),
-    /// No run's: each parameter holds a value the term that names it binds.
-    /// The scopes this gives say which columns they test and judge no row.
+    /// No run's: the scopes say which columns each term of the plan tests,
+    /// whatever value a run gives it, and judge no row. A parameter a column
+    /// is compared with stands for any value the comparison binds, a LIMIT's
+    /// for any positive one, and one a condition's truth is compared with
+    /// for any at all.
     Any,
 }
 

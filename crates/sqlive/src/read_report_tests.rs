@@ -182,6 +182,9 @@ fn a_table_narrowed_by_no_one_column_is_looked_up() {
         "SELECT title FROM tracks WHERE length(title) = ?1",
         "SELECT title, id FROM tracks ORDER BY title, id LIMIT 10",
         "SELECT title, id FROM tracks ORDER BY title, id LIMIT ?1",
+        "SELECT title FROM tracks WHERE (id = 5) = ?1",
+        "SELECT title FROM tracks WHERE (position > 2) > ?1",
+        "SELECT title FROM tracks WHERE (release_id IS NULL) = ?1",
         "SELECT title FROM tracks WHERE id = ?1 UNION ALL
          SELECT title FROM tracks WHERE release_id = ?2",
     ] {

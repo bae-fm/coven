@@ -3989,7 +3989,10 @@ let moved = handle
 - *What a statement depends on, in tests.* With sqlive's test-utils feature,
   sqlive's `read_report` says which rows of each table and view a statement
   depends on when a live query runs it
-  ([§4](coven.md#4-writing-locally)), before any value is bound. A table is
+  ([§4](coven.md#4-writing-locally)), before any value is bound. The report
+  takes each parameter that a column is compared with to hold a value that isn't
+  NULL and that SQLite compares as it is, and takes each run to return as many
+  rows as its LIMIT. A table is
   keyed by a column when every read of it compares that column by `=`, `IN` or
   `IS` with a value, or joins it to a column that the joined read itself
   compares so. A table is looked up when coven narrows every read of it but no one
@@ -4633,8 +4636,9 @@ pub struct ScopePlanSize {
     pub sources: usize,
     /// SELECT cores.
     pub cores: usize,
-    /// Edges between the sources: the equalities by which one source takes
-    /// values from another, each way counted on its own.
+    /// Edges between the sources: each an equality that the rows of one
+    /// source meet with a value of another's, by which coven narrows it. A
+    /// join's equality gives an edge each way, and an OR's sides none.
     pub edges: usize,
 }
 
