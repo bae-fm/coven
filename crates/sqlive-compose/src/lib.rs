@@ -11,9 +11,7 @@ pub use sqlive_compose_macros::{fragment, read};
 /// decodes JSON with, so an app lists none of them.
 #[doc(hidden)]
 pub mod generated {
-    pub use hex;
     pub use serde;
-    pub use serde_json;
     pub use sqlive;
 
     /// Reads bytes that a JSON document holds as hexadecimal text.

@@ -12,10 +12,6 @@ categories = ["database"]
 # The compiler an app's build script runs.
 compiler = ["dep:proc-macro2", "dep:quote", "dep:syn", "dep:thiserror"]
 
-# The issue tracker of SPEC.md as a schema and a compiled crate, which this
-# crate's tests and the tests of crates that build on it share.
-test-utils = ["compiler"]
-
 [dependencies]
 sqlive.workspace = true
 sqlive-compose-macros.workspace = true

@@ -1,4 +1,81 @@
-use crate::compiler::test_tracker::{compile, compile_lib, messages};
+use crate::compiler::{compile_crate, CompileError, Function, Input, Output, Setup};
+use std::collections::BTreeMap;
+
+/// The tables of the tracker.
+const SCHEMA: &str = "
+CREATE TABLE people (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, photo BLOB NOT NULL) STRICT;
+CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL) STRICT;
+CREATE TABLE issues (
+    id TEXT NOT NULL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    state TEXT NOT NULL,
+    author_id TEXT NOT NULL REFERENCES people (id),
+    assignee_id TEXT REFERENCES people (id),
+    opened_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE labels (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, hidden INTEGER NOT NULL) STRICT;
+CREATE TABLE issue_labels (
+    issue_id TEXT NOT NULL REFERENCES issues (id),
+    label_id TEXT NOT NULL REFERENCES labels (id),
+    PRIMARY KEY (issue_id, label_id)
+) STRICT;
+CREATE TABLE comments (
+    id TEXT NOT NULL PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issues (id),
+    author_id TEXT NOT NULL REFERENCES people (id),
+    body TEXT NOT NULL,
+    written_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE comment_reads (
+    issue_id TEXT NOT NULL,
+    person_id TEXT NOT NULL,
+    read_at INTEGER NOT NULL,
+    PRIMARY KEY (issue_id, person_id)
+) STRICT;";
+
+/// The tracker's setup step.
+fn setup() -> Setup {
+    Setup {
+        sql: vec![SCHEMA.to_owned()],
+        functions: vec![Function { name: "fold_case".into(), arguments: 1, deterministic: true }],
+        collations: vec![],
+    }
+}
+
+/// Compile the crate `name` whose files are `files`, given the manifests of
+/// the crates it depends on.
+fn compile(
+    name: &str,
+    files: &[(&str, &str)],
+    manifests: &[&str],
+) -> Result<Output, Vec<CompileError>> {
+    let files: BTreeMap<String, String> =
+        files.iter().map(|(path, text)| ((*path).to_owned(), (*text).to_owned())).collect();
+    let reader = move |path: &str| {
+        files.get(path).cloned().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+    };
+    compile_crate(Input {
+        crate_name: name.to_owned(),
+        source_reader: &reader,
+        manifests: manifests.iter().map(|manifest| (*manifest).to_owned()).collect(),
+        setup: setup(),
+    })
+}
+
+/// The compile of a crate whose `src/lib.rs` is `lib`.
+fn compile_lib(lib: &str) -> Result<Output, Vec<CompileError>> {
+    compile("tracker", &[("src/lib.rs", lib)], &[])
+}
+
+/// The error messages of a failed compile.
+fn messages(result: Result<Output, Vec<CompileError>>) -> Vec<String> {
+    match result {
+        Ok(_) => panic!("the compile passes"),
+        Err(errors) => errors.iter().map(ToString::to_string).collect(),
+    }
+}
 
 fn code_of(output: &super::Output, name: &str) -> String {
     let (_, text) = output.files.iter().find(|(file, _)| file == name).unwrap();
@@ -530,4 +607,203 @@ sqlive_compose::read!(Bare, r#"SELECT i.title FROM issues AS i WHERE i.id = ?"#)
             "src/lib.rs:3:1: Bare reads the parameter ?, and a parameter is written :name",
         ]
     );
+}
+
+fn types_of(lib: &str, name: &str) -> Vec<String> {
+    let output = compile_lib(lib).unwrap();
+    let (_, code) = output.files.iter().find(|(file, _)| file == &format!("{name}.rs")).unwrap();
+    let file = syn::parse_file(code).unwrap();
+    let syn::Item::Struct(item) = &file.items[0] else { panic!("a struct comes first") };
+    item.fields
+        .iter()
+        .map(|field| {
+            let ty = &field.ty;
+            format!("{}: {}", field.ident.as_ref().unwrap(), quote::quote!(#ty))
+        })
+        .collect()
+}
+
+#[test]
+fn a_column_on_the_right_of_a_left_join_can_be_null() {
+    let lib = r##"
+sqlive_compose::fragment!(Assigned, r#"
+    SELECT i.id, a.name, a.photo
+    FROM issues AS i LEFT JOIN people AS a ON a.id = i.assignee_id
+"#);
+"##;
+    assert_eq!(
+        types_of(lib, "Assigned"),
+        ["id: String", "name: Option < String >", "photo: Option < Vec < u8 > >"]
+    );
+}
+
+#[test]
+fn a_bare_column_is_placed_by_its_table() {
+    let lib = r##"
+sqlive_compose::fragment!(Assigned, r#"
+    SELECT title, name
+    FROM issues LEFT JOIN people ON people.id = issues.assignee_id
+"#);
+"##;
+    assert_eq!(types_of(lib, "Assigned"), ["title: String", "name: Option < String >"]);
+}
+
+#[test]
+fn a_star_takes_the_columns_the_other_items_leave() {
+    let lib = r##"
+sqlive_compose::fragment!(Starred, r#"
+    SELECT j.*, i.title FROM projects AS j JOIN issues AS i ON i.project_id = j.id
+"#);
+"##;
+    assert_eq!(types_of(lib, "Starred"), ["id: String", "name: String", "title: String"]);
+    let errors = messages(compile_lib(
+        r##"sqlive_compose::fragment!(Starred, r#"SELECT j.*, i.* FROM projects AS j JOIN issues AS i ON i.project_id = j.id"#);"##,
+    ));
+    assert_eq!(errors, ["src/lib.rs:1:1: Starred selects more than one `*`, so name the columns"]);
+}
+
+#[test]
+fn a_scalar_subquery_can_be_null_and_a_declaration_may_say_so() {
+    let lib = r##"
+sqlive_compose::fragment!(Latest { latest: Option<i64> }, r#"
+    SELECT i.id, (SELECT max(c.written_at) FROM comments AS c WHERE c.issue_id = i.id) AS latest
+    FROM issues AS i
+"#);
+"##;
+    assert_eq!(types_of(lib, "Latest"), ["id: String", "latest: Option < i64 >"]);
+}
+
+#[test]
+fn two_columns_with_one_name_fail() {
+    let output =
+        compile_lib(r##"sqlive_compose::fragment!(Same { a: i64 }, r#"SELECT 1 AS a, 2 AS a"#);"##);
+    assert_eq!(messages(output), ["src/lib.rs:1:1: Same returns the column a twice"]);
+}
+
+#[test]
+fn a_bare_column_that_two_items_could_give_needs_a_declaration() {
+    let lib = |declaration: &str| {
+        format!(
+            r##"sqlive_compose::fragment!(Twice {declaration}, r#"
+    SELECT id FROM people AS a LEFT JOIN people AS b USING (id)
+"#);"##
+        )
+    };
+    assert_eq!(
+        messages(compile_lib(&lib(""))),
+        ["src/lib.rs:1:1: Twice names the column id with no table, and more than one FROM item could give it, so the header must declare id"]
+    );
+    assert_eq!(types_of(&lib("{ id: String }"), "Twice"), ["id: String"]);
+}
+
+const JSON_FRAGMENTS: &str = r##"
+sqlive_compose::fragment!(
+    IssueLabels on issues {
+        struct Label { name: String, hidden: bool }
+        labels: json<Vec<Label>>
+    },
+    r#"
+    SELECT json_group_array(json_object(
+               'name', l.name,
+               'hidden', json(iif(l.hidden, 'true', 'false')))
+               ORDER BY l.name) AS labels
+    FROM issue_labels AS il
+    JOIN labels AS l ON l.id = il.label_id
+    WHERE il.issue_id = @parent.id
+"#);
+sqlive_compose::fragment!(
+    CommentAuthor on comments {
+        struct Author { id: PersonId, name: String, photo: hex }
+        author: json<Author>
+    },
+    r#"
+    SELECT json_object('id', p.id, 'name', p.name, 'photo', hex(p.photo)) AS author
+    FROM people AS p
+    WHERE p.id = @parent.author_id
+"#);
+"##;
+
+#[test]
+fn a_document_that_matches_its_shape_compiles_to_a_struct_and_a_decoder() {
+    let output = compile_lib(JSON_FRAGMENTS).unwrap();
+    let labels = output.files.iter().find(|(name, _)| name == "IssueLabels.rs").unwrap().1.clone();
+    syn::parse_file(&labels).unwrap();
+    assert!(labels.contains("pub struct Label"), "{labels}");
+    assert!(labels.contains("pub (crate) labels : Vec < Label >"), "{labels}");
+    assert!(labels.contains("json_column (row , offset + 0usize) ?"), "{labels}");
+    let author =
+        output.files.iter().find(|(name, _)| name == "CommentAuthor.rs").unwrap().1.clone();
+    syn::parse_file(&author).unwrap();
+    assert!(
+        author.contains("deserialize_with = \"::sqlive_compose::generated::hex_bytes\""),
+        "{author}"
+    );
+    assert!(author.contains("pub (crate) photo : Vec < u8 >"), "{author}");
+    let manifest: serde_json::Value = serde_json::from_str(&output.manifest).unwrap();
+    // An aggregate with no GROUP BY gives one row for any parent row.
+    assert_eq!(manifest["fragments"][0]["one_row"], true);
+    assert_eq!(manifest["fragments"][1]["one_row"], false);
+}
+
+#[test]
+fn keys_that_differ_from_the_shape_fail_with_both_lists() {
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::fragment!(
+    IssueLabels on issues {
+        struct Label { name: String, hidden: bool }
+        labels: json<Vec<Label>>
+    },
+    r#"
+    SELECT COALESCE((SELECT json_group_array(json_object('name', l.name, 'color', l.hidden))
+                     FROM issue_labels AS il JOIN labels AS l ON l.id = il.label_id
+                     WHERE il.issue_id = @parent.id), '[]') AS labels
+"#);
+"##,
+    ));
+    assert_eq!(
+        errors,
+        ["src/lib.rs:2:1: labels: the document has the key color, which Label lacks, and lacks Label's key hidden"]
+    );
+}
+
+#[test]
+fn a_nested_document_and_the_kind_of_a_document_are_checked() {
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::read!(
+    Nested {
+        struct Inner { a: i64 }
+        struct Outer { name: String, inner: Inner }
+        doc: json<Outer>,
+        other: json<Vec<Inner>>
+    },
+    r#"SELECT json_object('name', 'x', 'inner', json_object('a', 1, 'b', 2)) AS doc,
+              json_object('a', 1) AS other"#
+);
+"##,
+    ));
+    assert_eq!(errors, ["src/lib.rs:2:1: doc: the document has the key b, which Inner lacks"]);
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::read!(
+    Kind { struct Inner { a: i64 } other: json<Vec<Inner>> },
+    r#"SELECT json_object('a', 1) AS other"#
+);
+"##,
+    ));
+    assert_eq!(
+        errors,
+        ["src/lib.rs:2:1: other: the SQL builds an object, and the header declares an array"]
+    );
+}
+
+#[test]
+fn an_opaque_document_is_not_checked() {
+    compile_lib(
+        r##"
+sqlive_compose::read!(Opaque { doc: json<Vec<Elsewhere>> }, r#"SELECT json_group_array(json_object('x', 1)) AS doc"#);
+"##,
+    )
+    .unwrap();
 }

@@ -179,7 +179,3 @@ fn object(sql: &str, tokens: &[Token], range: Range<usize>) -> Built {
     }
     Built::Object(pairs)
 }
-
-#[cfg(test)]
-#[path = "json_tests.rs"]
-mod tests;

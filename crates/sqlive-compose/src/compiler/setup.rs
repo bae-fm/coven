@@ -1,15 +1,8 @@
 //! The schema an app's reads are checked against, as data.
 
-/// A SQL function that the schema's SQL names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Function {
-    /// The function's name.
-    pub name: String,
-    /// How many arguments it takes, or -1 for any number.
-    pub arguments: i32,
-    /// Whether it gives the same result for the same arguments.
-    pub deterministic: bool,
-}
+/// A SQL function that the schema's SQL names: its name, its number of
+/// arguments and whether it is deterministic.
+pub use sqlive::StandInFunction as Function;
 
 /// What the compiler runs to build the schema: the SQL texts in the order to
 /// run them, and what the SQL names that SQLite doesn't have. SQLite fails to
@@ -27,15 +20,6 @@ pub struct Setup {
 
 impl Setup {
     pub(crate) fn probe(&self) -> sqlive::SqliteResult<sqlive::SchemaProbe> {
-        let functions: Vec<sqlive::StandInFunction> = self
-            .functions
-            .iter()
-            .map(|function| sqlive::StandInFunction {
-                name: function.name.clone(),
-                arguments: function.arguments,
-                deterministic: function.deterministic,
-            })
-            .collect();
-        sqlive::SchemaProbe::open(&self.sql, &functions, &self.collations)
+        sqlive::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
     }
 }
