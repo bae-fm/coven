@@ -747,9 +747,10 @@ nothing runs it again.
 
 Coven reads a statement's SQL to work out what it depends on when a live query
 first runs it. The more a statement joins, the longer that takes, so coven logs
-at debug level how many FROM items, SELECTs and equalities between FROM items it
-read in each statement. When Ben's album page is slow to open the first time,
-the log shows how large its statement is.
+at debug level how many FROM items and SELECTs it read in each statement, and by
+how many equalities one FROM item takes values from another, each way counted on
+its own. When Ben's album page is slow to open the first time, the log shows how
+large its statement is.
 
 Coven judges each row a write changes by the row's net change: the row as it was
 before the write and as it is when the write commits. A write can change one row
@@ -1378,9 +1379,12 @@ statement with a recursive CTE of its own, or with `x IN table`, narrows
 nothing: it depends on every row of each table it read.
 
 Coven logs at debug level each statement that reads a table or a view whole,
-with the statement's SQL, each such table or view and the reason. A write to any
-row of such a table can run the live query again, and nothing in the result
-shows why. When Ben's app reads every one of his 100,000 tracks because a second
+with the statement's SQL. The log names each table one of the statement's own
+SELECTs, CTEs or views reads whole and each view coven reads whole, with the
+reason. The log doesn't name the tables behind such a view, and for a statement
+that narrows nothing it gives one reason for every table. A write to any row of
+a table read whole can run the live query again, and nothing in the result shows
+why. When Ben's app reads every one of his 100,000 tracks because a second
 subquery of the screen's statement leaves out its WHERE, the log names `tracks`
 and that subquery's name for it.
 

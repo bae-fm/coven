@@ -3991,12 +3991,12 @@ let moved = handle
   depends on when a live query runs it
   ([§4](coven.md#4-writing-locally)), before any value is bound. A table is
   keyed by a column when every read of it compares that column by `=`, `IN` or
-  `IS` with a value, or joins it by `=` to a column of a table keyed by that
-  column. A table is looked up when coven narrows every read of it but no one
+  `IS` with a value, or joins it to a column that the joined read itself
+  compares so. A table is looked up when coven narrows every read of it but no one
   column is compared in all of them. A table is whole when some read of it
   depends on every row, and the report then gives the reason for each such read.
   A view coven reads whole is whole too, and so is each table the view reads,
-  whatever that table's own entry says. A statement coven can't narrow at all
+  whatever the report says of that table's other reads. A statement coven can't narrow at all
   has one reason and no entries. A test of Ben's album page fails when its
   statement starts to read `tracks` whole. The report's text holds one line for
   each entry.
