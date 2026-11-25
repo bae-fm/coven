@@ -514,3 +514,20 @@ sqlive_compose::read!(
     assert!(code.contains("pub me : PersonId"), "{code}");
     assert!(output.warnings.is_empty(), "{:?}", output.warnings);
 }
+
+#[test]
+fn a_parameter_that_is_not_written_with_a_name_fails() {
+    let errors = messages(compile_lib(
+        r##"
+sqlive_compose::read!(Numbered, r#"SELECT i.title FROM issues AS i WHERE i.id = ?1"#);
+sqlive_compose::read!(Bare, r#"SELECT i.title FROM issues AS i WHERE i.id = ?"#);
+"##,
+    ));
+    assert_eq!(
+        errors,
+        [
+            "src/lib.rs:2:1: Numbered reads the parameter ?1, and a parameter is written :name",
+            "src/lib.rs:3:1: Bare reads the parameter ?, and a parameter is written :name",
+        ]
+    );
+}

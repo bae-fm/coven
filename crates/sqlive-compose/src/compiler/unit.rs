@@ -170,6 +170,12 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
 /// Whether the parameters the statement reads are the ones the header
 /// declares, each written `:name`.
 fn check_parameters(header: &Header, prepared: &sqlive::ProbedStatement) -> Result<(), Cause> {
+    if prepared.unnamed_parameters > 0 {
+        return Err(Cause::ForeignParameter {
+            concerns: header.name.clone(),
+            parameter: "?".to_owned(),
+        });
+    }
     let mut read = BTreeSet::new();
     for parameter in &prepared.parameters {
         let Some(name) = parameter.strip_prefix(':') else {

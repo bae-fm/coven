@@ -36,12 +36,7 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
             (
                 column.name.as_str(),
                 origin.map(|origin| {
-                    (
-                        origin.table.as_str(),
-                        origin.column.as_str(),
-                        origin.declared_type.as_deref(),
-                        origin.not_null,
-                    )
+                    (origin.table.as_str(), origin.declared_type.as_deref(), origin.not_null)
                 }),
             )
         })
@@ -49,10 +44,10 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
     assert_eq!(
         origins,
         [
-            ("person_id", Some(("people", "id", Some("TEXT"), true))),
-            ("note", Some(("people", "note", Some("TEXT"), false))),
+            ("person_id", Some(("people", Some("TEXT"), true))),
+            ("note", Some(("people", Some("TEXT"), false))),
             ("shout", None),
-            ("title", Some(("issues", "title", Some("TEXT"), true))),
+            ("title", Some(("issues", Some("TEXT"), true))),
         ]
     );
 }
@@ -63,6 +58,8 @@ fn a_statement_lists_its_parameters_once_each() {
         .prepare("SELECT 1 FROM issues WHERE id = :issue OR title = :issue OR assignee_id = :who")
         .unwrap();
     assert_eq!(statement.parameters, [":issue", ":who"]);
+    assert_eq!(statement.unnamed_parameters, 0);
+    assert_eq!(probe().prepare("SELECT :a, ?").unwrap().unnamed_parameters, 1);
 }
 
 #[test]

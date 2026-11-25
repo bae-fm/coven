@@ -33,8 +33,6 @@ pub struct StandInFunction {
 pub struct ColumnOrigin {
     /// The table, as the schema names it.
     pub table: String,
-    /// The column, as the schema names it.
-    pub column: String,
     /// The type the table declares for the column, as written, when it
     /// declares one.
     pub declared_type: Option<String>,
@@ -59,6 +57,8 @@ pub struct ProbedStatement {
     /// The names of the parameters the statement reads, with their first
     /// character (`:name`), each once, in order of first use.
     pub parameters: Vec<String>,
+    /// How many parameters the statement reads that have no name: `?` alone.
+    pub unnamed_parameters: usize,
 }
 
 /// An in-memory database that holds a schema's tables, views and triggers.
@@ -106,12 +106,11 @@ impl SchemaProbe {
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
             let origin = match statement.column_metadata(position)? {
-                Some((_, table, column, declared, _, not_null, _, _))
+                Some((_, table, _, declared, _, not_null, _, _))
                     if metadata.database_name() == Some("main") =>
                 {
                     Some(ColumnOrigin {
                         table: table.to_string_lossy().into_owned(),
-                        column: column.to_string_lossy().into_owned(),
                         declared_type: declared
                             .map(|declared| declared.to_string_lossy().into_owned()),
                         not_null,
@@ -123,14 +122,18 @@ impl SchemaProbe {
         }
         let mut seen = BTreeSet::new();
         let mut parameters = Vec::new();
+        let mut unnamed_parameters = 0;
         for position in 1..=statement.parameter_count() {
-            if let Some(name) = statement.parameter_name(position) {
-                if seen.insert(name.to_owned()) {
-                    parameters.push(name.to_owned());
+            match statement.parameter_name(position) {
+                Some(name) => {
+                    if seen.insert(name.to_owned()) {
+                        parameters.push(name.to_owned());
+                    }
                 }
+                None => unnamed_parameters += 1,
             }
         }
-        Ok(ProbedStatement { columns, parameters })
+        Ok(ProbedStatement { columns, parameters, unnamed_parameters })
     }
 
     /// What a live query of `sql` depends on in each table it reads, as its
