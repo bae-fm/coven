@@ -133,22 +133,22 @@ fn disjuncts<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
 impl Planner<'_> {
     /// Whether `item` waits for an OR's partner: a side compares a column of
     /// it with a subquery's value whose source isn't placed yet.
-    pub(crate) fn waits_for_or(&self, item: usize, order: &[usize]) -> bool {
+    pub(crate) fn waits_for_or(&self, item: usize, placed: &[bool]) -> bool {
         self.items[item]
             .ors
             .iter()
             .flatten()
-            .any(|side| side.edges.iter().any(|edge| edge.nested && !order.contains(&edge.partner)))
+            .any(|side| side.edges.iter().any(|edge| edge.nested && !placed[edge.partner]))
     }
 
     /// The ORs on `item` whose sides take values only from sources placed
-    /// before it, in `order`.
-    pub(crate) fn placed_ors(&self, item: usize, order: &[usize]) -> Vec<Vec<EitherSide>> {
+    /// before it.
+    pub(crate) fn placed_ors(&self, item: usize, placed: &[bool]) -> Vec<Vec<EitherSide>> {
         self.items[item]
             .ors
             .iter()
             .filter(|sides| {
-                sides.iter().all(|side| side.edges.iter().all(|edge| order.contains(&edge.partner)))
+                sides.iter().all(|side| side.edges.iter().all(|edge| placed[edge.partner]))
             })
             .map(|sides| sides.iter().map(EitherSide::of).collect())
             .collect()
