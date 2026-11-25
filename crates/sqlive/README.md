@@ -147,6 +147,23 @@ write changes another release's tracks. A statement with a `LIMIT` narrows
 further once a run returns as many rows as the limit. A one-shot read records
 nothing, because nothing runs it again.
 
+## Checking SQL against a schema
+
+A build tool can check SQL before the program runs. `SchemaProbe::open` makes a
+database in memory, with no rows, that has run the schema's SQL texts in order.
+SQLite refuses to prepare SQL that names a function or a collation it doesn't
+know, so the caller lists the functions (`StandInFunction`) and the collations
+that the schema's SQL uses by name, and the probe registers a stand-in for each.
+`SchemaProbe::prepare` prepares a statement and returns its result columns, with
+the table column each one is when it is one unchanged (`ColumnOrigin`), and the
+parameters it reads. `SchemaProbe::read_report` returns the `ReadReport` that
+says what a live query of the statement depends on in each table: the rows one
+value fixes, the rows a lookup finds, or every row, with the reason. The probe
+opens no file and runs no SQL but the schema's.
+
+`sqlive::Row` is the row a query's closure maps, so code that reads a row names
+no other crate's type.
+
 ## Policy
 
 The program that embeds sqlive, the host, implements `Policy` to judge each
