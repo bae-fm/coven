@@ -614,23 +614,22 @@ holds the same value in `page.issue`. sqlive reads the conditions of a live
 query's statement to find which rows it depends on, so that a write to any other
 row doesn't run the query again. A comparison with a parameter tells sqlive
 which rows those are. A comparison with a column of the root tells sqlive less,
-and which side comes first decides whether it tells sqlive anything. sqlive
-reports what the read depends on in `issues` for each form:
+in either order. sqlive reports what the read depends on in `issues` for each
+form:
 
 | The join's condition | What sqlive reports for `issues` |
 |---|---|
 | `issue.issue_id = :issue` | `keyed by id` |
-| `issue.issue_id = page.issue` | `looked up` |
-| `page.issue = issue.issue_id` | ``whole: nothing narrows `i` `` |
+| `issue.issue_id = page.issue` or `page.issue = issue.issue_id` | `looked up` |
 
 *Keyed* means that sqlive files the query under the issue's id, so a write to
 another issue doesn't have to judge the query at all. *Looked up* means that
 sqlive narrows the rows but files the query under no one value, so each write to
 `issues` judges the query. For a join, the write asks with a small SELECT
-whether the row it changed is one the query depends on. *Whole* means that the
-query depends on every row, so a write to any issue can run it again. A read
-therefore compares with the request's parameter and uses the root only to return
-a row.
+whether the row it changed is one the query depends on. The later sections also
+meet a third answer, *whole*: the query depends on every row, so a write to any
+issue can run it again. A read therefore compares with the request's parameter
+and uses the root only to return a row.
 
 ## 6. Joining spreads
 
