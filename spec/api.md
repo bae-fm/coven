@@ -4637,8 +4637,8 @@ pub struct ScopePlanSize {
     /// SELECT cores.
     pub cores: usize,
     /// Edges between the sources: each an equality that the rows of one
-    /// source meet with a value of another's, by which coven narrows it. A
-    /// join's equality gives an edge each way, and an OR's sides none.
+    /// source meet with a value of another's, by which coven narrows it. One
+    /// equality can give an edge each way, and an OR's sides give none.
     pub edges: usize,
 }
 

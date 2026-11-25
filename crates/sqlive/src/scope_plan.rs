@@ -69,7 +69,8 @@ pub struct ScopePlanSize {
     pub cores: usize,
     /// Edges between the sources: each an equality that the rows of one
     /// source meet with a value of another's, by which the planner narrows
-    /// it. A join's equality gives an edge each way, and an OR's sides none.
+    /// it. One equality can give an edge each way, and an OR's sides give
+    /// none.
     pub edges: usize,
 }
 

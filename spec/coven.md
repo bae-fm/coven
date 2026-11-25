@@ -750,7 +750,7 @@ first runs it. The more a statement joins, the longer that takes, so coven logs
 at debug level how many FROM items and SELECTs it read in each statement, and how
 many edges it found between the FROM items. An edge is an equality that the rows
 of one FROM item meet with a value of another's, by which coven narrows the
-first. A join's equality gives an edge each way, and the sides of an OR, of a
+first. One equality can give an edge each way, and the sides of an OR, of a
 COALESCE or of a compound subquery give none. When Ben's album page is slow to
 open the first time, the log shows how large its statement is.
 
