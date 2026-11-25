@@ -548,3 +548,44 @@ async fn a_member_with_no_recorded_access_has_none_and_null_columns() {
     assert_eq!(columns, vec![(None, None)]);
     db.close().await.unwrap();
 }
+
+/// The follow of the local member's circles lists them as the one-shot read
+/// does, and runs again for a change to a membership of the local member
+/// but not for another member's.
+#[tokio::test]
+async fn the_circles_follow_runs_again_only_for_the_local_members_circles() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    let mut circles = db.subscribe_circles::<DbError>();
+    let listed = crate::tests::next(&mut circles).await;
+    assert_eq!(listed, db.circles().await.unwrap());
+    assert_eq!(listed.len(), 1);
+    let mut state = db.store_state().await.unwrap();
+    let gifts = CircleId(uuid::Uuid::from_u128(7));
+    state.circles.get_mut(&gifts).unwrap().members.remove(&member(2));
+    state.circles.get_mut(&gifts).unwrap().members.remove(&member(3));
+    db.admin_fixture(
+        coven_format::admin::StoreChange::DeleteCircle {
+            circle: CircleId(uuid::Uuid::from_u128(8)),
+        },
+        state.clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!circles.is_marked_for_rerun());
+    state.circles.get_mut(&gifts).unwrap().members.remove(&member(1));
+    db.admin_fixture(
+        coven_format::admin::StoreChange::DeleteCircle {
+            circle: CircleId(uuid::Uuid::from_u128(8)),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(circles.is_marked_for_rerun());
+    assert!(crate::tests::next(&mut circles).await.is_empty());
+    db.close().await.unwrap();
+}

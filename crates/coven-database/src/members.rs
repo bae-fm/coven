@@ -105,25 +105,20 @@ pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>
     Ok(members)
 }
 
+/// The circles of the member the local device registered under, as one
+/// statement: none while the device has no registration.
 pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, DbError> {
-    let Some(me) = device_member(db, device)? else {
-        return Ok(Vec::new());
-    };
     // Ordered by the membership's circle, which the member's index holds in
     // order; `c.circle` is the same value but would be sorted after the join.
-    let circles = db.query(
-        "SELECT c.circle,c.name FROM _coven_circle_members m JOIN _coven_circles c ON c.circle=m.circle
-         WHERE m.member=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)
+    Ok(db.host_live_read(
+        "SELECT c.circle,c.name FROM _coven_devices x
+         JOIN _coven_circle_members m ON m.member=x.member
+         JOIN _coven_circles c ON c.circle=m.circle
+         WHERE x.device=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)
          ORDER BY m.circle",
-        [me],
-        |r| {
-            Ok(Circle {
-                id: circle(r, 0)?,
-                name: r.get(1)?,
-            })
-        },
-    )?;
-    Ok(circles)
+        [device],
+        |r| Ok(Circle { id: circle(r, 0)?, name: r.get(1)? }),
+    )?)
 }
 
 /// A circle's members who remain in the store; none for an absent or deleted circle.
