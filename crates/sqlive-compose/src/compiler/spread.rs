@@ -58,6 +58,8 @@ pub(crate) enum Place {
     Value {
         /// The alias of the FROM item, lowercase.
         parent: String,
+        /// The table the fragment's parent row is of.
+        table: String,
     },
 }
 
@@ -160,11 +162,7 @@ pub(crate) fn expand(
             next = close + 1;
         }
         let alias = alias_at(sql, &tokens, next, tokens.len()).map(|(alias, _)| alias);
-        let (text, parent) = instantiate(registry, concerns, record, &arguments)?;
-        let place = match parent {
-            Some(parent) => Place::Value { parent },
-            None => Place::Table,
-        };
+        let (text, place) = instantiate(registry, concerns, record, &arguments)?;
         edits.push((token.range.start..end, text));
         placed.push(Placed { alias, record: record.clone(), place });
         index = next;
@@ -226,7 +224,7 @@ fn instantiate(
     concerns: &str,
     record: &Record,
     arguments: &[Argument],
-) -> Result<(String, Option<String>), Cause> {
+) -> Result<(String, Place), Cause> {
     let fragment = record.path.clone();
     for (position, argument) in arguments.iter().enumerate() {
         let known = argument.name == "parent"
@@ -241,7 +239,7 @@ fn instantiate(
     }
     let find = |name: &str| arguments.iter().find(|argument| argument.name == name);
     let parent = match (&record.parent, find("parent")) {
-        (Some(_), Some(argument)) => {
+        (Some(table), Some(argument)) => {
             let alias = argument
                 .single
                 .as_ref()
@@ -250,10 +248,11 @@ fn instantiate(
                     let name = lex::tokens(&single.text).first()?.name(&single.text)?;
                     Some((single.text.clone(), name))
                 });
-            Some(alias.ok_or_else(|| Cause::BadArgument {
+            let (raw, name) = alias.ok_or_else(|| Cause::BadArgument {
                 fragment: fragment.clone(),
                 argument: "parent".to_owned(),
-            })?)
+            })?;
+            Some((raw, name, table.clone()))
         }
         (Some(_), None) => return Err(Cause::MissingParent { fragment }),
         (None, Some(_)) => return Err(Cause::NoParentRow { fragment }),
@@ -291,8 +290,12 @@ fn instantiate(
             columns.join(", ")
         ));
     }
-    let body = substitute(&record.sql, &bindings, parent.as_ref().map(|(raw, _)| raw.as_str()));
-    Ok((format!("({})", with_ctes(&ctes, &body)), parent.map(|(_, name)| name)))
+    let body = substitute(&record.sql, &bindings, parent.as_ref().map(|(raw, _, _)| raw.as_str()));
+    let place = match parent {
+        Some((_, parent, table)) => Place::Value { parent, table },
+        None => Place::Table,
+    };
+    Ok((format!("({})", with_ctes(&ctes, &body)), place))
 }
 
 /// The prefix of the CTE names of the fragment at `path`: its crate and its

@@ -146,10 +146,7 @@ pub(crate) fn fragment_path(crate_name: &str, module: &[String], name: &str) -> 
 /// beside a FROM item that reads the parent's table, never in FROM itself.
 fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause> {
     for spread in placed {
-        let (Some(table), Place::Value { parent }) = (&spread.record.parent, &spread.place) else {
-            if spread.record.parent.is_some() {
-                return Err(Cause::MissingParent { fragment: spread.record.path.clone() });
-            }
+        let Place::Value { parent, table } = &spread.place else {
             continue;
         };
         if let Some(alias) = &spread.alias {

@@ -66,7 +66,7 @@ fn a_value_spread_binds_its_parameters_and_its_parent_row() {
         expansion.sql,
         "SELECT i.title, (SELECT count(*) AS unread FROM comments AS c WHERE c.issue_id = i.id AND c.author_id = :me) AS unread FROM issues AS i"
     );
-    assert!(matches!(&expansion.placed[0].place, Place::Value { parent } if parent == "i"));
+    assert!(matches!(&expansion.placed[0].place, Place::Value { parent, .. } if parent == "i"));
 }
 
 #[test]
