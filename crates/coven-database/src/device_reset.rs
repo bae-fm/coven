@@ -8,7 +8,7 @@ use coven_merge::Slot;
 
 pub(crate) fn read(database: &StoreSql) -> Result<Option<DeviceReset>, DbError> {
     Ok(database
-        .query(
+        .host_live_read(
             "SELECT old_device,new_device FROM _coven_device_reset WHERE singleton=1",
             [],
             |row| Ok(DeviceReset { old_device: row.get(0)?, new_device: row.get(1)? }),
