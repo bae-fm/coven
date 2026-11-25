@@ -101,11 +101,11 @@ fn a_column_list_of_another_length_keeps_the_statement_whole() {
 }
 
 #[test]
-fn a_statement_the_parser_cannot_number_is_whole() {
-    assert_whole(
-        "SELECT id FROM tracks /* never ends",
-        "the parser can't number the statement's parameters",
-    );
+fn a_statement_the_parser_cannot_read_is_whole() {
+    // SQLite reads a comment that never ends and the parser doesn't.
+    let report = report("SELECT id FROM tracks /* never ends");
+    let why = "every table: whole: the parser can't read the statement: ";
+    assert!(report.starts_with(why), "{report}");
 }
 
 #[test]

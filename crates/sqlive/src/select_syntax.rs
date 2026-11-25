@@ -8,32 +8,21 @@ use sqlite3_parser::ast::{
     As, Expr, FrameBound, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name, Operator,
     Over, QualifiedName, ResultColumn, Select, SortedColumn, Window,
 };
-use sqlite3_parser::lexer::{
-    sql::{TokenType, Tokenizer},
-    Scanner,
-};
+use sqlite3_parser::lexer::sql::TokenType;
 
 // Number every parameter in source order, before interpreting any predicate.
-// The parser's AST normalizes LIMIT offset,count into count/OFFSET, so use its
-// lexer to preserve source order. Only variables are rewritten; conditions are
+// The parser's AST normalizes LIMIT offset,count into count/OFFSET, so read the
+// tokens to preserve source order. Only variables are rewritten; conditions are
 // recognized from the parsed SELECT and expression nodes, never token matching.
-pub(crate) fn number_parameters(
-    sql: &str,
-    statement: &Statement<'_>,
-) -> rusqlite::Result<Option<String>> {
-    let mut scanner = Scanner::new(Tokenizer::new());
+pub(crate) fn number_parameters(sql: &str, statement: &Statement<'_>) -> rusqlite::Result<String> {
     let mut next = 1;
     let mut end_of_previous = 0;
     let mut numbered = String::new();
-    loop {
-        let Ok((start, token, end)) = scanner.scan(sql.as_bytes()) else {
-            return Ok(None);
-        };
-        let Some((_, kind)) = token else { break };
+    for (kind, range) in crate::token_scan::scan(sql)? {
         if kind != TokenType::TK_VARIABLE {
             continue;
         }
-        let name = &sql[start..end];
+        let name = &sql[range.clone()];
         let index = if name == "?" {
             next
         } else if let Some(digits) = name.strip_prefix('?') {
@@ -41,15 +30,15 @@ pub(crate) fn number_parameters(
         } else {
             statement
                 .parameter_index(name)?
-                .expect("parsed parameter belongs to prepared statement")
+                .expect("scanned parameter belongs to prepared statement")
         };
         next = next.max(index + 1);
-        numbered.push_str(&sql[end_of_previous..start]);
+        numbered.push_str(&sql[end_of_previous..range.start]);
         numbered.push_str(&format!("?{index}"));
-        end_of_previous = end;
+        end_of_previous = range.end;
     }
     numbered.push_str(&sql[end_of_previous..]);
-    Ok(Some(numbered))
+    Ok(numbered)
 }
 
 /// The conditions `expr` joins with AND, each once.

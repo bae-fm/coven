@@ -98,9 +98,7 @@ impl ScopePlan {
                 size: ScopePlanSize::default(),
             })
         };
-        let Some(sql) = number_parameters(sql, statement)? else {
-            return unread("the parser can't number the statement's parameters");
-        };
+        let sql = number_parameters(sql, statement)?;
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
         // SQLite and the parser can accept different language versions. A

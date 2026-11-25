@@ -509,6 +509,8 @@ async fn and_keeps_key_bounds_without_renumbering_skipped_parameters() {
         ("SELECT value+? FROM items WHERE deleted=? AND ?=id AND deleted=?", vec![0,0,2,0]),
         ("SELECT value FROM items WHERE deleted=?3 AND id=? AND deleted=:deleted AND id IN (?4,?)", vec![0,0,0,2,0,2]),
         ("SELECT value FROM items WHERE (id=? AND value>?) AND (deleted=? OR value=?)", vec![2,0,0,-1]),
+        ("SELECT value+$a FROM items WHERE deleted=$a::b(c) AND id=$a::b(d) AND deleted=$a::b(c)", vec![0,0,2]),
+        ("SELECT value+#a(b) FROM items WHERE deleted=:a::b AND id=@a::b(:c;d) AND deleted=$::a", vec![0,0,2,0]),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
