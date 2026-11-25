@@ -229,14 +229,17 @@ impl<'connection> MigrationContext<'connection> {
         )
     }
 
+    /// Run one app statement through `run`, which takes the text SQLite reads
+    /// of `sql`, and record what it does to the schema.
     fn statement<T>(
         &self,
         sql: &str,
-        run: impl FnOnce() -> sqlive::rusqlite::Result<T>,
+        run: impl FnOnce(&str) -> sqlive::rusqlite::Result<T>,
     ) -> sqlive::rusqlite::Result<T> {
+        let sql = sqlive::sql::up_to_nul(sql);
         self.before_statement(sql)?;
         let before = self.database.schema_cookie()?;
-        let result = run();
+        let result = run(sql);
         if self.database.schema_cookie()? != before {
             self.record(sql)?;
         }
@@ -253,12 +256,12 @@ impl<'connection> MigrationContext<'connection> {
 
     /// Execute one app statement with parameters.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> sqlive::rusqlite::Result<usize> {
-        self.statement(sql, || self.database.app_execute(sql, params))
+        self.statement(sql, |sql| self.database.app_execute(sql, params))
     }
 
     /// Execute app statements without escaping the migration transaction.
     pub fn execute_batch(&self, sql: &str) -> sqlive::rusqlite::Result<()> {
-        self.database.app_batch_each(sql, |text, step| self.statement(text, &mut *step))
+        self.database.app_batch_each(sql, |text, step| self.statement(text, |_| step()))
     }
 
     /// Map one row from an app query.
@@ -267,7 +270,9 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnOnce(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.statement(sql, || self.database.app_query_row(sqlive::Recorded::No, sql, params, map))
+        self.statement(sql, |sql| {
+            self.database.app_query_row(sqlive::Recorded::No, sql, params, map)
+        })
     }
 
     /// Map every result of an app query.
@@ -276,7 +281,7 @@ impl<'connection> MigrationContext<'connection> {
         P: Params,
         F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>,
     {
-        self.statement(sql, || self.database.app_query(sqlive::Recorded::No, sql, params, map))
+        self.statement(sql, |sql| self.database.app_query(sqlive::Recorded::No, sql, params, map))
     }
 }
 

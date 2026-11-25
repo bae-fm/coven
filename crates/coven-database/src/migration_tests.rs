@@ -255,6 +255,29 @@ async fn migration_context_queries_and_parameters_use_the_actual_transaction() {
 }
 
 #[tokio::test]
+async fn a_migration_statement_ends_at_its_first_nul() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![],
+            vec![Migration::addition_with(1, "data", |sql| {
+                sql.execute_batch("CREATE TABLE local(id INTEGER)")?;
+                assert_eq!(sql.execute("INSERT INTO local VALUES (?1) -- \0\n '", [7])?, 1);
+                sql.execute("ALTER TABLE local RENAME TO renamed -- \0\n '", [])?;
+                assert_eq!(
+                    sql.query("SELECT id FROM renamed -- \0\n '", [], |r| r.get::<_, i64>(0))?,
+                    [7]
+                );
+                Ok(())
+            })],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn reordering_existing_columns_is_a_breaking_schema_change() {
     let store = TestStore::new();
     let db = store

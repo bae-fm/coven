@@ -26,7 +26,7 @@ impl Token {
 
 /// The text SQLite reads of `sql`: it stops at the first NUL, inside a comment
 /// too.
-pub(crate) fn up_to_nul(sql: &str) -> &str {
+pub fn up_to_nul(sql: &str) -> &str {
     sql.split_once('\0').map_or(sql, |(read, _)| read)
 }
 
