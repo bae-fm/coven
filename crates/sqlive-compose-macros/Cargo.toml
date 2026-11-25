@@ -1,0 +1,20 @@
+[package]
+name = "sqlive-compose-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The fragment! and read! macros of sqlive-compose."
+keywords = ["sqlite", "sql", "macro"]
+categories = ["database"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[lints]
+workspace = true

@@ -3164,6 +3164,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlive-compose"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "sqlive",
+ "sqlive-compose-macros",
+ "syn 3.0.6",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sqlive-compose-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -14488,7 +14488,7 @@ How the Rust is organised, and the rules a checker enforces on it.
 
 ### F.1 Crates
 
-Coven is a Cargo workspace of eleven crates, each owning one part of this
+Coven is a Cargo workspace of thirteen crates, each owning one part of this
 document:
 
 | Crate | Owns | Sections |
@@ -14496,6 +14496,8 @@ document:
 | `windows-reserved-names` | the names Windows opens a device for instead of a file, which no name coven writes and no path sqlive opens may hold | §4, §17.3 |
 | `panic-as-error` | catching a panic as a value that names where it began, handing a bug no caller waits for to a sink, finding the bug an error carries, and taking a lock whose holder panicked | api.md E15 |
 | `sqlive` | SQLite connections judged by a host's policy, their write transactions and what each commit changed, what a live query's statements read and the rows each read depends on, the live queries and change watches a commit wakes, each database's writer, readers and upkeep threads, the handle whose failure ends every later call, the error its calls return, and the schema probe, an in-memory database of a schema's tables that a build tool prepares SQL on and asks what a live query of it depends on | §4 |
+| `sqlive-compose-macros` | the `fragment!` and `read!` macros, each of which includes the Rust the compiler wrote for its call | [sqlive-compose](../crates/sqlive-compose/SPEC.md) §10 |
+| `sqlive-compose` | an app's reads written as SQL fragments and spreads, and the compiler that an app's build script runs: it composes each read into one statement, checks it against the schema through sqlive's schema probe, and writes the types of its parameters and rows | [sqlive-compose](../crates/sqlive-compose/SPEC.md) |
 | `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, watching the device's network, reporting a panic in coven's work to the app's bug sink, and a runtime shutting down into a value | §6.7, §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
@@ -14509,6 +14511,11 @@ document:
   `coven-database` and `coven-storage` never depend on each other. So the
   database never reaches storage, and storage never reads the database;
   `coven-sync` is where the two meet.
+- `sqlive-compose` depends on sqlive and on no coven crate, and `coven` depends on
+  sqlive and not on `sqlive-compose`, so the two are siblings. An app names
+  `sqlive-compose` itself, for its read macros and for the compiler in its build
+  scripts; `coven` re-exports neither. The compiler opens SQLite only through
+  sqlive's schema probe, so F.2 needs no exception for it.
 - `coven-merge` and `coven-format` read no clock, file, database or network. So
   the merge is tested, and checked against the Lean model
   ([proofs/merge.md](proofs/merge.md)), without SQLite or storage.
@@ -14833,7 +14840,8 @@ the rules above.
 - **Visibility.** Nothing is `pub` that can't be reached from outside its crate.
   `pub(in path)` and `super::super::` aren't used: an item needed elsewhere moves
   to where both callers can see it. `coven` re-exports the API at its root and
-  keeps every module private.
+  keeps every module private. It re-exports nothing of `sqlive-compose`: an app
+  names that crate for its read macros and its build scripts' compiler (F.1).
 - **Errors** are typed enums per crate. An error is never turned into text to be
   passed on, and nothing returns `Result<_, String>`.
 - **Failures keep their causes.** Failed app calls and whole-pass sync failures

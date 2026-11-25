@@ -1,0 +1,31 @@
+[package]
+name = "sqlive-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Composes an app's SQL reads from fragments while the app compiles, and types their rows."
+keywords = ["sqlite", "sql", "compiler", "live-query"]
+categories = ["database"]
+
+[features]
+# The compiler an app's build script runs.
+compiler = ["dep:proc-macro2", "dep:quote", "dep:syn", "dep:thiserror"]
+
+# The issue tracker of SPEC.md as a schema and a compiled crate, which this
+# crate's tests and the tests of crates that build on it share.
+test-utils = ["compiler"]
+
+[dependencies]
+sqlive.workspace = true
+sqlive-compose-macros.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+hex.workspace = true
+proc-macro2 = { workspace = true, optional = true }
+quote = { workspace = true, optional = true }
+syn = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -30,6 +30,8 @@ crate_order = [
     "windows-reserved-names",
     "panic-as-error",
     "sqlive",
+    "sqlive-compose-macros",
+    "sqlive-compose",
     "coven-foundation",
     "coven-crypto",
     "coven-merge",

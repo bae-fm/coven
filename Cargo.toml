@@ -1,7 +1,7 @@
 # coven, as spec/coven.md describes it.
 [workspace]
 resolver = "2"
-members = ["crates/windows-reserved-names", "crates/panic-as-error", "crates/sqlive", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-policy", "tools/owner-construction-check"]
+members = ["crates/windows-reserved-names", "crates/panic-as-error", "crates/sqlive", "crates/sqlive-compose-macros", "crates/sqlive-compose", "crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge", "crates/coven-format", "crates/coven-database", "crates/coven-storage", "crates/coven-sync", "crates/coven", "tools/owner-construction-policy", "tools/owner-construction-check"]
 
 [workspace.package]
 edition = "2021"
@@ -16,6 +16,7 @@ repository = "https://github.com/bae-fm/coven"
 windows-reserved-names = { path = "crates/windows-reserved-names", version = "0.1.0" }
 panic-as-error = { path = "crates/panic-as-error", version = "0.1.0" }
 sqlive = { path = "crates/sqlive" }
+sqlive-compose-macros = { path = "crates/sqlive-compose-macros" }
 coven-foundation = { path = "crates/coven-foundation" }
 coven-crypto = { path = "crates/coven-crypto" }
 coven-merge = { path = "crates/coven-merge" }

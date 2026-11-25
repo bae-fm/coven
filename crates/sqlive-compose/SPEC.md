@@ -1079,7 +1079,8 @@ F.2](../../spec/coven.md#f2-capabilities), itself. Its one entry point is
 
 - each generated file's name and text;
 - the crate's own fragment manifest, as text;
-- every path it asked the source reader for;
+- every path the source reader gave a file for, so that Cargo runs the build
+  script again when one changes;
 - its warnings.
 
 When something fails, it returns its errors instead. Each error is a typed
