@@ -59,11 +59,15 @@ pub(crate) fn count_capture(db: &StoreSql, name: &str, size: u64) -> Result<(), 
 /// Sum the sizes of the store's own files in `coven_library_bytes`: the
 /// value of `LocalBytes::library`.
 pub(crate) fn library(db: &StoreSql) -> Result<u64, DbError> {
-    crate::sqlite::unsigned(db.query_row(
-        "SELECT coalesce(sum(bytes),0) FROM coven_library_bytes",
-        [],
-        |r| r.get::<_, i64>(0),
-    )?)
+    let sums =
+        db.host_live_read("SELECT coalesce(sum(bytes),0) FROM coven_library_bytes", [], |r| {
+            r.get::<_, i64>(0)
+        })?;
+    crate::sqlite::unsigned(
+        sums.into_iter()
+            .next()
+            .ok_or(DbError::Invariant { what: "a statement of aggregates returns its row" })?,
+    )
 }
 
 /// Move a folder whose bytes a row counts out of the store's directory with
