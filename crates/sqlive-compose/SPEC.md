@@ -812,9 +812,10 @@ issues/src/lib.rs:40:1: issues::A spreads itself: issues::A, issues::B, issues::
 ```
 
 **Prepare.** SQLite prepares each fragment on its own and each composed read.
-The compiler prepares a fragment with a parent row as a subquery in a `SELECT`
-from its parent table, and a fragment with a relation over an empty set of rows
-of the declared types. SQLite reports what it can't find, and the error holds
+The compiler prepares a fragment with a parent row with each `@parent.column`
+written as a subquery that reads that column of the parent table, so the
+fragment's own columns keep their tables and types. It prepares a fragment with
+a relation over an empty set of rows of the declared types. SQLite reports what it can't find, and the error holds
 SQLite's message:
 
 ```sql
