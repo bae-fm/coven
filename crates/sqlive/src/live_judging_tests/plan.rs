@@ -529,6 +529,29 @@ async fn and_keeps_key_bounds_without_renumbering_skipped_parameters() {
     db.close();
 }
 
+/// SQLite reads a statement up to its first NUL, even one inside a comment,
+/// so a condition or a parameter past it narrows nothing.
+#[tokio::test]
+async fn a_nul_ends_the_statement_the_plan_reads() {
+    let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY, deleted INTEGER, value INTEGER); INSERT INTO items VALUES(1,0,10),(2,0,20),(3,1,30)");
+    for sql in [
+        "SELECT value FROM items WHERE deleted=0 -- \0\n AND id=1",
+        "SELECT value FROM items WHERE deleted=0 -- \0\n AND id=$past",
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[
+                ("UPDATE items SET value=value+1 WHERE id=3", false),
+                ("UPDATE items SET value=value+1 WHERE id=2", true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}
+
 /// A statement a row mapper runs records its own reads; the statement
 /// around it keeps its key range, before and after the inner one.
 #[tokio::test]

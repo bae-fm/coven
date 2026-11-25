@@ -98,6 +98,8 @@ impl ScopePlan {
                 size: ScopePlanSize::default(),
             })
         };
+        // SQLite stops reading at the first NUL, inside a comment too.
+        let sql = sql.split_once('\0').map_or(sql, |(read, _)| read);
         let sql = number_parameters(sql, statement)?;
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
