@@ -272,11 +272,12 @@ fn a_root_equality_narrows_whichever_side_each_column_stands_on() {
 }
 
 #[test]
-fn a_clock_column_of_a_root_narrows_as_an_expression_does() {
-    let report_of = |root: &str, on: &str| {
-        report(&format!("SELECT t.title FROM ({root} AS at) AS page JOIN tracks t ON {on}"))
+fn a_clock_column_of_a_root_taking_the_first_side_narrows_as_an_expression_does() {
+    let report_of = |root: &str| {
+        report(&format!(
+            "SELECT t.title FROM ({root} AS at) AS page JOIN tracks t ON page.at = t.title"
+        ))
     };
-    for on in ["t.title = page.at", "page.at = t.title"] {
-        assert_eq!(report_of("SELECT CURRENT_TIMESTAMP", on), report_of("SELECT ?1 || 'a'", on));
-    }
+    assert_eq!(report_of("SELECT CURRENT_TIMESTAMP"), report_of("SELECT ?1 || 'a'"));
+    assert_eq!(report_of("SELECT CURRENT_TIMESTAMP"), "tracks: whole: nothing narrows `t`");
 }

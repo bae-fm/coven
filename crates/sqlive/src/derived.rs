@@ -412,7 +412,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 };
                 let value = match passed {
                     Some((item, column)) => OutputValue::Passed(item, column),
-                    None if constant(expr) && !holds_clock(expr) => OutputValue::Constant,
+                    None if constant(expr) && repeatable(planner, expr) => OutputValue::Constant,
                     None => OutputValue::Other,
                 };
                 found.push(Output { name, value });
@@ -580,9 +580,9 @@ pub(crate) fn push_down(
     }
 }
 
-/// Whether `expr` reads the clock, as `CURRENT_TIMESTAMP` does.
-fn holds_clock(expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
+/// Whether a write evaluating `expr` again gets the query's answer.
+fn repeatable(planner: &Planner, expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
     let mut found = Vec::new();
     parts(expr, &mut found);
-    found.iter().any(|part| matches!(part, Part::Clock))
+    planner.functions.repeatable(&found)
 }
