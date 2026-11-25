@@ -13,11 +13,12 @@
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Member, MemberValue};
+use crate::scope_one_of::constant;
 use crate::scope_plan::{is_name, read_select, Edge, Object, Planner, Source, Unread};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::ast::{CommonTableExpr, Expr, Name, OneSelect, ResultColumn, Select, With};
+use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
 
 /// The CTEs a FROM item can name where it is read, and those whose SQL is
 /// being read now, which naming again would recurse.
@@ -264,9 +265,10 @@ fn read_derived<'a>(
         // The column compares as the columns it passes on do in every arm.
         let mut affinities = arms.iter().map(|(_, columns, _)| {
             let output = columns.get(position)?;
-            match &output.passed {
-                Some((item, column)) => planner.items[*item].columns.affinity(column),
-                None => output.valued.then_some(Affinity::Blob),
+            match &output.value {
+                OutputValue::Passed(item, column) => planner.items[*item].columns.affinity(column),
+                OutputValue::Constant => Some(Affinity::Blob),
+                OutputValue::Other => None,
             }
         });
         let first = affinities.next().flatten();
@@ -276,7 +278,7 @@ fn read_derived<'a>(
     }
     let rows = (!arms.iter().any(|(_, _, rows)| rows.aggregated || rows.windowed)).then(|| {
         arms.iter()
-            .map(|(_, columns, _)| columns.iter().map(|output| output.passed.clone()).collect())
+            .map(|(_, columns, _)| columns.iter().map(|output| output.passed()).collect())
             .collect()
     });
     // A LIMIT keeps rows by the others around them, and a window function's
@@ -293,7 +295,7 @@ fn read_derived<'a>(
                     .into_iter()
                     .map(|output| {
                         output
-                            .passed
+                            .passed()
                             .filter(|passed| !rows.aggregated || rows.keys.contains(passed))
                     })
                     .collect()
@@ -358,10 +360,27 @@ fn arm_rows(planner: &Planner, select: &Select<'_>, core: usize, body: &OneSelec
 /// passes on unchanged, if it does.
 struct Output {
     name: Option<String>,
-    passed: Option<(usize, String)>,
-    /// Whether the output is a literal or a parameter, whose values have no
-    /// affinity and compare by BINARY, as a column declared with no type.
-    valued: bool,
+    value: OutputValue,
+}
+
+/// What an output column holds.
+enum OutputValue {
+    /// A column of the core's own source, passed on unchanged.
+    Passed(usize, String),
+    /// A literal or a parameter, whose values have no affinity and compare
+    /// by BINARY, as a column declared with no type: no clock, which
+    /// another answer than the query's replaces at a write.
+    Constant,
+    Other,
+}
+
+impl Output {
+    fn passed(&self) -> Option<(usize, String)> {
+        match &self.value {
+            OutputValue::Passed(item, column) => Some((*item, column.clone())),
+            OutputValue::Constant | OutputValue::Other => None,
+        }
+    }
 }
 
 /// Each output column of the arm `core`, read from `body`, or `None` when a
@@ -375,7 +394,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 rows.first().expect("a parsed VALUES has at least one row").len(),
             )
             .into_iter()
-            .map(|name| Output { name: Some(name), passed: None, valued: false })
+            .map(|name| Output { name: Some(name), value: OutputValue::Other })
             .collect(),
         );
     };
@@ -391,11 +410,12 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     Some(alias) => Some(crate::sql::alias_name(alias)),
                     None => passed.as_ref().map(|(_, column)| column.clone()),
                 };
-                let valued = matches!(
-                    crate::sql::unparenthesized(expr),
-                    Expr::Literal(_) | Expr::Variable(_)
-                );
-                found.push(Output { name, passed, valued });
+                let value = match passed {
+                    Some((item, column)) => OutputValue::Passed(item, column),
+                    None if constant(expr) && !holds_clock(expr) => OutputValue::Constant,
+                    None => OutputValue::Other,
+                };
+                found.push(Output { name, value });
             }
             ResultColumn::Star => {
                 // A USING join's right side leaves out the columns it
@@ -433,8 +453,10 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
                 .iter()
                 .map(|column| Output {
                     name: column.name.clone(),
-                    passed: column.name.clone().map(|name| (position, name)),
-                    valued: false,
+                    value: match &column.name {
+                        Some(name) => OutputValue::Passed(position, name.clone()),
+                        None => OutputValue::Other,
+                    },
                 })
                 .collect(),
         ),
@@ -556,4 +578,11 @@ pub(crate) fn push_down(
             push_down(planner, target, renamed, passed);
         }
     }
+}
+
+/// Whether `expr` reads the clock, as `CURRENT_TIMESTAMP` does.
+fn holds_clock(expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
+    let mut found = Vec::new();
+    parts(expr, &mut found);
+    found.iter().any(|part| matches!(part, Part::Clock))
 }

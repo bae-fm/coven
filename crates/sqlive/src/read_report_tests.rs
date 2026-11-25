@@ -270,3 +270,13 @@ fn a_root_equality_narrows_whichever_side_each_column_stands_on() {
         assert_eq!(report(&sql(&swapped)), report(&sql(on)), "{join} swapped");
     }
 }
+
+#[test]
+fn a_clock_column_of_a_root_narrows_as_an_expression_does() {
+    let report_of = |root: &str, on: &str| {
+        report(&format!("SELECT t.title FROM ({root} AS at) AS page JOIN tracks t ON {on}"))
+    };
+    for on in ["t.title = page.at", "page.at = t.title"] {
+        assert_eq!(report_of("SELECT CURRENT_TIMESTAMP", on), report_of("SELECT ?1 || 'a'", on));
+    }
+}

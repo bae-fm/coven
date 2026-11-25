@@ -57,7 +57,7 @@ fn arguments<'a>(expr: &'a Expr<'a>) -> Option<Vec<&'a Expr<'a>>> {
 }
 
 /// Whether `expr` is a constant or a parameter, which `operand` reads.
-fn constant(expr: &Expr<'_>) -> bool {
+pub(crate) fn constant(expr: &Expr<'_>) -> bool {
     matches!(
         unparenthesized(expr),
         Expr::Literal(_)
