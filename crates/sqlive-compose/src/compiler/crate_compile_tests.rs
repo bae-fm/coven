@@ -843,3 +843,11 @@ sqlive_compose::read!(Numbered, r#"SELECT c.id, @people::CommentAuthor(parent: 1
         ["src/lib.rs:2:1: the spread of people::CommentAuthor binds parent to a value that is not the form it takes"]
     );
 }
+
+#[test]
+fn a_manifest_path_that_is_no_rust_path_is_refused_where_the_manifest_is_read() {
+    let manifest = r#"{"fragments":[{"path":"people::a b","parameters":[],"parent":null,
+        "relations":[],"sql":"SELECT 1","width":1,"presence":null,"one_row":false}]}"#;
+    let errors = messages(compile("app", &[("src/lib.rs", "")], &[manifest]));
+    assert_eq!(errors, ["a manifest names a fragment at people::a b, which is no Rust path"]);
+}

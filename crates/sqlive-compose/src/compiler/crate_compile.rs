@@ -18,7 +18,12 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     for text in &input.manifests {
         let manifest: model::Manifest =
             serde_json::from_str(text).map_err(|error| setup_error(Cause::ManifestRead(error)))?;
-        manifest.fragments.into_iter().for_each(|record| registry.add(record));
+        for record in manifest.fragments {
+            if syn::parse_str::<syn::Path>(&record.path).is_err() {
+                return Err(setup_error(Cause::BadPath { path: record.path }));
+            }
+            registry.add(record);
+        }
     }
     let mut errors = Vec::new();
     let mut calls = Vec::new();

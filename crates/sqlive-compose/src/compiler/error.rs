@@ -317,10 +317,8 @@ pub enum Cause {
         name: String,
     },
     /// A dependency's manifest names a fragment by a path that isn't Rust's.
-    #[error("{concerns} spreads a fragment at {path}, which is no Rust path")]
+    #[error("a manifest names a fragment at {path}, which is no Rust path")]
     BadPath {
-        /// The call's name.
-        concerns: String,
         /// The path.
         path: String,
     },

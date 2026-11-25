@@ -145,9 +145,6 @@ fn spread_field(
             .any(|(from, &nullable)| nullable && from.qualifier.as_deref() == Some(alias)),
     };
     let path = registry.code_path(&spread.record.path);
-    if syn::parse_str::<syn::Path>(&path).is_err() {
-        return Err(Cause::BadPath { concerns: header.name.clone(), path });
-    }
     let (ty, reading) = if nullable {
         let presence = spread.record.presence.ok_or_else(|| Cause::NoPresence {
             concerns: header.name.clone(),
