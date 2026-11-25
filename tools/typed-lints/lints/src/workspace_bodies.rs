@@ -53,8 +53,8 @@ pub(crate) fn workspace_bodies(
     bodies
 }
 
-/// Every definition of the workspace's crates the crate depends on. `lint`
-/// reads their bodies, so the compile stops when it lacks them.
+/// Every definition of the workspace's crates the crate depends on, except
+/// a procedural macro crate's. `lint` reads their bodies, so the compile stops when it lacks them.
 pub(crate) fn earlier_definitions<'tcx>(
     workspace: &WorkspacePolicy,
     tcx: TyCtxt<'tcx>,
@@ -72,6 +72,9 @@ pub(crate) fn earlier_definitions<'tcx>(
         .iter()
         .copied()
         .filter(|krate| workspace.holds_file(tcx, tcx.def_span(krate.as_def_id())))
+        // A procedural macro crate is a dylib that rustc loads to run, and its
+        // metadata holds only the macros: it has no function bodies to read.
+        .filter(|krate| tcx.used_crate_source(*krate).dylib.is_none())
         .collect::<Vec<_>>();
     crates.into_iter().flat_map(move |krate| {
         (0..tcx.num_extern_def_ids(krate))
