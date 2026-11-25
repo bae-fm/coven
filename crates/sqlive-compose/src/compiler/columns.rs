@@ -5,6 +5,8 @@
 use super::core::{Core, FromItem, Item, ItemKind, Join};
 use super::error::Cause;
 use super::header::{Declared, Header, RustType};
+use super::json;
+use super::lex::Token;
 use super::model::{strict_type, Field, Reading};
 use super::spread::{Placed, Registry};
 
@@ -25,6 +27,8 @@ pub(crate) fn fields(
     prepared: &sqlive::ProbedStatement,
     placed: &[Placed],
     registry: &Registry,
+    sql: &str,
+    tokens: &[Token],
 ) -> Result<Vec<Field>, Cause> {
     let spans = spans(header, core, prepared.columns.len(), placed)?;
     let nullable_from = nullable_items(core);
@@ -45,7 +49,15 @@ pub(crate) fn fields(
         }
         let columns = prepared.columns.iter().enumerate().skip(span.start).take(span.width);
         for (position, column) in columns {
-            let field = column_field(header, core, &nullable_from, span.item, column, position)?;
+            let field = column_field(
+                header,
+                core,
+                &nullable_from,
+                span.item,
+                column,
+                position,
+                (sql, tokens),
+            )?;
             push(header, &mut fields, field)?;
         }
     }
@@ -155,6 +167,7 @@ fn column_field(
     item: &Item,
     column: &sqlive::ProbedColumn,
     position: usize,
+    (sql, tokens): (&str, &[Token]),
 ) -> Result<Field, Cause> {
     let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
     // SQLite names the origin of a compound's first SELECT only.
@@ -163,7 +176,12 @@ fn column_field(
         || joins_with_nulls(core, nullable_from, item, origin, &column.name, header)?
         || item.kind == ItemKind::Subquery;
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
-        (Some(Declared::Json(ty)), _) => (ty.clone(), Reading::Json),
+        (Some(Declared::Json(ty)), _) => {
+            if matches!(item.kind, ItemKind::Expression | ItemKind::Subquery) {
+                json::check(sql, tokens, item.tokens.clone(), &column.name, ty, &header.shapes)?;
+            }
+            (ty.clone(), Reading::Json)
+        }
         (Some(Declared::Type(ty)), _) => {
             if nullable && !ty.is_option() {
                 return Err(Cause::NullableColumn {

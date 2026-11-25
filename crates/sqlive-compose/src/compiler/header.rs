@@ -57,6 +57,20 @@ impl RustType {
         }
     }
 
+    /// The type inside, when this is `Vec<…>`.
+    pub(crate) fn vec_inner(&self) -> Option<RustType> {
+        let Ok(Type::Path(path)) = syn::parse_str::<Type>(&self.0) else { return None };
+        let segment = path.path.segments.last()?;
+        if segment.ident != "Vec" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else { return None };
+        match arguments.args.first()? {
+            syn::GenericArgument::Type(inner) => Some(Self::of(inner)),
+            _ => None,
+        }
+    }
+
     /// Whether the type can hold NULL: it is `Option<…>`.
     pub(crate) fn is_option(&self) -> bool {
         self.option_inner().is_some()

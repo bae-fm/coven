@@ -5,7 +5,7 @@ use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use super::header::{Header, Parameter, RustType};
+use super::header::{FieldType, Header, Parameter, RustType, Shape};
 use super::model::{Field, Reading};
 
 const GENERATED: &str = "::sqlive_compose::generated";
@@ -55,6 +55,39 @@ fn row_type() -> TokenStream {
     quote!(&#row<'_>)
 }
 
+/// The structs of the JSON documents the header declares the shapes of.
+fn shapes(shapes: &[Shape]) -> TokenStream {
+    let serde = path("serde");
+    let serde_text = format!("{GENERATED}::serde");
+    let hex = format!("{GENERATED}::hex_bytes");
+    let structs = shapes.iter().map(|shape| {
+        let name = ident(&shape.name);
+        let doc = format!("A JSON document of the shape `{}`.", shape.name);
+        let fields = shape.fields.iter().map(|(field, ty)| {
+            let field = ident(field);
+            match ty {
+                FieldType::Type(ty) => {
+                    let ty = rust_type(ty);
+                    quote!(pub(crate) #field: #ty,)
+                }
+                FieldType::Hex => quote!(
+                    #[serde(deserialize_with = #hex)]
+                    pub(crate) #field: Vec<u8>,
+                ),
+            }
+        });
+        quote! {
+            #[doc = #doc]
+            #[derive(#serde::Deserialize)]
+            #[serde(crate = #serde_text)]
+            pub struct #name {
+                #(#fields)*
+            }
+        }
+    });
+    quote!(#(#structs)*)
+}
+
 /// A fragment's type, which reads its columns.
 pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let name = ident(&header.name);
@@ -64,7 +97,10 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
     let result = path("sqlive::SqliteResult");
+    let shapes = shapes(&header.shapes);
     quote! {
+        #shapes
+
         #[doc = #doc]
         pub struct #name {
             #(pub(crate) #names: #types,)*
@@ -101,7 +137,10 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
     let to_sql = path("sqlive::ToSql");
     let params_doc = format!("What the `{}` read's request binds.", header.name);
     let row_doc = format!("A row of the `{}` read.", header.name);
+    let shapes = shapes(&header.shapes);
     quote! {
+        #shapes
+
         #[doc = #doc]
         pub struct #name;
 

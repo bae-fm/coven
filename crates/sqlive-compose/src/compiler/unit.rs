@@ -69,8 +69,16 @@ pub(crate) fn compile(
             width: prepared.columns.len(),
         }));
     }
-    let fields = columns::fields(header, &outline, &prepared, &expansion.placed, context.registry)
-        .map_err(&fail)?;
+    let fields = columns::fields(
+        header,
+        &outline,
+        &prepared,
+        &expansion.placed,
+        context.registry,
+        &prepared_sql,
+        &tokens,
+    )
+    .map_err(&fail)?;
     let mut warnings = Vec::new();
     match context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))? {
         sqlive::ReadReport::Whole { why } => {

@@ -16,6 +16,14 @@ pub mod generated {
     pub use serde_json;
     pub use sqlive;
 
+    /// Reads bytes that a JSON document holds as hexadecimal text.
+    pub fn hex_bytes<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        hex::decode(text).map_err(serde::de::Error::custom)
+    }
+
     /// Whether the column at `index` is NULL.
     pub fn is_null(row: &sqlive::Row<'_>, index: usize) -> sqlive::SqliteResult<bool> {
         Ok(row.get::<_, sqlive::SqlValue>(index)? == sqlive::SqlValue::Null)

@@ -285,6 +285,29 @@ pub enum Cause {
         /// The call's name.
         concerns: String,
     },
+    /// The keys of a JSON document that the SQL builds differ from the fields
+    /// of the shape that the header declares.
+    #[error("{}", json_keys_message(column, shape, extra, missing))]
+    JsonKeys {
+        /// The column.
+        column: String,
+        /// The shape.
+        shape: String,
+        /// The keys the SQL builds that the shape lacks.
+        extra: Vec<String>,
+        /// The shape's fields that the SQL builds no key for.
+        missing: Vec<String>,
+    },
+    /// The SQL builds a document of another kind than the header declares.
+    #[error("{column}: the SQL builds {built}, and the header declares {declared}")]
+    JsonKind {
+        /// The column.
+        column: String,
+        /// What the header declares.
+        declared: String,
+        /// What the SQL builds.
+        built: String,
+    },
     /// Fragments spread each other in a circle.
     #[error("{first} spreads itself: {}", chain.join(", "))]
     Cycle {
@@ -302,6 +325,22 @@ pub enum Cause {
     /// The crate's manifest can't be written as text.
     #[error("can't write the crate's manifest: {0}")]
     Manifest(serde_json::Error),
+}
+
+fn keys(names: &[String]) -> String {
+    let noun = if names.len() == 1 { "key" } else { "keys" };
+    format!("{noun} {}", names.join(", "))
+}
+
+fn json_keys_message(column: &str, shape: &str, extra: &[String], missing: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !extra.is_empty() {
+        parts.push(format!("has the {}, which {shape} lacks", keys(extra)));
+    }
+    if !missing.is_empty() {
+        parts.push(format!("lacks {shape}'s {}", keys(missing)));
+    }
+    format!("{column}: the document {}", parts.join(", and "))
 }
 
 /// What SQLite says of the SQL it refused, without the SQL's text, which the

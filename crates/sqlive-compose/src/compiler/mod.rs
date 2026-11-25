@@ -12,6 +12,7 @@ mod crate_compile;
 mod error;
 mod generate;
 mod header;
+mod json;
 mod lex;
 mod model;
 mod rename;
