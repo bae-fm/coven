@@ -34,13 +34,8 @@ pub struct ConnectionWork {
     pub stopped_questions: usize,
     /// Scope plans built for a live query's statement (`scope_plan.rs`).
     pub scope_plans_built: usize,
-    /// Sources those plans read: the items of each FROM, those of the
-    /// subqueries, CTEs and views read as their own included.
-    pub scope_plan_sources: usize,
-    /// SELECT cores those plans read.
-    pub scope_plan_cores: usize,
-    /// Edges those plans found between their sources.
-    pub scope_plan_edges: usize,
+    /// How much of their statements those plans read, all together.
+    pub scope_plan_size: crate::ScopePlanSize,
 }
 
 /// Where connections count their work. Clones count into the same place.

@@ -3996,10 +3996,11 @@ let moved = handle
   column is compared in all of them. A table is whole when some read of it
   depends on every row, and the report then gives the reason for each such read.
   A view coven reads whole is whole too, and so is each table the view reads,
-  whatever the report says of that table's other reads. A statement coven can't narrow at all
-  has one reason and no entries. A test of Ben's album page fails when its
-  statement starts to read `tracks` whole. The report's text holds one line for
-  each entry.
+  whatever the report says of that table's other reads. A statement coven can't
+  narrow at all has one reason and no entries. A test that depends on sqlive
+  asserts the report of Ben's album page, and fails when the page's statement
+  starts to read `tracks` whole. The report's text holds one line for each
+  entry.
 
 | View | Column | Holds |
 |---|---|---|
@@ -4618,14 +4619,23 @@ pub struct WorkCounts {
     /// Scope plans coven built for live queries' statements: what each
     /// statement lets its live query narrow (§4).
     pub scope_plans_built: usize,
-    /// Sources those plans read: the items of each FROM, those of the
-    /// subqueries, CTEs and views read as their own included.
-    pub scope_plan_sources: usize,
-    /// SELECT cores those plans read.
-    pub scope_plan_cores: usize,
-    /// Edges those plans found between their sources: the equalities by
-    /// which one source takes values from another.
-    pub scope_plan_edges: usize,
+    /// How much of their statements those plans read, all together.
+    pub scope_plan_size: ScopePlanSize,
+}
+
+/// How much of a statement coven read to build its scope plan, up to where it
+/// stopped, if it did.
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScopePlanSize {
+    /// Sources: the items of each FROM, those of the subqueries, CTEs and
+    /// views read as their own included.
+    pub sources: usize,
+    /// SELECT cores.
+    pub cores: usize,
+    /// Edges between the sources: the equalities by which one source takes
+    /// values from another, each way counted on its own.
+    pub edges: usize,
 }
 
 #[cfg(feature = "test-utils")]

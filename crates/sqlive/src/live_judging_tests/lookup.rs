@@ -508,9 +508,7 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     assert_eq!(
         crate::ConnectionWork {
             scope_plans_built: 0,
-            scope_plan_sources: 0,
-            scope_plan_cores: 0,
-            scope_plan_edges: 0,
+            scope_plan_size: crate::ScopePlanSize::default(),
             ..live
         },
         once

@@ -1,5 +1,5 @@
 use super::WorkCounter;
-use crate::test_utils::{notes_migrations, notes_tables};
+use crate::test_utils::{notes_migrations, notes_tables, ScopePlanSize};
 use crate::tests::{next, TestStore};
 use crate::DbError;
 
@@ -16,15 +16,8 @@ async fn a_live_querys_first_run_counts_its_scope_plan() {
     });
     assert_eq!(next(&mut query).await, 0);
     let work = counter.take();
-    assert_eq!(
-        (
-            work.scope_plans_built,
-            work.scope_plan_sources,
-            work.scope_plan_cores,
-            work.scope_plan_edges
-        ),
-        (1, 1, 1, 0)
-    );
+    assert_eq!(work.scope_plans_built, 1);
+    assert_eq!(work.scope_plan_size, ScopePlanSize { sources: 1, cores: 1, edges: 0 });
     drop(query);
     db.close().await.unwrap();
 }

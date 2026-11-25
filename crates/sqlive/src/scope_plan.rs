@@ -60,11 +60,25 @@ pub(crate) struct ScopePlan {
 /// How much of a statement the planner read to build its plan, up to where
 /// it stopped, if it did: what it holds before it passes edges into
 /// subqueries, CTEs and views as it orders the sources.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct ScopePlanSize {
-    pub(crate) sources: usize,
-    pub(crate) cores: usize,
-    pub(crate) edges: usize,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScopePlanSize {
+    /// Sources: the items of each FROM, those of the subqueries, CTEs and
+    /// views read as their own included.
+    pub sources: usize,
+    /// SELECT cores.
+    pub cores: usize,
+    /// Edges between the sources: the equalities by which one source takes
+    /// values from another, each way counted on its own.
+    pub edges: usize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl std::ops::AddAssign for ScopePlanSize {
+    fn add_assign(&mut self, other: Self) {
+        self.sources += other.sources;
+        self.cores += other.cores;
+        self.edges += other.edges;
+    }
 }
 
 impl ScopePlan {

@@ -40,14 +40,8 @@ pub struct WorkCounts {
     /// Scope plans built for live queries' statements: what each statement
     /// lets its live query narrow (§4).
     pub scope_plans_built: usize,
-    /// Sources those plans read: the items of each FROM, those of the
-    /// subqueries, CTEs and views read as their own included.
-    pub scope_plan_sources: usize,
-    /// SELECT cores those plans read.
-    pub scope_plan_cores: usize,
-    /// Edges those plans found between their sources: the equalities by
-    /// which one source takes values from another.
-    pub scope_plan_edges: usize,
+    /// How much of their statements those plans read, all together.
+    pub scope_plan_size: sqlive::ScopePlanSize,
 }
 
 /// The work coven counts beside its connections'.
@@ -94,9 +88,7 @@ impl WorkCounter {
             app_write_steps: connections.app_write_steps,
             lookup_steps: connections.lookup_steps,
             scope_plans_built: connections.scope_plans_built,
-            scope_plan_sources: connections.scope_plan_sources,
-            scope_plan_cores: connections.scope_plan_cores,
-            scope_plan_edges: connections.scope_plan_edges,
+            scope_plan_size: connections.scope_plan_size,
         }
     }
 

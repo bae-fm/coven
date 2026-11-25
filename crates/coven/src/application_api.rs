@@ -40,7 +40,9 @@ pub use coven_crypto::{
 };
 pub use coven_database::stored_time;
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_database::test_utils::{record_user_file, StatementLog, WorkCounter, WorkCounts};
+pub use coven_database::test_utils::{
+    record_user_file, ScopePlanSize, StatementLog, WorkCounter, WorkCounts,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{

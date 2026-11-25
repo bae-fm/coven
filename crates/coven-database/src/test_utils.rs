@@ -19,7 +19,7 @@ mod work_counts;
 pub(crate) use work_counts::StoreWork;
 pub use work_counts::{WorkCounter, WorkCounts};
 
-pub use sqlive::{report_cost, report_time, StatementLog};
+pub use sqlive::{report_cost, report_time, ScopePlanSize, StatementLog};
 
 /// Boundaries after a local write's durable commit, for process-crash tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 use super::ScopePlans;
 use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions, TestRead};
 use crate::triggered_inserts::SCHEMA as TRIGGERED;
-use crate::ScopePlan;
+use crate::{ScopePlan, ScopePlanSize};
 use std::sync::Arc;
 
 fn notes() -> TestDatabase {
@@ -208,44 +208,23 @@ const ALBUM_TITLES: &str =
 #[tokio::test]
 async fn a_live_run_counts_the_size_of_its_plan() {
     let work = work_of_plan(ALBUM_TITLES, true).await;
-    assert_eq!(
-        (
-            work.scope_plans_built,
-            work.scope_plan_sources,
-            work.scope_plan_cores,
-            work.scope_plan_edges
-        ),
-        (1, 2, 1, 2)
-    );
+    assert_eq!(work.scope_plans_built, 1);
+    assert_eq!(work.scope_plan_size, ScopePlanSize { sources: 2, cores: 1, edges: 2 });
 }
 
 #[tokio::test]
 async fn a_one_shot_read_counts_no_plan() {
     let work = work_of_plan(ALBUM_TITLES, false).await;
-    assert_eq!(
-        (
-            work.scope_plans_built,
-            work.scope_plan_sources,
-            work.scope_plan_cores,
-            work.scope_plan_edges
-        ),
-        (0, 0, 0, 0)
-    );
+    assert_eq!(work.scope_plans_built, 0);
+    assert_eq!(work.scope_plan_size, ScopePlanSize::default());
 }
 
 /// The planner stops at the NATURAL join, after it read `tracks`.
 #[tokio::test]
 async fn a_plan_that_stops_counts_what_it_read_before() {
     let work = work_of_plan("SELECT title FROM tracks NATURAL JOIN releases", true).await;
-    assert_eq!(
-        (
-            work.scope_plans_built,
-            work.scope_plan_sources,
-            work.scope_plan_cores,
-            work.scope_plan_edges
-        ),
-        (1, 1, 1, 0)
-    );
+    assert_eq!(work.scope_plans_built, 1);
+    assert_eq!(work.scope_plan_size, ScopePlanSize { sources: 1, cores: 1, edges: 0 });
 }
 
 /// A plan of some statement, for tests of the map that keeps plans.

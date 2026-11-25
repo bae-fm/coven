@@ -312,9 +312,7 @@ impl<P: Policy> HostSql<P> {
         #[cfg(any(test, feature = "test-utils"))]
         self.record_work(|work| {
             work.scope_plans_built += 1;
-            work.scope_plan_sources += sources;
-            work.scope_plan_cores += cores;
-            work.scope_plan_edges += edges;
+            work.scope_plan_size += plan.size;
         });
         Ok(Arc::new(plan))
     }

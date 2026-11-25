@@ -112,6 +112,7 @@ pub use rusqlite;
 pub use scope_lookup::{Judging, Lookup, Lookups, NoAnswer, LOOKUP_STEPS};
 pub use scope_order::LastRow;
 pub(crate) use scope_plan::ScopePlan;
+pub use scope_plan::ScopePlanSize;
 pub use scope_row::RowCondition;
 pub use scope_term::Affinity;
 pub use snapshot_values::SnapshotValue;
