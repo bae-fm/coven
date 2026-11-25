@@ -279,3 +279,7 @@ fn joins_with_nulls(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "columns_tests.rs"]
+mod tests;
