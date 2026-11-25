@@ -109,3 +109,31 @@ pub(crate) fn scan_reason(
 _ => None,
     }
 }
+
+/// The store's name follows a change of the name, and a write that changes
+/// only the slot that set it, which the name's statement doesn't read, leaves
+/// the follow alone.
+#[tokio::test]
+async fn the_store_name_follows_a_rename() {
+    use crate::tests::{next, TestStore};
+    use crate::DbError;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let id = store.id();
+    db.commit_writer(|sql, _| {
+        super::name_before_creation(sql, id, "Household", coven_merge::slot(1), false).unwrap()
+    });
+    let mut name = db.subscribe_store_name::<DbError>();
+    assert_eq!(next(&mut name).await, "Household");
+    db.commit_writer(|sql, _| {
+        super::name_before_creation(sql, id, "Household", coven_merge::slot(2), false).unwrap()
+    });
+    assert!(!name.is_marked_for_rerun());
+    db.commit_writer(|sql, _| {
+        super::name_before_creation(sql, id, "Renamed", coven_merge::slot(3), false).unwrap()
+    });
+    assert!(name.is_marked_for_rerun());
+    assert_eq!(next(&mut name).await, "Renamed");
+    assert_eq!(db.store_name().await.unwrap(), "Renamed");
+    db.close().await.unwrap();
+}

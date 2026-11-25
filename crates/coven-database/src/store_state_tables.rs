@@ -86,7 +86,7 @@ pub(crate) fn deleted_circles(db: &StoreSql) -> Result<BTreeMap<CircleId, Slot>,
 
 pub(crate) fn name(database: &StoreSql) -> Result<String, DbError> {
     database
-        .query("SELECT name FROM _coven_store WHERE singleton=1", [], |row| row.get(0))?
+        .host_live_read("SELECT name FROM _coven_store WHERE singleton=1", [], |row| row.get(0))?
         .pop()
         .ok_or(DbError::DamagedDatabase)
 }
