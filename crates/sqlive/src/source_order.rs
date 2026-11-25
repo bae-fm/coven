@@ -149,3 +149,7 @@ impl Planner<'_> {
         waiting
     }
 }
+
+#[cfg(test)]
+#[path = "source_order_tests.rs"]
+mod tests;

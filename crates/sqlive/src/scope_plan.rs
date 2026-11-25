@@ -48,7 +48,7 @@ use sqlite3_parser::{
 /// bound.
 pub(crate) struct ScopePlan {
     /// `None` when the statement's shape keeps every table it reads whole.
-    sources: Option<Sources>,
+    pub(crate) sources: Option<Sources>,
     /// The columns its rows depend on that SQLite's authorizer doesn't
     /// report, or unknown when the parser can't read the statement
     /// (`unreported_columns.rs`).
