@@ -58,37 +58,51 @@ pub struct CircleMemberInfo {
 
 use crate::store_state_tables::{circle, device_member, member};
 
+/// Every active member with each device they registered, and the member the
+/// local device registered under, as one statement: a member without a device
+/// has one row whose device columns are NULL.
+const MEMBERS: &str = "SELECT m.member,m.signing,m.sealing,m.role,m.removed,m.access,m.joined_circle,m.joined_person,m.keys_by,
+        d.device,d.name,d.state,
+        (SELECT x.member FROM _coven_devices x WHERE x.device=?1)
+     FROM _coven_members m LEFT JOIN _coven_devices d ON d.member=m.member
+     WHERE m.removed=0
+     ORDER BY m.member,d.device";
+
 pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>, DbError> {
-    let me = device_member(db, device)?;
-    let members = db.query(
-        "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members WHERE removed=0
-         ORDER BY member",
-        [],
-        crate::store_state_tables::stored_member,
-    )?;
-    members
-        .into_iter()
-        .map(|(id, crate::StoreMember { keys, access, role, .. })| {
-            let devices = db.query(
-                "SELECT device,name,state FROM _coven_devices WHERE member=?1 ORDER BY device",
-                [id],
-                |r| {
-                    let id = r.get::<_, DeviceId>(0)?;
-                    Ok(DeviceInfo {
-                        id,
-                        is_self: id == device,
-                        name: r.get(1)?,
-                        state: crate::write_encoding::stored(
-                            r,
-                            2,
-                            sqlive::rusqlite::types::Type::Text,
-                        )?,
-                    })
-                },
-            )?;
-            Ok(MemberInfo { is_self: me.as_ref() == Some(&id), keys, id, role, access, devices })
-        })
-        .collect()
+    let rows = db.host_live_read(MEMBERS, [device], |r| {
+        let (id, member) = crate::store_state_tables::stored_member(r)?;
+        let listed = match r.get::<_, Option<DeviceId>>(9)? {
+            Some(id) => Some(DeviceInfo {
+                id,
+                is_self: id == device,
+                name: r.get(10)?,
+                state: crate::write_encoding::stored(r, 11, sqlive::rusqlite::types::Type::Text)?,
+            }),
+            None => None,
+        };
+        let me = match r.get_ref(12)? {
+            sqlive::rusqlite::types::ValueRef::Null => None,
+            _ => Some(crate::store_state_tables::member(r, 12)?),
+        };
+        Ok((id, member, listed, me))
+    })?;
+    let mut members: Vec<MemberInfo> = Vec::new();
+    for (id, crate::StoreMember { keys, access, role, .. }, listed, me) in rows {
+        if members.last().is_none_or(|last| last.id != id) {
+            members.push(MemberInfo {
+                is_self: me.as_ref() == Some(&id),
+                keys,
+                id,
+                role,
+                access,
+                devices: Vec::new(),
+            });
+        }
+        if let (Some(device), Some(last)) = (listed, members.last_mut()) {
+            last.devices.push(device);
+        }
+    }
+    Ok(members)
 }
 
 pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, DbError> {

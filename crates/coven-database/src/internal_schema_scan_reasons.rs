@@ -163,8 +163,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ),
         (
             "members.rs",
-            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members WHERE removed=0 ORDER BY member",
-            "_coven_members",
+            "SELECT m.member,m.signing,m.sealing,m.role,m.removed,m.access,m.joined_circle,m.joined_person,m.keys_by, d.device,d.name,d.state, (SELECT x.member FROM _coven_devices x WHERE x.device=?1) FROM _coven_members m LEFT JOIN _coven_devices d ON d.member=m.member WHERE m.removed=0 ORDER BY m.member,d.device",
+            "m",
         ) => Some("the member list returns every current member"),
         (
             "file_queue.rs",
