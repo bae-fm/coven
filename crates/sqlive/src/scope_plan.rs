@@ -134,11 +134,10 @@ pub(crate) struct Sources {
     /// The app's views and the CTEs read as sources of their own, by the
     /// names, lowercase, SQLite reports reads through them by, but none that
     /// SQLite can also report a read through inside a view read whole: such
-    /// a read could be the view's, whose tables no source narrows.
-    pub(crate) inlined: BTreeSet<String>,
-    /// Whether it reads a view whole that the parser can't read, whose SQL
-    /// could use any name: `inlined` then holds none.
-    pub(crate) unread_whole_view: bool,
+    /// a read could be the view's, whose tables no source narrows. `None`
+    /// when it reads a view whole that the parser can't read, whose SQL could
+    /// use any name.
+    pub(crate) inlined: Option<BTreeSet<String>>,
     /// The shadow tables of the contentful FTS5 tables it reads, lowercase.
     /// FTS5 reads them for the statement as it runs, and SQLite reports
     /// those reads, but they read what the FTS5 table's rows show: sqlive

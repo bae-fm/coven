@@ -145,16 +145,18 @@ fn table_rows(
 ) -> SourceRows {
     // A read through such a name may be the view's, whose tables no source
     // narrows (`Sources::inlined`).
-    match within {
-        Some(_) if sources.unread_whole_view => {
-            return SourceRows::Whole("a view read whole that the parser can't read".to_owned())
+    if let Some(name) = within {
+        match &sources.inlined {
+            None => {
+                return SourceRows::Whole("a view read whole that the parser can't read".to_owned())
+            }
+            Some(inlined) if !inlined.contains(name) => {
+                return SourceRows::Whole(format!(
+                    "read through `{name}`, which a view read whole also names"
+                ))
+            }
+            Some(_) => {}
         }
-        Some(name) if !sources.inlined.contains(name) => {
-            return SourceRows::Whole(format!(
-                "read through `{name}`, which a view read whole also names"
-            ))
-        }
-        _ => {}
     }
     match keys {
         Some(keys) => SourceRows::Narrowed(keys),

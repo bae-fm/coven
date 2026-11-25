@@ -86,17 +86,13 @@ impl Planner<'_> {
             order.push(next);
         }
         let windows = self.cores.iter_mut().filter_map(|core| core.window.take()).collect();
-        let unread_whole_view = self.whole_names.is_none();
-        let whole_names = self.whole_names;
+        let inlined = self.inlined;
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
             order,
             inlined: self
-                .inlined
-                .into_iter()
-                .filter(|name| whole_names.as_ref().is_some_and(|whole| !whole.contains(name)))
-                .collect(),
-            unread_whole_view,
+                .whole_names
+                .map(|whole| inlined.into_iter().filter(|name| !whole.contains(name)).collect()),
             fts5_shadows: self.fts5_shadows.into_iter().collect(),
             sorted,
             windows,

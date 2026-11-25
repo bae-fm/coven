@@ -148,7 +148,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
     }
     Scopes {
         tables: scopes,
-        inlined: sources.inlined.clone(),
+        inlined: sources.inlined.clone().unwrap_or_default(),
         fts5_shadows: sources.fts5_shadows.clone(),
         ..Scopes::default()
     }
