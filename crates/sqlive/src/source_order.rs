@@ -86,6 +86,7 @@ impl Planner<'_> {
             order.push(next);
         }
         let windows = self.cores.iter_mut().filter_map(|core| core.window.take()).collect();
+        let unread_whole_view = self.whole_names.is_none();
         let whole_names = self.whole_names;
         Sources {
             sources: self.items.into_iter().map(|item| item.source).collect(),
@@ -95,6 +96,7 @@ impl Planner<'_> {
                 .into_iter()
                 .filter(|name| whole_names.as_ref().is_some_and(|whole| !whole.contains(name)))
                 .collect(),
+            unread_whole_view,
             fts5_shadows: self.fts5_shadows.into_iter().collect(),
             sorted,
             windows,
@@ -126,7 +128,7 @@ impl Planner<'_> {
         let takes_unplaced_values = |item: usize| {
             partners(item).any(|partner| {
                 is_candidate(partner)
-                    && items[partner].source.table.is_none()
+                    && items[partner].source.table().is_none()
                     && items[partner].source.term.is_none()
                     && edges.by_member[partner].is_empty()
             })
@@ -141,7 +143,9 @@ impl Planner<'_> {
                     items[*item].source.term.is_some() && !takes_unplaced_values(*item)
                 })
             })
-            .or_else(|| candidates.iter().copied().find(|item| items[*item].source.table.is_none()))
+            .or_else(|| {
+                candidates.iter().copied().find(|item| items[*item].source.table().is_none())
+            })
             .unwrap_or(free)
     }
 

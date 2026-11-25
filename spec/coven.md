@@ -1377,6 +1377,13 @@ it reads. A
 statement with a recursive CTE of its own, or with `x IN table`, narrows
 nothing: it depends on every row of each table it read.
 
+Coven logs at debug level each statement that reads a table or a view whole,
+with the statement's SQL, each such table or view and the reason. A write to any
+row of such a table can run the live query again, and nothing in the result
+shows why. When Ben's app reads every one of his 100,000 tracks because a second
+subquery of the screen's statement leaves out its WHERE, the log names `tracks`
+and that subquery's name for it.
+
 Applying another device's slot narrows the same way. As the slot's rows change,
 coven notes each table's changed columns and, for a table a live query reads,
 the changed rows' keys and the values live queries read or test, and judges each

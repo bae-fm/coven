@@ -15,6 +15,7 @@
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
+use crate::read_report::ReadReport;
 use crate::scope_plan::ScopePlanSize;
 use crate::{ReadFrame, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
@@ -305,6 +306,9 @@ impl<P: Policy> HostSql<P> {
         })?;
         let ScopePlanSize { sources, cores, edges } = plan.size;
         tracing::debug!(sources, cores, edges, "sqlive built a scope plan");
+        if let Some(whole) = ReadReport::of(&plan).whole() {
+            tracing::debug!(sql, %whole, "a live query's statement reads tables or views whole");
+        }
         #[cfg(any(test, feature = "test-utils"))]
         self.record_work(|work| {
             work.scope_plans_built += 1;

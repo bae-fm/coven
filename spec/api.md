@@ -3986,6 +3986,20 @@ let moved = handle
   writes and migrations too. `test_track_work` also counts the scope plans
   coven builds, each of which says what one statement lets its live query
   narrow, and the sources, cores and edges they hold (`WorkCounts`).
+- *What a statement depends on, in tests.* With sqlive's test-utils feature,
+  sqlive's `read_report` says which rows of each table and view a statement
+  depends on when a live query runs it
+  ([§4](coven.md#4-writing-locally)), before any value is bound. A table is
+  keyed by a column when every read of it compares that column by `=`, `IN` or
+  `IS` with a value, or joins it by `=` to a column of a table keyed by that
+  column. A table is looked up when coven narrows every read of it but no one
+  column is compared in all of them. A table is whole when some read of it
+  depends on every row, and the report then gives the reason for each such read.
+  A view coven reads whole is whole too, and so is each table the view reads,
+  whatever that table's own entry says. A statement coven can't narrow at all
+  has one reason and no entries. A test of Ben's album page fails when its
+  statement starts to read `tracks` whole. The report's text holds one line for
+  each entry.
 
 | View | Column | Holds |
 |---|---|---|
@@ -4619,6 +4633,46 @@ impl CovenHandle {
     /// Counts the work the store's connections run into `counter`, from the
     /// next call on. Install it between calls, before the one to measure.
     pub async fn test_track_work(&self, counter: WorkCounter) -> Result<(), DbError>;
+}
+
+/// sqlive's: what the live query that reads `whole` whole depends on when it
+/// runs `sql` on `connection`.
+#[cfg(feature = "test-utils")]
+pub fn read_report(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    whole: &WholeViews,
+) -> rusqlite::Result<ReadReport>;
+
+/// What a live query's statement depends on. Its text holds one line for each
+/// entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadReport {
+    /// Coven can't narrow the statement: it depends on every row of each
+    /// table it reads.
+    Whole { why: String },
+    /// One entry for each table it narrows or reads whole and each view it
+    /// reads whole, by name.
+    Entries(Vec<ReadEntry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadEntry {
+    /// The table or view, lowercase.
+    pub object: String,
+    pub rows: ReadRows,
+}
+
+/// Which rows of one table or view a statement depends on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadRows {
+    /// Those that hold one of a few values in `column`.
+    Keyed { column: String },
+    /// Those each read narrows it to, with no one column that all of them
+    /// compare with values.
+    LookedUp,
+    /// Every row, with the reason for each read that nothing narrows.
+    Whole { why: Vec<String> },
 }
 
 /// One `_coven_lost` row (Appendix B.3).

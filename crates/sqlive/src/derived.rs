@@ -13,7 +13,7 @@
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Member, MemberValue};
-use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
+use crate::scope_plan::{is_name, read_select, Edge, Object, Planner, Source, Unread};
 use crate::scope_term::ScopeTerm;
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
@@ -123,7 +123,7 @@ pub(crate) struct Derived {
 type Passed = Vec<Option<(usize, String)>>;
 
 /// Read `named` as a FROM item of a core that sits in `parent`: its source,
-/// its columns and its cores, or `None` when sqlive can't read its rows.
+/// its columns and its cores, or why sqlive can't read its rows.
 pub(crate) fn read_derived_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -131,7 +131,7 @@ pub(crate) fn read_derived_item<'a>(
     qualifier: String,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<(Source, Columns, Derived)>> {
+) -> rusqlite::Result<Result<(Source, Columns, Derived), Unread>> {
     // What reading it adds to the planner: its own items and cores.
     let (items, cores) = (planner.items.len(), planner.cores.len());
     let found = match named {
@@ -155,33 +155,35 @@ pub(crate) fn read_derived_item<'a>(
             let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
             // A CTE naming itself, or one naming it, recurses.
             let Some(inner) = ctes.reading(&declared) else {
-                return Ok(None);
+                return Ok(Err(Unread("a recursive CTE")));
             };
             planner.inlined.push(name.clone());
+            let around = planner.within.replace(name.clone());
             let names = cte.columns.map(|columns| {
                 columns
                     .iter()
                     .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
                     .collect()
             });
-            read_derived(connection, planner, cte.select, names, parent, &inner)?.map(
-                |(columns, derived)| {
-                    // A CTE of a WITH in no other core names no row around
-                    // it, wherever the statement reads it.
-                    let alone = declared.alone || planner.alone(parent, items, cores);
-                    let from = alone.then(|| {
-                        let mut read = planner.ctes_read(items);
-                        read.push(declared.number);
-                        let select = format!("SELECT * FROM {}", crate::sql::identifier(&name));
-                        let with =
-                            ctes.around(&read, &select).expect("a CTE is visible where it is read");
-                        format!("({with}) AS {qualifier}")
-                    });
-                    (from, columns, derived)
-                },
-            )
+            let read = read_derived(connection, planner, cte.select, names, parent, &inner)?;
+            planner.within = around;
+            read.map(|(columns, derived)| {
+                // A CTE of a WITH in no other core names no row around
+                // it, wherever the statement reads it.
+                let alone = declared.alone || planner.alone(parent, items, cores);
+                let from = alone.then(|| {
+                    let mut read = planner.ctes_read(items);
+                    read.push(declared.number);
+                    let select = format!("SELECT * FROM {}", crate::sql::identifier(&name));
+                    let with =
+                        ctes.around(&read, &select).expect("a CTE is visible where it is read");
+                    format!("({with}) AS {qualifier}")
+                });
+                (from, columns, derived)
+            })
         }
         Named::View(stored) => {
+            let around = planner.within.replace(stored.to_ascii_lowercase());
             let read = read_view(connection, stored, |columns, select| {
                 let names = columns.map(|columns| {
                     columns
@@ -192,9 +194,9 @@ pub(crate) fn read_derived_item<'a>(
                 // A view names only the schema's tables and views.
                 read_derived(connection, planner, select, names, None, &Ctes::default())
             })?;
-            // A view the parser can't read is read whole.
+            planner.within = around;
             let Ok(read) = read else {
-                return Ok(None);
+                return Ok(Err(Unread("a view the parser can't read")));
             };
             read.map(|(columns, derived)| {
                 let from = Some(format!("main.{} AS {qualifier}", crate::sql::identifier(stored)));
@@ -205,7 +207,7 @@ pub(crate) fn read_derived_item<'a>(
     Ok(found.map(|(from, columns, derived)| {
         (
             Source {
-                table: None,
+                object: Object::Derived,
                 from,
                 qualifier,
                 term: None,
@@ -228,9 +230,10 @@ fn read_derived<'a>(
     names: Option<Vec<String>>,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<(Columns, Derived)>> {
-    let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
-        return Ok(None);
+) -> rusqlite::Result<Result<(Columns, Derived), Unread>> {
+    let cores = match read_select(connection, planner, select, parent, ctes)? {
+        Ok(cores) => cores,
+        Err(unread) => return Ok(Err(unread)),
     };
     let bodies = std::iter::once(&select.body.select)
         .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
@@ -238,14 +241,18 @@ fn read_derived<'a>(
     for (core, body) in cores.iter().copied().zip(bodies) {
         let Some(columns) = arm_columns(planner, core, body) else {
             // A `*` over a table function's columns: no column is known.
-            return Ok(Some((Columns::Unknown, Derived { arms: Vec::new(), rows: None })));
+            return Ok(Ok((Columns::Unknown, Derived { arms: Vec::new(), rows: None })));
         };
         arms.push((core, columns, arm_rows(planner, select, core, body)));
     }
     let width = arms[0].1.len();
     let named: Vec<Option<String>> = match names {
         Some(names) if names.len() == width => names.into_iter().map(Some).collect(),
-        Some(_) => return Ok(None),
+        Some(_) => {
+            return Ok(Err(Unread(
+                "a CTE or view whose column list differs in length from its SELECT's columns",
+            )))
+        }
         None => arms[0].1.iter().map(|output| output.name.clone()).collect(),
     };
     let mut columns = Vec::new();
@@ -290,7 +297,7 @@ fn read_derived<'a>(
             })
             .collect()
     };
-    Ok(Some((Columns::Listed(columns), Derived { arms, rows })))
+    Ok(Ok((Columns::Listed(columns), Derived { arms, rows })))
 }
 
 /// How an arm makes its rows from its sources' rows.
@@ -498,7 +505,7 @@ pub(crate) fn push_down(
         }
         for target in targets {
             let found = &planner.items[target];
-            if found.source.table.is_none() && found.derived.is_none() {
+            if found.source.table().is_none() && found.derived.is_none() {
                 continue;
             }
             // A term a row of NULLs can pass narrows nothing on a LEFT JOIN's

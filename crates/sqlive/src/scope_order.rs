@@ -230,6 +230,29 @@ impl SortedLimit {
         })
     }
 
+    /// Whether a full run bounds `source`'s rows, whose memberships are
+    /// `memberships` (`bound`).
+    pub(crate) fn bounds(&self, source: usize, memberships: &[Membership]) -> bool {
+        self.run_of(source, memberships).is_some()
+    }
+
+    /// The position of the first run that sorts `source`, and, for each run
+    /// before it, the first of `memberships`, `source`'s own, that takes a
+    /// value from that run's source; `None` when the order doesn't sort it,
+    /// or it takes no value from an earlier run's source.
+    fn run_of<'a>(
+        &self,
+        source: usize,
+        memberships: &'a [Membership],
+    ) -> Option<(usize, Vec<&'a Membership>)> {
+        let position = self.runs.iter().position(|run| run.source == source)?;
+        let earlier = self.runs[..position]
+            .iter()
+            .map(|run| memberships.iter().find(|found| found.partner == run.source))
+            .collect::<Option<_>>()?;
+        Some((position, earlier))
+    }
+
     /// The bound of `source`'s rows for a run bound to `parameters` whose
     /// last row's ORDER BY values are `last`, when the order sorts it: its
     /// first run's terms at or before their values, or, for each earlier
@@ -245,27 +268,26 @@ impl SortedLimit {
         memberships: &[Membership],
         looked_up: impl Fn(&Membership, RowScope) -> RowScope,
     ) -> Option<RowScope> {
+        let (position, joined) = self.run_of(source, memberships)?;
         let mut earlier = Vec::new();
         let mut values = last;
-        for run in &self.runs {
+        for (run, membership) in self.runs[..position].iter().zip(joined) {
             let (own, rest) = values.split_at(run.terms.len());
             values = rest;
-            if run.source == source {
-                let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
-                    .expect("a tied row passes, so some row does");
-                return Some(
-                    earlier
-                        .into_iter()
-                        .rev()
-                        .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
-                );
-            }
-            let membership = memberships.iter().find(|found| found.partner == run.source)?;
             if let Some(before) = sorted_before(&run.terms, own, parameters, None) {
                 earlier.push(looked_up(membership, before));
             }
         }
-        None
+        let run = &self.runs[position];
+        let own = &values[..run.terms.len()];
+        let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
+            .expect("a tied row passes, so some row does");
+        Some(
+            earlier
+                .into_iter()
+                .rev()
+                .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
+        )
     }
 }
 
@@ -291,7 +313,7 @@ pub(crate) fn sorted_limit(
             return Ok(None);
         };
         let from = &planner.items[item];
-        if from.core != core || from.source.table.is_none() || from.left_on.is_some() {
+        if from.core != core || from.source.table().is_none() || from.left_on.is_some() {
             return Ok(None);
         }
         let term = SortTerm { key, descending: term.order == Some(SortOrder::Desc), position };

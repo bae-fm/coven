@@ -82,7 +82,7 @@ pub(crate) fn read_window(
         return Ok(None);
     };
     let source = &planner.items[item].source;
-    let (Some(_), Some(from)) = (&source.table, &source.from) else {
+    let (Some(_), Some(from)) = (source.table(), &source.from) else {
         return Ok(None);
     };
     let mut found = Vec::new();

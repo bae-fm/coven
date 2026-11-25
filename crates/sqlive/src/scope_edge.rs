@@ -36,7 +36,7 @@ impl Planner<'_> {
     /// `item`'s `column` as a member column, when sqlive narrows by it.
     pub(crate) fn narrowed_column(&self, item: usize, column: String) -> Option<MemberColumn> {
         let found = &self.items[item];
-        if found.source.table.is_none() && found.derived.is_none() {
+        if found.source.table().is_none() && found.derived.is_none() {
             return None;
         }
         let affinity = found.columns.affinity(&column)?;

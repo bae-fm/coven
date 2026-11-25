@@ -47,8 +47,9 @@ use sqlite3_parser::{
 /// The rows of each table a statement can depend on, before its values are
 /// bound.
 pub(crate) struct ScopePlan {
-    /// `None` when the statement's shape keeps every table it reads whole.
-    pub(crate) sources: Option<Sources>,
+    /// Why the planner couldn't read the statement, when its shape keeps
+    /// every table it reads whole.
+    pub(crate) sources: Result<Sources, String>,
     /// The columns its rows depend on that SQLite's authorizer doesn't
     /// report, or unknown when the parser can't read the statement
     /// (`unreported_columns.rs`).
@@ -76,7 +77,7 @@ impl ScopePlan {
     ) -> rusqlite::Result<Self> {
         let unread = |why: &str| -> rusqlite::Result<Self> {
             Ok(Self {
-                sources: None,
+                sources: Err(why.to_owned()),
                 unreported: Arc::new(UnreportedColumns::unknown(connection, why.to_owned())?),
                 size: ScopePlanSize::default(),
             })
@@ -99,7 +100,7 @@ impl ScopePlan {
         let functions = Functions::read(connection)?;
         let (sources, size) = Sources::read(connection, select, whole, &functions)?;
         Ok(Self {
-            sources,
+            sources: sources.map_err(|Unread(why)| why.to_owned()),
             unreported: Arc::new(unreported_columns(connection, &functions, select)?),
             size,
         })
@@ -108,7 +109,7 @@ impl ScopePlan {
     /// Where a run bound to `parameters` finds the row its scope ends at, or
     /// `None` when no row of the run bounds it (`scope_order.rs`).
     pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
-        self.sources.as_ref()?.sorted.as_ref()?.last_row(parameters)
+        self.sources.as_ref().ok()?.sorted.as_ref()?.last_row(parameters)
     }
 
     /// The scope of each table the statement reads as one of its sources,
@@ -117,8 +118,8 @@ impl ScopePlan {
     /// table the plan doesn't name depends on every row.
     pub(crate) fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
         let mut scopes = match &self.sources {
-            Some(sources) => crate::scope_lookup::scopes(sources, parameters, last),
-            None => Scopes::default(),
+            Ok(sources) => crate::scope_lookup::scopes(sources, parameters, last),
+            Err(_) => Scopes::default(),
         };
         scopes.unreported = Arc::clone(&self.unreported);
         scopes
@@ -135,6 +136,9 @@ pub(crate) struct Sources {
     /// SQLite can also report a read through inside a view read whole: such
     /// a read could be the view's, whose tables no source narrows.
     pub(crate) inlined: BTreeSet<String>,
+    /// Whether it reads a view whole that the parser can't read, whose SQL
+    /// could use any name: `inlined` then holds none.
+    pub(crate) unread_whole_view: bool,
     /// The shadow tables of the contentful FTS5 tables it reads, lowercase.
     /// FTS5 reads them for the statement as it runs, and SQLite reports
     /// those reads, but they read what the FTS5 table's rows show: sqlive
@@ -150,11 +154,7 @@ pub(crate) struct Sources {
 }
 
 pub(crate) struct Source {
-    /// The table whose rows this source reads, lowercase; `None` for a FROM
-    /// item sqlive reads only for its values, as a table function, a view
-    /// read whole, or a subquery, CTE or view whose own tables sqlive reads
-    /// as sources of their own.
-    pub(crate) table: Option<String>,
+    pub(crate) object: Object,
     /// The FROM item as sqlive's own SQL names it, with its qualifier;
     /// `None` for a table function of another source's columns, or a
     /// subquery or CTE whose SQL names a row around it, whose rows exist
@@ -176,6 +176,40 @@ pub(crate) struct Source {
     /// values from sources placed before it (`scope_or.rs`).
     pub(crate) either: Vec<Vec<crate::scope_or::EitherSide>>,
 }
+
+impl Source {
+    /// The table whose rows this source reads, lowercase; `None` for a FROM
+    /// item sqlive reads only for its values.
+    pub(crate) fn table(&self) -> Option<&str> {
+        match &self.object {
+            Object::Table { name, .. } => Some(name),
+            Object::View { .. } | Object::Function | Object::Derived => None,
+        }
+    }
+}
+
+/// What a source reads its rows from.
+pub(crate) enum Object {
+    /// A table, by its name, lowercase.
+    Table {
+        name: String,
+        /// The innermost CTE or app view the source sits in, lowercase, which
+        /// SQLite reports its reads through.
+        within: Option<String>,
+    },
+    /// A view read whole, by its name, lowercase, and why it is.
+    View { name: String, why: Unread },
+    /// A table function.
+    Function,
+    /// A subquery, CTE or view whose own tables sqlive reads as sources of
+    /// their own.
+    Derived,
+}
+
+/// Why the planner can't read a statement's, a subquery's, a CTE's or a
+/// view's tables as sources: the shape that stops it.
+#[derive(Clone, Copy)]
+pub(crate) struct Unread(pub(crate) &'static str);
 
 /// `member` equals `value` over some row of `partner` in its scope, a NULL
 /// matching a NULL when `nulls`.
@@ -244,7 +278,7 @@ impl Sources {
         select: &Select<'_>,
         whole: &WholeViews,
         functions: &Functions,
-    ) -> rusqlite::Result<(Option<Self>, ScopePlanSize)> {
+    ) -> rusqlite::Result<(Result<Self, Unread>, ScopePlanSize)> {
         let mut planner = Planner {
             items: Vec::new(),
             cores: Vec::new(),
@@ -253,6 +287,7 @@ impl Sources {
             inlined: Vec::new(),
             fts5_shadows: Vec::new(),
             whole,
+            within: None,
             declared_ctes: 0,
             whole_names: Some(BTreeSet::new()),
         };
@@ -262,20 +297,21 @@ impl Sources {
             cores: planner.cores.len(),
             edges: planner.edges.len(),
         };
-        let Some(cores) = read else {
-            return Ok((None, size));
+        let cores = match read {
+            Ok(cores) => cores,
+            Err(unread) => return Ok((Err(unread), size)),
         };
         let sorted = match cores[..] {
             [core] => sorted_limit(connection, &planner, select, core)?,
             _ => None,
         };
-        Ok((Some(planner.ordered(sorted)), size))
+        Ok((Ok(planner.ordered(sorted)), size))
     }
 }
 
 /// A statement's cores, their items and the edges between them, as the
-/// `read_` functions find them; each of those gives `None` for a shape that
-/// keeps every table whole.
+/// `read_` functions find them; each of those gives the reason for a shape
+/// that keeps every table whole.
 pub(crate) struct Planner<'a> {
     pub(crate) items: Vec<FromItem>,
     /// Each core after the core it sits in.
@@ -292,6 +328,8 @@ pub(crate) struct Planner<'a> {
     pub(crate) fts5_shadows: Vec<String>,
     /// The views and tables the live query reads whole.
     pub(crate) whole: &'a WholeViews,
+    /// The innermost CTE or app view whose SQL is being read, lowercase.
+    pub(crate) within: Option<String>,
     /// How many CTEs the WITHs read so far declare, which numbers each.
     pub(crate) declared_ctes: usize,
     /// The names, lowercase, SQLite can report a read through inside the
@@ -482,6 +520,10 @@ impl Planner<'_> {
     }
 }
 
+/// Why a statement that names a contentful FTS5 table's hidden column stops
+/// (`Planner::names_hidden`).
+const HIDDEN_COLUMN: Unread = Unread("an FTS5 table's hidden column");
+
 /// Read `select`, which sits in the core `parent`, if any, where its FROM
 /// items can name `ctes`: the cores of its arms.
 pub(crate) fn read_select<'a>(
@@ -490,7 +532,7 @@ pub(crate) fn read_select<'a>(
     select: &'a Select<'a>,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<Vec<usize>>> {
+) -> rusqlite::Result<Result<Vec<usize>, Unread>> {
     let inner;
     let ctes = match &select.with {
         Some(with) => {
@@ -503,10 +545,10 @@ pub(crate) fn read_select<'a>(
         .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
     let mut cores = Vec::new();
     for arm in arms {
-        let Some(core) = read_core(connection, planner, arm, parent, ctes)? else {
-            return Ok(None);
-        };
-        cores.push(core);
+        match read_core(connection, planner, arm, parent, ctes)? {
+            Ok(core) => cores.push(core),
+            Err(unread) => return Ok(Err(unread)),
+        }
     }
     let mut found = Vec::new();
     for term in select.order_by.iter().flat_map(|terms| terms.iter()) {
@@ -518,15 +560,15 @@ pub(crate) fn read_select<'a>(
     let order = match cores[..] {
         [core] => {
             if planner.names_hidden(core, &found) {
-                return Ok(None);
+                return Ok(Err(HIDDEN_COLUMN));
             }
             planner.note_names(core, &found);
             Some(core)
         }
         _ => None,
     };
-    if read_nested(connection, planner, &found, order, ctes)?.is_none() {
-        return Ok(None);
+    if let Err(unread) = read_nested(connection, planner, &found, order, ctes)? {
+        return Ok(Err(unread));
     }
     // SQLite resolves LIMIT and OFFSET with no names around them.
     let mut found = Vec::new();
@@ -549,14 +591,15 @@ fn read_nested<'a>(
     found: &[Part<'a>],
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<Subqueries<'a>>> {
+) -> rusqlite::Result<Result<Subqueries<'a>, Unread>> {
     let mut read = Vec::new();
     for part in found {
         match part {
             Part::Name(_) | Part::Collation | Part::Function(..) | Part::Clock => {}
             Part::Select(select) | Part::Subquery(select) => {
-                let Some(cores) = read_select(connection, planner, select, parent, ctes)? else {
-                    return Ok(None);
+                let cores = match read_select(connection, planner, select, parent, ctes)? {
+                    Ok(cores) => cores,
+                    Err(unread) => return Ok(Err(unread)),
                 };
                 if let (Some(_), [core]) = (parent, &cores[..]) {
                     planner.cores[*core].window = read_window(connection, planner, select, *core)?;
@@ -564,10 +607,10 @@ fn read_nested<'a>(
                 read.push((*select, cores));
             }
             // Its table is read outside any FROM, and so in every row.
-            Part::Table(_) => return Ok(None),
+            Part::Table(_) => return Ok(Err(Unread("`x IN table`"))),
         }
     }
-    Ok(Some(read))
+    Ok(Ok(read))
 }
 
 /// Read one core, which sits in `parent`: its items, then the SELECTs in any
@@ -579,7 +622,7 @@ fn read_core<'a>(
     select: &'a OneSelect<'a>,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<usize>> {
+) -> rusqlite::Result<Result<usize, Unread>> {
     let core = planner.cores.len();
     planner.cores.push(Core {
         parent,
@@ -595,7 +638,7 @@ fn read_core<'a>(
                 parts(expr, &mut found);
             }
             if planner.names_hidden(core, &found) {
-                return Ok(None);
+                return Ok(Err(HIDDEN_COLUMN));
             }
             planner.note_names(core, &found);
             return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|_| core));
@@ -614,7 +657,7 @@ fn read_core<'a>(
     }
     let mut conditions: Vec<(Written<'_>, Place)> = Vec::new();
     if let Some(from) = from {
-        let read = crate::from_item::read_from(
+        if let Err(unread) = crate::from_item::read_from(
             connection,
             planner,
             from,
@@ -622,9 +665,8 @@ fn read_core<'a>(
             (core, parent, ctes),
             &mut conditions,
             &mut found,
-        )?;
-        if read.is_none() {
-            return Ok(None);
+        )? {
+            return Ok(Err(unread));
         }
     }
     if let Some(predicate) = where_clause {
@@ -643,11 +685,12 @@ fn read_core<'a>(
         window_parts(&definition.window, &mut found);
     }
     if planner.names_hidden(core, &found) {
-        return Ok(None);
+        return Ok(Err(HIDDEN_COLUMN));
     }
     planner.note_names(core, &found);
-    let Some(subqueries) = read_nested(connection, planner, &found, Some(core), ctes)? else {
-        return Ok(None);
+    let subqueries = match read_nested(connection, planner, &found, Some(core), ctes)? {
+        Ok(subqueries) => subqueries,
+        Err(unread) => return Ok(Err(unread)),
     };
     let mut read = Vec::new();
     for (condition, place) in conditions {
@@ -677,7 +720,7 @@ fn read_core<'a>(
         let term = planner.items[item].source.term.clone();
         crate::derived::push_down(planner, item, term, Vec::new());
     }
-    Ok(Some(core))
+    Ok(Ok(core))
 }
 
 /// A condition of a core as its SQL writes it.

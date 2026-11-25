@@ -5,7 +5,7 @@
 
 use crate::derived::{read_derived_item, Ctes, Derived};
 use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
-use crate::scope_plan::{is_name, Place, Planner, Source, Written};
+use crate::scope_plan::{is_name, Object, Place, Planner, Source, Unread, Written};
 use crate::scope_row::{row_term, RowExpression};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{conjuncts, parts, text, Functions, Part};
@@ -128,7 +128,7 @@ impl FromItem {
 }
 
 /// The FROM item `table` of `core`, which sits in `parent`, where its name
-/// can name `ctes`; `None` when sqlive can't read its rows.
+/// can name `ctes`; or why sqlive can't read its rows.
 pub(crate) fn read_item<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -137,7 +137,7 @@ pub(crate) fn read_item<'a>(
     core: usize,
     parent: Option<usize>,
     ctes: &Ctes<'a>,
-) -> rusqlite::Result<Option<FromItem>> {
+) -> rusqlite::Result<Result<FromItem, Unread>> {
     let qualifier = |alias: &Option<As<'_>>, name: &Name<'_>| match alias {
         Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
         None => name.0.to_owned(),
@@ -175,46 +175,60 @@ pub(crate) fn read_item<'a>(
                 }
             }
             if !in_main(name) {
-                return Ok(None);
+                return Ok(Err(Unread("a table outside the main schema")));
             }
             let Some((stored, kind)) = main_object(connection, &name.name)? else {
-                return Ok(None);
+                return Ok(Err(Unread(
+                    "a name that is no CTE, ordinary table, view or contentful FTS5 table",
+                )));
             };
             let ordinary = kind == "table";
             let contentful = kind == "virtual";
-            if kind == "view" && !planner.whole.contains(&stored) {
-                let read = (
-                    planner.items.len(),
-                    planner.cores.len(),
-                    planner.edges.len(),
-                    planner.inlined.len(),
-                );
-                if let Some((source, columns, derived)) = read_derived_item(
-                    connection,
-                    planner,
-                    crate::derived::Named::View(&stored),
-                    qualifier.clone(),
-                    parent,
-                    ctes,
-                )? {
-                    planner.inlined.push(stored.to_ascii_lowercase());
-                    return Ok(Some(item(source, columns, Some(derived))));
-                }
-                // A view sqlive can't read as cores of its own, as one with a
-                // recursive CTE, is read for its values alone, and its tables
-                // whole, as a view read whole is.
-                planner.items.truncate(read.0);
-                planner.cores.truncate(read.1);
-                planner.edges.truncate(read.2);
-                planner.inlined.truncate(read.3);
-            }
-            // A read SQLite reports inside a view read whole names the view
-            // or a CTE or view inside it, which the statement's own CTEs and
-            // views may share.
-            if kind == "view" {
+            let name = stored.to_ascii_lowercase();
+            let object = if kind == "view" {
+                let why = if planner.whole.contains(&stored) {
+                    Unread("a view the live query reads whole")
+                } else {
+                    let read = (
+                        planner.items.len(),
+                        planner.cores.len(),
+                        planner.edges.len(),
+                        planner.inlined.len(),
+                    );
+                    match read_derived_item(
+                        connection,
+                        planner,
+                        crate::derived::Named::View(&stored),
+                        qualifier.clone(),
+                        parent,
+                        ctes,
+                    )? {
+                        Ok((source, columns, derived)) => {
+                            planner.inlined.push(name);
+                            return Ok(Ok(item(source, columns, Some(derived))));
+                        }
+                        // A view sqlive can't read as cores of its own, as
+                        // one with a recursive CTE, is read for its values
+                        // alone, and its tables whole, as a view read whole
+                        // is.
+                        Err(unread) => {
+                            planner.items.truncate(read.0);
+                            planner.cores.truncate(read.1);
+                            planner.edges.truncate(read.2);
+                            planner.inlined.truncate(read.3);
+                            unread
+                        }
+                    }
+                };
+                // A read SQLite reports inside a view read whole names the
+                // view or a CTE or view inside it, which the statement's own
+                // CTEs and views may share.
                 let found = crate::whole_view_names::whole_view_names(connection, &stored)?;
                 planner.note_whole_view(found);
-            }
+                Object::View { name, why }
+            } else {
+                Object::Table { name, within: planner.within.clone() }
+            };
             // An ordinary table, a contentful FTS5 table, whose rows sqlive
             // sees change as its content table's do, or a view read only for
             // its values: a view read whole can show what the host's memory
@@ -235,9 +249,9 @@ pub(crate) fn read_item<'a>(
                     stored_from,
                 )
             };
-            Ok(Some(item(
+            Ok(Ok(item(
                 Source {
-                    table: (ordinary || contentful).then(|| stored.to_ascii_lowercase()),
+                    object,
                     from: Some(from),
                     qualifier,
                     term: None,
@@ -251,7 +265,7 @@ pub(crate) fn read_item<'a>(
         }
         SelectTable::TableCall(name, args, alias) => {
             if !in_main(name) {
-                return Ok(None);
+                return Ok(Err(Unread("a table function outside the main schema")));
             }
             let qualifier = qualifier(alias, &name.name);
             let mut found = Vec::new();
@@ -263,9 +277,9 @@ pub(crate) fn read_item<'a>(
                 Some(_) => text(table),
                 None => format!("{} AS {qualifier}", text(table)),
             });
-            Ok(Some(item(
+            Ok(Ok(item(
                 Source {
-                    table: None,
+                    object: Object::Function,
                     from,
                     qualifier,
                     term: None,
@@ -305,8 +319,8 @@ pub(crate) fn read_item<'a>(
 /// tables, `group` says whether a LEFT JOIN adds the join, which then adds
 /// its first table. A parenthesized join's tables are items of the core too,
 /// joined one after another, where that gives SQLite's rows
-/// (`Planner::group_flattens`). `None` for a shape that keeps every table
-/// whole.
+/// (`Planner::group_flattens`). The reason for a shape that keeps every
+/// table whole.
 pub(crate) fn read_from<'a>(
     connection: &Connection,
     planner: &mut Planner,
@@ -315,7 +329,7 @@ pub(crate) fn read_from<'a>(
     (core, parent, ctes): (usize, Option<usize>, &Ctes<'a>),
     conditions: &mut Vec<(Written<'a>, Place)>,
     found: &mut Vec<Part<'a>>,
-) -> rusqlite::Result<Option<()>> {
+) -> rusqlite::Result<Result<(), Unread>> {
     let tables = from
         .select
         .iter()
@@ -327,7 +341,7 @@ pub(crate) fn read_from<'a>(
             Some(JoinOperator::Comma | JoinOperator::TypedJoin(None)) => false,
             Some(JoinOperator::TypedJoin(Some(kind))) => {
                 if kind.intersects(JoinType::NATURAL | JoinType::RIGHT) {
-                    return Ok(None);
+                    return Ok(Err(Unread("a NATURAL or RIGHT join")));
                 }
                 kind.contains(JoinType::LEFT)
             }
@@ -341,11 +355,13 @@ pub(crate) fn read_from<'a>(
                 || matches!(inner.select, Some(SelectTable::Sub(..)))
                 || matches!(constraint, Some(JoinConstraint::Using(_)))
             {
-                return Ok(None);
+                return Ok(Err(Unread(
+                    "a parenthesized join under an alias, starting with another, or joined by USING",
+                )));
             }
             let first = planner.items.len();
             let held = conditions.len();
-            let read = read_from(
+            if let Err(unread) = read_from(
                 connection,
                 planner,
                 inner,
@@ -353,9 +369,8 @@ pub(crate) fn read_from<'a>(
                 (core, parent, ctes),
                 conditions,
                 found,
-            )?;
-            if read.is_none() {
-                return Ok(None);
+            )? {
+                return Ok(Err(unread));
             }
             let mut on = Vec::new();
             if let Some(JoinConstraint::On(expr)) = constraint {
@@ -363,7 +378,9 @@ pub(crate) fn read_from<'a>(
                 conjuncts(expr, &mut on);
             }
             if !planner.group_flattens(core, first, left, &conditions[held..], &on) {
-                return Ok(None);
+                return Ok(Err(Unread(
+                    "a parenthesized join whose rows aren't its tables joined in turn",
+                )));
             }
             let place = if left { Place::LeftOn(first) } else { Place::Inner };
             conditions.extend(on.into_iter().map(|expr| (Written::Expr(expr), place)));
@@ -374,8 +391,9 @@ pub(crate) fn read_from<'a>(
                 parts(arg, found);
             }
         }
-        let Some(item) = read_item(connection, planner, table, left, core, parent, ctes)? else {
-            return Ok(None);
+        let item = match read_item(connection, planner, table, left, core, parent, ctes)? {
+            Ok(item) => item,
+            Err(unread) => return Ok(Err(unread)),
         };
         let place = if left { Place::LeftOn(planner.items.len()) } else { Place::Inner };
         planner.cores[core].items.push(planner.items.len());
@@ -390,7 +408,9 @@ pub(crate) fn read_from<'a>(
             }
             // Inside a parenthesized join, USING compares with the leftmost
             // table of the join, not of the core.
-            Some(JoinConstraint::Using(_)) if group.is_some() => return Ok(None),
+            Some(JoinConstraint::Using(_)) if group.is_some() => {
+                return Ok(Err(Unread("USING inside a parenthesized join")))
+            }
             Some(JoinConstraint::Using(names)) => {
                 let right = planner.items.len() - 1;
                 for name in names.iter() {
@@ -406,7 +426,7 @@ pub(crate) fn read_from<'a>(
             }
         }
     }
-    Ok(Some(()))
+    Ok(Ok(()))
 }
 
 impl Planner<'_> {

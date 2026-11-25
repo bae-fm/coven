@@ -13,7 +13,7 @@ fn order(sql: &str) -> Vec<String> {
     connection.execute_batch(SCHEMA).unwrap();
     let statement = connection.prepare(sql).unwrap();
     let plan = ScopePlan::build(&connection, sql, &statement, &WholeViews::new([])).unwrap();
-    let sources = plan.sources.expect("the planner reads the statement");
+    let sources = plan.sources.unwrap();
     sources.order.iter().map(|&source| sources.sources[source].qualifier.clone()).collect()
 }
 

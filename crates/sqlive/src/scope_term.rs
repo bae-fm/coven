@@ -143,6 +143,26 @@ impl ScopeTerm {
         }
     }
 
+    /// The columns in which every row that passes it holds one of a few
+    /// values, in the order `RowScope::key` looks for one in, when it binds
+    /// values that are no NULL: those it compares by `=`, `IN` or `IS`.
+    pub(crate) fn key_columns(&self) -> Vec<String> {
+        match self {
+            Self::Compare { column, ordering: Ordering::Equal, inclusive: false, .. }
+            | Self::In { column, .. }
+            | Self::Is { column, .. } => vec![column.clone()],
+            Self::Compare { .. } | Self::Null { .. } | Self::Truth { .. } | Self::Row(_) => {
+                Vec::new()
+            }
+            Self::And(left, right) => {
+                let mut columns = left.key_columns();
+                add_columns(&mut columns, right.key_columns());
+                columns
+            }
+            Self::Or(left, right) => shared_columns(left.key_columns(), right.key_columns()),
+        }
+    }
+
     /// Whether a row whose columns are all NULL can pass it: a NULL test
     /// does, as does `IS` a parameter, whose value isn't known until a run.
     /// Every other term is false where its column is NULL. An AND passes
@@ -248,6 +268,21 @@ impl ScopeTerm {
             }
         }
     }
+}
+
+/// Add to `columns` those of `others` it lacks.
+pub(crate) fn add_columns(columns: &mut Vec<String>, others: Vec<String>) {
+    for column in others {
+        if !columns.contains(&column) {
+            columns.push(column);
+        }
+    }
+}
+
+/// Those of `columns` that `others` holds too.
+pub(crate) fn shared_columns(mut columns: Vec<String>, others: Vec<String>) -> Vec<String> {
+    columns.retain(|column| others.contains(column));
+    columns
 }
 
 /// The condition whose truth a term compares with a value: a NULL test, or

@@ -130,7 +130,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
     }
     let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
     for (position, (source, scope)) in sources.sources.iter().zip(bound).enumerate() {
-        let (Some(table), Some(scope)) = (&source.table, scope) else {
+        let (Some(table), Some(scope)) = (source.table(), scope) else {
             continue;
         };
         // A subquery's window narrows its table's own scope, and no lookup
@@ -144,7 +144,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
             Some(other) => other.or(scope),
             None => scope,
         };
-        scopes.insert(table.clone(), scope);
+        scopes.insert(table.to_owned(), scope);
     }
     Scopes {
         tables: scopes,

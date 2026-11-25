@@ -45,6 +45,7 @@ mod planner_statistics;
 pub mod random_scopes;
 mod read_capture;
 mod read_index;
+mod read_report;
 mod read_set;
 mod row_scope;
 mod schema_objects;
@@ -102,6 +103,9 @@ pub use live_query_runs::LiveQueryRuns;
 pub use no_policy::{HandleFailure, NoPolicy};
 pub use panic_as_error;
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
+#[cfg(any(test, feature = "test-utils"))]
+pub use read_report::read_report;
+pub use read_report::{ReadEntry, ReadReport, ReadRows};
 pub use read_set::{affected, Answers, ColumnSet, ReadSet, RowChange, TableRead, ROWS_PER_TABLE};
 pub use row_scope::{RowImage, RowScope, Scopes};
 pub use rusqlite;

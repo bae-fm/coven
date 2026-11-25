@@ -75,7 +75,7 @@ pub(crate) fn item_row_term(
     parts: &[Part<'_>],
 ) -> Option<Arc<RowTerm>> {
     let from = &planner.items[item];
-    from.source.table.as_ref()?;
+    from.source.table()?;
     row_term(planner.functions, &from.source.qualifier, expr, parts, &|name| {
         let (_, column) = planner.resolve(core, name)?;
         let affinity = from.columns.affinity(&column)?;
