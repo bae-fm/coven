@@ -60,6 +60,7 @@ mod scope_term;
 mod scope_window;
 mod select_syntax;
 mod snapshot_values;
+mod source_order;
 pub mod sql;
 mod sql_value;
 mod sql_walk;
