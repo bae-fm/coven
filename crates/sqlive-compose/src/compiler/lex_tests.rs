@@ -1,4 +1,4 @@
-use super::{tokens, Kind};
+use super::{apply, tokens, Kind};
 
 fn kinds(sql: &str) -> Vec<(Kind, &str)> {
     tokens(sql).into_iter().map(|token| (token.kind, &sql[token.range])).collect()
@@ -68,4 +68,14 @@ fn a_quoted_name_unquotes_to_lowercase() {
     let sql = "\"Odd \"\"Name\"\" \" [Other] `Back`";
     let names: Vec<_> = tokens(sql).iter().map(|token| token.name(sql).unwrap()).collect();
     assert_eq!(names, ["odd \"name\" ", "other", "back"]);
+}
+
+#[test]
+fn edits_replace_ranges_and_keep_the_rest() {
+    let sql = "SELECT :a, :b";
+    let parameters: Vec<_> =
+        tokens(sql).into_iter().filter(|t| t.kind == Kind::Parameter).collect();
+    let edits: Vec<_> =
+        parameters.iter().map(|token| (token.range.clone(), ":x".to_owned())).collect();
+    assert_eq!(apply(sql, &edits), "SELECT :x, :x");
 }

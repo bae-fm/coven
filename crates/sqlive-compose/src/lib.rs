@@ -16,6 +16,11 @@ pub mod generated {
     pub use serde_json;
     pub use sqlive;
 
+    /// Whether the column at `index` is NULL.
+    pub fn is_null(row: &sqlive::Row<'_>, index: usize) -> sqlive::SqliteResult<bool> {
+        Ok(row.get::<_, sqlive::SqlValue>(index)? == sqlive::SqlValue::Null)
+    }
+
     /// Reads a JSON document that a column holds as text.
     pub fn json_column<T: serde::de::DeserializeOwned>(
         row: &sqlive::Row<'_>,

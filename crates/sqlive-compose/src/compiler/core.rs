@@ -31,6 +31,11 @@ pub(crate) struct FromItem {
     pub(crate) table: Option<String>,
     /// How it joins.
     pub(crate) join: Join,
+    /// The index of the token that names its table, when the item names a
+    /// table with no schema in front of the name.
+    pub(crate) at_table: Option<usize>,
+    /// Whether a schema's name qualifies its table.
+    pub(crate) qualified: bool,
 }
 
 /// What a result column is.
@@ -90,7 +95,8 @@ const AGGREGATES: [&str; 12] = [
 const CLAUSE_ENDS: [&str; 9] =
     ["where", "group", "having", "window", "order", "limit", "union", "intersect", "except"];
 
-const NOT_ALIASES: [&str; 22] = [
+const NOT_ALIASES: [&str; 23] = [
+    "from",
     "join",
     "left",
     "right",
@@ -313,6 +319,58 @@ fn from_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<FromItem>
     items
 }
 
+/// The alias that the tokens from `at` up to `end` give the item before
+/// them, and how many tokens it takes: `AS name`, or a name that no keyword
+/// of the SQL could be.
+pub(crate) fn alias_at(
+    sql: &str,
+    tokens: &[Token],
+    at: usize,
+    end: usize,
+) -> Option<(String, usize)> {
+    let after = tokens.get(at).filter(|_| at < end)?;
+    if after.is_word(sql, "as") {
+        return tokens.get(at + 1).and_then(|alias| alias.name(sql)).map(|alias| (alias, 2));
+    }
+    let alias = after.name(sql)?;
+    let keyword = after.kind == Kind::Word && NOT_ALIASES.contains(&alias.as_str());
+    (!keyword).then_some((alias, 1))
+}
+
+/// Every FROM item of the statement, at any depth.
+pub(crate) fn all_from_items(sql: &str, tokens: &[Token]) -> Vec<FromItem> {
+    let mut items = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let distinct = index > 0 && tokens[index - 1].is_word(sql, "distinct");
+        if token.is_word(sql, "from") && !distinct {
+            items.extend(from_items(sql, tokens, index + 1..clause_end(sql, tokens, index)));
+        }
+    }
+    items
+}
+
+/// The index where the clause that the FROM at `from` starts ends: at the
+/// next clause of its SELECT, or the parenthesis that closes its subquery.
+fn clause_end(sql: &str, tokens: &[Token], from: usize) -> usize {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(from + 1) {
+        if token.is_symbol(sql, '(') {
+            depth += 1;
+        } else if token.is_symbol(sql, ')') {
+            if depth == 0 {
+                return index;
+            }
+            depth -= 1;
+        } else if depth == 0
+            && token.kind == Kind::Word
+            && CLAUSE_ENDS.contains(&token.text(sql).to_ascii_lowercase().as_str())
+        {
+            return index;
+        }
+    }
+    tokens.len()
+}
+
 /// The FROM item that starts at `index`, and where the next token after it
 /// is, or `None` when the tokens there aren't an item.
 fn from_item(
@@ -322,7 +380,14 @@ fn from_item(
     end: usize,
     join: Join,
 ) -> (FromItem, Option<usize>) {
-    let mut item = FromItem { qualifier: None, alias: None, table: None, join };
+    let mut item = FromItem {
+        qualifier: None,
+        alias: None,
+        table: None,
+        join,
+        at_table: None,
+        qualified: false,
+    };
     let token = &tokens[index];
     let mut next = index + 1;
     if token.is_symbol(sql, '(') {
@@ -336,30 +401,21 @@ fn from_item(
                 return (item, None);
             };
             item.table = Some(table);
+            item.qualified = true;
             next += 2;
         } else if after.is_some_and(|after| after.is_symbol(sql, '(')) {
             let Some(close) = matching(sql, tokens, next) else { return (item, None) };
             next = close + 1;
         } else {
             item.table = Some(name);
+            item.at_table = Some(index);
         }
     } else {
         return (item, None);
     }
-    if next < end {
-        let after = &tokens[next];
-        if after.is_word(sql, "as") {
-            if let Some(alias) = tokens.get(next + 1).and_then(|alias| alias.name(sql)) {
-                item.alias = Some(alias);
-                next += 2;
-            }
-        } else if let Some(alias) = after.name(sql) {
-            let keyword = after.kind == Kind::Word && NOT_ALIASES.contains(&alias.as_str());
-            if !keyword {
-                item.alias = Some(alias);
-                next += 1;
-            }
-        }
+    if let Some((alias, used)) = alias_at(sql, tokens, next, end) {
+        item.alias = Some(alias);
+        next += used;
     }
     item.qualifier = item.alias.clone().or_else(|| item.table.clone());
     (item, Some(next))

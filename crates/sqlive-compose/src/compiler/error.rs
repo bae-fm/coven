@@ -159,6 +159,143 @@ pub enum Cause {
         /// The column.
         column: String,
     },
+    /// A spread names a fragment that no crate in reach offers.
+    #[error("{concerns} spreads {path}, which is no fragment of this crate or of a dependency")]
+    UnknownFragment {
+        /// The call's name.
+        concerns: String,
+        /// The path as written.
+        path: String,
+    },
+    /// A spread's arguments or its markers aren't written as the header
+    /// syntax has them.
+    #[error("{concerns}: the spread of {fragment} is not written `@path(name: value, …)`")]
+    BadSpread {
+        /// The call's name.
+        concerns: String,
+        /// The fragment.
+        fragment: String,
+    },
+    /// A spread binds a name that the fragment doesn't declare.
+    #[error("the spread of {fragment} binds {argument}, which the fragment does not declare")]
+    UnknownArgument {
+        /// The fragment.
+        fragment: String,
+        /// The argument.
+        argument: String,
+    },
+    /// A spread binds one name twice.
+    #[error("the spread of {fragment} binds {argument} twice")]
+    DuplicateArgument {
+        /// The fragment.
+        fragment: String,
+        /// The argument.
+        argument: String,
+    },
+    /// A spread binds a name to a value of the wrong form.
+    #[error("the spread of {fragment} binds {argument} to a value that is not the form it takes")]
+    BadArgument {
+        /// The fragment.
+        fragment: String,
+        /// The argument.
+        argument: String,
+    },
+    /// A spread binds no value to a parameter.
+    #[error("the spread of {fragment} binds no value to its parameter {parameter}")]
+    NoValue {
+        /// The fragment.
+        fragment: String,
+        /// The parameter.
+        parameter: String,
+    },
+    /// A spread of a fragment that reads a parent row names none.
+    #[error("the spread of {fragment} binds no parent row, and the fragment reads one")]
+    MissingParent {
+        /// The fragment.
+        fragment: String,
+    },
+    /// A spread names a parent row for a fragment that reads none.
+    #[error("the spread of {fragment} binds a parent row, and the fragment reads none")]
+    NoParentRow {
+        /// The fragment.
+        fragment: String,
+    },
+    /// A spread gives no rows to a relation.
+    #[error("the spread of {fragment} binds no rows to its relation {relation}")]
+    MissingRelation {
+        /// The fragment.
+        fragment: String,
+        /// The relation.
+        relation: String,
+    },
+    /// `@parent` outside a fragment that reads a parent row.
+    #[error("{concerns} writes @parent, and only a fragment with a parent row can")]
+    ParentOutsideFragment {
+        /// The call's name.
+        concerns: String,
+    },
+    /// A fragment that reads a parent row is spread as a table.
+    #[error("{fragment} reads a parent row, so its spread is a value, not a table in FROM")]
+    ParentSpreadInFrom {
+        /// The fragment.
+        fragment: String,
+    },
+    /// The FROM item a spread names as its parent row doesn't read the
+    /// fragment's parent table.
+    #[error("the spread of {fragment} takes its parent row from {alias}, which is no FROM item that reads {table}")]
+    WrongParentTable {
+        /// The fragment.
+        fragment: String,
+        /// The alias the spread names.
+        alias: String,
+        /// The table the fragment reads a row of.
+        table: String,
+    },
+    /// A fragment that reads a parent row returns more or fewer than one
+    /// column.
+    #[error(
+        "{concerns} reads a parent row and returns {width} columns, and a value is one column"
+    )]
+    ParentColumns {
+        /// The call's name.
+        concerns: String,
+        /// How many columns.
+        width: usize,
+    },
+    /// A result column names one column of a spread.
+    #[error("{concerns} selects {column}, one column of a spread: select the spread with its alias and `.*`")]
+    SpreadColumn {
+        /// The call's name.
+        concerns: String,
+        /// The column as written.
+        column: String,
+    },
+    /// A spread that can be missing has no column that is NULL only when it
+    /// is.
+    #[error("{concerns} spreads {fragment} where its row can be missing, and it has no NOT NULL column to tell")]
+    NoPresence {
+        /// The call's name.
+        concerns: String,
+        /// The fragment.
+        fragment: String,
+    },
+    /// The result items of the statement don't add up to its columns.
+    #[error("{concerns}: the compiler can't tell which result item gives which column")]
+    Unaligned {
+        /// The call's name.
+        concerns: String,
+    },
+    /// Fragments spread each other in a circle.
+    #[error("{first} spreads itself: {}", chain.join(", "))]
+    Cycle {
+        /// The fragment the circle starts and ends at.
+        first: String,
+        /// The fragments in the circle, from the first back to it.
+        chain: Vec<String>,
+    },
+    /// A dependency's manifest isn't a manifest.
+    #[error("can't read a dependency's manifest: {0}")]
+    ManifestRead(serde_json::Error),
     /// The schema's setup fails.
     #[error("the schema's setup fails: {0}")]
     Setup(sqlive::SqliteError),

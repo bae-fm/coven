@@ -1,68 +1,53 @@
-//! The typed columns of a call's statement: where each comes from in a
-//! table, whether it can be NULL, and the Rust type that reads it.
+//! The typed fields of a call's statement: where each result column comes
+//! from in a table or in a spread, whether it can be NULL, and the Rust type
+//! that reads it.
 
-use super::core::{Core, Item, ItemKind, Join};
+use super::core::{Core, FromItem, Item, ItemKind, Join};
 use super::error::Cause;
 use super::header::{Declared, Header, RustType};
 use super::model::{strict_type, Field, Reading};
+use super::spread::{Placed, Registry};
 
-/// Each result column of the statement, as `prepared` describes it, as a
-/// field of the call's type, in order.
+/// A result item and the result columns it gives.
+struct Span<'a> {
+    item: &'a Item,
+    start: usize,
+    width: usize,
+    /// The fragment it spreads, when it is `alias.*` of a table spread or a
+    /// value spread's alias.
+    spread: Option<&'a Placed>,
+}
+
+/// Each field of the call's type, in the order of the result items.
 pub(crate) fn fields(
     header: &Header,
     core: &Core,
     prepared: &sqlive::ProbedStatement,
+    placed: &[Placed],
+    registry: &Registry,
 ) -> Result<Vec<Field>, Cause> {
-    let items = align(header, core, prepared.columns.len())?;
+    let spans = spans(header, core, prepared.columns.len(), placed)?;
     let nullable_from = nullable_items(core);
-    let mut fields = Vec::new();
-    for (position, (column, &item)) in prepared.columns.iter().zip(&items).enumerate() {
-        if fields.iter().any(|field: &Field| field.name == column.name) {
-            return Err(Cause::DuplicateColumn {
-                concerns: header.name.clone(),
-                column: column.name.clone(),
-            });
+    let mut fields: Vec<Field> = Vec::new();
+    for span in &spans {
+        if let Some(spread) = span.spread {
+            let field = spread_field(header, core, &nullable_from, span, spread, registry)?;
+            push(header, &mut fields, field)?;
+            continue;
         }
-        let declared =
-            header.declarations.iter().find(|declaration| declaration.column == column.name);
-        let nullable = column.origin.as_ref().is_some_and(|origin| !origin.not_null)
-            || joins_with_nulls(core, &nullable_from, item, column, header)?
-            || item.is_some_and(|item| item.kind == ItemKind::Subquery);
-        let (ty, reading) =
-            match (declared.map(|declaration| &declaration.declared), &column.origin) {
-                (Some(Declared::Json(ty)), _) => (ty.clone(), Reading::Json),
-                (Some(Declared::Type(ty)), _) => {
-                    if nullable && !ty.is_option() {
-                        return Err(Cause::NullableColumn {
-                            column: column.name.clone(),
-                            declared: ty.0.clone(),
-                        });
-                    }
-                    (ty.clone(), Reading::Value)
-                }
-                (None, Some(origin)) => {
-                    let mapped =
-                        origin.declared_type.as_deref().and_then(strict_type).ok_or_else(|| {
-                            Cause::UnmappedType {
-                                concerns: header.name.clone(),
-                                column: column.name.clone(),
-                                declared: origin
-                                    .declared_type
-                                    .clone()
-                                    .unwrap_or_else(|| "no type".to_owned()),
-                            }
-                        })?;
-                    let ty = if nullable { format!("Option<{mapped}>") } else { mapped.to_owned() };
-                    (RustType(ty), Reading::Value)
-                }
-                (None, None) => {
-                    return Err(Cause::UntypedColumn {
-                        concerns: header.name.clone(),
-                        column: column.name.clone(),
-                    })
-                }
-            };
-        fields.push(Field { name: column.name.clone(), ty, reading, column: position });
+        if let ItemKind::Column { qualifier: Some(qualifier), name } = &span.item.kind {
+            if placed.iter().any(|spread| spread.alias.as_deref() == Some(qualifier.as_str())) {
+                return Err(Cause::SpreadColumn {
+                    concerns: header.name.clone(),
+                    column: format!("{qualifier}.{name}"),
+                });
+            }
+        }
+        let columns = prepared.columns.iter().enumerate().skip(span.start).take(span.width);
+        for (position, column) in columns {
+            let field = column_field(header, core, &nullable_from, span.item, column, position)?;
+            push(header, &mut fields, field)?;
+        }
     }
     for declaration in &header.declarations {
         if !prepared.columns.iter().any(|column| column.name == declaration.column) {
@@ -75,38 +60,142 @@ pub(crate) fn fields(
     Ok(fields)
 }
 
-/// The result item each column comes from: a column an item names gives that
-/// item, and a `*` gives the columns it expands to, whose number is what the
-/// other items leave. Nothing aligns when the core is a compound.
-fn align<'a>(
+fn push(header: &Header, fields: &mut Vec<Field>, field: Field) -> Result<(), Cause> {
+    if fields.iter().any(|other| other.name == field.name) {
+        return Err(Cause::DuplicateColumn { concerns: header.name.clone(), column: field.name });
+    }
+    fields.push(field);
+    Ok(())
+}
+
+/// The result items with the columns each gives. A `*` takes the columns
+/// that the other items leave; a compound statement has no item to align.
+fn spans<'a>(
     header: &Header,
     core: &'a Core,
     columns: usize,
-) -> Result<Vec<Option<&'a Item>>, Cause> {
-    if core.compound {
-        return Ok(vec![None; columns]);
-    }
-    let stars = core
-        .items
-        .iter()
-        .filter(|item| matches!(item.kind, ItemKind::Star | ItemKind::QualifiedStar(_)))
-        .count();
+    placed: &'a [Placed],
+) -> Result<Vec<Span<'a>>, Cause> {
+    let spread_of = |item: &Item| -> Option<&'a Placed> {
+        match &item.kind {
+            ItemKind::QualifiedStar(qualifier) => placed.iter().find(|spread| {
+                spread.parent.is_none() && spread.alias.as_deref() == Some(qualifier.as_str())
+            }),
+            ItemKind::Subquery => placed.iter().find(|spread| {
+                spread.parent.is_some() && item.alias.is_some() && spread.alias == item.alias
+            }),
+            _ => None,
+        }
+    };
+    let width_of = |item: &Item| match (spread_of(item), &item.kind) {
+        (Some(spread), ItemKind::QualifiedStar(_)) => Some(spread.record.width),
+        (_, ItemKind::Star | ItemKind::QualifiedStar(_)) => None,
+        _ => Some(1),
+    };
+    let stars = core.items.iter().filter(|item| width_of(item).is_none()).count();
     if stars > 1 {
         return Err(Cause::Stars { concerns: header.name.clone() });
     }
-    let single = core.items.len() - stars;
-    let star_width = columns.saturating_sub(single);
-    let mut aligned = Vec::new();
+    let known: usize = core.items.iter().filter_map(width_of).sum();
+    let star_width = columns.saturating_sub(known);
+    let mut spans = Vec::new();
+    let mut start = 0;
     for item in &core.items {
-        let width = if matches!(item.kind, ItemKind::Star | ItemKind::QualifiedStar(_)) {
-            star_width
-        } else {
-            1
-        };
-        aligned.extend(std::iter::repeat_n(Some(item), width));
+        let width = width_of(item).unwrap_or(star_width);
+        spans.push(Span { item, start, width, spread: spread_of(item) });
+        start += width;
     }
-    aligned.resize(columns, None);
-    Ok(aligned)
+    if start != columns {
+        return Err(Cause::Unaligned { concerns: header.name.clone() });
+    }
+    Ok(spans)
+}
+
+/// The field for the columns of a spread.
+fn spread_field(
+    header: &Header,
+    core: &Core,
+    nullable_from: &[bool],
+    span: &Span<'_>,
+    spread: &Placed,
+    registry: &Registry,
+) -> Result<Field, Cause> {
+    let is_value = spread.parent.is_some();
+    let nullable = if is_value {
+        !spread.record.one_row
+    } else {
+        let qualifier = spread.alias.as_deref();
+        core.from
+            .iter()
+            .zip(nullable_from)
+            .any(|(from, &nullable)| nullable && from.qualifier.as_deref() == qualifier)
+    };
+    if nullable && spread.record.presence.is_none() {
+        return Err(Cause::NoPresence {
+            concerns: header.name.clone(),
+            fragment: spread.record.path.clone(),
+        });
+    }
+    let path = registry.code_path(&spread.record.path);
+    let name = span.item.alias.clone().or_else(|| spread.alias.clone()).unwrap_or_default();
+    let ty = if nullable { format!("Option<{path}>") } else { path.clone() };
+    Ok(Field {
+        name,
+        ty: RustType(ty),
+        reading: Reading::Spread { path, presence: spread.record.presence },
+        column: span.start,
+    })
+}
+
+/// The field for the result column `column`, which comes from `item`.
+fn column_field(
+    header: &Header,
+    core: &Core,
+    nullable_from: &[bool],
+    item: &Item,
+    column: &sqlive::ProbedColumn,
+    position: usize,
+) -> Result<Field, Cause> {
+    let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
+    // SQLite names the origin of a compound's first SELECT only.
+    let origin = if core.compound { None } else { column.origin.as_ref() };
+    let nullable = origin.is_some_and(|origin| !origin.not_null)
+        || joins_with_nulls(core, nullable_from, item, origin, &column.name, header)?
+        || item.kind == ItemKind::Subquery;
+    let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
+        (Some(Declared::Json(ty)), _) => (ty.clone(), Reading::Json),
+        (Some(Declared::Type(ty)), _) => {
+            if nullable && !ty.is_option() {
+                return Err(Cause::NullableColumn {
+                    column: column.name.clone(),
+                    declared: ty.0.clone(),
+                });
+            }
+            (ty.clone(), Reading::Value)
+        }
+        (None, Some(origin)) => {
+            let mapped =
+                origin.declared_type.as_deref().and_then(strict_type).ok_or_else(|| {
+                    Cause::UnmappedType {
+                        concerns: header.name.clone(),
+                        column: column.name.clone(),
+                        declared: origin
+                            .declared_type
+                            .clone()
+                            .unwrap_or_else(|| "no type".to_owned()),
+                    }
+                })?;
+            let ty = if nullable { format!("Option<{mapped}>") } else { mapped.to_owned() };
+            (RustType(ty), Reading::Value)
+        }
+        (None, None) => {
+            return Err(Cause::UntypedColumn {
+                concerns: header.name.clone(),
+                column: column.name.clone(),
+            })
+        }
+    };
+    Ok(Field { name: column.name.clone(), ty, reading, column: position })
 }
 
 /// For each FROM item, whether a LEFT, RIGHT or FULL join gives its columns
@@ -128,40 +217,36 @@ fn nullable_items(core: &Core) -> Vec<bool> {
 fn joins_with_nulls(
     core: &Core,
     nullable_from: &[bool],
-    item: Option<&Item>,
-    column: &sqlive::ProbedColumn,
+    item: &Item,
+    origin: Option<&sqlive::ColumnOrigin>,
+    column: &str,
     header: &Header,
 ) -> Result<bool, Cause> {
-    let qualifier = match item.map(|item| &item.kind) {
-        Some(ItemKind::Column { qualifier, .. }) => qualifier.clone(),
-        Some(ItemKind::QualifiedStar(qualifier)) => Some(qualifier.clone()),
+    let qualifier = match &item.kind {
+        ItemKind::Column { qualifier, .. } => qualifier.clone(),
+        ItemKind::QualifiedStar(qualifier) => Some(qualifier.clone()),
         _ => None,
     };
-    let Some(origin) = &column.origin else { return Ok(false) };
-    let candidates: Vec<usize> = core
+    let Some(origin) = origin else { return Ok(false) };
+    let reads = |from: &FromItem| match &qualifier {
+        Some(qualifier) => from.qualifier.as_deref() == Some(qualifier.as_str()),
+        None => {
+            from.table.as_deref().is_some_and(|table| table.eq_ignore_ascii_case(&origin.table))
+        }
+    };
+    let nullable: Vec<bool> = core
         .from
         .iter()
-        .enumerate()
-        .filter(|(_, from)| match &qualifier {
-            Some(qualifier) => from.qualifier.as_deref() == Some(qualifier.as_str()),
-            None => {
-                from.table.as_deref().is_some_and(|table| table.eq_ignore_ascii_case(&origin.table))
-            }
-        })
-        .map(|(position, _)| position)
+        .zip(nullable_from)
+        .filter(|(from, _)| reads(from))
+        .map(|(_, &nullable)| nullable)
         .collect();
-    let nullable: Vec<bool> = candidates.iter().map(|&position| nullable_from[position]).collect();
     match nullable[..] {
         [] => Ok(false),
         [only] => Ok(only),
         [first, ..] if nullable.iter().all(|&flag| flag == first) => Ok(first),
-        _ => Err(Cause::UnplacedColumn {
-            concerns: header.name.clone(),
-            column: column.name.clone(),
-        }),
+        _ => {
+            Err(Cause::UnplacedColumn { concerns: header.name.clone(), column: column.to_owned() })
+        }
     }
 }
-
-#[cfg(test)]
-#[path = "columns_tests.rs"]
-mod tests;

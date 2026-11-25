@@ -1,0 +1,111 @@
+//! Renaming the CTEs a call declares, and the relations a fragment is given,
+//! to `<crate>__<fragment>__<name>`, so that no two fragments' CTEs share a
+//! name once their SQL is one statement (`SPEC.md`, section 4).
+
+use std::collections::BTreeSet;
+use std::ops::Range;
+
+use super::core::{all_from_items, matching};
+use super::lex::{self, Token};
+
+/// A CTE the SQL declares.
+struct Declared {
+    name: String,
+    /// The index of the token that holds its name.
+    at: usize,
+    /// The indices of the tokens of its body, inside its parentheses.
+    body: Range<usize>,
+    /// Whether its WITH clause is RECURSIVE, so the body may name the CTE.
+    recursive: bool,
+}
+
+/// The name that `prefix` gives the CTE or relation `name`.
+pub(crate) fn renamed(prefix: &str, name: &str) -> String {
+    format!("{prefix}__{}", name.to_ascii_lowercase())
+}
+
+/// `sql` with each CTE it declares, and each of `relations` it reads as a
+/// table, named by `prefix`. A table read without an alias keeps its old
+/// name as one, so the columns the SQL qualifies by it still resolve.
+pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
+    let tokens = lex::tokens(sql);
+    let declared = declarations(sql, &tokens);
+    let mut names: BTreeSet<String> = declared.iter().map(|cte| cte.name.clone()).collect();
+    names.extend(relations.iter().map(|relation| relation.to_ascii_lowercase()));
+    if names.is_empty() {
+        return sql.to_owned();
+    }
+    let mut edits = Vec::new();
+    for cte in &declared {
+        edits.push((tokens[cte.at].range.clone(), renamed(prefix, &cte.name)));
+    }
+    for item in all_from_items(sql, &tokens) {
+        let Some(table) = item.table.as_ref().filter(|table| names.contains(*table)) else {
+            continue;
+        };
+        if item.qualified || item.at_table.is_none() {
+            continue;
+        }
+        let at = item.at_table.unwrap_or_default();
+        let inside_own_body = declared
+            .iter()
+            .any(|cte| !cte.recursive && cte.name == *table && cte.body.contains(&at));
+        if inside_own_body {
+            continue;
+        }
+        let original = tokens[at].text(sql);
+        let new = renamed(prefix, table);
+        let text = if item.alias.is_some() { new } else { format!("{new} AS {original}") };
+        edits.push((tokens[at].range.clone(), text));
+    }
+    lex::apply(sql, &edits)
+}
+
+/// The CTEs the SQL declares, at any depth.
+fn declarations(sql: &str, tokens: &[Token]) -> Vec<Declared> {
+    let mut declared = Vec::new();
+    for (start, token) in tokens.iter().enumerate() {
+        if !token.is_word(sql, "with") {
+            continue;
+        }
+        let mut at = start + 1;
+        let recursive = tokens.get(at).is_some_and(|next| next.is_word(sql, "recursive"));
+        if recursive {
+            at += 1;
+        }
+        while let Some(name) = tokens.get(at).and_then(|name| name.name(sql)) {
+            let name_at = at;
+            at += 1;
+            if tokens.get(at).is_some_and(|next| next.is_symbol(sql, '(')) {
+                let Some(close) = matching(sql, tokens, at) else { return declared };
+                at = close + 1;
+            }
+            if !tokens.get(at).is_some_and(|next| next.is_word(sql, "as")) {
+                break;
+            }
+            at += 1;
+            while tokens
+                .get(at)
+                .is_some_and(|next| next.is_word(sql, "not") || next.is_word(sql, "materialized"))
+            {
+                at += 1;
+            }
+            if !tokens.get(at).is_some_and(|next| next.is_symbol(sql, '(')) {
+                break;
+            }
+            let Some(close) = matching(sql, tokens, at) else { return declared };
+            declared.push(Declared { name, at: name_at, body: at + 1..close, recursive });
+            at = close + 1;
+            if tokens.get(at).is_some_and(|next| next.is_symbol(sql, ',')) {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    declared
+}
+
+#[cfg(test)]
+#[path = "rename_tests.rs"]
+mod tests;

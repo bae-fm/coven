@@ -11,6 +11,16 @@ pub(crate) enum Reading {
     Value,
     /// The column's text, which the field's type decodes from JSON.
     Json,
+    /// The columns of a fragment, the first of which is the field's column.
+    Spread {
+        /// The Rust path of the fragment's type, as the call's own code
+        /// writes it.
+        path: String,
+        /// The position, from the field's column, of the fragment's first
+        /// column that can't be NULL, which tells a row from the NULLs of a
+        /// missing row. Only a field that can be missing reads it.
+        presence: Option<usize>,
+    },
 }
 
 /// One field of a generated row or fragment type.

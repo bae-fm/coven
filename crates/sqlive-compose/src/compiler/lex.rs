@@ -173,6 +173,22 @@ pub(crate) fn tokens(sql: &str) -> Vec<Token> {
     tokens
 }
 
+/// Replace each range of `sql` that `edits` names, which don't overlap, in
+/// order of position.
+pub(crate) fn apply(sql: &str, edits: &[(Range<usize>, String)]) -> String {
+    let mut sorted: Vec<&(Range<usize>, String)> = edits.iter().collect();
+    sorted.sort_by_key(|(range, _)| range.start);
+    let mut result = String::with_capacity(sql.len());
+    let mut at = 0;
+    for (range, text) in sorted {
+        result.push_str(&sql[at..range.start]);
+        result.push_str(text);
+        at = range.end;
+    }
+    result.push_str(&sql[at..]);
+    result
+}
+
 #[cfg(test)]
 #[path = "lex_tests.rs"]
 mod tests;

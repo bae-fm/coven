@@ -28,7 +28,7 @@ fn path(tail: &str) -> TokenStream {
 /// the field's own position.
 fn read_field(field: &Field) -> TokenStream {
     let column = field.column;
-    match field.reading {
+    match &field.reading {
         Reading::Value => {
             let ty = rust_type(&field.ty);
             quote!(row.get::<_, #ty>(offset + #column)?)
@@ -36,6 +36,16 @@ fn read_field(field: &Field) -> TokenStream {
         Reading::Json => {
             let json = path("json_column");
             quote!(#json(row, offset + #column)?)
+        }
+        Reading::Spread { path: fragment, presence } => {
+            let fragment: TokenStream = fragment.parse().unwrap_or_default();
+            if field.ty.is_option() {
+                let at = column + presence.unwrap_or_default();
+                let is_null = path("is_null");
+                quote!(if #is_null(row, offset + #at)? { None } else { Some(#fragment::read(row, offset + #column)?) })
+            } else {
+                quote!(#fragment::read(row, offset + #column)?)
+            }
         }
     }
 }
