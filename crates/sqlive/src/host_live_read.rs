@@ -29,10 +29,18 @@ impl<P: Policy> HostSql<P> {
             } else {
                 None
             };
-            self.run_rows(crate::Recorded::No, None, sql, statement, schema, params, |row| {
-                values.push(map(row)?);
-                Ok(true)
-            })
+            self.run_rows(
+                crate::Recorded::No,
+                crate::authorization::Owner::Host,
+                sql,
+                statement,
+                schema,
+                params,
+                |row| {
+                    values.push(map(row)?);
+                    Ok(true)
+                },
+            )
             .map_err(crate::Error::from)
         })?;
         Ok(values)

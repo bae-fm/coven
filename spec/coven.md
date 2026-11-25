@@ -747,8 +747,10 @@ nothing runs it again.
 
 A live query of coven's own, one that follows a table app SQL can't read, runs a statement of
 coven's own. Coven reads that statement as it reads an app's, so it narrows by the same rules and
-the query runs again only for a write that changes a row the statement read. A statement of coven's
-own that a live query runs through any other call reads each table it names whole.
+the query runs again only for a write that changes a row the statement read. When a write asks
+SQLite a question about such a row, as for a join's partner rows, SQLite answers it as coven's own
+SQL, which may read the tables app SQL can't. A statement of coven's own that a live query runs
+through any other call reads each table it names whole.
 
 Coven reads a statement's SQL to work out what it depends on when a live query
 first runs it. The more a statement joins, the longer that takes, so coven logs

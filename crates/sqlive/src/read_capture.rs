@@ -153,6 +153,7 @@ impl ReadCapture {
                 table,
                 columns,
                 inserted_only: false,
+                host: scopes.host,
             }
         }));
     }

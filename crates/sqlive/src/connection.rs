@@ -596,7 +596,7 @@ impl<P: Policy> HostSql<P> {
             let schema = statement.schema();
             self.run_rows(
                 recorded,
-                Some(StepsOf::AppRead),
+                crate::authorization::Owner::App,
                 sql,
                 &mut statement,
                 schema,
@@ -609,14 +609,14 @@ impl<P: Policy> HostSql<P> {
 
     /// Run the prepared `statement`, made from `sql`, and hand `each` its
     /// rows in order until they end or `each` answers false, under the
-    /// authorizer's step scope, counting its steps as `steps` when it gives
-    /// them. In a live query's read, each table it read
+    /// authorizer's step scope, counting an app statement's steps. In a live
+    /// query's read, each table it read
     /// is recorded in the scope its plan gives this run: a plan kept against
     /// `schema` is shared with the database's other connections.
     fn run_rows<Q: Params>(
         &self,
         recorded: Recorded,
-        steps: Option<StepsOf>,
+        owner: crate::authorization::Owner,
         sql: &str,
         statement: &mut rusqlite::Statement<'_>,
         schema: Option<i64>,
@@ -647,11 +647,17 @@ impl<P: Policy> HostSql<P> {
                 }
             }
         };
-        let result = match steps {
-            Some(steps) => self.counting_steps(statement, steps, run),
-            None => run(statement),
+        // The work counts are the app's.
+        let result = match owner {
+            crate::authorization::Owner::Host => run(statement),
+            _ => self.counting_steps(statement, StepsOf::AppRead, run),
         };
-        self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
+        self.record_app_statement(
+            plan.as_deref(),
+            owner == crate::authorization::Owner::Host,
+            &parameters,
+            last.as_deref(),
+        );
         #[cfg(any(test, feature = "test-utils"))]
         if recorded == Recorded::Yes {
             if let Some(log) = self.statement_log.borrow().as_ref() {

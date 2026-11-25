@@ -61,7 +61,12 @@ impl<P: Policy> HostSql<P> {
     /// Answer one question about a changed row, read in this connection's
     /// transaction, judged as app SQL is without recording its reads.
     fn ask_judged(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
-        self.authorization.judged_unrecorded(|| Ok(self.ask(judging)))?
+        match judging {
+            // A host statement's read can name tables the app's SQL can't, so
+            // its questions run as the host's own SQL.
+            Judging::Host(question) => self.authorization.unrecorded(|| self.ask(*question)),
+            question => self.authorization.judged_unrecorded(|| Ok(self.ask(question)))?,
+        }
     }
 
     /// Answer one question about a changed row, read in this connection's
@@ -69,6 +74,7 @@ impl<P: Policy> HostSql<P> {
     /// how the authorizer judges it.
     fn ask(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
         match judging {
+            Judging::Host(question) => self.ask(*question),
             Judging::Partner(lookup, value) => {
                 let (sql, parameters) = lookup.sql(value);
                 self.run_limited(sql, &parameters)

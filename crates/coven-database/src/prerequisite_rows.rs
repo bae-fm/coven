@@ -53,6 +53,7 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
         columns: columns.iter().map(|column| (*column).into()).collect(),
         scope,
         inserted_only: false,
+        host: false,
     }
 }
 

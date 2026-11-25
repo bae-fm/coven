@@ -234,6 +234,8 @@ pub struct Scopes {
     /// that a query whose rows SQLite picks reads, or every column when the
     /// planner couldn't tell which (`unreported_columns.rs`).
     pub(crate) unreported: std::sync::Arc<crate::unreported_columns::UnreportedColumns>,
+    /// Whether a host statement made the read.
+    pub(crate) host: bool,
 }
 
 impl Default for Scopes {
@@ -246,6 +248,7 @@ impl Default for Scopes {
             unreported: std::sync::Arc::new(crate::unreported_columns::UnreportedColumns::Known(
                 crate::read_set::ColumnSet::new(),
             )),
+            host: false,
         }
     }
 }

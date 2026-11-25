@@ -12,6 +12,7 @@ fn read(table: &str, scope: RowScope) -> TableRead {
         columns: ["release".to_owned(), "title".to_owned()].into(),
         scope,
         inserted_only: false,
+        host: false,
     }
 }
 

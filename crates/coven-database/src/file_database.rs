@@ -670,18 +670,21 @@ impl FileDatabase {
                 columns: ["paused".into()].into(),
                 scope: sqlive::RowScope::All,
                 inserted_only: false,
+                host: false,
             },
             sqlive::TableRead {
                 table: "_coven_file_uploads".into(),
                 columns: ["location".into()].into(),
                 scope: sqlive::RowScope::All,
                 inserted_only: true,
+                host: false,
             },
             sqlive::TableRead {
                 table: "_coven_upload_files".into(),
                 columns: ["file".into()].into(),
                 scope: sqlive::RowScope::All,
                 inserted_only: false,
+                host: false,
             },
         ]
     }

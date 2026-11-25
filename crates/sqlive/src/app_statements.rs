@@ -238,19 +238,22 @@ impl<P: Policy> HostSql<P> {
         self.scope_plan(sql, statement, schema).map(Some)
     }
 
-    /// End the app statement begun last: each table it read in the scope
-    /// `plan` gives it for this run, which returned `last` as the ORDER BY's
+    /// End the statement begun last, the host's own when `host`: each table
+    /// it read in the scope `plan` gives it for this run, which returned `last` as the ORDER BY's
     /// values of the row the plan's `last_row` names, or whole.
     pub(super) fn record_app_statement(
         &self,
         plan: Option<&crate::ScopePlan>,
+        host: bool,
         parameters: &[crate::SqlValue],
         last: Option<&[crate::SqlValue]>,
     ) {
-        self.authorization.record_statement(&match plan {
+        let mut scopes = match plan {
             Some(plan) => plan.scopes(parameters, last),
             None => crate::Scopes::default(),
-        });
+        };
+        scopes.host = host;
+        self.authorization.record_statement(&scopes);
     }
 
     /// Run `run` on `statement`, counting the SQLite virtual machine steps it
