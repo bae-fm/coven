@@ -1156,7 +1156,10 @@ none.
 
 A lookup compares as the statement does. A join on an expression, which has no
 affinity, gives the looked-up value the joined column's, so a text `'5'` the
-expression makes equals the 5 an INTEGER column holds. Where coven couldn't
+expression makes equals the 5 an INTEGER column holds. So does a column of a
+subquery that is a literal or a parameter, as in `(SELECT ?1 AS release) AS
+page`: it has no affinity and compares by BINARY, so `t.release_id =
+page.release` and `page.release = t.release_id` narrow `t` alike. Where coven couldn't
 compare as SQLite does, the join narrows nothing: between columns of different
 affinities, by a collation other than BINARY, as when its first side is a
 NOCASE column, and on anything but an equality or `IS`. A column declared with

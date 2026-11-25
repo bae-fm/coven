@@ -252,3 +252,21 @@ fn each_reason_a_table_is_whole_is_listed_once() {
         "tracks: whole: nothing narrows `a`"
     );
 }
+
+#[test]
+fn a_root_equality_narrows_whichever_side_each_column_stands_on() {
+    let root = "(SELECT ?1 AS rel) AS page";
+    for (join, on) in [
+        ("JOIN", "t.release_id = page.rel"),
+        ("LEFT JOIN", "t.release_id = page.rel"),
+        (",", "WHERE t.release_id = page.rel"),
+    ] {
+        let sql = |on: &str| {
+            let on = if join == "," { on.to_owned() } else { format!("ON {on}") };
+            format!("SELECT t.title FROM {root} {join} tracks t {on}")
+        };
+        let swapped = on.replace("t.release_id = page.rel", "page.rel = t.release_id");
+        assert_eq!(report(&sql(on)), "tracks: looked up", "{join}");
+        assert_eq!(report(&sql(&swapped)), report(&sql(on)), "{join} swapped");
+    }
+}

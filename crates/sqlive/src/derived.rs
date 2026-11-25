@@ -14,10 +14,10 @@ use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Member, MemberValue};
 use crate::scope_plan::{is_name, read_select, Edge, Object, Planner, Source, Unread};
-use crate::scope_term::ScopeTerm;
+use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
-use sqlite3_parser::ast::{CommonTableExpr, Name, OneSelect, ResultColumn, Select, With};
+use sqlite3_parser::ast::{CommonTableExpr, Expr, Name, OneSelect, ResultColumn, Select, With};
 
 /// The CTEs a FROM item can name where it is read, and those whose SQL is
 /// being read now, which naming again would recurse.
@@ -263,8 +263,11 @@ fn read_derived<'a>(
         });
         // The column compares as the columns it passes on do in every arm.
         let mut affinities = arms.iter().map(|(_, columns, _)| {
-            let (item, column) = columns.get(position)?.passed.as_ref()?;
-            planner.items[*item].columns.affinity(column)
+            let output = columns.get(position)?;
+            match &output.passed {
+                Some((item, column)) => planner.items[*item].columns.affinity(column),
+                None => output.valued.then_some(Affinity::Blob),
+            }
         });
         let first = affinities.next().flatten();
         let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));
@@ -356,6 +359,9 @@ fn arm_rows(planner: &Planner, select: &Select<'_>, core: usize, body: &OneSelec
 struct Output {
     name: Option<String>,
     passed: Option<(usize, String)>,
+    /// Whether the output is a literal or a parameter, whose values have no
+    /// affinity and compare by BINARY, as a column declared with no type.
+    valued: bool,
 }
 
 /// Each output column of the arm `core`, read from `body`, or `None` when a
@@ -369,7 +375,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 rows.first().expect("a parsed VALUES has at least one row").len(),
             )
             .into_iter()
-            .map(|name| Output { name: Some(name), passed: None })
+            .map(|name| Output { name: Some(name), passed: None, valued: false })
             .collect(),
         );
     };
@@ -385,7 +391,11 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     Some(alias) => Some(crate::sql::alias_name(alias)),
                     None => passed.as_ref().map(|(_, column)| column.clone()),
                 };
-                found.push(Output { name, passed });
+                let valued = matches!(
+                    crate::sql::unparenthesized(expr),
+                    Expr::Literal(_) | Expr::Variable(_)
+                );
+                found.push(Output { name, passed, valued });
             }
             ResultColumn::Star => {
                 // A USING join's right side leaves out the columns it
@@ -424,6 +434,7 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
                 .map(|column| Output {
                     name: column.name.clone(),
                     passed: column.name.clone().map(|name| (position, name)),
+                    valued: false,
                 })
                 .collect(),
         ),

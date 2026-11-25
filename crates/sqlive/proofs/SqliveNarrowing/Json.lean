@@ -282,7 +282,7 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
 
 /-- A derived item's columns: the names of its first arm's result columns,
 a repeated name left unnamed, and each column's affinity when every arm
-passes on columns of one affinity (`read_derived`). -/
+passes on columns of one affinity, or is a literal (`read_derived`). -/
 partial def derivedColumns (q : Nat) : M (List (Option String) × List (Option Affinity)) := do
   let b ← get
   let query := b.queries.getD q default
@@ -295,6 +295,9 @@ partial def derivedColumns (q : Nat) : M (List (Option String) × List (Option A
       | some (.expr (.col i c)) =>
         if (b.items.getD i default).core == k then ((b.items.getD i default).columns[c]?).join
         else none
+      -- A literal has no affinity and compares by BINARY, as a column of no
+      -- type does (`read_derived`).
+      | some (.expr (.lit _)) => some .blob
       | _ => none
     match found with
     | some a :: rest => if rest.all (· == some a) then some a else none
