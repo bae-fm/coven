@@ -185,7 +185,7 @@ pub(crate) fn read_all(db: &StoreSql) -> Result<Vec<(RetrySubject, RetryWait)>, 
 
 pub(crate) fn find(db: &StoreSql, subject: RetrySubject) -> Result<Option<RetryWait>, DbError> {
     let key = key(subject);
-    db.query(key.statements().find, [key.value()], read_row)?
+    db.host_live_read(key.statements().find, [key.value()], read_row)?
         .pop()
         .map(|row| row.decode().map(|(_, wait)| wait))
         .transpose()

@@ -160,3 +160,21 @@ pub(crate) fn fill_for_plans(db: &sqlive::rusqlite::Connection) {
     )
     .unwrap();
 }
+
+/// The follow of one subject's wait is empty until the wait is armed, runs
+/// again for that subject's row, and leaves another subject's row alone.
+#[tokio::test]
+async fn the_follow_of_a_wait_ignores_the_waits_of_other_subjects() {
+    use crate::tests::next;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut join = db.subscribe_retry_wait(RetrySubject::Join);
+    assert_eq!(next(&mut join).await, None);
+    db.record_retry(RetrySubject::Sync, wait(1, 5)).await.unwrap();
+    assert!(!join.is_marked_for_rerun());
+    db.record_retry(RetrySubject::Join, wait(2, 7)).await.unwrap();
+    assert!(join.is_marked_for_rerun());
+    assert_eq!(next(&mut join).await, Some(wait(2, 7)));
+    assert_eq!(db.retry_wait(RetrySubject::Join).await.unwrap(), Some(wait(2, 7)));
+    db.close().await.unwrap();
+}
