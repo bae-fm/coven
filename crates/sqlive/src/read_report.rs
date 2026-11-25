@@ -6,9 +6,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::scope_edge::MemberValue;
-use crate::scope_plan::{Object, PartnerValue, ScopePlan, Source, Sources};
-use crate::scope_term::{add_columns, shared_columns, ScopeTerm};
+use crate::row_scope::RowScope;
+use crate::scope_lookup::{source_scopes, table_scopes};
+use crate::scope_plan::{Object, ScopePlan, Source, Sources};
+use crate::scope_term::RunValues;
 
 /// What a live query's statement depends on, as its plan narrows what it
 /// reads. It also depends on every row of each table a view read whole reads,
@@ -63,21 +64,38 @@ impl ReadReport {
             Ok(sources) => sources,
             Err(why) => return Self::Whole { why: why.clone() },
         };
-        let narrowed = narrowed(sources);
-        let mut read: BTreeMap<&str, Vec<SourceRows>> = BTreeMap::new();
-        for (source, keys) in sources.sources.iter().zip(narrowed) {
-            let (object, rows) = match &source.object {
-                Object::Table { name, within } => (name, table_rows(sources, source, within, keys)),
-                Object::View { name, why } => (name, SourceRows::Whole(why.0.to_owned())),
+        let last = sources
+            .sorted
+            .as_ref()
+            .and_then(|sorted| sorted.last_row(RunValues::Any))
+            .map(|last| last.any_values());
+        let scopes = source_scopes(sources, RunValues::Any, last.as_deref());
+        // Why each table is read whole, when it is, and each view is.
+        let mut whole: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for (source, scope) in sources.sources.iter().zip(&scopes) {
+            let (object, why) = match &source.object {
+                Object::Table { name, within } => {
+                    (name, why_whole(sources, source, within.as_ref(), scope))
+                }
+                Object::View { name, why } => (name, Some(why.0.to_owned())),
                 Object::Function | Object::Derived => continue,
             };
-            read.entry(object).or_default().push(rows);
+            let reasons = whole.entry(object).or_default();
+            reasons.extend(why.filter(|why| !reasons.contains(why)));
         }
-        Self::Entries(
-            read.into_iter()
-                .map(|(object, rows)| ReadEntry { object: object.to_owned(), rows: merged(rows) })
-                .collect(),
-        )
+        let tables = table_scopes(sources, scopes);
+        let entries = whole.into_iter().map(|(object, why)| {
+            let rows = if why.is_empty() {
+                match tables[object].key() {
+                    Some((column, _)) => ReadRows::Keyed { column: column.to_owned() },
+                    None => ReadRows::LookedUp,
+                }
+            } else {
+                ReadRows::Whole { why }
+            };
+            ReadEntry { object: object.to_owned(), rows }
+        });
+        Self::Entries(entries.collect())
     }
 
     /// The entries whose every row the statement depends on, as text, when
@@ -126,124 +144,26 @@ impl fmt::Display for ReadEntry {
     }
 }
 
-/// The rows of its table one source depends on.
-enum SourceRows {
-    /// Every row, and why.
-    Whole(String),
-    /// Those that hold one of a few values in each of these columns, or some
-    /// other narrowing's when there are none.
-    Narrowed(Vec<String>),
-}
-
-/// The rows of its table that `source`, read within the CTE or view
-/// `within`, depends on; `keys` are its own, if anything narrows it.
-fn table_rows(
+/// Why `source` reads every row of its table, in a scope of `scope`, when it
+/// does; `within` is the CTE or view it sits in.
+fn why_whole(
     sources: &Sources,
     source: &Source,
-    within: &Option<String>,
-    keys: Option<Vec<String>>,
-) -> SourceRows {
+    within: Option<&String>,
+    scope: &RowScope,
+) -> Option<String> {
     // A read through such a name may be the view's, whose tables no source
     // narrows (`Sources::inlined`).
     if let Some(name) = within {
         match &sources.inlined {
-            None => {
-                return SourceRows::Whole("a view read whole that the parser can't read".to_owned())
-            }
+            None => return Some("a view read whole that the parser can't read".to_owned()),
             Some(inlined) if !inlined.contains(name) => {
-                return SourceRows::Whole(format!(
-                    "read through `{name}`, which a view read whole also names"
-                ))
+                return Some(format!("read through `{name}`, which a view read whole also names"))
             }
             Some(_) => {}
         }
     }
-    match keys {
-        Some(keys) => SourceRows::Narrowed(keys),
-        None => SourceRows::Whole(format!("nothing narrows `{}`", source.qualifier)),
-    }
-}
-
-/// The rows that every source of one table, or one view read whole, depends
-/// on together, as `scope_lookup::scopes` joins their scopes with OR.
-fn merged(sources: Vec<SourceRows>) -> ReadRows {
-    let mut why: Vec<String> = Vec::new();
-    let mut keys: Option<Vec<String>> = None;
-    for rows in sources {
-        match rows {
-            SourceRows::Whole(reason) => {
-                if !why.contains(&reason) {
-                    why.push(reason);
-                }
-            }
-            SourceRows::Narrowed(found) => {
-                keys = Some(match keys {
-                    Some(keys) => shared_columns(keys, found),
-                    None => found,
-                });
-            }
-        }
-    }
-    if !why.is_empty() {
-        return ReadRows::Whole { why };
-    }
-    match keys.into_iter().flatten().next() {
-        Some(column) => ReadRows::Keyed { column },
-        None => ReadRows::LookedUp,
-    }
-}
-
-/// For each of `sources`, `None` when nothing narrows it, and otherwise the
-/// columns its scope compares with values, in the order `RowScope::key` looks
-/// for one in: the scope `scope_lookup::scopes` would bind for a run whose
-/// values all bind.
-fn narrowed(sources: &Sources) -> Vec<Option<Vec<String>>> {
-    let mut found: Vec<Option<Vec<String>>> = sources.sources.iter().map(|_| None).collect();
-    for &position in &sources.order {
-        let source = &sources.sources[position];
-        let mut keys: Option<Vec<String>> = None;
-        for term in [&source.term, &source.carried].into_iter().flatten() {
-            narrow(&mut keys, term.key_columns());
-        }
-        for membership in &source.memberships {
-            let column = match (&membership.member, &membership.value) {
-                (MemberValue::Column(member), PartnerValue::Column(column))
-                    if found[membership.partner]
-                        .as_ref()
-                        .is_some_and(|keys| keys.contains(column)) =>
-                {
-                    Some(member.clone())
-                }
-                _ => None,
-            };
-            narrow(&mut keys, column.into_iter().collect());
-        }
-        for sides in &source.either {
-            let sides = sides
-                .iter()
-                .map(|side| side.term.as_ref().map(ScopeTerm::key_columns).unwrap_or_default());
-            if let Some(shared) = sides.reduce(shared_columns) {
-                narrow(&mut keys, shared);
-            }
-        }
-        if sources
-            .sorted
-            .as_ref()
-            .is_some_and(|sorted| sorted.bounds(position, &source.memberships))
-        {
-            narrow(&mut keys, Vec::new());
-        }
-        found[position] = keys;
-    }
-    for window in &sources.windows {
-        narrow(&mut found[window.item], Vec::new());
-    }
-    found
-}
-
-/// Add a narrowing that fixes `columns` to the columns of `keys`.
-fn narrow(keys: &mut Option<Vec<String>>, columns: Vec<String>) {
-    add_columns(keys.get_or_insert_default(), columns);
+    matches!(scope, RowScope::All).then(|| format!("nothing narrows `{}`", source.qualifier))
 }
 
 /// What the live query that reads `whole` whole depends on when it runs

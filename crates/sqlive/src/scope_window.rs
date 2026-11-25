@@ -39,6 +39,7 @@ use crate::scope_edge::MemberValue;
 use crate::scope_order::{ordered_limit, OrderedLimit, RunLimit};
 use crate::scope_plan::{is_name, Planner};
 use crate::scope_row::{item_row_term, typed, RowTerm};
+use crate::scope_term::RunValues;
 use crate::select_syntax::{conjuncts, order_term, parts, OrderTerm, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
@@ -185,15 +186,14 @@ fn partition_column(
 }
 
 impl Window {
-    /// The scope this window gives its table for a run bound to
-    /// `parameters`, or `None` when the LIMIT's value is not a positive
-    /// integer.
-    pub(crate) fn bind(&self, parameters: &[Value]) -> Option<RowScope> {
-        let limit = self.limit.value(parameters)?;
+    /// The scope this window gives its table for a run bound to `values`, or
+    /// `None` when the LIMIT's value is not a positive integer.
+    pub(crate) fn bind(&self, values: RunValues<'_>) -> Option<RowScope> {
+        let limit = self.limit.value(values)?;
         Some(RowScope::Window(Arc::new(RowWindow {
             window: self.clone(),
             limit,
-            parameters: parameters.to_vec(),
+            parameters: values.parameters().to_vec(),
         })))
     }
 }

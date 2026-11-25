@@ -62,36 +62,36 @@ pub(crate) enum ScopeTerm {
 impl ScopeTerm {
     /// The scope this run's values give, or `None` when a value would need a
     /// conversion SQLite applies and sqlive doesn't.
-    pub(crate) fn bind(&self, parameters: &[Value]) -> Option<RowScope> {
+    pub(crate) fn bind(&self, values: RunValues<'_>) -> Option<RowScope> {
         match self {
             Self::Compare { column, affinity, operand, ordering, inclusive } => {
-                let value = operand.value(parameters);
-                affinity.compares(value).then(|| RowScope::Compare {
+                let value = operand.value(values, *affinity);
+                affinity.compares(&value).then(|| RowScope::Compare {
                     column: column.clone(),
-                    value: value.clone(),
+                    value,
                     ordering: *ordering,
                     inclusive: *inclusive,
                 })
             }
             Self::In { column, affinity, operands } => {
-                let values: Vec<Value> =
-                    operands.iter().map(|operand| operand.value(parameters).clone()).collect();
-                values
+                let found: Vec<Value> =
+                    operands.iter().map(|operand| operand.value(values, *affinity)).collect();
+                found
                     .iter()
                     .all(|value| affinity.compares(value))
-                    .then(|| RowScope::equal(column.clone(), values))
+                    .then(|| RowScope::equal(column.clone(), found))
             }
             Self::Null { column, not } => {
                 Some(RowScope::Null { column: column.clone(), not: *not })
             }
             Self::Row(term) => Some(RowScope::Row(Arc::new(RowCondition {
                 term: Arc::clone(term),
-                parameters: parameters.to_vec(),
+                parameters: values.parameters().to_vec(),
                 test: RowTest::Holds,
             }))),
             Self::Truth { condition, ordering, inclusive, is, operand } => {
-                let value = operand.value(parameters);
-                let passes = |truth: Option<i64>| match (truth, value) {
+                let value = operand.value(values, Affinity::Numeric);
+                let passes = |truth: Option<i64>| match (truth, &value) {
                     (None, value) => *is && matches!(value, Value::Null),
                     (Some(_), Value::Null) => false,
                     (Some(truth), value) => {
@@ -110,8 +110,8 @@ impl ScopeTerm {
                         continue;
                     }
                     let found = match truth {
-                        None => condition.when_null(parameters),
-                        _ => condition.when(holds, parameters),
+                        None => condition.when_null(values),
+                        _ => condition.when(holds, values),
                     }?;
                     scope = Some(match scope {
                         Some(other) => RowScope::or(other, found),
@@ -123,43 +123,23 @@ impl ScopeTerm {
                 )
             }
             Self::Is { column, affinity, operand } => {
-                let value = operand.value(parameters);
+                let value = operand.value(values, *affinity);
                 if matches!(value, Value::Null) {
                     Some(RowScope::Null { column: column.clone(), not: false })
                 } else {
-                    affinity.compares(value).then(|| RowScope::Compare {
+                    affinity.compares(&value).then(|| RowScope::Compare {
                         column: column.clone(),
-                        value: value.clone(),
+                        value,
                         ordering: Ordering::Equal,
                         inclusive: false,
                     })
                 }
             }
-            Self::And(left, right) => match (left.bind(parameters), right.bind(parameters)) {
+            Self::And(left, right) => match (left.bind(values), right.bind(values)) {
                 (Some(left), Some(right)) => Some(left.and(right)),
                 (scope, None) | (None, scope) => scope,
             },
-            Self::Or(left, right) => Some(left.bind(parameters)?.or(right.bind(parameters)?)),
-        }
-    }
-
-    /// The columns in which every row that passes it holds one of a few
-    /// values, in the order `RowScope::key` looks for one in, when it binds
-    /// values that are no NULL: those it compares by `=`, `IN` or `IS`.
-    pub(crate) fn key_columns(&self) -> Vec<String> {
-        match self {
-            Self::Compare { column, ordering: Ordering::Equal, inclusive: false, .. }
-            | Self::In { column, .. }
-            | Self::Is { column, .. } => vec![column.clone()],
-            Self::Compare { .. } | Self::Null { .. } | Self::Truth { .. } | Self::Row(_) => {
-                Vec::new()
-            }
-            Self::And(left, right) => {
-                let mut columns = left.key_columns();
-                add_columns(&mut columns, right.key_columns());
-                columns
-            }
-            Self::Or(left, right) => shared_columns(left.key_columns(), right.key_columns()),
+            Self::Or(left, right) => Some(left.bind(values)?.or(right.bind(values)?)),
         }
     }
 
@@ -270,21 +250,6 @@ impl ScopeTerm {
     }
 }
 
-/// Add to `columns` those of `others` it lacks.
-pub(crate) fn add_columns(columns: &mut Vec<String>, others: Vec<String>) {
-    for column in others {
-        if !columns.contains(&column) {
-            columns.push(column);
-        }
-    }
-}
-
-/// Those of `columns` that `others` holds too.
-pub(crate) fn shared_columns(mut columns: Vec<String>, others: Vec<String>) -> Vec<String> {
-    columns.retain(|column| others.contains(column));
-    columns
-}
-
 /// The condition whose truth a term compares with a value: a NULL test, or
 /// a column compared with a value. In each row it is 1, 0 or NULL; a NULL
 /// test is never NULL, and a comparison is where its column is NULL.
@@ -324,15 +289,15 @@ impl Truth {
     }
 
     /// The rows where the condition is true, or false when not `holds`, for
-    /// a run bound to `parameters`; `None` when a value would be converted.
-    fn when(&self, holds: bool, parameters: &[Value]) -> Option<RowScope> {
+    /// a run bound to `values`; `None` when a value would be converted.
+    fn when(&self, holds: bool, values: RunValues<'_>) -> Option<RowScope> {
         match self {
             Self::Null { column, not } => {
                 Some(RowScope::Null { column: column.clone(), not: *not == holds })
             }
             Self::Compare { column, affinity, operand, ordering, inclusive } => {
-                let value = operand.value(parameters);
-                if !affinity.compares(value) {
+                let value = operand.value(values, *affinity);
+                if !affinity.compares(&value) {
                     return None;
                 }
                 // Compared with NULL it is NULL in every row.
@@ -359,13 +324,13 @@ impl Truth {
     }
 
     /// The rows where the condition is NULL.
-    fn when_null(&self, parameters: &[Value]) -> Option<RowScope> {
+    fn when_null(&self, values: RunValues<'_>) -> Option<RowScope> {
         match self {
             // A NULL test is never NULL.
             Self::Null { column, .. } => Some(RowScope::equal(column.clone(), vec![])),
             Self::Compare { column, affinity, operand, .. } => {
-                let value = operand.value(parameters);
-                if !affinity.compares(value) {
+                let value = operand.value(values, *affinity);
+                if !affinity.compares(&value) {
                     return None;
                 }
                 Some(if matches!(value, Value::Null) {
@@ -387,10 +352,34 @@ pub(crate) enum Operand {
 }
 
 impl Operand {
-    pub(crate) fn value<'a>(&'a self, parameters: &'a [Value]) -> &'a Value {
+    /// The value for a run bound to `values`, where a column of `affinity`
+    /// is compared with it.
+    pub(crate) fn value(&self, values: RunValues<'_>, affinity: Affinity) -> Value {
+        match (self, values) {
+            (Self::Constant(value), _) => value.clone(),
+            (Self::Parameter(index), RunValues::Run(parameters)) => parameters[*index].clone(),
+            (Self::Parameter(_), RunValues::Any) => affinity.any_value(),
+        }
+    }
+}
+
+/// The values a statement's parameters hold as its plan's terms bind.
+#[derive(Clone, Copy)]
+pub(crate) enum RunValues<'a> {
+    /// A run's parameters.
+    Run(&'a [Value]),
+    /// No run's: each parameter holds a value the term that names it binds.
+    /// The scopes this gives say which columns they test and judge no row.
+    Any,
+}
+
+impl<'a> RunValues<'a> {
+    /// The run's parameters, which SQL that judges rows binds; none when no
+    /// run binds them.
+    pub(crate) fn parameters(self) -> &'a [Value] {
         match self {
-            Self::Constant(value) => value,
-            Self::Parameter(index) => &parameters[*index],
+            Self::Run(parameters) => parameters,
+            Self::Any => &[],
         }
     }
 }
@@ -418,6 +407,15 @@ impl Affinity {
             Self::Blob
         } else {
             Self::Numeric
+        }
+    }
+
+    /// A value other than NULL that SQLite compares with a column of this
+    /// affinity as it is.
+    pub(crate) fn any_value(self) -> Value {
+        match self {
+            Self::Numeric | Self::Blob => Value::Integer(1),
+            Self::Text => Value::Text(b"1".to_vec()),
         }
     }
 

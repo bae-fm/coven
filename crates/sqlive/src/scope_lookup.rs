@@ -11,7 +11,7 @@ use crate::row_scope::{RowScope, Scopes};
 use crate::scope_edge::MemberValue;
 use crate::scope_plan::{Membership, PartnerValue, Sources};
 use crate::scope_row::{RowCondition, RowTest};
-use crate::scope_term::{Affinity, ScopeTerm};
+use crate::scope_term::{Affinity, RunValues, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
 
 /// What a write asks of SQLite about a changed row.
@@ -50,15 +50,47 @@ pub const LOOKUP_STEPS: i32 = 1_000;
 
 /// The scope of each table among `sources`, for a run bound to
 /// `parameters` that returned `last`, the ORDER BY's values of its last row,
-/// when it returned as many rows as its LIMIT. The sources placed after a
-/// sorted one look its rows up within its bound too.
+/// when it returned as many rows as its LIMIT.
 pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
-    let parameters: Arc<[Value]> = parameters.into();
+    let found = source_scopes(sources, RunValues::Run(parameters), last);
+    Scopes {
+        tables: table_scopes(sources, found),
+        inlined: sources.inlined.clone().unwrap_or_default(),
+        fts5_shadows: sources.fts5_shadows.clone(),
+        ..Scopes::default()
+    }
+}
+
+/// The scope of each table among `sources`, whose own scopes are `found`.
+pub(crate) fn table_scopes(sources: &Sources, found: Vec<RowScope>) -> BTreeMap<String, RowScope> {
+    let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
+    for (source, scope) in sources.sources.iter().zip(found) {
+        let Some(table) = source.table() else {
+            continue;
+        };
+        let scope = match scopes.remove(table) {
+            Some(other) => other.or(scope),
+            None => scope,
+        };
+        scopes.insert(table.to_owned(), scope);
+    }
+    scopes
+}
+
+/// The scope each of `sources` gives its rows, for a run bound to `values`
+/// that returned `last`, as `scopes` does. The sources placed after a sorted
+/// one look its rows up within its bound too.
+pub(crate) fn source_scopes(
+    sources: &Sources,
+    values: RunValues<'_>,
+    last: Option<&[Value]>,
+) -> Vec<RowScope> {
+    let parameters = values.parameters();
     let mut bound: Vec<Option<RowScope>> = sources.sources.iter().map(|_| None).collect();
     for &position in &sources.order {
         let source = &sources.sources[position];
         let bind = |term: &Option<ScopeTerm>| {
-            term.as_ref().and_then(|term| term.bind(&parameters)).unwrap_or(RowScope::All)
+            term.as_ref().and_then(|term| term.bind(values)).unwrap_or(RowScope::All)
         };
         let mut scope = bind(&source.term).and(bind(&source.carried));
         let partner_scope = |membership: &Membership| {
@@ -75,7 +107,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
                 membership.affinity,
                 membership.nulls,
                 partner_scope,
-                &parameters,
+                parameters,
             ));
             match &membership.member {
                 MemberValue::Column(column) => RowScope::Joined { column: column.clone(), lookup },
@@ -116,7 +148,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
             let found = sorted.bound(
                 position,
                 last,
-                &parameters,
+                parameters,
                 &source.memberships,
                 |membership, before| {
                     joined(membership, partner_scope(membership).clone().and(before))
@@ -128,30 +160,20 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         }
         bound[position] = Some(scope);
     }
-    let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
-    for (position, (source, scope)) in sources.sources.iter().zip(bound).enumerate() {
-        let (Some(table), Some(scope)) = (source.table(), scope) else {
-            continue;
-        };
-        // A subquery's window narrows its table's own scope, and no lookup
-        // of another source (`scope_window.rs`).
-        let window = sources.windows.iter().find(|window| window.item == position);
-        let scope = match window.and_then(|window| window.bind(&parameters)) {
-            Some(window) => scope.and(window),
-            None => scope,
-        };
-        let scope = match scopes.remove(table) {
-            Some(other) => other.or(scope),
-            None => scope,
-        };
-        scopes.insert(table.to_owned(), scope);
-    }
-    Scopes {
-        tables: scopes,
-        inlined: sources.inlined.clone().unwrap_or_default(),
-        fts5_shadows: sources.fts5_shadows.clone(),
-        ..Scopes::default()
-    }
+    bound
+        .into_iter()
+        .enumerate()
+        .map(|(position, scope)| {
+            let scope = scope.expect("the planner places every source");
+            // A subquery's window narrows its table's own scope, and no
+            // lookup of another source (`scope_window.rs`).
+            let window = sources.windows.iter().find(|window| window.item == position);
+            match window.and_then(|window| window.bind(values)) {
+                Some(window) => scope.and(window),
+                None => scope,
+            }
+        })
+        .collect()
 }
 
 /// A join's lookup: whether a row of the partner FROM item, in the scope the

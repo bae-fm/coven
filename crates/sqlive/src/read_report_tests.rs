@@ -140,6 +140,18 @@ fn a_table_that_a_value_fixes_a_column_of_is_keyed() {
         report("SELECT title FROM tracks WHERE release_id IS ?1"),
         "tracks: keyed by release_id"
     );
+    assert_eq!(report("SELECT title FROM tracks WHERE (id = 5) = 1"), "tracks: keyed by id");
+}
+
+#[test]
+fn a_join_is_keyed_by_its_own_partner_and_not_by_the_partners_other_reads() {
+    assert_eq!(
+        report(
+            "SELECT t.title, (SELECT count(*) FROM releases b)
+             FROM releases r JOIN tracks t ON t.release_id = r.id WHERE r.id = ?1"
+        ),
+        "releases: whole: nothing narrows `b`\ntracks: keyed by release_id"
+    );
 }
 
 #[test]
@@ -169,6 +181,7 @@ fn a_table_narrowed_by_no_one_column_is_looked_up() {
         "SELECT title FROM tracks WHERE id = ?1 OR release_id = ?2",
         "SELECT title FROM tracks WHERE length(title) = ?1",
         "SELECT title, id FROM tracks ORDER BY title, id LIMIT 10",
+        "SELECT title, id FROM tracks ORDER BY title, id LIMIT ?1",
         "SELECT title FROM tracks WHERE id = ?1 UNION ALL
          SELECT title FROM tracks WHERE release_id = ?2",
     ] {

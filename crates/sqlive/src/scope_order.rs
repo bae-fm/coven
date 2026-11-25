@@ -42,7 +42,7 @@ use crate::from_item::ColumnValue;
 use crate::row_scope::RowScope;
 use crate::scope_plan::{is_name, Membership, Planner};
 use crate::scope_row::{item_row_term, RowCondition, RowExpression, RowTerm, RowTest};
-use crate::scope_term::{operand, Affinity, Operand};
+use crate::scope_term::{operand, Affinity, Operand, RunValues};
 use crate::select_syntax::{order_term, parts, Functions, OrderTerm, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
@@ -63,13 +63,13 @@ pub(crate) struct SortedLimit {
 pub(crate) struct RunLimit(Operand);
 
 impl RunLimit {
-    /// The LIMIT's value for a run bound to `parameters`, or `None` when it
-    /// is not a positive integer.
-    pub(crate) fn value(&self, parameters: &[Value]) -> Option<usize> {
-        let Value::Integer(limit) = self.0.value(parameters) else {
+    /// The LIMIT's value for a run bound to `values`, or `None` when it is
+    /// not a positive integer.
+    pub(crate) fn value(&self, values: RunValues<'_>) -> Option<usize> {
+        let Value::Integer(limit) = self.0.value(values, Affinity::Numeric) else {
             return None;
         };
-        usize::try_from(*limit).ok().filter(|limit| *limit > 0)
+        usize::try_from(limit).ok().filter(|limit| *limit > 0)
     }
 }
 
@@ -209,6 +209,11 @@ pub struct LastRow {
 }
 
 impl LastRow {
+    /// Values a last row could hold, for a plan bound to no run's.
+    pub(crate) fn any_values(&self) -> Vec<Value> {
+        self.positions.iter().map(|_| Affinity::Numeric.any_value()).collect()
+    }
+
     /// The ORDER BY's values in `row`, in its order.
     pub fn values(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<Value>> {
         self.positions.iter().map(|position| Ok(row.get_ref(*position)?.into())).collect()
@@ -216,11 +221,11 @@ impl LastRow {
 }
 
 impl SortedLimit {
-    /// Where a run bound to `parameters` finds its last row, or `None` when
-    /// the LIMIT's value is not a positive integer.
-    pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
+    /// Where a run bound to `values` finds its last row, or `None` when the
+    /// LIMIT's value is not a positive integer.
+    pub(crate) fn last_row(&self, values: RunValues<'_>) -> Option<LastRow> {
         Some(LastRow {
-            limit: self.limit.value(parameters)?,
+            limit: self.limit.value(values)?,
             positions: self
                 .runs
                 .iter()
@@ -228,29 +233,6 @@ impl SortedLimit {
                 .map(|term| term.position)
                 .collect(),
         })
-    }
-
-    /// Whether a full run bounds `source`'s rows, whose memberships are
-    /// `memberships` (`bound`).
-    pub(crate) fn bounds(&self, source: usize, memberships: &[Membership]) -> bool {
-        self.run_of(source, memberships).is_some()
-    }
-
-    /// The position of the first run that sorts `source`, and, for each run
-    /// before it, the first of `memberships`, `source`'s own, that takes a
-    /// value from that run's source; `None` when the order doesn't sort it,
-    /// or it takes no value from an earlier run's source.
-    fn run_of<'a>(
-        &self,
-        source: usize,
-        memberships: &'a [Membership],
-    ) -> Option<(usize, Vec<&'a Membership>)> {
-        let position = self.runs.iter().position(|run| run.source == source)?;
-        let earlier = self.runs[..position]
-            .iter()
-            .map(|run| memberships.iter().find(|found| found.partner == run.source))
-            .collect::<Option<_>>()?;
-        Some((position, earlier))
     }
 
     /// The bound of `source`'s rows for a run bound to `parameters` whose
@@ -268,26 +250,27 @@ impl SortedLimit {
         memberships: &[Membership],
         looked_up: impl Fn(&Membership, RowScope) -> RowScope,
     ) -> Option<RowScope> {
-        let (position, joined) = self.run_of(source, memberships)?;
         let mut earlier = Vec::new();
         let mut values = last;
-        for (run, membership) in self.runs[..position].iter().zip(joined) {
+        for run in &self.runs {
             let (own, rest) = values.split_at(run.terms.len());
             values = rest;
+            if run.source == source {
+                let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
+                    .expect("a tied row passes, so some row does");
+                return Some(
+                    earlier
+                        .into_iter()
+                        .rev()
+                        .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
+                );
+            }
+            let membership = memberships.iter().find(|found| found.partner == run.source)?;
             if let Some(before) = sorted_before(&run.terms, own, parameters, None) {
                 earlier.push(looked_up(membership, before));
             }
         }
-        let run = &self.runs[position];
-        let own = &values[..run.terms.len()];
-        let at_or_before = sorted_before(&run.terms, own, parameters, Some(RowScope::All))
-            .expect("a tied row passes, so some row does");
-        Some(
-            earlier
-                .into_iter()
-                .rev()
-                .fold(at_or_before, |later, sooner: RowScope| sooner.or(later)),
-        )
+        None
     }
 }
 

@@ -31,7 +31,7 @@ use crate::scope_edge::{Member, MemberValue};
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
-use crate::scope_term::{term, Affinity, ScopeTerm};
+use crate::scope_term::{term, Affinity, RunValues, ScopeTerm};
 use crate::scope_window::{read_window, Window};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
 use crate::sql::unparenthesized;
@@ -109,7 +109,7 @@ impl ScopePlan {
     /// Where a run bound to `parameters` finds the row its scope ends at, or
     /// `None` when no row of the run bounds it (`scope_order.rs`).
     pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
-        self.sources.as_ref().ok()?.sorted.as_ref()?.last_row(parameters)
+        self.sources.as_ref().ok()?.sorted.as_ref()?.last_row(RunValues::Run(parameters))
     }
 
     /// The scope of each table the statement reads as one of its sources,

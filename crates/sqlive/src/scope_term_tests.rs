@@ -44,7 +44,7 @@ fn bound(
         (is_name(expr) && expr.to_string() == "x").then(|| ("x".to_owned(), Affinity::Blob))
     };
     let term = term(connection, &column, condition).unwrap()?;
-    Some(term.bind(parameters))
+    Some(term.bind(RunValues::Run(parameters)))
 }
 
 #[test]
