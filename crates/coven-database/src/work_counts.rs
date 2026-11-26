@@ -42,6 +42,8 @@ pub struct WorkCounts {
     pub scope_plans_built: usize,
     /// How much of their statements those plans read, all together.
     pub scope_plan_size: sqlive::ScopePlanSize,
+    /// How long building those plans took, all together.
+    pub scope_plan_time: std::time::Duration,
 }
 
 /// The work coven counts beside its connections'.
@@ -89,6 +91,7 @@ impl WorkCounter {
             lookup_steps: connections.lookup_steps,
             scope_plans_built: connections.scope_plans_built,
             scope_plan_size: connections.scope_plan_size,
+            scope_plan_time: connections.scope_plan_time,
         }
     }
 

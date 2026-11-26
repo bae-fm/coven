@@ -210,6 +210,7 @@ async fn a_live_run_counts_the_size_of_its_plan() {
     let work = work_of_plan(ALBUM_TITLES, true).await;
     assert_eq!(work.scope_plans_built, 1);
     assert_eq!(work.scope_plan_size, ScopePlanSize { sources: 2, cores: 1, edges: 2 });
+    assert!(work.scope_plan_time > std::time::Duration::ZERO);
 }
 
 #[tokio::test]
@@ -217,6 +218,7 @@ async fn a_one_shot_read_counts_no_plan() {
     let work = work_of_plan(ALBUM_TITLES, false).await;
     assert_eq!(work.scope_plans_built, 0);
     assert_eq!(work.scope_plan_size, ScopePlanSize::default());
+    assert_eq!(work.scope_plan_time, std::time::Duration::ZERO);
 }
 
 /// The planner stops at the NATURAL join, after it read `tracks`.

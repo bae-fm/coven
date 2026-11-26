@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 /// The work a connection counts: its commits, its reads of the schema
 /// cookie, the steps of the statements it runs for the app and for live
-/// queries' lookups, and the scope plans it builds, with their size.
+/// queries' lookups, and the scope plans it builds, with their size and build
+/// time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionWork {
     /// Successful durable transaction commits, unchanged transactions'
@@ -36,6 +37,8 @@ pub struct ConnectionWork {
     pub scope_plans_built: usize,
     /// How much of their statements those plans read, all together.
     pub scope_plan_size: crate::ScopePlanSize,
+    /// How long building those plans took, all together.
+    pub scope_plan_time: std::time::Duration,
 }
 
 /// Where connections count their work. Clones count into the same place.

@@ -509,6 +509,7 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
         crate::ConnectionWork {
             scope_plans_built: 0,
             scope_plan_size: crate::ScopePlanSize::default(),
+            scope_plan_time: std::time::Duration::ZERO,
             ..live
         },
         once

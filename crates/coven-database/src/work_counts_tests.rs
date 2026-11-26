@@ -18,6 +18,7 @@ async fn a_live_querys_first_run_counts_its_scope_plan() {
     let work = counter.take();
     assert_eq!(work.scope_plans_built, 1);
     assert_eq!(work.scope_plan_size, ScopePlanSize { sources: 1, cores: 1, edges: 0 });
+    assert!(work.scope_plan_time > std::time::Duration::ZERO);
     drop(query);
     db.close().await.unwrap();
 }

@@ -23,6 +23,7 @@ use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 /// How many app statements' reads a connection keeps, in every context
 /// together, and how many statements' plans a database keeps: more than an
@@ -309,11 +310,13 @@ impl<P: Policy> HostSql<P> {
         sql: &str,
         statement: &Statement<'_>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
+        let started = Instant::now();
         let plan = self.authorization.unrecorded(|| {
             ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
         })?;
+        let built_in = started.elapsed();
         let ScopePlanSize { sources, cores, edges } = plan.size;
-        tracing::debug!(sources, cores, edges, "sqlive built a scope plan");
+        tracing::debug!(sources, cores, edges, ?built_in, "sqlive built a scope plan");
         if let Some(whole) = ReadReport::of(&plan).whole() {
             tracing::debug!(sql, %whole, "a live query's statement reads tables or views whole");
         }
@@ -321,6 +324,7 @@ impl<P: Policy> HostSql<P> {
         self.record_work(|work| {
             work.scope_plans_built += 1;
             work.scope_plan_size += plan.size;
+            work.scope_plan_time += built_in;
         });
         Ok(Arc::new(plan))
     }

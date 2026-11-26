@@ -4624,6 +4624,8 @@ pub struct WorkCounts {
     pub scope_plans_built: usize,
     /// How much of their statements those plans read, all together.
     pub scope_plan_size: ScopePlanSize,
+    /// How long building those plans took, all together.
+    pub scope_plan_time: Duration,
 }
 
 /// How much of a statement coven read to build its scope plan, up to where it
