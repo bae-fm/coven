@@ -1766,14 +1766,18 @@ REPLACE, with or without a WITH clause or RETURNING, and false for a SELECT.
 A tool that generates statements uses it to refuse a write where it expects a
 read and a read where it expects a write. For each result column,
 `SchemaProbe::prepare` also says whether no row of the statement holds NULL in
-it (`ProbedColumn::never_null`). That holds for a literal other than NULL, and
-for a table's column that the table declares NOT NULL, or that is the rowid,
+it (`ProbedColumn::never_null`). In a SELECT, that holds for a literal other
+than NULL, and for a table's column that the table declares NOT NULL, or that is the rowid,
 when no query the column passes through gives NULL of its own, as a join, an
 aggregate with no GROUP BY, a compound or a scalar subquery can. An aggregate in
 a subquery counts for the query around it when it qualifies columns, each with a
 name of that query's FROM, so SQL that passes an aggregate an outer column
-writes the column's qualifier. `SchemaProbe::table_columns` lists the
-columns of a table or view in the order of an INSERT with no column list, each
+writes the column's qualifier. In an INSERT, UPDATE, DELETE or REPLACE, it
+holds only for a RETURNING column that is a table's column which the table
+declares NOT NULL, or which is the rowid, and for no computed column, a literal
+too. It holds for no column of a statement that the probe's parser can't read,
+or of a SELECT whose columns the probe can't tell. `SchemaProbe::table_columns`
+lists the columns of a table or view in the order of an INSERT with no column list, each
 with whether the table declares it NOT NULL, so that such a tool can check a
 value it binds against the column it fills.
 

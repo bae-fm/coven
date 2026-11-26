@@ -34,6 +34,8 @@ pub struct StandInFunction {
 pub struct ColumnOrigin {
     /// The table, as the schema names it.
     pub table: String,
+    /// The table's column, as SQLite names it.
+    pub column: String,
     /// The type the table declares for the column, as written, when it
     /// declares one.
     pub declared_type: Option<String>,
@@ -52,8 +54,12 @@ pub struct ProbedColumn {
     /// KEY` column. The statement keeps it so unless a query the column passes
     /// through gives NULL of its own: a join that pads its FROM item, an
     /// aggregate with no GROUP BY, a SELECT of a compound or a scalar
-    /// subquery. A literal other than NULL holds none either, and the probe
-    /// takes every other computed column to be one that can hold NULL.
+    /// subquery. In a SELECT, a literal other than NULL holds none either, and
+    /// the probe takes every other computed column to be one that can hold
+    /// NULL. In a write, only a table's column can be one that holds none: the
+    /// probe takes each computed column of a RETURNING, a literal too, to be
+    /// one that can hold NULL. It takes every column to be one when it can't
+    /// read the statement, or can't tell which columns a SELECT gives.
     pub never_null: bool,
 }
 
@@ -127,26 +133,26 @@ impl SchemaProbe {
         let nulls = statement_nulls(&self.connection, sql)?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
-            let (origin, column) = match statement.column_metadata(position)? {
+            let origin = match statement.column_metadata(position)? {
                 Some((_, table, column, declared, ..))
                     if metadata.database_name() == Some("main") =>
                 {
-                    let origin = ColumnOrigin {
+                    Some(ColumnOrigin {
                         table: table.to_string_lossy().into_owned(),
+                        column: column.to_string_lossy().into_owned(),
                         declared_type: declared
                             .map(|declared| declared.to_string_lossy().into_owned()),
-                    };
-                    (Some(origin), Some(column.to_string_lossy().into_owned()))
+                    })
                 }
-                _ => (None, None),
+                _ => None,
             };
             let never_null = match &nulls {
                 StatementNulls::Select(nullable) => !nullable[position],
-                StatementNulls::Write => match (&origin, column) {
-                    (Some(origin), Some(column)) => {
-                        table_column_never_null(&self.connection, &origin.table, &column)?
+                StatementNulls::Write => match &origin {
+                    Some(origin) => {
+                        table_column_never_null(&self.connection, &origin.table, &origin.column)?
                     }
-                    _ => false,
+                    None => false,
                 },
                 StatementNulls::Unknown => false,
             };

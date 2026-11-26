@@ -135,5 +135,6 @@ fn a_returning_column_holds_what_its_table_column_holds() {
         ("INSERT INTO people (id, name) VALUES ('a', 'b') RETURNING name, note", &[true, false]),
         ("UPDATE verdicts SET kind = 'a' RETURNING rowid, kind", &[true, true]),
         ("DELETE FROM issues RETURNING title, assignee_id", &[true, false]),
+        ("DELETE FROM issues RETURNING 1, upper(title)", &[false, false]),
     ]);
 }
