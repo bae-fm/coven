@@ -394,7 +394,10 @@ fn sort_term(
             },
             ColumnValue::Collated(affinity, declared) => SortKey::Expression {
                 expression: column_expression(from, &column, *affinity),
-                collation: not_binary(explicit.unwrap_or_else(|| declared.clone())),
+                collation: match explicit {
+                    Some(name) => not_binary(name),
+                    None => Some(declared.clone()),
+                },
             },
             ColumnValue::Unknown | ColumnValue::Hidden => return None,
         };
