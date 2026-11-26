@@ -124,6 +124,24 @@ pub(crate) struct Derived {
 /// column the output passes on unchanged, if it does.
 type Passed = Vec<Option<(usize, String)>>;
 
+/// What each of `arms` passes on in the column `column` of `columns`, the
+/// columns of the query they are the arms of; nothing when `columns` lists no
+/// such column.
+fn passed_on<'a>(
+    columns: &Columns,
+    arms: &'a [Passed],
+    column: &str,
+) -> Vec<Option<&'a (usize, String)>> {
+    let Columns::Listed(columns) = columns else {
+        return Vec::new();
+    };
+    let Some(position) = columns.iter().position(|listed| listed.name.as_deref() == Some(column))
+    else {
+        return Vec::new();
+    };
+    arms.iter().map(|arm| arm.get(position)?.as_ref()).collect()
+}
+
 /// Read `named` as a FROM item of a core that sits in `parent`: its source,
 /// its columns and its cores, or why sqlive can't read its rows.
 pub(crate) fn read_derived_item<'a>(
@@ -502,12 +520,8 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
 /// nothing of the column, or passes on no column of its own source.
 pub(crate) fn pulled(planner: &Planner, item: usize, column: &str) -> Option<ScopeTerm> {
     let rows = planner.items[item].derived.as_ref()?.rows.as_ref()?;
-    let Columns::Listed(columns) = &planner.items[item].columns else {
-        return None;
-    };
-    let position = columns.iter().position(|listed| listed.name.as_deref() == Some(column))?;
-    let mut terms = rows.iter().map(|arm| {
-        let (source, passed) = arm.get(position)?.as_ref()?;
+    let mut terms = passed_on(&planner.items[item].columns, rows, column).into_iter().map(|arm| {
+        let (source, passed) = arm?;
         let term = planner.items[*source].source.term.as_ref()?;
         term.renamed(&|tested| (tested == passed).then(|| column.to_owned()))
     });
@@ -538,16 +552,12 @@ pub(crate) fn passed_source(
     if found.source.from.is_some() {
         return None;
     }
-    let [arm] = &found.derived.as_ref()?.rows.as_ref()?[..] else {
+    let rows = found.derived.as_ref()?.rows.as_ref()?;
+    let [Some((source, passed))] = passed_on(&found.columns, rows, column)[..] else {
         return None;
     };
-    let Columns::Listed(columns) = &found.columns else {
-        return None;
-    };
-    let position = columns.iter().position(|listed| listed.name.as_deref() == Some(column))?;
-    let (source, passed) = arm.get(position)?.clone()?;
-    planner.items[source].source.from.as_ref()?;
-    Some((source, passed))
+    planner.items[*source].source.from.as_ref()?;
+    Some((*source, passed.clone()))
 }
 
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and
@@ -569,25 +579,29 @@ pub(crate) fn push_down(
     if term.is_none() && edges.is_empty() {
         return;
     }
-    let Columns::Listed(columns) = &planner.items[item].columns else {
-        return;
-    };
-    let positions: Vec<Option<String>> = columns.iter().map(|column| column.name.clone()).collect();
-    for arm in derived.arms.clone() {
+    let mut tested = Vec::new();
+    if let Some(term) = &term {
+        term.columns(&mut tested);
+    }
+    let reached: Vec<&str> = tested
+        .iter()
+        .map(String::as_str)
+        .chain(edges.iter().filter_map(|edge| edge.member.column()))
+        .collect();
+    // What each arm passes on in each column the term and edges reach.
+    let passed: Vec<(&str, Passed)> = reached
+        .iter()
+        .map(|column| {
+            let arms = passed_on(&planner.items[item].columns, &derived.arms, column);
+            (*column, arms.into_iter().map(Option::<&_>::cloned).collect())
+        })
+        .collect();
+    for arm in 0..derived.arms.len() {
         let through = |column: &str| {
-            let position = positions.iter().position(|name| name.as_deref() == Some(column))?;
-            arm[position].clone()
+            passed.iter().find(|(reached, _)| *reached == column)?.1.get(arm)?.clone()
         };
         let mut targets: Vec<usize> = Vec::new();
-        let mut tested = Vec::new();
-        if let Some(term) = &term {
-            term.columns(&mut tested);
-        }
-        let reached = tested
-            .iter()
-            .map(String::as_str)
-            .chain(edges.iter().filter_map(|edge| edge.member.column()));
-        for column in reached {
+        for &column in &reached {
             if let Some((target, _)) = through(column) {
                 if !targets.contains(&target) {
                     targets.push(target);
