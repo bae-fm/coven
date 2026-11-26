@@ -1230,8 +1230,11 @@ parentheses has an alias, starts with another, or joins a table by USING.
 One of coven's views or a table function in a join narrows the tables beside
 it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
 or the function. The view's own tables are read whole. A table function of
-another table's columns, as `json_each(l.items)`, narrows nothing: it lists
-rows only beside that table's rows, so a lookup can't ask it alone.
+another table's columns, as `json_each(l.items)` or `json_each(l.rowid)`,
+narrows nothing: it lists rows only beside that table's rows, so a lookup can't
+ask it alone. Nor does one whose arguments read the clock or a function that
+isn't deterministic, as `json_each(json_array(CURRENT_TIMESTAMP))`: a write's
+lookup would ask it again and get another list than the query did.
 A condition on a table's own rows doesn't put it ahead of such a function: a
 list window that reads `json_each(?1) AS w JOIN placement AS p ON p.key =
 unhex(w.value) AND p.item <> 'group'` still narrows `placement` to the keys the

@@ -394,3 +394,41 @@ fn a_column_of_a_view_read_whole_is_one_a_subquery_cannot_judge() {
         assert!(report.contains("tracks: whole: nothing narrows `t`"), "{sql}: {report}");
     }
 }
+
+#[test]
+fn a_table_function_over_the_clock_or_a_random_value_narrows_nothing() {
+    for arguments in ["CURRENT_TIMESTAMP", "random()", "json_array(CURRENT_TIMESTAMP)"] {
+        for sql in [
+            format!(
+                "SELECT t.title FROM json_each({arguments}) AS w JOIN tracks t ON t.title = w.value"
+            ),
+            format!(
+                "SELECT t.title FROM tracks t JOIN json_each({arguments}) AS w ON t.title = w.value"
+            ),
+        ] {
+            let report = report(&sql);
+            assert!(report.contains("tracks: whole: nothing narrows `t`"), "{sql}: {report}");
+        }
+    }
+}
+
+#[test]
+fn a_table_function_over_a_parameter_still_narrows() {
+    let report =
+        report("SELECT t.title FROM json_each(?1) AS w JOIN tracks t ON t.title = w.value");
+    assert_eq!(report, "tracks: looked up");
+}
+
+#[test]
+fn a_table_function_over_a_column_of_an_earlier_item_narrows_nothing() {
+    for argument in
+        ["r.id", "r.rowid", "json_array(r.rowid)", "json_array(CURRENT_TIMESTAMP, r.id)"]
+    {
+        let sql = format!(
+            "SELECT t.title FROM releases r, json_each({argument}) AS w
+             JOIN tracks t ON t.title = w.value WHERE r.id = ?1"
+        );
+        let report = report(&sql);
+        assert!(report.contains("tracks: whole: nothing narrows `t`"), "{sql}: {report}");
+    }
+}
