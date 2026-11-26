@@ -11,6 +11,10 @@
 //! subquery returns NULL when it returns no row, and the analysis takes it,
 //! as it takes every other computed expression, to be one that can give
 //! NULL.
+//!
+//! It also says of each column whether the statement can give no row of the
+//! FROM item the column comes from: a join pads that item, or an aggregate
+//! with no GROUP BY makes a row over no rows.
 
 use rusqlite::Connection;
 use sqlite3_parser::{
@@ -29,13 +33,31 @@ use crate::schema_probe::table_column_never_null;
 use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
 use crate::sql::unparenthesized;
 
+/// What a statement does to the NULLs of one result column.
+#[derive(Clone, Copy)]
+pub(crate) struct ColumnNulls {
+    /// Whether it can be NULL.
+    pub(crate) nullable: bool,
+    /// Whether the statement can give no row of the FROM item the column
+    /// comes from.
+    pub(crate) row_can_be_missing: bool,
+}
+
 /// A column that a query or a FROM item gives.
 #[derive(Clone)]
 struct Column {
     /// Its name, lowercase, when it has one that SQL around it can use.
     name: Option<String>,
-    /// Whether it can be NULL.
-    nullable: bool,
+    /// What its NULLs are. An item's own list says nothing of a missing row
+    /// of the item: `Item::read` does, where a core reads the column.
+    nulls: ColumnNulls,
+}
+
+impl Column {
+    /// A column called `name` that comes from no FROM item's row.
+    fn new(name: Option<String>, nullable: bool) -> Self {
+        Self { name, nulls: ColumnNulls { nullable, row_can_be_missing: false } }
+    }
 }
 
 /// A FROM item of a core.
@@ -47,7 +69,9 @@ struct Item {
     /// Whether it is a table, which one of the rowid's names that no column
     /// of it has reads the rowid of.
     table: bool,
-    /// Whether a join gives it NULL for the rows it doesn't join.
+    /// Whether the core can give no row of it, and NULL in each of its
+    /// columns: a join gives it NULL for the rows it doesn't join, or the
+    /// core's aggregate makes a row over no rows.
     padded: bool,
     /// The columns, lowercase, that USING or NATURAL compares with an item
     /// to its left, which a bare name and a `*` take from that item.
@@ -61,7 +85,13 @@ impl Item {
 
     /// `column`, one of its columns, as the core that reads the item gets it.
     fn read(&self, column: &Column) -> Column {
-        Column { name: column.name.clone(), nullable: column.nullable || self.padded }
+        Column {
+            name: column.name.clone(),
+            nulls: ColumnNulls {
+                nullable: column.nulls.nullable || self.padded,
+                row_can_be_missing: self.padded,
+            },
+        }
     }
 }
 
@@ -83,9 +113,8 @@ impl StarItem for Item {
 
 /// What a statement does to the NULLs of its result columns.
 pub(crate) enum StatementNulls {
-    /// A SELECT, with whether it can give NULL in each result column, in
-    /// order.
-    Select(Vec<bool>),
+    /// A SELECT, with what it does to each result column, in order.
+    Select(Vec<ColumnNulls>),
     /// A statement that writes: each column its RETURNING takes from the table
     /// it changes holds what the table's column holds.
     Write,
@@ -117,7 +146,7 @@ pub(crate) fn statement_nulls(
     let analysis = Analysis { connection, functions: &functions };
     let columns = analysis.select(select, &Ctes::default())?;
     Ok(columns.map_or(StatementNulls::Unknown, |columns| {
-        StatementNulls::Select(columns.into_iter().map(|column| column.nullable).collect())
+        StatementNulls::Select(columns.into_iter().map(|column| column.nulls).collect())
     }))
 }
 
@@ -128,8 +157,8 @@ struct Analysis<'c> {
 
 impl Analysis<'_> {
     /// The columns of `select`, where its SQL can name `ctes`: those of its
-    /// first SELECT, each of which can be NULL where any SELECT of the
-    /// compound can give NULL in it.
+    /// first SELECT, each of which can be NULL, or come from a missing row,
+    /// where it can in any SELECT of the compound.
     fn select<'a>(
         &self,
         select: &'a Select<'a>,
@@ -153,7 +182,8 @@ impl Analysis<'_> {
                 return Ok(None);
             };
             for (column, other) in columns.iter_mut().zip(arm) {
-                column.nullable |= other.nullable;
+                column.nulls.nullable |= other.nulls.nullable;
+                column.nulls.row_can_be_missing |= other.nulls.row_can_be_missing;
             }
         }
         Ok(Some(columns))
@@ -171,9 +201,9 @@ impl Analysis<'_> {
                 let columns = crate::sql::values_names(width)
                     .into_iter()
                     .enumerate()
-                    .map(|(position, name)| Column {
-                        name: Some(name),
-                        nullable: rows.iter().any(|row| !never_null_literal(&row[position])),
+                    .map(|(position, name)| {
+                        let nullable = rows.iter().any(|row| !never_null_literal(&row[position]));
+                        Column::new(Some(name), nullable)
                     })
                     .collect();
                 return Ok(Some(columns));
@@ -421,7 +451,7 @@ impl Analysis<'_> {
         let columns: Vec<Column> = declared_columns(self.connection, stored)?
             .into_iter()
             .filter(|column| !column.hidden)
-            .map(|column| Column { name: Some(column.name.to_ascii_lowercase()), nullable: true })
+            .map(|column| Column::new(Some(column.name.to_ascii_lowercase()), true))
             .collect();
         Ok((!columns.is_empty()).then_some(columns))
     }
@@ -438,7 +468,7 @@ impl Analysis<'_> {
         let names = cte.columns.map(crate::sql::column_list_names);
         let Some(inner) = ctes.reading(&declared) else {
             return Ok(names.map(|names| {
-                names.into_iter().map(|name| Column { name: Some(name), nullable: true }).collect()
+                names.into_iter().map(|name| Column::new(Some(name), true)).collect()
             }));
         };
         Ok(self.select(cte.select, &inner)?.map(|columns| renamed(columns, names)))
@@ -488,10 +518,7 @@ impl Analysis<'_> {
                 continue;
             }
             let never_null = table_column_never_null(self.connection, &stored, &column.name)?;
-            columns.push(Column {
-                name: Some(column.name.to_ascii_lowercase()),
-                nullable: !never_null,
-            });
+            columns.push(Column::new(Some(column.name.to_ascii_lowercase()), !never_null));
         }
         if !columns.is_empty() {
             item.columns = Some(columns);
@@ -543,7 +570,7 @@ fn renamed(mut columns: Vec<Column>, names: Option<Vec<String>>) -> Vec<Column> 
 /// The column that the result expression `expr` of a core whose FROM items are
 /// `items` gives.
 fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
-    let computed = Column { name: None, nullable: !never_null_literal(expr) };
+    let computed = Column::new(None, !never_null_literal(expr));
     let (qualifier, name) = match unparenthesized(expr) {
         Expr::Id(name) => (None, name.0),
         Expr::Name(name) => (None, name.0),
@@ -565,18 +592,19 @@ fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
         }
         // An item of unknown columns may be the one that has the name.
         if item.columns.is_none() {
-            return Column { name: Some(name), nullable: true };
+            return item.read(&Column::new(Some(name), true));
         }
         if item.table {
             rowids.push(item.padded);
         }
     }
     match rowids[..] {
-        [padded] if ROWID_NAMES.contains(&name.as_str()) => {
-            Column { name: Some(name), nullable: padded }
-        }
+        [padded] if ROWID_NAMES.contains(&name.as_str()) => Column {
+            name: Some(name),
+            nulls: ColumnNulls { nullable: padded, row_can_be_missing: padded },
+        },
         // A name of a row around the core, or none of any item's.
-        _ => Column { name: Some(name), nullable: true },
+        _ => Column::new(Some(name), true),
     }
 }
 

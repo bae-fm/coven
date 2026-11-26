@@ -138,3 +138,64 @@ fn a_returning_column_holds_what_its_table_column_holds() {
         ("DELETE FROM issues RETURNING 1, upper(title)", &[false, false]),
     ]);
 }
+
+#[test]
+fn a_column_says_whether_its_from_item_can_have_no_row() {
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    // Each case's first two columns are of the items `a` and `b`.
+    for (sql, expected) in [
+        (
+            "SELECT a.name, b.name FROM issues LEFT JOIN (people AS a JOIN people AS b) ON 1",
+            [true, true],
+        ),
+        (
+            "SELECT a.name, b.name FROM issues LEFT JOIN ((people AS a JOIN people AS b)) ON 1",
+            [true, true],
+        ),
+        (
+            "SELECT a.name, b.name FROM (people AS a JOIN people AS b) RIGHT JOIN issues ON 1",
+            [true, true],
+        ),
+        (
+            "SELECT a.name, b.name FROM issues JOIN (people AS a RIGHT JOIN people AS b ON 1) ON 1",
+            [true, false],
+        ),
+        (
+            "SELECT a.name, b.name FROM issues JOIN (people AS a FULL JOIN people AS b ON 1) ON 1",
+            [true, true],
+        ),
+        (
+            "SELECT a.name, b.name FROM (people AS a JOIN people AS b) FULL JOIN issues ON 1",
+            [true, true],
+        ),
+        (
+            "SELECT a.name, b.name FROM (people AS a JOIN people AS b) LEFT JOIN issues ON 1",
+            [false, false],
+        ),
+        // An aggregate with no GROUP BY gives a row over no rows.
+        ("SELECT a.name, b.name, count(*) FROM people AS a, people AS b", [true, true]),
+        (
+            "SELECT a.name, b.name, count(*) FROM people AS a, people AS b GROUP BY a.id",
+            [false, false],
+        ),
+        // A compound's later SELECT can lack a row of its item too.
+        (
+            "SELECT a.name, b.name FROM people AS a, people AS b \
+             UNION ALL SELECT p.name, p.name FROM issues LEFT JOIN people AS p ON 1",
+            [true, true],
+        ),
+    ] {
+        let statement = probe.prepare(sql).unwrap();
+        let found = [0, 1].map(|position| statement.columns[position].row_can_be_missing);
+        assert_eq!(found, expected, "{sql}");
+    }
+    // A subquery's own missing rows are its own, and a computed column comes
+    // from no item.
+    let statement = probe
+        .prepare(
+            "SELECT s.name, 1, upper(s.name) FROM \
+             (SELECT p.name FROM issues LEFT JOIN people AS p ON 1) AS s",
+        )
+        .unwrap();
+    assert!(statement.columns.iter().all(|column| !column.row_can_be_missing));
+}

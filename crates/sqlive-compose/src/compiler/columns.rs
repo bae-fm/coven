@@ -2,7 +2,7 @@
 //! from in a table or in a spread, whether it can be NULL, and the Rust type
 //! that reads it.
 
-use super::core::{Core, FromItem, Item, ItemKind, Join, Source};
+use super::core::{Core, Item, ItemKind};
 use super::error::Cause;
 use super::header::{Declared, Header, RustType};
 use super::json;
@@ -35,7 +35,8 @@ pub(crate) fn fields(
     let mut fields: Vec<Field> = Vec::new();
     for span in &spans {
         if let Some((spread, alias)) = span.spread {
-            let field = spread_field(header, core, span, (spread, alias), registry)?;
+            let columns = &prepared.columns[span.start..span.start + span.width];
+            let field = spread_field(header, columns, span, (spread, alias), registry)?;
             push(header, &mut fields, field)?;
             continue;
         }
@@ -121,16 +122,15 @@ fn spans<'a>(
 /// The field for the columns of a spread.
 fn spread_field(
     header: &Header,
-    core: &Core,
+    columns: &[sqlive_reads::ProbedColumn],
     span: &Span<'_>,
     (spread, alias): (&Placed, &str),
     registry: &Registry,
 ) -> Result<Field, Cause> {
     let nullable = match &spread.place {
         Place::Value { .. } => !spread.record.one_row,
-        // SQLite resolved the spread's `alias.*`, so its item is in FROM.
-        Place::Table => padded(&core.from, alias)
-            .expect("the outline holds the FROM item of each table spread that a `*` selects"),
+        // The columns of `alias.*` come from one FROM item, the spread's.
+        Place::Table => columns.iter().any(|column| column.row_can_be_missing),
     };
     let path = registry.code_path(&spread.record.path);
     let (ty, reading) = if nullable {
@@ -216,28 +216,6 @@ fn field_name(header: &Header, name: &str) -> Result<FieldName, Cause> {
     FieldName::new(name).ok_or_else(|| Cause::BadIdentifier {
         concerns: header.name.clone(),
         name: name.to_owned(),
-    })
-}
-
-/// Whether a LEFT, RIGHT or FULL join gives NULL for the rows it doesn't join
-/// to the item of `items` that `alias` qualifies, which may be in joins in
-/// parentheses, or `None` when `alias` qualifies none.
-fn padded(items: &[FromItem], alias: &str) -> Option<bool> {
-    items.iter().enumerate().find_map(|(position, item)| {
-        let own = matches!(item.join, Join::Left | Join::Full);
-        let later =
-            items[position + 1..].iter().any(|item| matches!(item.join, Join::Right | Join::Full));
-        if item.qualifier.as_deref() == Some(alias) {
-            return Some(own || later);
-        }
-        match &item.source {
-            // Under an alias, SQL around the parentheses can't name the
-            // items in them.
-            Source::Parenthesized(inner) if item.alias.is_none() => {
-                padded(inner, alias).map(|inside| inside || own || later)
-            }
-            _ => None,
-        }
     })
 }
 

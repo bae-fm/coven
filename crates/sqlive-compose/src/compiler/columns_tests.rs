@@ -1,5 +1,4 @@
-use super::padded;
-use crate::compiler::core::outline;
+use crate::compiler::core::{every_item, outline};
 use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages};
 use crate::compiler::lex::tokens;
 
@@ -166,25 +165,6 @@ sqlive_compose::read!(Case { said: Option<String> }, r#"
 }
 
 #[test]
-fn a_join_pads_the_items_in_the_parentheses_it_adds() {
-    // sqlive refuses a read with a RIGHT or FULL join, and an inner join in
-    // left-joined parentheses, so no compile reaches most of these.
-    for (from, expected) in [
-        ("i LEFT JOIN (a JOIN b ON 1) ON 1", [Some(true), Some(true)]),
-        ("i LEFT JOIN ((a JOIN b ON 1)) ON 1", [Some(true), Some(true)]),
-        ("(a JOIN b ON 1) RIGHT JOIN i ON 1", [Some(true), Some(true)]),
-        ("i JOIN (a RIGHT JOIN b ON 1) ON 1", [Some(true), Some(false)]),
-        ("i JOIN (a FULL JOIN b ON 1) ON 1", [Some(true), Some(true)]),
-        ("i JOIN (a JOIN b ON 1) ON 1 FULL JOIN j ON 1", [Some(true), Some(true)]),
-        ("(a JOIN b ON 1) LEFT JOIN i ON 1", [Some(false), Some(false)]),
-    ] {
-        let sql = format!("SELECT 1 FROM {from}");
-        let core = outline(&sql, &tokens(&sql));
-        assert_eq!([padded(&core.from, "a"), padded(&core.from, "b")], expected, "{from}");
-    }
-}
-
-#[test]
 fn a_table_functions_column_takes_a_declared_type_that_holds_null() {
     for sql in [
         "SELECT value FROM json_each(:list)",
@@ -220,6 +200,39 @@ fn is_distinct_from_in_a_result_column_starts_no_from_clause() {
         assert!(code_of(&output, "First.rs").contains("pub (crate) a : crate :: Person ,"));
         let sql = format!("SELECT j.name {operator} 'x' FROM projects AS j");
         let core = outline(&sql, &tokens(&sql));
-        assert_eq!(padded(&core.from, "j"), Some(false), "{operator}");
+        let from: Vec<_> =
+            every_item(&core.from).into_iter().map(|item| item.qualifier.as_deref()).collect();
+        assert_eq!(from, [Some("j")], "{operator}");
+    }
+}
+
+#[test]
+fn a_spread_beside_an_aggregate_with_no_group_by_is_an_option() {
+    for (rest, count, ty) in [
+        ("count(*) AS n FROM @crate::Person AS a", "i64", "Option < crate :: Person >"),
+        (
+            "max(a.name) AS n FROM @crate::Person AS a",
+            "Option<String>",
+            "Option < crate :: Person >",
+        ),
+        // SQLite gives this aggregate to the query around its subquery.
+        (
+            "(SELECT count(a.person_id)) AS n FROM @crate::Person AS a",
+            "Option<i64>",
+            "Option < crate :: Person >",
+        ),
+        // No row comes of no rows.
+        ("count(*) AS n FROM @crate::Person AS a GROUP BY a.name", "i64", "crate :: Person"),
+        ("count(*) OVER () AS n FROM @crate::Person AS a", "i64", "crate :: Person"),
+        ("(SELECT count(*) FROM issues) AS n FROM @crate::Person AS a", "i64", "crate :: Person"),
+    ] {
+        let lib = format!(
+            "sqlive_compose::fragment!(Person, \
+             r#\"SELECT p.id AS person_id, p.name FROM people AS p\"#);\n\
+             sqlive_compose::fragment!(Case {{ n: {count} }}, r#\"SELECT a.*, {rest}\"#);"
+        );
+        let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{rest}: {errors:?}"));
+        let code = code_of(&output, "Case.rs");
+        assert!(code.contains(&format!("pub (crate) a : {ty} ,")), "{rest}: {code}");
     }
 }

@@ -4,8 +4,7 @@
 //! rest of the statement.
 
 use super::core::{
-    from_item, matching, result_items, top_level_parts, Core, FromItem, Item, ItemKind, Join,
-    Source,
+    from_item, matching, result_items, top_level_parts, Core, FromItem, Item, ItemKind, Source,
 };
 use super::error::Cause;
 use super::header::Header;
@@ -65,7 +64,7 @@ pub(crate) fn target(sql: &str, tokens: &[Token]) -> Option<Target> {
     let (item, after) = if verb == Verb::Insert {
         inserted_table(sql, tokens, table)?
     } else {
-        let (item, after) = from_item(sql, tokens, table, tokens.len(), Join::Inner);
+        let (item, after) = from_item(sql, tokens, table, tokens.len());
         (item, after?)
     };
     let table = item.table()?.to_owned();
@@ -93,8 +92,7 @@ fn inserted_table(sql: &str, tokens: &[Token], at: usize) -> Option<(FromItem, u
     } else {
         Source::Qualified { name: name.clone() }
     };
-    let item =
-        FromItem { qualifier: alias.clone().or(Some(name)), alias, source, join: Join::Inner };
+    let item = FromItem { qualifier: alias.clone().or(Some(name)), alias, source };
     Some((item, after))
 }
 

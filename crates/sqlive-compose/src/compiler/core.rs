@@ -1,24 +1,11 @@
 //! The outline of a statement's first SELECT core, read from its tokens: the
-//! result columns, the FROM items with how each joins, and whether the
-//! core aggregates. The compiler reads this much of the SQL itself and leaves
-//! the rest to SQLite and sqlive.
+//! result columns, the FROM items, and whether the core aggregates. The
+//! compiler reads this much of the SQL itself and leaves the rest to SQLite
+//! and sqlive.
 
 use std::ops::Range;
 
 use super::lex::{Kind, Token};
-
-/// How a FROM item joins the items before it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Join {
-    /// The first item, a comma, or an inner or cross join.
-    Inner,
-    /// A LEFT join: the item's columns are NULL where no row joins.
-    Left,
-    /// A RIGHT join.
-    Right,
-    /// A FULL join.
-    Full,
-}
 
 /// One item of a FROM clause.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,8 +16,6 @@ pub(crate) struct FromItem {
     pub(crate) alias: Option<String>,
     /// What it reads.
     pub(crate) source: Source,
-    /// How it joins.
-    pub(crate) join: Join,
 }
 
 /// What a FROM item reads.
@@ -42,8 +27,7 @@ pub(crate) enum Source {
     Qualified { name: String },
     /// A subquery or a table function.
     Derived,
-    /// A join in parentheses, with the items it joins. Its own joins pad
-    /// those items, and the join that adds it pads them all.
+    /// A join in parentheses, with the items it joins.
     Parenthesized(Vec<FromItem>),
 }
 
@@ -371,18 +355,15 @@ fn item(sql: &str, tokens: &[Token], range: Range<usize>) -> Item {
 fn from_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<FromItem> {
     let mut items = Vec::new();
     let mut index = range.start;
-    let mut join = Join::Inner;
     let mut depth = 0usize;
     let mut expecting_table = true;
     while index < range.end {
         let token = &tokens[index];
         if depth == 0 && expecting_table {
             expecting_table = false;
-            let (mut item, next) = from_item(sql, tokens, index, range.end, join);
+            let (item, next) = from_item(sql, tokens, index, range.end);
             if let Some(next_index) = next {
-                item.join = join;
                 items.push(item);
-                join = Join::Inner;
                 index = next_index;
                 continue;
             }
@@ -391,20 +372,8 @@ fn from_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<FromItem>
             depth += 1;
         } else if token.is_symbol(sql, ')') {
             depth = depth.saturating_sub(1);
-        } else if depth == 0 {
-            if token.is_symbol(sql, ',') {
-                join = Join::Inner;
-                expecting_table = true;
-            } else if token.kind == Kind::Word {
-                match token.text(sql).to_ascii_lowercase().as_str() {
-                    "left" => join = Join::Left,
-                    "right" => join = Join::Right,
-                    "full" => join = Join::Full,
-                    "inner" | "cross" | "natural" => join = Join::Inner,
-                    "join" => expecting_table = true,
-                    _ => {}
-                }
-            }
+        } else if depth == 0 && (token.is_symbol(sql, ',') || token.is_word(sql, "join")) {
+            expecting_table = true;
         }
         index += 1;
     }
@@ -473,9 +442,8 @@ pub(crate) fn from_item(
     tokens: &[Token],
     index: usize,
     end: usize,
-    join: Join,
 ) -> (FromItem, Option<usize>) {
-    let mut item = FromItem { qualifier: None, alias: None, source: Source::Derived, join };
+    let mut item = FromItem { qualifier: None, alias: None, source: Source::Derived };
     let token = &tokens[index];
     let mut next = index + 1;
     if token.is_symbol(sql, '(') {

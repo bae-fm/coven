@@ -1,4 +1,4 @@
-use super::{outline, ItemKind, Join};
+use super::{outline, ItemKind};
 use crate::compiler::lex::tokens;
 
 fn core(sql: &str) -> super::Core {
@@ -26,30 +26,21 @@ fn result_columns_are_classified() {
 }
 
 #[test]
-fn from_items_know_their_alias_table_and_join() {
+fn from_items_know_their_alias_and_table() {
     let sql = "WITH c AS (SELECT 1 AS x) SELECT 1 FROM issues i LEFT JOIN (SELECT 1) AS sub ON 1 JOIN people AS p USING (id), c";
     let from: Vec<_> = core(sql)
         .from
         .iter()
-        .map(|item| (item.qualifier.clone(), item.table().map(str::to_owned), item.join))
+        .map(|item| (item.qualifier.clone(), item.table().map(str::to_owned)))
         .collect();
     assert_eq!(
         from,
         [
-            (Some("i".into()), Some("issues".into()), Join::Inner),
-            (Some("sub".into()), None, Join::Left),
-            (Some("p".into()), Some("people".into()), Join::Inner),
-            (Some("c".into()), Some("c".into()), Join::Inner),
+            (Some("i".into()), Some("issues".into())),
+            (Some("sub".into()), None),
+            (Some("p".into()), Some("people".into())),
+            (Some("c".into()), Some("c".into())),
         ]
-    );
-}
-
-#[test]
-fn right_and_full_joins_are_kept() {
-    let from = core("SELECT 1 FROM a RIGHT JOIN b ON 1 FULL OUTER JOIN c ON 1").from;
-    assert_eq!(
-        from.iter().map(|item| item.join).collect::<Vec<_>>(),
-        [Join::Inner, Join::Right, Join::Full]
     );
 }
 
