@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::{Cause, CompileError, Location};
 use super::header::Header;
-use super::source::{Call, Walked};
+use super::source::Call;
 use super::spread::{spread_paths, Registry};
 use super::unit::{self, fragment_path};
-use super::{model, source, Input, Output};
+use super::{model, source, CompiledCall, Input, Output};
 
 /// Compile the crate `input` describes, or return every error.
 pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
@@ -50,6 +50,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     let mut files = Vec::new();
     let mut manifest = model::Manifest::default();
     let mut warnings = Vec::new();
+    let mut reads = BTreeMap::new();
     let mut failed: BTreeSet<usize> = order.failed;
     for &position in &order.compile {
         let (call, header) = calls[position];
@@ -69,6 +70,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
                     manifest.fragments.push(record);
                 }
                 warnings.extend(compiled.warnings);
+                reads.insert(position, compiled.reads);
             }
             Err(error) => {
                 errors.push(error);
@@ -83,11 +85,14 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     }
     let manifest = serde_json::to_string_pretty(&manifest)
         .map_err(|error| setup_error(Cause::Manifest(error)))?;
-    Ok(Output { files, manifest, read: walked_read(walked), warnings })
-}
-
-fn walked_read(walked: Walked) -> Vec<String> {
-    walked.read
+    let reported = calls
+        .iter()
+        .enumerate()
+        .map(|(position, (call, header))| {
+            CompiledCall::of(call, header, reads.remove(&position).unwrap_or_default())
+        })
+        .collect();
+    Ok(Output { files, manifest, read: walked.read, warnings, calls: reported })
 }
 
 fn error_of(call: &Call, concerns: &str, cause: Cause) -> CompileError {
@@ -185,4 +190,4 @@ fn visit(
 
 #[cfg(test)]
 #[path = "crate_compile_tests.rs"]
-mod tests;
+pub(super) mod tests;

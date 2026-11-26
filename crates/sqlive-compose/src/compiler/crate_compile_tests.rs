@@ -68,7 +68,7 @@ fn compile(
 }
 
 /// The compile of a crate whose `src/lib.rs` is `lib`.
-fn compile_lib(lib: &str) -> Result<Output, Vec<CompileError>> {
+pub(crate) fn compile_lib(lib: &str) -> Result<Output, Vec<CompileError>> {
     compile("tracker", &[("src/lib.rs", lib)], &[])
 }
 

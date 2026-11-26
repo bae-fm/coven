@@ -9,6 +9,7 @@
 mod columns;
 mod core;
 mod crate_compile;
+mod crate_report;
 mod error;
 mod generate;
 mod header;
@@ -24,8 +25,9 @@ mod unit;
 use std::io;
 
 pub use crate_compile::compile_crate;
+pub use crate_report::CompiledCall;
 pub use error::{Cause, CompileError, Location, Warning};
-pub use header::HeaderError;
+pub use header::{CallKind, HeaderError};
 pub use setup::{Function, Setup};
 
 /// What `compile_crate` compiles.
@@ -52,4 +54,8 @@ pub struct Output {
     pub read: Vec<String>,
     /// The warnings of the crate's reads.
     pub warnings: Vec<Warning>,
+    /// Each `fragment!` and `read!` call the compiler found and compiled, in
+    /// the order the walk finds them: the crate's modules from `src/lib.rs`,
+    /// leaving out the modules that `#[cfg(test)]` marks.
+    pub calls: Vec<CompiledCall>,
 }

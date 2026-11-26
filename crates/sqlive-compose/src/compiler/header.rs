@@ -14,7 +14,7 @@ mod keyword {
 
 /// Which macro a call is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallKind {
+pub enum CallKind {
     /// `fragment!`.
     Fragment,
     /// `read!`.
@@ -154,6 +154,14 @@ impl Header {
         match &self.kind {
             HeaderKind::Fragment { relations, .. } => relations,
             HeaderKind::Read => &[],
+        }
+    }
+
+    /// Which macro the call is.
+    pub(crate) fn kind(&self) -> CallKind {
+        match self.kind {
+            HeaderKind::Fragment { .. } => CallKind::Fragment,
+            HeaderKind::Read => CallKind::Read,
         }
     }
 

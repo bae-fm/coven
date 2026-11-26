@@ -1084,7 +1084,16 @@ F.2](../../spec/coven.md#f2-capabilities), itself. Its one entry point is
 - the crate's own fragment manifest, as text;
 - every path the source reader gave a file for, so that Cargo runs the build
   script again when one changes;
-- its warnings.
+- its warnings;
+- each call it compiled, in the order the walk finds them: which macro it is,
+  its name, its location, its SQL as its author wrote it, with the spreads in
+  place, and the tables and views its own SQL reads. The reads are the names
+  after FROM and JOIN at any depth, lowercase, with a schema's prefix dropped.
+  They leave out the call's own CTEs and relations, table-valued functions and
+  what the fragments it spreads read, so a tool that checks which tables a
+  crate's calls read takes the compiler's own list and finds the calls, reads
+  the SQL and names the tables by no rule of its own. A module marked
+  `#[cfg(test)]` is not walked, and its calls are not reported.
 
 When something fails, it returns its errors instead. Each error is a typed
 variant that holds its location, what it concerns and its cause, such as

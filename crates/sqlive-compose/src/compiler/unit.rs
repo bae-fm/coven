@@ -29,6 +29,8 @@ pub(crate) struct Compiled {
     pub(crate) record: Option<Record>,
     /// The read's warnings.
     pub(crate) warnings: Vec<Warning>,
+    /// The tables and views the call's own SQL reads.
+    pub(crate) reads: BTreeSet<String>,
 }
 
 /// Compile `call`, whose header is `header`.
@@ -47,6 +49,7 @@ pub(crate) fn compile(
     let relation_names: Vec<String> =
         header.relations().iter().map(|relation| relation.name.clone()).collect();
     let renamed = rename::rename(&header.sql, &prefix, &relation_names);
+    let reads = own_reads(&renamed, &prefix);
     let expansion =
         spread::expand(context.registry, &header.name, header.parent().is_some(), &renamed)
             .map_err(&fail)?;
@@ -117,7 +120,22 @@ pub(crate) fn compile(
         }
         HeaderKind::Read => (generate::read(header, sql, &fields), None),
     };
-    Ok(Compiled { code, record, warnings })
+    Ok(Compiled { code, record, warnings, reads })
+}
+
+/// The tables and views that `renamed`, a call's SQL with its CTEs and
+/// relations renamed by `prefix`, reads by name in FROM and JOIN, at any
+/// depth. A spread is not one of them: its fragment's own SQL reads what it
+/// reads.
+fn own_reads(renamed: &str, prefix: &str) -> BTreeSet<String> {
+    let tokens = lex::tokens(renamed);
+    let declared = format!("{}__", prefix.to_ascii_lowercase());
+    core::all_from_items(renamed, &tokens)
+        .iter()
+        .filter_map(core::FromItem::table)
+        .filter(|name| !name.starts_with(&declared))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The position, among a fragment's columns, of the first one that can't be
