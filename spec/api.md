@@ -3935,6 +3935,7 @@ let moved = handle
 | | `subject_kind` | the kind of `PendingSubject` the record is about, in snake case: `write`, `slot`, `key_copy`, `snapshot`, `upload`, `download`, `keep`, `move`, `operation`, `retention`, `audience` or `connection` |
 | | `reason_kind` | the kind of `PendingReason` the record gives, in snake case: `missing`, `waits`, `key_unavailable`, `original`, `paused`, `failed` and so on, one for each variant |
 | | `original_path` | for a record whose reason is `original`, the original's path as the operating system's bytes, the form `coven_user_files.path` holds, so a join on it finds the original's row; NULL otherwise |
+| | `id` | the row's key, which SQLite picks: it names the row for live queries and means nothing else |
 | `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, decoded with `operation` by `Invite::from_columns`, which `Invite::list` uses |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | | `stage` | `granting` until the invite's code is shown, `waiting` while it waits for its request or the admin's decision, `approving` once the admin approved the request; as `InviteStage` names them |

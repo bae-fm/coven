@@ -80,7 +80,8 @@ macro_rules! uploaded {
 }
 
 /// The table and its index, as every store holds them. A record names each
-/// file once, or no file, so `position` and `file` together name a row.
+/// file once, or no file, so `position` and `file` together name a row. `id`
+/// is the row's key, which SQLite picks and which means nothing else.
 pub(crate) const TABLE: &str = "CREATE TABLE coven_pending (
         record BLOB NOT NULL,
         file TEXT,
@@ -90,7 +91,8 @@ pub(crate) const TABLE: &str = "CREATE TABLE coven_pending (
         operation INTEGER,
         subject_kind TEXT,
         reason_kind TEXT,
-        original_path BLOB
+        original_path BLOB,
+        id INTEGER PRIMARY KEY
     ) STRICT;
     CREATE UNIQUE INDEX _coven_pending_files ON coven_pending(position,ifnull(file,x''));";
 

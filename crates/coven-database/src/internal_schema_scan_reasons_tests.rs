@@ -763,6 +763,9 @@ fn the_moves_table_holds_what_coven_keeps() {
 /// records.
 #[test]
 fn the_pending_table_holds_what_its_source_says() {
+    // The table's own key, `id`, isn't a column of its source.
+    const COLUMNS: &str =
+        "record,file,position,cause,move,operation,subject_kind,reason_kind,original_path";
     let db = fixture::populated();
     let differ = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
     let agrees = || {
@@ -771,7 +774,8 @@ fn the_pending_table_holds_what_its_source_says() {
         {
             assert_eq!(
                 differ(&format!(
-                    "SELECT count(*) FROM (SELECT * FROM {from} EXCEPT SELECT * FROM {to})"
+                    "SELECT count(*) FROM (SELECT {COLUMNS} FROM {from}
+                     EXCEPT SELECT {COLUMNS} FROM {to})"
                 )),
                 0,
                 "{from} has rows that {to} lacks"

@@ -125,10 +125,10 @@ fn heard(db: &StoreDatabase) -> Vec<Heard> {
         sql.batch("DELETE FROM heard").unwrap();
         let differ: i64 = sql
             .query_row(
-                "SELECT (SELECT count(*) FROM (SELECT * FROM coven_pending
-                            EXCEPT SELECT * FROM _coven_pending_source))
-                      + (SELECT count(*) FROM (SELECT * FROM _coven_pending_source
-                            EXCEPT SELECT * FROM coven_pending))",
+                "SELECT (SELECT count(*) FROM (SELECT record,file,position,cause,move,operation,subject_kind,reason_kind,original_path FROM coven_pending
+                            EXCEPT SELECT record,file,position,cause,move,operation,subject_kind,reason_kind,original_path FROM _coven_pending_source))
+                      + (SELECT count(*) FROM (SELECT record,file,position,cause,move,operation,subject_kind,reason_kind,original_path FROM _coven_pending_source
+                            EXCEPT SELECT record,file,position,cause,move,operation,subject_kind,reason_kind,original_path FROM coven_pending))",
                 [],
                 |r| r.get(0),
             )

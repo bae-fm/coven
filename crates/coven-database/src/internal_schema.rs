@@ -22,7 +22,7 @@
 //! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
 //! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 pub(crate) use coven_schema::{CACHE_COMPLETE_FILE, CACHE_HEADER, FOLLOWED, WRITE_DEVICE_SQL};
 /// Coven's tables no live query reads: the merge state, authorship, creation,
 /// publication and claim records each write keeps beside its rows. A write records no
