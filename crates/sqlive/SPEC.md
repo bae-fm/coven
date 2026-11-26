@@ -1764,7 +1764,11 @@ read `tracks` whole. `SchemaProbe::prepare` also says whether the statement
 writes (`ProbedStatement::writes`): it is true for an INSERT, UPDATE, DELETE or
 REPLACE, with or without a WITH clause or RETURNING, and false for a SELECT.
 A tool that generates statements uses it to refuse a write where it expects a
-read and a read where it expects a write. For each result column,
+read and a read where it expects a write. For a result column that passes on
+a column unchanged, `SchemaProbe::prepare` names the column and the table or
+table function it belongs to (`ProbedColumn::origin`), with the type the
+schema's table declares for it. It gives a table function's column, such as
+`value` of `json_each`, no declared type. For each result column,
 `SchemaProbe::prepare` also says whether no row of the statement holds NULL in
 it (`ProbedColumn::never_null`). In a SELECT, that holds for a literal other
 than NULL, and for a table's column that the table declares NOT NULL, or that is the rowid,

@@ -855,6 +855,10 @@ sqlive_compose::fragment!(Titles(project: ProjectId), r#"
 issues/src/lib.rs:20:1: Titles computes the column title, and its header gives title no type
 ```
 
+A table function's column that the statement takes unchanged, such as `value`
+of `json_each`, has no table's type either, so the header declares one. The
+column can be NULL (below), so that type is an `Option`.
+
 A column that can be NULL needs an `Option`. A table's column can be NULL when
 the table doesn't declare it `NOT NULL` and it isn't the rowid, and when a
 query that the column passes through gives NULL of its own (below). A scalar

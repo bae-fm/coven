@@ -28,16 +28,17 @@ pub struct StandInFunction {
     pub deterministic: bool,
 }
 
-/// Where a result column of a statement comes from in a table, when it is
-/// one of the table's columns.
+/// Where a result column of a statement comes from, when it is a column of a
+/// table or of a table function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnOrigin {
-    /// The table, as the schema names it.
+    /// The table, as the schema names it, or the table function, as SQLite
+    /// names it.
     pub table: String,
-    /// The table's column, as SQLite names it.
+    /// The column, as SQLite names it.
     pub column: String,
-    /// The type the table declares for the column, as written, when it
-    /// declares one.
+    /// The type the schema's table declares for the column, as written, when
+    /// it declares one. A table function's column has none here.
     pub declared_type: Option<String>,
 }
 
@@ -46,7 +47,8 @@ pub struct ColumnOrigin {
 pub struct ProbedColumn {
     /// The name SQLite gives the column.
     pub name: String,
-    /// The table column the result is, when it is one unchanged.
+    /// The column of a table or table function that the result is, when it is
+    /// one unchanged.
     pub origin: Option<ColumnOrigin>,
     /// Whether no row the statement returns holds NULL in the column. A
     /// table's column holds none when the table declares it `NOT NULL`, or it
@@ -133,19 +135,16 @@ impl SchemaProbe {
         let nulls = statement_nulls(&self.connection, sql)?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
-            let origin = match statement.column_metadata(position)? {
-                Some((_, table, column, declared, ..))
-                    if metadata.database_name() == Some("main") =>
-                {
-                    Some(ColumnOrigin {
-                        table: table.to_string_lossy().into_owned(),
-                        column: column.to_string_lossy().into_owned(),
-                        declared_type: declared
-                            .map(|declared| declared.to_string_lossy().into_owned()),
-                    })
-                }
-                _ => None,
-            };
+            let origin =
+                match (metadata.database_name(), metadata.table_name(), metadata.origin_name()) {
+                    (Some("main"), Some(table), Some(column)) => Some(ColumnOrigin {
+                        table: table.to_owned(),
+                        column: column.to_owned(),
+                        declared_type: schema_column(&self.connection, table, column)?
+                            .and_then(|column| column.declared_type),
+                    }),
+                    _ => None,
+                };
             let never_null = match &nulls {
                 StatementNulls::Select(nullable) => !nullable[position],
                 StatementNulls::Write => match &origin {
@@ -203,17 +202,42 @@ impl SchemaProbe {
     }
 }
 
-/// Whether no row of the main schema's table `table` holds NULL in its column
-/// `column`, which may be one of the rowid's names: the table declares it
-/// `NOT NULL`, or it is the rowid.
+/// What the main schema declares of a table's column.
+struct SchemaColumn {
+    declared_type: Option<String>,
+    not_null: bool,
+    primary_key: bool,
+}
+
+/// What the main schema declares of the column `column` of `table`, which may
+/// be one of the rowid's names, or `None` when the schema holds no such table:
+/// SQLite names a table function and its column as a column's origin too.
+fn schema_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<Option<SchemaColumn>> {
+    if !connection.table_exists(Some("main"), table)? {
+        return Ok(None);
+    }
+    let (declared, _, not_null, primary_key, _) =
+        connection.column_metadata(Some("main"), table, column)?;
+    let declared_type = declared.map(|declared| declared.to_string_lossy().into_owned());
+    Ok(Some(SchemaColumn { declared_type, not_null, primary_key }))
+}
+
+/// Whether no row of `table` holds NULL in its column `column`, which may be
+/// one of the rowid's names: the main schema's table declares it `NOT NULL`,
+/// or it is the rowid. A table function's column can hold NULL.
 pub(crate) fn table_column_never_null(
     connection: &Connection,
     table: &str,
     column: &str,
 ) -> rusqlite::Result<bool> {
-    let (_, _, not_null, primary_key, _) =
-        connection.column_metadata(Some("main"), table, column)?;
-    Ok(not_null || (primary_key && is_rowid(connection, table, column)?))
+    let Some(declared) = schema_column(connection, table, column)? else {
+        return Ok(false);
+    };
+    Ok(declared.not_null || (declared.primary_key && is_rowid(connection, table, column)?))
 }
 
 /// Whether `column`, which SQLite says is part of the primary key of

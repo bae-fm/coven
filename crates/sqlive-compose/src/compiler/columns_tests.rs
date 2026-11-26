@@ -172,3 +172,23 @@ fn a_join_pads_the_items_in_the_parentheses_it_adds() {
         assert_eq!([padded(&core.from, "a"), padded(&core.from, "b")], expected, "{from}");
     }
 }
+
+#[test]
+fn a_table_functions_column_takes_a_declared_type_that_holds_null() {
+    for sql in [
+        "SELECT value FROM json_each(:list)",
+        "SELECT s.value FROM (SELECT j.value FROM json_each(:list) AS j) AS s",
+    ] {
+        let lib = format!(
+            "sqlive_compose::read!(Case(list: String) {{ value: Option<String> }}, r#\"{sql}\"#);"
+        );
+        let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{sql}: {errors:?}"));
+        let code = code_of(&output, "Case.rs");
+        assert!(code.contains("pub value : Option < String >"), "{sql}: {code}");
+        assert_eq!(
+            messages(compile_lib(&lib.replace("Option<String> }", "String }"))),
+            ["src/lib.rs:1:1: value can be NULL, and the header types it String, which holds no NULL"],
+            "{sql}"
+        );
+    }
+}

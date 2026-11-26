@@ -159,3 +159,34 @@ fn a_read_report_says_what_the_statement_depends_on() {
         ReadReport::Whole { .. }
     ));
 }
+
+#[test]
+fn a_table_functions_column_names_the_function_and_can_hold_null() {
+    let probe = probe();
+    for sql in [
+        "SELECT value FROM json_each('[1]')",
+        "SELECT s.value FROM (SELECT j.value FROM json_each(:list) AS j) AS s",
+        "INSERT INTO people (id, name) VALUES (:id, :name)
+         RETURNING (SELECT value FROM json_each('[1]')) AS value",
+    ] {
+        let statement = probe.prepare(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        let column = &statement.columns[0];
+        let origin = column.origin.as_ref().unwrap_or_else(|| panic!("{sql}"));
+        assert_eq!(
+            (origin.table.as_str(), origin.column.as_str(), origin.declared_type.as_deref()),
+            ("json_each", "value", None),
+            "{sql}"
+        );
+        assert!(!column.never_null, "{sql}");
+    }
+    let every = probe.prepare("SELECT * FROM json_each('[1]')").unwrap();
+    let names: Vec<_> = every.columns.iter().map(|column| column.name.as_str()).collect();
+    assert_eq!(names, ["key", "value", "type", "atom", "id", "parent", "fullkey", "path"]);
+}
+
+#[test]
+fn a_column_of_sqlites_own_schema_table_names_its_declared_type() {
+    let statement = probe().prepare("SELECT name FROM sqlite_schema").unwrap();
+    let origin = statement.columns[0].origin.as_ref().unwrap();
+    assert_eq!(origin.declared_type.as_deref(), Some("TEXT"));
+}
