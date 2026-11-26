@@ -258,23 +258,35 @@ impl Planner<'_> {
             }
             return self.passed_edge(member, partner, &partner_column);
         }
-        let value = match (partner_affinity, &member.value) {
+        let value = self.compared_value(&member, partner, partner_column, partner_affinity)?;
+        self.edge_to(member, partner, value)
+    }
+
+    /// What `partner`'s column `column`, of `partner_affinity`, gives
+    /// `member` to compare with.
+    fn compared_value(
+        &self,
+        member: &Member,
+        partner: usize,
+        column: String,
+        partner_affinity: Option<Affinity>,
+    ) -> Option<PartnerValue> {
+        Some(match (partner_affinity, &member.value) {
             (Some(partner_affinity), MemberValue::Column(_)) => {
-                self.partner_column(member.affinity, partner, partner_column, partner_affinity)?
+                self.partner_column(member.affinity, partner, column, partner_affinity)?
             }
             // SQLite gives an expression's value the column's affinity, and
             // so does the question that judges a changed row (`scope_row.rs`).
-            (Some(_), MemberValue::Expression(_)) => PartnerValue::Column(partner_column),
+            (Some(_), MemberValue::Expression(_)) => PartnerValue::Column(column),
             // A column sqlive gives no affinity, as a view's or a
             // function's: a lookup compares it as the statement does, with
             // whatever affinity SQLite gives it.
             (None, _) => PartnerValue::Expression(format!(
                 "{}.{}",
                 self.items[partner].source.qualifier,
-                crate::sql::identifier(&partner_column)
+                crate::sql::identifier(&column)
             )),
-        };
-        self.edge_to(member, partner, value)
+        })
     }
 
     /// What `partner`'s column `column`, of affinity `partner_affinity`,
@@ -325,14 +337,10 @@ impl Planner<'_> {
     /// and compares as an equality with the source's column would.
     pub(crate) fn passed_edge(&self, member: Member, derived: usize, column: &str) -> Option<Edge> {
         let (source, passed) = crate::derived::passed_source(self, derived, column)?;
+        // A source column sqlive gives no affinity gives no edge, as in the
+        // model's `Passed.edge`.
         let source_affinity = self.items[source].columns.affinity(&passed)?;
-        let value = match &member.value {
-            MemberValue::Column(_) => {
-                self.partner_column(member.affinity, source, passed, source_affinity)?
-            }
-            // SQLite gives an expression's value the column's affinity.
-            MemberValue::Expression(_) => PartnerValue::Column(passed),
-        };
+        let value = self.compared_value(&member, source, passed, Some(source_affinity))?;
         Some(Edge {
             member,
             partner: source,
