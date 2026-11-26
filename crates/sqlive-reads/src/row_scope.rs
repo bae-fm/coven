@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::scope_lookup::{Judging, Lookup, Lookups, NoAnswer};
+use crate::scope_lookup::{GroupLookup, GroupQuestion, Judging, Lookup, Lookups, NoAnswer};
 use crate::scope_row::RowCondition;
 use crate::scope_window::{RowWindow, WindowQuestion};
 use crate::sql_value::SqlValue as Value;
@@ -56,6 +56,10 @@ pub enum RowScope {
         /// The question that finds partner rows holding a value.
         lookup: Arc<Lookup>,
     },
+    /// Rows whose columns equal the values of one row of another source in
+    /// its own scope: the equalities of one join, which a write judges by
+    /// running `group`.
+    JoinedAll(Arc<GroupLookup>),
     /// Rows that fewer than a subquery's LIMIT rows of their window sort
     /// before, which a write judges by asking SQLite (`scope_window.rs`).
     Window(Arc<RowWindow>),
@@ -100,6 +104,10 @@ impl RowScope {
                 // `IS`.
                 Some(Value::Null) if !lookup.nulls() => false,
                 Some(value) => lookups(Judging::Partner(lookup, value))?,
+            },
+            Self::JoinedAll(group) => match group.question(row) {
+                GroupQuestion::Answered(passes) => passes,
+                GroupQuestion::Ask(sql, parameters) => lookups(Judging::Row(&sql, &parameters))?,
             },
             // A value the question can't give its column's type, or one the
             // write didn't record, passes.
@@ -175,6 +183,7 @@ impl RowScope {
             | Self::Null { .. }
             | Self::Row(_)
             | Self::Joined { .. }
+            | Self::JoinedAll(_)
             | Self::Window(_) => {}
         }
     }
@@ -189,6 +198,7 @@ impl RowScope {
             | Self::Joined { column, .. } => {
                 into.insert(column.clone());
             }
+            Self::JoinedAll(group) => into.extend(group.columns().cloned()),
             Self::Row(condition) => {
                 into.extend(condition.term.columns.iter().map(|(column, _)| column.clone()));
             }

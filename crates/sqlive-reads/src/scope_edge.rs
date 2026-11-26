@@ -253,7 +253,7 @@ impl Planner<'_> {
         value: PartnerValue,
     ) -> Option<Edge> {
         self.items[partner].source.from.as_ref()?;
-        Some(Edge { member, partner, value, nested: false, nulls: false })
+        Some(Edge { member, partner, value, nested: false, nulls: false, pushed: false })
     }
 
     /// The edge `member_expr IS other` gives: the equality's, matching a NULL

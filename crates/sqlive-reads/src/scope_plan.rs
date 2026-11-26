@@ -234,6 +234,10 @@ pub(crate) struct Membership {
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
     pub(crate) nulls: bool,
+    /// Whether the partner is the source of a subquery's value.
+    pub(crate) nested: bool,
+    /// Whether the planner passed the edge into a derived item's arm.
+    pub(crate) pushed: bool,
 }
 
 impl Membership {
@@ -245,6 +249,8 @@ impl Membership {
             partner: edge.partner,
             value: edge.value.clone(),
             nulls: edge.nulls,
+            nested: edge.nested,
+            pushed: edge.pushed,
         }
     }
 }
@@ -955,6 +961,9 @@ pub(crate) struct Edge {
     pub(crate) nested: bool,
     /// Whether the condition is `IS`, which matches a NULL with a NULL.
     pub(crate) nulls: bool,
+    /// Whether the planner passed the edge into a derived item's arm from
+    /// an edge of the derived item.
+    pub(crate) pushed: bool,
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {

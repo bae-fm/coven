@@ -99,6 +99,6 @@ impl Planner<'_> {
         let partner_affinity = item.columns.affinity(&partner_column)?;
         let value =
             self.partner_column(member.affinity, partner, partner_column, partner_affinity)?;
-        Some(Edge { member, partner, value, nested: true, nulls: false })
+        Some(Edge { member, partner, value, nested: true, nulls: false, pushed: false })
     }
 }

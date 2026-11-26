@@ -9,6 +9,8 @@ mod burst;
 mod candidates;
 #[path = "live_judging_tests/carried_terms.rs"]
 mod carried_terms;
+#[path = "live_judging_tests/cell_cards.rs"]
+mod cell_cards;
 #[path = "live_judging_tests/derived.rs"]
 mod derived;
 #[path = "live_judging_tests/join_shapes.rs"]

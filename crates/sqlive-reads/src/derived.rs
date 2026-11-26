@@ -595,7 +595,7 @@ pub(crate) fn push_down(
                         value: MemberValue::Column(column),
                         affinity: edge.member.affinity,
                     };
-                    (passed == target).then(|| Edge { member, ..edge.clone() })
+                    (passed == target).then(|| Edge { member, pushed: true, ..edge.clone() })
                 })
                 .collect();
             if let Some(renamed) = &renamed {

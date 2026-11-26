@@ -126,7 +126,32 @@ pub(crate) fn source_scopes(
                 })),
             }
         };
-        for membership in &source.memberships {
+        // The memberships that compare columns of this source with one
+        // partner's by `=` are one join: one row of the partner gives all
+        // their values, so the partner's rows are looked up once for them.
+        let listed = |membership: &Membership| {
+            matches!(membership.member, MemberValue::Column(_))
+                && !membership.nulls
+                && !membership.nested
+                && !membership.pushed
+                && !matches!(
+                    (&membership.member, &membership.value),
+                    (MemberValue::Column(_), PartnerValue::Column(column))
+                        if partner_scope(membership).equal_values(column).is_some()
+                )
+        };
+        let mut groups: Vec<(usize, Vec<&Membership>)> = Vec::new();
+        for membership in source.memberships.iter().filter(|membership| listed(membership)) {
+            match groups.iter_mut().find(|(partner, _)| *partner == membership.partner) {
+                Some((_, group)) => group.push(membership),
+                None => groups.push((membership.partner, vec![membership])),
+            }
+        }
+        groups.retain(|(_, group)| group.len() > 1);
+        let grouped = |membership: &Membership| {
+            listed(membership) && groups.iter().any(|(partner, _)| *partner == membership.partner)
+        };
+        for membership in source.memberships.iter().filter(|membership| !grouped(membership)) {
             // Rows that must hold given values in the column hold no others.
             if let (MemberValue::Column(member), PartnerValue::Column(column)) =
                 (&membership.member, &membership.value)
@@ -137,6 +162,30 @@ pub(crate) fn source_scopes(
                 }
             }
             scope = scope.and(joined(membership, partner_scope(membership).clone()));
+        }
+        for (partner, group) in &groups {
+            let partner = &sources.sources[*partner];
+            let items = group
+                .iter()
+                .map(|membership| {
+                    let MemberValue::Column(column) = &membership.member else {
+                        unreachable!("a group lists memberships of columns")
+                    };
+                    GroupItem {
+                        member: column.clone(),
+                        value: membership.value.clone(),
+                        affinity: membership.affinity,
+                    }
+                })
+                .collect();
+            let partner_scope = partner_scope(group[0]).clone();
+            scope = scope.and(RowScope::JoinedAll(Arc::new(GroupLookup::new(
+                partner.from.clone().expect("an edge's partner reads alone"),
+                partner.qualifier.clone(),
+                items,
+                partner_scope,
+                parameters,
+            ))));
         }
         // An OR's scope passes the rows any of its sides' scopes do.
         for sides in &source.either {
@@ -340,6 +389,7 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
         RowScope::Joined { column, lookup } => {
             joined(&format!("{qualifier}.{}", crate::sql::identifier(column)), lookup, bound)
         }
+        RowScope::JoinedAll(group) => group.listed(qualifier, bound),
         RowScope::And(left, right) => format!(
             "({} AND {})",
             condition(left, qualifier, bound),
@@ -374,5 +424,134 @@ pub(crate) fn joined(compared: &str, lookup: &Lookup, bound: &mut Vec<Value>) ->
         )
     } else {
         listed
+    }
+}
+
+/// One equality of a join to a partner: a column of the joined source, and
+/// the value of the partner's rows it equals.
+#[derive(Debug)]
+pub(crate) struct GroupItem {
+    /// The joined source's column, lowercase.
+    pub(crate) member: String,
+    /// What the partner's rows give.
+    pub(crate) value: PartnerValue,
+    /// The joined column's affinity.
+    pub(crate) affinity: Affinity,
+}
+
+/// A join's equalities to one partner, as one question about a changed row:
+/// whether one row of the partner, in the scope the run gave it, holds the
+/// values of all the changed row's columns (SPEC.md section 7).
+#[derive(Debug)]
+pub struct GroupLookup {
+    /// The partner FROM item, as sqlive's SQL names it with its qualifier.
+    from: String,
+    qualifier: String,
+    items: Vec<GroupItem>,
+    /// The partner's rows in this run.
+    scope: RowScope,
+    /// The question's SQL up to the changed row's values: the partner's scope
+    /// as a condition, and the run's parameters it binds, which the values
+    /// follow.
+    condition: String,
+    parameters: Vec<Value>,
+}
+
+/// What a write asks of SQLite about a changed row of a joined group.
+pub(crate) enum GroupQuestion {
+    /// The answer, with no question to ask.
+    Answered(bool),
+    /// The SQL, and the parameters to bind to it.
+    Ask(String, Vec<Value>),
+}
+
+impl GroupLookup {
+    /// The group of the equalities `items` to the partner `from` as
+    /// `qualifier` names it, in its `scope` for a run bound to `parameters`.
+    pub(crate) fn new(
+        from: String,
+        qualifier: String,
+        items: Vec<GroupItem>,
+        scope: RowScope,
+        parameters: &[Value],
+    ) -> Self {
+        let mut parameters = parameters.to_vec();
+        let condition = condition(&scope, &qualifier, &mut parameters);
+        Self { from, qualifier, items, scope, condition, parameters }
+    }
+
+    /// The columns of the joined source the group compares, lowercase.
+    pub(crate) fn columns(&self) -> impl Iterator<Item = &String> {
+        self.items.iter().map(|item| &item.member)
+    }
+
+    /// What a write asks of the row it changed. NULL equals nothing, so a
+    /// row with a NULL in a column the group compares passes none. A column
+    /// the image doesn't hold passes: the write that made it didn't know this
+    /// scope would test it.
+    pub(crate) fn question(&self, row: &crate::row_scope::RowImage) -> GroupQuestion {
+        let values: Vec<Option<&Value>> =
+            self.items.iter().map(|item| row.get(&item.member)).collect();
+        if values.iter().any(|value| matches!(value, Some(Value::Null))) {
+            return GroupQuestion::Answered(false);
+        }
+        if values.iter().any(Option::is_none) {
+            return GroupQuestion::Answered(true);
+        }
+        let mut parameters = self.parameters.clone();
+        let mut compared = Vec::with_capacity(self.items.len());
+        for (item, value) in self.items.iter().zip(values.into_iter().flatten()) {
+            parameters.push(value.clone());
+            let placeholder = format!("?{}", parameters.len());
+            // As a lookup does, give an expression's value the joined
+            // column's affinity.
+            let value = match (&item.value, item.affinity, value) {
+                (PartnerValue::Expression(_), Affinity::Text, Value::Text(_)) => {
+                    format!("CAST({placeholder} AS TEXT)")
+                }
+                (
+                    PartnerValue::Expression(_),
+                    Affinity::Numeric,
+                    Value::Integer(_) | Value::Real(_),
+                ) => {
+                    format!("CAST({placeholder} AS NUMERIC)")
+                }
+                _ => placeholder,
+            };
+            compared.push(format!(
+                "{} = {value} COLLATE BINARY",
+                partner_value(&self.qualifier, &item.value)
+            ));
+        }
+        GroupQuestion::Ask(
+            format!(
+                "SELECT 1 FROM {} WHERE {} AND {} LIMIT 1",
+                self.from,
+                compared.join(" AND "),
+                self.condition
+            ),
+            parameters,
+        )
+    }
+
+    /// Whether the columns of the row `qualifier` names equal the values of
+    /// one row of the partner in its scope, as SQL whose values go to
+    /// `bound`: a row value compared with a subquery that names only the
+    /// partner's rows, so no name in it can mean a row around it.
+    fn listed(&self, qualifier: &str, bound: &mut Vec<Value>) -> String {
+        let members: Vec<String> = self
+            .items
+            .iter()
+            .map(|item| format!("{qualifier}.{}", crate::sql::identifier(&item.member)))
+            .collect();
+        let values: Vec<String> =
+            self.items.iter().map(|item| partner_value(&self.qualifier, &item.value)).collect();
+        format!(
+            "({}) IN (SELECT {} FROM {} WHERE {})",
+            members.join(", "),
+            values.join(", "),
+            self.from,
+            condition(&self.scope, &self.qualifier, bound)
+        )
     }
 }
