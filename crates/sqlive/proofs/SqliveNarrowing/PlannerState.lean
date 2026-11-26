@@ -1,4 +1,5 @@
 import SqliveNarrowing.Planner
+import SqliveNarrowing.WellFormed
 
 /-! What the planner's state keeps however it reads the conditions: it holds
 an ON narrowing back only for an item a LEFT JOIN adds, and once it releases
@@ -445,9 +446,9 @@ theorem getD_find_mem {l : List Nat} {p1 p2 p3 : Nat → Bool} {first : Nat} {S 
 /-- The state after `ordered` places `next` with the items `order` placed
 before it. -/
 def ordered.placed (s : Statement) (st : PState) (order : List Nat) (next : Nat) : PState :=
-  let taken := st.edges.filter fun e => e.member == next && order.contains e.partner
+  let taken := st.edges.filter fun e => e.member == next && e.placedIn order
   let either := (st.items next).ors.filter fun sides =>
-    sides.all fun side => side.edges.all fun e => order.contains e.partner
+    sides.all fun side => side.edges.all fun e => e.placedIn order
   let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
   PushDown.pushDown s s.fuel s.fuel st next none taken
 
@@ -537,10 +538,11 @@ edge of the planned state to a subquery's source has a partner in an arm of
 some core's subquery (`plan_nestedOK`): never an item of the statement's own
 core, which sits in no core. -/
 
-/-- Whether an edge to a subquery's source has its partner in an arm of a
-subquery of some core. -/
+/-- Whether an edge to a subquery's source, or to the source a derived
+item passes a column on from, has its partner in an arm of a query some core
+reads. -/
 def Edge.NestedOK (s : Statement) (e : Edge) : Prop :=
-  e.nested = true → ∃ k, ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms
+  e.nested = true → ∃ k, ∃ q ∈ s.nestedQueries k, (s.item e.partner).core ∈ (s.query q).arms
 
 /-- Whether every edge of the narrowing keeps `Edge.NestedOK`. -/
 def Narrowing.NestedOK (s : Statement) (n : Narrowing) : Prop := ∀ e ∈ n.edges, e.NestedOK s
@@ -621,10 +623,10 @@ theorem PState.NestedOK.narrowOn {s : Statement} {st : PState} (h : st.NestedOK 
     {n : Narrowing} (hn : n.NestedOK s) : (st.narrowOn fuel i n).NestedOK s := by
   unfold PState.narrowOn
   simp only [Narrowing.split]
-  have hown := h.add (n := ⟨n.terms.filter (·.1 == i), n.edges.filter (·.member == i),
-    n.ors.filter (·.item == i)⟩) (fun e he => hn e (List.mem_filter.mp he).1)
-  have hothers : Narrowing.NestedOK s ⟨n.terms.filter (·.1 != i), n.edges.filter (·.member != i),
-      n.ors.filter (·.item != i)⟩ := fun e he => hn e (List.mem_filter.mp he).1
+  have hown := h.add (n := ⟨n.terms.filter (·.1 == i), n.edges.filter (Edge.ownOn i),
+    n.ors.filter (Disjunction.ownOn i)⟩) (fun e he => hn e (List.mem_filter.mp he).1)
+  have hothers : Narrowing.NestedOK s ⟨n.terms.filter (·.1 != i), n.edges.filter (!Edge.ownOn i ·),
+      n.ors.filter (!Disjunction.ownOn i ·)⟩ := fun e he => hn e (List.mem_filter.mp he).1
   split
   · rename_i held hheld
     refine hown.update (fun m hm => hown.2.1 i m hm) ?_
@@ -708,8 +710,17 @@ theorem PState.NestedOK.readCore {s : Statement} {st : PState} (h : st.NestedOK 
     intro x hx e he
     obtain ⟨⟨cd, p'⟩, hcd, rfl⟩ := List.mem_map.mp hx
     intro hnest
-    obtain ⟨q, hq, harm⟩ := (readCondition_sound s k cd).2.1 e he |>.2.2.2.2.2.1 hnest
-    exact ⟨k, q, Core.cond_queries hcd hq, harm⟩
+    have hin := (readCondition_sound s k cd).2.1 e he |>.2.2.2.2.2.1
+    cases hv : e.via with
+    | none =>
+      obtain ⟨q, hq, harm⟩ := hin.1 hnest hv
+      exact ⟨k, q, List.mem_append_right _ (Core.cond_queries hcd hq), harm⟩
+    | some dp =>
+      obtain ⟨⟨_, xc, hps, _⟩, _⟩ := hin.2 dp.1 dp.2 hv
+      obtain ⟨qd, v, a, hkind, harms, _, _, _, hd, _, hxa, _⟩ := Passed.passedSource_facts hps
+      exact ⟨(s.item dp.1).core, qd,
+        List.mem_append_left _ (List.mem_filterMap.mpr ⟨dp.1, hd, by simp [hkind]⟩),
+        by rw [hxa, harms]; simp⟩
   have hn : n.NestedOK s := by
     rcases List.mem_append.mp hx with hx | hx
     · exact hread _ (List.mem_filter.mp hx).1
@@ -866,14 +877,29 @@ theorem sameLinks_readCore (s : Statement) (st : PState) (k : Nat) :
   · exact PState.sameLinks_narrow _ _ _
   · exact PState.sameLinks_narrowOn _ _ _ _
 
+/-- Whether `pre` holds an edge's partner and the derived item it reads
+through, if any. -/
+def Edge.Before (pre : List Nat) (e : Edge) : Prop :=
+  e.partner ∈ pre ∧ ∀ d pc, e.via = some (d, pc) → d ∈ pre
+
+theorem Edge.before_of_placedIn {order : List Nat} {e : Edge} (h : e.placedIn order = true) :
+    e.Before order := by
+  unfold Edge.placedIn at h
+  simp only [Bool.and_eq_true, List.contains_iff_mem] at h
+  refine ⟨h.1, fun d pc hv => ?_⟩
+  have := h.2
+  rw [hv] at this
+  simpa using this
+
 /-- Whether each item placed in `order` takes its memberships' values and
-its kept ORs' sides' values from items placed before it, and each item not
-placed has no membership and keeps no OR. -/
+its kept ORs' sides' values from items placed before it, through derived
+items placed before it, and each item not placed has no membership and keeps
+no OR. -/
 def PState.PlacedLinks (st : PState) (order : List Nat) : Prop :=
   ∀ i, (i ∉ order → (st.items i).memberships = [] ∧ (st.items i).either = []) ∧
-    (∀ m ∈ (st.items i).memberships, ∃ pre post, order = pre ++ i :: post ∧ m.partner ∈ pre) ∧
+    (∀ m ∈ (st.items i).memberships, ∃ pre post, order = pre ++ i :: post ∧ m.Before pre) ∧
     ∀ sides ∈ (st.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
-      ∃ pre post, order = pre ++ i :: post ∧ e.partner ∈ pre
+      ∃ pre post, order = pre ++ i :: post ∧ e.Before pre
 
 theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Nat}
     (h : st.PlacedLinks order) {next : Nat} (hnext : next ∉ order) :
@@ -882,10 +908,10 @@ theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Na
   simp only
   generalize hst' : st.update next _ = st'
   have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
-    (st.edges.filter fun e => e.member == next && order.contains e.partner)
+    (st.edges.filter fun e => e.member == next && e.placedIn order)
   generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
-  have hext : ∀ {i x : Nat}, (∃ pre post, order = pre ++ i :: post ∧ x ∈ pre) →
-      ∃ pre post, order ++ [next] = pre ++ i :: post ∧ x ∈ pre := by
+  have hext : ∀ {i : Nat} {x : Edge}, (∃ pre post, order = pre ++ i :: post ∧ x.Before pre) →
+      ∃ pre post, order ++ [next] = pre ++ i :: post ∧ x.Before pre := by
     rintro i x ⟨pre, post, heq, hx⟩
     exact ⟨pre, post ++ [next], by simp [heq], hx⟩
   intro i
@@ -898,12 +924,11 @@ theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Na
     obtain ⟨hm0, he0⟩ := (h i).1 hnext
     refine ⟨fun hn => absurd (List.mem_append_right _ (List.mem_singleton_self i)) hn, ?_, ?_⟩
     · intro m hm
-      simp only [hm0, List.nil_append, List.mem_filter, Bool.and_eq_true, beq_iff_eq,
-        List.contains_iff_mem] at hm
-      exact ⟨order, [], rfl, hm.2.2⟩
+      simp only [hm0, List.nil_append, List.mem_filter, Bool.and_eq_true, beq_iff_eq] at hm
+      exact ⟨order, [], rfl, Edge.before_of_placedIn hm.2.2⟩
     · intro sides hsides side hside e he
-      simp only [List.mem_filter, List.all_eq_true, List.contains_iff_mem] at hsides
-      exact ⟨order, [], rfl, hsides.2 side hside e he⟩
+      simp only [List.mem_filter, List.all_eq_true] at hsides
+      exact ⟨order, [], rfl, Edge.before_of_placedIn (hsides.2 side hside e he)⟩
   · rename_i hi
     refine ⟨fun hn => (h i).1 (fun ho => hn (List.mem_append_left _ ho)),
       fun m hm => hext ((h i).2.1 m hm), fun sides hs side hside e he => hext ((h i).2.2 sides hs side hside e he)⟩
@@ -922,17 +947,32 @@ theorem ordered_go_placedLinks (s : Statement) : ∀ (fuel : Nat) (all : List Na
       exact ordered_go_placedLinks s fuel all _ _ _ (h.placed hnin)
 
 /-- Each item's memberships, and the sides of each OR it keeps, take values
-from items the planner placed before it. -/
-theorem plan_placedBefore (s : Statement) (i : Nat) :
+from items the planner placed before it, through derived items it placed
+before it. -/
+theorem plan_before (s : Statement) (i : Nat) :
     (∀ m ∈ ((plan s).state.items i).memberships,
-      ∃ pre post, (plan s).order = pre ++ i :: post ∧ m.partner ∈ pre) ∧
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ m.Before pre) ∧
     ∀ sides ∈ ((plan s).state.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
-      ∃ pre post, (plan s).order = pre ++ i :: post ∧ e.partner ∈ pre := by
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ e.Before pre := by
   unfold plan ordered
   simp only
   refine (ordered_go_placedLinks s _ _ _ [] [] (fun j => ?_) i).2
   have hsame := PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder (PState.initial s) j
   rw [hsame.1, hsame.2]
   simp [PState.initial]
+
+/-- Each item's memberships, and the sides of each OR it keeps, take values
+from items the planner placed before it. -/
+theorem plan_placedBefore (s : Statement) (i : Nat) :
+    (∀ m ∈ ((plan s).state.items i).memberships,
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ m.partner ∈ pre) ∧
+    ∀ sides ∈ ((plan s).state.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
+      ∃ pre post, (plan s).order = pre ++ i :: post ∧ e.partner ∈ pre :=
+  ⟨fun m hm => by
+    obtain ⟨pre, post, h, hb⟩ := (plan_before s i).1 m hm
+    exact ⟨pre, post, h, hb.1⟩,
+  fun sides hs side hside e he => by
+    obtain ⟨pre, post, h, hb⟩ := (plan_before s i).2 sides hs side hside e he
+    exact ⟨pre, post, h, hb.1⟩⟩
 
 end SqliveNarrowing

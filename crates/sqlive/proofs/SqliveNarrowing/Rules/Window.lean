@@ -152,7 +152,7 @@ theorem partitionColumn_facts {s : Statement} {k i : Nat} {member other : Expr} 
     · rename_i hc
       cases h
       obtain ⟨hj, hm, _⟩ := hc
-      obtain ⟨_, _, _, hq, hitems, _, _, hpm, _, _, _⟩ := Edge.edge_facts hedge
+      obtain ⟨_, _, _, _, hq, hitems, _, _, hpm, _, _, _⟩ := Edge.edge_facts hedge
       subst hj
       refine ⟨rfl, hq, fun j hj hji => hpm ?_⟩
       rw [← hitems j hj, hji, hm]

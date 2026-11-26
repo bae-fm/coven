@@ -132,8 +132,14 @@ structure Edge where
   affinity : Affinity
   partner : Nat
   value : PValue
-  /-- Whether the partner is the source of a subquery's value. -/
+  /-- Whether the partner sits in a core inside the member's: the source of a
+  subquery's value, or the item a derived item's arm passes the compared
+  column on from (`via`). -/
   nested : Bool
+  /-- The derived item, which a lookup can't read alone, and its column that
+  the equality compares, when its one arm passes that column on unchanged
+  from the partner (`Passed`). -/
+  via : Option (Nat × Nat) := none
   /-- Whether the edge compares by `IS`, which matches a NULL with a NULL. -/
   nulls : Bool := false
   /-- Whether the planner passed the edge into a derived item's arm from an
@@ -179,10 +185,26 @@ def Narrowing.mayHoldOnNulls (n : Narrowing) : Bool :=
   n.terms.any (fun (_, t) => t.mayHoldOnNulls) || n.edges.any (·.nulls) ||
     n.ors.any (·.mayHoldOnNulls)
 
-/-- What of `n` narrows `i`, and the rest. -/
+/-- Whether an edge narrows a LEFT JOIN's item `i` from the join's ON while
+the join is a LEFT JOIN's: an edge from `i` that reads through no derived
+item. -/
+def Edge.ownOn (i : Nat) (e : Edge) : Bool := e.member == i && e.via.isNone
+
+/-- Whether an OR narrows a LEFT JOIN's item `i` from the join's ON while the
+join is a LEFT JOIN's: an OR of `i` none of whose sides' edges reads through
+a derived item. -/
+def Disjunction.ownOn (i : Nat) (d : Disjunction) : Bool :=
+  d.item == i && d.sides.all fun side => side.edges.all (·.via.isNone)
+
+/-- What of `n`, the ON of the LEFT JOIN adding `i`, narrows `i` while the
+join is a LEFT JOIN's, and the rest, which waits for the join to be an inner
+join's. An edge from `i` through a derived item, and an OR of `i` with a side
+that holds one, wait with the rest: the proofs find such an edge's partner
+row only in a binding its core keeps, and the ON holds of bindings of the
+items before the join's, which the core may not keep (`plan_left_passes`). -/
 def Narrowing.split (n : Narrowing) (i : Nat) : Narrowing × Narrowing :=
-  (⟨n.terms.filter (·.1 == i), n.edges.filter (·.member == i), n.ors.filter (·.item == i)⟩,
-   ⟨n.terms.filter (·.1 != i), n.edges.filter (·.member != i), n.ors.filter (·.item != i)⟩)
+  (⟨n.terms.filter (·.1 == i), n.edges.filter (Edge.ownOn i), n.ors.filter (Disjunction.ownOn i)⟩,
+   ⟨n.terms.filter (·.1 != i), n.edges.filter (!Edge.ownOn i ·), n.ors.filter (!Disjunction.ownOn i ·)⟩)
 
 def Narrowing.append (a b : Narrowing) : Narrowing :=
   ⟨a.terms ++ b.terms, a.edges ++ b.edges, a.ors ++ b.ors⟩
@@ -311,6 +333,35 @@ where
       match (s.core k).parent with
       | some p => k :: go f p
       | none => [k]
+
+/-- The source, and its column, that derived item `d`'s column `pc` passes
+on unchanged, when a lookup can't read `d` alone and can read the source:
+`d`'s query is one SELECT that neither aggregates nor calls a window
+function, whose result column `pc` is a bare column of one of its own items
+(`derived::passed_source`). `d` is an item of its core's FROM, as every item
+of a statement the reader reads is. -/
+def passedSource (s : Statement) (d pc : Nat) : Option (Nat × Nat) :=
+  match (s.item d).kind with
+  | .table _ => none
+  | .derived q _ =>
+    match (s.query q).arms with
+    | [a] =>
+      if (s.item d).readable || (s.core a).aggregated || (s.core a).windowed ||
+        !(s.core (s.item d).core).items.contains d then none
+      else
+        match (s.core a).output[pc]? with
+        | some (.expr (.col x xc)) =>
+          if (s.item x).core = a ∧ (s.item x).readable then some (x, xc) else none
+        | _ => none
+    | _ => none
+
+/-- Whether the items `placed` hold an edge's partner, and the derived item
+it reads through, if any: then its member can take the partner's values
+(`Edge::placed`). -/
+def Edge.placedIn (placed : List Nat) (e : Edge) : Bool :=
+  placed.contains e.partner && match e.via with
+    | some (d, _) => placed.contains d
+    | none => true
 
 /-! The state sqlive narrows a statement's items in (`Planner`). -/
 

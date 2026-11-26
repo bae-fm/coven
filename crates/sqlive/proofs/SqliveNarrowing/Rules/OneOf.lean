@@ -147,7 +147,8 @@ theorem arm_row {s : Statement} {db : Db} {f : Nat} {b : Bind} {q : Nat} {r : Ro
 /-- What a value edge says of its partner. -/
 theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr} {e : Edge}
     (h : valueEdge s m c aff arg = some e) :
-    e.member = m ∧ e.memberValue = .column c ∧ e.nested = false ∧ e.nulls = false ∧ e.partner ≠ m ∧
+    e.member = m ∧ e.memberValue = .column c ∧ e.nested = false ∧ e.via = none ∧ e.nulls = false ∧
+    e.partner ≠ m ∧
     (s.item e.partner).readable ∧ arg.queries = [] ∧
     (arg.strict = true ∨ s.alwaysBound e.partner = true) ∧
     (∀ j ∈ arg.items, j = e.partner) ∧ arg.refs ≠ [] ∧ e.value = .expr arg := by
@@ -169,7 +170,7 @@ theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr
       cases hs : arg.strict
       · exact Or.inr (by simpa [hs] using hbad.2.2.2)
       · exact Or.inl rfl
-    refine ⟨rfl, rfl, rfl, rfl, hbad.2.1, by simpa using hbad.2.2.1, by simpa using hq,
+    refine ⟨rfl, rfl, rfl, rfl, rfl, hbad.2.1, by simpa using hbad.2.2.1, by simpa using hq,
       hst, by simpa using hbad.1, ?_, rfl⟩
     intro hnil
     simp [Expr.items, hnil] at hp
@@ -178,7 +179,7 @@ theorem valueEdge_facts {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr
 theorem valueEdge_holds {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr} {e : Edge}
     (h : valueEdge s m c aff arg = some e) {db : Db} {f : Nat} {b : Bind} {sub : Subs} {x : Int}
     (hm : cellOf (b m) c = some x) (ha : arg.eval b sub = some x) : e.HoldsIn s db f b := by
-  obtain ⟨hmem, hcol, hn, _, _, _, hq, hst, hitems, hrefs, hval⟩ := valueEdge_facts h
+  obtain ⟨hmem, hcol, hn, _, _, _, _, hq, hst, hitems, hrefs, hval⟩ := valueEdge_facts h
   rw [arg.eval_rowBind hitems hq] at ha
   cases hb : b e.partner with
   | none =>
@@ -188,7 +189,7 @@ theorem valueEdge_holds {s : Statement} {m c : Nat} {aff : Affinity} {arg : Expr
       cases ha
     | false =>
       have hab : s.alwaysBound e.partner = true := by simpa [hs] using hst
-      exact Or.inr (Or.inr ⟨by simp [hval, PValue.strict, hs], hn, hab, hb⟩)
+      exact Or.inr (Or.inr (Or.inl ⟨by simp [hval, PValue.strict, hs], hn, hab, hb⟩))
   | some r =>
     refine Or.inl ⟨x, by rw [hmem, hcol]; exact hm, ?_⟩
     simp only [hn, Bool.false_eq_true, ↓reduceIte]
@@ -199,36 +200,19 @@ theorem subEdge_holds {s : Statement} {k m c q : Nat} {e : Edge}
     (h : SubqueryEdge.edge s k (.col m c) q = some e) {db : Db} {f : Nat} {b : Bind} {x : Int}
     (hm : cellOf (b m) c = some x)
     (hs : (Expr.sub q).eval b (evalQuery s db f b) = some x) : e.HoldsIn s db f b := by
-  obtain ⟨sub', pc, mc, harms, hout, hval, hpcore, _, hmem, hmv, _, hnest⟩ :=
-    SubqueryEdge.edge_facts h
+  obtain ⟨c', hmem, _, _, _, _, _, _, hh⟩ := SubqueryEdge.edge_props h
   simp only [Expr.col.injEq] at hmem
   obtain ⟨rfl, rfl⟩ := hmem
-  refine Or.inl ⟨x, by simpa [hmv, PValue.on] using hm, ?_⟩
-  simp only [hnest, ↓reduceIte]
   simp only [Expr.eval] at hs
   cases hhead : (evalQuery s db f b q).head? with
   | none => simp [hhead] at hs
   | some row =>
     rw [hhead] at hs
-    have hrow := List.mem_of_head? hhead
-    cases f with
-    | zero => simp [evalQuery] at hrow
-    | succ f' =>
-      refine ⟨f', rfl, ?_⟩
-      simp only [Option.bind_some, List.head?_eq_getElem?] at hs
-      rcases query_row_at harms hout hrow with hnone | ⟨b', hb', hcell, hrow'⟩
-      · simp [hnone] at hs
-      · simp only [hcell, Option.join_some, Expr.eval] at hs
-        cases hp : b' e.partner with
-        | none => simp [hp, cellOf] at hs
-        | some r =>
-          rw [hpcore]
-          refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
-          · rw [← hrow' hagg hwin]
-            exact hrow
-          · simp only [hp, cellOf] at hs
-            rw [hval]
-            exact hs
+    simp only [Option.bind_some] at hs
+    refine hh db f b x row hm (List.mem_of_head? hhead) ?_
+    cases row with
+    | nil => simp at hs
+    | cons v vs => simpa [Row.cell] using hs
 
 /-- What a side's edges say statically: each is from `m`, outside a
 subquery its partner isn't `m` and is among the items `named`, and inside
@@ -301,14 +285,14 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
     obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨_, _, _, harms, _, _, hpcore, hread, hmem, hmv, _, hnest⟩ := SubqueryEdge.edge_facts he'
+    obtain ⟨_, hmem, _, _, hnest, hread, hstrict, hin, _⟩ := SubqueryEdge.edge_props he'
     simp only [Expr.col.injEq] at hmem
     exact ⟨hmem.1.symm, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
-      Or.inl (by rw [hmv]; rfl), fun _ => ⟨q, by simp [Expr.queries], by rw [hpcore, harms]; simp⟩⟩
+      hstrict, hin _ (by simp [Expr.queries])⟩
   · obtain ⟨e', he', rfl⟩ := Option.map_eq_some_iff.mp h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨hmem, hmv, hnest, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
+    obtain ⟨hmem, hmv, hnest, hvia, _, hne, hread, _, _, hitems, hrefs, _⟩ := valueEdge_facts he'
     have hpart : e.partner ∈ arg.items := by
       cases hr : arg.refs with
       | nil => exact absurd hr hrefs
@@ -317,7 +301,7 @@ theorem argSide_facts {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr
         rw [← hitems p.1 hp]
         exact hp
     exact ⟨hmem, fun _ => by rw [hmem]; exact hne, fun _ => hpart, hread, Or.inl (by rw [hmv]; rfl),
-      fun h => by simp [hnest] at h⟩
+      Edge.nestedIn_of hvia fun h => by simp [hnest] at h⟩
 
 /-- A side of an argument that gives the member's value holds. -/
 theorem argSide_holds {s : Statement} {k m c : Nat} {aff : Affinity} {arg : Expr} {side : Side}
@@ -361,7 +345,7 @@ theorem armSide_facts {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
         simp only [List.mem_singleton] at he
         subst he
         exact ⟨rfl, fun h => by simp at h, fun h => by simp at h, hp.2, Or.inl rfl,
-          fun _ => by rw [hp.1]; exact harm⟩
+          Edge.nestedIn_of rfl fun _ => by rw [hp.1]; exact harm⟩
       · cases h
     · cases h
   · cases h
@@ -403,7 +387,7 @@ theorem armSide_holds {s : Statement} {m c : Nat} {aff : Affinity} {arm : Nat} {
       · simp only [Expr.eval, Row.cell, List.getElem?_cons_zero, Option.join_some] at hx
         refine Or.inl ⟨x, hm, ?_⟩
         simp only [↓reduceIte]
-        refine ⟨f, rfl, ?_⟩
+        refine ⟨trivial, f, rfl, ?_⟩
         cases hb : b' p with
         | none => simp [hb, cellOf] at hx
         | some r' =>
@@ -531,9 +515,8 @@ theorem one_of_sound : ReadCondition.Disjoins readCondition := by
           · obtain ⟨arg, hargm, harg⟩ := (mapM_mem hsides).2 side hside
             intro e he
             obtain ⟨h1, h2, h3, h4, h5, h6⟩ := argSide_facts harg e he
-            refine ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4, h5, fun hn => ?_⟩
-            obtain ⟨q, hq, harm⟩ := h6 hn
-            exact ⟨q, hqueries _ (args_queries hargm _ hq), harm⟩
+            exact ⟨h1, h2, fun hn => hnamed _ (args_items hargm _ (h3 hn)), h4, h5,
+              h6.mono fun q hq => hqueries _ (args_queries hargm _ hq)⟩
           · obtain ⟨x, hm, ho⟩ := hval hc
             rw [hmember] at hm
             simp only [Expr.eval] at hm

@@ -118,8 +118,8 @@ theorem PState.Lookups.narrowOn {s : Statement} {st : PState} (h : st.Lookups s)
     {n : Narrowing} (hn : n.Readable s) : (st.narrowOn fuel i n).Lookups s := by
   unfold PState.narrowOn
   simp only [Narrowing.split]
-  have hown := h.add (hn.filter (·.1 == i) (·.member == i) (·.item == i))
-  have hothers := hn.filter (·.1 != i) (·.member != i) (·.item != i)
+  have hown := h.add (hn.filter (·.1 == i) (Edge.ownOn i) (Disjunction.ownOn i))
+  have hothers := hn.filter (·.1 != i) (!Edge.ownOn i ·) (!Disjunction.ownOn i ·)
   split
   · rename_i held hheld
     refine hown.update (fun sides hs => hown.2.1 i sides hs)

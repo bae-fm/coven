@@ -42,7 +42,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q position : Nat} 
       (s.core sub).output[position]? = some (.expr (.col e.partner pc)) ∧
       (∀ r, e.value.eval r = r.cell pc) ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
       member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
-      e.nested = true := by
+      e.nested = true ∧ e.via = none := by
   unfold edge at h
   simp only [bind, Option.bind] at h
   split at h
@@ -74,7 +74,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q position : Nat} 
               simp only [hv] at h
               cases h
               exact ⟨sub, pc, _, harms, hout, columnValue_eval hv, by simpa using hbad.1,
-                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl⟩
+                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl, rfl⟩
     · cases h
   · cases h
 
@@ -144,10 +144,10 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       | none => simp [hm] at hpos
       | some member =>
       simp only [hm, bind, Option.bind] at hpos
-      obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hpos
+      obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest, hvia⟩ := edge_facts hpos
       refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
       Or.inl (by rw [hmv]; rfl),
-      fun _ => ⟨q, by simp [Cond.queries], by rw [hpcore, harms]; simp⟩,
+      Edge.nestedIn_of hvia fun _ => ⟨q, by simp [Cond.queries], by rw [hpcore, harms]; simp⟩,
       fun db f b hc => ?_⟩
       -- The comparison gives a row of the subquery equal to the row value.
       have hrow : ∃ row ∈ evalQuery s db f b q, rowEqTruth
@@ -172,7 +172,7 @@ theorem row_subquery_edge_sound : ReadCondition.Sound readCondition where
       · obtain ⟨x, hx, hy⟩ := rowEqTruth_at heq hvs hcell
         refine Or.inl ⟨x, hx, ?_⟩
         simp only [hnest, ↓reduceIte]
-        refine ⟨f', rfl, ?_⟩
+        refine ⟨hvia, f', rfl, ?_⟩
         cases hp : b' e.partner with
         | none => simp [Expr.eval, hp, cellOf] at hy
         | some r =>

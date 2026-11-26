@@ -296,19 +296,19 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
   unfold ordered.placed at hfin ⊢
   simp only at hfin ⊢
   have hs' := hs.update (i := next) (g := fun p => { p with
-      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && order.contains e.partner,
+      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
       either := (st.items next).ors.filter fun sides =>
-        sides.all fun side => side.edges.all fun e => order.contains e.partner })
+        sides.all fun side => side.edges.all fun e => e.placedIn order })
     (fun hl Z f k b hb hi => hs.rows Z f k b hb next hi hl)
     (fun Z f b r hb hr u hu => hs.terms Z f b next r hb hr u hu)
     (fun Z f b r hb hr u hu => hs.carried Z f b next r hb hr u hu)
     (fun Z f b hb hr sides hsides => hs.ors Z f b next hb hr sides hsides)
     (fun n hn => hs.held next n hn)
   have hpass : (st.update next fun p => { p with
-      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && order.contains e.partner,
+      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
       either := (st.items next).ors.filter fun sides =>
-        sides.all fun side => side.edges.all fun e => order.contains e.partner }).Passes next
-      (st.edges.filter fun e => e.member == next && order.contains e.partner) :=
+        sides.all fun side => side.edges.all fun e => e.placedIn order }).Passes next
+      (st.edges.filter fun e => e.member == next && e.placedIn order) :=
     fun e he => Or.inl (by simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he)
   have hgrow := (PushDown.pushDown_keeps s s.fuel s.fuel _ next none _ hpass).1
   refine PState.Sem.pushEdges h (fun _ _ _ _ hb => hb.1) (Fin := Fin)

@@ -1,4 +1,4 @@
-import SqliveNarrowing.Reader
+import SqliveNarrowing.Rules.Passed
 
 /-! Rule 3: a column compared with the value a subquery returns,
 `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` or `col IN (SELECT x.c
@@ -8,7 +8,9 @@ SELECT whose one result column is a bare column of one of its own items,
 readable alone, of the member column's affinity or of none (`columnValue`).
 A comparison reads only the subquery's first column, so the model's
 subquery may return more columns after it: its ORDER BY terms that the SQL
-doesn't return. -/
+doesn't return. A column of a derived item of the subquery's core that a
+lookup can't read alone gives the edge to the source its arm passes the
+column on from, through the item (`Passed`, `throughEdge`). -/
 namespace SqliveNarrowing.SubqueryEdge
 
 /-- The column a condition compares and the subquery it compares with. -/
@@ -24,8 +26,8 @@ def compared : Cond → Option (Expr × Nat)
   | _ => none
 
 /-- The edge from `member`, written in core `k`, to the source of the column
-query `q` returns. -/
-def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
+query `q` returns, when a lookup reads the source alone. -/
+def sourceEdge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
   let [sub] := (s.query q).arms | none
   let some (OutCol.expr (Expr.col p pc)) := (s.core sub).output[0]? | none
   if (s.item p).core ≠ sub ∨ !(s.item p).readable then none
@@ -36,6 +38,21 @@ def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
   let value ← columnValue affinity pa p pc
   pure { member := m, memberValue := .column c, affinity, partner := p, value, nested := true }
 
+/-- The edge from the column `member`, written in core `k`, through the
+derived item whose column query `q` returns, when a lookup can't read the
+item alone (`Planner::arm_edge`). -/
+def throughEdge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge := do
+  let [sub] := (s.query q).arms | none
+  let some (OutCol.expr (Expr.col d pc)) := (s.core sub).output[0]? | none
+  if (s.item d).core ≠ sub ∨ sub = k ∨ (s.item d).readable then none
+  let .col .. := member | none
+  Passed.edge s k member d pc
+
+/-- The edge from `member` that query `q`'s column gives: `sourceEdge`'s, or
+else `throughEdge`'s. -/
+def edge (s : Statement) (k : Nat) (member : Expr) (q : Nat) : Option Edge :=
+  (sourceEdge s k member q).orElse fun _ => throughEdge s k member q
+
 def readCondition : ReadCondition := fun s k cd => do
   let (member, q) ← compared cd
   let e ← edge s k member q
@@ -45,13 +62,13 @@ def readCondition : ReadCondition := fun s k cd => do
 subquery's core, under the same binding, whose source row holds the member
 column's value. -/
 
-theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
-    (h : edge s k member q = some e) :
+theorem sourceEdge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
+    (h : sourceEdge s k member q = some e) :
     ∃ sub pc c, (s.query q).arms = [sub] ∧ (s.core sub).output[0]? = some (.expr (.col e.partner pc)) ∧
       (∀ r, e.value.eval r = r.cell pc) ∧ (s.item e.partner).core = sub ∧ (s.item e.partner).readable ∧
       member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
-      e.nested = true := by
-  unfold edge at h
+      e.nested = true ∧ e.via = none := by
+  unfold sourceEdge at h
   simp only [bind, Option.bind] at h
   split at h
   · rename_i sub harms
@@ -82,7 +99,7 @@ theorem edge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge
               simp only [hv] at h
               cases h
               exact ⟨sub, pc, _, harms, hout, columnValue_eval hv, by simpa using hbad.1,
-                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl⟩
+                by simpa using hbad.2, rfl, rfl, by simpa using hk, rfl, rfl⟩
     · cases h
   · cases h
 
@@ -156,6 +173,98 @@ theorem compared_queries {cd : Cond} {member : Expr} {q : Nat} (h : compared cd 
     · cases h
   · cases h
 
+/-- An edge `throughEdge` reads is `Passed.edge`'s, through an item of the
+subquery's one core whose column the subquery returns first. -/
+theorem throughEdge_facts {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
+    (h : throughEdge s k member q = some e) :
+    ∃ sub d pc m c, (s.query q).arms = [sub] ∧ (s.core sub).output[0]? = some (.expr (.col d pc)) ∧
+      (s.item d).core = sub ∧ sub ≠ k ∧ member = .col m c ∧ Passed.edge s k member d pc = some e := by
+  unfold throughEdge at h
+  simp only [bind, Option.bind] at h
+  split at h
+  · rename_i sub harms
+    split at h
+    · rename_i d pc hout
+      split at h
+      · cases h
+      rename_i hok
+      simp only [not_or, Bool.not_eq_true, ne_eq, Decidable.not_not] at hok
+      split at h
+      · rename_i m c
+        exact ⟨sub, d, pc, m, c, harms, hout, hok.1, hok.2.1, rfl, h⟩
+      · cases h
+    · cases h
+  · cases h
+
+/-- What an edge `edge` reads says of it: its member is the compared column,
+of the core; it waits for its partner, which a lookup reads alone; it sits
+in an arm of the subquery, or reads through an item of that arm; and it
+holds of a binding where the member's value is the first column of a row
+the subquery returns. -/
+theorem edge_props {s : Statement} {k : Nat} {member : Expr} {q : Nat} {e : Edge}
+    (h : edge s k member q = some e) :
+    ∃ c, member = .col e.member c ∧ e.memberValue = .column c ∧ (s.item e.member).core = k ∧
+      e.nested = true ∧ (s.item e.partner).readable ∧ e.memberStrict s ∧
+      (∀ queries, q ∈ queries → e.NestedIn s queries) ∧
+      ∀ db f b x row, cellOf (b e.member) c = some x → row ∈ evalQuery s db f b q →
+        row.cell 0 = some x → e.HoldsIn s db f b := by
+  unfold edge at h
+  cases hse : sourceEdge s k member q with
+  | some e' =>
+    rw [hse] at h
+    cases h
+    obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest, hvia⟩ :=
+      sourceEdge_facts hse
+    refine ⟨mc, hmem, hmv, hk, hnest, hread, Or.inl (by rw [hmv]; rfl),
+      fun queries hq => Edge.nestedIn_of hvia fun _ => ⟨q, hq, by rw [hpcore, harms]; simp⟩,
+      fun db f b x row hm hrowq hcell => ?_⟩
+    refine Or.inl ⟨x, by simpa [hmv, PValue.on] using hm, ?_⟩
+    simp only [hnest, ↓reduceIte]
+    cases f with
+    | zero => simp [evalQuery] at hrowq
+    | succ f' =>
+      refine ⟨hvia, f', rfl, ?_⟩
+      rcases query_row_at harms hout hrowq with hnone | ⟨b', hb', hcell', hrow'⟩
+      · simp [Row.cell, hnone] at hcell
+      · simp only [Row.cell, hcell', Option.join_some, Expr.eval] at hcell
+        cases hp : b' e.partner with
+        | none => simp [hp, cellOf] at hcell
+        | some r =>
+          rw [hpcore]
+          refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
+          · rw [← hrow' hagg hwin]
+            exact hrowq
+          · simp only [hp, cellOf] at hcell
+            simp [hval, hcell]
+  | none =>
+    rw [hse] at h
+    obtain ⟨sub, d, pc, m, c, harms, hout, hdcore, hsk, rfl, hp⟩ := throughEdge_facts h
+    obtain ⟨_, hk, hvia, hpassed, hread, hstrict, _, hcol⟩ := Passed.edge_facts hp
+    obtain ⟨rfl, hmvc⟩ := hcol m c rfl
+    refine ⟨c, rfl, hmvc, hk, hpassed.1, hread, hstrict,
+      fun queries hq => ⟨fun _ hv => (by rw [hvia] at hv; cases hv), fun d' pc' hv => ?_⟩,
+      fun db f b x row hm hrowq hcell => ?_⟩
+    · rw [hvia] at hv
+      obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj hv)
+      exact ⟨hpassed, Or.inr ⟨q, hq, by rw [hdcore, harms]; simp⟩⟩
+    · cases f with
+      | zero => simp [evalQuery] at hrowq
+      | succ f' =>
+        rcases query_row_at harms hout hrowq with hnone | ⟨b', hb', hcell', hrow'⟩
+        · simp [Row.cell, hnone] at hcell
+        · simp only [Row.cell, hcell', Option.join_some, Expr.eval] at hcell
+          cases hbd : b' d with
+          | none => simp [hbd, cellOf] at hcell
+          | some rd =>
+            simp only [hbd, cellOf] at hcell
+            refine Passed.edge_holds hp (b := b) (sub := evalQuery s db (f' + 1) b)
+              (by simpa [Expr.eval] using hm) (Or.inr ⟨by rw [hdcore]; exact hsk, f', rfl, b',
+                by rw [hdcore]; exact hb',
+                ⟨q, by rw [hdcore, harms]; simp, fun _ hagg hwin => ?_⟩, rd, hbd, hcell⟩)
+            rw [hdcore] at hagg hwin ⊢
+            rw [← hrow' hagg hwin]
+            exact hrowq
+
 /-- Rule 3's theorem: a column compared with a subquery's value, true of a
 binding, takes a value a binding of the subquery's core gives its source. -/
 theorem subquery_edge_sound : ReadCondition.Sound readCondition where
@@ -184,34 +293,12 @@ theorem subquery_edge_sound : ReadCondition.Sound readCondition where
     subst h
     simp only [List.mem_singleton] at he
     subst he
-    obtain ⟨sub, pc, mc, harms, hout, hval, hpcore, hread, hmem, hmv, hk, hnest⟩ := edge_facts hedge
-    refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread,
-      Or.inl (by rw [hmv]; rfl),
-      fun _ => ⟨q, compared_queries hcmp, by rw [hpcore, harms]; simp⟩,
-      fun db f b hc => ?_⟩
+    obtain ⟨c, hmem, hmv, hk, hnest, hread, hstrict, hin, hh⟩ := edge_props hedge
+    refine ⟨hk, fun h => by simp [hnest] at h, fun h => by simp [hnest] at h, hread, hstrict,
+      hin _ (compared_queries hcmp), fun db f b hc => ?_⟩
     -- The condition gives the member's value and a row of the subquery with it.
-    have hrow : ∃ x row, member.eval b (evalQuery s db f b) = some x ∧
-        row ∈ evalQuery s db f b q ∧ row.cell 0 = some x := compared_sound hcmp hc
-    obtain ⟨x, row, hmx, hrowq, hcell⟩ := hrow
-    refine Or.inl ⟨x, ?_, ?_⟩
-    · rw [hmem] at hmx
-      simpa [Expr.eval, hmv, PValue.on] using hmx
-    · simp only [hnest, ↓reduceIte]
-      cases f with
-      | zero => simp [evalQuery] at hrowq
-      | succ f' =>
-        refine ⟨f', rfl, ?_⟩
-        rcases query_row_at harms hout hrowq with hnone | ⟨b', hb', hcell', hrow'⟩
-        · simp [Row.cell, hnone] at hcell
-        · simp only [Row.cell, hcell', Option.join_some, Expr.eval] at hcell
-          cases hp : b' e.partner with
-          | none => simp [hp, cellOf] at hcell
-          | some r =>
-            rw [hpcore]
-            refine ⟨b', hb', ⟨q, by rw [harms]; simp, fun _ hagg hwin => ?_⟩, r, hp, ?_⟩
-            · rw [← hrow' hagg hwin]
-              exact hrowq
-            · simp only [hp, cellOf] at hcell
-              simp [hval, hcell]
+    obtain ⟨x, row, hmx, hrowq, hcell⟩ := compared_sound hcmp hc
+    rw [hmem] at hmx
+    exact hh db f b x row (by simpa [Expr.eval] using hmx) hrowq hcell
 
 end SqliveNarrowing.SubqueryEdge

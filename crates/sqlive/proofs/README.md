@@ -188,6 +188,27 @@ JOIN adds, so where such a part holds, its item has a row.
   that `x.c = (SELECT y.d ...)` or `x.c IN (SELECT y.d ...)`, true of a
   binding, makes `x.c` hold the value `y.d` holds in a binding the subquery's
   core keeps.
+- **An equality through a correlated FROM subquery or CTE.** A FROM
+  subquery or CTE whose SQL names a row around it lists rows only beside that
+  row, so no lookup reads it alone. When its query is one SELECT that neither
+  aggregates nor calls a window function, and the compared column is a bare
+  column of one of that SELECT's items, which a lookup reads alone
+  (`passedSource`), an equality with the column gives an edge to that source
+  item, through the derived item (`Edge.via`). The member is a column or an
+  expression of the derived item's core joined to it, or a column compared
+  with a subquery's value read from the derived item, as `c.x = (SELECT d.y
+  FROM d)`, where the derived item sits in the subquery's one core.
+  `orPassed_sound` and `edge_props` prove that such an edge, true of a
+  binding, makes the member hold the value the derived item's row holds in
+  the column, and `Passed.edge_holds` that the derived row sits in the
+  binding, or in a binding of the subquery's core that gives the row the
+  subquery returns. The derived item's row is the row of a binding its one
+  arm keeps, whose source row holds the column's value
+  (`derived_source_passes`). The planner places the member after the derived
+  item and the source (`Edge.placedIn`, `plan_before`). A LEFT JOIN's ON
+  holds back each such edge, and each OR with a side that holds one, until
+  the join is an inner join's: the bindings before the join's item hold the
+  derived item's row, but not the binding of its arm that gives the row.
 - **A row value compared with a subquery's row.** `row_subquery_edge_sound`
   proves the same of each pair of `(x.a, x.b) = (SELECT y.c, y.d ...)`, the
   subquery on either side, and of `(x.a, x.b) IN (SELECT y.c, y.d ...)`, since
@@ -526,11 +547,15 @@ from the edges conditions give, and no step of the planner reads that list.
 a subquery's source has its partner in an arm of some core's subquery, as
 each condition's reader promises, because the planner changes only an
 edge's member when it passes the edge into a derived item's arm, and that
-each item's memberships are edges from it. `plan_placedBefore` proves that
+each item's memberships are edges from it, and that each edge through a
+derived item reads a column that the derived item's one arm passes on from a
+source the arm lists, where the derived item sits in the member's core or in
+a core of the condition's subquery (`Edge.NestedIn`). `plan_before` proves that
 each item's memberships, and the sides of each OR it keeps, take values from
-items the planner placed before it: the planner sets them only as it places
-the item, from the edges and sides whose partners it placed before, and no
-other step changes them.
+items the planner placed before it, through derived items it placed before
+it: the planner sets them only as it places the item, from the edges and
+sides whose partners and derived items it placed before, and no other step
+changes them. `plan_placedBefore` states the partners' part of it.
 [ReadOrder.lean](SqliveNarrowing/ReadOrder.lean)
 states the order the planner reads cores in. A core sits below another when
 it is an arm of a query the other reads, as a derived item's or a subquery's,
@@ -660,8 +685,12 @@ before it, and what each edge passed into the item asks. In a binding that
 matters, the planned state's facts hold (`plan_semTests`): each term holds,
 and each membership and each side of a kept OR holds. An edge's partner has
 its row in the binding or, for a subquery's source, in a binding of the
-subquery's core under it. The planner places each partner before its member,
-so by induction on the order the partner's row passes its test. That row is
+subquery's core under it. An edge through a derived item finds its partner's
+row in the binding of the derived item's arm that gives the derived item's
+row, and that binding matters to the derived item's query when the derived
+row passes its test (`derived_source_passes`). The planner places each
+partner, and each derived item an edge reads through, before its member, so
+by induction on the order the partner's row passes its test. That row is
 then a row of the partner's lookup that passes the partner's scope
 (`partner_found`), and the membership's scope passes the member's row. An
 edge passed into a derived item's arm passes because the binding's row is one

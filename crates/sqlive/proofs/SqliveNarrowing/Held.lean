@@ -24,10 +24,11 @@ def OnNames (s : Statement) (i j : Nat) : Prop :=
   ∃ cd ∈ (s.core (s.item i).core).onOf i, j ∈ cd.items
 
 /-- What an edge from `i` that `i`'s ON gives says of its partner: a lookup
-reads it alone; outside a subquery, it is another item the ON names; inside
-one, it sits in an arm of a subquery of one of the ON's conditions. -/
+reads it alone; the edge reads through no derived item (`Narrowing.split`);
+outside a subquery, the partner is another item the ON names; inside one, it
+sits in an arm of a subquery of one of the ON's conditions. -/
 def Edge.OnPartner (s : Statement) (i : Nat) (e : Edge) : Prop :=
-  (s.item e.partner).readable = true ∧
+  (s.item e.partner).readable = true ∧ e.via = none ∧
   (e.nested = false → e.partner ≠ i ∧ OnNames s i e.partner) ∧
   (e.nested = true → ∃ cd ∈ (s.core (s.item i).core).onOf i, ∃ q ∈ cd.queries,
     (s.item e.partner).core ∈ (s.query q).arms)
@@ -456,17 +457,18 @@ theorem PState.Held.narrowOn {s : Statement} (hwf : s.wellFormed = true) {st Fin
     rw [hcore]
     exact List.mem_filterMap.mpr ⟨(cd, .leftOn i), hcd, by simp⟩
   obtain ⟨hterms, hedges, hors⟩ := readCondition_sound s k cd
-  have hpartner : ∀ e : Edge, e.member = i → (e.nested = false → e.partner ≠ e.member) →
+  have hpartner : ∀ e : Edge, e.member = i → e.via = none → (e.nested = false → e.partner ≠ e.member) →
       (e.nested = false → e.partner ∈ cd.items) → (s.item e.partner).readable = true →
       e.NestedIn s cd.queries → e.OnPartner s i := by
-    intro e hm hne hin hread hnest
-    refine ⟨hread, fun hn => ⟨hm ▸ hne hn, cd, hon, hin hn⟩, fun hn => ?_⟩
-    obtain ⟨q, hq, harm⟩ := hnest hn
+    intro e hm hvn hne hin hread hnest
+    refine ⟨hread, hvn, fun hn => ⟨hm ▸ hne hn, cd, hon, hin hn⟩, fun hn => ?_⟩
+    obtain ⟨q, hq, harm⟩ := hnest.1 hn hvn
     exact ⟨cd, hon, q, hq, harm⟩
   unfold PState.narrowOn
   simp only [Narrowing.split]
   have hown := h.add (n := ⟨(readCondition s k cd).terms.filter (·.1 == i),
-      (readCondition s k cd).edges.filter (·.member == i), (readCondition s k cd).ors.filter (·.item == i)⟩)
+      (readCondition s k cd).edges.filter (Edge.ownOn i),
+      (readCondition s k cd).ors.filter (Disjunction.ownOn i)⟩)
     (fun p hp _ Z f b r honAt => by
       obtain ⟨hp', hpi⟩ := List.mem_filter.mp hp
       simp only [beq_iff_eq] at hpi
@@ -475,19 +477,20 @@ theorem PState.Held.narrowOn {s : Statement} (hwf : s.wellFormed = true) {st Fin
       rwa [hpi, show (b.set i (some r)) i = some r by simp [Bind.set]] at this)
     (fun e he _ => by
       obtain ⟨he', hei⟩ := List.mem_filter.mp he
-      simp only [beq_iff_eq] at hei
+      simp only [Edge.ownOn, Bool.and_eq_true, beq_iff_eq, Option.isNone_iff_eq_none] at hei
       obtain ⟨_, hne, hin, hread, _, hnest, hh⟩ := hedges e he'
-      rw [hei]
-      exact ⟨hpartner e hei hne hin hread hnest, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩)
+      rw [hei.1]
+      exact ⟨hpartner e hei.1 hei.2 hne hin hread hnest, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩)
     (fun d hd _ => by
       obtain ⟨hd', hdi⟩ := List.mem_filter.mp hd
-      simp only [beq_iff_eq] at hdi
+      simp only [Disjunction.ownOn, Bool.and_eq_true, beq_iff_eq, List.all_eq_true,
+        Option.isNone_iff_eq_none] at hdi
       obtain ⟨_, _, hsides, hh⟩ := hors d hd'
-      rw [hdi]
+      rw [hdi.1]
       refine ⟨fun side hside e he => ?_, fun Z f b r honAt => hh Z f _ (honAt.cond hon)⟩
       obtain ⟨hm, hne, hin, hread, _, hnest⟩ := hsides side hside e he
-      rw [hdi] at hm
-      exact ⟨hm, hpartner e hm hne hin hread hnest⟩)
+      rw [hdi.1] at hm
+      exact ⟨hm, hpartner e hm (hdi.2 side hside e he) hne hin hread hnest⟩)
   split
   · rename_i held hheld
     exact hown.update_same rfl rfl rfl (fun _ => by rw [hheld]; rfl)
@@ -528,12 +531,12 @@ theorem PState.Held.carry {s : Statement} (hwf : s.wellFormed = true) {st Fin : 
     intro x hx hl Z f b r hon har
     obtain ⟨e, he, hcm, hcp, hn, y, mc, hv, hm, hi, u, hr, hu⟩ := Transfer.mem_carried hx
     rw [hi] at hl hon har
-    obtain ⟨⟨hread, hpart, _⟩, hholds⟩ := h.edges e.member hl e he rfl
+    obtain ⟨⟨hread, _, hpart, _⟩, hholds⟩ := h.edges e.member hl e he rfl
     obtain ⟨hne, hnames⟩ := hpart hn
     have hh := hholds Z f b r hon
     have hset : (b.set e.member (some r)) e.partner = b e.partner := by simp [Bind.set, hne]
     obtain ⟨rp, hrp, hcell⟩ : ∃ rp, b e.partner = some rp ∧ (e.nulls = false → rp.cell y ≠ none) := by
-      rcases hh with ⟨x0, _, hx0⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩
+      rcases hh with ⟨x0, _, hx0⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩
       · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hx0
         obtain ⟨rp, hrp, hval⟩ := hx0
         rw [hset] at hrp
@@ -545,6 +548,8 @@ theorem PState.Held.carry {s : Statement} (hwf : s.wellFormed = true) {st Fin : 
       · obtain ⟨rp, hrp⟩ := Option.ne_none_iff_exists'.mp (har.2 e.partner hne hnames hab)
         exact ⟨rp, hrp, fun hnf => by rw [hnf] at hnul; cases hnul⟩
       · simp [hv, PValue.strict] at hst
+      · rw [hn] at hnt
+        cases hnt
     have hgood := har.1 e.partner rp hne hnames hrp
     have hut : u.holds ((b.set e.member (some r)) e.partner) = true := by
       rw [hset, hrp]
@@ -753,7 +758,7 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
         e.value.eval r' = e.memberValue.eval r ∧
         ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
         (e.nested = false → b e.partner = some r') := by
-    intro e hm hp ⟨hread, hplain, hnest⟩ hh
+    intro e hm hp ⟨hread, hvn, hplain, hnest⟩ hh
     have hpi : e.partner ≠ i := fun he => hipre (he ▸ hp)
     suffices h : ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
@@ -763,8 +768,8 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       obtain ⟨r', h1, h2, h3, h4, h5⟩ := h
       exact ⟨r', h1, h2, h3, h4, fun hn => by rw [← hset _ hpi]; exact h5 hn⟩
     refine partner_found hm hbi hh (fun hn hab => by rw [hset _ hpi]; exact hnamed _ hpi (hplain hn).2 hab)
-      (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn g' hg' b' hb' hgr r' hr' => ?_)
-      hread
+      (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn _ g' hg' b' hb' hgr r' hr' => ?_)
+      (fun d pc _ hv => by rw [hvn] at hv; cases hv) hread
     obtain ⟨cd, hcd, q', hq', harm⟩ := hnest hn
     rw [hcorei] at hcd
     have hsub := Core.onOf_queries hcd hq'

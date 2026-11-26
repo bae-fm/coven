@@ -11,6 +11,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Or.or_sound
 #print axioms SqliveNarrowing.OneOf.one_of_sound
 #print axioms SqliveNarrowing.SubqueryEdge.subquery_edge_sound
+#print axioms SqliveNarrowing.SubqueryEdge.edge_props
+#print axioms SqliveNarrowing.Passed.edge_holds
+#print axioms SqliveNarrowing.Edge.orPassed_sound
 #print axioms SqliveNarrowing.RowSubqueryEdge.row_subquery_edge_sound
 #print axioms SqliveNarrowing.PushDown.renamed_sound
 #print axioms SqliveNarrowing.PushDown.push_down_sound
@@ -95,6 +98,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_pushed
 #print axioms SqliveNarrowing.plan_order
 #print axioms SqliveNarrowing.plan_nestedOK
+#print axioms SqliveNarrowing.plan_before
 #print axioms SqliveNarrowing.plan_placedBefore
 #print axioms SqliveNarrowing.plan_restriction
 #print axioms SqliveNarrowing.Planned.bound_passes
@@ -126,6 +130,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.membershipScope_pushed
 #print axioms SqliveNarrowing.pushed_passes
 #print axioms SqliveNarrowing.partner_found
+#print axioms SqliveNarrowing.derived_source_passes
 #print axioms SqliveNarrowing.Limit.run_facts
 #print axioms SqliveNarrowing.item_passes
 #print axioms SqliveNarrowing.plan_kept_rows

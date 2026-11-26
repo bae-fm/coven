@@ -41,29 +41,34 @@ def readCore (s : Statement) (st : PState) (k : Nat) : PState :=
   let st := Transfer.carry s st k
   c.items.foldl (fun st i => PushDown.pushDown s s.fuel s.fuel st i (st.items i).term []) st
 
-/-- The items of `remaining` that wait: those taking a subquery's value from
-an item not placed yet, and those whose every partner waits
-(`Planner::waiting`). -/
+/-- The items of `remaining` that wait: those taking a subquery's value, or
+a value a derived item's arm passes on, from an item not placed yet, or
+through a derived item not placed yet, and those whose every partner waits
+(`Planner::waiting`). A derived item that an edge from its partner reads
+through gives that partner no values, so the partner counts as none of its
+partners. -/
 def waiting (st : PState) (order remaining : List Nat) : List Nat :=
   let first := remaining.filter fun i =>
-    st.edges.any (fun e => e.nested && e.member == i && !order.contains e.partner) ||
+    st.edges.any (fun e => e.nested && e.member == i && !e.placedIn order) ||
       (st.items i).ors.any fun sides => sides.any fun side =>
-        side.edges.any fun e => e.nested && !order.contains e.partner
+        side.edges.any fun e => e.nested && !e.placedIn order
   go remaining.length first
 where
   go : Nat → List Nat → List Nat
     | 0, w => w
     | f + 1, w =>
       let starved := remaining.find? fun i =>
-        let partners := (st.edges.filter (·.member == i)).map (·.partner)
+        let counted := st.edges.filter fun e => e.member == i &&
+          !st.edges.any fun back => back.member == e.partner && back.via.map (·.1) == some i
+        let partners := counted.map (·.partner)
         !w.contains i && !partners.isEmpty && partners.all w.contains
       match starved with
       | some i => go f (w ++ [i])
       | none => w
 
 /-- Place the items one by one, each taking as memberships its edges to
-items placed before it, and passing them into it when it is derived
-(`Planner::ordered`). -/
+items placed before it, through derived items placed before it, and passing
+them into it when it is derived (`Planner::ordered`). -/
 def ordered (s : Statement) (st : PState) : PState × List Nat :=
   let all := s.cores.length |> List.range |>.flatMap fun k => (s.core k).items
   go all.length all st [] []
@@ -94,9 +99,9 @@ where
               |>.orElse (fun _ => candidates.find? fun i => (s.table? i).isNone)
               |>.getD first
           | none, [] => r
-        let taken := st.edges.filter fun e => e.member == next && order.contains e.partner
+        let taken := st.edges.filter fun e => e.member == next && e.placedIn order
         let either := (st.items next).ors.filter fun sides =>
-          sides.all fun side => side.edges.all fun e => order.contains e.partner
+          sides.all fun side => side.edges.all fun e => e.placedIn order
         let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
         let st := PushDown.pushDown s s.fuel s.fuel st next none taken
         go f all st (order ++ [next]) waited

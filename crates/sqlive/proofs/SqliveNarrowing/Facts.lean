@@ -121,12 +121,14 @@ theorem Statement.KeptIn.facts {s : Statement} (h : s.wellFormed = true) {Z : Db
 /-- An edge's fact at binding `b` of core `k`: it holds of `b`, its member
 value is NULL for a missing row unless every binding holds the member's row,
 a partner outside a subquery that no LEFT JOIN adds has a row in `b`, a
-partner inside one sits in an arm of one of `k`'s subqueries, and a partner
-outside one is an item its own core lists. -/
+partner inside one sits in an arm of one of `k`'s subqueries, an edge
+through a derived item reads through one of `k` or of an arm of one of its
+subqueries (`Edge.NestedIn`), and a partner outside a subquery is an item
+its own core lists. -/
 def Edge.Fact (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (e : Edge) : Prop :=
   e.HoldsIn s Z f b ∧ e.memberStrict s ∧
     (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
-    (e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms) ∧
+    e.NestedIn s (s.core k).subqueries ∧
     (e.nested = false → e.partner ∈ (s.core (s.item e.partner).core).items)
 
 /-- An OR's fact at binding `b` of core `k`: it holds of `b`, each side
@@ -136,7 +138,7 @@ def Disjunction.Fact (s : Statement) (Z : Db) (f k : Nat) (b : Bind) (d : Disjun
   d.HoldsIn s Z f b ∧ (∀ side ∈ d.sides, side.narrows = true) ∧
     ∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧ e.memberStrict s ∧
       (e.nested = false → s.alwaysBound e.partner = true → b e.partner ≠ none) ∧
-      (e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms)
+      e.NestedIn s (s.core k).subqueries
 
 /-- Every term, edge and OR of `n` is on an item of core `k`. -/
 def Narrowing.In (s : Statement) (k : Nat) (n : Narrowing) : Prop :=
@@ -181,11 +183,8 @@ theorem readCondition_facts {s : Statement} (h : s.wellFormed = true) {k : Nat} 
     obtain ⟨k', _, hjk'⟩ := (s.wellFormed_parts h).refs k (s.cond_core_lt hcd) _ hp
     rw [((s.wellFormed_parts h).items k' (s.core_lt hjk') j' hjk').2]
     exact hjk'
-  have hnest : ∀ e : Edge, e.NestedIn s cd.queries →
-      e.nested = true → ∃ q ∈ (s.core k).subqueries, (s.item e.partner).core ∈ (s.query q).arms := by
-    intro e hn hnt
-    obtain ⟨q, hq, harm⟩ := hn hnt
-    exact ⟨q, Core.cond_queries hcd hq, harm⟩
+  have hnest : ∀ e : Edge, e.NestedIn s cd.queries → e.NestedIn s (s.core k).subqueries :=
+    fun e hn => hn.mono fun q hq => Core.cond_queries hcd hq
   refine ⟨fun p hp => (hterms p.1 p.2 hp).2 Z f b hholds, fun e he => ?_, fun d hd => ?_⟩
   · obtain ⟨_, _, hpart, _, hstrict, hn, hh⟩ := hedges e he
     exact ⟨hh Z f b hholds, hstrict, fun hnf hab => hbound _ (hpart hnf) hab, hnest e hn,
@@ -476,13 +475,13 @@ theorem PState.Sem.narrowOn {s : Statement} (h : s.wellFormed = true) {P : Cls}
       have := (hon Z f b hb (by rw [← hpi, hr]; simp)).1 p hp'
       rwa [hr] at this
     · obtain ⟨he', hei⟩ := List.mem_filter.mp he
-      simp only [beq_iff_eq] at hei
-      rw [hei, hcore] at hb ⊢
-      exact (hon Z f b hb (hei ▸ hm)).2.1 e he'
+      simp only [Edge.ownOn, Bool.and_eq_true, beq_iff_eq] at hei
+      rw [hei.1, hcore] at hb ⊢
+      exact (hon Z f b hb (hei.1 ▸ hm)).2.1 e he'
     · obtain ⟨hd', hdi⟩ := List.mem_filter.mp hd
-      simp only [beq_iff_eq] at hdi
-      rw [hdi, hcore] at hb ⊢
-      exact (hon Z f b hb (hdi ▸ hm)).2.2 d hd'
+      simp only [Disjunction.ownOn, Bool.and_eq_true, beq_iff_eq] at hdi
+      rw [hdi.1, hcore] at hb ⊢
+      exact (hon Z f b hb (hdi.1 ▸ hm)).2.2 d hd'
   have hothersIn : (n.split i).2.In s k :=
     ⟨fun p hp => hin.1 p (List.mem_filter.mp hp).1, fun e he => hin.2.1 e (List.mem_filter.mp he).1,
       fun d hd => hin.2.2 d (List.mem_filter.mp hd).1⟩
@@ -627,7 +626,7 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
   have hpk : P Z f (s.item e.partner).core b := by rw [hcp, ← hcm]; exact hb
   have hh' := hh
   obtain ⟨rp, hrp, hcell⟩ : ∃ rp, b e.partner = some rp ∧ (e.nulls = false → rp.cell y ≠ none) := by
-    rcases hh' with ⟨x, _, hx⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩
+    rcases hh' with ⟨x, _, hx⟩ | ⟨hnul, _, hab, _, _⟩ | ⟨hst, _, _, _⟩ | ⟨_, _, _, _, hnt, _⟩
     · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hx
       obtain ⟨rp, hrp, hval⟩ := hx
       refine ⟨rp, hrp, fun _ => ?_⟩
@@ -638,6 +637,8 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
     · obtain ⟨rp, hrp⟩ := Option.ne_none_iff_exists'.mp (hpart hn hab)
       exact ⟨rp, hrp, fun hnf => by rw [hnf] at hnul; cases hnul⟩
     · simp [hv, PValue.strict] at hst
+    · rw [hn] at hnt
+      cases hnt
   have hut : u.holds (b e.partner) = true := by
     rw [hrp]
     rcases hu with hu | ⟨hnf, hu⟩

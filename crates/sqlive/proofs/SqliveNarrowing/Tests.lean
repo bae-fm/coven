@@ -440,13 +440,9 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
       | false => rfl
       | true =>
         obtain ⟨k', q, hq, harm⟩ := hnestOK hn
-        have hk' : k' < s.cores.length := by
-          refine Decidable.byContradiction fun hk' => ?_
-          rw [s.core_out hk'] at hq
-          cases hq
-        have := (s.wellFormed_parts hwf).subqueryParents k' hk' q hq _ harm
-        rw [hpart, hcore run_j hrun_j, hparent] at this
-        cases this
+        rw [hpart, hcore run_j hrun_j] at harm
+        obtain rfl := s.wellFormed_armOf hwf harm (by rw [harms]; simp)
+        exact absurd hq (s.wellFormed_root hwf k')
     obtain ⟨hholds, hrj, hboundj⟩ := hmembers m hm ⟨run_j, hrun_j, hpart.symm⟩
     have hbi := hrows run_i' hrun_i
     have hbj := hrows run_j hrun_j

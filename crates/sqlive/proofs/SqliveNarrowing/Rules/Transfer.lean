@@ -128,7 +128,7 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
     (hh : e.HoldsIn s db f b) (ht : t.holds (b e.partner))
     (hr : t.renamed (fun c => if c = y then some mc else none) = some t') :
     t'.holds (b e.member) := by
-  rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩ | ⟨hvs, _⟩
+  rcases hh with ⟨x, hx, hp⟩ | ⟨_, _, _, hx, hnull⟩ | ⟨hvs, _⟩ | ⟨_, _, _, _, hnt, _⟩
   · simp only [hm, PValue.on] at hx
     simp only [hn, Bool.false_eq_true, ite_false] at hp
     obtain ⟨r, hb, hval⟩ := hp
@@ -170,6 +170,8 @@ theorem transfer_sound {s : Statement} {db : Db} {f : Nat} {b : Bind} {e : Edge}
       · simp [hcy] at hc
   · -- A column is a strict value.
     simp [hv, PValue.strict] at hvs
+  · rw [hn] at hnt
+    cases hnt
 
 theorem orAll_isSome {l : List (Option STerm)} {t : STerm} (h : orAll l = some t) :
     ∀ o ∈ l, o.isSome := by

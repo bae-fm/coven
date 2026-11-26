@@ -4,7 +4,7 @@ import SqliveNarrowing.Rules.RowSubqueryEdge
 /-! A row value equality between items, `(a.x1, ..., a.xn) = (b.y1, ...,
 b.yn)`, narrows as the equalities of its pairs: it has the truth of the AND
 of `a.xi = b.yi`, NULLs included, so each pair gives the edges an equality
-between two items gives (`read_condition`, `Edge.edge`). A pair naming one
+between two items gives (`read_condition`, `Edge.orPassed`). A pair naming one
 item only, or whose sides compare by another affinity or collation, gives
 none. -/
 namespace SqliveNarrowing.RowEdge
@@ -16,7 +16,7 @@ def readCondition : ReadCondition := fun s k cd =>
   | .rowEq ls rs =>
     if !cd.queries.isEmpty ∨ cd.items.eraseDups.length = 1 then none
     else some { edges := (ls.zip rs).flatMap fun (l, r) =>
-      (Edge.edge s k l r false).toList ++ (Edge.edge s k r l true).toList }
+      (Edge.orPassed s k l r false).toList ++ (Edge.orPassed s k r l true).toList }
   | _ => none
 
 /-- A row value equal to another: each pair's sides hold one value. -/
@@ -72,16 +72,14 @@ theorem row_edge_sound : ReadCondition.Sound readCondition where
         · exact ⟨p, Or.inl ⟨x, hl, hp⟩, rfl⟩
         · exact ⟨p, Or.inr ⟨x, hr, hp⟩, rfl⟩
       rcases he with he | he
-      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
-        refine ⟨hk, fun _ => hne, fun _ => hnamed r (Or.inr rfl) _ (Edge.edge_partner_mem he), hread,
-          Edge.edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
+      · obtain ⟨hk, hne, hin, hread, hstrict, hnest, hh⟩ := Edge.orPassed_sound he (hnamed r (Or.inr rfl))
+        refine ⟨hk, hne, hin, hread, hstrict, hnest, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
-        exact Edge.edge_holds he hl hr
-      · obtain ⟨_, hk, hnest, _, _, _, _, hne, hread, _⟩ := Edge.edge_facts he
-        refine ⟨hk, fun _ => hne, fun _ => hnamed l (Or.inl rfl) _ (Edge.edge_partner_mem he), hread,
-          Edge.edge_memberStrict he, fun h => by simp [hnest] at h, fun db f b hc => ?_⟩
+        exact hh db f b _ x hl hr
+      · obtain ⟨hk, hne, hin, hread, hstrict, hnest, hh⟩ := Edge.orPassed_sound he (hnamed l (Or.inl rfl))
+        refine ⟨hk, hne, hin, hread, hstrict, hnest, fun db f b hc => ?_⟩
         obtain ⟨x, hl, hr⟩ := hside hc
-        exact Edge.edge_holds he hr hl
+        exact hh db f b _ x hr hl
     · cases h
 
 end SqliveNarrowing.RowEdge
