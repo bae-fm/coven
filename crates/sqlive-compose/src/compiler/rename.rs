@@ -30,8 +30,7 @@ pub(crate) fn renamed(prefix: &str, name: &str) -> String {
 pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
     let tokens = lex::tokens(sql);
     let declared = declarations(sql, &tokens);
-    let mut names: BTreeSet<String> = declared.iter().map(|cte| cte.name.clone()).collect();
-    names.extend(relations.iter().map(|relation| relation.to_ascii_lowercase()));
+    let names = renamed_names(sql, relations);
     if names.is_empty() {
         return sql.to_owned();
     }
@@ -58,10 +57,14 @@ pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
     lex::apply(sql, &edits)
 }
 
-/// The names of the CTEs the SQL declares, at any depth, lowercase.
-pub(crate) fn declared_names(sql: &str) -> BTreeSet<String> {
+/// The names `rename` renames, lowercase: the CTEs the SQL declares, at any
+/// depth, and `relations`.
+pub(crate) fn renamed_names(sql: &str, relations: &[String]) -> BTreeSet<String> {
     let tokens = lex::tokens(sql);
-    declarations(sql, &tokens).into_iter().map(|cte| cte.name).collect()
+    let mut names: BTreeSet<String> =
+        declarations(sql, &tokens).into_iter().map(|cte| cte.name).collect();
+    names.extend(relations.iter().map(|relation| relation.to_ascii_lowercase()));
+    names
 }
 
 /// The CTEs the SQL declares, at any depth.

@@ -128,8 +128,9 @@ pub(crate) fn compile(
 /// are not among them: a spread's fragment's own SQL reads what it reads.
 fn own_reads(header: &Header) -> BTreeSet<String> {
     let tokens = lex::tokens(&header.sql);
-    let mut own = rename::declared_names(&header.sql);
-    own.extend(header.relations().iter().map(|relation| relation.name.to_ascii_lowercase()));
+    let relations: Vec<String> =
+        header.relations().iter().map(|relation| relation.name.clone()).collect();
+    let own = rename::renamed_names(&header.sql, &relations);
     core::all_from_items(&header.sql, &tokens)
         .iter()
         .filter_map(core::FromItem::table)
