@@ -1,4 +1,7 @@
+use super::padded;
+use crate::compiler::core::outline;
 use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages};
+use crate::compiler::lex::tokens;
 
 #[test]
 fn a_rowid_is_no_option_and_tells_a_missing_row_from_a_row() {
@@ -92,5 +95,80 @@ fn a_column_read_through_a_query_in_from_is_null_where_that_query_gives_null() {
             ["src/lib.rs:1:1: value can be NULL, and the header types it String, which holds no NULL"],
             "{sql}"
         );
+    }
+}
+
+#[test]
+fn a_spread_in_a_join_in_parentheses_is_an_option_where_a_join_gives_it_null() {
+    for (from, ty) in [
+        // A LEFT JOIN between the items in the parentheses.
+        (
+            "issues AS i JOIN (projects AS j LEFT JOIN @crate::Person AS a \
+             ON a.person_id = j.id) ON j.id = i.project_id",
+            "Option < crate :: Person >",
+        ),
+        (
+            "issues AS i JOIN (projects AS j JOIN (projects AS k \
+             LEFT JOIN @crate::Person AS a ON a.person_id = k.id) ON k.id = j.id) \
+             ON j.id = i.project_id",
+            "Option < crate :: Person >",
+        ),
+        // No join gives the spread NULL.
+        (
+            "issues AS i JOIN (projects AS j JOIN @crate::Person AS a ON a.person_id = j.id) \
+             ON j.id = i.project_id",
+            "crate :: Person",
+        ),
+        (
+            "issues AS i JOIN (@crate::Person AS a LEFT JOIN projects AS j \
+             ON j.id = a.person_id) ON a.person_id = i.assignee_id",
+            "crate :: Person",
+        ),
+    ] {
+        let lib = format!(
+            "sqlive_compose::fragment!(Person, r#\"SELECT p.id AS person_id FROM people AS p\"#);\n\
+             sqlive_compose::fragment!(Case, r#\"SELECT a.* FROM {from}\"#);"
+        );
+        let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{from}: {errors:?}"));
+        let code = code_of(&output, "Case.rs");
+        assert!(code.contains(&format!("pub (crate) a : {ty} ,")), "{from}: {code}");
+    }
+}
+
+#[test]
+fn sql_in_a_join_in_parentheses_is_read_as_the_rest_of_from_is() {
+    // A CTE the call declares, and the parent row of a value spread.
+    let lib = r##"
+sqlive_compose::fragment!(
+    Said on comments { said: String },
+    r#"SELECT json_array(c.body) AS said FROM comments AS c WHERE c.id = @parent.id"#
+);
+sqlive_compose::read!(Case { said: Option<String> }, r#"
+    WITH mine AS (SELECT id, issue_id FROM comments)
+    SELECT i.title, @crate::Said(parent: c) AS said
+    FROM issues AS i JOIN (mine AS m JOIN comments AS c ON c.id = m.id) ON m.issue_id = i.id
+"#);
+"##;
+    let output = compile_lib(lib).unwrap_or_else(|errors| panic!("{errors:?}"));
+    let case = output.calls.iter().find(|call| call.name == "Case").unwrap();
+    assert_eq!(case.reads.iter().collect::<Vec<_>>(), ["comments", "issues"]);
+}
+
+#[test]
+fn a_join_pads_the_items_in_the_parentheses_it_adds() {
+    // sqlive refuses a read that LEFT JOINs a spread in parentheses, and a
+    // RIGHT or FULL join, so no compile reaches these.
+    for (from, expected) in [
+        ("i LEFT JOIN (a JOIN b ON 1) ON 1", [Some(true), Some(true)]),
+        ("i LEFT JOIN ((a JOIN b ON 1)) ON 1", [Some(true), Some(true)]),
+        ("(a JOIN b ON 1) RIGHT JOIN i ON 1", [Some(true), Some(true)]),
+        ("i JOIN (a RIGHT JOIN b ON 1) ON 1", [Some(true), Some(false)]),
+        ("i JOIN (a FULL JOIN b ON 1) ON 1", [Some(true), Some(true)]),
+        ("i JOIN (a JOIN b ON 1) ON 1 FULL JOIN j ON 1", [Some(true), Some(true)]),
+        ("(a JOIN b ON 1) LEFT JOIN i ON 1", [Some(false), Some(false)]),
+    ] {
+        let sql = format!("SELECT 1 FROM {from}");
+        let core = outline(&sql, &tokens(&sql));
+        assert_eq!([padded(&core.from, "a"), padded(&core.from, "b")], expected, "{from}");
     }
 }

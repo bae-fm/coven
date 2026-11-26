@@ -1130,8 +1130,8 @@ on the fragment:
 
 | Spread | Field |
 |---|---|
-| In `FROM`, or the right side of an inner join | `Fragment` |
-| On the right of a `LEFT JOIN` | `Option<Fragment>` |
+| In `FROM`, where no join gives it NULL | `Fragment` |
+| In `FROM`, where a join gives it NULL: on the right of a `LEFT JOIN`, on the left of a `RIGHT JOIN`, or on either side of a `FULL JOIN`, in parentheses or not | `Option<Fragment>` |
 | As a value, when the fragment always returns one row | `Fragment` |
 | As a value otherwise | `Option<Fragment>` |
 

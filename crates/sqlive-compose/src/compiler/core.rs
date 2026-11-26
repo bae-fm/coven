@@ -42,6 +42,9 @@ pub(crate) enum Source {
     Qualified { name: String },
     /// A subquery or a table function.
     Derived,
+    /// A join in parentheses, with the items it joins. Its own joins pad
+    /// those items, and the join that adds it pads them all.
+    Parenthesized(Vec<FromItem>),
 }
 
 impl FromItem {
@@ -49,9 +52,21 @@ impl FromItem {
     pub(crate) fn table(&self) -> Option<&str> {
         match &self.source {
             Source::Table { name, .. } | Source::Qualified { name } => Some(name),
-            Source::Derived => None,
+            Source::Derived | Source::Parenthesized(_) => None,
         }
     }
+}
+
+/// Each item of `items`, and after a join in parentheses, each item in it.
+pub(crate) fn every_item(items: &[FromItem]) -> Vec<&FromItem> {
+    let mut every = Vec::new();
+    for item in items {
+        every.push(item);
+        if let Source::Parenthesized(inner) = &item.source {
+            every.extend(every_item(inner));
+        }
+    }
+    every
 }
 
 /// What a result column is.
@@ -408,14 +423,16 @@ pub(crate) fn alias_at(
     (!keyword).then_some((alias, 1))
 }
 
-/// Every FROM item of the statement, at any depth. The table that a DELETE
-/// deletes from is no FROM item: the statement reads nothing of it by naming it.
+/// Every FROM item of the statement, at any depth, in parentheses or not. The
+/// table that a DELETE deletes from is no FROM item: the statement reads
+/// nothing of it by naming it.
 pub(crate) fn all_from_items(sql: &str, tokens: &[Token]) -> Vec<FromItem> {
     let mut items = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         let follows = |word: &str| index > 0 && tokens[index - 1].is_word(sql, word);
         if token.is_word(sql, "from") && !follows("distinct") && !follows("delete") {
-            items.extend(from_items(sql, tokens, index + 1..clause_end(sql, tokens, index)));
+            let clause = from_items(sql, tokens, index + 1..clause_end(sql, tokens, index));
+            items.extend(every_item(&clause).into_iter().cloned());
         }
     }
     items
@@ -457,6 +474,9 @@ pub(crate) fn from_item(
     let mut next = index + 1;
     if token.is_symbol(sql, '(') {
         let Some(close) = matching(sql, tokens, index) else { return (item, None) };
+        if !opens_query(sql, tokens, index) {
+            item.source = Source::Parenthesized(from_items(sql, tokens, index + 1..close));
+        }
         next = close + 1;
     } else if let Some(name) = token.name(sql) {
         let after = tokens.get(next);
@@ -544,7 +564,8 @@ fn reads_outer_rows_only(
         }
         let dot = tokens.get(index + 1).is_some_and(|dot| dot.is_symbol(sql, '.'));
         if let Some(qualifier) = tokens[index].name(sql).filter(|_| dot) {
-            if from.iter().any(|item| item.qualifier.as_deref() == Some(qualifier.as_str())) {
+            let own = every_item(from);
+            if own.iter().any(|item| item.qualifier.as_deref() == Some(qualifier.as_str())) {
                 return false;
             }
             qualified = true;
