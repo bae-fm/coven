@@ -13,9 +13,9 @@
 
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::schema_objects::read_view;
-use crate::scope_edge::{Member, MemberValue};
+use crate::scope_edge::{Edge, Member, MemberValue};
 use crate::scope_one_of::constant;
-use crate::scope_plan::{is_name, read_select, Edge, Object, Planner, Source, Unread};
+use crate::scope_plan::{is_name, read_select, Object, Planner, Source, Unread};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;

@@ -10,8 +10,8 @@
 //! takes values from `x`, never the reverse, and `x` is placed before `col`'s
 //! source (`Planner::ordered`).
 
-use crate::scope_edge::Member;
-use crate::scope_plan::{is_name, Edge, Planner};
+use crate::scope_edge::{Edge, Member, Nesting};
+use crate::scope_plan::{is_name, Planner};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, OneSelect, Operator, ResultColumn, Select};
 
@@ -115,8 +115,7 @@ impl Planner<'_> {
             member,
             partner,
             value,
-            nested: true,
-            through: None,
+            nesting: Nesting::Subquery,
             nulls: false,
             pushed: false,
         })

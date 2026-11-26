@@ -1,8 +1,9 @@
 //! The order a statement's sources take values in: each after the sources
 //! whose values its memberships compare with (SPEC.md section 7).
 
+use crate::scope_edge::{Edge, Nesting};
 use crate::scope_order::SortedLimit;
-use crate::scope_plan::{Edge, Membership, Planner, Sources};
+use crate::scope_plan::{Membership, Planner, Sources};
 
 /// A planner's edges by the items they join, each as its position in the
 /// planner's edges, in order.
@@ -161,7 +162,7 @@ impl Planner<'_> {
             let nested = edges.by_member[item]
                 .iter()
                 .map(|edge| &self.edges[*edge])
-                .any(|edge| edge.nested && !edge.placed(placed));
+                .any(|edge| edge.nesting.nested() && !edge.placed(placed));
             if nested || self.waits_for_or(item, placed) {
                 waiting[item] = true;
                 uncounted.push(item);
@@ -173,7 +174,7 @@ impl Planner<'_> {
         let counted = |edge: &Edge| {
             edges.by_member[edge.partner]
                 .iter()
-                .all(|back| self.edges[*back].through != Some(edge.member.item))
+                .all(|back| self.edges[*back].nesting != Nesting::Through(edge.member.item))
         };
         // How many of each item's counted edges have a partner that doesn't
         // wait.

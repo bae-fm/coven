@@ -27,7 +27,7 @@ use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
-use crate::scope_edge::{Member, MemberValue};
+use crate::scope_edge::{Edge, MemberValue};
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
 use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
@@ -234,7 +234,8 @@ pub(crate) struct Membership {
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
     pub(crate) nulls: bool,
-    /// Whether the partner is the source of a subquery's value.
+    /// Whether the partner sits in a core inside the member's
+    /// (`Nesting::nested`).
     pub(crate) nested: bool,
     /// Whether the planner passed the edge into a derived item's arm.
     pub(crate) pushed: bool,
@@ -249,7 +250,7 @@ impl Membership {
             partner: edge.partner,
             value: edge.value.clone(),
             nulls: edge.nulls,
-            nested: edge.nested,
+            nested: edge.nesting.nested(),
             pushed: edge.pushed,
         }
     }
@@ -944,10 +945,13 @@ impl Narrowing {
         let (own_edges, edges) = self
             .edges
             .into_iter()
-            .partition(|edge| edge.member.item == item && edge.through.is_none());
+            .partition(|edge| edge.member.item == item && edge.nesting.through().is_none());
         let (own_ors, ors) = self.ors.into_iter().partition(|or| {
             or.item == item
-                && or.sides.iter().all(|side| side.edges.iter().all(|edge| edge.through.is_none()))
+                && or
+                    .sides
+                    .iter()
+                    .all(|side| side.edges.iter().all(|edge| edge.nesting.through().is_none()))
         });
         (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
     }
@@ -956,38 +960,6 @@ impl Narrowing {
         self.terms.extend(other.terms);
         self.edges.extend(other.edges);
         self.ors.extend(other.ors);
-    }
-}
-
-/// `member`'s column equals a value of `partner`'s rows.
-#[derive(Clone)]
-pub(crate) struct Edge {
-    /// The column that takes values from `partner`.
-    pub(crate) member: Member,
-    pub(crate) partner: usize,
-    pub(crate) value: PartnerValue,
-    /// Whether `partner` sits in a core inside the member's: the source of a
-    /// subquery's value that the member's column is compared with, or the
-    /// source a derived item's arm passes the compared column on from
-    /// (`through`). The member waits for it.
-    pub(crate) nested: bool,
-    /// The derived item that can't be read alone whose column the
-    /// equality compares, and whose one arm passes that column on
-    /// unchanged from `partner` (`derived::passed_source`). The member
-    /// waits for it too.
-    pub(crate) through: Option<usize>,
-    /// Whether the condition is `IS`, which matches a NULL with a NULL.
-    pub(crate) nulls: bool,
-    /// Whether the planner passed the edge into a derived item's arm from
-    /// an edge of the derived item.
-    pub(crate) pushed: bool,
-}
-
-impl Edge {
-    /// Whether `placed` holds the partner, and the derived item the edge
-    /// reads through, if any: then the member can take the partner's values.
-    pub(crate) fn placed(&self, placed: &[bool]) -> bool {
-        placed[self.partner] && self.through.is_none_or(|through| placed[through])
     }
 }
 

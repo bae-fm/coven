@@ -179,7 +179,7 @@ fn partition_column(
         match &edge.member.value {
             MemberValue::Column(column)
                 if edge.member.item == item
-                    && edge.through.is_none()
+                    && edge.nesting.through().is_none()
                     && planner.items[edge.partner].core != core =>
             {
                 Some(column.clone())

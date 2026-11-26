@@ -13,7 +13,8 @@
 //! then holds the OR of its sides' scopes (`scope_lookup.rs`). The model
 //! states the rule as `Or.readCondition` in `crates/sqlive/proofs`.
 
-use crate::scope_plan::{read_condition, Edge, Membership, Narrowing, Planner, Subqueries};
+use crate::scope_edge::Edge;
+use crate::scope_plan::{read_condition, Membership, Narrowing, Planner, Subqueries};
 use crate::scope_term::ScopeTerm;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Operator};
@@ -138,7 +139,7 @@ impl Planner<'_> {
             .ors
             .iter()
             .flatten()
-            .any(|side| side.edges.iter().any(|edge| edge.nested && !edge.placed(placed)))
+            .any(|side| side.edges.iter().any(|edge| edge.nesting.nested() && !edge.placed(placed)))
     }
 
     /// The ORs on `item` whose sides take values only from sources placed

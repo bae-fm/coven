@@ -8,12 +8,67 @@
 use crate::from_item::Columns;
 use std::sync::Arc;
 
-use crate::scope_plan::{is_name, Edge, PartnerValue, Planner};
+use crate::scope_plan::{is_name, PartnerValue, Planner};
 use crate::scope_row::{item_row_term, RowTerm};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, strict, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::{Expr, Name};
+
+/// `member`'s column equals a value of `partner`'s rows.
+#[derive(Clone)]
+pub(crate) struct Edge {
+    /// The column that takes values from `partner`.
+    pub(crate) member: Member,
+    pub(crate) partner: usize,
+    pub(crate) value: PartnerValue,
+    /// Where `partner` sits for the member.
+    pub(crate) nesting: Nesting,
+    /// Whether the condition is `IS`, which matches a NULL with a NULL.
+    pub(crate) nulls: bool,
+    /// Whether the planner passed the edge into a derived item's arm from
+    /// an edge of the derived item.
+    pub(crate) pushed: bool,
+}
+
+impl Edge {
+    /// Whether `placed` holds the partner, and the derived item the edge
+    /// reads through, if any: then the member can take the partner's values.
+    pub(crate) fn placed(&self, placed: &[bool]) -> bool {
+        placed[self.partner] && self.nesting.through().is_none_or(|through| placed[through])
+    }
+}
+
+/// Where an edge's partner sits for its member.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nesting {
+    /// An item the condition names, in the member's core or around it.
+    Named,
+    /// The source of a subquery's value that the member's column is
+    /// compared with, in the subquery's core. The member waits for it.
+    Subquery,
+    /// The source that this derived item, which can't be read alone, passes
+    /// the compared column on from unchanged through its one arm
+    /// (`derived::passed_source`). The member waits for the source and the
+    /// derived item.
+    Through(usize),
+}
+
+impl Nesting {
+    /// Whether the partner sits in a core inside the member's, which the
+    /// member waits for.
+    pub(crate) fn nested(self) -> bool {
+        self != Self::Named
+    }
+
+    /// The derived item the edge reads its partner through, if any.
+    pub(crate) fn through(self) -> Option<usize> {
+        match self {
+            Self::Through(derived) => Some(derived),
+            Self::Named | Self::Subquery => None,
+        }
+    }
+}
 
 impl Planner<'_> {
     /// The member column `member_expr`, written in `core`, names: a bare
@@ -261,15 +316,7 @@ impl Planner<'_> {
         value: PartnerValue,
     ) -> Option<Edge> {
         self.items[partner].source.from.as_ref()?;
-        Some(Edge {
-            member,
-            partner,
-            value,
-            nested: false,
-            through: None,
-            nulls: false,
-            pushed: false,
-        })
+        Some(Edge { member, partner, value, nesting: Nesting::Named, nulls: false, pushed: false })
     }
 
     /// The edge from `member` to the source that `derived`'s column `column`
@@ -290,8 +337,7 @@ impl Planner<'_> {
             member,
             partner: source,
             value,
-            nested: true,
-            through: Some(derived),
+            nesting: Nesting::Through(derived),
             nulls: false,
             pushed: false,
         })
@@ -311,7 +357,7 @@ impl Planner<'_> {
         let edge = self.edge(core, member_expr, other, first)?;
         // A derived item's NULL says nothing of the source its arm passes
         // the column on from.
-        if edge.through.is_some() {
+        if edge.nesting.through().is_some() {
             return None;
         }
         self.items[edge.partner].always_bound().then_some(Edge { nulls: true, ..edge })
@@ -335,7 +381,7 @@ impl Planner<'_> {
     pub(crate) fn carry_terms(&mut self, core: usize) {
         let mut carried: Vec<(usize, ScopeTerm)> = Vec::new();
         for edge in &self.edges {
-            if edge.nested
+            if edge.nesting.nested()
                 || self.items[edge.member.item].core != core
                 || self.items[edge.partner].core != core
             {
