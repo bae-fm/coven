@@ -50,7 +50,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     let mut files = Vec::new();
     let mut manifest = model::Manifest::default();
     let mut warnings = Vec::new();
-    let mut reads = BTreeMap::new();
+    let mut reported = BTreeMap::new();
     let mut failed: BTreeSet<usize> = order.failed;
     for &position in &order.compile {
         let (call, header) = calls[position];
@@ -70,7 +70,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
                     manifest.fragments.push(record);
                 }
                 warnings.extend(compiled.warnings);
-                reads.insert(position, compiled.reads);
+                reported.insert(position, CompiledCall::of(call, header, compiled.reads));
             }
             Err(error) => {
                 errors.push(error);
@@ -85,14 +85,13 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     }
     let manifest = serde_json::to_string_pretty(&manifest)
         .map_err(|error| setup_error(Cause::Manifest(error)))?;
-    let reported = calls
-        .iter()
-        .enumerate()
-        .map(|(position, (call, header))| {
-            CompiledCall::of(call, header, reads.remove(&position).unwrap_or_default())
-        })
-        .collect();
-    Ok(Output { files, manifest, read: walked.read, warnings, calls: reported })
+    Ok(Output {
+        files,
+        manifest,
+        read: walked.read,
+        warnings,
+        calls: reported.into_values().collect(),
+    })
 }
 
 fn error_of(call: &Call, concerns: &str, cause: Cause) -> CompileError {

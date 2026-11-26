@@ -58,6 +58,12 @@ pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
     lex::apply(sql, &edits)
 }
 
+/// The names of the CTEs the SQL declares, at any depth, lowercase.
+pub(crate) fn declared_names(sql: &str) -> BTreeSet<String> {
+    let tokens = lex::tokens(sql);
+    declarations(sql, &tokens).into_iter().map(|cte| cte.name).collect()
+}
+
 /// The CTEs the SQL declares, at any depth.
 fn declarations(sql: &str, tokens: &[Token]) -> Vec<Declared> {
     let mut declared = Vec::new();
