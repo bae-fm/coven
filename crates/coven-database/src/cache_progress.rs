@@ -96,7 +96,9 @@ pub(crate) fn covered(db: &StoreSql, file: &FileRef, device: DeviceId) -> Result
         crate::FilePlace::DeviceOnly { device: on } if on == device => Ok(file.size()),
         crate::FilePlace::DeviceOnly { .. } => Ok(0),
         crate::FilePlace::Cloud { .. } => {
-            let held = held(db, &[file])?.pop().ok_or(DbError::DamagedDatabase)?;
+            let held = held(db, &[file])?.pop().ok_or(DbError::Invariant {
+                what: "the statement returns a row for each stored file",
+            })?;
             covered_by(&held, file)
         }
     }
@@ -126,7 +128,9 @@ pub(crate) fn pin_progress(
             crate::FilePlace::DeviceOnly { device: on } if on == device => (file.size(), true),
             crate::FilePlace::DeviceOnly { .. } => (0, false),
             crate::FilePlace::Cloud { .. } => {
-                let held = held.next().ok_or(DbError::DamagedDatabase)?;
+                let held = held.next().ok_or(DbError::Invariant {
+                    what: "the statement returns a row for each stored file",
+                })?;
                 (covered_by(&held, file)?, held.kept)
             }
         };

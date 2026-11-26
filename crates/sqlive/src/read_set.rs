@@ -149,10 +149,10 @@ impl Answers {
         lookups: &mut Lookups<'_>,
     ) -> Result<bool, NoAnswer> {
         // A question's answer doesn't depend on whose SQL asks it.
-        let plain = match judging {
-            Judging::Host(question) => *question,
-            question => question,
-        };
+        let mut plain = judging;
+        while let Judging::Host(question) = plain {
+            plain = *question;
+        }
         match plain {
             Judging::Partner(lookup, value) => {
                 let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value).owned());
@@ -175,7 +175,7 @@ impl Answers {
                 self.rows.insert(key, found);
                 Ok(found)
             }
-            Judging::Host(_) => unreachable!("a question names its host once"),
+            Judging::Host(_) => lookups(judging),
         }
     }
 }
