@@ -1,5 +1,5 @@
 use super::{SchemaProbe, StandInFunction};
-use crate::{ReadReport, ReadRows};
+use crate::{ColumnNulls, ReadReport, ReadRows};
 
 const SCHEMA: &str =
     "CREATE TABLE people (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, note TEXT) STRICT;
@@ -36,7 +36,7 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
             (
                 column.name.as_str(),
                 origin.map(|origin| (origin.table.as_str(), origin.declared_type.as_deref())),
-                !column.nulls.nullable(),
+                column.nulls.as_ref().is_some_and(|nulls| !nulls.nullable()),
             )
         })
         .collect();
@@ -64,7 +64,7 @@ fn never_null(sql: &str) -> bool {
     let probe = SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
     assert!(statement.columns[0].origin.is_some(), "{sql}");
-    !statement.columns[0].nulls.nullable()
+    statement.columns[0].nulls.as_ref().is_some_and(|nulls| !nulls.nullable())
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn a_table_functions_column_names_the_function_and_can_hold_null() {
             ("json_each", "value", None),
             "{sql}"
         );
-        assert!(column.nulls.nullable(), "{sql}");
+        assert!(column.nulls.as_ref().is_some_and(ColumnNulls::nullable), "{sql}");
     }
     let every = probe.prepare("SELECT * FROM json_each('[1]')").unwrap();
     let names: Vec<_> = every.columns.iter().map(|column| column.name.as_str()).collect();

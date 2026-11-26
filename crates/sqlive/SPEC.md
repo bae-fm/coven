@@ -1791,9 +1791,9 @@ give the column (`SelectNull`): no NULL; a computed value other than a literal
 and a scalar subquery, which can be NULL as far as the probe can tell; the
 literal NULL; NULL only where the SELECT has no row of one of its FROM items,
 which a number tells from its others; or a value that can be NULL otherwise.
-Of every column of a statement that its parser can't read, and of a SELECT
-whose columns it can't tell, the probe says that it can hold NULL and that its
-row can be missing. `SchemaProbe::table_columns`
+Of the columns of a statement that its parser can't read, and of a SELECT
+whose columns it can't tell, the probe says none of this: their `nulls` is
+`None`. `SchemaProbe::table_columns`
 lists the columns of a table or view in the order of an INSERT with no column list, each
 with whether the table declares it NOT NULL, so that such a tool can check a
 value it binds against the column it fills.

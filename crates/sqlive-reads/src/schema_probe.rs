@@ -50,8 +50,11 @@ pub struct ProbedColumn {
     /// The column of a table or table function that the result is, when it is
     /// one unchanged.
     pub origin: Option<ColumnOrigin>,
-    /// Where the statement can give NULL in the column.
-    pub nulls: ColumnNulls,
+    /// Where the statement can give NULL in the column, or `None` when the
+    /// probe can't read the statement, or can't tell which columns a SELECT
+    /// gives: it knows then neither where the column can be NULL nor how many
+    /// SELECTs give it values.
+    pub nulls: Option<ColumnNulls>,
 }
 
 /// What SQLite made of a statement it prepared.
@@ -135,7 +138,7 @@ impl SchemaProbe {
                     _ => None,
                 };
             let nulls = match &statement_nulls {
-                StatementNulls::Select(columns) => columns[position].clone(),
+                StatementNulls::Select(columns) => Some(columns[position].clone()),
                 StatementNulls::Write => {
                     let never_null = match &origin {
                         Some(origin) => table_column_never_null(
@@ -146,11 +149,9 @@ impl SchemaProbe {
                         None => false,
                     };
                     let null = if never_null { SelectNull::Never } else { SelectNull::Value };
-                    ColumnNulls { selects: vec![null], row_can_be_missing: false }
+                    Some(ColumnNulls { selects: vec![null], row_can_be_missing: false })
                 }
-                StatementNulls::Unknown => {
-                    ColumnNulls { selects: vec![SelectNull::Value], row_can_be_missing: true }
-                }
+                StatementNulls::Unknown => None,
             };
             columns.push(ProbedColumn { name: metadata.name().to_owned(), origin, nulls });
         }

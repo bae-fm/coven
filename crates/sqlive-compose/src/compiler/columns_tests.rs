@@ -353,3 +353,17 @@ fn a_compound_gives_a_spread_a_row_or_no_row() {
         assert_eq!(compound_errors("", &format!("{first} {later}")), [""; 0], "{later}");
     }
 }
+
+#[test]
+fn a_column_of_a_statement_the_probe_cant_read_can_be_null() {
+    // SQLite reads a comment that never ends, and the probe's parser doesn't.
+    // No live query runs a write, so nothing else refuses one.
+    let lib = r##"sqlive_compose::write!(Redraft(id: String) { value: String }, r#"
+    UPDATE drafts SET body = 'x' WHERE id = :id RETURNING upper(id) AS value /* never ends"#);"##;
+    assert_eq!(
+        messages(compile_lib(lib)),
+        ["src/lib.rs:1:1: value can be NULL, and the header types it String, which holds no NULL"]
+    );
+    compile_lib(&lib.replace("value: String", "value: Option<String>"))
+        .unwrap_or_else(|errors| panic!("{errors:?}"));
+}

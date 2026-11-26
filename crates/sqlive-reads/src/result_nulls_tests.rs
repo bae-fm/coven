@@ -1,4 +1,9 @@
-use crate::{SchemaProbe, SelectNull};
+use crate::{ColumnNulls, ProbedColumn, SchemaProbe, SelectNull};
+
+/// Where the probe says `column`, of a statement it reads, can be NULL.
+fn nulls(column: &ProbedColumn) -> &ColumnNulls {
+    column.nulls.as_ref().expect("the probe reads the statement")
+}
 
 const SCHEMA: &str = "
 CREATE TABLE people (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, note TEXT) STRICT;
@@ -16,7 +21,7 @@ CREATE VIRTUAL TABLE docs USING fts5(body);";
 fn never_null(sql: &str) -> Vec<bool> {
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
-    statement.columns.iter().map(|column| !column.nulls.nullable()).collect()
+    statement.columns.iter().map(|column| !nulls(column).nullable()).collect()
 }
 
 #[track_caller]
@@ -186,7 +191,7 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
-        let found = [0, 1].map(|position| statement.columns[position].nulls.row_can_be_missing);
+        let found = [0, 1].map(|position| nulls(&statement.columns[position]).row_can_be_missing);
         assert_eq!(found, expected, "{sql}");
     }
     // A subquery's own missing rows are its own, and a computed column comes
@@ -197,7 +202,7 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
              (SELECT p.name FROM issues LEFT JOIN people AS p ON 1) AS s",
         )
         .unwrap();
-    assert!(statement.columns.iter().all(|column| !column.nulls.row_can_be_missing));
+    assert!(statement.columns.iter().all(|column| !nulls(column).row_can_be_missing));
 }
 
 #[test]
@@ -239,7 +244,16 @@ fn a_column_says_what_each_select_of_a_compound_can_give_it() {
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
-        let found = [0, 1].map(|position| statement.columns[position].nulls.selects.clone());
+        let found = [0, 1].map(|position| nulls(&statement.columns[position]).selects.clone());
         assert_eq!(found, expected, "{sql}");
     }
+}
+
+#[test]
+fn a_statement_the_parser_cant_read_says_nothing_of_its_nulls() {
+    // SQLite reads a comment that never ends, and the parser doesn't.
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let statement =
+        probe.prepare("SELECT name FROM people UNION ALL SELECT NULL /* never ends").unwrap();
+    assert_eq!(statement.columns[0].nulls, None);
 }

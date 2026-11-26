@@ -912,6 +912,11 @@ FROM (SELECT p.name
 `people.name` is `NOT NULL`, but `assignee` can be NULL: the subquery gives
 NULL for an issue with no assignee.
 
+The compiler takes each column of a statement that the probe can't read, as one
+with a comment that never ends, to be one that can be NULL, and each table
+spread in it to be one whose row can be missing. sqlive can't analyze such a
+read, so only a write gets that far.
+
 **The rowid.** No row holds NULL in its rowid. So `rowid`, `_rowid_` and `oid`
 can't be NULL, unless the table has a column of its own under that name, and
 neither can an `INTEGER PRIMARY KEY` column, which is the rowid under the

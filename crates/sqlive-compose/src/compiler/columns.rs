@@ -2,7 +2,7 @@
 //! from in a table or in a spread, whether it can be NULL, and the Rust type
 //! that reads it.
 
-use sqlive_reads::SelectNull;
+use sqlive_reads::{ColumnNulls, SelectNull};
 
 use super::core::{Core, Item, ItemKind};
 use super::error::Cause;
@@ -129,16 +129,25 @@ fn spread_field(
     (spread, alias): (&Placed, &str),
     registry: &Registry,
 ) -> Result<Field, Cause> {
-    check_later_selects(header, columns, (spread, alias))?;
+    // Of a statement the probe can't read, any column can be NULL.
+    let read: Option<Vec<(&str, &ColumnNulls)>> =
+        columns.iter().map(|column| Some((column.name.as_str(), column.nulls.as_ref()?))).collect();
+    if let Some(read) = &read {
+        check_later_selects(header, read, (spread, alias))?;
+    }
     let can_be_missing = match &spread.place {
         Place::Value { .. } => !spread.record.one_row,
         // The columns of `alias.*` come from one FROM item, the spread's.
-        Place::Table => columns.iter().any(|column| column.nulls.row_can_be_missing),
+        Place::Table => {
+            read.as_ref().is_none_or(|read| read.iter().any(|(_, nulls)| nulls.row_can_be_missing))
+        }
     };
     // A later SELECT of a compound gives no row of the fragment where it can
     // give NULL in the column that each of the fragment's rows holds.
     let later_can_give_none = spread.record.presence().is_some_and(|presence| {
-        columns[presence].nulls.selects[1..].iter().any(|select| *select != SelectNull::Never)
+        read.as_ref().is_none_or(|read| {
+            read[presence].1.selects[1..].iter().any(|select| *select != SelectNull::Never)
+        })
     });
     let path = registry.code_path(&spread.record.path);
     let (ty, reading) = if can_be_missing || later_can_give_none {
@@ -155,20 +164,20 @@ fn spread_field(
 }
 
 /// Whether each later SELECT of a compound gives the spread, whose columns
-/// are `columns`, a row of its fragment or none: it fills each column that
+/// are `columns`, each with its name, a row of its fragment or none: it fills each column that
 /// each row of the fragment holds, or gives NULL in such a column only where
 /// it gives NULL in the one that tells a missing row too.
 fn check_later_selects(
     header: &Header,
-    columns: &[sqlive_reads::ProbedColumn],
+    columns: &[(&str, &ColumnNulls)],
     (spread, alias): (&Placed, &str),
 ) -> Result<(), Cause> {
     let Some((&presence, others)) = spread.record.required.split_first() else {
         return Ok(());
     };
-    for (select, &tells) in columns[presence].nulls.selects.iter().enumerate().skip(1) {
+    for (select, &tells) in columns[presence].1.selects.iter().enumerate().skip(1) {
         for &other in others {
-            let held = match columns[other].nulls.selects[select] {
+            let held = match columns[other].1.selects[select] {
                 SelectNull::Never | SelectNull::Computed => true,
                 // The reader reads no row where every row of the SELECT
                 // gives NULL in the column that tells one.
@@ -180,7 +189,7 @@ fn check_later_selects(
                 return Err(Cause::NullInSpread {
                     concerns: header.name.clone(),
                     select: select + 1,
-                    column: format!("{alias}.{}", columns[other].name),
+                    column: format!("{alias}.{}", columns[other].0),
                     fragment: spread.record.path.clone(),
                 });
             }
@@ -189,11 +198,11 @@ fn check_later_selects(
     Ok(())
 }
 
-/// The first SELECT of a compound, counted from 1, that can give `column`
-/// NULL: all but a computed value, whose header type says whether it can be.
-fn null_select(column: &sqlive_reads::ProbedColumn) -> Option<usize> {
-    column
-        .nulls
+/// The first SELECT of a compound, counted from 1, that can give NULL in the
+/// column of `nulls`: all but a computed value, whose header type says whether
+/// it can be.
+fn null_select(nulls: &ColumnNulls) -> Option<usize> {
+    nulls
         .selects
         .iter()
         .position(|select| !matches!(select, SelectNull::Never | SelectNull::Computed))
@@ -209,16 +218,18 @@ fn column_field(
     (sql, tokens): (&str, &[Token]),
 ) -> Result<Field, Cause> {
     let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
-    let compound = column.nulls.selects.len() > 1;
+    let compound = column.nulls.as_ref().filter(|nulls| nulls.selects.len() > 1);
     // SQLite names the origin of a compound's first SELECT only.
-    let origin = if compound { None } else { column.origin.as_ref() };
-    let null_select = if compound { null_select(column) } else { None };
-    let nullable = if compound {
-        null_select.is_some()
-    } else if item.kind == ItemKind::Subquery {
-        !never_null::expression(sql, &tokens[item.expression.clone()])
-    } else {
-        origin.is_some() && column.nulls.nullable()
+    let origin = if compound.is_some() { None } else { column.origin.as_ref() };
+    let null_select = compound.and_then(null_select);
+    let nullable = match &column.nulls {
+        // Of a statement the probe can't read, any column can be NULL.
+        None => true,
+        Some(_) if compound.is_some() => null_select.is_some(),
+        Some(_) if item.kind == ItemKind::Subquery => {
+            !never_null::expression(sql, &tokens[item.expression.clone()])
+        }
+        Some(nulls) => origin.is_some() && nulls.nullable(),
     };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {

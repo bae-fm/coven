@@ -34,10 +34,7 @@ use crate::schema_probe::table_column_never_null;
 use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
 use crate::sql::unparenthesized;
 
-/// Where a statement can give NULL in one of its result columns. Of a
-/// statement the schema probe can't read, and of a SELECT whose columns it
-/// can't tell, it says that the column can be NULL (`SelectNull::Value`) and
-/// that its row can be missing.
+/// Where a statement can give NULL in one of its result columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnNulls {
     /// What each SELECT of the statement's compound can give the column, in
