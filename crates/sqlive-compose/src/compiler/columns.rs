@@ -128,7 +128,9 @@ fn spread_field(
 ) -> Result<Field, Cause> {
     let nullable = match &spread.place {
         Place::Value { .. } => !spread.record.one_row,
-        Place::Table => padded(&core.from, alias) == Some(true),
+        // SQLite resolved the spread's `alias.*`, so its item is in FROM.
+        Place::Table => padded(&core.from, alias)
+            .expect("the outline holds the FROM item of each table spread that a `*` selects"),
     };
     let path = registry.code_path(&spread.record.path);
     let (ty, reading) = if nullable {
