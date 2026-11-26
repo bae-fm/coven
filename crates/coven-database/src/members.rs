@@ -136,31 +136,35 @@ pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, Db
 }
 
 /// A circle's members who remain in the store; none for an absent or deleted
-/// circle. One statement, which also reads the member the local device
-/// registered under.
+/// circle. One statement, whose first arm reads the member the local device
+/// registered under, so a registration that doesn't decode fails the read
+/// whether or not the circle has members.
 pub(crate) fn circle_members(
     db: &StoreSql,
     device: DeviceId,
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {
-    let members = db.host_live_read(
-        "SELECT m.member,(SELECT x.member FROM _coven_devices x WHERE x.device=?1)
+    let rows = db.host_live_read(
+        "SELECT NULL,x.member FROM _coven_devices x WHERE x.device=?1
+         UNION ALL
+         SELECT m.member,NULL
          FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
          WHERE m.circle=?2 AND s.removed=0
-           AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)
-         ORDER BY m.member",
+           AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=m.circle)",
         (device, circle),
         |r| {
-            let me = match r.get_ref(1)? {
-                sqlive::rusqlite::types::ValueRef::Null => None,
-                _ => Some(member(r, 1)?),
-            };
-            Ok((member(r, 0)?, me))
+            Ok(match r.get_ref(0)? {
+                sqlive::rusqlite::types::ValueRef::Null => (None, Some(member(r, 1)?)),
+                _ => (Some(member(r, 0)?), None),
+            })
         },
     )?;
+    let me = rows.iter().find_map(|(_, me)| *me);
+    let mut members: Vec<MemberId> = rows.into_iter().filter_map(|(member, _)| member).collect();
+    members.sort();
     Ok(members
         .into_iter()
-        .map(|(member, me)| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
+        .map(|member| CircleMemberInfo { is_self: me.as_ref() == Some(&member), member })
         .collect())
 }
 

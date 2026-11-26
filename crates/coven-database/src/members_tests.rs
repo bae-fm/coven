@@ -658,3 +658,25 @@ async fn a_damaged_own_device_row_fails_the_circles_read() {
     ));
     db.close().await.unwrap();
 }
+
+/// A device row whose member doesn't decode is damage for a circle's member
+/// list too, never an empty list (§19.3).
+#[tokio::test]
+async fn a_damaged_own_device_row_fails_the_circle_members_read() {
+    use crate::store_state_tables::tests::{damage, MEMBER_DAMAGE};
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    // A circle with no members: no row of the list carries the damaged member.
+    let gifts = CircleId(uuid::Uuid::from_u128(9));
+    db.inspect_writer(|sql, _| damage(sql, MEMBER_DAMAGE[5]));
+    assert!(matches!(db.circle_members(gifts).await, Err(DbError::DamagedDatabase)));
+    assert!(matches!(
+        db.subscribe_circle_members::<DbError>(gifts)
+            .next_inline()
+            .await
+            .expect("the live query answers"),
+        Err(DbError::DamagedDatabase)
+    ));
+    db.close().await.unwrap();
+}
