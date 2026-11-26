@@ -133,11 +133,11 @@ fn spread_field(
         // later SELECT of a compound gives no row of the fragment where it
         // can give NULL in the column that each of the fragment's rows holds.
         Place::Table => {
-            columns.iter().any(|column| column.row_can_be_missing)
+            columns.iter().any(|column| column.nulls.row_can_be_missing)
                 || spread
                     .record
                     .presence
-                    .is_some_and(|presence| columns[presence].null_in_later_select)
+                    .is_some_and(|presence| columns[presence].nulls.null_in_later_select)
         }
     };
     let path = registry.code_path(&spread.record.path);
@@ -169,7 +169,7 @@ fn column_field(
         // The later SELECTs of a compound give the column values too.
         core.compound || !never_null::expression(sql, &tokens[item.expression.clone()])
     } else {
-        origin.is_some() && !column.never_null
+        origin.is_some() && column.nulls.nullable
     };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {

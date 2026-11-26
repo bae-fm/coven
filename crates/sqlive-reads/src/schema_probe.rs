@@ -50,35 +50,8 @@ pub struct ProbedColumn {
     /// The column of a table or table function that the result is, when it is
     /// one unchanged.
     pub origin: Option<ColumnOrigin>,
-    /// Whether no row the statement returns holds NULL in the column. A
-    /// table's column holds none when the table declares it `NOT NULL`, or it
-    /// is the rowid, by one of the rowid's own names or as an `INTEGER PRIMARY
-    /// KEY` column. The statement keeps it so unless a query the column passes
-    /// through gives NULL of its own: a join that pads its FROM item, an
-    /// aggregate with no GROUP BY, a SELECT of a compound or a scalar
-    /// subquery. In a SELECT, a literal other than NULL holds none either, and
-    /// the probe takes every other computed column to be one that can hold
-    /// NULL. In a write, only a table's column can be one that holds none: the
-    /// probe takes each computed column of a RETURNING, a literal too, to be
-    /// one that can hold NULL. It takes every column to be one when it can't
-    /// read the statement, or can't tell which columns a SELECT gives.
-    pub never_null: bool,
-    /// Whether the statement can give no row of the FROM item it takes the
-    /// column from, and so NULL in each of that item's columns: a join pads
-    /// the item, or an aggregate with no GROUP BY makes a row over no rows.
-    /// It speaks of the first SELECT's own FROM items: a column of a subquery
-    /// there says nothing of the rows missing inside the subquery. A computed
-    /// column comes from no item, and a RETURNING's column from the row the
-    /// write changed, so neither has a missing row. It takes every column to
-    /// come from an item with one when it can't read the statement, or can't
-    /// tell which columns a SELECT gives.
-    pub row_can_be_missing: bool,
-    /// Whether a SELECT of the statement's compound after the first can give
-    /// NULL in the column, whatever the first can give. False in a statement
-    /// with no compound operator and in a write's RETURNING. It takes every
-    /// column to be one when it can't read the statement, or can't tell which
-    /// columns a SELECT gives.
-    pub null_in_later_select: bool,
+    /// Where the statement can give NULL in the column.
+    pub nulls: ColumnNulls,
 }
 
 /// What SQLite made of a statement it prepared.
@@ -148,7 +121,7 @@ impl SchemaProbe {
     pub fn prepare(&self, sql: &str) -> rusqlite::Result<ProbedStatement> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let nulls = statement_nulls(&self.connection, sql)?;
+        let statement_nulls = statement_nulls(&self.connection, sql)?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
             let origin =
@@ -161,7 +134,7 @@ impl SchemaProbe {
                     }),
                     _ => None,
                 };
-            let column_nulls = match &nulls {
+            let nulls = match &statement_nulls {
                 StatementNulls::Select(columns) => columns[position],
                 StatementNulls::Write => ColumnNulls {
                     nullable: match &origin {
@@ -181,13 +154,7 @@ impl SchemaProbe {
                     null_in_later_select: true,
                 },
             };
-            columns.push(ProbedColumn {
-                name: metadata.name().to_owned(),
-                origin,
-                never_null: !column_nulls.nullable,
-                row_can_be_missing: column_nulls.row_can_be_missing,
-                null_in_later_select: column_nulls.null_in_later_select,
-            });
+            columns.push(ProbedColumn { name: metadata.name().to_owned(), origin, nulls });
         }
         let mut seen = BTreeSet::new();
         let mut parameters = Vec::new();

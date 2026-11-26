@@ -16,7 +16,7 @@ CREATE VIRTUAL TABLE docs USING fts5(body);";
 fn never_null(sql: &str) -> Vec<bool> {
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
-    statement.columns.iter().map(|column| column.never_null).collect()
+    statement.columns.iter().map(|column| !column.nulls.nullable).collect()
 }
 
 #[track_caller]
@@ -186,7 +186,7 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
-        let found = [0, 1].map(|position| statement.columns[position].row_can_be_missing);
+        let found = [0, 1].map(|position| statement.columns[position].nulls.row_can_be_missing);
         assert_eq!(found, expected, "{sql}");
     }
     // A subquery's own missing rows are its own, and a computed column comes
@@ -197,7 +197,7 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
              (SELECT p.name FROM issues LEFT JOIN people AS p ON 1) AS s",
         )
         .unwrap();
-    assert!(statement.columns.iter().all(|column| !column.row_can_be_missing));
+    assert!(statement.columns.iter().all(|column| !column.nulls.row_can_be_missing));
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn a_column_says_whether_a_later_select_can_give_it_null() {
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
-        let found = [0, 1].map(|position| statement.columns[position].null_in_later_select);
+        let found = [0, 1].map(|position| statement.columns[position].nulls.null_in_later_select);
         assert_eq!(found, expected, "{sql}");
     }
 }

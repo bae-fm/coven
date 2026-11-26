@@ -1770,27 +1770,26 @@ a column unchanged, `SchemaProbe::prepare` names the column and the table or
 table function it belongs to (`ProbedColumn::origin`), with the type the
 schema's table declares for it. It gives a table function's column, such as
 `value` of `json_each`, no declared type. For each result column,
-`SchemaProbe::prepare` also says whether no row of the statement holds NULL in
-it (`ProbedColumn::never_null`). In a SELECT, that holds for a literal other
-than NULL, and for a table's column that the table declares NOT NULL, or that is the rowid,
-when no query the column passes through gives NULL of its own, as a join, an
-aggregate with no GROUP BY, a compound or a scalar subquery can. An aggregate in
-a subquery counts for the query around it when it qualifies columns, each with a
-name of that query's FROM, so SQL that passes an aggregate an outer column
-writes the column's qualifier. In an INSERT, UPDATE, DELETE or REPLACE, it
-holds only for a RETURNING column that is a table's column which the table
-declares NOT NULL, or which is the rowid, and for no computed column, a literal
-too. It holds for no column of a statement that the probe's parser can't read,
-or of a SELECT whose columns the probe can't tell. For each result column, it
-also says whether the statement can give no row of the FROM item that its first
-SELECT takes the column from, and so NULL in each of that item's columns
-(`ProbedColumn::row_can_be_missing`): a join pads the item, in parentheses or
-not, or an aggregate with no GROUP BY makes a row over no rows. A computed
-column and a write's RETURNING column have no such item. It says apart from
-this whether a SELECT of a compound after the first can give NULL in the column
-(`ProbedColumn::null_in_later_select`). For every column of a statement the
-probe can't read, and of a SELECT whose columns it can't tell, it says both.
-`SchemaProbe::table_columns`
+`SchemaProbe::prepare` also says where the statement can give NULL in it
+(`ProbedColumn::nulls`, a `ColumnNulls`). No row holds NULL in it
+(`ColumnNulls::nullable` is false), in a SELECT, for a literal other than NULL,
+and for a table's column that the table declares NOT NULL, or that is the
+rowid, when no query the column passes through gives NULL of its own, as a
+join, an aggregate with no GROUP BY, a compound or a scalar subquery can. An
+aggregate in a subquery counts for the query around it when it qualifies
+columns, each with a name of that query's FROM, so SQL that passes an aggregate
+an outer column writes the column's qualifier. In an INSERT, UPDATE, DELETE or
+REPLACE, only a RETURNING column that is a table's column which the table
+declares NOT NULL, or which is the rowid, holds no NULL, and no computed
+column does, a literal too. `ColumnNulls::row_can_be_missing` says whether the
+statement can give no row of the FROM item that its first SELECT takes the
+column from, and so NULL in each of that item's columns: a join pads the item,
+in parentheses or not, or an aggregate with no GROUP BY makes a row over no
+rows. A computed column and a write's RETURNING column have no such item.
+`ColumnNulls::null_in_later_select` says apart from this whether a SELECT of a
+compound after the first can give NULL in the column. The probe takes all three
+to be true of every column of a statement that its parser can't read, and of a
+SELECT whose columns it can't tell. `SchemaProbe::table_columns`
 lists the columns of a table or view in the order of an INSERT with no column list, each
 with whether the table declares it NOT NULL, so that such a tool can check a
 value it binds against the column it fills.

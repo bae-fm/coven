@@ -42,6 +42,7 @@ pub use read_set::{
     affected, affected_by, past_row_limit, Answers, ColumnSet, ReadSet, RowChange, TableRead,
     ValueKey, ROWS_PER_TABLE,
 };
+pub use result_nulls::ColumnNulls;
 pub use row_scope::{compare, RowImage, RowScope, Scopes};
 pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};

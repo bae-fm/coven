@@ -34,16 +34,34 @@ use crate::schema_probe::table_column_never_null;
 use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
 use crate::sql::unparenthesized;
 
-/// What a statement does to the NULLs of one result column.
-#[derive(Clone, Copy)]
-pub(crate) struct ColumnNulls {
-    /// Whether it can be NULL.
-    pub(crate) nullable: bool,
-    /// Whether the statement can give no row of the FROM item the column
-    /// comes from.
-    pub(crate) row_can_be_missing: bool,
-    /// Whether a SELECT of a compound after the first can give NULL in it.
-    pub(crate) null_in_later_select: bool,
+/// Where a statement can give NULL in one of its result columns. The schema
+/// probe takes each of these to be true of a statement it can't read, and of
+/// a SELECT whose columns it can't tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnNulls {
+    /// Whether a row the statement returns can hold NULL in the column. A
+    /// table's column holds none when the table declares it `NOT NULL`, or it
+    /// is the rowid, by one of the rowid's own names or as an `INTEGER PRIMARY
+    /// KEY` column. The statement keeps it so unless a query the column passes
+    /// through gives NULL of its own: a join that pads its FROM item, an
+    /// aggregate with no GROUP BY, a SELECT of a compound or a scalar
+    /// subquery. In a SELECT, a literal other than NULL holds none either, and
+    /// every other computed column can hold NULL. In a write, only a table's
+    /// column can be one that holds none: each computed column of a
+    /// RETURNING, a literal too, can hold NULL.
+    pub nullable: bool,
+    /// Whether the statement can give no row of the FROM item it takes the
+    /// column from, and so NULL in each of that item's columns: a join pads
+    /// the item, or an aggregate with no GROUP BY makes a row over no rows.
+    /// It speaks of the first SELECT's own FROM items: a column of a subquery
+    /// there says nothing of the rows missing inside the subquery. A computed
+    /// column comes from no item, and a RETURNING's column from the row the
+    /// write changed, so neither has a missing row.
+    pub row_can_be_missing: bool,
+    /// Whether a SELECT of the statement's compound after the first can give
+    /// NULL in the column, whatever the first can give. False in a statement
+    /// with no compound operator and in a write's RETURNING.
+    pub null_in_later_select: bool,
 }
 
 /// A column that a query or a FROM item gives.

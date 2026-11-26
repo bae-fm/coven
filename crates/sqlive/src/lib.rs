@@ -90,11 +90,11 @@ pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 pub use sqlive_reads::read_report;
 pub use sqlive_reads::sql;
 pub use sqlive_reads::{
-    affected, Affinity, Answers, ColumnOrigin, ColumnSet, Judging, LastRow, Lookup, Lookups,
-    NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry, ReadFrame, ReadReport,
-    ReadRows, ReadSet, RowChange, RowCondition, RowImage, RowScope, SchemaProbe, ScopePlanSize,
-    Scopes, SqlValue, StandInFunction, TableColumn, TableRead, WholeViews, LOOKUP_STEPS,
-    ROWS_PER_TABLE,
+    affected, Affinity, Answers, ColumnNulls, ColumnOrigin, ColumnSet, Judging, LastRow, Lookup,
+    Lookups, NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry, ReadFrame,
+    ReadReport, ReadRows, ReadSet, RowChange, RowCondition, RowImage, RowScope, SchemaProbe,
+    ScopePlanSize, Scopes, SqlValue, StandInFunction, TableColumn, TableRead, WholeViews,
+    LOOKUP_STEPS, ROWS_PER_TABLE,
 };
 pub(crate) use sqlive_reads::{
     affected_by, compare, parameters, past_row_limit, ScopePlan, ValueKey, FTS5_CONTENT,
