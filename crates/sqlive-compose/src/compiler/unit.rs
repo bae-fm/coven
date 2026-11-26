@@ -65,23 +65,6 @@ pub(crate) fn compile(
     let prepared =
         context.probe.prepare(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))?;
     check_parameters(header, &prepared).map_err(&fail)?;
-    let outline = core::outline(&prepared_sql, &tokens);
-    if header.parent().is_some() && prepared.columns.len() != 1 {
-        return Err(fail(Cause::ParentColumns {
-            concerns: header.name.clone(),
-            width: prepared.columns.len(),
-        }));
-    }
-    let fields = columns::fields(
-        header,
-        &outline,
-        &prepared,
-        &expansion.placed,
-        context.registry,
-        &prepared_sql,
-        &tokens,
-    )
-    .map_err(&fail)?;
     let mut warnings = Vec::new();
     match context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))? {
         sqlive::ReadReport::Whole { why } => {
@@ -101,6 +84,23 @@ pub(crate) fn compile(
         }
         sqlive::ReadReport::Entries(_) => {}
     }
+    let outline = core::outline(&prepared_sql, &tokens);
+    if header.parent().is_some() && prepared.columns.len() != 1 {
+        return Err(fail(Cause::ParentColumns {
+            concerns: header.name.clone(),
+            width: prepared.columns.len(),
+        }));
+    }
+    let fields = columns::fields(
+        header,
+        &outline,
+        &prepared,
+        &expansion.placed,
+        context.registry,
+        &prepared_sql,
+        &tokens,
+    )
+    .map_err(&fail)?;
     let (code, record) = match &header.kind {
         HeaderKind::Fragment { parent, relations } => {
             let record = Record {

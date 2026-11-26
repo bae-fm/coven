@@ -906,7 +906,9 @@ RIGHT JOIN @people::Person AS author ON author.person_id = issue.author_id
 tracker/src/issue_page.rs:6:1: sqlive can't analyze IssuePage: a NATURAL or RIGHT join
 ```
 
-Section 11 lists the shapes.
+Section 11 lists the shapes. The compiler asks sqlive before it types the
+columns, so a shape that sqlive can't analyze is the error a call reports, not
+the column error that the shape also causes.
 
 **Whole-table reads.** When sqlive analyzes a statement and reports a table as
 read whole, the compiler warns and names the table and the reason. The build
