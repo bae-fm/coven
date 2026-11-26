@@ -124,7 +124,7 @@ impl SchemaProbe {
     pub fn prepare(&self, sql: &str) -> rusqlite::Result<ProbedStatement> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let statement_nulls = statement_nulls(&self.connection, sql)?;
+        let statement_nulls = statement_nulls(&self.connection, sql, statement.column_count())?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
             let origin =
@@ -139,10 +139,10 @@ impl SchemaProbe {
                 };
             let nulls = match &statement_nulls {
                 StatementNulls::Select(columns) => Some(columns[position].clone()),
-                StatementNulls::Write(returning) => {
+                StatementNulls::Write(subqueries) => {
                     // SQLite names a subquery's column as the origin of the
                     // subquery, which gives NULL with no row.
-                    let null = match returning.subquery(position, statement.column_count()) {
+                    let null = match subqueries[position] {
                         Some(null) => null,
                         None => match &origin {
                             Some(origin)

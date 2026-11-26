@@ -160,6 +160,12 @@ fn a_scalar_subquery_that_returns_one_row_holds_what_it_selects() {
              (SELECT title FROM issues WHERE 0)",
             &[true, true, true, false, false],
         ),
+        // SQLite refuses a `table.*` in a RETURNING, so each `*` gives as
+        // many columns as another.
+        (
+            "DELETE FROM issues RETURNING *, (SELECT title FROM issues WHERE 0), *",
+            &[true, true, false, false, true, true, false],
+        ),
         (
             "SELECT (SELECT count(*) FROM people), (SELECT max(name) FROM people)
              UNION ALL SELECT 1, 'a'",

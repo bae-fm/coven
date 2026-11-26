@@ -198,63 +198,42 @@ pub(crate) enum StatementNulls {
     Select(Vec<ColumnNulls>),
     /// A statement that writes: each column its RETURNING takes from the table
     /// it changes holds what the table's column holds, and each scalar
-    /// subquery of it holds what the subquery gives.
-    Write(Returning),
+    /// subquery of it holds what the subquery gives, which is here for each
+    /// column that one gives, in order.
+    Write(Vec<Option<SelectNull>>),
     /// A statement the analysis can't read, which can give NULL anywhere.
     Unknown,
 }
 
-/// For each result of a RETURNING, in order, what it gives its column when it
-/// is a scalar subquery, or a `*`.
-pub(crate) struct Returning(Vec<ReturningResult>);
-
-enum ReturningResult {
-    Star,
-    Subquery(SelectNull),
-    Other,
+/// For each of the `width` columns of the RETURNING whose results are
+/// `results`, what the scalar subquery that gives it can give, or `None` when
+/// no scalar subquery does.
+fn returning_subqueries(
+    results: &[ResultColumn<'_>],
+    width: usize,
+    functions: &Functions,
+) -> Vec<Option<SelectNull>> {
+    let stars = results.iter().filter(|result| matches!(result, ResultColumn::Star)).count();
+    // A result that is no `*` gives one column. SQLite refuses a `table.*`
+    // here, so each `*` gives every column of the table the statement changes.
+    let star_width = (width + stars - results.len()).checked_div(stars).unwrap_or_default();
+    let columns = results.iter().flat_map(|result| match result {
+        ResultColumn::Star => vec![None; star_width],
+        ResultColumn::TableStar(_) => unreachable!("SQLite refuses a `table.*` in a RETURNING"),
+        ResultColumn::Expr(expr, _) => vec![match unparenthesized(expr) {
+            Expr::Subquery(_) => Some(SelectNull::of_computed(expr, functions)),
+            _ => None,
+        }],
+    });
+    columns.collect()
 }
 
-impl Returning {
-    fn read(results: Option<&[ResultColumn<'_>]>, functions: &Functions) -> Self {
-        let results = results.into_iter().flatten().map(|result| match result {
-            ResultColumn::Star | ResultColumn::TableStar(_) => ReturningResult::Star,
-            ResultColumn::Expr(expr, _) => match unparenthesized(expr) {
-                Expr::Subquery(_) => {
-                    ReturningResult::Subquery(SelectNull::of_computed(expr, functions))
-                }
-                _ => ReturningResult::Other,
-            },
-        });
-        Self(results.collect())
-    }
-
-    /// What the scalar subquery gives that is the column at `position` of the
-    /// RETURNING's `width` columns, or `None` when no scalar subquery is.
-    pub(crate) fn subquery(&self, position: usize, width: usize) -> Option<SelectNull> {
-        let star = |result: &ReturningResult| matches!(result, ReturningResult::Star);
-        // A result gives one column unless it is a `*`, so a result's column
-        // is known by what stands before it or after it when no `*` does.
-        let before = self.0.iter().take_while(|result| !star(result)).count();
-        let after = self.0.iter().rev().take_while(|result| !star(result)).count();
-        let result = if position < before {
-            &self.0[position]
-        } else if position >= width - after {
-            &self.0[self.0.len() - (width - position)]
-        } else {
-            return None;
-        };
-        match result {
-            ReturningResult::Subquery(null) => Some(*null),
-            ReturningResult::Star | ReturningResult::Other => None,
-        }
-    }
-}
-
-/// What the statement `sql`, which SQLite prepared on `connection`, does to
-/// the NULLs of its result columns.
+/// What the statement `sql`, which SQLite prepared on `connection` with
+/// `width` result columns, does to their NULLs.
 pub(crate) fn statement_nulls(
     connection: &Connection,
     sql: &str,
+    width: usize,
 ) -> rusqlite::Result<StatementNulls> {
     let bump = Bump::new();
     let mut parser = Parser::new(&bump, sql.as_bytes());
@@ -273,7 +252,8 @@ pub(crate) fn statement_nulls(
         Stmt::Insert { returning, .. }
         | Stmt::Update { returning, .. }
         | Stmt::Delete { returning, .. } => {
-            return Ok(StatementNulls::Write(Returning::read(returning, &functions)))
+            let results = returning.unwrap_or_default();
+            return Ok(StatementNulls::Write(returning_subqueries(results, width, &functions)));
         }
         _ => return Ok(StatementNulls::Unknown),
     };
