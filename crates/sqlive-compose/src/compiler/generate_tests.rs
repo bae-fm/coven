@@ -42,3 +42,10 @@ fn a_name_that_cannot_be_an_identifier_is_refused() {
     assert!(FieldName::new("type").is_some() && FieldName::new("r#type").is_some());
     assert!(FieldName::new("a\u{0301}\u{00b7}").is_some());
 }
+
+#[test]
+fn a_row_derives_clone_partial_eq_and_debug() {
+    let header = parse(CallKind::Read, quote!(Page, r#"SELECT 1"#)).unwrap();
+    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)]);
+    assert!(code.contains("# [derive (Clone , Debug , PartialEq)] pub struct PageRow"), "{code}");
+}

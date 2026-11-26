@@ -929,6 +929,7 @@ with one field for each column and spread:
 
 ```rust
 /// The columns of `Person`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Person {
     pub(crate) person_id: PersonId,
     pub(crate) name: String,
@@ -979,6 +980,7 @@ impl IssuePageParams {
 }
 
 /// A row of the read.
+#[derive(Clone, Debug, PartialEq)]
 pub struct IssuePageRow {
     pub issue: Option<issues::Issue>,
     pub author: Option<people::Person>,
@@ -991,6 +993,11 @@ impl IssuePageRow {
     pub fn read(row: &Row<'_>) -> rusqlite::Result<Self> { /* … */ }
 }
 ```
+
+The row derives `Clone`, `PartialEq` and `Debug`, so an app can use it as its
+own row type: keep it, compare it and print it. Every type a row holds
+implements those traits too: the fragment structs and JSON document structs
+derive them, and a declared type, such as `IssueState`, implements them itself.
 
 The row struct has one field for each spread, named by the spread's alias, and
 one for each column that the read itself returns, as `IssueComments` returns

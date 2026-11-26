@@ -93,7 +93,7 @@ fn shapes(shapes: &[Shape]) -> TokenStream {
         });
         quote! {
             #[doc = #doc]
-            #[derive(#serde::Deserialize)]
+            #[derive(Clone, Debug, PartialEq, #serde::Deserialize)]
             #[serde(crate = #serde_text)]
             pub struct #name {
                 #(#fields)*
@@ -117,6 +117,7 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
         #shapes
 
         #[doc = #doc]
+        #[derive(Clone, Debug, PartialEq)]
         pub struct #name {
             #(pub(crate) #names: #types,)*
         }
@@ -180,6 +181,7 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
         }
 
         #[doc = #row_doc]
+        #[derive(Clone, Debug, PartialEq)]
         pub struct #row_name {
             #(
                 #[allow(missing_docs)]
