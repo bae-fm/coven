@@ -12,6 +12,7 @@ use rusqlite::Connection;
 
 use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
+use crate::result_nulls::{statement_nulls, StatementNulls};
 use crate::scope_plan::ScopePlan;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
@@ -36,10 +37,6 @@ pub struct ColumnOrigin {
     /// The type the table declares for the column, as written, when it
     /// declares one.
     pub declared_type: Option<String>,
-    /// Whether no row of the table holds NULL in the column: the table
-    /// declares it `NOT NULL`, or it is the rowid, by one of the rowid's own
-    /// names or as an `INTEGER PRIMARY KEY` column.
-    pub never_null: bool,
 }
 
 /// One result column of a prepared statement.
@@ -49,6 +46,15 @@ pub struct ProbedColumn {
     pub name: String,
     /// The table column the result is, when it is one unchanged.
     pub origin: Option<ColumnOrigin>,
+    /// Whether no row the statement returns holds NULL in the column. A
+    /// table's column holds none when the table declares it `NOT NULL`, or it
+    /// is the rowid, by one of the rowid's own names or as an `INTEGER PRIMARY
+    /// KEY` column. The statement keeps it so unless a query the column passes
+    /// through gives NULL of its own: a join that pads its FROM item, an
+    /// aggregate with no GROUP BY, a SELECT of a compound or a scalar
+    /// subquery. A literal other than NULL holds none either, and the probe
+    /// takes every other computed column to be one that can hold NULL.
+    pub never_null: bool,
 }
 
 /// What SQLite made of a statement it prepared.
@@ -118,25 +124,33 @@ impl SchemaProbe {
     pub fn prepare(&self, sql: &str) -> rusqlite::Result<ProbedStatement> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
+        let nulls = statement_nulls(&self.connection, sql)?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
-            let origin = match statement.column_metadata(position)? {
-                Some((_, table, column, declared, _, not_null, primary_key, _))
+            let (origin, column) = match statement.column_metadata(position)? {
+                Some((_, table, column, declared, ..))
                     if metadata.database_name() == Some("main") =>
                 {
-                    let table = table.to_string_lossy().into_owned();
-                    let never_null = not_null
-                        || (primary_key && self.is_rowid(&table, &column.to_string_lossy())?);
-                    Some(ColumnOrigin {
-                        table,
+                    let origin = ColumnOrigin {
+                        table: table.to_string_lossy().into_owned(),
                         declared_type: declared
                             .map(|declared| declared.to_string_lossy().into_owned()),
-                        never_null,
-                    })
+                    };
+                    (Some(origin), Some(column.to_string_lossy().into_owned()))
                 }
-                _ => None,
+                _ => (None, None),
             };
-            columns.push(ProbedColumn { name: metadata.name().to_owned(), origin });
+            let never_null = match &nulls {
+                StatementNulls::Select(nullable) => !nullable[position],
+                StatementNulls::Write => match (&origin, column) {
+                    (Some(origin), Some(column)) => {
+                        table_column_never_null(&self.connection, &origin.table, &column)?
+                    }
+                    _ => false,
+                },
+                StatementNulls::Unknown => false,
+            };
+            columns.push(ProbedColumn { name: metadata.name().to_owned(), origin, never_null });
         }
         let mut seen = BTreeSet::new();
         let mut parameters = Vec::new();
@@ -157,19 +171,6 @@ impl SchemaProbe {
             unnamed_parameters,
             writes: !statement.readonly(),
         })
-    }
-
-    /// Whether `column`, which SQLite says is part of the primary key of
-    /// `table`, is the table's rowid. SQLite says that of a name of the rowid
-    /// that no column of the table has. It gives every primary key an index,
-    /// except an `INTEGER PRIMARY KEY` that is the rowid itself.
-    fn is_rowid(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
-        self.connection.query_row(
-            "SELECT NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(?1, 'main') WHERE name = ?2)
-                 OR NOT EXISTS (SELECT 1 FROM pragma_index_list(?1, 'main') WHERE origin = 'pk')",
-            [table, column],
-            |row| row.get(0),
-        )
     }
 
     /// The columns of `table` in the order of an INSERT with no column list,
@@ -194,6 +195,32 @@ impl SchemaProbe {
         let plan = ScopePlan::build(&self.connection, sql, &statement, &WholeViews::new([]))?;
         Ok(ReadReport::of(&plan))
     }
+}
+
+/// Whether no row of the main schema's table `table` holds NULL in its column
+/// `column`, which may be one of the rowid's names: the table declares it
+/// `NOT NULL`, or it is the rowid.
+pub(crate) fn table_column_never_null(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let (_, _, not_null, primary_key, _) =
+        connection.column_metadata(Some("main"), table, column)?;
+    Ok(not_null || (primary_key && is_rowid(connection, table, column)?))
+}
+
+/// Whether `column`, which SQLite says is part of the primary key of
+/// `table`, is the table's rowid. SQLite says that of a name of the rowid
+/// that no column of the table has. It gives every primary key an index,
+/// except an `INTEGER PRIMARY KEY` that is the rowid itself.
+fn is_rowid(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(?1, 'main') WHERE name = ?2)
+             OR NOT EXISTS (SELECT 1 FROM pragma_index_list(?1, 'main') WHERE origin = 'pk')",
+        [table, column],
+        |row| row.get(0),
+    )
 }
 
 #[cfg(test)]

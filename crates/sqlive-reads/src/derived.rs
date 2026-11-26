@@ -35,7 +35,7 @@ pub(crate) struct Ctes<'a> {
 /// A CTE as one WITH declares it.
 #[derive(Clone, Copy)]
 pub(crate) struct Declared<'a> {
-    cte: &'a CommonTableExpr<'a>,
+    pub(crate) cte: &'a CommonTableExpr<'a>,
     /// Its number among the statement's CTEs, which the FROM items that read
     /// it hold.
     pub(crate) number: usize,
@@ -70,7 +70,7 @@ impl<'a> Ctes<'a> {
     /// The CTEs `declared`'s own SQL can name, as SQLite resolves names
     /// where a CTE is declared, reading it; `None` when it is being read
     /// already, as a CTE that names itself, or one naming it, is.
-    fn reading(&self, declared: &Declared<'a>) -> Option<Self> {
+    pub(crate) fn reading(&self, declared: &Declared<'a>) -> Option<Self> {
         if self.reading.contains(&declared.number) {
             return None;
         }

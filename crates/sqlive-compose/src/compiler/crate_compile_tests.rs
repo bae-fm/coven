@@ -38,6 +38,7 @@ CREATE TABLE drafts (id TEXT NOT NULL PRIMARY KEY, body TEXT) STRICT;
 CREATE TRIGGER drafts_broken AFTER INSERT ON drafts BEGIN INSERT INTO nowhere VALUES (1); END;
 CREATE VIRTUAL TABLE docs USING fts5(body);
 CREATE TABLE verdicts (verdict_id INTEGER PRIMARY KEY, kind TEXT NOT NULL) STRICT;
+CREATE VIEW assignees AS SELECT i.id AS issue_id, p.name FROM issues AS i LEFT JOIN people AS p ON p.id = i.assignee_id;
 CREATE VIEW weird AS SELECT i.title FROM issues AS i RIGHT JOIN people AS p ON p.id = i.author_id;
 CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c;";
 
@@ -687,19 +688,11 @@ fn two_columns_with_one_name_fail() {
 }
 
 #[test]
-fn a_bare_column_that_two_items_could_give_needs_a_declaration() {
-    let lib = |declaration: &str| {
-        format!(
-            r##"sqlive_compose::fragment!(Twice {declaration}, r#"
+fn a_bare_column_that_using_compares_comes_from_the_item_on_the_left() {
+    let lib = r##"sqlive_compose::fragment!(Twice, r#"
     SELECT id FROM people AS a LEFT JOIN people AS b USING (id)
-"#);"##
-        )
-    };
-    assert_eq!(
-        messages(compile_lib(&lib(""))),
-        ["src/lib.rs:1:1: Twice names the column id with no table, and more than one FROM item could give it, so the header must declare id"]
-    );
-    assert_eq!(types_of(&lib("{ id: String }"), "Twice"), ["id: String"]);
+"#);"##;
+    assert_eq!(types_of(lib, "Twice"), ["id: String"]);
 }
 
 const JSON_FRAGMENTS: &str = r##"

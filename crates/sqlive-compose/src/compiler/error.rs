@@ -174,15 +174,6 @@ pub enum Cause {
         /// The call's name.
         concerns: String,
     },
-    /// A bare column name that more than one FROM item of different joins
-    /// could give.
-    #[error("{concerns} names the column {column} with no table, and more than one FROM item could give it, so the header must declare {column}")]
-    UnplacedColumn {
-        /// The call's name.
-        concerns: String,
-        /// The column.
-        column: String,
-    },
     /// A spread names a fragment that no crate in reach offers.
     #[error("{concerns} spreads {path}, which is no fragment of this crate or of a dependency")]
     UnknownFragment {

@@ -57,3 +57,40 @@ fn a_json_column_that_can_be_null_needs_an_option() {
         assert_eq!(manifest["fragments"][0]["presence"], serde_json::Value::Null, "{sql}");
     }
 }
+
+#[test]
+fn a_column_read_through_a_query_in_from_is_null_where_that_query_gives_null() {
+    let left = "FROM issues AS i LEFT JOIN people AS p ON p.id = i.assignee_id";
+    for sql in [
+        // A LEFT JOIN of the inner query.
+        format!("SELECT s.name AS value FROM (SELECT p.name {left}) AS s"),
+        format!("WITH s AS (SELECT p.name {left}) SELECT s.name AS value FROM s"),
+        "SELECT s.name AS value FROM assignees AS s".to_owned(),
+        format!("SELECT s.name AS value FROM (SELECT * FROM (SELECT p.name {left})) AS s"),
+        // A scalar subquery that can return no row.
+        "SELECT s.name AS value FROM (SELECT (SELECT p.name FROM people AS p) AS name) AS s"
+            .to_owned(),
+        // A later SELECT of a compound.
+        "SELECT s.name AS value FROM (SELECT NULL AS name UNION ALL SELECT name FROM people) AS s"
+            .to_owned(),
+        "SELECT s.name AS value FROM \
+         (SELECT assignee_id AS name FROM issues UNION ALL SELECT name FROM people) AS s"
+            .to_owned(),
+        // An aggregate over no rows gives its one row NULL in each column.
+        "SELECT s.name AS value FROM (SELECT p.name, count(*) FROM people AS p) AS s".to_owned(),
+        // A bare name, a `*` and a join in parentheses.
+        "SELECT name AS value FROM issues AS i \
+         LEFT JOIN (SELECT id, name FROM people) AS s ON s.id = i.assignee_id"
+            .to_owned(),
+        "SELECT p.name AS value FROM issues AS i \
+         LEFT JOIN (people AS p LEFT JOIN projects AS j ON j.id = p.id) ON p.id = i.assignee_id"
+            .to_owned(),
+    ] {
+        let lib = format!("sqlive_compose::fragment!(Case {{ value: String }}, r#\"{sql}\"#);");
+        assert_eq!(
+            messages(compile_lib(&lib)),
+            ["src/lib.rs:1:1: value can be NULL, and the header types it String, which holds no NULL"],
+            "{sql}"
+        );
+    }
+}

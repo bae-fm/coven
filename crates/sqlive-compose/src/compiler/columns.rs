@@ -2,7 +2,7 @@
 //! from in a table or in a spread, whether it can be NULL, and the Rust type
 //! that reads it.
 
-use super::core::{Core, FromItem, Item, ItemKind, Join};
+use super::core::{Core, Item, ItemKind, Join};
 use super::error::Cause;
 use super::header::{Declared, Header, RustType};
 use super::json;
@@ -51,15 +51,7 @@ pub(crate) fn fields(
         }
         let columns = prepared.columns.iter().enumerate().skip(span.start).take(span.width);
         for (position, column) in columns {
-            let field = column_field(
-                header,
-                core,
-                &nullable_from,
-                span.item,
-                column,
-                position,
-                (sql, tokens),
-            )?;
+            let field = column_field(header, core, span.item, column, position, (sql, tokens))?;
             push(header, &mut fields, field)?;
         }
     }
@@ -162,7 +154,6 @@ fn spread_field(
 fn column_field(
     header: &Header,
     core: &Core,
-    nullable_from: &[bool],
     item: &Item,
     column: &sqlive_reads::ProbedColumn,
     position: usize,
@@ -175,16 +166,7 @@ fn column_field(
         // The later SELECTs of a compound give the column values too.
         core.compound || !never_null::expression(sql, &tokens[item.expression.clone()])
     } else {
-        origin.is_some_and(|origin| !origin.never_null)
-            || joins_with_nulls(
-                core,
-                nullable_from,
-                item,
-                origin,
-                &column.name,
-                header,
-                declared.is_some(),
-            )?
+        origin.is_some() && !column.never_null
     };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {
@@ -254,46 +236,6 @@ fn nullable_items(core: &Core) -> Vec<bool> {
             own || later
         })
         .collect()
-}
-
-/// Whether a join gives the column NULL: the FROM item it comes from is
-/// nullable.
-fn joins_with_nulls(
-    core: &Core,
-    nullable_from: &[bool],
-    item: &Item,
-    origin: Option<&sqlive_reads::ColumnOrigin>,
-    column: &str,
-    header: &Header,
-    declared: bool,
-) -> Result<bool, Cause> {
-    let qualifier = match &item.kind {
-        ItemKind::Column { qualifier, .. } => qualifier.clone(),
-        ItemKind::QualifiedStar(qualifier) => Some(qualifier.clone()),
-        _ => None,
-    };
-    let Some(origin) = origin else { return Ok(false) };
-    let reads = |from: &FromItem| match &qualifier {
-        Some(qualifier) => from.qualifier.as_deref() == Some(qualifier.as_str()),
-        None => from.table().is_some_and(|table| table.eq_ignore_ascii_case(&origin.table)),
-    };
-    let nullable: Vec<bool> = core
-        .from
-        .iter()
-        .zip(nullable_from)
-        .filter(|(from, _)| reads(from))
-        .map(|(_, &nullable)| nullable)
-        .collect();
-    match nullable[..] {
-        [] => Ok(false),
-        [only] => Ok(only),
-        [first, ..] if nullable.iter().all(|&flag| flag == first) => Ok(first),
-        // The header's declaration says what the compiler can't tell.
-        _ if declared => Ok(false),
-        _ => {
-            Err(Cause::UnplacedColumn { concerns: header.name.clone(), column: column.to_owned() })
-        }
-    }
 }
 
 #[cfg(test)]

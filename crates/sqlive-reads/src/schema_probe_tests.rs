@@ -35,24 +35,23 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
             let origin = column.origin.as_ref();
             (
                 column.name.as_str(),
-                origin.map(|origin| {
-                    (origin.table.as_str(), origin.declared_type.as_deref(), origin.never_null)
-                }),
+                origin.map(|origin| (origin.table.as_str(), origin.declared_type.as_deref())),
+                column.never_null,
             )
         })
         .collect();
     assert_eq!(
         origins,
         [
-            ("person_id", Some(("people", Some("TEXT"), true))),
-            ("note", Some(("people", Some("TEXT"), false))),
-            ("shout", None),
-            ("title", Some(("issues", Some("TEXT"), true))),
+            ("person_id", Some(("people", Some("TEXT"))), true),
+            ("note", Some(("people", Some("TEXT"))), false),
+            ("shout", None, false),
+            ("title", Some(("issues", Some("TEXT"))), true),
         ]
     );
 }
 
-/// Whether the one column of `sql` never holds NULL in its table, on a
+/// Whether the one column of `sql` never holds NULL, on a
 /// schema of every kind of primary key.
 fn never_null(sql: &str) -> bool {
     let schema = "
@@ -64,7 +63,8 @@ fn never_null(sql: &str) -> bool {
         CREATE VIRTUAL TABLE docs USING fts5(body);";
     let probe = SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
-    statement.columns[0].origin.as_ref().unwrap().never_null
+    assert!(statement.columns[0].origin.is_some(), "{sql}");
+    statement.columns[0].never_null
 }
 
 #[test]

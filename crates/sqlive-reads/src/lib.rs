@@ -10,6 +10,7 @@ mod from_item;
 mod read_capture;
 mod read_report;
 mod read_set;
+mod result_nulls;
 mod row_scope;
 mod schema_objects;
 mod schema_probe;

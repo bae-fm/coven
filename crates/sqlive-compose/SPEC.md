@@ -216,11 +216,12 @@ A parent row follows `on`, and a relation follows `with`. Section 3 shows both.
 After those, the braces hold *declarations*, each of which gives a column its
 Rust type. A column that the SQL takes unchanged from a table, such as
 `p.name` in `Person`, needs none: the compiler takes its type from the table's
-STRICT type, and whether it can be NULL from the table: its `NOT NULL` and its
-rowid (section 8). A column that the SQL computes, such as `count(*) AS
-unread`, always needs one, since SQLite gives a computed column no type. A
-declaration on a table's column replaces the type the schema gives, as
-`person_id: PersonId` does in `Person`. Section 9 gives the rules in full.
+STRICT type. Whether it can be NULL comes from the table, its `NOT NULL` and its
+rowid, and from the queries the column passes through (section 8). A column that
+the SQL computes, such as `count(*) AS unread`, always needs one, since SQLite
+gives a computed column no type. A declaration on a table's column replaces the
+type the schema gives, as `person_id: PersonId` does in `Person`. Section 9
+gives the rules in full.
 
 ## 3. Three ways to spread a fragment
 
@@ -855,10 +856,11 @@ issues/src/lib.rs:20:1: Titles computes the column title, and its header gives t
 ```
 
 A column that can be NULL needs an `Option`. A table's column can be NULL when
-the table doesn't declare it `NOT NULL` and it isn't the rowid, and when the SQL
-places the table on the right of a `LEFT JOIN`. A scalar subquery as a result
-column can be NULL unless the compiler can tell that it never is (below). A
-declaration that gives such a column a type other than an `Option` fails:
+the table doesn't declare it `NOT NULL` and it isn't the rowid, and when a
+query that the column passes through gives NULL of its own (below). A scalar
+subquery as a result column can be NULL unless the compiler can tell that it
+never is (below). A declaration that gives such a column a type other than an
+`Option` fails:
 
 ```rust
 sqlive_compose::fragment!(Assignee { assignee_id: PersonId }, r#"
@@ -879,8 +881,32 @@ people/src/lib.rs:8:1: author can be NULL, and the header types it json<Author>,
 The generated reader of a `json<Option<Author>>` column gives `None` for NULL
 and for a document that is JSON's `null`.
 
-A bare column name that the compiler can't place on one `FROM` item needs a
-declaration.
+**The queries a column passes through.** SQLite names a table's column as the
+origin of a result column that takes it unchanged, through any number of
+subqueries in `FROM`, CTEs and views. The compiler reads each of those queries
+through sqlive's schema probe. The column can be NULL when one of them, or the
+statement itself:
+
+- places the `FROM` item it takes the column from where a join gives that item
+  NULL: on the right of a `LEFT JOIN`, on the left of a `RIGHT JOIN`, or on
+  either side of a `FULL JOIN`, in parentheses or not;
+- calls an aggregate with no `GROUP BY`, which gives one row even over no rows.
+  An aggregate in a subquery of a result column counts when SQLite gives it to
+  this query: it qualifies columns, each with a name of this query's `FROM`;
+- is a compound, and one of its `SELECT`s can give NULL in the column;
+- takes the column from a scalar subquery, which can return no row;
+- takes it from `NULL` or another computed expression that isn't a literal,
+  from a table function, from a recursive CTE where it reads itself, or from a
+  view that the probe's parser can't read.
+
+```sql
+SELECT shown.name AS assignee
+FROM (SELECT p.name
+      FROM issues AS i LEFT JOIN people AS p ON p.id = i.assignee_id) AS shown
+```
+
+`people.name` is `NOT NULL`, but `assignee` can be NULL: the subquery gives
+NULL for an issue with no assignee.
 
 **The rowid.** No row holds NULL in its rowid. So `rowid`, `_rowid_` and `oid`
 can't be NULL, unless the table has a column of its own under that name, and
