@@ -58,6 +58,7 @@ fn a_scalar_subquerys_expression_on_never_null_values_is_never_null() {
     assert_never_null(&[
         "(SELECT json(json_group_array(i.title)) FROM issues AS i)",
         "(SELECT coalesce(max(i.number), 0) FROM issues AS i)",
+        "(SELECT coalesce(max(i.title), x'00') FROM issues AS i)",
         "(SELECT ifnull(sum(i.number), count(*)) FROM issues AS i)",
         "(SELECT json_object('top', max(i.number)) FROM issues AS i)",
         "(SELECT json_array(max(i.number)) FROM issues AS i)",

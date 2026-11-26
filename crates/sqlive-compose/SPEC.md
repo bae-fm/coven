@@ -939,7 +939,7 @@ passes through.
   with a name of the subquery's `FROM`, so SQL that passes an aggregate an
   outer column writes the column's qualifier.
 - *Its one value is never NULL.* The value is one of these:
-  - a number or a string;
+  - a number, a string or a blob;
   - `count`, `total`, `json_group_array`, `json_group_object` or the `jsonb_`
     form of either, with or without `FILTER`;
   - `json_object`, `json_array` or the `jsonb_` form of either;
