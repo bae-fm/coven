@@ -359,131 +359,77 @@ pub enum Audience {
   finds a folder for them everywhere but Android, where the app names one, such
   as its cache folder, with `Coven::set_temporary_directory` before the first
   store opens. Without one there, a connection whose temporary tables outgrow
-  its cache fails with SQLite's `SQLITE_IOERR_GETTEMPPATH`. Coven builds SQLite to keep
-  temporary tables in files unless a connection asks for memory, SQLite's own
-  default, on Android too. It refuses to open with a SQLite built to keep them
-  in memory unless a connection asks for files (`SQLITE_TEMP_STORE=2`), or
-  whatever it asks (`=3`, libsqlite3-sys's Android default): a streamed write's
-  staged rows, in coven's temporary tables, would then sit in memory whole.
-  Coven also keeps a statement's journal in memory up to 124 KiB
-  (`SQLITE_STMTJRNL_SPILL`, [§21.2](coven.md#212-what-else-stays-bounded)). It
-  refuses to open with a SQLite built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`,
-  which libsqlite3-sys no longer sets itself: releasing memory would then free
-  only the releasing connection's pages ([§4](coven.md#4-writing-locally)). The
-  app's workspace sets coven's `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0
-  -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976
+  its cache fails with SQLite's `SQLITE_IOERR_GETTEMPPATH`. Coven builds SQLite
+  to keep temporary tables in files unless a connection asks for memory,
+  SQLite's own default, on Android too. It refuses to open with a SQLite built
+  to keep them in memory unless a connection asks for files
+  (`SQLITE_TEMP_STORE=2`), or whatever it asks (`=3`, libsqlite3-sys's Android
+  default): a streamed write's staged rows, in coven's temporary tables, would
+  then sit in memory whole. Coven also keeps a statement's journal in memory up
+  to 124 KiB (`SQLITE_STMTJRNL_SPILL`,
+  [§21.2](coven.md#212-what-else-stays-bounded)). It refuses to open with a
+  SQLite built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`, which libsqlite3-sys
+  no longer sets itself: releasing memory would then free only the releasing
+  connection's pages ([sqlive's spec, section
+  10](../crates/sqlive/SPEC.md#memory)). The app's workspace sets coven's
+  `LIBSQLITE3_FLAGS`, `SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE
+  -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976
   -DSQLITE_ENABLE_MEMORY_MANAGEMENT`.
-- *SQLite settings* tune the store's connections ([§4](coven.md#4-writing-locally)).
-  `CovenBuilder::sqlite_settings` takes a `SqliteSettings`, whose fields are
-  typed values, never PRAGMA text; a field left `None` keeps SQLite's default,
-  except `checkpoint_fullfsync`, which is on for macOS and iOS
-  ([§3](coven.md#3-what-coven-assumes)). Coven applies them to the writer and
-  readers of a writable handle, and to every connection of a read-only one, as
-  each opens and before any statement of its own. Connections coven opens to
-  its own files, such as `inputs.db` beside the database, keep SQLite's
-  defaults, with the same `checkpoint_fullfsync` on macOS and iOS and coven's
-  own checkpoints and `journal_size_limit`.
-- Coven checkpoints the WAL itself, off the commit path
-  ([§4](coven.md#4-writing-locally)): the writer's own `wal_autocheckpoint`,
-  and that of the connection that keeps the planner's statistics, is always
-  0, and a thread of the store's own, with its own connection,
-  checkpoints once the WAL holds `wal_autocheckpoint` pages not yet copied,
-  1,000 when unset. It copies and syncs what it can before it holds coven's
-  writer, so coven's writes wait only for what was committed during its last
-  copy and since, and for up to 100 ms of waiting for readers.
-  `WalAutocheckpoint::Off`
-  leaves checkpoints to the app. A checkpoint that finds the database busy or
-  locked, or that SQLite couldn't start because another connection was
-  checkpointing or committing, is tried again at the next commit; any other
-  failure fails the handle with `DbError::CheckpointFailed` until the store is
-  reopened. The thread starts as the store opens and closing stops and joins
-  it, so no runtime's shutdown ends it; a checkpoint that panics fails the
-  handle with the bug, which the bug sink hears once, and every later call and
-  live query fails with `DbError::StoreFailed` carrying it until the store is
-  reopened (E15).
+- *SQLite settings* tune the store's connections.
+  `CovenBuilder::sqlite_settings` takes sqlive's `SqliteSettings`, which coven
+  re-exports with the types of its fields; [sqlive's spec, section
+  10](../crates/sqlive/SPEC.md#sqlites-settings) lists every SQLite setting,
+  which ones the app can choose, and why the rest are fixed, and §4 says which
+  of the fixed ones coven's guarantees rest on. Coven passes the settings to the
+  writer and readers of a writable handle, and to every connection of a
+  read-only one. Connections coven opens to its own files, such as `inputs.db`
+  beside the database, keep SQLite's defaults, with the same
+  `checkpoint_fullfsync` on macOS and iOS and sqlive's own checkpoints and
+  `journal_size_limit`.
+- Coven creates its temporary triggers, and the tables the writer keeps for
+  staging each slot's rows, after `temp_store` applies, since changing it drops
+  temporary objects. The writer keeps those tables, emptied after each slot,
+  rather than making them per slot: creating or dropping a temporary table makes
+  SQLite parse and plan every prepared statement again. Coven's own `inputs.db`
+  connection keeps them in files (§21.2).
+- sqlive checkpoints the WAL itself, off the commit path, once it holds
+  `wal_autocheckpoint` pages not yet copied, 1,000 when unset, and
+  `WalAutocheckpoint::Off` leaves checkpoints to the app. A checkpoint that
+  fails other than on a busy or locked database fails the handle with
+  `DbError::CheckpointFailed` until the store is reopened, and one that panics
+  fails it with the bug, which the bug sink hears once, and every later call
+  and live query with `DbError::StoreFailed` (§4, E15). A read-only handle's
+  cache connection, the only one of its connections that commits, checkpoints
+  as it commits at `wal_autocheckpoint`'s size.
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
-  effect, which every connection shares. SQLite lowers `mmap_size` and
-  `threads` to the limits it was built with, and the readback shows the lowered
-  value. A value larger than SQLite can hold, such as a busy timeout past
-  `i32::MAX` milliseconds, fails the open with
+  effect, as sqlive's `sqlite_settings` does, with sqlive's checkpoint size
+  read from the readers. A value larger than SQLite can hold fails the open with
   `DbError::SqliteSettingOutOfRange`.
 - The page size and auto-vacuum mode apply only when the store's database is
   created, by whichever call creates it: creating, joining, restoring or
-  resetting. A store keeps the ones it was created with; reopening it with
-  others changes nothing, and the readback shows the store's own.
+  resetting. A store keeps the ones it was created with.
 - `checkpoint(mode)` checkpoints the store's WAL on the writer, between writes,
-  in one of SQLite's modes: `Noop`, which only reads the frame counts,
-  `Passive`, `Full`, `Restart` or `Truncate`. It
-  returns what SQLite reports: `NotStarted` when SQLite read nothing of the
-  WAL, because another connection was checkpointing it, or was committing to
-  it as SQLite read where it ends; it gives up on that at once, without the
-  busy timeout. Otherwise `Ran`: whether a reader or another writer kept it
-  from finishing within the busy timeout, the frames in the WAL, and the
-  frames copied into the database. After a `Restart` that wasn't busy, the
-  next write starts the WAL file over from its start, so the file stops
-  growing. A store created with `AutoVacuum::Incremental`, which is the mode
-  where the app sets none, gives back the free pages past 4 MiB each time a
-  claim of writes lands; `Off` and `Full` keep their SQLite meaning and coven
-  runs no vacuum on them. `incremental_vacuum` stays the app's call for the
-  rest.
+  as sqlive's `wal_checkpoint` does, and returns what SQLite reports. A store
+  created with `AutoVacuum::Incremental`, which is the mode where the app sets
+  none, gives back the free pages past 4 MiB each time a claim of writes lands
+  (§4); `Off` and `Full` keep their SQLite meaning and coven runs no vacuum on
+  them. `incremental_vacuum` stays the app's call for the rest.
 - `release_memory()` frees the cached pages no statement is using, as SQLite's
-  `sqlite3_db_release_memory` does ([§4](coven.md#4-writing-locally)). A host calls it when the OS
-  warns of low memory and when the app goes to the background: on Android from `onTrimMemory`, whose
-  `TRIM_MEMORY_UI_HIDDEN` and `TRIM_MEMORY_BACKGROUND` levels report the app leaving the screen and
-  waiting in the background; on iOS on `didReceiveMemoryWarningNotification` and
-  `didEnterBackgroundNotification`. A desktop app needn't. SQLite, as coven builds it, keeps every
-  connection's unused pages in one pool for the process, which one release empties: so the call
-  releases once, on an idle reader, and frees the pages of every connection, and of every store the
-  process has open. It is safe at any time and never waits for a write. Later reads load what they
-  need again.
-
-Every SQLite setting, and who chooses it. Settings marked *app* are fields of
-`SqliteSettings`; the rest have no field.
-
-| Setting | Chosen by | Why, and when it applies |
-|---|---|---|
-| `busy_timeout` | app | how long a connection waits for a lock; unset keeps the 5 seconds rusqlite sets at open; RESTART and TRUNCATE checkpoints wait this long for readers |
-| `cache_size`, `cache_spill` | app | memory each connection uses, and when a transaction writes changed pages early |
-| `mmap_size` | app | reads through memory-mapped I/O; SQLite caps it |
-| `temp_store` | app | where temporary tables live; set before coven creates its temporary triggers and the tables the writer keeps for staging each slot's rows, since changing it drops temporary objects. The writer keeps those tables, emptied after each slot, rather than making them per slot: creating or dropping a temporary table makes SQLite parse and plan every prepared statement again. Coven's own `inputs.db` connection keeps them in files (§21.2) |
-| `threads` | app | helper threads for sorting; SQLite caps it |
-| `journal_size_limit`, `wal_autocheckpoint` | app | how large the WAL file stays once a checkpoint lets it start over, unset is coven's 4 MiB; and how many pages not yet copied the WAL holds before coven checkpoints it, off the commit path, unset is 1,000; with coven's checkpoints off, the WAL grows until the app checkpoints. The writer's own `wal_autocheckpoint`, and that of the connection that keeps the planner's statistics, is always 0, and `sqlite_settings()` reads coven's from the readers. A read-only handle's cache connection, the only one of its connections that commits, checkpoints as it commits at this size |
-| `automatic_index`, `analysis_limit` | app | query planning; `analysis_limit` bounds every `ANALYZE`, and coven's own reads at most 2,000 rows of each index whatever it is |
-| `cell_size_check` | app | extra damage checks as pages are read |
-| `secure_delete` | app | overwrites deleted content |
-| `fullfsync` | app | on macOS and iOS, a commit also flushes the drive's own cache; unset keeps SQLite's default, off, so a power loss can take the latest commits |
-| `checkpoint_fullfsync` | app | on macOS and iOS, a checkpoint also flushes the drive's own cache; unset is on there, so a power loss can't damage the database file once the WAL starts over |
-| `page_size` | app, at creation | fixed once the file has its first page, and WAL mode never changes it |
-| `auto_vacuum` | app, at creation | unset is `Incremental`, and coven gives back free pages past 4 MiB after each landed claim of writes; turning the mode on or off later needs a `VACUUM`, which coven never runs |
-| `journal_mode` | coven: WAL | readers keep their snapshots while a write commits (§4) |
-| `synchronous` | coven: FULL | a committed write survives a power loss (§4) |
-| `locking_mode` | coven: NORMAL | an exclusive lock would shut out the readers and other processes |
-| `foreign_keys` | coven: ON | the rules of §9.1 |
-| `recursive_triggers` | coven: ON | every device runs the same triggers for the same SQL (§9.4) |
-| `trusted_schema` | coven: OFF | triggers and views call only functions marked safe for them |
-| `application_id`, `user_version` | coven | the version of coven's tables, and of the app's migrations (E13) |
-| `schema_version`, `writable_schema` | coven: untouched, and refused by defensive mode | writing them would corrupt the schema or get around coven's checks of it |
-| `query_only` | coven: off | the writer commits coven's own changes; readers open read-only |
-| `defer_foreign_keys` | coven: off | it lasts one transaction, and every transaction is coven's |
-| `ignore_check_constraints` | coven: off | a row failing a CHECK after a merge is taken out on every device (§9.3) |
-| `legacy_alter_table` | coven: off | it changes what a rename does to triggers and views, so one migration would leave different schemas on different devices |
-| `case_sensitive_like` | coven: off | it changes what `LIKE` returns, so the same trigger or CHECK could decide differently on two devices |
-| `encoding` | coven: UTF-8 | key comparison compares stored bytes, which differ between encodings (§9.2) |
-| `max_page_count` | coven: unlimited | other members' writes would fill it, and this device could no longer apply slots |
-| `lock_proxy_file` | coven: none | it changes how other processes lock the file |
-| `reverse_unordered_selects` | coven: off | a testing aid that reorders results without `ORDER BY` |
-| `read_uncommitted` | no effect | it affects only shared-cache connections, which coven never opens |
-| `soft_heap_limit`, `hard_heap_limit`, `data_store_directory` | the process | they set every connection in the process, not one store's |
-| `temp_store_directory` | app, for the process | `Coven::set_temporary_directory`, before the first store opens; an Android app names one, since SQLite finds no folder there |
-| `count_changes`, `default_cache_size`, `empty_result_callbacks`, `full_column_names`, `short_column_names` | nobody | deprecated, though the bundled SQLite still runs them: `count_changes` makes a write return a row count, the column-name pragmas rename result columns, `empty_result_callbacks` changes `sqlite3_exec`'s callbacks, and `default_cache_size` writes a cache size into the file's header |
-| `parser_trace`, `sql_trace`, `vdbe_*`, `activate_extensions` | nobody | they exist only in SQLite's debugging or encryption builds |
-| `wal_checkpoint`, `incremental_vacuum`, `shrink_memory` | app, as calls | `checkpoint`, `incremental_vacuum` and `release_memory` on the handle |
-| `optimize` | coven, as calls | coven gathers the planner's statistics at a writable open, after migrating and before the readers open, at close, and while the store stays open once a table reaches 100 rows or ten times its counted size, checked each 1,000 rows the writer changes; it keeps none for a table under 100 rows (§4); app writes can't run `ANALYZE` |
-| `foreign_key_check` | nobody | a call coven doesn't offer |
-| `integrity_check`, `quick_check` | nobody | they read every row and index; a statement that meets damage fails with `DbError::DamagedDatabase` instead (§19.3) |
-| `collation_list`, `compile_options`, `database_list`, `data_version`, `foreign_key_list`, `freelist_count`, `function_list`, `index_info`, `index_list`, `index_xinfo`, `lock_status`, `module_list`, `page_count`, `pragma_list`, `stats`, `table_info`, `table_list`, `table_xinfo` | nobody | reports, not settings |
-| `sqlite3_limit` limits | coven: SQLite's | a lower limit on one device would refuse values, rows and statements other devices and coven itself write |
-| `sqlite3_db_config` options | coven | double-quoted string literals off; defensive mode on, so SQL that could damage the database file fails, such as writing a virtual table's own tables directly; the query planner's stability guarantee on, so the plan of every statement, coven's and the app's, never depends on the values bound to it: otherwise each use of a cached statement whose plan read a bound value parses and plans it again, once per row of a write's commit, and a `LIKE ?` gives up the index range it would take from a bound prefix; the rest at SQLite's defaults, not offered |
+  `sqlite3_db_release_memory` does, once, on an idle reader, which frees the
+  pages of every connection and of every store the process has open (§4). A
+  host calls it when the OS warns of low memory and when the app goes to the
+  background: on Android from `onTrimMemory`, whose `TRIM_MEMORY_UI_HIDDEN` and
+  `TRIM_MEMORY_BACKGROUND` levels report the app leaving the screen and waiting
+  in the background; on iOS on `didReceiveMemoryWarningNotification` and
+  `didEnterBackgroundNotification`. A desktop app needn't. It is safe at any
+  time and never waits for a write.
+- Of SQLite's settings with no field, coven keeps its own versions in
+  `application_id` and `user_version` (E13); the app names a temporary folder
+  for the process with `Coven::set_temporary_directory`, before the first store
+  opens; and `checkpoint`, `incremental_vacuum` and `release_memory` on the
+  handle run SQLite's `wal_checkpoint`, `incremental_vacuum` and
+  `shrink_memory`. A statement that meets damage fails with
+  `DbError::DamagedDatabase` (§19.3).
 - *Collations* are the app's own orders for text, which its SQL names with
   `COLLATE` ([§4](coven.md#4-writing-locally)). `CovenBuilder::collation(name,
   version, compare)` adds one; `compare` takes two strings and returns their
@@ -2971,93 +2917,9 @@ pub enum ProtectionSupport {
     Locked,
 }
 
-/// SQLite settings for the store's connections; `None` keeps SQLite's default,
-/// except `checkpoint_fullfsync`, on for macOS and iOS, and
-/// `journal_size_limit`, 4 MiB. `wal_autocheckpoint` is when coven checkpoints,
-/// off the commit path. Each field's PRAGMA is
-/// its name. `Default` leaves every one unset.
-#[derive(Default)]
-pub struct SqliteSettings {
-    /// At most `i32::MAX` milliseconds.
-    pub busy_timeout: Option<Duration>,
-    pub cache_size: Option<CacheSize>,
-    pub cache_spill: Option<CacheSpill>,
-    /// At most `i64::MAX`; SQLite lowers it to its build's limit.
-    pub mmap_size: Option<u64>,
-    pub temp_store: Option<TempStore>,
-    /// At most `i32::MAX`; SQLite lowers it to its build's limit.
-    pub threads: Option<u32>,
-    pub journal_size_limit: Option<JournalSizeLimit>,
-    pub wal_autocheckpoint: Option<WalAutocheckpoint>,
-    pub automatic_index: Option<bool>,
-    pub cell_size_check: Option<bool>,
-    pub secure_delete: Option<SecureDelete>,
-    pub fullfsync: Option<bool>,
-    pub checkpoint_fullfsync: Option<bool>,
-    pub analysis_limit: Option<AnalysisLimit>,
-    /// Applies only when the database is created.
-    pub page_size: Option<PageSize>,
-    /// Applies only when the database is created. Unset is `Incremental`, and
-    /// coven gives back free pages past 4 MiB each time a claim lands.
-    pub auto_vacuum: Option<AutoVacuum>,
-}
-
-/// The same settings as SQLite reports them, every one known.
-pub struct SqliteSettingsInEffect {
-    pub busy_timeout: Duration,
-    pub cache_size: CacheSize,
-    /// When on, never below the cache's own page count.
-    pub cache_spill: CacheSpill,
-    pub mmap_size: u64,
-    pub temp_store: TempStore,
-    pub threads: u32,
-    pub journal_size_limit: JournalSizeLimit,
-    pub wal_autocheckpoint: WalAutocheckpoint,
-    pub automatic_index: bool,
-    pub cell_size_check: bool,
-    pub secure_delete: SecureDelete,
-    pub fullfsync: bool,
-    pub checkpoint_fullfsync: bool,
-    pub analysis_limit: AnalysisLimit,
-    pub page_size: PageSize,
-    pub auto_vacuum: AutoVacuum,
-}
-
-/// Counts at most `i32::MAX` unless noted.
-pub enum CacheSize { Pages(u32), Kibibytes(u32) }
-pub enum CacheSpill { Off, Pages(NonZeroU32) }
-pub enum TempStore { Default, File, Memory }
-/// Bytes at most `i64::MAX`.
-pub enum JournalSizeLimit { Unlimited, Bytes(u64) }
-pub enum WalAutocheckpoint { Off, Pages(NonZeroU32) }
-pub enum SecureDelete { Off, On, Fast }
-pub enum AnalysisLimit { Unlimited, Rows(NonZeroU32) }
-pub enum PageSize {
-    Bytes512, Bytes1024, Bytes2048, Bytes4096,
-    Bytes8192, Bytes16384, Bytes32768, Bytes65536,
-}
-pub enum AutoVacuum { Off, Full, Incremental }
-
-pub enum CheckpointMode { Noop, Passive, Full, Restart, Truncate }
-
-/// What a checkpoint did, as SQLite reports it.
-pub enum WalCheckpoint {
-    /// SQLite read nothing of the WAL: another connection was checkpointing
-    /// it, or committing to it as SQLite read where it ends.
-    NotStarted,
-    /// SQLite read the WAL and copied what it could.
-    Ran {
-        /// `Full`, `Restart` or `Truncate` couldn't finish within the busy
-        /// timeout.
-        busy: bool,
-        /// Frames in the WAL.
-        log_frames: u32,
-        /// Frames copied into the database, this time or before.
-        checkpointed_frames: u32,
-    },
-}
-
-pub enum IncrementalVacuum { All, Pages(NonZeroU32) }
+/// `SqliteSettings`, `SqliteSettingsInEffect` and the types of their fields,
+/// `CheckpointMode`, `WalCheckpoint` and `IncrementalVacuum` are sqlive's,
+/// which coven re-exports (sqlive's spec, section 10).
 
 /// Whether an app function's result depends on its arguments alone; only a
 /// deterministic one can appear where a stored value depends on it, and it
@@ -3769,23 +3631,18 @@ let moved = handle
 
 - Reads run on several read-only connections at once ([§4](coven.md#4-writing-locally)).
 - A one-shot read, as `read`, records nothing of what it reads: nothing runs
-  it again. It and a live query's run alike run only the app's statements;
-  the writes that change a joined table run coven's lookups
-  ([§4](coven.md#4-writing-locally)).
-- A *live query* runs once, then again whenever a write commits that changes
-  rows it read. Its errors are results and don't end it, except the one saying
-  the store closed or its handle fails every call, and one that carries a bug,
-  as a run that panicked does (E15): after that one, `next_blocking()` returns
-  `None`, and never repeats it.
-- A live query's calls need no async runtime, and only `next_blocking()`
-  waits. `changed()` returns a future that resolves on any executor once a
-  write changed what the query read, a new request came, or the handle failed
-  or closed. `run_changed()` then runs the query once on the calling thread, without waiting.
-  `next_blocking()` parks the calling thread until `changed()` would resolve
-  and runs the query on it. An async app awaits `changed()` and runs
-  `run_changed()` on a blocking thread, which leaves no thread waiting when a
-  write leaves the result equal. The examples below call `next_blocking()` on
-  a blocking thread for brevity; a program with no runtime calls it alone.
+  it again. A *live query*, as `subscribe` returns, is sqlive's `LiveQuery`,
+  which coven re-exports with the other live query types. sqlive's spec states
+  how one runs, which writes run it again, what its calls wait for and which
+  errors end it ([sections 3 to 8](../crates/sqlive/SPEC.md#3-live-queries)).
+- A live query's errors are results and don't end it, except the one saying
+  the store closed (`StoreClosed`) or its handle fails every call
+  (`RollbackFailed`, `StatePersistence`, `CheckpointFailed`,
+  `StatisticsFailed`, `WallTimer`, or `StoreFailed` for state a bug may have
+  left wrong), and one that carries a bug, as a run that panicked does
+  (`DbError::Bug`, E15): after that one, `next_blocking()` returns `None`, and
+  never repeats it. The examples below call `next_blocking()` on a blocking
+  thread for brevity; a program with no runtime calls it alone.
 - A read and a live query fail with their closure's own error type, as a
   write does (E3): Ana's music app's closures return its `LibraryError`, and
   its live query of albums delivers one. The type takes coven's `DbError`
@@ -3802,8 +3659,7 @@ let moved = handle
   stream.
 - The closure passed to `read` or `subscribe` runs SQL while it holds its read
   snapshot and a reader connection; `process` maps the result to the app's types
-  after the connection is released. A rerun after a write that returns the same
-  result isn't delivered.
+  after the connection is released.
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
@@ -3983,31 +3839,21 @@ let moved = handle
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
-  coven's lookups judging whether a write changed rows a live query joins
-  ([§4](coven.md#4-writing-locally)). A test that runs the same read, or the
-  same write beside the same live query, over a small table and a large one
-  fails when its steps grow with the table. The app's statements count in
-  writes and migrations too. `test_track_work` also counts the scope plans
-  coven builds, each of which says what one statement lets its live query
-  narrow, and the sources, cores and edges they hold (`WorkCounts`).
-- *What a statement depends on, in tests.* With sqlive's test-utils feature,
-  sqlive's `read_report` says which rows of each table and view a statement
-  depends on when a live query runs it
-  ([§4](coven.md#4-writing-locally)), before any value is bound. The report
-  takes each parameter that a column is compared with to hold a value that isn't
-  NULL and that SQLite compares as it is, and takes each run to return as many
-  rows as its LIMIT. A table is
-  keyed by a column when every read of it compares that column by `=`, `IN` or
-  `IS` with a value, or joins it to a column that the joined read itself
-  compares so. A table is looked up when coven narrows every read of it but no one
-  column is compared in all of them. A table is whole when some read of it
-  depends on every row, and the report then gives the reason for each such read.
-  A view coven reads whole is whole too, and so is each table the view reads,
-  whatever the report says of that table's other reads. A statement coven can't
-  narrow at all has one reason and no entries. A test that depends on sqlive
+  sqlive's lookups judging whether a write changed rows a live query joins
+  ([sqlive's spec, section 7](../crates/sqlive/SPEC.md#what-a-lookup-costs)). A
+  test that runs the same read, or the same write beside the same live query,
+  over a small table and a large one fails when its steps grow with the table.
+  The app's statements count in writes and migrations too. `test_track_work`
+  also counts the scope plans sqlive builds, each of which says what one
+  statement lets its live query narrow, and the sources, cores and edges they
+  hold (`WorkCounts`).
+- *What a statement depends on, in tests.* sqlive's `read_report`, with sqlive's
+  test-utils feature, says which rows of each table and view a statement depends
+  on when a live query runs it ([sqlive's spec, section
+  12](../crates/sqlive/SPEC.md#12-testing-what-a-statement-depends-on)). coven's
+  views are among the views it reads whole. A test that depends on sqlive
   asserts the report of Ben's album page, and fails when the page's statement
-  starts to read `tracks` whole. The report's text holds one line for each
-  entry.
+  starts to read `tracks` whole.
 
 | View | Column | Holds |
 |---|---|---|
@@ -4226,50 +4072,11 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output>;
 }
 
-/// A subscription's results and lifetime; dropping it ends the query (E4).
-/// Its results fail with `E`, the query closure's own error type.
-pub struct LiveQuery<T, E> { /* private fields */ }
-
-/// A subscription whose request may be replaced while it runs (E4), its
-/// results failing with `E` as a `LiveQuery`'s do.
-pub struct ReconfigurableLiveQuery<Q, T, E> { /* private fields */ }
-
-/// Shared access to replacing a live query's request (E4).
-pub struct LiveQueryRequests<Q> { /* private fields */ }
-
-/// How often a live query had run when asked, for tests and benchmarks that
-/// count the runs writes caused and those that found nothing new (E4).
-#[cfg(feature = "test-utils")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LiveQueryRuns { /* private fields */ }
-
-/// A request revision assigned by one live query (E4).
-pub struct LiveQueryRevision(pub u64);
-
-/// The query was dropped before its request could be replaced (E4).
-pub struct LiveQueryClosed;
-
-/// A result together with the request that produced it (E4).
-pub struct ReconfigurableLiveQueryEvent<Q, T, E> {
-    /// The request used by this run.
-    pub request: Q,
-    /// The revision assigned to that request.
-    pub revision: LiveQueryRevision,
-    /// A new request, changed rows, or both.
-    pub cause: LiveQueryCause,
-    /// The query's result, including failures that do not end the query.
-    pub result: Result<T, E>,
-}
-
-/// Why a reconfigurable live query ran; its first run answers the initial request (E4).
-pub enum LiveQueryCause {
-    /// A new request, including the initial one.
-    Request,
-    /// A write changed rows the query read.
-    Write,
-    /// A new request and a relevant write arrived before this run.
-    RequestAndWrite,
-}
+/// `LiveQuery`, `ReconfigurableLiveQuery`, `LiveQueryRequests`,
+/// `LiveQueryRevision`, `LiveQueryClosed`, `ReconfigurableLiveQueryEvent`,
+/// `LiveQueryCause` and, with test-utils, `LiveQueryRuns` are sqlive's, which
+/// coven re-exports (sqlive's spec, section 3). A `LiveQuery<T, E>` that
+/// coven returns fails with `E`, the query closure's own error type.
 
 /// An open file with checked identity, header and range-reading state (§17.7).
 /// Retaining a stream prevents store deletion, including after the store closes.
@@ -4395,118 +4202,6 @@ where
         T: Send + 'static;
 }
 
-impl<T, E> LiveQuery<T, E>
-where
-    T: Send + 'static,
-    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
-{
-    /// Resolves once `next_blocking` has something to do: a write changed what
-    /// the last run read, the handle failed or closed, the query ended, or no
-    /// run has answered yet. Any executor can poll it, and dropping it loses
-    /// nothing.
-    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static;
-
-    /// Runs the query once if a write changed what the last run read or no
-    /// run has answered yet, and never parks. Returns `None` when nothing
-    /// changed, when the new result equals the last, and once the query has
-    /// ended.
-    pub fn run_changed(&mut self) -> Option<Result<T, E>>
-    where
-        T: Clone + PartialEq;
-
-    /// Returns the first result at once; after that, parks this thread until a
-    /// write changes the result, then runs the query on it and returns the new
-    /// result. An error is a result too, and doesn't end the query, except the
-    /// one saying the store closed, the handle fails every call
-    /// (`RollbackFailed`, `StatePersistence`, `CheckpointFailed`,
-    /// `StatisticsFailed`, `WallTimer`, or `StoreFailed` for state a bug may
-    /// have left wrong), or one that carries a bug, as a run that panicked
-    /// does (`DbError::Bug`, E15): after it, `None`, so a loop over the query
-    /// ends.
-    pub fn next_blocking(&mut self) -> Option<Result<T, E>>
-    where
-        T: Clone + PartialEq;
-
-    /// Runs `process` on each result after its run releases the connection.
-    pub fn process<P, U>(self, process: P) -> LiveQuery<U, E>
-    where
-        T: Clone + PartialEq,
-        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
-        U: Send + 'static;
-
-    /// How often this query has run so far, its processed form's runs too.
-    #[cfg(feature = "test-utils")]
-    pub fn runs(&self) -> LiveQueryRuns;
-
-    /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next_blocking` runs it again. A commit marks the queries it
-    /// changes as it commits, so this answers at once.
-    #[cfg(feature = "test-utils")]
-    pub fn is_marked_for_rerun(&self) -> bool;
-}
-
-impl<Q, T, E> ReconfigurableLiveQuery<Q, T, E>
-where
-    Q: Clone + PartialEq + Send + Sync + 'static,
-    T: Send + 'static,
-    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
-{
-    /// Process each successful value after its run releases the connection.
-    /// Request, revision and cause stay on the event; errors remain results.
-    /// Equality compares processed values. Existing request handles still work.
-    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
-    where
-        T: Clone + PartialEq,
-        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
-        U: Send + 'static;
-
-    /// A handle that replaces the request.
-    pub fn requests(&self) -> LiveQueryRequests<Q>;
-
-    /// How often this query has run so far, its processed form's runs too.
-    #[cfg(feature = "test-utils")]
-    pub fn runs(&self) -> LiveQueryRuns;
-
-    /// Whether a commit since this idle query's last result changes what it
-    /// reads, so `next_blocking` runs it again. A commit marks the queries it
-    /// changes as it commits, so this call answers at once.
-    #[cfg(feature = "test-utils")]
-    pub fn is_marked_for_rerun(&self) -> bool;
-
-    /// As `LiveQuery::changed`, and a new request resolves it too.
-    pub fn changed(&self) -> impl Future<Output = ()> + Send + 'static;
-
-    /// As `LiveQuery::run_changed`, returning the event.
-    pub fn run_changed(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
-    where
-        T: Clone + PartialEq;
-
-    /// As `LiveQuery::next_blocking`, returns the next result, with the
-    /// request and revision that produced it and whether a new request, a
-    /// write, or both caused it. Returns `None` after the result saying the
-    /// store closed or the handle failed, or one carrying a bug.
-    pub fn next_blocking(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
-    where
-        T: Clone + PartialEq;
-}
-
-impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
-    /// Replaces the request, returning the revision whose result will answer
-    /// it. Fails once the query is dropped.
-    pub fn set(&self, request: Q) -> Result<LiveQueryRevision, LiveQueryClosed>;
-}
-
-#[cfg(feature = "test-utils")]
-impl LiveQueryRuns {
-    /// The runs that have finished.
-    pub fn runs(&self) -> u64;
-    /// Of those, the runs a write caused, with no new request.
-    pub fn writes(&self) -> u64;
-    /// Of those, the runs whose result equaled the one before, which the
-    /// query didn't return.
-    pub fn equal(&self) -> u64;
-}
-
 /// Makes every object app SQL reads on `connection`, outside any store, as
 /// every store makes it, and registers coven's SQL functions there with
 /// `device` as this device and sync's computation of the sync state, for a
@@ -4630,11 +4325,11 @@ pub struct WorkCounts {
     /// SQLite steps the app's statements ran in `execute` and
     /// `execute_batch`, triggers' included, in writes and migrations.
     pub app_write_steps: usize,
-    /// Steps of coven's lookups judging whether a write changed rows a
-    /// live query joins (§4).
+    /// Steps of sqlive's lookups judging whether a write changed rows a
+    /// live query joins (sqlive's spec, section 7).
     pub lookup_steps: usize,
-    /// Scope plans coven built for live queries' statements: what each
-    /// statement lets its live query narrow (§4).
+    /// Scope plans sqlive built for live queries' statements: what each
+    /// statement lets its live query narrow (sqlive's spec, section 4).
     pub scope_plans_built: usize,
     /// How much of their statements those plans read, all together.
     pub scope_plan_size: ScopePlanSize,
@@ -4642,67 +4337,16 @@ pub struct WorkCounts {
     pub scope_plan_time: Duration,
 }
 
-/// How much of a statement coven read to build its scope plan, up to where it
-/// stopped, if it did.
+/// sqlive's, which coven re-exports with test-utils: how much of a statement
+/// sqlive read to build its scope plan (sqlive's spec, section 12).
 #[cfg(feature = "test-utils")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ScopePlanSize {
-    /// Sources: the items of each FROM, those of the subqueries, CTEs and
-    /// views read as their own included.
-    pub sources: usize,
-    /// SELECT cores.
-    pub cores: usize,
-    /// Edges between the sources: each an equality that the rows of one
-    /// source meet with a value of another's, by which coven narrows it. One
-    /// equality can give an edge each way, and an OR's sides give none.
-    pub edges: usize,
-}
+pub use sqlive::ScopePlanSize;
 
 #[cfg(feature = "test-utils")]
 impl CovenHandle {
     /// Counts the work the store's connections run into `counter`, from the
     /// next call on. Install it between calls, before the one to measure.
     pub async fn test_track_work(&self, counter: WorkCounter) -> Result<(), DbError>;
-}
-
-/// sqlive's: what the live query that reads `whole` whole depends on when it
-/// runs `sql` on `connection`.
-#[cfg(feature = "test-utils")]
-pub fn read_report(
-    connection: &rusqlite::Connection,
-    sql: &str,
-    whole: &WholeViews,
-) -> rusqlite::Result<ReadReport>;
-
-/// What a live query's statement depends on. Its text holds one line for each
-/// entry.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadReport {
-    /// Coven can't narrow the statement: it depends on every row of each
-    /// table it reads.
-    Whole { why: String },
-    /// One entry for each table it narrows or reads whole and each view it
-    /// reads whole, by name.
-    Entries(Vec<ReadEntry>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReadEntry {
-    /// The table or view, lowercase.
-    pub object: String,
-    pub rows: ReadRows,
-}
-
-/// Which rows of one table or view a statement depends on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReadRows {
-    /// Those that hold one of a few values in `column`.
-    Keyed { column: String },
-    /// Those each read narrows it to, with no one column that all of them
-    /// compare with values.
-    LookedUp,
-    /// Every row, with the reason for each read that nothing narrows.
-    Whole { why: Vec<String> },
 }
 
 /// One `_coven_lost` row (Appendix B.3).

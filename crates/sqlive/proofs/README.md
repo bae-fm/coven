@@ -1,15 +1,14 @@
 # Live query narrowing
 
-The Lean package in this directory models how sqlive narrows a live query to
-the rows its statements can depend on
-([coven's spec, §4](../../../spec/coven.md#4-writing-locally)), and which writes
-therefore run the query again. The package states a statement as sqlive's
-planner reads it, ports the planner, and proves each rule's step: the rows a
-rule leaves out of a table's scope are rows the statement's result
-doesn't depend on. `narrowing_sound` puts the steps together: for a
-well-formed statement, a write the judge lets pass leaves the statement's rows
-unchanged. A differential test runs sqlive, the model and SQLite on
-random statements and writes and compares all three.
+The Lean package in this directory models how sqlive narrows a live query to the
+rows its statements can depend on ([sqlive's spec](../SPEC.md), sections 4 to
+8), and which writes therefore run the query again. The package states a
+statement as sqlive's planner reads it, ports the planner, and proves each
+rule's step: the rows a rule leaves out of a table's scope are rows the
+statement's result doesn't depend on. `narrowing_sound` puts the steps together:
+for a well-formed statement, a write the judge lets pass leaves the statement's
+rows unchanged. A differential test runs sqlive, the model and SQLite on random
+statements and writes and compares all three.
 
 ## The model
 
@@ -819,5 +818,5 @@ SQLite's authorizer reports no read of the columns a USING or NATURAL join
 compares, nor of the columns that decide which rows a query whose rows SQLite
 picks keeps, or which row an aggregate takes a value from, so sqlive adds those
 columns to a statement's reads
-([coven's spec, §4](../../../spec/coven.md#4-writing-locally)), and the
+([sqlive's spec, section 4](../SPEC.md#4-what-a-statement-reads)), and the
 model's reads and sqlive's agree.

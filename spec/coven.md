@@ -468,13 +468,17 @@ error. An app that expects a conflict says so in its SQL, with `ON CONFLICT`
 or `INSERT OR IGNORE`. A query that finds no row is no failure, nor is an
 error the app's own mapping of a row returns: the statement ran.
 
-Coven keeps its own bookkeeping in tables inside the same database, which the app
-can't read or write. The app reads its own tables normally, on several read-only
-connections at once. It can subscribe to a query, which reruns only when rows it
-read change. Another process, such as a home-screen widget, can open the store
-read-only while the app has it open. A writable open requires SQLite's WAL journal
-mode so readers can keep their snapshots while a write commits. If SQLite keeps
-another mode, opening fails with `WalUnavailable`.
+Coven keeps its own bookkeeping in tables inside the same database, which the
+app can't read or write. The app reads its own tables normally, on several
+read-only connections at once. It can subscribe to a query, a *live query*,
+which reruns only when rows it read change. Coven runs the store's database
+through sqlive, the crate that holds its connections, captures each write and
+reruns the live queries a commit changes; [sqlive's
+spec](../crates/sqlive/SPEC.md) states how. Another process, such as a
+home-screen widget, can open the store read-only while the app has it open. A
+writable open fails with `WalUnavailable` when SQLite keeps a journal mode other
+than WAL, which sqlive needs ([sqlive's spec, section
+1](../crates/sqlive/SPEC.md#1-a-database-and-its-connections)).
 
 Some of that bookkeeping decides what the app shows: the files its rows
 reference, where each is and where a read here takes its bytes from, which
@@ -587,29 +591,29 @@ there: `coven_uploads.sending` is 1 for each file being sent, and
 `coven_sending` lists those files, one per upload in flight. A reopened store
 shows every file waiting.
 
-A live query that reads either runs again each time an upload starts or ends,
-as if a write had changed what it read. That includes one that only counts
+A live query that reads either runs again each time an upload starts or ends, as
+if a write had changed what it read. That includes one that only counts
 `coven_sending`'s rows, or asks whether it has any, and reads none of its
-columns: a read through one of coven's views reads the view too. Ana's photo
-app shows how many of each album's photos are going out now as one live query
-over `coven_sending` and `photos`. Since `coven_sending` holds at most as many
-files as the upload limit lets go out at once, counting them finds each file's
-photo through an index: on a queue of 20,000 files, finding the albums of the
-three being sent took 0.02 ms, where counting `sending` over `coven_uploads`
-read every queued file, in 1 ms. A query that reads neither isn't run again.
+columns: coven's views are among the views sqlive reads whole, so a read through
+one reads the view too ([sqlive's spec, section
+3](../crates/sqlive/SPEC.md#views-read-whole)). Ana's photo app shows how many
+of each album's photos are going out now as one live query over `coven_sending`
+and `photos`. Since `coven_sending` holds at most as many files as the upload
+limit lets go out at once, counting them finds each file's photo through an
+index: on a queue of 20,000 files, finding the albums of the three being sent
+took 0.02 ms, where counting `sending` over `coven_uploads` read every queued
+file, in 1 ms. A query that reads neither isn't run again.
 
 A read sees the files being sent as they stood at its snapshot, as it sees
 coven's tables. Ana resumes her uploads while a read that fixed its snapshot
 before the resume still runs, and the upload worker starts sending a photo
-before the read's statement gets to it. The read shows the photo paused and
-not being sent, as the store stood at its snapshot. If the read took the
-sending files from memory as its statement ran, it would show the photo
-paused, from its snapshot, and being sent, from after the resume, a state the
-store never held. So coven copies the files in flight as each read fixes its
-snapshot, while no write commits, and every statement of the read reads that
-copy. A write copies them as it begins, since no other write can commit before
-it ends. A read that fixes its snapshot while a write commits waits for that
-commit to finish.
+before the read's statement gets to it. The read shows the photo paused and not
+being sent, as the store stood at its snapshot. If the read took the sending
+files from memory as its statement ran, it would show the photo paused, from its
+snapshot, and being sent, from after the resume, a state the store never held.
+So the files in flight are one of the values coven keeps in memory beside the
+database, which each read copies as it fixes its snapshot ([sqlive's spec,
+section 3](../crates/sqlive/SPEC.md#values-the-host-keeps-in-memory)).
 
 Which files are being downloaded to keep whole is the same kind of fact. Ben
 prepares a pin of an album of 12 tracks; the prepare downloads up to the
@@ -728,938 +732,94 @@ writes the rows coven would write in the tables his triggers fire on, and
 records each track's original with `record_user_file`, which writes what
 staging the original writes.
 
-A live query depends on what its statements read. As SQLite prepares each
-statement, it tells coven the tables and columns the statement reads, and a
-commit that changes none of those columns doesn't run the query again. SQLite
-leaves out the columns a USING or NATURAL join compares, so coven adds them
-itself, for each table such a join compares in the statement or in one of the
-app's views it reads: a write that changes only `tracks.release_id` reruns a
-query that joins `tracks` to `releases` with `USING (release_id)`. SQLite also
-leaves out the columns that decide which rows a LIMIT keeps, which row an
-aggregate takes a value from, and which of the rows that compare equal a
-DISTINCT or a compound keeps, and coven adds them too, as the rules on LIMIT,
-aggregates, DISTINCT and compounds below say. Coven adds no column for a CTE
-that no query of the statement reads: SQLite never runs it, so its joins and
-its LIMIT change no row. Ben's import screens share one WITH, whose
-`candidate` CTE picks one row of `scan_folders` with `LIMIT 1`. A screen's
-statement that reads only `scan_files` doesn't rerun when a write changes
-another row of `scan_folders`. When coven
-can't parse the statement, or a view it reads, coven counts every column of
-every table as read, so every write runs the query again. A one-shot read records none of this:
-nothing runs it again.
+A live query reruns as sqlive's spec states ([sections 4 to
+8](../crates/sqlive/SPEC.md#4-what-a-statement-reads)): only for a commit that
+changes a column its statements read, in a row their conditions and joins allow.
+Ben's album page reads `SELECT title FROM tracks WHERE release_id = ?1 ORDER BY
+position`, and a write to another release's tracks doesn't rerun it. A live
+query of coven's own, one that follows a table app SQL can't read, runs a
+statement of coven's own, which sqlive reads as it reads an app's, so it narrows
+by the same rules.
 
-A live query of coven's own, one that follows a table app SQL can't read, runs a statement of
-coven's own. Coven reads that statement as it reads an app's, so it narrows by the same rules and
-the query runs again only for a write that changes a row the statement read. When a write asks
-SQLite a question about such a row, as for a join's partner rows, SQLite answers it as coven's own
-SQL, which may read the tables app SQL can't. A statement of coven's own that a live query runs
-through any other call reads each table it names whole.
+Applying another device's slot narrows the same way: coven applies it in one of
+sqlive's streamed transactions, which judges each row's net change as a local
+write does, and runs the lookups in the slot's own transaction before it commits
+([sqlive's spec, section 2](../crates/sqlive/SPEC.md#streamed-transactions)).
+Loading a snapshot and coven's upload and claim bookkeeping run the same way.
+When Ben's phone applies an edit his laptop made to another album's track, the
+album page open on his phone doesn't run again.
 
-Coven reads a statement's SQL to work out what it depends on when a live query
-first runs it. The more a statement joins, the longer that takes, so coven logs
-at debug level how many FROM items and SELECTs it read in each statement, and how
-many edges it found between the FROM items. An edge is an equality that the rows
-of one FROM item meet with a value of another's, by which coven narrows the
-first. One equality can give an edge each way, and the sides of an OR, of a
-COALESCE or of a compound subquery give none. When Ben's album page is slow to
-open the first time, the log shows how large its statement is.
+Some changes rewrite a whole device-local table, such as a play queue the app
+empties and fills again from the library. The app runs that SQL as a *bulk
+write*: one transaction of plain SQLite that changes device-local tables only,
+with no hook watching it, which empties a table in one step. sqlive's spec
+measures it and says which live queries it reruns ([section
+9](../crates/sqlive/SPEC.md#9-bulk-writes)).
 
-Coven judges each row a write changes by the row's net change: the row as it was
-before the write and as it is when the write commits. A write can change one row
-more than once. Ben's import marks a folder busy as a write starts to read its
-files, and marks it idle again before the write commits. His music app rewrites
-an album's list row with `INSERT OR REPLACE`, which SQLite runs as a delete and
-an insert even when every value comes out the same. Neither row changed, so
-neither write runs a live query again. A column that ends with the value it
-began with changed nothing either, and a row changed twice runs a query again as
-one change from its first values to its last would. For each row a write changes
-in a table that some live query reads, coven keeps the row's key and the values
-of the columns live queries read or narrow by, as they were before the write
-first changed the row and after it last did. A column whose values coven doesn't
-keep counts as changed once a statement changes it, and so does every column of
-a table with no primary key, since no key names its rows.
-
-Within a table, a statement that reads one table depends only on the rows its
-WHERE allows: a column compared with a constant or a bound value by `=`, `<`,
-`<=`, `>`, `>=` or `IN` with a list, and conditions like these joined by AND
-and OR. Ben's album page reads `SELECT title FROM tracks WHERE release_id = ?1
-ORDER BY position`. A write to another release's tracks doesn't rerun it; one
-that moves a track into this release or out of it does, since coven checks the
-changed row as it was before the write and as it is after. Functions,
-aggregates, grouping, ordering and limits work only on the rows the WHERE
-allows, so `SELECT count(*) FROM tracks WHERE release_id = ?1` narrows the same
-way.
-
-`IS` with a value, `IS NULL` and `IS NOT NULL` narrow too, and so do their
-spellings `ISNULL`, `NOTNULL` and `NOT NULL`. `x IS 5` is `x = 5`, and `x IS ?1`
-narrows by whichever the run's value is: the rows where `x` is NULL, or those
-where it equals the value. Ben's album grid sorted by artist lists the albums
-with no credits first, so its first window holds `credit_sort_key IS NULL`. An
-album added further down the list, with a credit, doesn't rerun that window.
-
-The truth of a NULL test or of a comparison, compared with a value, narrows to
-the rows where that comparison holds. Ben's album grid sorted by year lists the
-albums with no year last, so its order begins with `year IS NULL`. A window's
-statements hold `(year IS NULL) = 0`, which narrows to the albums that have a
-year, or compare `year IS NULL` between two bounds. An album added in another
-window's years doesn't rerun this window.
-
-A statement with a LIMIT narrows further when a run returns as many rows as its
-LIMIT. Ben's album list shows each window as one live query, `SELECT title, id
-FROM albums WHERE title >= ?1 ORDER BY title LIMIT 100`. A run that returns 100
-rows depends only on the albums that sort at or before its last row: an album
-that sorts after that row would sort after every row the run returned, so it
-can't appear in the result. So coven narrows `albums` to the rows whose `title`
-is at most the last row's, and each run sets that bound again from its own last
-row. An album added further down the list doesn't rerun the window. One added
-inside the window does, and so does deleting one, after which the window holds
-the next album too. A row equal to the last row on every ORDER BY column counts
-as inside, since SQLite could sort it before the last row. A run that returns
-fewer rows than its LIMIT already holds every row its WHERE allows, so its scope
-stays as the WHERE gives it.
-
-The bound compares rows as the ORDER BY does: term by term, each in its own
-direction, with NULL first in ascending order and last in descending. Coven
-reads the last row's values from the result, so the statement must also return
-each ORDER BY term as a result column, listed before any `*` and written as the
-term writes it, with or without the COLLATE it ends in (below). Each term
-reads one table, with no NULLS FIRST or LAST, and is one of these:
-
-- a stored column, in any collation;
-- an expression over that table's stored BINARY columns, such as `year IS
-  NULL` or `coalesce(year, 0) + 1`, that holds no subquery, no `rowid`, no
-  clock and no function that isn't deterministic;
-- a generated column whose collation is BINARY and whose expression names only
-  that table's stored BINARY columns.
-
-A term may end in one COLLATE, as `title COLLATE NOCASE`, which gives it that
-collation. A COLLATE anywhere else in the term, or an expression over a column
-that isn't BINARY, leaves the scope as the WHERE gives it. Without a COLLATE, a
-stored column sorts in the collation it declares and any other term in BINARY,
-as SQLite sorts it. The collation can be one of SQLite's own, `BINARY`,
-`NOCASE` or `RTRIM`, or one the app registered, as described near the end of
-this section. Coven keeps no list of collations, so a collation the app adds
-later narrows with no change to coven.
-
-To judge a write for a term, coven asks SQLite to compare the term's value in
-the changed row with the last row's, as it judges a condition on one table's
-row (below): a SELECT over the row's values that evaluates the expression, the
-column or a generated column's own expression, in the term's collation. Coven
-writes the expression after a unary plus and names the collation, as
-`+(title) COLLATE natural_order < ?3`. The plus takes away the expression's
-affinity, so SQLite compares the two values as the ORDER BY does, and the
-COLLATE makes it compare text by the app's function, the same function the
-ORDER BY runs. Values that are not text compare as they always do. For a
-generated column, coven gives the last row's value the column's type, as
-`CAST(?3 AS INTEGER)` in an INTEGER column, so SQLite converts the
-expression's value as it does the column's. Two values that the collation
-ties, such as `'Rock'` and `'rock'` in NOCASE, count as equal, so a row that
-ties with the last row on every term still passes. Ana's import list sorts
-paths with `ORDER BY path COLLATE natural_order, id` and returns both terms, so
-a full window that ends at "Track 12" doesn't rerun when she adds "Track 40".
-Ben's album grid sorted by year
-orders by `year IS NULL, year, id` and returns each term, so a full window
-that ends in 1998 doesn't rerun when Ben adds an album from 2004. His storage
-list sorts by `storage_order`, a generated column that ranks how each release
-is stored, and a release Ben adds with a later rank doesn't rerun a full
-window.
-
-The terms can read more than one table. Ben's album grid grouped by artist
-joins `artists` to `albums` with `JOIN albums AS al ON al.artist_id = ar.id`
-and orders by `ar.sort_key, ar.id, al.title, al.id`, returning each term. The
-ORDER BY's terms fall into runs of consecutive terms over one table: here the
-two terms over `artists`, then the two over `albums`. A row sorts at or before
-the last row when its first run's values sort before the last row's, or equal
-them and its other values sort at or before the last row's. So coven narrows
-the first run's table, `artists`, to the artists whose own terms sort at or
-before the last row's artist. It narrows a later run's table, `albums`, to the
-albums whose own terms sort at or before the last row's album, and to the
-albums that join an artist that sorts before the last row's artist. A write
-that changes an album asks for that artist as it asks for a joined row
-(below), within the artists the run's scope allows. An album Ben adds to an
-artist after the window, or to the window's last artist after its last album,
-doesn't rerun the window; one added to an earlier artist does, wherever its
-title sorts. A later run's table gets this bound only when coven reads it
-after the table of each earlier run and an equality with a column of that
-table narrows it. When a condition on `albums` alone makes coven read
-`albums` first, only the artists' bound narrows the window, and an album
-that meets that condition reruns it wherever it sorts.
-
-No table a term reads is the right side of a LEFT JOIN. There, when a write
-adds a row that matches a left row that had no match, SQLite no longer returns
-the row of NULLs it returned for that left row, and that row of NULLs can sort
-before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
-and no aggregate or window function in its result columns, since there one
-result row's values depend on many table rows. A join that narrows another
-table by a sorted table's rows takes only the rows within that table's bound.
-Any other ORDER BY, such as one by a result column's position or by an
-expression over two tables, and any OFFSET leave the scope as the WHERE gives
-it.
-
-Which rows a LIMIT keeps can depend on columns the statement never names.
-SQLite keeps the first rows it reads, and it reads them in the order of the
-plan it chooses. Ana's photo app shows one photo of each album with `p.id IN
-(SELECT f.id FROM photos AS f WHERE f.album_id = a.id LIMIT 1)`, and the app
-has an index on `photos(album_id, taken_at)`. SQLite reads each album's photos
-through that index, in the order Ana took them, so a write that changes only
-one photo's `taken_at` can change the photo the album shows. So a query with a
-LIMIT or an OFFSET depends on every column of each table it reads: the tables
-of its FROM, of the views and CTEs it reads, and of the queries inside it. So
-does a subquery whose first row a comparison takes, as `x = (SELECT ...)` or
-`(a, b) = (SELECT ...)`, since SQLite reads it as if it had `LIMIT 1`. The
-query's rows still narrow as its conditions and the LIMIT's bound say: a write
-to a photo of an album the screen doesn't show doesn't rerun it.
-
-An ORDER BY that sorts by the rowid of each of the query's tables tells every
-two of its rows apart, so the order SQLite reads them in can't change which
-rows the LIMIT keeps. Such a query depends only on the columns its statements
-name. Ben's album list above, ordered by `title` alone, depends on every column
-of `albums`: two albums with the same title can come in either order, and an
-index SQLite reads them through decides which one ends the window. Ordered by
-`title, id`, where `id` is the table's INTEGER PRIMARY KEY, the window depends
-only on the columns it names. A table's rowid is its INTEGER PRIMARY KEY
-column, or `rowid` where no column has that name. Each ORDER BY term names it
-as a column, by its name, by its result column's alias or by its position. The
-query is one SELECT with no DISTINCT, GROUP BY or aggregate, and each of its
-FROM items is a table. A WITHOUT ROWID table has no rowid, and a PRIMARY KEY
-that isn't the rowid, as `id INT PRIMARY KEY`, can hold NULL in many rows, so
-an ORDER BY over either still leaves the query depending on every column. A
-SELECT that calls an aggregate with no GROUP BY returns one row, which every
-order keeps, so a subquery such as `(SELECT count(*) FROM tracks AS t WHERE
-t.release_id = r.id)` depends only on the columns it names too.
-
-An aggregate can depend on the order SQLite reads rows in, with no LIMIT. Ben's
-artist list shows each artist's album count and the title of one album:
-`SELECT b.artist_id, b.title, count(*) FROM albums AS b GROUP BY b.artist_id`.
-`b.title` is no GROUP BY term and sits in no aggregate, so SQLite takes it from
-one of the artist's albums, which the order its plan reads them in decides. The
-app has an index on `albums(artist_id, year)`, so SQLite reads each artist's
-albums by year, and a write that changes only one album's `year` can change
-the title the list shows. `group_concat(b.title, ', ')` joins the titles in
-that same order. So a SELECT that groups its rows or calls an aggregate depends
-on every column of each table it reads, as a query with a LIMIT does, in four
-cases:
-
-- A result column, the HAVING or an ORDER BY term names a column, or holds a
-  subquery, outside every aggregate and every GROUP BY term, or the SELECT
-  returns a `*`.
-- The SELECT calls an aggregate other than `count`, `min` and `max`, and the
-  call has no ORDER BY of its own that sorts by the rowid of each of the
-  SELECT's tables. `group_concat` and `json_group_array` join their values in
-  the order SQLite reads them, and `sum`, `total` and `avg` add reals in that
-  order, which can change the last digits of the result.
-- The SELECT calls `min` or `max` of anything but the rowid or a stored column
-  of one of its tables whose collation is BINARY and whose declared type is
-  neither BLOB nor missing. Among values that compare equal and still differ,
-  `min` and `max` keep the value SQLite reads first: an untyped column can
-  hold both `1` and `1.0`, a NOCASE column both `'Abc'` and `'ABC'`, and an
-  expression can give either.
-- A result column, the HAVING or an ORDER BY term shows a GROUP BY term other
-  than a column that the third case allows. Among values of the term that
-  compare equal and still differ, a group keeps the value SQLite reads first,
-  so `SELECT b.genre, count(*) FROM albums AS b GROUP BY b.genre`, where
-  `genre` is a NOCASE column, can show `'Rock'` or `'rock'`.
-
-A column is a GROUP BY term when the GROUP BY names it as the SELECT writes
-it, or names its result column by position or alias. SQLite tells an aggregate
-from a scalar function by the function's name and the number of arguments the
-call passes: `max(b.year)` calls the aggregate, and `max(b.year, b.month)` calls
-SQLite's scalar max, which takes the larger value of each row, so its columns
-sit in no aggregate. `count` gives the same value in every order, and so do
-`min` and `max` of a column that the third case allows, so `SELECT
-b.artist_id, count(*), max(b.year) FROM albums AS b GROUP BY b.artist_id`,
-where `artist_id` and `year` are INTEGER columns, depends only on the columns
-it names. `group_concat(b.title,
-', ' ORDER BY b.id)`, where `id` is the table's INTEGER PRIMARY KEY, depends only on the columns it
-names. Ordered by `b.year` alone, it depends on every column of `albums`, since
-two albums of the same year can come in either order. The SELECT's conditions
-still narrow its rows: a write to an album of an artist the list doesn't show
-doesn't rerun it.
-
-A window function depends on that order too. `row_number() OVER (PARTITION BY
-b.artist_id ORDER BY b.year)` numbers an artist's two albums of the same year
-in the order SQLite reads them, and with no ORDER BY in its OVER, it numbers
-all of an artist's albums in that order. So a SELECT that calls a window
-function depends on every column of each table it reads, unless the window's
-ORDER BY sorts by the rowid of each of the SELECT's tables and the SELECT
-neither groups its rows nor calls an aggregate. `row_number() OVER (PARTITION
-BY b.artist_id ORDER BY b.year, b.id)` depends only on the columns it names.
-
-DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that
-compare equal. Among rows whose values compare equal and still differ, the
-order SQLite reads them in decides which one the result shows, so `SELECT
-DISTINCT b.genre FROM albums AS b`, where `genre` is a NOCASE column, can show
-`'Rock'` or `'rock'`, and so can `SELECT b.genre FROM albums AS b UNION SELECT
-s.genre FROM singles AS s`. So a SELECT DISTINCT, and a query that combines
-its SELECTs by UNION, INTERSECT or EXCEPT, depend on every column of each
-table they read, unless each result column of each such SELECT is a column
-that the third case of the aggregate rules allows.
-
-A condition narrows only where coven compares values as SQLite does. One on a
-column whose collation isn't BINARY, or on a generated column, doesn't, and nor
-does one whose value SQLite would convert first, as text compared with an
-INTEGER column: there SQLite's answer and coven's could differ. A NULL test
-looks through a COLLATE on its column, since a collation doesn't change whether
-a value is NULL.
-
-Any other condition on one table's row narrows that table too, however it is
-written: a function of a column, a CASE, `LIKE` and `GLOB`, `<>`, `NOT`, `IS
-NOT` a value, a row value, a COLLATE. Coven doesn't compare such a condition
-itself. To judge a write it asks SQLite whether the changed row passes, as it
-was before the write and as it is after, with each value given its column's
-type so the condition compares as it does in the table. Ben's artist picker
-lists the artists his typed text finds first, ordered by `CASE WHEN lower(name)
-= ?1 THEN 0 WHEN lower(name) GLOB ?2 THEN 1 ELSE 2 END`, so a window of it holds
-`CASE ... END = 2` over `artists`. Coven asks SQLite whether an artist written
-while the picker is open lands in that window's rank, so an artist added whose
-name the text doesn't find, and which sorts in another window, doesn't rerun
-it. The question is a SELECT over the changed row's values, with a text kept as
-`CAST(?3 AS TEXT)` in a TEXT column and an integer as `CAST(?3 AS INTEGER)` in
-a numeric one, so `name = 5` is true of the text `'5'` there as it is in the
-table.
-
-A condition is judged this way when it names columns of one table of its own
-SELECT and no other table, each a column coven narrows by (stored, BINARY),
-and holds no subquery, no `rowid`, no clock (`CURRENT_TIME`, `date('now')` and
-the other date and time functions) and no function that isn't deterministic. A
-condition that doesn't qualify, such as `b = (SELECT b FROM u LIMIT 1)`, `c >
-unixepoch('now')` or `t.a + u.a = 3`, narrows nothing, and a statement with no
-condition that narrows depends on every row of each table it read. When coven
-can't tell, it counts the row as a match, so the query runs again: a value
-with no cast that keeps it, such as a blob in a TEXT column, a value the write
-didn't record, and an error. When a question runs past the lookups' step
-limit (below), coven runs the query again whatever the write's other questions
-answer. A condition judged this way is never read from a view's or subquery's
-rows: it narrows the tables the statement reads directly, and the tables
-behind a view keep the conditions they have.
-
-A statement that joins tables narrows each one by the rows the others matched.
-Ben's album page lists its tracks with their credited artists:
-
-```sql
-SELECT t.title, a.name FROM tracks AS t
-LEFT JOIN track_artists AS c ON c.track_id = t.id
-LEFT JOIN artists AS a ON a.id = c.artist_id
-WHERE t.release_id = ?1 ORDER BY t.position
-```
-
-The WHERE narrows `tracks` to this release's rows. The join narrows
-`track_artists` to the rows whose `track_id` is the id of one of those tracks,
-and `artists` to the artists those rows name. A credit added to another
-release's track doesn't rerun the page; one added to this release's tracks
-does.
-
-The page's run reads nothing for its joins: the write that changes a joined
-table decides. When Ben credits an artist on track 7, coven asks, in that
-write's own transaction before it commits, whether one of this release's
-tracks has id 7. That question is a *lookup*, one for each live query that
-joins `track_artists`:
-
-```sql
-SELECT 1 FROM tracks AS t WHERE t.id = 7 AND t.release_id = ?1 LIMIT 1
-```
-
-where `?1` is the release the page's run was bound to. Coven looks up the
-row's value before the write and after it, so a credit moved onto this
-release's track or off it reruns the page. A lookup for `artists` asks the
-same of `track_artists`, with the tracks of this release inside it. Coven asks
-the tables, not the query's result: a release with no tracks yet has no row in
-the result, and its first track must still rerun a query that joins it.
-
-Asking at the write keeps a live query's run as fast as a one-shot read of the
-same SQL, and its memory the same whatever its partners hold: it keeps its
-statements' conditions, no values. Reading the joined values in each run
-instead could read a whole table for one small window. On a machine busy with
-other work, scrolling Ben's import list of 50,000 folders took 0.5 to 1.7 s a
-window that way, and 4 to 10 ms with lookups.
-
-A write pays for the narrowing instead. A lookup that an index serves takes a
-few of SQLite's steps, and a write looks each value up once for each query that
-joins its table. Over 10,000 releases of 12 tracks, a write that credits
-artists on 1,000 tracks of other releases took 0.5 ms more with the album page
-open, about 0.5 µs a track. Ben's import writes 270 rows at a time. With four
-of an album's screens open, each joining tables the import writes, it ran
-about 50 lookups a write, and cost the same 94 µs a row as with none open.
-
-A join narrows a table this way through an equality between one of its
-columns, or an expression over its own columns, and a column, or an expression
-over the columns, of one other table in the join. Each expression holds no
-clock (`CURRENT_TIMESTAMP`, `date('now')`) and no function SQLite doesn't flag
-deterministic, as `random()` or an app function
-registered nondeterministic: a write's lookup evaluates it again and could get
-another answer than the query did, so such a join narrows nothing. That holds
-for a column of a subquery or VALUES whose expression holds one, as `page.at` of
-`(SELECT CURRENT_TIMESTAMP AS at) AS page`, on either side of the `=` and in a
-USING join. So does a column of a subquery that reads a view read
-whole, which can show what coven holds in memory; a join on the view's own
-column still narrows. An aggregate or window function gives its rows' answer
-and doesn't count. A row value equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the
-equalities of its columns: SQLite gives it the truth of their AND, NULL included. An equality
-with COALESCE or IFNULL of such values narrows by each of them, since COALESCE
-returns one of its arguments: a value of one other table, a subquery's
-returned column or a constant. A lookup compares each value with the joined
-column's affinity, as SQLite gives it to COALESCE's value.
-
-Ben's album choice joins a record to its owner by `(CASE WHEN rr.kind =
-'album' THEN rr.key ELSE rr.album_key END) = o.album_key`: for a record a write
-changes, coven asks SQLite for the CASE's value in the record's row and whether
-an owner in the query's scope holds it, so a record of another album doesn't
-rerun the choice. SQLite gives such an expression's value the other side's
-affinity, and coven compares it the same way. An expression of a table's own
-columns that holds a COLLATE narrows nothing, and one over a table a LEFT JOIN
-adds narrows that table only when it is NULL wherever a column it names is
-NULL, as the next paragraph says of an expression over the other table.
-
-An expression over a table a LEFT JOIN adds gives the joined column values
-only when it is NULL wherever a column it names is NULL. Ben's album page
-shows each track's cover with `LEFT JOIN tags AS g ON g.track_id = t.id JOIN
-covers AS cv ON cv.kind = CASE WHEN g.kind IS NULL THEN 'plain' ELSE g.kind
-END`. A track with no tag shows the `'plain'` cover. A lookup asks the tags
-table, which has no row for that track, so it would never find the `'plain'`
-cover, and a new `'plain'` cover would not rerun the page. So over a LEFT
-JOIN's table, coven narrows by an expression built only of columns,
-constants, parameters, arithmetic, comparisons, `||`, the bit operators,
-`NOT`, the signs, CAST, COLLATE, `LIKE`, `GLOB`, `->`, `->>` and the built-in
-functions that return NULL whenever an argument is NULL, such as `lower`,
-`substr`, `length`, `abs`, `round` and `json_extract`. An expression with any
-other part narrows nothing there: CASE, `iif`, `nullif`, `IS`, `IS NULL`, AND,
-OR, BETWEEN, an IN list, `quote`, `typeof`, `hex`, `concat`, `printf`, a
-COALESCE inside another expression, and every function the app registers,
-whose NULLs coven can't know. The album page reads `covers` whole. The same
-CASE over a table an inner join adds narrows: every row the join keeps has a
-tag, which a lookup finds.
-
-An OR narrows a table when each of its sides does, to the rows either side
-allows: Ben's
-import finds an artist by `a.discogs_id = t.dg OR a.id = t.dg + 100`, and an
-artist neither side names doesn't rerun it. Coven looks up each side's
-equalities in the tables placed before that table, and an OR with a side
-whose table comes later narrows nothing there; a side that compares with a
-subquery's value waits for the subquery's table, as a column compared with
-one does. The ON of a
-LEFT JOIN narrows only its right side: it decides which right rows join each
-left row, and a left row none joins still appears, with
-NULLs in their place. Any other condition on the right side, in the WHERE or an
-inner join's ON, makes the LEFT JOIN an inner join. Each condition coven narrows
-by is false where its column is NULL, except the conditions the next paragraph
-lists, so a left row with NULLs in the right
-side's place fails it, and can't appear whatever the LEFT JOIN's ON matched:
-only the rows an inner join gives are left. So coven narrows such a join as an
-inner join, by its ON both ways. Ben's album page can list only the album's
-producers, with `JOIN tracks AS t ON t.release_id = r.id LEFT JOIN track_artists
-AS c ON c.track_id = t.id` and `WHERE r.album_id = ?1 AND c.role = 'producer'`.
-That narrows `track_artists` to the producer credits on this album's tracks, so
-crediting a producer on another album, or a singer on this one, doesn't rerun
-the page.
-
-Five kinds of condition can be true of the NULLs a missing right row gives: a
-NULL test; a truth compared with a value; a condition SQLite judges, such as
-`lower(c.role) = 'x'`; a join on `IS`; and an OR with a side that holds one of
-these. On the right side, such a condition doesn't make the join inner, and it
-narrows nothing there. Ben's
-album page lists the tracks no artist is credited on with `LEFT JOIN
-track_artists AS c ON c.track_id = t.id WHERE c.track_id IS NULL`. Crediting an
-artist on one of those tracks takes it off the page, so coven reads
-`track_artists` whole for this page: narrowing it to the rows with a NULL
-`track_id` would miss that credit. Another condition that makes the join inner,
-such as `AND c.role = 'producer'`, lets the NULL test narrow `track_artists`
-too. In the LEFT JOIN's own ON, as `ON c.track_id = t.id AND c.role IS NULL`, a
-NULL test narrows the right side as any condition there does.
-
-Coven looks the tables of a join up one after another. Each takes values from
-the tables before it, and the first one, a table that a condition of its own
-narrows, takes values from none. An equality between two columns also carries
-a condition on one of them to the other, so that first table still narrows by
-what the other side's conditions say of the column the join compares. Ben's
-album page can list only the numbered tracks of a release, with `SELECT
-t.title FROM tracks AS t JOIN releases AS r ON t.release_id = r.id WHERE r.id
-= ?1 AND t.position > 0`. Coven looks `tracks` up first, for `t.position > 0`,
-and `r.id = ?1` with the equality gives `tracks` the condition `t.release_id =
-?1` too. A numbered track added to another release doesn't rerun the page,
-and a numbered track added to this release does. A CTE, a subquery in FROM or a view
-carries its own tables' conditions the same way, through a column that passes
-a table's column on: `tracks` joined to `WITH r AS (SELECT id FROM releases
-WHERE id = ?1 LIMIT 1)` by `t.release_id = r.id` narrows by `t.release_id =
-?1`. A query with a SELECT that groups its rows or calls an aggregate or
-window function carries nothing out, even in a column its GROUP BY lists.
-A carried condition narrows only the table it is carried to: it doesn't
-change which table comes first, and an equality with an expression carries
-none.
-
-A lookup compares as the statement does. A join on an expression, which has no
-affinity, gives the looked-up value the joined column's, so a text `'5'` the
-expression makes equals the 5 an INTEGER column holds. So does a column of a
-subquery that is a literal or a parameter, as in `(SELECT ?1 AS release) AS
-page`: it has no affinity and compares by BINARY, so `t.release_id =
-page.release` and `page.release = t.release_id` narrow `t` alike. Where coven couldn't
-compare as SQLite does, the join narrows nothing: between columns of different
-affinities, by a collation other than BINARY, as when its first side is a
-NOCASE column, and on anything but an equality or `IS`. A column declared with
-no type still gives its values to a column of another affinity: SQLite
-compares a TEXT column with it as they are and gives its values an INTEGER
-column's affinity, and the lookup does the same. A join on `IS` matches
-NULL with NULL, and its lookup asks for a NULL the same way. Ben's import joins
-a candidate's failures to it by `f.hash IS v.hash AND f.run IS v.run`, where a
-run can be NULL, so a failure the import writes for another candidate doesn't
-rerun the list of this candidate's failures that Ben has open. A join on `IS`
-takes no values from a table a LEFT JOIN adds, whose missing row gives NULLs
-that no lookup finds, and it can be true of the NULLs a missing right row
-gives, so it never makes a LEFT JOIN an inner join.
-NATURAL, RIGHT and FULL joins narrow nothing either. A join with USING narrows
-as the ON it stands for: `JOIN r USING (k)` compares `r.k` with the `k` of the
-leftmost table before it that has one, by that table's collation.
-
-A join in parentheses narrows as its joins do, as if its tables were joined
-one after another, wherever that gives the rows SQLite gives. Ben's people
-screen lists each member with their person and avatar: `FROM members AS m LEFT
-JOIN (people AS p LEFT JOIN files AS a ON a.id = p.avatar_id) ON p.id =
-m.member`. SQLite joins `people` and `files` first, and gives a member whom no
-person joins NULLs in both tables. Joining `people` to the member, then
-`files` to the person, gives the same rows, since `a.id = p.avatar_id` can't
-hold where `people` has no row. So the ON around the parentheses narrows
-`people` as a LEFT JOIN's ON narrows its right side, and `files` narrows to
-the avatars of the people it allows: a file that is no listed person's avatar
-doesn't rerun the screen. SQLite reads a join in parentheses of two tables or
-more that follows another item of the FROM as a SELECT of every column of its
-tables, so a write to any column of `people` or `files` in those rows reruns
-the screen. An inner join of a join in parentheses always
-narrows this way, its ON read with the WHERE. A LEFT JOIN of one narrows
-this way only when its ON names no table in the parentheses but the first,
-holds no subquery, and each later table there joins by a LEFT JOIN whose ON
-compares a column of a table before it, other than by `IS`. A statement with
-any other join in parentheses narrows nothing, and so does one whose join in
-parentheses has an alias, starts with another, or joins a table by USING.
-
-One of coven's views or a table function in a join narrows the tables beside
-it, as `json_each(?1)` lists the ids an app passes in: a lookup asks the view
-or the function. The view's own tables are read whole. A table function of
-another table's columns, as `json_each(l.items)` or `json_each(l.rowid)`,
-narrows nothing: it lists rows only beside that table's rows, so a lookup can't
-ask it alone. Nor does one whose arguments read the clock or a function that
-isn't deterministic, as `json_each(json_array(CURRENT_TIMESTAMP))`: a write's
-lookup would ask it again and get another list than the query did.
-A condition on a table's own rows doesn't put it ahead of such a function: a
-list window that reads `json_each(?1) AS w JOIN placement AS p ON p.key =
-unhex(w.value) AND p.item <> 'group'` still narrows `placement` to the keys the
-function lists, so a write to the selection rows of `p.key` that the window
-checks with `EXISTS (SELECT 1 FROM selection AS chosen WHERE chosen.key =
-p.key)` reruns only the window listing that key.
-
-An FTS5 table that keeps its own content narrows as a table does. FTS5 keeps
-its rows in a content table of its own, and coven reads each change to that
-table as the same change to the FTS5 table's row, so conditions on the FTS5
-table narrow its rows and its joins narrow the tables beside it. A lookup
-reads the content table, which costs fewer of SQLite's steps than the FTS5
-table. Ben's library search reads `a.id IN (SELECT album_id FROM
-album_search WHERE title GLOB ?1)`: an edit to an album the search doesn't
-find doesn't rerun it, and neither does a search row whose title the pattern
-doesn't match. FTS5 deletes a row of its content table and inserts it again
-when an UPDATE names it. Coven judges the row's net change, one update of the
-columns whose values changed, so an UPDATE of a column the search doesn't read
-doesn't rerun it. A statement that names
-a column FTS5 adds narrows nothing, since coven can't judge one on a single
-row: `rank`, whose value depends on the table's other rows, and the column
-that bears the table's name, which `MATCH` and `bm25` name. An FTS5 table
-without a content table of its own, and any other virtual table, narrows
-nothing either.
-
-A lookup's cost depends on the app's indexes. One no index serves reads its
-partner row by row, so it could cost a write as much as reading the whole
-table. A lookup stops after 1,000 of SQLite's steps instead, and the query
-runs again whatever the write's other lookups find, which is always right, and
-the write's cost stays bounded. Over a partner of a few rows the lookup finishes and still narrows.
-An app's tests can count the work: with coven's test-utils feature,
-`test_track_work` counts the SQLite steps of the app's statements and of
-coven's lookups apart ([api.md E4](api.md#e4-reading)). Ben's test runs his
-album page over 10 releases and then over 1,000, and credits an artist on
-another release's track. The page and the write's lookup should run as many
-steps over both, and the test fails if they grow.
-
-Coven judges a write only against the live queries whose scopes its rows
-could pass. Coven files each waiting live query under each table the query
-reads and, when an equality or an IN list narrows the table, under the
-values that the equality or list compares with. Coven judges a change to a
-row against the queries it filed under a value the row holds before or
-after the change, and against those whose scope on the table has no
-equality. With 200 album pages open, each reading `SELECT title FROM tracks
-WHERE release_id = ?1` for its own release, coven judges a track Ben adds to
-one release against that release's page alone.
-
-A condition SQLite judges costs a write one small SELECT for each row it
-changes and each such condition a live query holds, and rows that agree on the
-columns a condition names share one answer. Ben's import writes 270 rows at a
-time. With four queries open, each holding such a condition on the table it
-writes, the write ran 33 SQLite steps a row and took 4.7 µs a row, against
-1.8 µs with none open, on a busy machine.
-
-A subquery is narrowed the same way, by its own conditions and by the values it
-compares with columns of the query around it. Ben's album page marks the tracks
-that have no credited artist yet with `NOT EXISTS (SELECT 1 FROM track_artists
-AS c WHERE c.track_id = t.id)`. Coven narrows `track_artists` to the rows whose
-`track_id` is one of this release's track ids, so a credit added to another
-release's track doesn't rerun the page. Values pass into a subquery: whether a
-subquery finds a row doesn't narrow the query around it, since NOT EXISTS keeps
-the very rows EXISTS drops, and a condition inside a subquery on the outer
-query's columns alone narrows nothing. Only a column the subquery returns as it
-is comes out of one, as the next paragraphs say. A SELECT with no FROM, as
-`SELECT EXISTS (...)`, depends on what its subqueries read, and each arm of a
-UNION, INTERSECT or EXCEPT on the rows its own conditions allow.
-
-A column compared with the value a subquery returns narrows by the subquery's
-source. Ben's album grid shows each album's cover, picked as the cover of the
-album's first release: `WHERE cover.id = (SELECT r.id FROM releases AS r WHERE
-r.album_id = a.id ORDER BY r.album_order, r.id LIMIT 1)`. The value the
-subquery returns is the `id` of a row of `releases`, and coven narrows
-`releases` to the releases of the albums the window shows. So `covers` narrows
-to the covers of those releases, as `JOIN releases AS r ON r.id = cover.id`
-would narrow it, and a cover written for another album's release doesn't rerun
-the window. A cover written for a release of an album the window shows does,
-even when that release isn't the album's first. Coven looks up the release of
-the cover, not the pick: running the pick once for each album the window shows
-would cost more as the window grows, and past 1,000 steps a lookup stops and
-the window runs again. This holds for `col = (SELECT x.c ...)`, `(SELECT x.c ...) = col` and
-`col IN (SELECT x.c ...)`, where the subquery's single column is a bare column
-`x.c` of one of its own sources, and where both columns have the same affinity,
-or `x.c` is declared with no type, and compare by BINARY, as a join's do. A
-subquery that combines SELECTs by UNION, INTERSECT or EXCEPT returns rows its
-SELECTs return, so it narrows by
-each of them when each returns such a column or a constant: `hash IN (SELECT
-hash FROM scan WHERE path = ?1 UNION ALL SELECT hash FROM scan WHERE path =
-?2)` narrows `hash` to the hashes of either path. One with VALUES narrows
-nothing. A row value narrows the same way, as `(a, b) = (SELECT x.c, x.d
-...)` or `(a, b) IN (SELECT x.c, x.d ...)`: each pair narrows as that pair
-alone would, since the comparison holds only where every pair is equal. A
-subquery returning an expression, as `max(x.c)` or `x.c + 1`, or a
-column of the query around it, returns no row's own value, so it narrows
-nothing, and neither do `NOT IN`, `<>` and `<` with a subquery. The files
-beside the covers narrow the same way: `coven_files.id = cover.file` takes its
-files from the covers. A subquery that names the compared column's own source,
-as `cover.id = (SELECT r.id FROM releases AS r WHERE r.kind = cover.kind)`,
-narrows its own table without the correlation: coven can't read the subquery's
-source before the covers it takes values from.
-
-A subquery that keeps the first rows for each row around it narrows the way a
-statement's LIMIT does. Ben's album grid shows the title of each album's first
-release with `(SELECT r.title FROM releases AS r WHERE r.album_id = a.id ORDER
-BY r.album_order, r.id LIMIT 1)` as a result column. For each album, the
-subquery returns the first row of the album's window: the releases whose
-`album_id` holds the album's `id`, in the subquery's order. A release that
-sorts after the first of its album's releases changes nothing the grid shows,
-wherever it sorts in another album's window. So coven narrows `releases` to the
-rows that fewer than LIMIT rows of their own window sort before. A release Ben
-adds as an album's second doesn't rerun the grid. One he adds before the
-album's first release does, and so do deleting the first release and moving a
-release to another album where it sorts first. A release whose `album_id` is
-NULL sits in no window, since `=` holds of no NULL. To judge a write, coven
-asks SQLite for the first LIMIT rows of the changed row's window, in the
-subquery's order, and whether the changed row sorts before the last of them.
-The question reads the database a lookup reads, so the run keeps no value.
-
-The subquery is one SELECT of one table, with a LIMIT whose value is a positive
-integer and no OFFSET, and with no GROUP BY, DISTINCT, aggregate or window
-function, since there one row depends on many. Each of its conditions is one of
-two kinds: a condition that names only that table's columns and that SQLite can
-judge row by row, as a condition on one table's row (above), or an equality of
-one of its columns with a value of the query around it that coven reads as a
-join's. The rows those conditions keep for a row around the subquery are then
-exactly that row's window. Each ORDER BY term is an expression over the table's
-columns of the first kind, written out rather than as a position, with no
-COLLATE and no NULLS FIRST or LAST. The window narrows only the table's own
-scope, not the rows another table's lookup reads. The cover above,
-`cover.id = (SELECT r.id ... ORDER BY r.album_order, r.id LIMIT 1)`, takes its
-value from the row the subquery returns, which sits inside the album's window,
-so `releases` narrows to each album's first release there too: a release that
-moves after its album's first doesn't rerun the grid. A cover written for any
-release of an album the grid shows still reruns it, since the lookup of
-`covers` reads every release of the album, as above.
-
-A subquery in FROM, a CTE and one of the app's own views are read as queries of
-their own. A condition on one of their columns that passes a
-table's column on unchanged narrows that table. Ben's app defines `CREATE VIEW
-album_tracks AS SELECT r.album_id, t.title FROM releases AS r JOIN tracks AS t
-ON t.release_id = r.id`, and its album page reads `SELECT title FROM
-album_tracks WHERE album_id = ?1`: that narrows `releases` to the album's
-releases and `tracks` to theirs, as the join written out would. A LEFT JOIN's
-right side in the view takes the condition too, which makes that join an inner
-join, as a WHERE condition does. A condition passes into each arm of a compound,
-but not into a query that calls a window function or has a LIMIT: a row of
-such a query depends on which other rows there are, so a condition on it says
-nothing of each. Nor does it pass into a query that groups its rows or calls
-an aggregate, whose row comes of many rows of its tables, except a condition on
-a column the GROUP BY lists, which holds the same value in each row of a
-group. Ben's release page counts the release's files that wait to upload
-with `LEFT JOIN (SELECT f.release_id, count(*) AS n FROM waiting AS f GROUP BY
-f.release_id) AS w ON w.release_id = r.id`. Each row of a group holds the
-group's `release_id`, so the join narrows `waiting` to this release's files,
-and a file of another release that starts to wait doesn't rerun the page. A
-condition on `n`, or on a column the query computes from the key, narrows
-nothing there. Coven's own views are read whole, since
-what they show changes with what coven holds in memory too. A view coven can't
-read this way, as one with a recursive CTE, is read whole; a lookup still asks
-it, so it narrows the tables beside it. SQLite names each read inside a view
-that coven reads whole by the innermost view or CTE the read goes through. When
-the statement's own CTE or view has the name of one inside such a view, coven
-can't tell their reads apart, so no read through that name narrows its table.
-Otherwise a statement whose CTE narrows `releases` to one row would take the
-view's reads of `releases` for the CTE's, and a write to another row, which
-changes the view, wouldn't rerun the statement.
-When coven's parser can't read such a view, coven doesn't know the names inside
-it, and no read through any view or CTE narrows. A CTE gives the tables joined
-to it their values wherever the statement reads it, in a subquery or in another CTE
-too, and so does a subquery in FROM, as long as its SQL names no row of the
-query around it. One that names such a row, as a subquery correlated with the
-row around it, lists rows only beside that row, so a lookup can't ask it
-alone, and the tables joined to it narrow by their own conditions only. A
-WITH inside a subquery or a CTE can declare a CTE under the name of an outer
-one. Where the inner WITH's SQL names it, the name means the inner CTE, as
-SQLite reads it, and an outer CTE whose own SQL names it still reads the
-outer one. A FROM item that names such a CTE narrows the tables of the CTE
-it reads. A
-statement with a recursive CTE of its own, or with `x IN table`, narrows
-nothing: it depends on every row of each table it read.
-
-Coven logs at debug level each statement that reads a table or a view whole,
-with the statement's SQL. The log names each table one of the statement's own
-SELECTs, CTEs or views reads whole and each view coven reads whole, with the
-reason. The log doesn't name the tables behind such a view, and for a statement
-that narrows nothing it gives one reason for every table. A write to any row of
-a table read whole can run the live query again, and nothing in the result shows
-why. When Ben's app reads every one of his 100,000 tracks because a second
-subquery of the screen's statement leaves out its WHERE, the log names `tracks`
-and that subquery's name for it.
-
-Applying another device's slot narrows the same way. As the slot's rows change,
-coven notes each table's changed columns and, for a table a live query reads,
-the changed rows' keys and the values live queries read or test, and judges each
-row's net change, as it does for a local write; it runs the lookups in the
-slot's own transaction before it commits. Loading a snapshot and coven's upload
-and claim bookkeeping are noted the same way. When Ben's phone applies an edit
-his laptop made to another album's track, the album page open on his phone
-doesn't run again.
-
-Some changes rewrite a whole device-local table. Ben plays his library of
-100,000 tracks, and his music app empties its play queue, a device-local
-table, and fills it again from the library. Through a write, coven's pre-update
-hook notes each row change for live queries, and while a pre-update hook
-watches, SQLite deletes a table's rows one by one instead of dropping its pages
-at once. So the app runs that SQL as a *bulk write* instead: one transaction of
-plain SQLite that changes device-local tables only, with no hook watching it.
-Over eight runs on a busy machine, clearing the 100,000-row queue took a median
-of 150 ms through a write and 6 ms through a bulk write, and filling it with
-one `INSERT ... SELECT` 210 ms and 70 ms.
-
-A bulk write never writes a synced table. It records no row change, so a
-change to a synced table could never reach a write record and would never
-sync. As SQLite prepares each statement, its authorizer reports every table
-the statement would write, including through the triggers and foreign-key
-actions SQLite compiles into it. A statement that would write a synced table
-fails the bulk write with `SyncedTableInBulkWrite`, and nothing it did commits;
-one that would write coven's tables fails with `InternalTable`, as in a write.
-The bulk write may read any table app SQL reads, so the queue fills from the
-synced `tracks` table. Triggers on device-local tables still run.
-
-That same report tells live queries what a bulk write changed. Coven keeps the
-tables its statements would write, and after it commits, every live query that
-read one of them runs again once, whatever rows it read, as when applying a
-slot. A table a statement might change counts even when it didn't, as one a
-trigger writes only when its `WHEN` holds. So a change of a few rows that
-should rerun only the live queries reading those rows is a write, not a bulk
-write.
+A bulk write never writes a synced table. It records no row change, so a change
+to a synced table could never reach a write record and would never sync. A
+statement that would write a synced table, directly or through the triggers and
+foreign-key actions SQLite compiles into it, fails the bulk write with
+`SyncedTableInBulkWrite`, and nothing it did commits; one that would write
+coven's tables fails with `InternalTable`, as in a write. The bulk write may
+read any table app SQL reads, so the queue fills from the synced `tracks` table.
+Triggers on device-local tables still run.
 
 App SQL can't run a PRAGMA, so the app chooses SQLite's settings through coven
-when it opens the store. Ana's notes app imports a thousand notes while a live
-query shows the list. It opens the store with a 64 MB page cache and automatic
-checkpoints off. After the import it checkpoints the WAL itself with RESTART, so
-the next writes reuse the WAL file from its start.
+when it opens the store ([api.md E1](api.md#e1-opening)). Coven passes them to
+sqlive, which applies them to every connection, checkpoints the WAL off the
+commit path, keeps the query planner's statistics, gives back cached memory and
+opens a Windows path by its plain form ([sqlive's spec, section
+10](../crates/sqlive/SPEC.md#10-upkeep)). Coven's own database beside the
+store's, `inputs.db`, which keeps what this device observed in storage apart
+from the app's writes, is checkpointed the same way, and is created with
+auto-vacuum off: it is held to its byte budget (§21.1), and the next received
+range reuses its freed pages.
 
-Unless the app turns them off, coven checkpoints the WAL itself, and never
-inside a commit. SQLite's own automatic checkpoint runs in the commit that
-takes the WAL past 1,000 pages, which then waits for it, `F_FULLFSYNC` included
-on macOS and iOS (§3). A live query that runs again after every commit keeps a
-reader's snapshot open nearly all the time, so that checkpoint can't copy the
-whole WAL, and every later commit runs another. Ben's music app imported 2,000
-small writes in 0.36 s with nobody reading, and in 2.3 to 4.5 s with its list's
-live query running again after each one, while the WAL grew to 23 MB. So none
-of the store's connections runs a checkpoint as it commits. The writer doesn't,
-and neither does the connection that keeps the planner's statistics while the
-store stays open, because that connection's commits hold the writer. Each
-commit wakes a thread of the store's own instead, which checkpoints on a
-connection of its own once the WAL holds 1,000 pages, or the app's
-`wal_autocheckpoint`, not yet copied. It copies what it can while writes go on
-and syncs the database file, then holds coven's writer, copies and syncs what
-was committed meanwhile, and waits up to 100 ms for the readers to leave the
-WAL, so the next commit writes it from its start. A reader that started before
-then finishes within that, and later ones read the database file alone. The same
-import took 0.42 s with the live query, and 0.47 s with a reader reading the
-whole table again and again without a pause, and the WAL stayed under 5 MB. Once
-the WAL starts over, its file shrinks back to 4 MiB, or the app's
-`journal_size_limit`. A reader that holds one snapshot longer than the wait
-keeps the WAL from starting over; coven tries again once it has grown by the
-same amount again. Closing the store still checkpoints the whole WAL and removes
-its file. Coven's own database beside the store's, `inputs.db`, which keeps what
-this device observed in storage apart from the app's writes, is checkpointed the
-same way.
+Where the app sets no auto-vacuum mode, a new store's database is
+`Incremental`: a write's three copies in the outgoing queue are deleted when its
+claim lands, and a store that kept their pages grew to 160 MB holding 54 MB
+after a 256 KiB note was edited 100 times. So each landed claim of writes, in
+the transaction that deletes the queue rows, gives back the free pages past
+4 MiB, as sqlive's `give_back_free_pages` does.
 
-The sync before it holds the writer keeps coven's writes from waiting for it.
-SQLite syncs the database file only when a checkpoint copies the whole WAL, and
-while the app writes, a commit lands during nearly every copy and leaves it
-short. The checkpoint holding the writer would then sync every page copied
-while writes went on. So coven syncs that copy itself, the way SQLite syncs a
-checkpoint, `F_FULLFSYNC` included on macOS and iOS, through SQLite's own
-handle to the file: closing any other handle to it would drop every lock
-SQLite holds on it in the process. A commit that lands during the copy gets a
-copy and sync of its own, again while each leaves fewer frames behind, so the
-checkpoint holding the writer copies and syncs only what was committed during
-the last of them and since, and nothing when no commit landed. Ben's music app
-imported 2,000 writes of ten releases each, every track with its file, some
-1,860 pages of the WAL a write, on a busy machine. Without these syncs its
-writes waited a median 29 to 42 ms at each checkpoint, 36 to 61 s over the
-import; with them, 18 to 24 ms, and 11 to 17 s. The import took about as long
-either way: the drive writes the same pages, only not while coven's writes
-wait. These syncs come on top of the checkpoint's own, which still comes
-before the WAL starts over (§3). A copy SQLite can't start, because another
-connection is checkpointing the WAL or committing to it right then, is tried
-again at the next commit, without holding the writer.
+Ben's music app on Android calls `release_memory` when the system warns it of
+low memory and when Ben switches away from it. Coven releases once, on an idle
+reader, which frees the cached pages of every connection the process has open,
+`inputs.db`'s and those of other stores included, for the reason sqlive's spec
+gives.
 
-A checkpoint can fail. When SQLite finds the database busy or locked past its
-wait, coven tries again at the next commit. So it does when SQLite can't start
-the checkpoint at all: another connection was checkpointing the WAL, or was
-committing to it just as SQLite read where it ends, and SQLite gives up at
-once, reporting the database busy and no frames. Nothing is wrong then, only
-busy. Any other failure would stop coven's checkpoints for good, and the WAL
-would then grow without bound while the store stayed open. So a checkpoint
-that SQLite fails, as on a full disk, fails the handle with
-`DbError::CheckpointFailed` and SQLite's cause. Every later call on that
-handle and every live query fails with it until the store is reopened, as
-after a failed rollback.
-
-The checkpointing thread lives exactly as long as the store: it starts as the
-store opens, and closing stops it and waits for it to end before the writer
-closes. It runs on no runtime of the app's. Ben's music app opened its store
-on a runtime it shut down when its import window closed, and kept the store
-open; a checkpointer that was that runtime's task would have ended with it,
-and the WAL would have grown with every later write. A checkpoint that
-panics is a bug in coven. The store must not stay open with no one
-checkpointing it, so the thread fails the handle with the bug: the bug goes to
-the app's bug sink once, and every later call and live query fails with
-`DbError::StoreFailed` carrying it until the store is reopened (E15), as after
-any failure that fails a handle. Closing the failed handle and opening the
-store again starts a new checkpointer, which copies the WAL the next commit
-past the threshold wakes it to. Coven never reopens by itself: a panic that
-happened once will likely happen again, and the app shows the failure and
-offers the reopen. A system that refuses the thread fails the open with
+When sqlive fails the store's handle, coven names the failure, and every later
+call and live query fails with it until the store is reopened: a checkpoint
+SQLite failed, as on a full disk, with `DbError::CheckpointFailed` and SQLite's
+cause; failed planner statistics with `DbError::StatisticsFailed`; a failed
+rollback with `RollbackFailed`; and a panic in an upkeep thread with
+`DbError::StoreFailed`, carrying the bug, which the app's bug sink hears once
+(E15). Coven never reopens by itself, and the app shows the failure and offers
+the reopen. A system that refuses an upkeep thread fails the open with
 `DbError::UpkeepThread`.
 
-On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
-path that starts `\\` for a network share. There it locks the WAL's
-shared-memory file through one handle for every connection in the process,
-and two connections taking one lock at once can leave the handle holding it
-for good: no checkpoint could then copy the WAL or start it over. So coven
-opens SQLite's files by the plain path, `D:\…`, and refuses a store whose
-path holds a name Windows reads as another file without the prefix: `.` or
-`..`, a name ending in a dot or a space, or a device's name such as `NUL`.
-
-Coven applies the app's settings to every connection a handle opens to the
-store's database, as each one opens, so the writer and the readers agree. The
-page size and auto-vacuum mode belong to the database file instead: they apply
-when the database is created, and an existing store keeps its own. Where the
-app sets no auto-vacuum mode, a new database is `Incremental`: a write's three
-copies in the outgoing queue are deleted when its claim lands, and a store that
-kept their pages grew to 160 MB holding 54 MB after a 256 KiB note was edited
-100 times. So each landed claim of writes, in the transaction that deletes the
-queue rows, gives back the free pages past 4 MiB, the same amount the WAL file
-keeps (`journal_size_limit`), so the next writes reuse those pages instead of
-growing the file. `inputs.db` is created with auto-vacuum off: it is held to
-its byte budget (§21.1), and the next received range reuses its freed pages.
-
-Each connection keeps the pages it read cached, up to its `cache_size`, so the
-next read needn't load them again. On a phone that memory counts against the
-app: the OS warns an app when memory runs low, and ends a background app that
-holds a lot. So the app can give it back. Ben's music app on Android calls
-`release_memory` when the system warns it and when Ben switches away from it.
-SQLite, as coven builds it (`SQLITE_ENABLE_MEMORY_MANAGEMENT`), keeps the
-pages no statement is using in one pool for the whole process, and a release on
-any connection empties the whole pool. So coven releases once, on an idle
-reader, and that frees the writer's cached pages, `inputs.db`'s, the
-checkpointers' and the planner statistics' too, and those of any other store
-the process has open. It never
-waits for a write: a write in progress keeps only the pages it is using. A
-reader that had read every page of a store with 200 rows of 4 KB, and the write
-of them waiting to upload, held 1.6 MB, and 10 KB after. The next reads load
-what they need from the database file again.
-
-Coven keeps the query planner's statistics itself. SQLite plans a query by how
-many rows each table and index holds, which `ANALYZE` records in
-`sqlite_stat1`; without them it guesses. So coven runs `PRAGMA optimize` as a
-writable handle opens, after migrating and before the readers open, so they
-plan with what it finds, and again as the handle closes. A run analyzes each
-table that has no statistics, or whose size changed tenfold since it was last
-analyzed. It reads at most 2,000 rows of each index, or the app's lower
-`analysis_limit`, and fewer in a schema of over 100 tables and indexes. On a
-store of four 20,000-row tables with two indexes each, beside coven's own, the
-first run took about 2 ms and a run with nothing to do about 0.2 ms, where
-analyzing every row took 13 ms. A run gathers no `sqlite_stat4` samples, so the
-planner doesn't evaluate the app's functions against them while it plans.
-
-Coven keeps no statistics for a table of fewer than 100 rows. Ben restores his
-music library on a new phone. Its database is created empty, except that each
-FTS5 search index already holds two rows of its own. Statistics saying an index
-holds two rows make SQLite read the whole index to clean up after each merge of
-its pages, instead of looking up the pages' range, and FTS5 merges as nearly
-every write to the index commits. So as the restore filled the index, nearly
-every applied row read all of it, and each cleanup went from 38 µs to 233 µs.
-SQLite may plan to read a table that small whole: in SQLite 3.53 reading a
-range by rowid lost to a full scan for a table counted at 2 rows, and a range
-of an index for tables counted at 8 to 50. Without statistics, SQLite plans each
-table as a large one, which a small table answers as quickly. So after each run
-coven forgets the statistics of every table under 100 rows, and a later run
-gathers them once the table holds more.
-
-The run that forgets them happens on a connection of its own as a handle
-opens. A connection that analyzes a table loads the count it found, and
-forgetting the statistics afterwards doesn't unload it, so the writer would
-keep planning with the small count. The writer and the readers then read what
-that run kept.
-
-A table can also fill while the handle stays open. Ben's first scan of his
-music folder fills the scan's candidates from empty, and every candidate holds
-the same folder root. Without statistics, SQLite takes a root to hold a few
-rows, so it looks up the candidates under one file root by reading every
-candidate of the root in order: at 10,000 candidates, 50,020 SQLite steps and
-442 µs a lookup, against 56 steps and 18 µs through the file root's index. So
-each time the writer's commits have changed 1,000 rows since the last check, a
-thread of coven's own asks SQLite which tables a run would analyze, without
-running it, and reads at most 100 rows of each. On the store of four
-20,000-row tables, a check took about 80 µs. When one of those tables holds
-100 rows or more, the thread runs on its own connection as an open's run does,
-holding coven's writer so no write of coven's finds the database locked. So a
-table has statistics within 1,000 changed rows of reaching 100 rows, or of
-SQLite estimating it at ten times its counted size. SQLite reads statistics
-again only as it reads the schema, so the run also creates and drops a table
-of coven's in its transaction. Every connection, the read-only readers among
-them and the run's own, then reads the schema and plans with the new
-statistics from its next statement. The thread lives as long as the store,
-and a panic in it fails the handle with the bug, as with the checkpointing
-thread. A check
-or run that fails other than on a busy or locked database stops it, and the
-handle fails with `DbError::StatisticsFailed` and SQLite's cause until the
-store is reopened: the planner would otherwise plan with statistics that no
-longer hold for as long as the store stayed open.
-
 The settings coven's guarantees rest on stay fixed, and the app has no way to
-name them. WAL mode lets readers keep their snapshots. `synchronous = FULL`
-makes a committed write survive a power loss, except the latest ones on
-macOS and iOS (§3). Normal locking lets the readers
-and other processes open the store. Foreign keys enforce the rules of §9.1.
-Recursive triggers make every device run the same triggers for the same SQL
-(§9.4). An untrusted schema keeps triggers and views to functions marked safe
-for them. SQLite's defensive mode refuses SQL that could damage the database
-file: writing an FTS5 index's own tables directly rather than through the
-index, writing the schema as a table, setting the schema's version number, and
-turning the journal off. Ana's notes app writing `note_search_data` itself
-could leave her search index out of step with the notes it indexes. Coven's
-own statements need none of these. [api.md E1](api.md#e1-opening) lists every
-SQLite setting, which ones the app can choose, and why the rest are fixed.
+name them: sqlive fixes some, and keeps SQLite's defaults for the rest, since
+app SQL can't run a PRAGMA ([sqlive's spec, section
+10](../crates/sqlive/SPEC.md#sqlites-settings) lists every setting). WAL mode
+lets readers keep their snapshots. `synchronous = FULL` makes a committed write
+survive a power loss, except the latest ones on macOS and iOS (§3). Foreign keys
+enforce the rules of §9.1. Recursive triggers make every device run the same
+triggers for the same SQL (§9.4). With CHECK constraints never ignored, a row
+failing a CHECK after a merge is taken out on every device (§9.3). Legacy `ALTER
+TABLE` stays off, since it changes what a rename does to triggers and views, so
+one migration would leave different schemas on different devices.
+`case_sensitive_like` stays off, since it changes what `LIKE` returns, so the
+same trigger or CHECK could decide differently on two devices. The encoding
+stays UTF-8, since key comparison compares stored bytes, which differ between
+encodings (§9.2). The page count stays unlimited, since other members' writes
+would fill a limit, and this device could no longer apply slots, and SQLite's
+own limits stay as they are, since a lower limit on one device would refuse
+values, rows and statements other devices and coven itself write. Defensive mode
+keeps an app from writing `note_search_data` itself, which could leave its
+search index out of step with the notes it indexes. Coven's own statements need
+none of these.
 
 The app can also give SQLite orders of its own for text. Ana's notes app lists
 titles so that "Note 9" comes before "Note 10", which none of SQLite's own
@@ -1790,129 +950,34 @@ how the app receives them.
 - **Rowids.** In a table whose rowid isn't its primary key, the app can read the
   rowid but can't change it once the row exists. The rowid is SQLite's private
   address for the row: coven doesn't sync or watch it, and VACUUM can renumber it.
-- **A statement inside a row mapping.** A query can run a statement from inside
-  another's row mapping, as Ben's album list reads each row's cover. The inner
-  statement records its own reads, and the one around it keeps its own range
-  of keys, so the list doesn't rerun for a write to an album it doesn't show.
-- **Prepared statements.** Each connection keeps the app's statements
-  prepared, as it does coven's own, since SQLite compiles into each one every
-  trigger it can fire and the views those read. A statement is prepared afresh
-  the first time in each kind of call, read or write, because SQLite reports
-  what it reads, and coven refuses what it may not do, only as it prepares; a
-  later use from the cache records the same reads. A schema change prepares
-  every statement again. A read or a write changes no schema, so each checks
-  for a change once, not before each statement. An app statement whose
-  triggers read a view of six tables took 16 µs to prepare and runs from the
-  cache in about 3 µs.
-- **What a live query's statement narrows.** Coven reads from each statement
-  of a live query which rows of each table the query depends on, by the rules
-  above, the first time a live query runs it. What it reads depends on the
-  statement's text, the schema, and the SQL functions and the views read whole
-  that the connection was set up with. Coven sets up every connection of a
-  database alike, so they share what each one reads, and a schema change reads
-  it again. Kept by each connection alone, it would cost Ben's import pane
-  again on each reader the pane first runs on. The pane's 22 statements took
-  2 s to read in a debug build, so each of his first switches between
-  candidates waited 2 s. When two readers first run a statement at the same
-  moment, one reads it and the other waits for what that one reads, since
-  reading it twice would only take more of the processor. When that reading
-  fails, the waiting reader reads the statement itself.
-- **A bulk write's statements aren't kept.** SQLite decides how a statement
-  deletes as it prepares it, and empties a table in one step only where no
-  pre-update hook watches. Kept, a bulk write's `DELETE FROM queue` would empty
-  the table in one step in a later write too, unseen by the hook, and live
-  queries reading the queue wouldn't run again. So each of a bulk write's
-  statements is prepared afresh and dropped after it runs.
-- **A table SQLite can't empty in one step.** SQLite deletes row by row from a
-  table with a trigger that runs on delete, or a foreign key into or out of
-  it, even in a bulk write.
 - **SQLite's flags.** Setting one of SQLite's flags also prepares every
   statement again. Coven defers foreign-key checks while it puts back and
   takes out rows (§8.4), so it sets that flag only in a transaction where it
   changes such a row, and once there.
-- **Coven's records beside each write.** Coven keeps each row change for live
-  queries only in tables a live query can read. The merge state, authorship,
-  creation, publication and claim records a write keeps beside its rows are
-  not among them, so their changes aren't kept; a live query that read one
-  would fail at once. Whether a file is pinned is answered from `coven_pins`
-  and the file's record, without its merge state. Leaving the
-  authorship, creation, publication and claim records out took a 500-row write
-  from 70.7 µs a row to 65.0 µs, and the merge state from 57.2 µs to 54.3 µs.
+- **Coven's records beside each write.** Coven names to sqlive the tables a live
+  query can't read, whose changes no write keeps for live queries ([sqlive's
+  spec, section 2](../crates/sqlive/SPEC.md#tables-live-queries-cant-read)). The
+  merge state, authorship, creation, publication and claim records a write keeps
+  beside its rows are among them, so a live query that read one would fail at
+  once. Whether a file is pinned is answered from `coven_pins` and the file's
+  record, without its merge state. Leaving the authorship, creation, publication
+  and claim records out took a 500-row write from 70.7 µs a row to 65.0 µs, and
+  the merge state from 57.2 µs to 54.3 µs.
 - **Device-local tables.** Their row changes are kept only for live queries,
-  since their rows never sync. Coven notes the tables and columns a write
-  changed. Only for a table a live query reads does it also copy the changed
-  rows' keys and the values of the columns live queries read or narrow by, and
-  no other values. Filling a 1,000,000-row local
-  table took 0.39 s through coven against 0.35 s in plain SQLite. Clearing it
-  took 0.35 s against 0.01 s: while coven's pre-update hook watches a write,
-  SQLite deletes row by row instead of dropping the table's pages at once. A
-  bulk write has no hook, and clears it in one step, as plain SQLite does.
-- **Writes of many rows.** A write keeps up to 10,000 of the rows it changed in
-  one device-local table for live queries, and applying a slot or loading a
-  snapshot up to 10,000 in any one table. Past that it keeps only that the table
-  changed, so a large write's or snapshot's memory stays bounded, and every live
-  query that read the table runs again. A write that changes more than 10,000
-  rows of any one table looks none of them up: every query that joins the table
-  runs again, so a write's lookups stay bounded too.
-- **A write while a query runs.** A live query's run doesn't know its scope
-  until it ends, so a write that commits meanwhile can't be judged against it.
-  The query keeps the write's changes and judges them as the run ends, with
-  lookups in the run's own snapshot: a value matches a join there exactly when
-  the run's partners held it. A lookup that fails there fails the run, and the
-  query runs again. The write copies the values the query's run before tested,
-  since a run of the same statements tests the same columns. Without them, a
-  write that met a run would rerun it whatever rows it changed. Ben's import
-  writes a batch of folders every few milliseconds while his import list is
-  open: each run would meet the next batch, and the list would run again and
-  again for as long as the import goes. A changed row missing a value the new
-  run tests, as a write met by a query's first run is, reruns the query.
-- **A run between a write's lookups and its commit.** A query can start a run
-  after a write looked its values up and before the write commits, as when the
-  app replaces its request then. That run doesn't see the write, and the
-  lookups answered for the query's earlier scope. So the query judges the
-  write again against its new scope, counting every join's value as matched:
-  the write's transaction has ended, and no lookup can read it.
-- **A lookup fails.** The write fails with the error and rolls back, as when
-  one of its own statements fails.
-- **Values a change leaves alone.** SQLite's record of coven's own
-  transactions names a row's key and the columns an update changed, not the
-  others. When a live query narrows by one of those others, coven reads
-  its value from the row before the transaction commits.
-- **A callback panics.** The unfinished transaction rolls back, the callback
-  gives its connection back, and the call fails with `DbError::Bug`, the
-  panic's text kept (api.md E15). A write's staged and released bytes go as
-  after any failed write, and later calls use the writer and the readers
-  again.
-- **A rollback fails.** Then the connection may still be inside the transaction.
-  The writer would treat its uncommitted changes as committed in its own later
-  reads and writes, and a reader would keep reading its old snapshot of the
-  database. So every later call on that handle, read-only or not, fails with
-  `RollbackFailed` until the store is reopened. Each live query reports it once
-  and then ends, as it does when the store closes: repeating the error would
-  keep a loop over the query busy with nothing to show.
-  - A write or check that failed and then failed to roll back reports both
-    failures.
-  - A read ends by rolling back. If only that rollback fails, the read reports
-    it; a read that had already failed keeps its own cause.
-  - If a callback panicked, the call fails with its `Bug`, and the failed
-    rollback is logged.
+  since their rows never sync: coven names only the synced tables for sqlive to
+  record whole ([sqlive's spec, section
+  2](../crates/sqlive/SPEC.md#2-writes-and-what-they-capture)).
+- **A callback panics.** The unfinished transaction rolls back and the call
+  fails with `DbError::Bug`, the panic's text kept (api.md E15), as sqlive's
+  spec says. A write's staged and released bytes go as after any failed write.
+- **A rollback fails.** Every later call on that handle, read-only or not,
+  fails with `RollbackFailed` until the store is reopened, and each live query
+  reports it once and then ends, for the reasons sqlive's spec gives.
 - **A view and the tables behind it.** A statement that reads a view may also
   name one of the tables the view reads, as long as it reads none of that
   table's columns, such as `SELECT count(*) FROM coven_members, _coven_members`.
   SQLite doesn't say which view such a read belongs to, so coven allows it, and
   the statement learns how many rows that table holds.
-- **ANALYZE in a write.** An app write can't run `ANALYZE`, and fails with
-  `StatementForbidden`: the write's session records every table its filter
-  admits, `sqlite_stat1` included, so the statistics `ANALYZE` changes would
-  land among the write's changes. Leaving `sqlite_stat1` out of that filter
-  would stop it; coven refuses the statement instead. Coven's own runs happen
-  outside any write, and a migration may still run `ANALYZE`.
-- **A small table.** SQLite keeps no statistics for a table with no rows, and
-  coven none for one under 100 rows, so every run analyzes each again, which
-  reads fewer than 100 rows of each.
-- **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
-  `StatePersistence`, `CheckpointFailed`, `StatisticsFailed`, `StoreFailed`)
-  skips the run, since its writer may still hold a transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
   ends, before the transaction that asked could commit.
@@ -1969,23 +1034,15 @@ how the app receives them.
 #### 4.1 Showing data
 
 The database on the device is what the app knows, and everything a screen shows
-comes from it by a query. Three things make that the natural way to build an
-app on coven:
-
-- **One source of truth: the local database.** Every row a screen shows, their
-  order, which ones a filter keeps, how many there are and which group each sits
-  in, is in the store's database or follows from it by a query. The app keeps no
-  second copy of rows to sort, filter or count in its own code.
-- **Data flows one way.** The app writes to the database, and live queries carry
-  each change to every screen that shows it. A screen never patches its own copy
-  after a write, and a write never pushes values into a screen. When a write
-  commits, on this device or applied from another, coven reruns each live query
-  that read what it changed, and the screen draws the new result.
-- **SQLite is fast, local and the app's own.** There is no server to wait on and
-  no round trip, so each screen is exactly the query it needs. Its SQL returns
-  the rows the screen draws, in the order it draws them, with the counts beside
-  them. The app's code turns those rows into its types and does nothing else
-  with them.
+comes from it by a live query. sqlive's spec says how to build a screen that
+way: one live query per screen, the work done in SQL, and memory only for values
+with no table ([section
+11](../crates/sqlive/SPEC.md#11-building-screens-on-live-queries)). `subscribe`
+serves a fixed screen and `subscribe_reconfigurable` one with parameters
+([api.md E4](api.md#e4-reading)). On coven, a write applied from another device
+reruns live queries as this device's own does, and local triggers run for
+applied writes too (§9.4), so a value a local table keeps is true on every
+device.
 
 Ben's music app lists the 20,000 album folders it has scanned for import. Each
 row sits on a tab, to do, done or skipped, with a state such as "needs you" or
@@ -2002,50 +1059,9 @@ table: at 100,000 folders a window of 50 rows takes about 1 ms when the list
 scrolls on from where it was and 29 to 70 ms when it jumps to the middle or the
 end, and the counts for every tab under a millisecond.
 
-Which commits run a live query again is §4's: what its statements read,
-narrowed by their conditions and joins.
-
-**Making each screen one query.**
-
-- *One live query per screen.* `subscribe` serves a fixed screen and
-  `subscribe_reconfigurable` one with parameters, such as a window, a filter, a
-  sort or an id; replacing them reruns the same subscription
-  ([api.md E4](api.md#e4-reading)).
-- *Do the work in SQL:* joins, rules as `CASE`, filters, sorts, counts with
-  `GROUP BY`, positions with `row_number()`, windows with `LIMIT` and `OFFSET`
-  or by key. The query's closure only runs SQL, and holds its read snapshot and
-  a reader connection while it runs. `process` maps rows to the app's types after
-  the snapshot is released.
-- *Read only what the screen draws.* Every table and column a query reads is a
-  reason to rerun it, and a query that reads a whole table to show fifty rows
-  pays for the whole table on every rerun.
-- *Index what the WHERE and ORDER BY name,* so a window touches about the window.
-- *Keep a value computed across tables in a local table.* When a screen sorts or
-  filters by a value that several tables decide, as the import list's tab and
-  order are, a local table holds it, indexed, and local triggers keep it in the
-  same write that changes its inputs. It is never stale, because it commits with
-  that write, and on every device, because local triggers run for applied
-  writes too.
-- *Keep reruns cheap.* A checkpoint can't start the WAL over while a read
-  snapshot is open, so expensive reruns back to back keep the WAL growing (§4).
-
-**Memory holds only values with no table:** progress, bytes per second, a
-playback position between saves, what the person has scrolled to or folded shut.
-Each goes on its own stream, keyed by what it belongs to, to the part of the
-screen that draws it. Such a value never decides which rows a list shows, their
-order, or a count. If it would, it belongs in a table. Coven follows the same
-rule for its own state (§4's views).
-
-**Orders and filters SQLite lacks** are the app's own collations and functions
-(§4). A list sorted so "Disc 9" comes before "Disc 10" names a natural-order
-collation, and a search that finds "École" for "école" compares a Unicode case
-fold. Both can back an index, so the sort or filter reads it like any other.
-
-**Edge cases.**
-
-- **An optional key.** `WHERE ?1 IS NULL OR id = ?1` depends on the whole table,
-  and SQLite can't use the key's index for it. Two statements, one for each
-  case, read by key.
+Coven keeps to that memory rule for its own state: what lasts only as long as the
+process, such as the files being sent, it keeps in memory and shows through its
+views (§4).
 
 ### 5. The sequence
 
@@ -3484,14 +2500,15 @@ Coven refuses, when the database opens and after migrating:
 - a synced table with no primary key;
 - an independent key with no text column to hold its UUID;
 - a primary-key column that allows NULL, in a synced table or a device-local
-  one. SQLite lets a non-integer key column hold NULL unless it is declared
-  `NOT NULL`, and a key with a NULL in it names no row. A local row never syncs,
-  but coven tells live queries which local rows a write changed by their keys
-  (§4), so a query reading Ben's `recent(path TEXT PRIMARY KEY)` would run
-  again after every change to it. A key declared `NOT NULL`, or one in a
-  `STRICT` or `WITHOUT ROWID` table, where SQLite refuses NULL itself, opens. A
-  local table with no primary key is allowed: every change to it reaches every
-  live query reading it;
+  one. SQLite lets a non-integer key column hold NULL unless it is declared `NOT
+  NULL`, and a key with a NULL in it names no row. A local row never syncs, but
+  sqlive tells live queries which local rows a write changed by their keys
+  ([sqlive's spec, section 2](../crates/sqlive/SPEC.md#net-changes)), so a query
+  reading Ben's `recent(path TEXT PRIMARY KEY)` would run again after every
+  change to it. A key declared `NOT NULL`, or one in a `STRICT` or `WITHOUT
+  ROWID` table, where SQLite refuses NULL itself, opens. A local table with no
+  primary key is allowed: every change to it reaches every live query reading
+  it;
 - a column that declares a collation other than `BINARY` when it is:
   - a primary-key column of a synced table;
   - a column of a synced table's unique constraint or unique index (a unique
@@ -3787,13 +2804,16 @@ doesn't, when the database opens and after migrating.
 
 - **A full-text index.** A local trigger can keep an FTS5 table as the search
   index, for this device's writes and applied ones alike. FTS5 reads the
-  database's data version as it writes its index, which coven allows, though
-  the app's own SQL still can't run a PRAGMA. A change to the rows of the
-  index's content table reruns the live queries that read those rows of the
-  FTS5 table (§4); a change to its configuration reruns each live query that
-  read the table, and one to the rest of the index reruns none. Only FTS5
-  writes these tables: a trigger or write that names a shadow table directly
-  fails (§4).
+  database's data version as it writes its index, which coven allows, though the
+  app's own SQL still can't run a PRAGMA. A change to the rows of the index's
+  content table reruns the live queries that read those rows of the FTS5 table
+  ([sqlive's spec, section
+  7](../crates/sqlive/SPEC.md#joins-in-parentheses-table-functions-and-fts5)); a
+  change to its configuration reruns each live query that read the table, and
+  one to the rest of the index reruns none. Only FTS5 writes these tables: a
+  trigger or write that names a shadow table directly fails, as SQLite's
+  defensive mode refuses it ([sqlive's spec, section
+  10](../crates/sqlive/SPEC.md#sqlites-settings)).
 - **The before-commit function writes only local tables.** It runs after a
   write's record is made, or in a transaction that makes none, so a change it
   made to a synced table would reach no record and never sync. As SQLite
@@ -12921,7 +11941,8 @@ What the models cover:
   approved, and nothing at the path carries the member's keys before that; and
   cancelling the new device before its restore records itself binds nothing
   (§13.2, §13.4). The sealing and opening are taken as given.
-- **Narrowing a live query** to the rows its statements can depend on (§4):
+- **Narrowing a live query** to the rows its statements can depend on
+  ([sqlive's spec](../crates/sqlive/SPEC.md#whats-proved)):
   each rule's step, against a port of sqlive's planner, and the rules put
   together: for a well-formed statement, a write the judge lets pass, with
   the scopes the planner gives, leaves the statement's rows unchanged. A
@@ -15233,16 +14254,14 @@ tests of the check scripts are `test` lines of `.checks`, which CI runs.
 
 Every machine-checked claim this document relies on, in the order of the sections
 it supports. Each row names the claim in plain words, its theorems, and the file
-under [proofs/](proofs/), or under [crates/sqlive/proofs/](../crates/sqlive/proofs/)
-for live queries, that proves them. A theorem proves what it states about
+under [proofs/](proofs/) that proves them. A theorem proves what it states about
 its model, under that model's assumptions; it does not prove the Rust code
 (§22). Rows marked *body* are also linked where the rule they explain appears.
 
 Write-ups explain each model and state its assumptions:
 [sequence](proofs/sequence.md), [merge](proofs/merge.md),
-[queue](proofs/queue.md) (conversion of old writes and the reload gate),
-[IO and observable work](proofs/io.md) and
-[live query narrowing](../crates/sqlive/proofs/README.md).
+[queue](proofs/queue.md) (conversion of old writes and the reload gate) and
+[IO and observable work](proofs/io.md).
 
 ### G.1 Promises (§2)
 
@@ -15661,55 +14680,8 @@ Write-ups explain each model and state its assumptions:
 
 ### G.9 Live queries (§4)
 
-| Claim | Theorems | File | Section |
-|---|---|---|---|
-| A condition on one item's own columns, true of a binding, makes the term coven reads from it true of the item's row | `term_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Term.lean` | §4 |
-| An equality between two items, true of a binding, makes the member column hold a value the partner's row gives | `edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
-| An expression of which each operation gives NULL where an operand is NULL is NULL where every column it names is NULL | `eval_null` | `../crates/sqlive/proofs/SqliveNarrowing/Reader.lean` | §4 |
-| COALESCE, a CASE and `IS NULL` each make an equality with them true where the item they name has no row | `nonstrict_holds_without_partner` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Edge.lean` | §4 |
-| A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowEdge.lean` | §4 |
-| A column equal to COALESCE of values, or equal to or IN a compound's rows, true of a binding, holds the value one argument or one arm gives | `one_of_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/OneOf.lean` | §4 |
-| An OR, true of a binding, makes one side of each OR coven reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Or.lean` | §4 |
-| `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/IsEdge.lean` | §4 |
-| A column equal to or IN a subquery's value holds a value the subquery's source gives in a binding its core keeps that gives a row the subquery returns, whatever columns the subquery returns after its first | `subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/SubqueryEdge.lean` | §4 |
-| A partner column of no affinity, which a lookup reads as an expression for a member column of another affinity, gives each row the value it holds | `columnValue_eval` | `../crates/sqlive/proofs/SqliveNarrowing/Plan.lean` | §4 |
-| Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps that gives a row the subquery returns | `row_subquery_edge_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | §4 |
-| Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules.lean` | §4 |
-| A term, an edge that compares by `=` or an OR that a row of NULLs fails, true of a binding with no row of its item, has an item no LEFT JOIN adds, or an edge's partner outside a subquery that no LEFT JOIN adds and the binding has no row of | `holds_none`, `HoldsIn.bound` | `../crates/sqlive/proofs/SqliveNarrowing/Reader.lean` | §4 |
-| A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row; a row of an arm that groups its rows holds, in each column its GROUP BY lists, the value of that column's item in every binding of its group | `push_down_sound`, `renamed_sound`, `group_key_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/PushDown.lean` | §4 |
-| An equality between two items, true of a binding, carries a term true of one side's row on its compared column to the other side's column; a derived item's row whose column isn't NULL passes what each of its arms' items' terms say of the column the arm passes on | `transfer_sound`, `pulled_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Transfer.lean` | §4 |
-| A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
-| A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/View.lean` | §4 |
-| An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowMember.lean` | §4 |
-| A parenthesized join gives the rows its tables give joined one after another: an inner join of one always, its ON read with the WHERE, and a LEFT JOIN of one when its ON names no table of the join but the first and each later table is a LEFT JOIN's whose ON can't hold where a table before it has no row | `left_group_flat`, `inner_group_flat` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Parenthesized.lean` | §4 |
-| A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/CteNames.lean` | §4 |
-| A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns, in any collation that orders values by a key, gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, a row that ties with the last row's values counting as at or before them, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `termKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
-| A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
-| A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
-| A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Virtual.lean` | §4 |
-| A statement read whole reruns on every write that any scopes rerun it on, so sqlive's judge, which narrows nothing for a write whose question stopped at the step limit, lets a write pass only when the judge without the limit does | `reruns_whole`, `Statement.rerunsLimited_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Judge.lean` | §4 |
-| A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `../crates/sqlive/proofs/SqliveNarrowing/Mask.lean` | §4 |
-| A write the judge lets pass leaves each slot whose masked row it changes holding rows that fail the table's scope before and after it, and each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_slots`, `unjudged_rows`, `whole_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean` | §4 |
-| A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean` | §4 |
-| A well-formed statement's own query names no item outside its cores, and a core run under a binding that holds a row of each outer item its query names that no LEFT JOIN adds runs its derived items' queries and its subqueries under such bindings too | `outer_root`, `outer_derived`, `outer_sub`, `outer_subOn` | `../crates/sqlive/proofs/SqliveNarrowing/Outer.lean` | §4 |
-| A query returns the same rows under two bindings that hold the same rows of the outer items it names, so each ON condition of a LEFT JOIN holds of each binding its core keeps that holds a row of the join's item | `evalQuery_outer_congr`, `Statement.on_kept` | `../crates/sqlive/proofs/SqliveNarrowing/Congr.lean` | §4 |
-| A subquery of one table with an ORDER BY over that table's columns, a LIMIT and no OFFSET, each of whose conditions names only that table's columns or compares one of its columns by `=` with a value around it, returns for each binding around it the first rows of that binding's window; a row passes the window's scope exactly when it holds no NULL in a compared column and fewer than LIMIT rows its core keeps sort before it, so either every binding of the core passes, or the first LIMIT do in the database the write leaves; the subquery returns the same rows from two databases that hold the same bindings that pass; a binding that gives a row the subquery returns, as the one a comparison takes the subquery's value from, sorts after fewer than LIMIT rows in its database, and so passes the window in the database the write leaves when both databases hold the same rows that pass the table's test | `read_facts`, `partitionOf_holds`, `window_bindings`, `window_kept`, `window_passes`, `take_sortBy_before`, `count_first`, `take_sortBy_window`, `window_queryRows`, `plan_windowRows`, `query_row_at`, `givesRow_count`, `givesRow_windowTest`, `givesRow_windowPasses`, `nested_windowPasses` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Window.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Windows.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Rows.lean`; `../crates/sqlive/proofs/SqliveNarrowing/Kept.lean` | §4 |
-| Two databases that hold the same rows passing each item's test give a core the same bindings that decide its query's rows, and the statement the same rows, when every such binding holds rows that pass their tests; an arm that aggregates makes the same rows that pass a test from the bindings whose GROUP BY values a row that passes it holds as from all its bindings; when the judge lets a write pass, each masked table holds the same rows that pass the scope of an item reading it | `joinItems_restricted`, `coreBindings_restricted`, `Core.result_filter_key`, `queryRows_restricted`, `agree_of_kept`, `result_restricted`, `scoped_rows` | `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
-| A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no OFFSET, whose run returned as many rows as its LIMIT, returns the same rows from two databases whose bindings that sort at or before the last row, and whose other queries' bindings, hold rows that pass their tests | `limit_restricted` | `../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean` | §4 |
-| A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Scopes.lean` | §4 |
-| The planned state holds an ON narrowing back only for an item a LEFT JOIN adds; each edge the planner passes into a derived item's arms comes from an edge the derived item holds, through the result column an arm passes the target's column on to, and makes the target an inner join's; the planner places each item once, and every item of every core; and each edge of the planned state whose partner is a subquery's source has its partner in an arm of some core's subquery, and each item's memberships are edges from it; and each item's memberships and the ORs it keeps take values from items placed before it | `plan_leftOn`, `plan_pushed`, `plan_order`, `plan_nestedOK`, `plan_placedBefore` | `../crates/sqlive/proofs/SqliveNarrowing/PlannerState.lean` | §4 |
-| The planner reads no core twice, and reads every core that sits in an arm of a query a core reads, at any depth, before that core | `readOrder_postorder` | `../crates/sqlive/proofs/SqliveNarrowing/ReadOrder.lean` | §4 |
-| The planner's state before it reads any condition, after it reads each core's conditions, and after it carries terms across a core's edges, says only what holds of every binding a core keeps: an item it holds no ON narrowing back for has a row, each term and carried term holds of its item's row, each edge and OR of an item with a row holds, and what it holds back for a LEFT JOIN's item holds where that item has a row | `PState.Sem.initial`, `PState.Sem.readConds`, `PState.Sem.carry` | `../crates/sqlive/proofs/SqliveNarrowing/Facts.lean` | §4 |
-| The planner only adds to an item's term; passing a term into a derived item's arms, and reading each core after every core below it, leaves the planner's state saying only what holds of each binding a core keeps and, below a core, of each binding that matters to its derived item's test | `PState.Sem.pushDown`, `PState.Sem.readCore`, `plan_readSem` | `../crates/sqlive/proofs/SqliveNarrowing/ReadPhase.lean` | §4 |
-| Placing each item, and passing the edges it takes into its arms, leaves the planned state saying only what holds of each binding a core keeps that matters to its query's test, as the planner's scopes give that test; each item's memberships are edges of the planned state | `PState.Sem.pushEdges`, `PState.Sem.placed`, `plan_sem`, `queryTest_good`, `plan_semTests`, `plan_membersEdges` | `../crates/sqlive/proofs/SqliveNarrowing/OrderPhase.lean` | §4 |
-| Every edge of the planned state, every edge of a side of each OR and every narrowing an ON holds back takes values from an item a lookup reads alone; each OR an item keeps is one of its ORs, each edge passed into a derived item's arm has a member its core lists, and the planner places only items a core lists; a derived item a lookup reads alone runs its query under any binding as under the binding of no row; every binding of an arm matters to a query whose every row matters, and the test of the statement's own query keeps every row | `plan_lookups`, `plan_order_listed`, `outerNames_readsAlone`, `evalQuery_readable`, `outer_readable`, `relevant_of_all`, `queryTest_root` | `../crates/sqlive/proofs/SqliveNarrowing/Partners.lean` | §4 |
-| In a binding that matters of a core run before or after the write, each row passes its item's test: its terms hold, its memberships' and kept ORs' partners, which the order places before it, give its values from rows of their lookups in their scopes, the edges passed into it pass, and its LIMIT bound passes; a row of an item a lookup reads alone is a row of the lookup; so such a binding holds no row only of an item the planned state holds an ON narrowing back for | `partner_found`, `pushed_passes`, `plan_kept_rows`, `plan_restricted` | `../crates/sqlive/proofs/SqliveNarrowing/Kept.lean` | §4 |
-| While the planner holds an ON narrowing back for a LEFT JOIN item, it adds to the item only what the item's ON says of it, and every other step leaves the item as it was; so each term, edge and OR the planned state holds of such an item holds wherever the item's ON holds of a row of it, and a row the ON holds for, in a binding whose rows pass their tests, passes the item's test | `untouched_narrow`, `untouched_pushDown`, `plan_held`, `plan_left_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Held.lean` | §4 |
-| The planner's scopes keep their promise for every query at every fuel at which two databases return the same rows that matter; a write the judge lets pass, with the scopes the planner gives the run that read the database before it, leaves a well-formed statement's rows unchanged, the statement's own query with a LIMIT bound included, and so does a write sqlive's judge lets pass when a question stopped at the step limit | `plan_kept`, `narrowing_sound`, `narrowing_sound_limited` | `../crates/sqlive/proofs/SqliveNarrowing/Sound.lean` | §4 |
-| A row a scope passes holds one of its key's values in the key's column, so the index of live queries finds each query for every change that reruns it; the judge through the index reruns each query on exactly the writes the judge of every change reruns it on, and so lets pass only writes that leave a well-formed statement's rows unchanged | `key_passes`, `lookup_complete`, `index_judges_alike`, `indexed_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Index.lean` | §4 |
-| A write's net change of each row, from the row before its first change to the row after its last, takes the database before the write to the database after it, and holds exactly the rows that differ between the two; so the judge of the net changes lets pass only writes that leave a well-formed statement's rows unchanged, directly or through the index, its verdict depends only on the databases before and after, a write whose every row ends as it began reruns nothing, and it reruns a statement only where the judge of every change does | `firstOld_eq`, `lastNew_eq`, `net_writes`, `mem_net`, `net_sound`, `indexed_net_sound`, `net_judges_states`, `net_unchanged`, `net_reruns_imp` | `../crates/sqlive/proofs/SqliveNarrowing/Net.lean` | §4 |
-| When the judge lets a write pass, the tables before and after it hold the same rows that pass each item's test from the planner's scopes and passed edges, and a derived item's test keeps only rows that matter to its query; in a binding of the statement's own core that sorts at or before the last row, the LIMIT bound of each item the ORDER BY sorts passes the item's row when its memberships to other such items hold | `plan_restriction`, `Planned.bound_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Tests.lean` | §4 |
-| Each result's assumptions and where its model stops | (write-up) | `../crates/sqlive/proofs/README.md` | §4 |
+sqlive's spec lists what's proved of how a live query narrows to the rows its
+statements can depend on ([What's proved](../crates/sqlive/SPEC.md#whats-proved)).
 
 ## Appendix H. Errors and statuses
 

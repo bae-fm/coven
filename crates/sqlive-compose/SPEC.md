@@ -6,7 +6,7 @@ others as *fragments*. A screen's *read* names the fragments it needs, and the
 compiler puts them together into one SQL statement, checks that statement
 against the app's schema, and generates the Rust types its rows decode into. The
 statement is a constant in the app's code, and the app runs it as a live query
-of [sqlive](../sqlive/README.md): a query that runs again when a write changes
+of [sqlive](../sqlive/SPEC.md): a query that runs again when a write changes
 what it read. [relay](https://relay.dev) composes GraphQL the same way: each
 component writes a fragment, and relay's compiler builds one operation from the
 fragments a page names.
@@ -559,8 +559,8 @@ The compiler also renames each CTE that a fragment declares to
 `<crate>__<fragment>__<cte>`, as it names a relation, so that no two fragments'
 CTEs share a name. The long name also keeps a CTE apart from the names inside a
 view that sqlive reads whole. sqlive can't tell the reads through two equal
-names apart, and then narrows neither ([coven's spec,
-§4](../../spec/coven.md#4-writing-locally)).
+names apart, and then narrows neither ([sqlive's spec, section
+8](../sqlive/SPEC.md#subqueries-in-from-ctes-and-views)).
 
 A crate spreads the fragments of the crates it depends on directly. Within one
 crate, fragments may spread each other in any order, but not in a circle: when
@@ -683,8 +683,8 @@ that a write changes, it runs the CTE, up to the number of steps that sqlive
 allows a lookup. A fragment that needs a computed value returns it beside the
 column the join uses.
 
-[Coven's spec, §4](../../spec/coven.md#4-writing-locally), states in full which
-conditions and joins sqlive narrows by.
+[sqlive's spec](../sqlive/SPEC.md#5-narrowing-one-table), sections 5 to 8,
+states in full which conditions and joins sqlive narrows by.
 
 ## 7. One read per concern
 

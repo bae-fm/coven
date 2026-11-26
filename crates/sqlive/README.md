@@ -16,6 +16,9 @@ pass, which it finds by the values the rows hold, so a write's judging doesn't
 grow with the number of live queries. Options can also start threads that
 checkpoint the WAL and keep the query planner's statistics.
 
+[SPEC.md](SPEC.md) specifies what sqlive does: what a write captures, which
+writes run a live query again, and the upkeep it runs while a database is open.
+
 ## Example
 
 This program opens a database, starts a live query that counts the rows of a
@@ -133,24 +136,6 @@ fn main() {
 A panic inside a query or a write comes back as an `Error::Bug` that names where
 the panic began. The live query's error type says whether it carries a bug
 (`CarriesBug`), and a query whose error carries one ends.
-
-## What a live query reruns on
-
-sqlive records the tables, the columns and the rows each statement of a live
-query reads. A commit that changes none of them does not run the query again.
-
-A statement that reads one table depends only on the rows its `WHERE` allows.
-A column compared with a constant or a bound value by `=`, `<`, `<=`, `>`, `>=`
-or `IN`, and conditions like these joined by `AND` and `OR`, narrow those rows.
-So `SELECT title FROM tracks WHERE release_id = ?1` does not run again when a
-write changes another release's tracks. A statement with a `LIMIT` narrows
-further once a run returns as many rows as the limit. A one-shot read records
-nothing, because nothing runs it again.
-
-A live query's host statement, one that reads tables the app's SQL can't,
-narrows the same way when the query runs it with `HostSql::host_live_read`.
-`HostSql::query` and `for_each` run a host statement that depends on every row
-of each table it reads.
 
 ## Checking SQL against a schema
 
