@@ -14577,11 +14577,20 @@ new ids          coven-foundation's id source
 files on disk    coven-foundation's files
 ```
 
-Two modules of sqlive are exceptions. The checkpointer times how long a
-checkpoint holds the writer with std's monotonic `Instant`, for a log line. The
-temporary-folder setting checks with `std::fs` that the folder the app names
-exists. sqlive depends on no coven crate, so neither takes a clock or a files
-capability from coven-foundation.
+The current time covers time that a value or a decision depends on: a stored
+timestamp, a deadline, a timeout, a debounce, a retry delay, an expiry. Code
+that depends on time passing is rare, and it takes the time from the clock it
+was given, so a test drives it without waiting; no test waits for real time.
+Measuring how long something took with std's monotonic `Instant`, for a log
+line or a work count, uses no capability, because the duration decides nothing
+and nothing stores it. The policy accepts an `Instant::now` whose value code
+only asks for `elapsed`, and refuses one that reaches a field, a branch or a
+call, and every `SystemTime`.
+
+One module of sqlive is an exception to the files rule. The temporary-folder
+setting checks with `std::fs` that the folder the app names exists. sqlive
+depends on no coven crate, so it takes no files capability from
+coven-foundation.
 
 Everything else reaches a capability through the object that owns it, given to
 it when it is built. The snapshot writer never calls the system clock; it asks

@@ -18,6 +18,7 @@ mod crate_code;
 mod crate_dependencies;
 mod database_boundary;
 mod domain_owners;
+mod elapsed_only;
 mod finding;
 mod macro_expansion;
 mod macro_rules;

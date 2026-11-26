@@ -33,6 +33,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::crate_code::CrateCode;
+use crate::elapsed_only::{measuring_starts, Start};
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
 use crate::name_resolution::{qualified_path, NameResolver, ResolutionError};
@@ -51,6 +52,7 @@ pub(crate) fn find_capability_boundary_violations(
     for file in &code.expanded {
         let gated = gated(policy, |capability| !capability.holds(&file.relative_path));
         let mut visitor = CapabilityBoundaryVisitor::new(file, &gated, policy, &production);
+        visitor.measuring = measuring_starts(&file.syntax, &measured_patterns(&gated));
         visitor.background_starts = &policy.background_starts;
         visitor.read(file, &mut violations, &mut uses);
     }
@@ -258,6 +260,11 @@ pub(crate) fn declared_items(files: &[RustFile]) -> BTreeSet<(String, String)> {
     items
 }
 
+/// The measured paths of these gates (`elapsed_only.rs`).
+fn measured_patterns(gated: &[(&Capability, &Gate)]) -> Vec<Vec<String>> {
+    gated.iter().flat_map(|(_, gate)| gate.measured_patterns.iter().cloned()).collect()
+}
+
 /// The gates of the capabilities `outside` picks, with their capability.
 fn gated(policy: &Policy, outside: impl Fn(&Capability) -> bool) -> Vec<(&Capability, &Gate)> {
     policy
@@ -283,6 +290,9 @@ struct CapabilityBoundaryVisitor<'a, 'p> {
     /// (`item_name`).
     item: Option<String>,
     rooted: bool,
+    /// Where the calls of measured paths start whose value only measures an
+    /// elapsed duration (`elapsed_only.rs`).
+    measuring: BTreeSet<Start>,
 }
 
 impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
@@ -303,6 +313,7 @@ impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
             current_type: "<free>".into(),
             item: None,
             rooted: false,
+            measuring: BTreeSet::new(),
         }
     }
 
@@ -371,8 +382,11 @@ impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
                 }
             }
         }
+        let start = span.start();
+        let measuring = self.measuring.contains(&(start.line, start.column));
         for &(capability, gate) in self.gated {
-            if gate_matches(gate, segments, is_import) {
+            let measured = !is_import && !measuring && holds_any(segments, &gate.measured_patterns);
+            if measured || gate_matches(gate, segments, is_import) {
                 self.record(capability, gate, span);
             }
         }

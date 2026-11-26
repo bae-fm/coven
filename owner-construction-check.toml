@@ -1928,17 +1928,18 @@ crates = [
 
 [[capabilities]]
 name = "current time"
-homes = [
-    "crates/coven-foundation/src/clock.rs",
-    # Times how long a checkpoint holds the writer, for a log line.
-    "crates/sqlive/src/wal_checkpoints.rs",
-]
+homes = ["crates/coven-foundation/src/clock.rs"]
+
+# Time a value or a decision depends on comes from the clock the code was given.
+# An `Instant` that only measures an elapsed duration, for a log line or a work
+# count, is no use of the clock (`measured_paths`): the check accepts a call
+# whose value is only asked `.elapsed()`, and refuses one that reaches a field,
+# a branch or a call.
 
 [[capabilities.gates]]
 kind = "system clock"
 paths = [
     "SystemTime::now",
-    "Instant::now",
     "Utc::now",
     "Local::now",
     "OffsetDateTime::now_utc",
@@ -1947,6 +1948,7 @@ paths = [
     "thread::sleep",
     "thread::sleep_until",
 ]
+measured_paths = ["Instant::now"]
 
 # Only generation is gated: parsing and validating an id is a deterministic
 # transformation any module may perform.

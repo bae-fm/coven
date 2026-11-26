@@ -124,7 +124,6 @@ homes = ["crates/app-foundation/src/clock.rs"]
 kind = "system clock"
 paths = [
     "SystemTime::now",
-    "Instant::now",
     "Utc::now",
     "Local::now",
     "OffsetDateTime::now_utc",
@@ -133,6 +132,7 @@ paths = [
     "thread::sleep",
     "thread::sleep_until",
 ]
+measured_paths = ["Instant::now"]
 
 [[capabilities]]
 name = "new ids"

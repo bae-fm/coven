@@ -382,6 +382,12 @@ pub struct Gate {
     /// unless it is a single name, which is a local binding.
     #[serde(default, rename = "calls", deserialize_with = "rust_paths")]
     pub call_patterns: Vec<Vec<String>>,
+    /// Written as Rust paths, `std::time::Instant::now`. Like `paths`, except
+    /// that a call whose value only measures an elapsed duration is no match:
+    /// code asks it `.elapsed()` and does nothing else with it
+    /// (`elapsed_only.rs`).
+    #[serde(default, rename = "measured_paths", deserialize_with = "rust_paths")]
+    pub measured_patterns: Vec<Vec<String>>,
     /// Method names whose receiver-call form (`x.name(...)`) is gated; `syn`
     /// does not surface a method call as a path.
     #[serde(default, rename = "methods")]
