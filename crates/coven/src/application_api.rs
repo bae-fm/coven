@@ -22,8 +22,8 @@ pub use crate::member_write::MemberWrite;
 pub use crate::read_handle::CovenReadHandle;
 #[cfg(any(test, feature = "test-utils"))]
 pub use crate::readable_objects::{
-    finish_operation, make_readable_objects, record_change, record_connected_storage,
-    record_invite, record_last_pass, record_pending, refuse_invite,
+    finish_operation, make_readable_objects, readable_objects_sql, record_change,
+    record_connected_storage, record_invite, record_last_pass, record_pending, refuse_invite,
 };
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;

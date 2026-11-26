@@ -91,6 +91,26 @@ async fn the_readable_objects_are_made_as_a_store_holds_them() {
     assert_eq!(made.len(), READABLE.len() + OUTSIDE_STORE_TABLES.len());
 }
 
+/// The text `readable_objects_sql` returns makes, on a connection with no
+/// function registered, the objects `make_readable_objects` makes.
+#[test]
+fn the_sql_text_makes_the_objects_on_a_bare_connection() {
+    let bare = Connection::open_in_memory().unwrap();
+    bare.execute_batch(&readable_objects_sql()).unwrap();
+    let outside = outside_store();
+    let schema = |connection: &Connection| -> Vec<(String, String, Option<String>)> {
+        let mut statement = connection
+            .prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY type,name")
+            .unwrap();
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        rows.map(Result::unwrap).collect()
+    };
+    assert_eq!(schema(&bare), schema(&outside));
+    for name in readable_names() {
+        assert!(schema(&bare).iter().any(|(_, found, _)| found == name), "{name}");
+    }
+}
+
 /// App SQL reads every readable object outside a store: each view finds the
 /// tables and functions it reads.
 #[test]

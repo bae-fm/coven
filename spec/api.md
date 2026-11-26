@@ -3934,7 +3934,9 @@ let moved = handle
   computation, the one every store registers, gives from the facts there. A
   test that runs the app's schema there calls it first, so the app's
   triggers and views apply and run as in a store, and the app keeps no copy
-  of coven's objects or functions that could fall behind them. coven writes
+  of coven's objects or functions that could fall behind them. A build script
+  that checks the app's SQL against coven's objects reads the same objects
+  as text from `readable_objects_sql`, with no connection and no function. coven writes
   no rows on that connection. Of coven's triggers that keep the eight
   tables an app's triggers may follow in a store, those that keep
   `coven_pending` run there too: the test writes the rows coven would in
@@ -4509,6 +4511,15 @@ impl LiveQueryRuns {
 /// test that runs the app's schema there (E4).
 #[cfg(feature = "test-utils")]
 pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId) -> rusqlite::Result<()>;
+
+/// Returns the SQL that `make_readable_objects` runs to make every object app
+/// SQL reads: the `CREATE` statements of the tables, views and indexes, and
+/// of coven's triggers that keep `coven_pending`. It opens no connection and
+/// registers no function, so a build script that checks app SQL against these
+/// objects needs only this text. The views' SQL names coven's SQL functions,
+/// which the connection that runs the text registers itself (E4).
+#[cfg(feature = "test-utils")]
+pub fn readable_objects_sql() -> String;
 
 /// Journals `invite` on a connection `make_readable_objects` prepared, as
 /// creating an invite and its later steps do, returning its operation (E4).

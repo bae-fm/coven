@@ -721,7 +721,9 @@ test-utils feature, `make_readable_objects` makes every table and view app
 SQL reads, with the tables of coven's own that the views read, and registers
 coven's SQL functions, each as a store makes it
 ([api.md E4](api.md#e4-reading)). coven writes no rows on that connection.
-Ben's test writes the rows coven would write in the tables his triggers fire
+A build script that checks the app's SQL against those objects calls
+`readable_objects_sql`, which returns the SQL that makes them as text and
+opens no connection. Ben's test writes the rows coven would write in the tables his triggers fire
 on, and records each track's original with `record_user_file`, which writes
 what staging the original writes.
 
