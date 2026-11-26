@@ -24,7 +24,7 @@ use rusqlite::Connection;
 use sqlite3_parser::{
     ast::{
         As, Cmd, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Literal, Name,
-        OneSelect, Operator, QualifiedName, ResultColumn, Select, SelectTable, Stmt,
+        OneSelect, QualifiedName, ResultColumn, Select, SelectTable, Stmt,
     },
     lexer::sql::Parser,
     Bump, FallibleIterator,
@@ -35,6 +35,7 @@ use crate::from_star::{star, StarItem};
 use crate::never_null;
 use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
+use crate::scope_term::null_test;
 use crate::select_syntax::{
     aggregate_owners, conjuncts, parts, result_expressions, Functions, Part,
 };
@@ -251,18 +252,6 @@ fn column_name<'a, 'b>(expr: &'a Expr<'b>) -> Option<(Option<&'a Name<'b>>, Stri
     Some((qualifier, crate::sql::name(name).to_ascii_lowercase()))
 }
 
-/// What `term` holds to be other than NULL, when that is all it asks:
-/// `x IS NOT NULL`, `x NOT NULL` or `x NOTNULL`.
-fn required_not_null<'a, 'b>(term: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
-    let null = |expr: &Expr<'_>| matches!(unparenthesized(expr), Expr::Literal(Literal::Null));
-    match term {
-        Expr::NotNull(expr) => Some(expr),
-        Expr::Binary(left, Operator::IsNot, right) if null(right) => Some(left),
-        Expr::Binary(left, Operator::IsNot, right) if null(left) => Some(right),
-        _ => None,
-    }
-}
-
 /// Applies the WHERE `predicate` to `items`, its core's FROM items. A column
 /// that one of the terms it joins with AND requires `IS NOT NULL` holds no
 /// NULL in a row the core keeps, and no such row lacks a row of the column's
@@ -270,8 +259,11 @@ fn required_not_null<'a, 'b>(term: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
 fn filter<'a>(items: &mut [Item], predicate: &'a Expr<'a>) {
     let mut terms = Vec::new();
     conjuncts(predicate, &mut terms);
-    for (qualifier, name) in terms.into_iter().filter_map(required_not_null).filter_map(column_name)
-    {
+    let required = terms
+        .into_iter()
+        .filter_map(null_test)
+        .filter_map(|(tested, not_null)| not_null.then_some(tested));
+    for (qualifier, name) in required.filter_map(column_name) {
         // Such a name's value can be another item's than the one it would
         // read in a result column, or either's.
         if qualifier.is_none()

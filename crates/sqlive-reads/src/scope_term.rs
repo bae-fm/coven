@@ -622,7 +622,7 @@ fn condition(
 /// The expression `expr` tests for NULL, and whether the test is `IS NOT
 /// NULL`: `x IS NULL`, `x ISNULL`, `x IS NOT NULL`, `x NOTNULL` or `x NOT
 /// NULL`.
-fn null_test<'a>(expr: &'a Expr<'a>) -> Option<(&'a Expr<'a>, bool)> {
+pub(crate) fn null_test<'a>(expr: &'a Expr<'a>) -> Option<(&'a Expr<'a>, bool)> {
     let is_null =
         |expr: &Expr<'_>| matches!(crate::sql::unparenthesized(expr), Expr::Literal(Literal::Null));
     match expr {
