@@ -281,7 +281,7 @@ fn read_derived<'a>(
                 || columns.get(position).is_some_and(|output| match &output.value {
                     OutputValue::Volatile => true,
                     OutputValue::Passed(item, column) => {
-                        planner.items[*item].column_unjudged(column)
+                        planner.items[*item].columns.volatile(column)
                     }
                     OutputValue::Constant | OutputValue::Other => false,
                 })
