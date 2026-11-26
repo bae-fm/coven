@@ -1397,7 +1397,8 @@ rows or more, the thread runs on its own connection as an open's run does,
 holding the writer so no write finds the database locked. So a table has
 statistics within 1,000 changed rows of reaching 100 rows, or of SQLite
 estimating it at ten times its counted size. SQLite reads statistics again only
-as it reads the schema, so the run also creates and drops a table in its
+as it reads the schema, so the run also creates and drops a table,
+`sqlive_statistics_gathered`, in its
 transaction. Every connection, the read-only readers among them and the run's
 own, then reads the schema and plans with the new statistics from its next
 statement. The thread lives as long as the database, and a panic in it fails the

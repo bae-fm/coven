@@ -658,8 +658,8 @@ impl<P: Policy> HostSql<P> {
         self.transaction(|connection| {
             connection.optimize()?;
             connection.batch(
-                "CREATE TABLE _coven_statistics_gathered(gathered);
-                 DROP TABLE _coven_statistics_gathered",
+                "CREATE TABLE sqlive_statistics_gathered(gathered);
+                 DROP TABLE sqlive_statistics_gathered",
             )
         })
     }
