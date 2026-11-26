@@ -117,18 +117,22 @@ theorem eq_of_perm_of_sorted {l₁ l₂ : List α} (hperm : l₁.Perm l₂)
 
 end Sorting
 
-theorem keyCompare_eq {ds : List Bool} {as bs : List Value} (ha : as.length = ds.length)
-    (hb : bs.length = ds.length) (h : keyCompare ds as bs = .eq) : as = bs := by
-  induction ds generalizing as bs with
-  | nil =>
-    cases as <;> cases bs <;> simp_all
-  | cons d ds ih =>
-    cases as <;> cases bs <;> simp at ha hb
-    rename_i a as b bs
-    rw [keyCompare_cons, Ordering.then_eq_eq] at h
-    rw [dcmp_eq.mp h.1, ih ha hb h.2]
+/-- Two keys that tie hold the same value in each term whose collation ties no
+two different values. -/
+theorem keyCompare_eq_exact {α : Type} (os : List (α × Dir)) (f g : α → Value)
+    (h : keyCompare (os.map (·.2)) (os.map fun o => f o.1) (os.map fun o => g o.1) = .eq) :
+    ∀ o ∈ os, o.2.exact = true → f o.1 = g o.1 := by
+  induction os with
+  | nil => simp
+  | cons o os ih =>
+    simp only [List.map_cons, keyCompare_cons, Ordering.then_eq_eq] at h
+    intro o' ho' hex
+    rcases List.mem_cons.mp ho' with rfl | ho'
+    · have h1 := dcmp_eq.mp h.1
+      exact Option.map_injective (o'.2.exact_inj hex) h1
+    · exact ih h.2 o' ho' hex
 
-theorem keyCompare_self (ds : List Bool) (as : List Value) : keyCompare ds as as = .eq := by
+theorem keyCompare_self (ds : List Dir) (as : List Value) : keyCompare ds as as = .eq := by
   induction ds generalizing as with
   | nil => cases as <;> rfl
   | cons d ds ih =>
@@ -136,18 +140,18 @@ theorem keyCompare_self (ds : List Bool) (as : List Value) : keyCompare ds as as
     | nil => rfl
     | cons a as => rw [keyCompare_cons, dcmp_eq.mpr rfl, ih]; rfl
 
-/-- Two keys that each sort at or before the other are equal. -/
-theorem keyLe_antisymm {ds : List Bool} {as bs : List Value} (ha : as.length = ds.length)
-    (hb : bs.length = ds.length) (h1 : keyLe ds as bs) (h2 : keyLe ds bs as) : as = bs := by
+/-- Two keys that each sort at or before the other tie. -/
+theorem keyLe_antisymm {ds : List Dir} {as bs : List Value}
+    (h1 : keyLe ds as bs) (h2 : keyLe ds bs as) : keyCompare ds as bs = .eq := by
   simp only [keyLe, bne_iff_ne, ne_eq] at h1 h2
   rw [keyCompare_swap] at h2
-  apply keyCompare_eq ha hb
   cases h : keyCompare ds as bs <;> simp_all [Ordering.swap]
 
 /-- A query whose ORDER BY tells every two of its rows apart returns the same
 rows whatever order it reads them in. -/
 theorem post_perm {q : Query} {rows rows' : List Row} (hperm : rows'.Perm rows)
-    (hsep : ∀ a ∈ rows, ∀ b ∈ rows, orderKey q a = orderKey q b → a = b) :
+    (hsep : ∀ a ∈ rows, ∀ b ∈ rows,
+      keyCompare (q.orderBy.map (·.2)) (orderKey q a) (orderKey q b) = .eq → a = b) :
     q.post rows' = q.post rows := by
   have hlen_key : ∀ r, (orderKey q r).length = (q.orderBy.map (·.2)).length := by
     intro r; simp [orderKey]
@@ -163,7 +167,7 @@ theorem post_perm {q : Query} {rows rows' : List Row} (hperm : rows'.Perm rows)
       · exact List.pairwise_of_forall (by simp)
       · exact List.pairwise_of_forall (by simp)
       · intro a ha b hb _ _
-        exact hsep a (hperm.mem_iff.mp ha) b (hperm.mem_iff.mp hb) (by rw [hkey, hkey])
+        exact hsep a (hperm.mem_iff.mp ha) b (hperm.mem_iff.mp hb) (by rw [hnil]; rfl)
     · let le := fun a b => keyLe (q.orderBy.map (·.2)) (orderKey q a) (orderKey q b)
       have total : ∀ a b, le a b || le b a := fun a b => keyLe_total _ _ _
       have trans : ∀ a b c, le a b → le b c → le a c := fun a b c h1 h2 =>
@@ -175,7 +179,7 @@ theorem post_perm {q : Query} {rows rows' : List Row} (hperm : rows'.Perm rows)
       · intro a ha b hb h1 h2
         have ha' := hperm.mem_iff.mp ((perm_sortBy rows').mem_iff.mp ha)
         have hb' := hperm.mem_iff.mp ((perm_sortBy rows').mem_iff.mp hb)
-        exact hsep a ha' b hb' (keyLe_antisymm (hlen_key a) (hlen_key b) h1 h2)
+        exact hsep a ha' b hb' (keyLe_antisymm h1 h2)
   unfold Query.post
   simp only
   rw [show (fun a b => keyLe (q.orderBy.map (·.2)) (q.orderBy.map fun (p, _) => a.cell p)
@@ -308,7 +312,8 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
     {eval : Bind → Nat → List Row} {outer : Bind} :
     ∀ a ∈ (s.core k).rows eval (coreBindings s db eval outer k),
     ∀ b ∈ (s.core k).rows eval (coreBindings s db eval outer k),
-      orderKey (s.query q) a = orderKey (s.query q) b → a = b := by
+      keyCompare ((s.query q).orderBy.map (·.2)) (orderKey (s.query q) a)
+        (orderKey (s.query q) b) = .eq → a = b := by
   unfold Statement.fullyOrders at hfull
   rw [harms] at hfull
   simp only [Bool.or_eq_true, Bool.and_eq_true, Bool.not_eq_true'] at hfull
@@ -331,17 +336,27 @@ theorem fullyOrders_separates {s : Statement} {db : Db} (hdb : db.Keyed) {q k : 
       rw [List.any_eq_false] at hwin
       exact absurd rfl (hwin _ ho)
     | _ => rfl
+  have hex := keyCompare_eq_exact (s.query q).orderBy
+    (fun p => Row.cell ((s.core k).output.map
+      (OutCol.plain eval (coreBindings s db eval outer k) ba ja)) p)
+    (fun p => Row.cell ((s.core k).output.map
+      (OutCol.plain eval (coreBindings s db eval outer k) bb jb)) p) hkey
   have hsame : ba = bb := by
     apply sortsByRowids_separates hdb hsorts hba hbb (sa := eval ba) (sb := eval bb)
     intro e he
     simp only [Statement.orderExprs, List.mem_filterMap] at he
     obtain ⟨⟨p, d⟩, hpd, hp⟩ := he
-    split at hp
-    · rename_i e' hout
-      cases hp
-      have hcell := (List.map_inj_left.mp hkey) (p, d) hpd
-      simpa [Row.cell, List.getElem?_map, hout, OutCol.plain] using hcell
-    · cases hp
+    have hcell := hex (p, d) hpd
+    cases hd : d.exact with
+    | false => simp [hd] at hp
+    | true =>
+      cases hout : (s.core k).output[p]? with
+      | none => simp [hd, hout] at hp
+      | some o =>
+        cases o <;> simp [hd, hout] at hp
+        subst hp
+        have hc := hcell hd
+        simpa [Row.cell, List.getElem?_map, hout, OutCol.plain] using hc
   rw [hsame, hplain bb ja jb]
 
 /-- Rule 7's theorem for a query that tells its rows apart: a one-arm query
@@ -608,7 +623,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
   | false =>
     -- Each window sorts by the rowid of each of the core's tables.
     have hsorts : ∀ partition orderBy, OutCol.rowNumber partition orderBy ∈ c.output →
-        s.sortsByRowids k (orderBy.map (·.1)) = true := by
+        s.sortsByRowids k (exactTerms orderBy) = true := by
       intro partition orderBy ho
       have hagg' : (s.core k).aggregated = false := hagg
       unfold Statement.followsOrder at hfree
@@ -621,9 +636,17 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
       constructor
       · intro h
         simp only [windowPeer, Bool.and_eq_true, beq_iff_eq] at h
-        have hkey := keyCompare_eq (by simp [windowKey]) (by simp [windowKey]) h.2
+        have h2 : keyCompare (orderBy.map (·.2))
+            (orderBy.map fun o => o.1.eval b' (eval b')) (orderBy.map fun o => o.1.eval b (eval b))
+            = .eq := by
+          simpa [windowKey, List.map_map, Function.comp_def] using h.2
+        have hex := keyCompare_eq_exact orderBy (fun e => e.eval b' (eval b'))
+          (fun e => e.eval b (eval b)) h2
         exact sortsByRowids_separates hdb (hsorts _ _ ho) hb' hb (sa := eval b') (sb := eval b)
-          (fun e he => (List.map_inj_left.mp hkey) e he)
+          (fun e he => by
+            obtain ⟨⟨e', d⟩, hmem, rfl⟩ := List.mem_map.mp he
+            obtain ⟨hmem, hd⟩ := List.mem_filter.mp hmem
+            exact hex (e', d) hmem hd)
       · rintro rfl
         simp [windowPeer, keyCompare_self]
     -- A row is its binding's values, each window's number counting the
@@ -659,7 +682,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
     exact (occurrences_perm hperm).map G
   | true =>
   have hfree' : ∀ o ∈ c.output, (∀ e, o = .expr e → e.bare c.groupBy = false) ∧
-      (∀ e orderBy, o = .concat e orderBy → s.sortsByRowids k (orderBy.map (·.1)) = true) := by
+      (∀ e orderBy, o = .concat e orderBy → s.sortsByRowids k (exactTerms orderBy) = true) := by
     intro o ho
     have hagg' : (s.core k).aggregated = true := hagg
     unfold Statement.followsOrder at hfree
@@ -698,14 +721,18 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
     | count => simp [OutCol.aggregate, hg.length_eq]
     | max e => simp only [OutCol.aggregate]; exact maxValue_perm (hg.map _)
     | concat e orderBy =>
-      have hsep : ∀ a ∈ g', ∀ b ∈ g', (orderBy.map fun (e, _) => e.eval a (eval a)) =
-          (orderBy.map fun (e, _) => e.eval b (eval b)) → a = b := by
+      have hsep : ∀ a ∈ g', ∀ b ∈ g', keyCompare (orderBy.map (·.2))
+          (orderBy.map fun (e, _) => e.eval a (eval a))
+          (orderBy.map fun (e, _) => e.eval b (eval b)) = .eq → a = b := by
         intro a ha b hb hkey
+        have hex := keyCompare_eq_exact orderBy (fun e => e.eval a (eval a))
+          (fun e => e.eval b (eval b)) hkey
         apply sortsByRowids_separates hdb (hsorts e orderBy rfl) (hin a (hg.mem_iff.mp ha))
           (hin b (hg.mem_iff.mp hb)) (sa := eval a) (sb := eval b)
         intro e' he'
         obtain ⟨⟨e'', d⟩, hed, rfl⟩ := List.mem_map.mp he'
-        exact (List.map_inj_left.mp hkey) (e'', d) hed
+        obtain ⟨hmem, hd⟩ := List.mem_filter.mp hed
+        exact hex (e'', d) hmem hd
       have hsort : sortBindings eval orderBy g' = sortBindings eval orderBy g := by
         unfold sortBindings
         split
@@ -715,7 +742,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
           · exact List.pairwise_of_forall (by simp)
           · exact List.pairwise_of_forall (by simp)
           · intro a ha b hb _ _
-            exact hsep a ha b hb (by simp [hnil])
+            exact hsep a ha b hb (by simp [hnil, keyCompare])
         · let ds := orderBy.map (·.2)
           let okey := fun (b : Bind) => orderBy.map fun (e, _) => e.eval b (eval b)
           have hlen : ∀ b, (okey b).length = ds.length := by intro b; simp [okey, ds]
@@ -730,7 +757,7 @@ theorem rows_perm_of_orderFree {s : Statement} {db : Db} (hdb : db.Keyed) {k : N
           · intro a ha b hb h1 h2
             have ha' := (perm_sortBy g').mem_iff.mp ha
             have hb' := (perm_sortBy g').mem_iff.mp hb
-            exact hsep a ha' b hb' (keyLe_antisymm (hlen a) (hlen b) h1 h2)
+            exact hsep a ha' b hb' (keyLe_antisymm h1 h2)
       simp only [OutCol.aggregate, hsort]
     | rowNumber => rfl
   unfold Core.rows

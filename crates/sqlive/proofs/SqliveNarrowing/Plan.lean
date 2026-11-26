@@ -191,6 +191,11 @@ inductive RScope where
   | null (column : Nat) (not : Bool)
   | inVals (column : Nat) (values : List Int)
   | row (item : Nat) (cond : Cond)
+  /-- The rows whose value of `e` is not NULL and compares with `value` as
+  `op` says by `key`, the key of the collation an ORDER BY term compares by
+  (`Dir`): an ORDER BY term's bound, which a write judges by SQLite's own
+  comparison, as the connection's collations give it. -/
+  | ordered (key : Int → Int) (e : Expr) (op : Op) (value : Int)
   /-- The row's `member` value equals `value` over a row of `partner` in
   `scope`; a NULL matches a NULL when `nulls`, as `IS` compares. -/
   | joined (member : PValue) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
@@ -199,7 +204,7 @@ inductive RScope where
   the rows of `item` that its `own` conditions pass and that hold one value in
   each `partition` column, sorted by `keys`, each descending when `true`
   (`Window`). A row with a NULL in a partition column sits in no window. -/
-  | window (item : Nat) (own : List Cond) (partition : List Nat) (keys : List (Expr × Bool))
+  | window (item : Nat) (own : List Cond) (partition : List Nat) (keys : List (Expr × Dir))
       (limit : Nat)
   | and (left right : RScope)
   | or (left right : RScope)
@@ -239,13 +244,13 @@ def RScope.equalValues (column : Nat) : RScope → Option (List Int)
 
 /-- The values of the ORDER BY terms `keys`, expressions over one item's
 columns, in its row `r`. -/
-def keyValues (keys : List (Expr × Bool)) (r : Row) : List Value :=
+def keyValues (keys : List (Expr × Dir)) (r : Row) : List Value :=
   keys.map fun (e, _) => e.eval (rowBind (some r)) noSubs
 
 /-- Whether `r'` is a row of the window `r` sits in that sorts before `r`:
 its `own` conditions hold, it holds `r`'s value in each `partition` column,
 and its values of `keys` sort before `r`'s. -/
-def windowBefore (own : List Cond) (partition : List Nat) (keys : List (Expr × Bool)) (r r' : Row) :
+def windowBefore (own : List Cond) (partition : List Nat) (keys : List (Expr × Dir)) (r r' : Row) :
     Bool :=
   own.all (fun cd => isTrue (cd.eval (rowBind (some r')) noSubs)) &&
     partition.all (fun c => r'.cell c == r.cell c) &&
@@ -265,6 +270,10 @@ def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
     | some x => vs.contains x
     | none => false
   | .row _ cd => isTrue (cd.eval (rowBind (some r)) noSubs)
+  | .ordered key e op v =>
+    match e.eval (rowBind (some r)) noSubs with
+    | some x => op.compare (key x) (key v)
+    | none => false
   | .joined m p v s nulls =>
     ((m.eval r).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == m.eval r && s.passes rowsOf r'
   | .window i own part keys n =>

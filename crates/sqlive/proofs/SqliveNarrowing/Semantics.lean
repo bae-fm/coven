@@ -146,7 +146,7 @@ def concatValue (vs : List Value) : Value :=
 /-- A group's bindings in the order a call's ORDER BY sorts them, each term
 descending when `true`, keeping the order SQLite reads them in among
 bindings that sort the same; in that order alone with no ORDER BY. -/
-def sortBindings (subs : Bind → Subs) (orderBy : List (Expr × Bool)) (g : List Bind) :
+def sortBindings (subs : Bind → Subs) (orderBy : List (Expr × Dir)) (g : List Bind) :
     List Bind :=
   let key (b : Bind) := orderBy.map fun (e, _) => e.eval b (subs b)
   if orderBy.isEmpty then g else sortBy (fun a b => keyLe (orderBy.map (·.2)) (key a) (key b)) g
@@ -170,7 +170,7 @@ def windowKey (subs : Bind → Subs) (exprs : List Expr) (b : Bind) : List Value
 
 /-- Whether `b'` sits in `b`'s partition of the window `PARTITION BY
 partition ORDER BY orderBy`, and how its ORDER BY values compare with `b`'s. -/
-def windowPeer (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Bool))
+def windowPeer (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Dir))
     (b b' : Bind) (o : Ordering) : Bool :=
   windowKey subs partition b' == windowKey subs partition b &&
     keyCompare (orderBy.map (·.2)) (windowKey subs (orderBy.map (·.1)) b')
@@ -180,7 +180,7 @@ def windowPeer (subs : Bind → Subs) (partition : List Expr) (orderBy : List (E
 of a core that doesn't aggregate: one more than the bindings of its
 partition that sort before it, and than those that sort the same and come
 before it in the order SQLite reads them in. -/
-def windowRowNumber (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Bool))
+def windowRowNumber (subs : Bind → Subs) (partition : List Expr) (orderBy : List (Expr × Dir))
     (kept : List Bind) (b : Bind) (j : Nat) : Value :=
   some (Int.ofNat (1 + kept.countP (windowPeer subs partition orderBy b · .lt) +
     (kept.take j).countP (windowPeer subs partition orderBy b · .eq)))

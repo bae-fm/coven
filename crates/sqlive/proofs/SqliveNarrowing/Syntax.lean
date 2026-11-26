@@ -105,13 +105,13 @@ inductive OutCol where
   own ORDER BY sorts them, each term descending when `true`. The model's
   values are integers, so the differential writes the joined text read back
   as one, which keeps the order. -/
-  | concat (e : Expr) (orderBy : List (Expr × Bool))
+  | concat (e : Expr) (orderBy : List (Expr × Dir))
   /-- `row_number() OVER (PARTITION BY ... ORDER BY ...)`, each ORDER BY term
   descending when `true`, in a core that doesn't aggregate: a binding's place
   among the bindings of its partition, in the order the window's ORDER BY
   sorts them and, among those that sort the same, in the order SQLite reads
   them in. -/
-  | rowNumber (partition : List Expr) (orderBy : List (Expr × Bool))
+  | rowNumber (partition : List Expr) (orderBy : List (Expr × Dir))
   deriving Repr, Inhabited
 
 /-- The expressions a result column holds. -/
@@ -159,8 +159,8 @@ structure Query where
   arms : List Nat
   /-- The operator before each arm after the first. -/
   ops : List Combine
-  /-- ORDER BY: result column positions, each descending when `true`. -/
-  orderBy : List (Nat × Bool)
+  /-- ORDER BY: result column positions, each with its direction and collation. -/
+  orderBy : List (Nat × Dir)
   /-- Whether each ORDER BY term writes its result column's column or
   expression, which sqlive's LIMIT bound needs, rather than its position. -/
   orderNamed : Bool

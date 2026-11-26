@@ -13,9 +13,9 @@ window function, whose value in a row the rows after the last can change. -/
 namespace SqliveNarrowing.Limit
 
 /-- What an ORDER BY term sorts its item's rows by (`SortKey`): one of
-its columns, which sqlive compares itself, or an expression over its columns
-with no subquery, which sqlive asks SQLite to evaluate on each row a write
-changes. -/
+its columns, or an expression over its columns with no subquery. A write asks
+SQLite for its value in each row it changes, and how it compares with the
+last row's by the term's collation (`RScope.ordered`). -/
 inductive SortKey where
   | column (c : Nat)
   | expr (e : Expr)
@@ -29,17 +29,17 @@ def SortKey.value (r : Row) : SortKey → Value
 /-- Consecutive ORDER BY terms over one item (`SortRun`). -/
 structure SortRun where
   item : Nat
-  /-- Each term: its key, whether descending, and the result column that
-  returns it. -/
-  terms : List (SortKey × Bool × Nat)
+  /-- Each term: its key, its direction and collation, and the result column
+  that returns it. -/
+  terms : List (SortKey × Dir × Nat)
   deriving Repr
 
-/-- The run's keys, each with whether it sorts descending. -/
-def SortRun.keys (run : SortRun) : List (SortKey × Bool) := run.terms.map fun (key, d, _) => (key, d)
+/-- The run's keys, each with its direction and collation. -/
+def SortRun.keys (run : SortRun) : List (SortKey × Dir) := run.terms.map fun (key, d, _) => (key, d)
 
 /-- The ORDER BY's terms, each with its item, as runs of consecutive terms
 over one item. -/
-def SortRun.group : List (Nat × SortKey × Bool × Nat) → List SortRun
+def SortRun.group : List (Nat × SortKey × Dir × Nat) → List SortRun
   | [] => []
   | (i, term) :: rest =>
     match group rest with
@@ -90,23 +90,25 @@ def SortKey.nullScope (i : Nat) (not : Bool) : SortKey → RScope
   | .column c => .null c not
   | .expr e => .row i (.null e not)
 
-/-- The rows of item `i` whose key compares with `x` by `op`. -/
-def SortKey.compareScope (i : Nat) (op : Op) (x : Int) : SortKey → RScope
-  | .column c => .compare c op x
-  | .expr e => .row i (.cmp op e (.lit (some x)))
+/-- The rows of item `i` whose key compares with `x` by `op` in the
+collation whose key is `k`. -/
+def SortKey.compareScope (i : Nat) (k : Int → Int) (op : Op) (x : Int) : SortKey → RScope
+  | .column c => .ordered k (.col i c) op x
+  | .expr e => .ordered k e op x
 
-/-- The rows of item `i` whose key sorts strictly before `v`: NULL first
-ascending and last descending; `none` when no value does. -/
-def SortKey.beforeScope (i : Nat) (key : SortKey) (desc : Bool) : Value → Option RScope
-  | none => if desc then some (key.nullScope i true) else none
+/-- The rows of item `i` whose key sorts strictly before `v` as `d` orders:
+NULL first ascending and last descending; `none` when no value does. -/
+def SortKey.beforeScope (i : Nat) (key : SortKey) (d : Dir) : Value → Option RScope
+  | none => if d.desc then some (key.nullScope i true) else none
   | some x =>
-    if desc then some (key.compareScope i .gt x)
-    else some ((key.nullScope i false).either (key.compareScope i .lt x))
+    if d.desc then some (key.compareScope i d.key .gt x)
+    else some ((key.nullScope i false).either (key.compareScope i d.key .lt x))
 
-/-- The rows of item `i` whose key holds `v`, NULL included. -/
-def SortKey.equalScope (i : Nat) (key : SortKey) : Value → RScope
+/-- The rows of item `i` whose key ties with `v` as `d` orders, NULL
+included. -/
+def SortKey.equalScope (i : Nat) (key : SortKey) (d : Dir) : Value → RScope
   | none => key.nullScope i false
-  | some x => key.compareScope i .eq x
+  | some x => key.compareScope i d.key .eq x
 
 /-- The rows either scope passes; `none` passes no row. -/
 def orTied : Option RScope → Option RScope → Option RScope
@@ -118,14 +120,14 @@ def orTied : Option RScope → Option RScope → Option RScope
 run's last row, or tie with it and pass `tied`: term by term, NULL first
 ascending and last descending; `none` when no row does
 (`sorted_before`). -/
-def sortedBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value)
+def sortedBefore (i : Nat) (terms : List (SortKey × Dir)) (last : List Value)
     (tied : Option RScope) : Option RScope :=
-  (terms.zip last).foldr (fun ((key, desc), v) scope =>
-    orTied (key.beforeScope i desc v) (scope.map (key.equalScope i v).both)) tied
+  (terms.zip last).foldr (fun ((key, d), v) scope =>
+    orTied (key.beforeScope i d v) (scope.map (key.equalScope i d v).both)) tied
 
 /-- The rows of item `i` that sort at or before `last`: a row equal to `last`
 passes. -/
-def atOrBefore (i : Nat) (terms : List (SortKey × Bool)) (last : List Value) : RScope :=
+def atOrBefore (i : Nat) (terms : List (SortKey × Dir)) (last : List Value) : RScope :=
   (sortedBefore i terms last (some .all)).getD .all
 
 /-- Item `i`'s bound from the ORDER BY's runs, each paired with the last
@@ -160,9 +162,10 @@ that pass it. When a run returned LIMIT rows, every row it returned sorts at
 or before its last row, so the rows that sort after the last row change
 nothing in the first LIMIT rows. -/
 
-/-- How an ORDER BY term compares two values, descending when `d`. -/
-def dcmp (d : Bool) (a b : Value) : Ordering :=
-  if d then (valueCompare a b).swap else valueCompare a b
+/-- How an ORDER BY term compares two values, descending when `d` says so,
+and by its collation. -/
+def dcmp (d : Dir) (a b : Value) : Ordering :=
+  if d.desc then (d.compare a b).swap else d.compare a b
 
 theorem valueCompare_some (x y : Int) :
     valueCompare (some x) (some y) = if x < y then .lt else if x = y then .eq else .gt := rfl
@@ -223,30 +226,49 @@ theorem valueCompare_lt_trans {a b c : Value} (h1 : valueCompare a b = .lt)
     · cases h'
       exact Or.inr ⟨x, z, rfl, rfl, by omega⟩
 
-theorem dcmp_swap (d : Bool) (a b : Value) : dcmp d b a = (dcmp d a b).swap := by
-  cases d <;> simp [dcmp, valueCompare_swap a b, Ordering.swap_swap]
+theorem Dir.compare_swap (d : Dir) (a b : Value) : d.compare b a = (d.compare a b).swap :=
+  valueCompare_swap _ _
 
-theorem dcmp_eq {d : Bool} {a b : Value} : dcmp d a b = .eq ↔ a = b := by
-  cases d <;> simp [dcmp, valueCompare_eq, Ordering.swap_eq_eq]
+theorem dcmp_swap (d : Dir) (a b : Value) : dcmp d b a = (dcmp d a b).swap := by
+  unfold dcmp
+  cases d.desc <;> simp [Dir.compare_swap d a b, Ordering.swap_swap]
 
-theorem dcmp_lt_trans {d : Bool} {a b c : Value} (h1 : dcmp d a b = .lt) (h2 : dcmp d b c = .lt) :
+/-- Two values tie when their keys are equal, which the model's collations
+let two different values do (`'a'` and `'A'` in NOCASE). -/
+theorem dcmp_eq {d : Dir} {a b : Value} : dcmp d a b = .eq ↔ a.map d.key = b.map d.key := by
+  unfold dcmp Dir.compare
+  cases d.desc <;> simp [valueCompare_eq, Ordering.swap_eq_eq]
+
+/-- A value that ties with another sorts the same against any third. -/
+theorem dcmp_congr_right {d : Dir} {a b c : Value} (h : b.map d.key = c.map d.key) :
+    dcmp d a b = dcmp d a c := by
+  unfold dcmp Dir.compare; rw [h]
+
+theorem dcmp_congr_left {d : Dir} {a b c : Value} (h : a.map d.key = b.map d.key) :
+    dcmp d a c = dcmp d b c := by
+  unfold dcmp Dir.compare; rw [h]
+
+theorem dcmp_lt_trans {d : Dir} {a b c : Value} (h1 : dcmp d a b = .lt) (h2 : dcmp d b c = .lt) :
     dcmp d a c = .lt := by
-  cases d
-  · exact valueCompare_lt_trans h1 h2
-  · simp only [dcmp, ↓reduceIte, Ordering.swap_eq_lt] at h1 h2 ⊢
-    have h1' : valueCompare b a = .lt := by rw [valueCompare_swap, h1]; rfl
-    have h2' : valueCompare c b = .lt := by rw [valueCompare_swap, h2]; rfl
+  unfold dcmp Dir.compare at *
+  cases hd : d.desc
+  · rw [hd] at h1 h2
+    exact valueCompare_lt_trans h1 h2
+  · rw [hd] at h1 h2
+    simp only [↓reduceIte, Ordering.swap_eq_lt, Bool.true_eq_false] at h1 h2 ⊢
+    have h1' : valueCompare (b.map d.key) (a.map d.key) = .lt := by rw [valueCompare_swap, h1]; rfl
+    have h2' : valueCompare (c.map d.key) (b.map d.key) = .lt := by rw [valueCompare_swap, h2]; rfl
     have := valueCompare_lt_trans h2' h1'
     rw [valueCompare_swap, this]; rfl
 
-theorem keyCompare_cons (d : Bool) (ds : List Bool) (a b : Value) (as bs : List Value) :
+theorem keyCompare_cons (d : Dir) (ds : List Dir) (a b : Value) (as bs : List Value) :
     keyCompare (d :: ds) (a :: as) (b :: bs) = (dcmp d a b).then (keyCompare ds as bs) := by
   simp [keyCompare, dcmp]
 
 theorem then_ne_gt {x y : Ordering} : x.then y ≠ .gt ↔ x = .lt ∨ (x = .eq ∧ y ≠ .gt) := by
   cases x <;> simp [Ordering.then]
 
-theorem keyCompare_swap (ds : List Bool) (as bs : List Value) :
+theorem keyCompare_swap (ds : List Dir) (as bs : List Value) :
     keyCompare ds bs as = (keyCompare ds as bs).swap := by
   induction ds generalizing as bs with
   | nil => simp [keyCompare, Ordering.swap]
@@ -258,17 +280,17 @@ theorem keyCompare_swap (ds : List Bool) (as bs : List Value) :
       | nil => simp [keyCompare, Ordering.swap]
       | cons b bs => rw [keyCompare_cons, keyCompare_cons, ih, dcmp_swap, Ordering.swap_then]
 
-theorem keyLe_cons (d : Bool) (ds : List Bool) (a v : Value) (as vs : List Value) :
+theorem keyLe_cons (d : Dir) (ds : List Dir) (a v : Value) (as vs : List Value) :
     keyLe (d :: ds) (a :: as) (v :: vs) =
       (dcmp d a v == .lt || (dcmp d a v == .eq && keyLe ds as vs)) := by
   simp only [keyLe, keyCompare_cons]
   cases dcmp d a v <;> cases keyCompare ds as vs <;> rfl
 
-theorem keyLe_total (ds : List Bool) (as bs : List Value) : keyLe ds as bs || keyLe ds bs as := by
+theorem keyLe_total (ds : List Dir) (as bs : List Value) : keyLe ds as bs || keyLe ds bs as := by
   simp only [keyLe, keyCompare_swap ds as bs, Bool.or_eq_true, bne_iff_ne, ne_eq]
   cases keyCompare ds as bs <;> simp [Ordering.swap]
 
-theorem keyLe_trans {ds : List Bool} {as bs cs : List Value} (ha : as.length = ds.length)
+theorem keyLe_trans {ds : List Dir} {as bs cs : List Value} (ha : as.length = ds.length)
     (hb : bs.length = ds.length) (hc : cs.length = ds.length)
     (h1 : keyLe ds as bs) (h2 : keyLe ds bs cs) : keyLe ds as cs := by
   simp only [keyLe, bne_iff_ne, ne_eq] at *
@@ -281,10 +303,10 @@ theorem keyLe_trans {ds : List Bool} {as bs cs : List Value} (ha : as.length = d
     rw [← ne_eq, then_ne_gt] at h1 h2 ⊢
     rcases h1 with h1 | ⟨h1, r1⟩ <;> rcases h2 with h2 | ⟨h2, r2⟩
     · exact Or.inl (dcmp_lt_trans h1 h2)
-    · rw [dcmp_eq.mp h2] at h1; exact Or.inl h1
-    · rw [dcmp_eq.mp h1]; exact Or.inl h2
-    · rw [dcmp_eq.mp h1]
-      exact Or.inr ⟨h2, ih ha hb hc r1 r2⟩
+    · rw [dcmp_congr_right (dcmp_eq.mp h2)] at h1; exact Or.inl h1
+    · rw [dcmp_congr_left (dcmp_eq.mp h1)]; exact Or.inl h2
+    · refine Or.inr ⟨?_, ih ha hb hc r1 r2⟩
+      rw [dcmp_congr_left (dcmp_eq.mp h1)]; exact h2
 
 /-! A stable sort and a test. -/
 
@@ -543,20 +565,18 @@ theorem null_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (n : Bool) (
     (key.nullScope i n).passes rowsOf r = ((key.value r).isNone != n) := by
   cases key <;> simp [SortKey.nullScope, SortKey.value, RScope.passes, Cond.eval, isTrue]
 
-/-- A key's comparison by `<`, `>` or `=` passes a row whose key holds a value
-that compares so, and no row whose key is NULL. -/
-theorem compare_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) {op : Op}
-    (hop : op = .lt ∨ op = .gt ∨ op = .eq) (x : Int) (key : SortKey) :
-    (key.compareScope i op x).passes rowsOf r =
+/-- A key's comparison by `<`, `>` or `=` in a collation passes a row whose key
+holds a value that compares so by the collation's key, and no row whose key
+is NULL. -/
+theorem compare_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (k : Int → Int)
+    (op : Op) (x : Int) (key : SortKey) :
+    (key.compareScope i k op x).passes rowsOf r =
       match key.value r with
-      | some y => op.compare y x
+      | some y => op.compare (k y) (k x)
       | none => false := by
   cases key with
   | column c => rfl
-  | expr e =>
-    simp only [SortKey.compareScope, SortKey.value, RScope.passes, Cond.eval, Expr.eval]
-    rcases hop with rfl | rfl | rfl <;>
-      cases e.eval (rowBind (some r)) noSubs <;> simp [Op.apply, isTrue]
+  | expr e => rfl
 
 /-- Whether a scope that may pass no row passes `r`. -/
 def passesSome (rowsOf : Nat → List Row) (r : Row) (scope : Option RScope) : Bool :=
@@ -571,49 +591,46 @@ theorem map_both_passes (rowsOf : Nat → List Row) (r : Row) (a : RScope) (scop
     passesSome rowsOf r (scope.map a.both) = (a.passes rowsOf r && passesSome rowsOf r scope) := by
   cases scope <;> simp [passesSome, passes_both]
 
-theorem before_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Bool)
+theorem before_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Dir)
     (v : Value) :
     ((key.beforeScope i d v).map (·.passes rowsOf r)).getD false =
       (dcmp d (key.value r) v == .lt) := by
-  have hlt : Op.lt = .lt ∨ Op.lt = .gt ∨ Op.lt = .eq := Or.inl rfl
-  have hgt : Op.gt = .lt ∨ Op.gt = .gt ∨ Op.gt = .eq := Or.inr (Or.inl rfl)
-  cases d <;> cases v with
+  obtain ⟨desc, k⟩ := d
+  cases desc <;> cases v with
   | none =>
     cases hx : key.value r <;>
-      simp [SortKey.beforeScope, null_passes, hx, dcmp, valueCompare, Ordering.swap]
+      simp [SortKey.beforeScope, null_passes, hx, dcmp, Dir.compare, valueCompare, Ordering.swap]
   | some y =>
     cases hx : key.value r with
     | none =>
-      simp [SortKey.beforeScope, null_passes, compare_passes _ _ _ hlt, compare_passes _ _ _ hgt,
-        passes_either, hx, dcmp, valueCompare, Ordering.swap]
+      simp [SortKey.beforeScope, null_passes, compare_passes, passes_either, hx, dcmp,
+        Dir.compare, valueCompare, Ordering.swap]
     | some x =>
-      simp only [SortKey.beforeScope, dcmp, Bool.false_eq_true, ↓reduceIte, valueCompare_some,
-        passes_either, null_passes, compare_passes _ _ _ hlt, compare_passes _ _ _ hgt, hx,
-        Op.compare, Option.isNone_some, bne_self_eq_false, Bool.false_or, Option.map_some,
-        Option.getD_some]
-      by_cases h1 : x < y <;> by_cases h2 : x = y <;> simp [h1, h2, Ordering.swap] <;> omega
-
-theorem equal_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Bool)
+      simp only [SortKey.beforeScope, dcmp, Dir.compare, Bool.false_eq_true, ↓reduceIte,
+        Option.map_some, valueCompare_some, passes_either, null_passes, compare_passes, hx,
+        Op.compare, Option.isNone_some, bne_self_eq_false, Bool.false_or, Option.getD_some]
+      by_cases h1 : k x < k y <;> by_cases h2 : k x = k y <;> simp [h1, h2, Ordering.swap]
+      all_goals omega
+theorem equal_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat) (key : SortKey) (d : Dir)
     (v : Value) :
-    (key.equalScope i v).passes rowsOf r = (dcmp d (key.value r) v == .eq) := by
-  have heq : Op.eq = .lt ∨ Op.eq = .gt ∨ Op.eq = .eq := Or.inr (Or.inr rfl)
-  have key_eq : (dcmp d (key.value r) v == .eq) = decide (key.value r = v) := by
-    by_cases h : key.value r = v
-    · rw [h, dcmp_eq.mpr rfl]; simp
-    · have : dcmp d (key.value r) v ≠ .eq := fun h' => h (dcmp_eq.mp h')
-      simp only [h, decide_false]
-      cases hd : dcmp d (key.value r) v <;> simp_all
-  rw [key_eq]
-  cases v with
-  | none => cases hx : key.value r <;> simp [SortKey.equalScope, null_passes, hx]
+    (key.equalScope i d v).passes rowsOf r = (dcmp d (key.value r) v == .eq) := by
+  obtain ⟨desc, k⟩ := d
+  cases desc <;> cases v with
+  | none => cases hx : key.value r <;> simp [SortKey.equalScope, null_passes, hx, dcmp,
+      Dir.compare, valueCompare, Ordering.swap]
   | some y =>
-    cases hx : key.value r <;> simp [SortKey.equalScope, compare_passes _ _ _ heq, hx, Op.compare]
-    exact Bool.eq_iff_iff.mpr (by simp)
+    cases hx : key.value r with
+    | none => simp [SortKey.equalScope, compare_passes, hx, dcmp, Dir.compare, valueCompare,
+        Ordering.swap]
+    | some x =>
+      simp only [SortKey.equalScope, compare_passes, hx, dcmp, Dir.compare, Bool.false_eq_true,
+        ↓reduceIte, Option.map_some, valueCompare_some, Op.compare]
+      by_cases h : k x = k y <;> by_cases h3 : k x < k y <;> simp [h, h3, Ordering.swap]
 
 /-- The scope `sortedBefore` gives passes a row of item `i` when the row's
 values of the keys sort before `last`, or equal it and pass `tied`. -/
 theorem sortedBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
-    (terms : List (SortKey × Bool)) (last : List Value) (tied : Option RScope)
+    (terms : List (SortKey × Dir)) (last : List Value) (tied : Option RScope)
     (hlen : last.length = terms.length) :
     passesSome rowsOf r (sortedBefore i terms last tied) =
       match keyCompare (terms.map (·.2)) (terms.map (·.1.value r)) last with
@@ -639,7 +656,7 @@ theorem sortedBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
         cases keyCompare (terms.map (·.2)) (terms.map (·.1.value r)) vs <;>
         simp [Ordering.then]
 
-theorem sortedBefore_isSome (i : Nat) (terms : List (SortKey × Bool)) (last : List Value)
+theorem sortedBefore_isSome (i : Nat) (terms : List (SortKey × Dir)) (last : List Value)
     {tied : Option RScope} (h : tied.isSome) : (sortedBefore i terms last tied).isSome := by
   induction terms generalizing last with
   | nil => simpa [sortedBefore] using h
@@ -657,7 +674,7 @@ theorem sortedBefore_isSome (i : Nat) (terms : List (SortKey × Bool)) (last : L
 /-- The bound's scope passes a row of the sorted item when the row's values
 of the ORDER BY's keys sort at or before `last`. -/
 theorem atOrBefore_passes (rowsOf : Nat → List Row) (r : Row) (i : Nat)
-    (terms : List (SortKey × Bool)) (last : List Value) (hlen : last.length = terms.length) :
+    (terms : List (SortKey × Dir)) (last : List Value) (hlen : last.length = terms.length) :
     (atOrBefore i terms last).passes rowsOf r =
       keyLe (terms.map (·.2)) (terms.map (·.1.value r)) last := by
   have hsome := sortedBefore_isSome i terms last (tied := some .all) rfl
@@ -698,7 +715,7 @@ the rest sort at or before. So an item whose first run comes first sorts at
 or before that run's values, and an item after it does too, unless some
 earlier run's values sort before. -/
 
-theorem keyCompare_append (ds ds' : List Bool) (as as' bs bs' : List Value)
+theorem keyCompare_append (ds ds' : List Dir) (as as' bs bs' : List Value)
     (ha : as.length = ds.length) (hb : bs.length = ds.length) :
     keyCompare (ds ++ ds') (as ++ as') (bs ++ bs') =
       (keyCompare ds as bs).then (keyCompare ds' as' bs') := by
@@ -717,7 +734,7 @@ theorem keyCompare_append (ds ds' : List Bool) (as as' bs bs' : List Value)
           keyCompare_cons, ih as bs ha hb, Ordering.then_assoc]
 
 /-- The runs' directions, in order. -/
-def runDirections (runs : List SortRun) : List Bool := runs.flatMap fun run => run.keys.map (·.2)
+def runDirections (runs : List SortRun) : List Dir := runs.flatMap fun run => run.keys.map (·.2)
 
 /-- The ORDER BY's values of a binding whose items hold the rows `row`: each
 run's keys' values in its item's row. -/

@@ -45,6 +45,11 @@ def OutCol.refs (o : OutCol) : List (Nat × Nat) := o.exprs.flatMap Expr.refs
 def Core.refs (c : Core) : List (Nat × Nat) :=
   c.conds.flatMap (·.1.refs) ++ c.output.flatMap OutCol.refs ++ c.groupBy.flatMap Expr.refs
 
+/-- The expressions of the ORDER BY terms `orderBy` whose collation ties no two
+different values. -/
+def exactTerms (orderBy : List (Expr × Dir)) : List Expr :=
+  (orderBy.filter (·.2.exact)).map (·.1)
+
 /-- Whether the expressions `sorted` sort the bindings of core `k` by the
 rowid of each of its items, each a table, its first column (`Json.readDb`):
 two bindings of such a core differ in some item's row, and so in its rowid
@@ -53,12 +58,13 @@ def Statement.sortsByRowids (s : Statement) (k : Nat) (sorted : List Expr) : Boo
   (s.core k).items.all fun i =>
     (s.table? i).isSome && (s.item i).rowidFirst && sorted.contains (.col i 0)
 
-/-- The result columns' expressions that query `q`'s ORDER BY sorts by. -/
+/-- The result columns' expressions that query `q`'s ORDER BY sorts by in a
+collation that ties no two different values. -/
 def Statement.orderExprs (s : Statement) (q k : Nat) : List Expr :=
-  (s.query q).orderBy.filterMap fun (p, _) =>
-    match (s.core k).output[p]? with
-    | some (.expr e) => some e
-    | _ => none
+  (s.query q).orderBy.filterMap fun (p, d) =>
+    match d.exact, (s.core k).output[p]? with
+    | true, some (.expr e) => some e
+    | _, _ => none
 
 /-- Whether query `q`'s ORDER BY tells every two of its rows apart. The query
 is one SELECT, and either it aggregates with no GROUP BY, so it returns one
@@ -119,9 +125,9 @@ def Statement.followsOrder (s : Statement) (k : Nat) : Bool :=
   c.output.any fun
     | .expr e => c.aggregated &&
         (e.bare c.groupBy || (e.groupTerms c.groupBy).any (!s.comparesExactly k ·))
-    | .concat _ orderBy => !s.sortsByRowids k (orderBy.map (·.1))
+    | .concat _ orderBy => !s.sortsByRowids k (exactTerms orderBy)
     | .max e => !s.comparesExactly k e
-    | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (orderBy.map (·.1))
+    | .rowNumber _ orderBy => c.aggregated || !s.sortsByRowids k (exactTerms orderBy)
     | .count => false
 
 /-- Whether core `k`'s rows follow the order SQLite reads its rows in: it is

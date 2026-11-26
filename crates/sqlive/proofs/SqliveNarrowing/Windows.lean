@@ -109,7 +109,7 @@ theorem keyAt_facts {s : Statement} {c : Core} {i pos : Nat} {e : Expr}
 /-- The keys `keyAt` reads of the ORDER BY terms `L` give each binding of
 core `c` the values those terms give it, in the same directions. -/
 theorem keyAt_map {s : Statement} {c : Core} {i : Nat} (E : Bind → Nat → List Row) (b : Bind) :
-    ∀ L : List (Nat × Bool), (∀ p ∈ L, (keyAt s c i p.1).isSome = true) →
+    ∀ L : List (Nat × Dir), (∀ p ∈ L, (keyAt s c i p.1).isSome = true) →
       L.map (fun (p, _) => (c.outRow E b).cell p) =
         (L.filterMap fun (pos, d) => (keyAt s c i pos).map (·, d)).map
           (fun (e, _) => e.eval (rowBind (b i)) noSubs) ∧
@@ -325,19 +325,19 @@ theorem window_passes {s : Statement} {w : Window} (hf : ReadFacts s w) {o : Bin
   rw [← hsame r']
   simp [windowBefore, Bool.and_assoc]
 
-theorem keyCompare_lt_iff {ds : List Bool} {a b : List Value} :
+theorem keyCompare_lt_iff {ds : List Dir} {a b : List Value} :
     keyCompare ds a b = .lt ↔ keyLe ds b a = false := by
   simp only [keyLe, Limit.keyCompare_swap ds a b, bne_eq_false_iff_eq]
   cases keyCompare ds a b <;> simp [Ordering.swap]
 
-theorem keyCompare_lt_beq {ds : List Bool} (a b : List Value) :
+theorem keyCompare_lt_beq {ds : List Dir} (a b : List Value) :
     (keyCompare ds a b == .lt) = !keyLe ds b a := by
   cases h : keyLe ds b a
   · simp [keyCompare_lt_iff.mpr h]
   · have : keyCompare ds a b ≠ .lt := fun h' => by rw [keyCompare_lt_iff] at h'; rw [h'] at h; cases h
     simp [this]
 
-theorem keyCompare_lt_of_le {ds : List Bool} {x a b : List Value} (hx : x.length = ds.length)
+theorem keyCompare_lt_of_le {ds : List Dir} {x a b : List Value} (hx : x.length = ds.length)
     (ha : a.length = ds.length) (hb : b.length = ds.length) (hlt : keyCompare ds x a = .lt)
     (hle : keyLe ds a b = true) : keyCompare ds x b = .lt := by
   rw [keyCompare_lt_iff] at hlt ⊢
@@ -500,7 +500,7 @@ theorem plan_windowRows {s : Statement} (hwf : s.wellFormed = true) {X Y : Db}
     · right
       have hbinds := window_bindings hf ht Y EY o
       rw [hbinds, List.filter_map, List.length_map]
-      let ds : List Bool := w.keys.map (·.2)
+      let ds : List Dir := w.keys.map (·.2)
       have hcount := count_first (le := fun a b : Row => keyLe ds (kv a) (kv b))
         (fun a b => Limit.keyLe_total _ _ _)
         (fun a b c h1 h2 => Limit.keyLe_trans (hkv a) (hkv b) (hkv c) h1 h2) K (n := w.limit)

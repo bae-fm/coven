@@ -35,7 +35,7 @@ structure Window where
   partition : List Nat
   /-- The ORDER BY's terms, expressions over the item's columns, each
   descending when `true`. -/
-  keys : List (Expr × Bool)
+  keys : List (Expr × Dir)
   limit : Nat
   deriving Repr
 

@@ -191,7 +191,7 @@ order, so a binding's values run by run are its ORDER BY values. -/
 /-- Grouping the ORDER BY's terms into runs keeps them in order: each run's
 terms, each with the run's item, give the terms back. -/
 theorem Limit.group_flatten :
-    ∀ terms : List (Nat × Limit.SortKey × Bool × Nat),
+    ∀ terms : List (Nat × Limit.SortKey × Dir × Nat),
       (Limit.SortRun.group terms).flatMap (fun run => run.terms.map (run.item, ·)) = terms
   | [] => rfl
   | (i, term) :: rest => by
@@ -215,8 +215,8 @@ theorem Limit.group_flatten :
 
 /-- A function of each run's terms with the run's item, joined over the
 runs, is the function of each term. -/
-theorem Limit.group_flatMap {γ : Type} (F : Nat → Limit.SortKey × Bool × Nat → γ)
-    (terms : List (Nat × Limit.SortKey × Bool × Nat)) :
+theorem Limit.group_flatMap {γ : Type} (F : Nat → Limit.SortKey × Dir × Nat → γ)
+    (terms : List (Nat × Limit.SortKey × Dir × Nat)) :
     (Limit.SortRun.group terms).flatMap (fun run => run.terms.map (F run.item)) =
       terms.map fun t => F t.1 t.2 := by
   conv => rhs; rw [← Limit.group_flatten terms]
@@ -225,7 +225,7 @@ theorem Limit.group_flatMap {γ : Type} (F : Nat → Limit.SortKey × Bool × Na
 
 /-- Each run's item is the item of one of the terms. -/
 theorem Limit.group_item :
-    ∀ {terms : List (Nat × Limit.SortKey × Bool × Nat)} {run : Limit.SortRun},
+    ∀ {terms : List (Nat × Limit.SortKey × Dir × Nat)} {run : Limit.SortRun},
       run ∈ Limit.SortRun.group terms → ∃ t ∈ terms, t.1 = run.item
   | [], _, h => by cases h
   | (i, term) :: rest, run, h => by
@@ -248,7 +248,7 @@ theorem Limit.group_item :
       exact ⟨(i, term), by simp, rfl⟩
 
 /-- Each term's item is a run's item. -/
-theorem Limit.term_item {terms : List (Nat × Limit.SortKey × Bool × Nat)} {t : Nat × Limit.SortKey × Bool × Nat}
+theorem Limit.term_item {terms : List (Nat × Limit.SortKey × Dir × Nat)} {t : Nat × Limit.SortKey × Dir × Nat}
     (ht : t ∈ terms) : ∃ run ∈ Limit.SortRun.group terms, run.item = t.1 := by
   rw [← Limit.group_flatten terms] at ht
   obtain ⟨run, hrun, hmem⟩ := List.mem_flatMap.mp ht
@@ -304,8 +304,8 @@ item `t.1`: result column `pd.1` holds an expression `e` over `t.1`, an item
 of the arm `k` that the state `st` holds no ON narrowing back for, which
 `sortKey` sorts by `t.2.1`, in the term's direction, and result column
 `t.2.2.2` holds `e` too. -/
-def Limit.SortedTerm (s : Statement) (st : PState) (k : Nat) (pd : Nat × Bool)
-    (t : Nat × Limit.SortKey × Bool × Nat) : Prop :=
+def Limit.SortedTerm (s : Statement) (st : PState) (k : Nat) (pd : Nat × Dir)
+    (t : Nat × Limit.SortKey × Dir × Nat) : Prop :=
   ∃ e, (s.core k).output[pd.1]? = some (.expr e) ∧ (s.item t.1).core = k ∧
     (st.items t.1).leftOn = none ∧ Limit.sortKey s t.1 e = some t.2.1 ∧ t.2.2.1 = pd.2 ∧
     (s.core k).output[t.2.2.2]? = some (.expr e)

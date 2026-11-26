@@ -71,6 +71,20 @@ def wholeShape : String → Except String WholeShape
 
 def lift {α : Type} (e : Except String α) : M α := StateT.lift e
 
+/-- An ORDER BY term's direction and collation: `desc`, and the `collation`
+SQLite compares the term's values by, BINARY when it names none. The runner
+knows three, each a total preorder on the integers: `binary`, the integers'
+own order; `fold`, which ties the integers that leave one remainder on
+division by three, as NOCASE ties 'a' and 'A'; and `reversed`, their order
+reversed. -/
+def readDir (term : Json) : Except String Dir := do
+  let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
+  match (field term "collation").bind (·.getStr?.toOption) |>.getD "binary" with
+  | "binary" => pure (Dir.plain desc)
+  | "fold" => pure ⟨desc, fun x => x % 3, false, by simp⟩
+  | "reversed" => pure ⟨desc, fun x => -x, true, fun _ a b h => by simp only at h; omega⟩
+  | other => throw s!"unknown collation {other}"
+
 /-- The item an alias names in core `k` or a core it sits in, and the
 column's position, as SQLite resolves a qualified name. -/
 def resolve (k : Nat) (alias column : String) : M (Nat × Nat) := do
@@ -132,7 +146,7 @@ partial def readSelect (schema : Schema) (j : Json) (parent : Option Nat)
     arms := arms ++ [← readCore schema arm parent ctes]
   let ops ← lift ((list j "ops").mapM fun o => do combineOp (← o.getStr?))
   let orderBy ← lift ((list j "order").mapM fun o => do
-    pure ((← o.getObjValAs? Nat "position"), (← o.getObjValAs? Bool "desc")))
+    pure ((← o.getObjValAs? Nat "position"), ← readDir o))
   let orderNamed := (field j "order_named").bind (·.getBool?.toOption) |>.getD false
   let limit := (field j "limit").bind (·.getNat?.toOption)
   let offset := (field j "offset").bind (·.getNat?.toOption)
@@ -323,8 +337,7 @@ partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visi
     let mut orderBy := []
     for term in list j "order" do
       let some sorted := field term "expr" | lift (throw "an ORDER BY term sorts by nothing")
-      let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
-      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, desc)]
+      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, ← lift (readDir term))]
     pure (.concat e orderBy, alias)
   else if let some window := field j "row_number" then
     let mut partition := []
@@ -333,8 +346,7 @@ partial def readOut (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Visi
     let mut orderBy := []
     for term in list window "order" do
       let some sorted := field term "expr" | lift (throw "an ORDER BY term sorts by nothing")
-      let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
-      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, desc)]
+      orderBy := orderBy ++ [(← readExpr schema sorted k ctes, ← lift (readDir term))]
     pure (.rowNumber partition orderBy, alias)
   else if (field j "count").isSome then
     pure (.count, alias)

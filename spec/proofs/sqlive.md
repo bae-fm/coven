@@ -272,9 +272,12 @@ JOIN adds, so where such a part holds, its item has a row.
 - **The LIMIT bound.** `limit_sound` proves that when a run returned as many
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. Each ORDER BY term sorts one item's rows by a key: one of
-  its columns, which sqlive compares itself, or an expression over its
-  columns with no subquery, which sqlive asks SQLite to evaluate on each row
-  a write changes. `sortKey_value` proves that in a binding where the term's
+  its columns, or an expression over its columns with no subquery, and by a
+  collation. The model gives a collation as a key into the integers' order
+  (`Dir`): two values compare as their keys do and tie when their keys are
+  equal, as `'a'` and `'A'` do in NOCASE, so any total preorder on values is
+  one. A write asks SQLite for the key's value in each row it changes
+  (`RScope.ordered`). `sortKey_value` proves that in a binding where the term's
   item has a row, the term's result column holds the key's value in that row.
   The terms fall into runs of consecutive terms over one item.
   `sortedBefore_passes` proves that a run's scope passes exactly the rows
@@ -322,8 +325,9 @@ JOIN adds, so where such a part holds, its item has a row.
   any of them among the rows the query keeps, so an index on a column no
   clause names can decide which rows those are. `fullyOrders_sound` proves
   that a query that aggregates with no GROUP BY, and so returns one row, or
-  whose ORDER BY sorts by the rowid of each of its tables, keeps the same rows
-  in every order, on a database whose tables hold each row's rowid in its
+  whose ORDER BY sorts by the rowid of each of its tables, each in a
+  collation that ties no two different values (`Dir.exact`), keeps the same
+  rows in every order, on a database whose tables hold each row's rowid in its
   first column, never NULL and different in each row.
   A SELECT that aggregates picks rows too. `bare_picks_any` proves that for
   any row of a group, some order of the group's rows gives that row's value to

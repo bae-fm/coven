@@ -93,15 +93,37 @@ def valueCompare : Value → Value → Ordering
   | some _, none => .gt
   | some x, some y => if x < y then .lt else if x = y then .eq else .gt
 
-/-- How an ORDER BY orders two keys, term by term, each ascending or
-descending (`true`) as `directions` says. -/
-def keyCompare : List Bool → List Value → List Value → Ordering
+/-- How an ORDER BY term orders values: descending when `desc`, and by a
+collation. A collation is a total preorder on values, and the model gives it
+as a key into the integers' order: two values compare as their keys do, and
+tie when their keys are equal, as `'a'` and `'A'` do in NOCASE. BINARY is the
+identity key. A term is `exact` when its collation ties no two different
+values, as a column of unique values needs of it to tell rows apart. -/
+structure Dir where
+  desc : Bool
+  key : Int → Int
+  exact : Bool
+  exact_inj : exact = true → Function.Injective key
+
+instance : Repr (Int → Int) := ⟨fun _ _ => "<key>"⟩
+instance : Repr Dir := ⟨fun d _ => repr d.desc⟩
+instance : Inhabited Dir := ⟨⟨false, id, true, fun _ => Function.injective_id⟩⟩
+
+/-- A term in BINARY collation, descending when `desc`. -/
+def Dir.plain (desc : Bool) : Dir := ⟨desc, id, true, fun _ => Function.injective_id⟩
+
+/-- How a term orders two values in ascending order: by their keys, NULL
+first. -/
+def Dir.compare (d : Dir) (a b : Value) : Ordering := valueCompare (a.map d.key) (b.map d.key)
+
+/-- How an ORDER BY orders two keys, term by term, each as its `Dir` says. -/
+def keyCompare : List Dir → List Value → List Value → Ordering
   | d :: ds, a :: as, b :: bs =>
-    (if d then (valueCompare a b).swap else valueCompare a b).then (keyCompare ds as bs)
+    (if d.desc then (d.compare a b).swap else d.compare a b).then (keyCompare ds as bs)
   | _, _, _ => .eq
 
 /-- Whether `a` sorts at or before `b`. -/
-def keyLe (directions : List Bool) (a b : List Value) : Bool :=
+def keyLe (directions : List Dir) (a b : List Value) : Bool :=
   keyCompare directions a b != .gt
 
 /-- Insert `x` before the first element it sorts at or before: stable. -/
