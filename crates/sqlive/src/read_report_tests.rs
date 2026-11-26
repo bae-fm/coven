@@ -272,12 +272,98 @@ fn a_root_equality_narrows_whichever_side_each_column_stands_on() {
 }
 
 #[test]
-fn a_clock_column_of_a_root_taking_the_first_side_narrows_as_an_expression_does() {
-    let report_of = |root: &str| {
-        report(&format!(
-            "SELECT t.title FROM ({root} AS at) AS page JOIN tracks t ON page.at = t.title"
-        ))
-    };
-    assert_eq!(report_of("SELECT CURRENT_TIMESTAMP"), report_of("SELECT ?1 || 'a'"));
-    assert_eq!(report_of("SELECT CURRENT_TIMESTAMP"), "tracks: whole: nothing narrows `t`");
+fn a_clock_column_of_a_root_narrows_nothing_either_way_round() {
+    for on in ["t.title = page.at", "page.at = t.title"] {
+        assert_eq!(
+            report(&format!(
+                "SELECT t.title FROM (SELECT CURRENT_TIMESTAMP AS at) AS page
+                 JOIN tracks t ON {on}"
+            )),
+            "tracks: whole: nothing narrows `t`",
+            "{on}"
+        );
+    }
+}
+
+#[test]
+fn a_derived_column_that_reads_the_clock_in_any_form_narrows_nothing() {
+    let whole = "tracks: whole: nothing narrows `t`";
+    for sql in [
+        "SELECT t.title FROM tracks t JOIN (SELECT CURRENT_TIMESTAMP AS title) AS page
+         USING (title)",
+        "SELECT t.title FROM (VALUES (CURRENT_TIMESTAMP)) AS page
+         JOIN tracks t ON t.title = page.column1",
+        "SELECT t.title FROM (SELECT (SELECT CURRENT_TIMESTAMP) AS at) AS page
+         JOIN tracks t ON t.title = page.at",
+        "SELECT t.title FROM (SELECT x.at || '' AS at FROM (SELECT CURRENT_TIMESTAMP AS at) AS x)
+         AS page JOIN tracks t ON t.title = page.at",
+        "SELECT t.title FROM (SELECT random() AS at) AS page JOIN tracks t ON t.title = page.at",
+        "WITH c AS (SELECT CURRENT_TIMESTAMP AS at), g AS (SELECT (SELECT at FROM c) AS n)
+         SELECT t.title FROM g JOIN tracks t ON t.title = g.n",
+        "WITH c AS (SELECT random() AS r), g AS (SELECT (SELECT r FROM c) AS n)
+         SELECT t.title FROM g JOIN tracks t ON t.position = g.n",
+        "WITH g AS (SELECT (SELECT id FROM releases ORDER BY random() LIMIT 1) AS n)
+         SELECT t.title FROM g JOIN tracks t ON t.id = g.n",
+        "SELECT t.title FROM (SELECT (SELECT count(*) FROM
+                              (SELECT 1 AS one FROM releases WHERE album < CURRENT_TIMESTAMP)) AS n)
+         AS page JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT at || '' AS n
+                              FROM (SELECT *, CURRENT_TIMESTAMP AS at FROM json_each(?1)) AS x)
+         AS page JOIN tracks t ON t.title = page.n",
+        "SELECT t.title FROM (SELECT *, CURRENT_TIMESTAMP AS at FROM json_each(?1)) AS page
+         JOIN tracks t ON t.title = page.at",
+        "SELECT t.title FROM (SELECT (SELECT at || '') AS at
+                              FROM (SELECT CURRENT_TIMESTAMP AS at) AS x, json_each(?1)) AS page
+         JOIN tracks t ON t.title = page.at",
+        "SELECT t.title FROM (SELECT x.at || '' AS at
+                              FROM (SELECT CURRENT_TIMESTAMP AS at) AS x, json_each(?1)) AS page
+         JOIN tracks t ON t.title = page.at",
+    ] {
+        let report = report(sql);
+        assert!(report.ends_with(whole), "{sql}: {report}");
+    }
+}
+
+#[test]
+fn an_aggregate_column_of_a_cte_still_gives_its_value() {
+    assert_eq!(
+        report(
+            "WITH g AS (SELECT count(*) AS n FROM releases)
+             SELECT t.title FROM g JOIN tracks t ON t.position = g.n"
+        ),
+        "releases: whole: nothing narrows `releases`\ntracks: looked up"
+    );
+}
+
+#[test]
+fn a_subquery_column_of_a_cte_still_gives_its_value() {
+    assert_eq!(
+        report(
+            "WITH g AS (SELECT (SELECT count(*) FROM releases) AS n)
+             SELECT t.title FROM g JOIN tracks t ON t.position = g.n"
+        ),
+        "releases: whole: nothing narrows `releases`\ntracks: looked up"
+    );
+}
+
+#[test]
+fn a_table_functions_column_of_a_cte_still_gives_its_value() {
+    assert_eq!(
+        report(
+            "WITH ids AS (SELECT value AS id FROM json_each(?1))
+             SELECT t.title FROM ids JOIN tracks t ON t.id = ids.id"
+        ),
+        "tracks: looked up"
+    );
+}
+
+#[test]
+fn a_column_is_volatile_by_its_own_subquery() {
+    assert_eq!(
+        report(
+            "WITH g AS (SELECT (SELECT count(*) FROM releases) AS n, (SELECT random()) AS r)
+             SELECT t.title FROM g JOIN tracks t ON t.position = g.n"
+        ),
+        "releases: whole: nothing narrows `releases`\ntracks: looked up"
+    );
 }

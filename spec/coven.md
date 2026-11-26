@@ -1084,8 +1084,11 @@ over the columns, of one other table in the join. Each expression holds no
 clock (`CURRENT_TIMESTAMP`, `date('now')`) and no function SQLite doesn't flag
 deterministic, as `random()` or an app function
 registered nondeterministic: a write's lookup evaluates it again and could get
-another answer than the query did, so such a join narrows nothing. A row value
-equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
+another answer than the query did, so such a join narrows nothing. That holds
+for a column of a subquery or VALUES whose expression holds one, as `page.at` of
+`(SELECT CURRENT_TIMESTAMP AS at) AS page`, on either side of the `=` and in a
+USING join. An aggregate or window function gives its rows' answer and doesn't
+count. A row value equality, as `(t.a, t.b) = (u.a, u.b)`, narrows as the equalities of its
 columns: SQLite gives it the truth of their AND, NULL included. An equality
 with COALESCE or IFNULL of such values narrows by each of them, since COALESCE
 returns one of its arguments: a value of one other table, a subquery's

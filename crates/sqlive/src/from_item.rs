@@ -41,6 +41,10 @@ pub(crate) enum ColumnValue {
     /// Values no condition narrows by: a generated column sqlive can't
     /// evaluate, or a column of a view read whole.
     Unknown,
+    /// A derived item's column whose expression gives another answer when
+    /// evaluated again, as one that reads the clock: a lookup that reads it
+    /// again at a write finds no row of the query's.
+    Volatile,
     /// A contentful FTS5 table's hidden column, the one that bears the
     /// table's name or `rank`, whose values depend on rows besides its own:
     /// a statement that names one narrows nothing (`Planner::names_hidden`).
@@ -51,8 +55,11 @@ pub(crate) enum ColumnValue {
 pub(crate) enum Columns {
     /// Every column, in order.
     Listed(Vec<Column>),
-    /// A table function's, which sqlive doesn't know.
-    Unknown,
+    /// A table function's, or a SELECT's whose `*` spans one, which sqlive
+    /// doesn't know. `volatile` says whether a SELECT's volatile
+    /// (`Planner::select_volatile`), so each of its columns may be; a table
+    /// function's is always false, whatever its arguments read.
+    Unknown { volatile: bool },
 }
 
 impl Columns {
@@ -65,7 +72,7 @@ impl Columns {
                 .filter_map(|column| column.name.as_ref())
                 .find(|column| *name == column.as_str())
                 .cloned(),
-            Self::Unknown => Some(crate::sql::name(name.0).to_ascii_lowercase()),
+            Self::Unknown { .. } => Some(crate::sql::name(name.0).to_ascii_lowercase()),
         }
     }
 
@@ -75,7 +82,26 @@ impl Columns {
             Self::Listed(columns) => {
                 Some(&columns.iter().find(|listed| listed.name.as_deref() == Some(column))?.value)
             }
-            Self::Unknown => None,
+            Self::Unknown { .. } => None,
+        }
+    }
+
+    /// Whether the values of `column` come from an expression that gives
+    /// another answer when a write's lookup evaluates it again, or may.
+    pub(crate) fn volatile(&self, column: &str) -> bool {
+        match self {
+            Self::Listed(_) => matches!(self.value(column), Some(ColumnValue::Volatile)),
+            Self::Unknown { volatile } => *volatile,
+        }
+    }
+
+    /// Whether any column is volatile (`volatile`).
+    pub(crate) fn any_volatile(&self) -> bool {
+        match self {
+            Self::Listed(columns) => {
+                columns.iter().any(|column| matches!(column.value, ColumnValue::Volatile))
+            }
+            Self::Unknown { volatile } => *volatile,
         }
     }
 
@@ -86,6 +112,7 @@ impl Columns {
             ColumnValue::Generated(_)
             | ColumnValue::Collated(..)
             | ColumnValue::Unknown
+            | ColumnValue::Volatile
             | ColumnValue::Hidden => None,
         }
     }
@@ -94,7 +121,7 @@ impl Columns {
     pub(crate) fn complete(&self) -> bool {
         match self {
             Self::Listed(columns) => columns.iter().all(|column| column.name.is_some()),
-            Self::Unknown => false,
+            Self::Unknown { .. } => false,
         }
     }
 }
@@ -294,7 +321,7 @@ pub(crate) fn read_item<'a>(
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },
-                Columns::Unknown,
+                Columns::Unknown { volatile: false },
                 None,
             )))
         }
@@ -673,6 +700,7 @@ fn evaluated(
             ColumnValue::Generated(_)
             | ColumnValue::Collated(..)
             | ColumnValue::Unknown
+            | ColumnValue::Volatile
             | ColumnValue::Hidden => None,
         }
     })?;

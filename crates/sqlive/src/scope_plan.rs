@@ -275,6 +275,10 @@ pub(crate) struct Core {
     /// The window of the subquery whose one core this is
     /// (`scope_window.rs`).
     pub(crate) window: Option<Window>,
+    /// Whether a lookup that evaluates the core's own clauses again at a
+    /// write could get another answer than the query did
+    /// (`Planner::volatile`), a subquery in them counting by its SELECT's.
+    pub(crate) volatile: bool,
 }
 
 /// Where a condition was written: the WHERE or an inner join's ON, or the
@@ -303,6 +307,7 @@ impl Sources {
             whole,
             within: None,
             declared_ctes: 0,
+            selects: Vec::new(),
             whole_names: Some(BTreeSet::new()),
         };
         let read = read_select(connection, &mut planner, select, None, &Ctes::default())?;
@@ -346,6 +351,10 @@ pub(crate) struct Planner<'a> {
     pub(crate) within: Option<String>,
     /// How many CTEs the WITHs read so far declare, which numbers each.
     pub(crate) declared_ctes: usize,
+    /// Each SELECT the planner has read, by address, in the order it
+    /// finished reading them, and whether it is volatile
+    /// (`select_volatile`).
+    selects: Vec<(usize, bool)>,
     /// The names, lowercase, SQLite can report a read through inside the
     /// views the statement reads whole (`whole_view_names.rs`); `None` once
     /// the parser can't read one of those, whose SQL could use any name.
@@ -416,7 +425,10 @@ impl Planner<'_> {
                 }
                 None => {
                     // A function's columns are unknown: one of them could be it.
-                    if items.clone().any(|(_, item)| matches!(item.columns, Columns::Unknown)) {
+                    if items
+                        .clone()
+                        .any(|(_, item)| matches!(item.columns, Columns::Unknown { .. }))
+                    {
                         return None;
                     }
                     // A USING join's right side leaves its compared
@@ -454,6 +466,20 @@ impl Planner<'_> {
             })
             .collect();
         self.cores[core].names.extend(names);
+    }
+
+    /// Whether `select`, which the planner has read, is volatile: its cores'
+    /// clauses, ORDER BY and LIMIT, or any SELECT it read (its subqueries, and
+    /// the subqueries, CTEs and views in its FROM).
+    pub(crate) fn select_volatile(&self, select: &Select<'_>) -> bool {
+        let address = std::ptr::from_ref(select) as usize;
+        let (_, volatile) = self
+            .selects
+            .iter()
+            .rev()
+            .find(|(read, _)| *read == address)
+            .expect("the planner reads a SELECT before it asks whether it is volatile");
+        *volatile
     }
 
     /// Whether a FROM subquery or CTE read in a core that sits in `parent`,
@@ -557,6 +583,7 @@ pub(crate) fn read_select<'a>(
     };
     let arms = std::iter::once(&select.body.select)
         .chain(select.body.compounds.iter().flatten().map(|compound| &compound.select));
+    let read_before = planner.selects.len();
     let mut cores = Vec::new();
     for arm in arms {
         match read_core(connection, planner, arm, parent, ctes)? {
@@ -584,6 +611,7 @@ pub(crate) fn read_select<'a>(
     if let Err(unread) = read_nested(connection, planner, &found, order, ctes)? {
         return Ok(Err(unread));
     }
+    let mut volatile = planner.volatile(cores[0], &found);
     // SQLite resolves LIMIT and OFFSET with no names around them.
     let mut found = Vec::new();
     for limit in select.limit.iter() {
@@ -592,7 +620,14 @@ pub(crate) fn read_select<'a>(
             parts(offset, &mut found);
         }
     }
-    Ok(read_nested(connection, planner, &found, None, ctes)?.map(|_| cores))
+    if let Err(unread) = read_nested(connection, planner, &found, None, ctes)? {
+        return Ok(Err(unread));
+    }
+    volatile |= planner.volatile(cores[0], &found)
+        || cores.iter().any(|core| planner.cores[*core].volatile)
+        || planner.selects[read_before..].iter().any(|(_, read)| *read);
+    planner.selects.push((std::ptr::from_ref(select) as usize, volatile));
+    Ok(Ok(cores))
 }
 
 /// The SELECTs read in one core's clauses, each with its arms' cores.
@@ -644,6 +679,7 @@ fn read_core<'a>(
         aliases: Vec::new(),
         names: Vec::new(),
         window: None,
+        volatile: false,
     });
     let mut found = Vec::new();
     let (columns, from, where_clause, group_by, having, window_clause) = match select {
@@ -655,7 +691,11 @@ fn read_core<'a>(
                 return Ok(Err(HIDDEN_COLUMN));
             }
             planner.note_names(core, &found);
-            return Ok(read_nested(connection, planner, &found, Some(core), ctes)?.map(|_| core));
+            let read = read_nested(connection, planner, &found, Some(core), ctes)?;
+            return Ok(read.map(|_| {
+                planner.cores[core].volatile = planner.volatile(core, &found);
+                core
+            }));
         }
         OneSelect::Select {
             columns, from, where_clause, group_by, having, window_clause, ..
@@ -706,6 +746,7 @@ fn read_core<'a>(
         Ok(subqueries) => subqueries,
         Err(unread) => return Ok(Err(unread)),
     };
+    planner.cores[core].volatile = planner.volatile(core, &found);
     let mut read = Vec::new();
     for (condition, place) in conditions {
         let found = match condition {

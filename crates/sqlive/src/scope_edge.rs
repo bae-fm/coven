@@ -138,7 +138,32 @@ impl Planner<'_> {
         // the LEFT JOIN inner (`scope_one_of.rs` reads a column equal to
         // COALESCE).
         let bound = self.items[source].always_bound() || strict(expr, self.functions);
-        (self.functions.repeatable(&found) && bound).then_some(source)
+        (!self.volatile(core, &found) && bound).then_some(source)
+    }
+
+    /// Whether a lookup that evaluates the expression `found`, written in
+    /// `core`, again at a write could get another answer than the query did:
+    /// it reads the clock, calls a function the connection doesn't flag
+    /// deterministic (an aggregate or a window function takes its rows'
+    /// answer), names a column of a derived item that does (any such column
+    /// in scope, for a name sqlive can't place), or holds a volatile subquery
+    /// (`select_volatile`).
+    pub(crate) fn volatile(&self, core: usize, found: &[Part<'_>]) -> bool {
+        found.iter().any(|part| match part {
+            Part::Clock => true,
+            Part::Function(name, arguments, _) => {
+                !part.many_rows(self.functions) && !self.functions.repeats(name, *arguments)
+            }
+            Part::Name(name) => match self.resolve(core, name) {
+                Some((item, column)) => self.items[item].columns.volatile(&column),
+                None => self.scope_of(core).any(|scope| {
+                    let items = &self.cores[scope].items;
+                    items.iter().any(|item| self.items[*item].columns.any_volatile())
+                }),
+            },
+            Part::Select(select) | Part::Subquery(select) => self.select_volatile(select),
+            Part::Table(_) | Part::Collation => false,
+        })
     }
 
     /// The edge `member = partner.column` gives, with `partner`'s column
@@ -150,6 +175,10 @@ impl Planner<'_> {
         (partner, partner_column): (usize, String),
         first: bool,
     ) -> Option<Edge> {
+        // A USING join reaches here without `source_of`.
+        if self.items[partner].columns.volatile(&partner_column) {
+            return None;
+        }
         let partner_affinity = self.items[partner].columns.affinity(&partner_column);
         if first && partner_affinity.is_none() {
             return None;
@@ -291,7 +320,7 @@ impl Planner<'_> {
                 break;
             }
             let columns = &self.items[item].columns;
-            if matches!(columns, Columns::Unknown) {
+            if matches!(columns, Columns::Unknown { .. }) {
                 return None;
             }
             if let Some(found) = columns.named(&Name(column)) {

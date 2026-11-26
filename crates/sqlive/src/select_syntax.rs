@@ -589,14 +589,4 @@ impl Functions {
             && !called.is_empty()
             && called.iter().all(|definition| definition.builtin && !definition.aggregate)
     }
-
-    /// Whether evaluating the expression `found` holds twice gives the same
-    /// answer: it names no clock and every function in it is deterministic.
-    pub(crate) fn repeatable(&self, found: &[Part<'_>]) -> bool {
-        found.iter().all(|part| match part {
-            Part::Clock => false,
-            Part::Function(name, arguments, _) => self.repeats(name, *arguments),
-            _ => true,
-        })
-    }
 }

@@ -242,7 +242,10 @@ fn read_derived<'a>(
     for (core, body) in cores.iter().copied().zip(bodies) {
         let Some(columns) = arm_columns(planner, core, body) else {
             // A `*` over a table function's columns: no column is known.
-            return Ok(Ok((Columns::Unknown, Derived { arms: Vec::new(), rows: None })));
+            return Ok(Ok((
+                Columns::Unknown { volatile: planner.select_volatile(select) },
+                Derived { arms: Vec::new(), rows: None },
+            )));
         };
         arms.push((core, columns, arm_rows(planner, select, core, body)));
     }
@@ -268,12 +271,23 @@ fn read_derived<'a>(
             match &output.value {
                 OutputValue::Passed(item, column) => planner.items[*item].columns.affinity(column),
                 OutputValue::Constant => Some(Affinity::Blob),
-                OutputValue::Other => None,
+                OutputValue::Volatile | OutputValue::Other => None,
             }
+        });
+        let volatile = arms.iter().any(|(_, columns, _)| {
+            columns.get(position).is_some_and(|output| match &output.value {
+                OutputValue::Volatile => true,
+                OutputValue::Passed(item, column) => planner.items[*item].columns.volatile(column),
+                OutputValue::Constant | OutputValue::Other => false,
+            })
         });
         let first = affinities.next().flatten();
         let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));
-        let value = affinity.map_or(ColumnValue::Unknown, ColumnValue::Compared);
+        let value = if volatile {
+            ColumnValue::Volatile
+        } else {
+            affinity.map_or(ColumnValue::Unknown, ColumnValue::Compared)
+        };
         columns.push(Column { name, value });
     }
     let rows = (!arms.iter().any(|(_, _, rows)| rows.aggregated || rows.windowed)).then(|| {
@@ -368,9 +382,12 @@ enum OutputValue {
     /// A column of the core's own source, passed on unchanged.
     Passed(usize, String),
     /// A literal or a parameter, whose values have no affinity and compare
-    /// by BINARY, as a column declared with no type: no clock, which
-    /// another answer than the query's replaces at a write.
+    /// by BINARY, as a column declared with no type. It holds no clock,
+    /// which would give a write's lookup another answer than the query's
+    /// (`Volatile`).
     Constant,
+    /// An expression that gives another answer when evaluated again.
+    Volatile,
     Other,
 }
 
@@ -378,7 +395,7 @@ impl Output {
     fn passed(&self) -> Option<(usize, String)> {
         match &self.value {
             OutputValue::Passed(item, column) => Some((*item, column.clone())),
-            OutputValue::Constant | OutputValue::Other => None,
+            OutputValue::Constant | OutputValue::Volatile | OutputValue::Other => None,
         }
     }
 }
@@ -389,14 +406,19 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
     let OneSelect::Select { columns, .. } = body else {
         let OneSelect::Values(rows) = body else { unreachable!("a core is a SELECT or VALUES") };
         // VALUES names its columns column1, column2, …
-        return Some(
-            crate::sql::values_names(
-                rows.first().expect("a parsed VALUES has at least one row").len(),
-            )
-            .into_iter()
-            .map(|name| Output { name: Some(name), value: OutputValue::Other })
-            .collect(),
+        let names = crate::sql::values_names(
+            rows.first().expect("a parsed VALUES has at least one row").len(),
         );
+        let mut found = Vec::new();
+        for (position, name) in names.into_iter().enumerate() {
+            let mut volatile = false;
+            for expr in rows.iter().filter_map(|row| row.get(position)) {
+                volatile |= volatile_expr(planner, core, expr);
+            }
+            let value = if volatile { OutputValue::Volatile } else { OutputValue::Other };
+            found.push(Output { name: Some(name), value });
+        }
+        return Some(found);
     };
     let mut found = Vec::new();
     for column in columns.iter() {
@@ -412,7 +434,8 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 };
                 let value = match passed {
                     Some((item, column)) => OutputValue::Passed(item, column),
-                    None if constant(expr) && repeatable(planner, expr) => OutputValue::Constant,
+                    None if volatile_expr(planner, core, expr) => OutputValue::Volatile,
+                    None if constant(expr) => OutputValue::Constant,
                     None => OutputValue::Other,
                 };
                 found.push(Output { name, value });
@@ -433,11 +456,12 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 }
             }
             ResultColumn::TableStar(qualifier) => {
-                let item = planner.cores[core]
+                let named = planner.cores[core]
                     .items
                     .iter()
                     .copied()
-                    .find(|item| *qualifier == Name(&planner.items[*item].source.qualifier))?;
+                    .find(|item| *qualifier == Name(&planner.items[*item].source.qualifier));
+                let item = named?;
                 found.extend(every_column(&planner.items[item], item)?);
             }
         }
@@ -460,7 +484,7 @@ fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
                 })
                 .collect(),
         ),
-        Columns::Unknown => None,
+        Columns::Unknown { .. } => None,
     }
 }
 
@@ -580,9 +604,9 @@ pub(crate) fn push_down(
     }
 }
 
-/// Whether a write evaluating `expr` again gets the query's answer.
-fn repeatable(planner: &Planner, expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
+/// Whether `expr`, written in `core`, is volatile (`Planner::volatile`).
+fn volatile_expr(planner: &Planner, core: usize, expr: &sqlite3_parser::ast::Expr<'_>) -> bool {
     let mut found = Vec::new();
     parts(expr, &mut found);
-    planner.functions.repeatable(&found)
+    planner.volatile(core, &found)
 }

@@ -399,7 +399,7 @@ fn sort_term(
                     None => Some(declared.clone()),
                 },
             },
-            ColumnValue::Unknown | ColumnValue::Hidden => return None,
+            ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => return None,
         };
         return Some((position, item, key));
     }
