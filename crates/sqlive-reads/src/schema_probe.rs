@@ -59,6 +59,10 @@ pub struct ProbedStatement {
     pub parameters: Vec<String>,
     /// How many parameters the statement reads that have no name: `?` alone.
     pub unnamed_parameters: usize,
+    /// Whether running the statement can change the database, as SQLite's
+    /// `sqlite3_stmt_readonly` says: false for an INSERT, UPDATE, DELETE or
+    /// REPLACE, and for a statement that changes the schema.
+    pub writes: bool,
 }
 
 /// An in-memory database that holds a schema's tables, views and triggers.
@@ -133,7 +137,12 @@ impl SchemaProbe {
                 None => unnamed_parameters += 1,
             }
         }
-        Ok(ProbedStatement { columns, parameters, unnamed_parameters })
+        Ok(ProbedStatement {
+            columns,
+            parameters,
+            unnamed_parameters,
+            writes: !statement.readonly(),
+        })
     }
 
     /// What a live query of `sql` depends on in each table it reads, as its

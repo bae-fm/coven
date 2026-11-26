@@ -1760,7 +1760,11 @@ and view a statement depends on when a live query runs it, before any value is
 bound. `SchemaProbe::read_report` gives the same report for a statement over a
 schema in memory, with no rows (the crate's [README](README.md)). A test that
 asserts the report of an album page fails when the page's statement starts to
-read `tracks` whole.
+read `tracks` whole. `SchemaProbe::prepare` also says whether the statement
+writes (`ProbedStatement::writes`): it is true for an INSERT, UPDATE, DELETE or
+REPLACE, with or without a WITH clause or RETURNING, and false for a SELECT.
+A tool that generates statements uses it to refuse a write where it expects a
+read and a read where it expects a write.
 
 The report takes each parameter that a column is compared with to hold a value
 that isn't NULL and that SQLite compares as it is, and takes each run to return

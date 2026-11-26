@@ -63,6 +63,22 @@ fn a_statement_lists_its_parameters_once_each() {
 }
 
 #[test]
+fn a_statement_says_whether_it_writes() {
+    let probe = probe();
+    assert!(!probe.prepare("SELECT title FROM issues").unwrap().writes);
+    for sql in [
+        "INSERT INTO people (id, name) VALUES (:id, :name)",
+        "UPDATE issues SET title = :title WHERE id = :id",
+        "DELETE FROM issues WHERE id = :id",
+        "REPLACE INTO people (id, name) VALUES (:id, :name)",
+        "INSERT INTO people (id, name) VALUES (:id, :name) RETURNING id",
+        "WITH gone AS (SELECT id FROM issues) DELETE FROM issues WHERE id IN gone",
+    ] {
+        assert!(probe.prepare(sql).unwrap().writes, "{sql}");
+    }
+}
+
+#[test]
 fn a_read_report_says_what_the_statement_depends_on() {
     let probe = probe();
     let ReadReport::Entries(entries) =

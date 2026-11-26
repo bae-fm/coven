@@ -145,8 +145,8 @@ SQLite refuses to prepare SQL that names a function or a collation it doesn't
 know, so the caller lists the functions (`StandInFunction`) and the collations
 that the schema's SQL uses by name, and the probe registers a stand-in for each.
 `SchemaProbe::prepare` prepares a statement and returns its result columns, with
-the table column each one is when it is one unchanged (`ColumnOrigin`), and the
-parameters it reads. `SchemaProbe::read_report` returns the `ReadReport` that
+the table column each one is when it is one unchanged (`ColumnOrigin`), the
+parameters it reads, and whether the statement writes. `SchemaProbe::read_report` returns the `ReadReport` that
 says what a live query of the statement depends on in each table: the rows one
 value fixes, the rows a lookup finds, or every row, with the reason. The probe
 opens no file and runs no SQL but the schema's.
