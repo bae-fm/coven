@@ -121,13 +121,17 @@ impl From<RetryState> for RetryEffect {
 }
 
 impl RetryEffect {
+    /// The statement that reads `coven_retry_effect`'s one row: the `effect`
+    /// and `cooling_until` columns [`Self::from_columns`] decodes. An app
+    /// composes it into its own reads.
+    pub const READ: &'static str = "SELECT effect,cooling_until FROM coven_retry_effect";
+
     /// Read `coven_retry_effect`, as an app's live query does:
     /// `handle.subscribe(RetryEffect::read)`.
     pub fn read(sql: coven_database::SqlReadContext<'_>) -> Result<Self, DbError> {
-        let (effect, until) =
-            sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-            })?;
+        let (effect, until) = sql.query_row(Self::READ, [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
         Self::from_columns(&effect, until)
     }
 

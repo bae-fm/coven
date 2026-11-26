@@ -6878,6 +6878,10 @@ pub enum RetryEffect {
 }
 
 impl RetryEffect {
+    /// The statement that reads `coven_retry_effect`'s row: its `effect` and
+    /// `cooling_until` columns, which `from_columns` decodes. An app composes
+    /// it into its own reads.
+    pub const READ: &'static str;
     /// Reads `coven_retry_effect`: `handle.subscribe(RetryEffect::read)`.
     pub fn read(sql: SqlReadContext<'_>) -> Result<RetryEffect, DbError>;
     /// The effect `coven_retry_effect`'s `effect` and `cooling_until` columns

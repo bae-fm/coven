@@ -139,6 +139,26 @@ async fn a_cooldowns_end_is_written_by_the_next_step() {
     database.close().await.unwrap();
 }
 
+/// The exported statement returns the row `read` decodes: an app that runs
+/// it in a query of its own decodes the same effect before and after the
+/// row changes.
+#[tokio::test]
+async fn the_exported_statement_returns_the_row_read_decodes() {
+    let fixture = Fixture::new();
+    let (database, waits) = open(&fixture).await;
+    let by_statement = |sql: coven_database::SqlReadContext<'_>| -> Result<RetryEffect, DbError> {
+        let (effect, until) = sql.query_row(RetryEffect::READ, [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
+        RetryEffect::from_columns(&effect, until)
+    };
+    assert_eq!(database.read(by_statement).await.unwrap(), RetryEffect::NotSyncing);
+    waits.sync_started().await.unwrap();
+    assert_eq!(database.read(by_statement).await.unwrap(), RetryEffect::Pass);
+    assert_eq!(database.read(RetryEffect::read).await.unwrap(), RetryEffect::Pass);
+    database.close().await.unwrap();
+}
+
 /// A failure only new credentials, an update or a reset can clear holds the
 /// pass: a retry made then is answered with it at once, even during a
 /// cooldown, and one already waiting is answered by the owner's plan.
