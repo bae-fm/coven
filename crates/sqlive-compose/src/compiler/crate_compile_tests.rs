@@ -36,8 +36,7 @@ CREATE TABLE comment_reads (
 ) STRICT;
 CREATE VIRTUAL TABLE docs USING fts5(body);
 CREATE VIEW weird AS SELECT i.title FROM issues AS i RIGHT JOIN people AS p ON p.id = i.author_id;
-CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c;
-CREATE VIEW v AS SELECT count(*) AS n FROM issues;";
+CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c;";
 
 /// The tracker's setup step.
 fn setup() -> Setup {
