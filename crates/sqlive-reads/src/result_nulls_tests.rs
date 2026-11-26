@@ -178,11 +178,11 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
             "SELECT a.name, b.name, count(*) FROM people AS a, people AS b GROUP BY a.id",
             [false, false],
         ),
-        // A compound's later SELECT can lack a row of its item too.
+        // A later SELECT's items are not the ones a column comes from.
         (
             "SELECT a.name, b.name FROM people AS a, people AS b \
              UNION ALL SELECT p.name, p.name FROM issues LEFT JOIN people AS p ON 1",
-            [true, true],
+            [false, false],
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
@@ -198,4 +198,34 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
         )
         .unwrap();
     assert!(statement.columns.iter().all(|column| !column.row_can_be_missing));
+}
+
+#[test]
+fn a_column_says_whether_a_later_select_can_give_it_null() {
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    for (sql, expected) in [
+        // The first SELECT's own NULLs are none of a later one's.
+        ("SELECT note, id FROM people", [false, false]),
+        ("SELECT note, id FROM people UNION ALL SELECT 'a', 'b'", [false, false]),
+        ("SELECT id, name FROM people UNION ALL SELECT NULL, 'b'", [true, false]),
+        ("SELECT id, name FROM people UNION SELECT id, note FROM people", [false, true]),
+        (
+            "SELECT id, name FROM people UNION ALL SELECT 'a', 'b' UNION ALL VALUES ('c', NULL)",
+            [false, true],
+        ),
+        (
+            "SELECT id, name FROM people \
+             UNION ALL SELECT p.id, p.name FROM issues LEFT JOIN people AS p ON 1",
+            [true, true],
+        ),
+        // A subquery's compound is its own.
+        (
+            "SELECT s.id, s.name FROM (SELECT id, name FROM people UNION SELECT NULL, NULL) AS s",
+            [false, false],
+        ),
+    ] {
+        let statement = probe.prepare(sql).unwrap();
+        let found = [0, 1].map(|position| statement.columns[position].null_in_later_select);
+        assert_eq!(found, expected, "{sql}");
+    }
 }

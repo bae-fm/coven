@@ -1782,13 +1782,15 @@ holds only for a RETURNING column that is a table's column which the table
 declares NOT NULL, or which is the rowid, and for no computed column, a literal
 too. It holds for no column of a statement that the probe's parser can't read,
 or of a SELECT whose columns the probe can't tell. For each result column, it
-also says whether the statement can give no row of the FROM item the column
-comes from, and so NULL in each of that item's columns
+also says whether the statement can give no row of the FROM item that its first
+SELECT takes the column from, and so NULL in each of that item's columns
 (`ProbedColumn::row_can_be_missing`): a join pads the item, in parentheses or
 not, or an aggregate with no GROUP BY makes a row over no rows. A computed
-column and a write's RETURNING column have no such item. The probe says that
-every column of a statement it can't read, and of a SELECT whose columns it
-can't tell, can have one. `SchemaProbe::table_columns`
+column and a write's RETURNING column have no such item. It says apart from
+this whether a SELECT of a compound after the first can give NULL in the column
+(`ProbedColumn::null_in_later_select`). For every column of a statement the
+probe can't read, and of a SELECT whose columns it can't tell, it says both.
+`SchemaProbe::table_columns`
 lists the columns of a table or view in the order of an INSERT with no column list, each
 with whether the table declares it NOT NULL, so that such a tool can check a
 value it binds against the column it fills.

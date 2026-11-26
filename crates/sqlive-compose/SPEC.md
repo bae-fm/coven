@@ -1129,8 +1129,13 @@ on the fragment:
 | In `FROM`, where each row the statement returns has a row of it | `Fragment` |
 | In `FROM`, where a join gives it NULL: on the right of a `LEFT JOIN`, on the left of a `RIGHT JOIN`, or on either side of a `FULL JOIN`, in parentheses or not | `Option<Fragment>` |
 | In the `FROM` of a statement that calls an aggregate with no `GROUP BY` (section 8), which returns a row even over no rows | `Option<Fragment>` |
+| In the `FROM` of a compound's first `SELECT`, where a later `SELECT` can give NULL (section 8) in the column that tells a missing row from a row (section 3) | `Option<Fragment>` |
 | As a value, when the fragment always returns one row | `Fragment` |
 | As a value otherwise | `Option<Fragment>` |
+
+A fragment with no column that tells a missing row from a row holds NULL in
+each of its fields, so a later `SELECT` of a compound leaves its spread a
+`Fragment`.
 
 A fragment always returns one row when its `SELECT` calls an aggregate over its
 own rows and has no `GROUP BY`, `HAVING`, `LIMIT` or compound operator (section

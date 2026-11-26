@@ -129,8 +129,16 @@ fn spread_field(
 ) -> Result<Field, Cause> {
     let nullable = match &spread.place {
         Place::Value { .. } => !spread.record.one_row,
-        // The columns of `alias.*` come from one FROM item, the spread's.
-        Place::Table => columns.iter().any(|column| column.row_can_be_missing),
+        // The columns of `alias.*` come from one FROM item, the spread's. A
+        // later SELECT of a compound gives no row of the fragment where it
+        // can give NULL in the column that each of the fragment's rows holds.
+        Place::Table => {
+            columns.iter().any(|column| column.row_can_be_missing)
+                || spread
+                    .record
+                    .presence
+                    .is_some_and(|presence| columns[presence].null_in_later_select)
+        }
     };
     let path = registry.code_path(&spread.record.path);
     let (ty, reading) = if nullable {

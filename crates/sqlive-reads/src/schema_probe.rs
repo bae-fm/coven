@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
-use crate::result_nulls::{statement_nulls, StatementNulls};
+use crate::result_nulls::{statement_nulls, ColumnNulls, StatementNulls};
 use crate::scope_plan::ScopePlan;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
@@ -66,13 +66,19 @@ pub struct ProbedColumn {
     /// Whether the statement can give no row of the FROM item it takes the
     /// column from, and so NULL in each of that item's columns: a join pads
     /// the item, or an aggregate with no GROUP BY makes a row over no rows.
-    /// It speaks of the statement's own FROM items: a column of a subquery
+    /// It speaks of the first SELECT's own FROM items: a column of a subquery
     /// there says nothing of the rows missing inside the subquery. A computed
     /// column comes from no item, and a RETURNING's column from the row the
     /// write changed, so neither has a missing row. It takes every column to
     /// come from an item with one when it can't read the statement, or can't
     /// tell which columns a SELECT gives.
     pub row_can_be_missing: bool,
+    /// Whether a SELECT of the statement's compound after the first can give
+    /// NULL in the column, whatever the first can give. False in a statement
+    /// with no compound operator and in a write's RETURNING. It takes every
+    /// column to be one when it can't read the statement, or can't tell which
+    /// columns a SELECT gives.
+    pub null_in_later_select: bool,
 }
 
 /// What SQLite made of a statement it prepared.
@@ -155,24 +161,32 @@ impl SchemaProbe {
                     }),
                     _ => None,
                 };
-            let (never_null, row_can_be_missing) = match &nulls {
-                StatementNulls::Select(columns) => {
-                    (!columns[position].nullable, columns[position].row_can_be_missing)
-                }
-                StatementNulls::Write => match &origin {
-                    Some(origin) => (
-                        table_column_never_null(&self.connection, &origin.table, &origin.column)?,
-                        false,
-                    ),
-                    None => (false, false),
+            let column_nulls = match &nulls {
+                StatementNulls::Select(columns) => columns[position],
+                StatementNulls::Write => ColumnNulls {
+                    nullable: match &origin {
+                        Some(origin) => !table_column_never_null(
+                            &self.connection,
+                            &origin.table,
+                            &origin.column,
+                        )?,
+                        None => true,
+                    },
+                    row_can_be_missing: false,
+                    null_in_later_select: false,
                 },
-                StatementNulls::Unknown => (false, true),
+                StatementNulls::Unknown => ColumnNulls {
+                    nullable: true,
+                    row_can_be_missing: true,
+                    null_in_later_select: true,
+                },
             };
             columns.push(ProbedColumn {
                 name: metadata.name().to_owned(),
                 origin,
-                never_null,
-                row_can_be_missing,
+                never_null: !column_nulls.nullable,
+                row_can_be_missing: column_nulls.row_can_be_missing,
+                null_in_later_select: column_nulls.null_in_later_select,
             });
         }
         let mut seen = BTreeSet::new();

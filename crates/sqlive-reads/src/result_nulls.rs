@@ -14,7 +14,8 @@
 //!
 //! It also says of each column whether the statement can give no row of the
 //! FROM item the column comes from: a join pads that item, or an aggregate
-//! with no GROUP BY makes a row over no rows.
+//! with no GROUP BY makes a row over no rows. And it says whether a later
+//! SELECT of the statement's compound can give NULL in the column.
 
 use rusqlite::Connection;
 use sqlite3_parser::{
@@ -41,6 +42,8 @@ pub(crate) struct ColumnNulls {
     /// Whether the statement can give no row of the FROM item the column
     /// comes from.
     pub(crate) row_can_be_missing: bool,
+    /// Whether a SELECT of a compound after the first can give NULL in it.
+    pub(crate) null_in_later_select: bool,
 }
 
 /// A column that a query or a FROM item gives.
@@ -48,15 +51,18 @@ pub(crate) struct ColumnNulls {
 struct Column {
     /// Its name, lowercase, when it has one that SQL around it can use.
     name: Option<String>,
-    /// What its NULLs are. An item's own list says nothing of a missing row
-    /// of the item: `Item::read` does, where a core reads the column.
+    /// What its NULLs are. Where a core reads the column, `Item::read` says
+    /// whether the item's row can be missing, and that no later SELECT of
+    /// the core's own compound has been read.
     nulls: ColumnNulls,
 }
 
 impl Column {
     /// A column called `name` that comes from no FROM item's row.
     fn new(name: Option<String>, nullable: bool) -> Self {
-        Self { name, nulls: ColumnNulls { nullable, row_can_be_missing: false } }
+        let nulls =
+            ColumnNulls { nullable, row_can_be_missing: false, null_in_later_select: false };
+        Self { name, nulls }
     }
 }
 
@@ -90,6 +96,7 @@ impl Item {
             nulls: ColumnNulls {
                 nullable: column.nulls.nullable || self.padded,
                 row_can_be_missing: self.padded,
+                null_in_later_select: false,
             },
         }
     }
@@ -157,8 +164,8 @@ struct Analysis<'c> {
 
 impl Analysis<'_> {
     /// The columns of `select`, where its SQL can name `ctes`: those of its
-    /// first SELECT, each of which can be NULL, or come from a missing row,
-    /// where it can in any SELECT of the compound.
+    /// first SELECT, each of which can be NULL where any SELECT of the
+    /// compound can give NULL in it.
     fn select<'a>(
         &self,
         select: &'a Select<'a>,
@@ -183,7 +190,7 @@ impl Analysis<'_> {
             };
             for (column, other) in columns.iter_mut().zip(arm) {
                 column.nulls.nullable |= other.nulls.nullable;
-                column.nulls.row_can_be_missing |= other.nulls.row_can_be_missing;
+                column.nulls.null_in_later_select |= other.nulls.nullable;
             }
         }
         Ok(Some(columns))
@@ -601,7 +608,11 @@ fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
     match rowids[..] {
         [padded] if ROWID_NAMES.contains(&name.as_str()) => Column {
             name: Some(name),
-            nulls: ColumnNulls { nullable: padded, row_can_be_missing: padded },
+            nulls: ColumnNulls {
+                nullable: padded,
+                row_can_be_missing: padded,
+                null_in_later_select: false,
+            },
         },
         // A name of a row around the core, or none of any item's.
         _ => Column::new(Some(name), true),

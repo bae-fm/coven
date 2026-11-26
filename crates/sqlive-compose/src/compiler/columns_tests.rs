@@ -236,3 +236,29 @@ fn a_spread_beside_an_aggregate_with_no_group_by_is_an_option() {
         assert!(code.contains(&format!("pub (crate) a : {ty} ,")), "{rest}: {code}");
     }
 }
+
+#[test]
+fn a_spread_is_an_option_where_a_later_select_gives_it_no_row() {
+    for (later, ty) in [
+        ("SELECT NULL, NULL", "Option < crate :: Person >"),
+        ("VALUES (NULL, NULL)", "Option < crate :: Person >"),
+        ("SELECT i.assignee_id, i.assignee_id FROM issues AS i", "Option < crate :: Person >"),
+        (
+            "SELECT p.id, p.name FROM issues AS i LEFT JOIN people AS p ON p.id = i.assignee_id",
+            "Option < crate :: Person >",
+        ),
+        // Each later row is a row of the fragment.
+        ("SELECT p.id, NULL FROM people AS p", "crate :: Person"),
+        ("SELECT b.* FROM @crate::Person AS b", "crate :: Person"),
+    ] {
+        let lib = format!(
+            "sqlive_compose::fragment!(Person {{ note: Option<String> }}, \
+             r#\"SELECT p.id AS person_id, nullif(p.name, '') AS note FROM people AS p\"#);\n\
+             sqlive_compose::fragment!(Case, \
+             r#\"SELECT a.* FROM @crate::Person AS a UNION ALL {later}\"#);"
+        );
+        let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{later}: {errors:?}"));
+        let code = code_of(&output, "Case.rs");
+        assert!(code.contains(&format!("pub (crate) a : {ty} ,")), "{later}: {code}");
+    }
+}
