@@ -29,15 +29,15 @@ struct Held {
     kept: bool,
 }
 
-/// What the cache holds of each of `files`, which are stored files, in order:
-/// one statement reads the files as a JSON array.
-fn held(db: &StoreSql, files: &[&FileRef]) -> Result<Vec<Held>, DbError> {
+/// What the cache holds of each of `files`, stored files with their content
+/// hashes, in order: one statement reads the files as a JSON array.
+fn held(
+    db: &StoreSql,
+    files: &[(&FileRef, &coven_crypto::ContentHash)],
+) -> Result<Vec<Held>, DbError> {
     let listed = files
         .iter()
-        .map(|file| {
-            let crate::FilePlace::Cloud { content_hash, .. } = file.place() else {
-                return Err(DbError::Invariant { what: "only a stored file has cached bytes" });
-            };
+        .map(|(file, content_hash)| {
             let hash: String = content_hash.as_bytes().iter().map(|b| format!("{b:02X}")).collect();
             Ok(serde_json::json!({
                 "namespace": file.namespace(),
@@ -95,8 +95,8 @@ pub(crate) fn covered(db: &StoreSql, file: &FileRef, device: DeviceId) -> Result
     match file.place() {
         crate::FilePlace::DeviceOnly { device: on } if on == device => Ok(file.size()),
         crate::FilePlace::DeviceOnly { .. } => Ok(0),
-        crate::FilePlace::Cloud { .. } => {
-            let held = held(db, &[file])?.pop().ok_or(DbError::Invariant {
+        crate::FilePlace::Cloud { content_hash, .. } => {
+            let held = held(db, &[(file, content_hash)])?.pop().ok_or(DbError::Invariant {
                 what: "the statement returns a row for each stored file",
             })?;
             covered_by(&held, file)
@@ -112,9 +112,12 @@ pub(crate) fn pin_progress(
     files: &[FileRef],
     device: DeviceId,
 ) -> Result<PinProgress, DbError> {
-    let stored: Vec<&FileRef> = files
+    let stored: Vec<(&FileRef, &coven_crypto::ContentHash)> = files
         .iter()
-        .filter(|file| matches!(file.place(), crate::FilePlace::Cloud { .. }))
+        .filter_map(|file| match file.place() {
+            crate::FilePlace::Cloud { content_hash, .. } => Some((file, content_hash)),
+            crate::FilePlace::DeviceOnly { .. } => None,
+        })
         .collect();
     let mut held = held(db, &stored)?.into_iter();
     let mut progress = PinProgress {
