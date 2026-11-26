@@ -75,6 +75,7 @@ impl Boundary {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn load_selected(database: &StoreSql) -> Result<Vec<Self>, DbError> {
         Ok(retained(database)?.into_iter().map(|row| row.boundary).collect())
     }
@@ -178,10 +179,35 @@ pub(crate) fn replace(
     Ok(changed_resets)
 }
 
-struct RetainedBoundary {
-    boundary: Boundary,
+pub(crate) struct RetainedBoundary {
+    pub(crate) boundary: Boundary,
     included: Option<u64>,
     applied: bool,
+}
+
+/// A `_coven_boundaries` row, read as
+/// `SELECT kind,version,audience,snapshot_device,snapshot_number,slot,included,applied`
+/// from column `first`.
+pub(crate) fn retained_boundary(
+    row: &sqlive::rusqlite::Row<'_>,
+    first: usize,
+) -> sqlive::rusqlite::Result<RetainedBoundary> {
+    let snapshot = SnapshotId {
+        audience: audience(row, first + 2)?,
+        device: row.get::<_, DeviceId>(first + 3)?,
+        number: counter(row.get(first + 4)?)?,
+    };
+    let entry = crate::store_state_tables::slot(row, first + 5)?;
+    let boundary =
+        match (row.get::<_, String>(first)?.as_str(), row.get::<_, Option<u32>>(first + 1)?) {
+            ("schema", Some(number)) => {
+                Boundary::SchemaChange(StoreVersion { number, snapshot, entry })
+            }
+            ("reset", None) => Boundary::Reset { entry, snapshot },
+            _ => return Err(damaged(first, sqlive::rusqlite::types::Type::Text)),
+        };
+    let included = row.get::<_, Option<Vec<u8>>>(first + 6)?.map(counter).transpose()?;
+    Ok(RetainedBoundary { boundary, included, applied: row.get(first + 7)? })
 }
 
 fn retained(database: &StoreSql) -> Result<Vec<RetainedBoundary>, DbError> {
@@ -189,21 +215,7 @@ fn retained(database: &StoreSql) -> Result<Vec<RetainedBoundary>, DbError> {
         "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied
          FROM _coven_boundaries b ORDER BY b.slot",
         [],
-        |row| {
-            let snapshot = SnapshotId {
-                audience: audience(row, 2)?,
-                device: row.get::<_, DeviceId>(3)?,
-                number: counter(row.get(4)?)?,
-            };
-            let entry = crate::store_state_tables::slot(row, 5)?;
-            let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
-                ("schema", Some(number)) => Boundary::SchemaChange(StoreVersion { number, snapshot, entry }),
-                ("reset", None) => Boundary::Reset { entry, snapshot },
-                _ => return Err(damaged(0, sqlive::rusqlite::types::Type::Text)),
-            };
-            let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter).transpose()?;
-            Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })
-        },
+        |row| retained_boundary(row, 0),
     )?)
 }
 

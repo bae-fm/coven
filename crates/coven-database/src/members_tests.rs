@@ -621,3 +621,23 @@ async fn the_circle_members_follow_runs_again_only_for_its_circle() {
     assert_eq!(listed, [CircleMemberInfo { member: member(1), is_self: true }]);
     db.close().await.unwrap();
 }
+
+/// The follow of the whole applied state starts with the empty state and
+/// delivers what the one-shot read returns once a replay changes it: every
+/// part of it, circle memberships and deletions included.
+#[tokio::test]
+async fn the_state_follow_delivers_the_applied_state_whole() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut state = db.subscribe_store_state();
+    assert_eq!(crate::tests::next(&mut state).await, db.store_state().await.unwrap());
+    fixture(&db).await;
+    let applied = crate::tests::next(&mut state).await;
+    assert_eq!(applied, db.store_state().await.unwrap());
+    assert_eq!(applied.members.len(), 3);
+    assert_eq!(applied.devices.len(), 6);
+    assert_eq!(applied.circles.len(), 2);
+    assert_eq!(applied.circles[&CircleId(uuid::Uuid::from_u128(7))].members.len(), 3);
+    assert_eq!(applied.circle_deletions.len(), 1);
+    db.close().await.unwrap();
+}

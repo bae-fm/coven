@@ -52,18 +52,27 @@ fn member_keys(row: &Row<'_>, signing: usize) -> sqlive::rusqlite::Result<Member
 /// A fact that doesn't
 /// decode is `DamagedDatabase`.
 pub(crate) fn stored_member(row: &Row<'_>) -> sqlive::rusqlite::Result<(MemberId, StoreMember)> {
-    let joined = Joined { person: stored(row, 7, Type::Text)?, circle: circle(row, 6)? };
+    stored_member_at(row, 0)
+}
+
+/// [`stored_member`], whose nine columns start at column `first`.
+fn stored_member_at(
+    row: &Row<'_>,
+    first: usize,
+) -> sqlive::rusqlite::Result<(MemberId, StoreMember)> {
+    let joined =
+        Joined { person: stored(row, first + 7, Type::Text)?, circle: circle(row, first + 6)? };
     Ok((
-        member(row, 0)?,
+        member(row, first)?,
         StoreMember {
-            keys: member_keys(row, 1)?,
-            keys_by: row.get(8)?,
-            role: stored(row, 3, Type::Text)?,
-            removed: stored(row, 4, Type::Integer)?,
-            access: stored::<Option<Vec<u8>>>(row, 5, Type::Blob)?
+            keys: member_keys(row, first + 1)?,
+            keys_by: row.get(first + 8)?,
+            role: stored(row, first + 3, Type::Text)?,
+            removed: stored(row, first + 4, Type::Integer)?,
+            access: stored::<Option<Vec<u8>>>(row, first + 5, Type::Blob)?
                 .map(|bytes| serde_json::from_slice(&bytes))
                 .transpose()
-                .map_err(|_not_access| damaged(5, Type::Blob))?,
+                .map_err(|_not_access| damaged(first + 5, Type::Blob))?,
             joined,
         },
     ))
@@ -149,59 +158,108 @@ pub(crate) fn created(database: &StoreSql) -> Result<bool, DbError> {
     )?)
 }
 
+/// Every fact of the applied state, one row each, as one statement: the
+/// first column names the part a row belongs to, and the others hold the part's
+/// columns in the order the part's reader decodes them.
+const STATE: &str = "SELECT 'store',store,name,named_at,NULL,NULL,NULL,NULL,NULL,NULL
+     FROM _coven_store WHERE singleton=1 AND created=1
+   UNION ALL
+     SELECT 'member',member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by
+     FROM _coven_members
+   UNION ALL
+     SELECT 'bound_key',signing,sealing,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM _coven_bound_keys
+   UNION ALL
+     SELECT 'device',device,member,name,state,NULL,NULL,NULL,NULL,NULL FROM _coven_devices
+   UNION ALL
+     SELECT 'circle',circle,name,base,NULL,NULL,NULL,NULL,NULL,NULL FROM _coven_circles
+   UNION ALL
+     SELECT 'circle_member',circle,member,NULL,NULL,NULL,NULL,NULL,NULL,NULL
+     FROM _coven_circle_members
+   UNION ALL
+     SELECT 'circle_deletion',circle,slot,NULL,NULL,NULL,NULL,NULL,NULL,NULL
+     FROM _coven_circle_deletions
+   UNION ALL
+     SELECT 'boundary',kind,version,audience,snapshot_device,snapshot_number,slot,included,applied,NULL
+     FROM _coven_boundaries";
+
+/// One row of [`STATE`], decoded.
+enum Fact {
+    Store(StoreIdentity),
+    Member(MemberId, StoreMember),
+    BoundKey(MemberPublicKeys),
+    Device(DeviceId, StoreDevice),
+    Circle(CircleId, StoreCircle),
+    CircleMember(CircleId, MemberId),
+    CircleDeletion(CircleId, Slot),
+    Boundary(crate::write_boundary::RetainedBoundary),
+}
+
+fn fact(row: &Row<'_>) -> sqlive::rusqlite::Result<Fact> {
+    Ok(match row.get::<_, String>(0)?.as_str() {
+        "store" => Fact::Store(StoreIdentity {
+            id: row.get(1)?,
+            name: row.get(2)?,
+            named_at: slot(row, 3)?,
+        }),
+        "member" => {
+            let (id, member) = stored_member_at(row, 1)?;
+            Fact::Member(id, member)
+        }
+        "bound_key" => Fact::BoundKey(member_keys(row, 1)?),
+        "device" => Fact::Device(
+            row.get(1)?,
+            StoreDevice {
+                member: member(row, 2)?,
+                name: row.get(3)?,
+                state: stored(row, 4, Type::Text)?,
+            },
+        ),
+        "circle" => Fact::Circle(
+            circle(row, 1)?,
+            StoreCircle { name: row.get(2)?, members: BTreeSet::new(), base: row.get(3)? },
+        ),
+        "circle_member" => Fact::CircleMember(circle(row, 1)?, member(row, 2)?),
+        "circle_deletion" => Fact::CircleDeletion(circle(row, 1)?, slot(row, 2)?),
+        "boundary" => Fact::Boundary(crate::write_boundary::retained_boundary(row, 1)?),
+        _ => return Err(damaged(0, Type::Text)),
+    })
+}
+
+/// The applied state, from one statement over the membership and audience
+/// tables and the retained boundaries.
 pub(crate) fn read(database: &StoreSql) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
-    state.store = database
-        .query(
-            "SELECT store,name,named_at FROM _coven_store WHERE singleton=1 AND created=1",
-            [],
-            |r| Ok(StoreIdentity { id: r.get(0)?, name: r.get(1)?, named_at: slot(r, 2)? }),
-        )?
-        .pop();
-    state.members = database
-        .query(
-            "SELECT member,signing,sealing,role,removed,access,joined_circle,joined_person,keys_by FROM _coven_members",
-            [],
-            stored_member,
-        )?
-        .into_iter()
-        .collect();
-    state.bound_keys = database
-        .query("SELECT signing,sealing FROM _coven_bound_keys", [], |row| member_keys(row, 0))?
-        .into_iter()
-        .collect();
-    state.devices = database
-        .query("SELECT device,member,name,state FROM _coven_devices", [], |row| {
-            Ok((
-                row.get::<_, DeviceId>(0)?,
-                StoreDevice {
-                    member: member(row, 1)?,
-                    name: row.get(2)?,
-                    state: stored(row, 3, Type::Text)?,
-                },
-            ))
-        })?
-        .into_iter()
-        .collect();
-    state.circles = database
-        .query("SELECT circle,name,base FROM _coven_circles", [], |row| {
-            Ok((
-                circle(row, 0)?,
-                StoreCircle { name: row.get(1)?, members: BTreeSet::new(), base: row.get(2)? },
-            ))
-        })?
-        .into_iter()
-        .collect();
-    for (circle, member) in
-        database.query("SELECT circle,member FROM _coven_circle_members", [], |row| {
-            Ok((circle(row, 0)?, member(row, 1)?))
-        })?
-    {
+    let mut circle_members = Vec::new();
+    let mut boundaries = Vec::new();
+    for fact in database.host_live_read(STATE, [], fact)? {
+        match fact {
+            Fact::Store(store) => state.store = Some(store),
+            Fact::Member(id, member) => {
+                state.members.insert(id, member);
+            }
+            Fact::BoundKey(keys) => {
+                state.bound_keys.insert(keys);
+            }
+            Fact::Device(id, device) => {
+                state.devices.insert(id, device);
+            }
+            Fact::Circle(id, circle) => {
+                state.circles.insert(id, circle);
+            }
+            Fact::CircleMember(circle, member) => circle_members.push((circle, member)),
+            Fact::CircleDeletion(circle, slot) => {
+                state.circle_deletions.insert(circle, slot);
+            }
+            Fact::Boundary(boundary) => boundaries.push(boundary),
+        }
+    }
+    for (circle, member) in circle_members {
         state.circles.get_mut(&circle).ok_or(DbError::DamagedDatabase)?.members.insert(member);
     }
-    state.circle_deletions = deleted_circles(database)?;
-    for boundary in crate::Boundary::load_selected(database)? {
-        boundary.apply(&mut state);
+    // Later boundaries of an audience replace earlier ones.
+    boundaries.sort_by_key(|row| row.boundary.entry());
+    for row in boundaries {
+        row.boundary.apply(&mut state);
     }
     Ok(state)
 }
