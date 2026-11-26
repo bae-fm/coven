@@ -23,28 +23,39 @@ fn path(tail: &str) -> TokenStream {
     format!("{GENERATED}::{tail}").parse().expect("a path of constants")
 }
 
+/// The index of the column `column` places after the row's offset: `offset`
+/// itself for the first column, which `offset + 0usize` would write as an
+/// operation that clippy refuses (`clippy::identity_op`).
+fn column_at(column: usize) -> TokenStream {
+    if column == 0 {
+        quote!(offset)
+    } else {
+        quote!(offset + #column)
+    }
+}
+
 /// The expression that reads `field` from `row`, the column at `offset` plus
 /// the field's own position.
 fn read_field(field: &Field) -> TokenStream {
-    let column = field.column;
+    let column = column_at(field.column);
     match &field.reading {
         Reading::Value => {
             let ty = rust_type(&field.ty);
-            quote!(row.get::<_, #ty>(offset + #column)?)
+            quote!(row.get::<_, #ty>(#column)?)
         }
         Reading::Json => {
             let json = path("json_column");
-            quote!(#json(row, offset + #column)?)
+            quote!(#json(row, #column)?)
         }
         Reading::Spread { path: fragment, .. } => {
             let fragment = fragment_path(fragment);
-            quote!(#fragment::read(row, offset + #column)?)
+            quote!(#fragment::read(row, #column)?)
         }
         Reading::MissingSpread { path: fragment, presence } => {
             let fragment = fragment_path(fragment);
-            let at = column + presence;
+            let at = column_at(field.column + presence);
             let is_null = path("is_null");
-            quote!(if #is_null(row, offset + #at)? { None } else { Some(#fragment::read(row, offset + #column)?) })
+            quote!(if #is_null(row, #at)? { None } else { Some(#fragment::read(row, #column)?) })
         }
     }
 }

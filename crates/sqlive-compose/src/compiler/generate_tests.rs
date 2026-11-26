@@ -14,7 +14,7 @@ fn a_fragment_reads_each_column_at_its_offset() {
         &header,
         &[field("a", "i64", Reading::Value, 0), field("type", "Vec<Label>", Reading::Json, 1)],
     );
-    assert!(code.contains("a : row . get :: < _ , i64 > (offset + 0usize) ?"), "{code}");
+    assert!(code.contains("a : row . get :: < _ , i64 > (offset) ?"), "{code}");
     assert!(
         code.contains(
             "r#type : :: sqlive_compose :: generated :: json_column (row , offset + 1usize) ?"

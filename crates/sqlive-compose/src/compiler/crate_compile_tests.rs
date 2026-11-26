@@ -329,7 +329,7 @@ sqlive_compose::read!(IssueAssignee(issue: IssueId), r#"
     assert!(page.contains("pub issue : issues :: Issue"), "{page}");
     assert!(page.contains("pub author : people :: Person"), "{page}");
     assert!(page.contains("pub project : issues :: Project"), "{page}");
-    assert!(page.contains("issues :: Issue :: read (row , offset + 0usize) ?"), "{page}");
+    assert!(page.contains("issues :: Issue :: read (row , offset) ?"), "{page}");
     assert!(page.contains("people :: Person :: read (row , offset + 8usize) ?"), "{page}");
     let assignee = code_of(&output, "IssueAssignee.rs");
     assert!(assignee.contains("pub assignee : Option < people :: Person >"), "{assignee}");
@@ -733,7 +733,7 @@ fn a_document_that_matches_its_shape_compiles_to_a_struct_and_a_decoder() {
     syn::parse_file(&labels).unwrap();
     assert!(labels.contains("pub struct Label"), "{labels}");
     assert!(labels.contains("pub (crate) labels : Vec < Label >"), "{labels}");
-    assert!(labels.contains("json_column (row , offset + 0usize) ?"), "{labels}");
+    assert!(labels.contains("json_column (row , offset) ?"), "{labels}");
     let author =
         output.files.iter().find(|(name, _)| name == "CommentAuthor.rs").unwrap().1.clone();
     syn::parse_file(&author).unwrap();
