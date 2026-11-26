@@ -286,11 +286,8 @@ impl Lookup {
     /// The SQL that looks up `value`, and its parameters with `value` last.
     pub fn sql(&self, value: &Value) -> (&str, Vec<Value>) {
         let sql = &self.sql;
-        let typed = match (self.affinity, value) {
-            (Affinity::Text, Value::Text(_))
-            | (Affinity::Numeric, Value::Integer(_) | Value::Real(_)) => sql.typed.as_deref(),
-            _ => None,
-        };
+        let typed =
+            if carries_affinity(self.affinity, value) { sql.typed.as_deref() } else { None };
         let mut parameters = sql.parameters.clone();
         parameters.push(value.clone());
         (typed.unwrap_or(&sql.plain), parameters)
@@ -323,16 +320,32 @@ fn render(
     // to it, carries the affinity into the lookup's comparison; a cast
     // would change a value of any other type, and no conversion makes
     // such a value equal to the expression's.
-    let typed = match (partner, affinity) {
-        (PartnerValue::Expression(_), Affinity::Text) => {
-            Some(found(&format!("CAST({value} AS TEXT)")))
-        }
-        (PartnerValue::Expression(_), Affinity::Numeric) => {
-            Some(found(&format!("CAST({value} AS NUMERIC)")))
-        }
-        _ => None,
+    let typed = match partner {
+        PartnerValue::Expression(_) => cast_to_affinity(&value, affinity).map(|cast| found(&cast)),
+        PartnerValue::Column(_) => None,
     };
     LookupSql { plain: found(&value), typed, parameters }
+}
+
+/// `value`, SQL, cast to `affinity`'s type, which carries the affinity into a
+/// comparison with an expression, which has none; `None` for an affinity
+/// that converts nothing.
+fn cast_to_affinity(value: &str, affinity: Affinity) -> Option<String> {
+    match affinity {
+        Affinity::Text => Some(format!("CAST({value} AS TEXT)")),
+        Affinity::Numeric => Some(format!("CAST({value} AS NUMERIC)")),
+        _ => None,
+    }
+}
+
+/// Whether casting `value` to `affinity`'s type keeps it as it is: a cast would
+/// change a value of any other type, and no conversion makes such a value equal
+/// to an expression's.
+fn carries_affinity(affinity: Affinity, value: &Value) -> bool {
+    matches!(
+        (affinity, value),
+        (Affinity::Text, Value::Text(_)) | (Affinity::Numeric, Value::Integer(_) | Value::Real(_))
+    )
 }
 
 /// The value a partner's rows give, as SQL over the rows `qualifier` names.
@@ -503,18 +516,9 @@ impl GroupLookup {
         for (item, value) in self.items.iter().zip(values.into_iter().flatten()) {
             parameters.push(value.clone());
             let placeholder = format!("?{}", parameters.len());
-            // As a lookup does, give an expression's value the joined
-            // column's affinity.
-            let value = match (&item.value, item.affinity, value) {
-                (PartnerValue::Expression(_), Affinity::Text, Value::Text(_)) => {
-                    format!("CAST({placeholder} AS TEXT)")
-                }
-                (
-                    PartnerValue::Expression(_),
-                    Affinity::Numeric,
-                    Value::Integer(_) | Value::Real(_),
-                ) => {
-                    format!("CAST({placeholder} AS NUMERIC)")
+            let value = match &item.value {
+                PartnerValue::Expression(_) if carries_affinity(item.affinity, value) => {
+                    cast_to_affinity(&placeholder, item.affinity).unwrap_or(placeholder)
                 }
                 _ => placeholder,
             };
