@@ -70,7 +70,7 @@ async fn readding_a_removed_row_without_its_removal_record_is_a_damaged_database
 #[tokio::test]
 async fn deleting_groceries_winner_returns_note_46_and_its_link() {
     let store = TestStore::new();
-    let db = store.schema(vec![table("notes"), table("links")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE SET NULL); CREATE TABLE counts(n INTEGER); INSERT INTO counts VALUES(0); CREATE TRIGGER counted_insert AFTER INSERT ON notes BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER counted_delete AFTER DELETE ON notes BEGIN UPDATE counts SET n=n-1; END;").await.unwrap();
+    let db = store.schema(vec![table("notes"), table("links")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE SET NULL); CREATE TABLE counts(n INTEGER PRIMARY KEY); INSERT INTO counts VALUES(0); CREATE TRIGGER counted_insert AFTER INSERT ON notes BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER counted_delete AFTER DELETE ON notes BEGIN UPDATE counts SET n=n-1; END;").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('45','Groceries')").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('46','Shopping'); INSERT INTO links VALUES('7','46')")
         .await
@@ -102,7 +102,7 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
         [("SET NULL", true), ("CASCADE", false), ("RESTRICT", false), ("NO ACTION", false)]
     {
         let store = TestStore::new();
-        let schema = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE {action}); CREATE TABLE counts(n INT); INSERT INTO counts VALUES(0); CREATE TRIGGER link_insert AFTER INSERT ON links BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER link_delete AFTER DELETE ON links BEGIN UPDATE counts SET n=n-1; END;");
+        let schema = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE {action}); CREATE TABLE counts(n INT NOT NULL PRIMARY KEY); INSERT INTO counts VALUES(0); CREATE TRIGGER link_insert AFTER INSERT ON links BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER link_delete AFTER DELETE ON links BEGIN UPDATE counts SET n=n-1; END;");
         let db = store
             .builder(
                 vec![table("notes"), table("links")],
@@ -364,7 +364,7 @@ async fn an_expression_over_a_folded_column_claims_by_bytes_like_its_index() {
 #[tokio::test]
 async fn restoration_skips_shared_triggers_and_runs_local_triggers() {
     let store = TestStore::new();
-    let db = store.schema(vec![table("notes").shared_trigger("edited")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,edited INT); CREATE TRIGGER edited AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET edited=edited+1 WHERE id=new.id; END; CREATE TABLE counts(n INT); INSERT INTO counts VALUES(0); CREATE TRIGGER counted_insert AFTER INSERT ON notes BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER counted_delete AFTER DELETE ON notes BEGIN UPDATE counts SET n=n-1; END;").await.unwrap();
+    let db = store.schema(vec![table("notes").shared_trigger("edited")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,edited INT); CREATE TRIGGER edited AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET edited=edited+1 WHERE id=new.id; END; CREATE TABLE counts(n INT NOT NULL PRIMARY KEY); INSERT INTO counts VALUES(0); CREATE TRIGGER counted_insert AFTER INSERT ON notes BEGIN UPDATE counts SET n=n+1; END; CREATE TRIGGER counted_delete AFTER DELETE ON notes BEGIN UPDATE counts SET n=n-1; END;").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('45','Groceries',0)").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('46','Shopping',0)").await.unwrap();
     crate::tests::remote_update(&db, "notes", "46", &[("title", Value::Text("Groceries".into()))])
@@ -431,9 +431,9 @@ async fn materialization_and_loss_failures_roll_back_the_entire_write() {
 #[tokio::test]
 async fn taking_a_row_out_runs_foreign_key_actions_on_local_tables() {
     let store = TestStore::new();
-    let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id)); CREATE TABLE search_index(note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);").await.unwrap();
+    let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,parent TEXT REFERENCES notes(id)); CREATE TABLE search_index(id INTEGER PRIMARY KEY, note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(id INTEGER PRIMARY KEY, note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);").await.unwrap();
     hidden_plan_note(&db).await;
-    sql(&db, "INSERT INTO search_index VALUES('1'); INSERT INTO selection VALUES('1')")
+    sql(&db, "INSERT INTO search_index VALUES(NULL,'1'); INSERT INTO selection VALUES(NULL,'1')")
         .await
         .unwrap();
 
@@ -634,14 +634,14 @@ async fn a_circle_deletion_runs_local_foreign_key_actions_once() {
     let db = store
         .schema(
             vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
-            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT); CREATE TABLE search_index(note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);",
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT); CREATE TABLE search_index(id INTEGER PRIMARY KEY, note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(id INTEGER PRIMARY KEY, note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);",
         )
         .await
         .unwrap();
     store.join_circle(&db, circle);
     sql(
         &db,
-        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','Gift'); INSERT INTO search_index VALUES('00000000-0000-4000-8000-000000000001'); INSERT INTO selection VALUES('00000000-0000-4000-8000-000000000001')",
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','Gift'); INSERT INTO search_index VALUES(NULL,'00000000-0000-4000-8000-000000000001'); INSERT INTO selection VALUES(NULL,'00000000-0000-4000-8000-000000000001')",
     )
     .await
     .unwrap();
@@ -669,9 +669,12 @@ async fn a_circle_deletion_runs_local_foreign_key_actions_once() {
     assert_eq!(remaining(&db), (0, None));
     // The app's own write to a local table follows its ordinary rules: a row
     // naming the removed note is refused.
-    assert!(sql(&db, "INSERT INTO search_index VALUES('00000000-0000-4000-8000-000000000001')")
-        .await
-        .is_err());
+    assert!(sql(
+        &db,
+        "INSERT INTO search_index VALUES(NULL,'00000000-0000-4000-8000-000000000001')"
+    )
+    .await
+    .is_err());
     assert_eq!(remaining(&db), (0, None));
     db.close().await.unwrap();
 }
@@ -902,12 +905,12 @@ fn unique_claims_order_before_deferrable_parents() {
 /// node's arrival as the app's triggers see it: whether its parent was in
 /// the table yet.
 const NODES: &str = "CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY, name TEXT UNIQUE, parent TEXT REFERENCES nodes(id));
-CREATE TABLE arrivals(kind TEXT NOT NULL, id TEXT NOT NULL, parent_here INT NOT NULL);
+CREATE TABLE arrivals(seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, id TEXT NOT NULL, parent_here INT NOT NULL);
 CREATE TRIGGER node_inserted AFTER INSERT ON nodes BEGIN
-  INSERT INTO arrivals VALUES('insert', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
+  INSERT INTO arrivals VALUES(NULL, 'insert', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
 END;
 CREATE TRIGGER node_updated AFTER UPDATE ON nodes BEGIN
-  INSERT INTO arrivals VALUES('update', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
+  INSERT INTO arrivals VALUES(NULL, 'update', new.id, new.parent IS NULL OR EXISTS(SELECT 1 FROM nodes WHERE id=new.parent));
 END;";
 
 /// Ana's and Ben's devices on `schema`, each knowing both members.

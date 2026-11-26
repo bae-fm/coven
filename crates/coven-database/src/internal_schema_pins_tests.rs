@@ -244,7 +244,7 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
             target("title"),
         ),
         (
-            "CREATE TABLE seen(file TEXT);
+            "CREATE TABLE seen(file TEXT NOT NULL PRIMARY KEY);
              CREATE TRIGGER seen AFTER DELETE ON coven_pins BEGIN INSERT INTO seen VALUES(OLD.file); END;
              CREATE TRIGGER titled AFTER INSERT ON seen BEGIN UPDATE files SET title='unpinned'; END",
             target("titled"),
@@ -257,7 +257,7 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
         ),
         // It reads only what app SQL may: coven's cache stays out of reach.
         (
-            "CREATE TABLE cached(path TEXT);
+            "CREATE TABLE cached(path TEXT NOT NULL PRIMARY KEY);
              CREATE TRIGGER copy AFTER INSERT ON coven_pins BEGIN
                  INSERT INTO cached SELECT path FROM _coven_cache;
              END",
@@ -266,7 +266,7 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
             },
         ),
         (
-            "CREATE TABLE sending(files TEXT);
+            "CREATE TABLE sending(files TEXT NOT NULL PRIMARY KEY);
              CREATE TRIGGER sent AFTER DELETE ON coven_pins BEGIN
                  INSERT INTO sending VALUES(_coven_sending_objects());
              END",

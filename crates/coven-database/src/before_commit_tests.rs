@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '');
 CREATE TABLE shown(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
-CREATE TABLE runs(run INTEGER NOT NULL);
+CREATE TABLE runs(run INTEGER NOT NULL PRIMARY KEY);
 CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY);
-CREATE TABLE tally(rows INTEGER NOT NULL);";
+CREATE TABLE tally(rows INTEGER NOT NULL PRIMARY KEY);";
 
 fn tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", crate::RowIdentity::SharedKey)]

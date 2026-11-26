@@ -100,7 +100,7 @@ async fn coven_refuses_a_queue_trigger_that_could_break_its_rules() {
         // It reads only what app SQL may: the queue's own bookkeeping stays
         // out of reach.
         (
-            "CREATE TABLE sources(original BLOB);
+            "CREATE TABLE sources(original BLOB NOT NULL PRIMARY KEY);
              CREATE TRIGGER copy AFTER INSERT ON coven_upload_queue BEGIN
                  INSERT INTO sources SELECT original FROM _coven_file_uploads WHERE id=NEW.position;
              END",

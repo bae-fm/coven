@@ -25,7 +25,8 @@ use std::io::Cursor;
 async fn sequence_settlement_matches_lean() {
     let runner = std::env::var_os("COVEN_SEQUENCE_LEAN").expect("sequenceRunner");
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE local(value TEXT)").await.unwrap();
+    let db =
+        store.schema(vec![], "CREATE TABLE local(value TEXT NOT NULL PRIMARY KEY)").await.unwrap();
     // kept observations have already passed sync's authenticated own-id check;
     // its copy detection is exercised in the sync settlement differential.
     let mut cases = Vec::new();
@@ -174,7 +175,11 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
         let device = directory.settings().unwrap().device_id;
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![])
-            .migrations(vec![Migration::addition(1, "local", "CREATE TABLE local(value TEXT)")])
+            .migrations(vec![Migration::addition(
+                1,
+                "local",
+                "CREATE TABLE local(value TEXT NOT NULL PRIMARY KEY)",
+            )])
             .open()
             .await
             .unwrap();

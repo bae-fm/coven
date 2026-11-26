@@ -23,23 +23,23 @@ async fn local_keys_into_values_coven_updates_must_follow_them() {
         (format!("{pins} ON UPDATE CASCADE)"), None),
         (format!("{pins} ON UPDATE SET NULL)"), None),
         (
-            "CREATE TABLE pins(note TEXT REFERENCES parents(id) ON DELETE CASCADE)".into(),
+            "CREATE TABLE pins(id INTEGER PRIMARY KEY, note TEXT REFERENCES parents(id) ON DELETE CASCADE)".into(),
             None,
         ),
         (
-            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(code TEXT REFERENCES pins(code) ON DELETE CASCADE)"),
+            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(id INTEGER PRIMARY KEY, code TEXT REFERENCES pins(code) ON DELETE CASCADE)"),
             Some("marks"),
         ),
         (
-            format!("{pins} ON UPDATE SET NULL); CREATE TABLE marks(code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE RESTRICT)"),
+            format!("{pins} ON UPDATE SET NULL); CREATE TABLE marks(id INTEGER PRIMARY KEY, code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE RESTRICT)"),
             Some("marks"),
         ),
         (
-            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE CASCADE)"),
+            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(id INTEGER PRIMARY KEY, code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE CASCADE)"),
             None,
         ),
         (
-            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(pin TEXT REFERENCES pins(id) ON DELETE CASCADE)"),
+            format!("{pins} ON UPDATE CASCADE); CREATE TABLE marks(id INTEGER PRIMARY KEY, pin TEXT REFERENCES pins(id) ON DELETE CASCADE)"),
             None,
         ),
     ] {
@@ -83,7 +83,7 @@ async fn a_local_key_that_does_not_follow_stops_every_apply() {
     crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','a')").await.unwrap();
     db.inspect_writer(|writer, _| {
         writer
-            .batch("CREATE TABLE pins(code TEXT REFERENCES parents(code) ON DELETE CASCADE); INSERT INTO pins VALUES('a')")
+            .batch("CREATE TABLE pins(id INTEGER PRIMARY KEY, code TEXT REFERENCES parents(code) ON DELETE CASCADE); INSERT INTO pins VALUES(NULL,'a')")
             .unwrap()
     });
     for _ in 0..2 {
@@ -112,7 +112,7 @@ async fn a_local_key_that_does_not_follow_stops_every_apply() {
 async fn an_applied_rename_reaches_every_following_local_key() {
     for (action, expected) in [("CASCADE", Some("b")), ("SET NULL", None)] {
         let store = TestStore::new();
-        let schema = format!("{PARENTS}; CREATE TABLE pins(code TEXT UNIQUE REFERENCES parents(code) ON DELETE CASCADE ON UPDATE {action}); CREATE TABLE marks(code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE CASCADE)");
+        let schema = format!("{PARENTS}; CREATE TABLE pins(id INTEGER PRIMARY KEY, code TEXT UNIQUE REFERENCES parents(code) ON DELETE CASCADE ON UPDATE {action}); CREATE TABLE marks(id INTEGER PRIMARY KEY, code TEXT REFERENCES pins(code) ON DELETE CASCADE ON UPDATE CASCADE)");
         let db = store
             .builder(
                 vec![shared("parents")],
@@ -126,7 +126,7 @@ async fn an_applied_rename_reaches_every_following_local_key() {
             .unwrap();
         crate::write::tests::sql(
             &db,
-            "INSERT INTO parents VALUES('p','a'); INSERT INTO pins VALUES('a'); INSERT INTO marks VALUES('a')",
+            "INSERT INTO parents VALUES('p','a'); INSERT INTO pins VALUES(NULL,'a'); INSERT INTO marks VALUES(NULL,'a')",
         )
         .await
         .unwrap();
@@ -152,10 +152,10 @@ async fn an_applied_rename_reaches_every_following_local_key() {
 
 #[tokio::test]
 async fn set_default_between_local_tables_remains_sqlites_action() {
-    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
+    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY, p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(id INTEGER PRIMARY KEY, p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
     let store = TestStore::new();
     let db = store.schema(vec![shared("synced")], SCHEMA).await.unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO parent VALUES('p'),('fallback'); INSERT INTO child VALUES('p'); UPDATE parent SET id='q' WHERE id='p'").await.unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO parent VALUES('p'),('fallback'); INSERT INTO child VALUES(NULL,'p'); UPDATE parent SET id='q' WHERE id='p'").await.unwrap();
     db.read(|sql| {
         assert_eq!(
             sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
@@ -194,8 +194,8 @@ async fn local_children_can_reference_unique_nonprimary_values() {
     for synced_parent in [false, true] {
         let store = TestStore::new();
         let tables = if synced_parent { vec![shared("parents")] } else { vec![] };
-        let db = store.schema(tables, "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(parent TEXT REFERENCES parents(code) ON DELETE CASCADE ON UPDATE CASCADE)").await.unwrap();
-        crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','old'); INSERT INTO children VALUES('old'); UPDATE parents SET code='new'").await.unwrap();
+        let db = store.schema(tables, "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE); CREATE TABLE children(id INTEGER PRIMARY KEY, parent TEXT REFERENCES parents(code) ON DELETE CASCADE ON UPDATE CASCADE)").await.unwrap();
+        crate::write::tests::sql(&db, "INSERT INTO parents VALUES('p','old'); INSERT INTO children VALUES(NULL,'old'); UPDATE parents SET code='new'").await.unwrap();
         db.read(|sql| {
             assert_eq!(
                 sql.query_row("SELECT parent FROM children", [], |r| r.get::<_, String>(0))?,

@@ -59,7 +59,7 @@ async fn reserved_prefixes_cover_every_app_object_and_rename_destination() {
                 .builder(
                     vec![],
                     vec![Migration::addition_with(1, "reserved name", move |sql| {
-                        sql.execute_batch("CREATE TABLE local(x)")?;
+                        sql.execute_batch("CREATE TABLE local(x NOT NULL PRIMARY KEY)")?;
                         sql.execute_batch(&operation)?;
                         Ok(())
                     })],
@@ -158,7 +158,7 @@ async fn trigger_targets_are_rejected_while_preparing_before_any_row_changes() {
             table = table.shared_trigger("effect");
         }
         let db = store.builder(vec![table], vec![Migration::addition_with(1, "triggers", move |sql| {
-            sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0)")?;
+            sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER PRIMARY KEY); INSERT INTO local VALUES (0)")?;
             sql.execute_batch(if shared {
                 "CREATE TRIGGER effect AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE local SET n = n+1; END"
             } else {
@@ -178,7 +178,7 @@ async fn trigger_targets_are_rejected_while_preparing_before_any_row_changes() {
 async fn permitted_local_and_shared_triggers_run_with_applying_false() {
     let store = TestStore::new();
     let db = store.builder(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("shared")], vec![Migration::breaking_with(1, "triggers", |sql| {
-        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER); INSERT INTO local VALUES (0); CREATE TRIGGER local_effect AFTER INSERT ON notes BEGIN UPDATE local SET n = n+1; END; CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET n = 7 WHERE id = new.id; END; INSERT INTO notes VALUES ('a',0)")?;
+        sql.execute_batch("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, n INTEGER); CREATE TABLE local(n INTEGER PRIMARY KEY); INSERT INTO local VALUES (0); CREATE TRIGGER local_effect AFTER INSERT ON notes BEGIN UPDATE local SET n = n+1; END; CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET n = 7 WHERE id = new.id; END; INSERT INTO notes VALUES ('a',0)")?;
         assert_eq!(sql.query_row("SELECT n FROM notes", [], |r| r.get::<_, i64>(0))?, 7);
         assert_eq!(sql.query_row("SELECT n FROM local", [], |r| r.get::<_, i64>(0))?, 1);
         assert!(!sql.query_row("SELECT coven_applying()", [], |r| r.get::<_, bool>(0))?);
@@ -227,7 +227,11 @@ async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
 
 #[tokio::test]
 async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
-    for key in ["id TEXT NOT NULL PRIMARY KEY", "id TEXT", "id INTEGER NOT NULL PRIMARY KEY DESC"] {
+    for key in [
+        "id TEXT NOT NULL PRIMARY KEY",
+        "id INT NOT NULL PRIMARY KEY",
+        "id INTEGER NOT NULL PRIMARY KEY DESC",
+    ] {
         for column in ["rowid", "_rowid_", "oid", "\"RoWiD\"", "[OID]", "`_rowid_`", "'rowid'"] {
             let operation = format!("UPDATE items SET {column}=2");
             let store = TestStore::new();

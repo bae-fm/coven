@@ -88,7 +88,7 @@ fn integrity(connection: &StoreSql) -> Vec<String> {
     rows(connection, "PRAGMA integrity_check")
 }
 
-const ORDERED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_ordered ON words(word COLLATE ordered)";
+const ORDERED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY); CREATE INDEX words_ordered ON words(word COLLATE ordered)";
 
 const AFTER_B: &str =
     "SELECT word FROM words WHERE word > 'b' COLLATE ordered ORDER BY word COLLATE ordered";
@@ -147,7 +147,7 @@ async fn an_unchanged_version_rebuilds_nothing() {
     database.close().await.unwrap();
 }
 
-const FOLDED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL); CREATE UNIQUE INDEX words_folded ON words(fold(word)); CREATE INDEX words_matching ON words(word) WHERE word REGEXP 'an'; CREATE INDEX words_plain ON words(word, length(word))";
+const FOLDED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY); CREATE UNIQUE INDEX words_folded ON words(fold(word)); CREATE INDEX words_matching ON words(word) WHERE word REGEXP 'an'; CREATE INDEX words_plain ON words(word, length(word))";
 
 const FOLDED_APPLES: &str = "SELECT word FROM words WHERE fold(word) = fold('Apples')";
 
@@ -185,31 +185,31 @@ async fn a_new_function_version_rebuilds_exactly_the_indexes_that_call_it() {
 async fn a_version_a_check_unique_index_or_generated_column_uses_cannot_change() {
     for (schema, functions, name, table) in [
         (
-            "CREATE TABLE words(word TEXT NOT NULL CHECK (fold(word) <> 'banned'))",
+            "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY CHECK (fold(word) <> 'banned'))",
             folding as fn(u32) -> SqlFunctions,
             "fold",
             "words",
         ),
         (
-            "CREATE TABLE words(word TEXT NOT NULL, folded TEXT AS (fold(word)) STORED)",
+            "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY, folded TEXT AS (fold(word)) STORED)",
             folding,
             "fold",
             "words",
         ),
         (
-            "CREATE TABLE words(word TEXT NOT NULL, CHECK (word REGEXP '[a-z]'))",
+            "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY, CHECK (word REGEXP '[a-z]'))",
             folding,
             "regexp",
             "words",
         ),
         (
-            "CREATE TABLE words(word TEXT NOT NULL COLLATE ordered, CHECK (word <> 'banned'))",
+            "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY COLLATE ordered, CHECK (word <> 'banned'))",
             ordered,
             "ordered",
             "words",
         ),
         (
-            "CREATE TABLE words(word TEXT NOT NULL, CHECK (word >= 'a' COLLATE ordered))",
+            "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY, CHECK (word >= 'a' COLLATE ordered))",
             ordered,
             "ordered",
             "words",
@@ -275,7 +275,7 @@ async fn a_read_only_open_refuses_indexes_built_with_another_version() {
 /// back: the old version still opens.
 #[tokio::test]
 async fn a_rebuild_a_unique_index_refuses_changes_nothing() {
-    const TAGS: &str = "CREATE TABLE words(word TEXT NOT NULL UNIQUE COLLATE ordered)";
+    const TAGS: &str = "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY UNIQUE COLLATE ordered)";
     let caseless = SqlFunctions::default().collation("ordered", 2, |left: &str, right: &str| {
         left.to_lowercase().cmp(&right.to_lowercase())
     });
@@ -295,7 +295,7 @@ async fn a_rebuild_a_unique_index_refuses_changes_nothing() {
     database.close().await.unwrap();
 }
 
-const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL, score REAL NOT NULL, shown TEXT AS (CAST(score AS TEXT)) VIRTUAL, kept TEXT AS (CAST(score AS TEXT)) STORED);
+const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY, score REAL NOT NULL, shown TEXT AS (CAST(score AS TEXT)) VIRTUAL, kept TEXT AS (CAST(score AS TEXT)) STORED);
      CREATE INDEX words_score_text ON words(CAST(score AS TEXT));
      CREATE INDEX words_shown ON words(shown);
      CREATE INDEX words_kept ON words(kept);

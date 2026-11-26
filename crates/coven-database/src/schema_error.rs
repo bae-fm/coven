@@ -124,10 +124,10 @@ pub enum SchemaError {
         /// The missing trigger.
         trigger: String,
     },
-    /// A synced table has no primary key (§9.2).
-    #[error("synced table {table} has no primary key")]
+    /// A table, synced or device-local, has no primary key (§9.2).
+    #[error("table {table} has no primary key")]
     NoPrimaryKey {
-        /// The declared table.
+        /// The table.
         table: String,
     },
     /// A primary-key column of a synced or device-local table permits NULL

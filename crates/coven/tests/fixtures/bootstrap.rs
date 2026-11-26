@@ -18,7 +18,7 @@ pub(super) fn migrations() -> Vec<Migration> {
         "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL); \
          CREATE TABLE circle_notes(id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL, audience TEXT NOT NULL); \
          CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, circle TEXT NOT NULL); \
-         CREATE TABLE joining_runs(member TEXT NOT NULL, person TEXT, circle TEXT NOT NULL)",
+         CREATE TABLE joining_runs(member TEXT NOT NULL PRIMARY KEY, person TEXT, circle TEXT NOT NULL)",
     )]
 }
 

@@ -16,6 +16,9 @@ impl From<sqlive::Error<StoreFailure, DbError>> for DbError {
             sqlive::Error::StatementForbidden { operation } => {
                 Self::StatementForbidden { operation }
             }
+            sqlive::Error::TableWithoutPrimaryKey { table } => {
+                Self::Schema(crate::SchemaError::NoPrimaryKey { table })
+            }
             sqlive::Error::TransactionEnded => Self::TransactionEnded,
             sqlive::Error::Closed => Self::StoreClosed,
             sqlive::Error::Bug(bug) => Self::Bug(bug),

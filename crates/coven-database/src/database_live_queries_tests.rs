@@ -481,7 +481,7 @@ async fn process_compares_processed_results() {
 #[tokio::test]
 async fn joins_views_generated_columns_collations_and_local_tables_are_observed() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE local(value TEXT COLLATE NOCASE, extra INTEGER, upper_value TEXT AS (upper(value))); CREATE TABLE keyed(id TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID; CREATE VIEW joined AS SELECT local.value, local.upper_value, keyed.value AS other FROM local JOIN keyed ON local.value=keyed.id").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE local(value TEXT NOT NULL PRIMARY KEY COLLATE NOCASE, extra INTEGER, upper_value TEXT AS (upper(value))); CREATE TABLE keyed(id TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID; CREATE VIEW joined AS SELECT local.value, local.upper_value, keyed.value AS other FROM local JOIN keyed ON local.value=keyed.id").await.unwrap();
     db.commit_writer(|sql, _| {
         sql.batch(
             "INSERT INTO local(value,extra) VALUES ('a',0); INSERT INTO keyed VALUES ('a',x'01')",
@@ -511,16 +511,16 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
 #[tokio::test]
 async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent REFERENCES parent ON DELETE CASCADE, title); CREATE TABLE audit(value); CREATE TRIGGER record_change AFTER UPDATE OF title ON child BEGIN INSERT INTO audit VALUES (new.title); END;").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY, parent REFERENCES parent ON DELETE CASCADE, title); CREATE TABLE audit(id INTEGER PRIMARY KEY, value); CREATE TRIGGER record_change AFTER UPDATE OF title ON child BEGIN INSERT INTO audit VALUES(NULL,new.title); END;").await.unwrap();
     db.commit_writer(|sql, _| {
-        sql.batch("INSERT INTO parent VALUES (1); INSERT INTO child VALUES (1,'one')").unwrap()
+        sql.batch("INSERT INTO parent VALUES (1); INSERT INTO child VALUES(NULL,1,'one')").unwrap()
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let (equal_run, equal_finished) = tokio::sync::oneshot::channel();
     let equal_run = Mutex::new(Some(equal_run));
     let mut children = db.subscribe(move |sql| {
-        let value = sql.query_row("SELECT count(*) FROM child", [], |r| r.get::<_, i64>(0))?;
+        let value = sql.query_row("SELECT count(title) FROM child", [], |r| r.get::<_, i64>(0))?;
         if count.fetch_add(1, Ordering::SeqCst) == 1 {
             equal_run.lock().unwrap().take().unwrap().send(()).unwrap();
         }
@@ -538,7 +538,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
         })
         .unwrap()
     });
-    // The unkeyed child's update hook invalidates the count, which stays equal.
+    // The update changes a column the count reads, and the count stays equal.
     assert!(children.is_marked_for_rerun());
     assert!(audit.is_marked_for_rerun());
     assert_eq!(next_result(&mut audit).await.unwrap(), ["two"]);

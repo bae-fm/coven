@@ -137,7 +137,7 @@ fn every_readable_object_reads_outside_a_store() {
 #[test]
 fn an_app_trigger_on_each_followed_table_fires_outside_a_store() {
     let outside = outside_store();
-    outside.execute_batch("CREATE TABLE heard(what TEXT NOT NULL);").unwrap();
+    outside.execute_batch("CREATE TABLE heard(what TEXT NOT NULL PRIMARY KEY);").unwrap();
     for followed in FOLLOWED {
         outside
             .execute_batch(&format!(
@@ -172,8 +172,7 @@ fn an_app_trigger_reads_a_recorded_original_outside_a_store() {
     outside
         .execute_batch(
             "CREATE TABLE tracks(id INTEGER PRIMARY KEY, file TEXT NOT NULL);
-             CREATE TABLE track_originals(
-                 track INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
+             CREATE TABLE track_originals(track INTEGER NOT NULL PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL,
                  modified_seconds INTEGER NOT NULL, modified_nanos INTEGER NOT NULL);
              CREATE TRIGGER track_original AFTER INSERT ON tracks BEGIN
                  INSERT INTO track_originals

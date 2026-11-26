@@ -221,7 +221,7 @@ async fn writes_cannot_change_the_schema() {
     for statement in [
         "DROP TABLE notes",
         "ALTER TABLE notes ADD COLUMN extra TEXT",
-        "CREATE TABLE extra(id TEXT)",
+        "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY)",
     ] {
         assert!(
             matches!(sql(&database, statement).await, Err(DbError::StatementForbidden { .. })),
@@ -565,7 +565,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         CREATE TABLE tasks(id TEXT NOT NULL PRIMARY KEY,note TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,body TEXT);
         CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,task TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,body TEXT);
         CREATE INDEX tasks_note ON tasks(note); CREATE INDEX items_task ON items(task);
-        CREATE TABLE selection(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX selection_note ON selection(note);").await.unwrap();
+        CREATE TABLE selection(id INTEGER PRIMARY KEY, note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE INDEX selection_note ON selection(note);").await.unwrap();
     store.join_circle(
         &db,
         coven_foundation::id_source::CircleId(
@@ -576,7 +576,7 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
         for n in 0..2000 {
             let note = format!("00000000-0000-4000-8000-{n:012x}");
             context.execute("INSERT INTO notes VALUES(?1,'store',?1)", [&note])?;
-            context.execute("INSERT INTO selection VALUES(?1)", [&note])?;
+            context.execute("INSERT INTO selection VALUES(NULL,?1)", [&note])?;
             for c in 0..2 {
                 let task = format!("00000000-0000-4000-8001-{:012x}", n * 2 + c);
                 context.execute("INSERT INTO tasks VALUES(?1,?2,'body')", [&task, &note])?;

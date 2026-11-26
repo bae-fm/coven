@@ -20,7 +20,7 @@ async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applyi
             SyncedTable::new("totals", RowIdentity::SharedKey),
         ]
     };
-    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE totals(id TEXT NOT NULL PRIMARY KEY,n INTEGER NOT NULL); CREATE TABLE audit(applying INTEGER); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN INSERT INTO totals VALUES('all',1) ON CONFLICT(id) DO UPDATE SET n=n+1; END; CREATE TRIGGER local AFTER INSERT ON notes BEGIN INSERT INTO audit VALUES(coven_applying()); END";
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE totals(id TEXT NOT NULL PRIMARY KEY,n INTEGER NOT NULL); CREATE TABLE audit(id INTEGER PRIMARY KEY, applying INTEGER); CREATE TRIGGER shared AFTER INSERT ON notes WHEN NOT coven_applying() BEGIN INSERT INTO totals VALUES('all',1) ON CONFLICT(id) DO UPDATE SET n=n+1; END; CREATE TRIGGER local AFTER INSERT ON notes BEGIN INSERT INTO audit VALUES(NULL,coven_applying()); END";
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();
     sql(&a, "INSERT INTO notes VALUES('one')").await.unwrap();

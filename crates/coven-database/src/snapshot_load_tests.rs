@@ -80,7 +80,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
             .is_err());
         assert_eq!(contents(&b), original);
     }
-    b.inspect_writer(|db, _|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
+    b.inspect_writer(|db, _|db.batch("CREATE TABLE store_changes(value INTEGER PRIMARY KEY); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
     let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
         Ok(db.query("SELECT value FROM notes ORDER BY audience", [], |r| r.get::<_, i64>(0))?)
     });

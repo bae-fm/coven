@@ -47,7 +47,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
                 Migration::addition(
                     2,
                     "counted",
-                    "CREATE TABLE counted(views INTEGER NOT NULL); INSERT INTO counted SELECT count(*) FROM coven_members",
+                    "CREATE TABLE counted(views INTEGER NOT NULL PRIMARY KEY); INSERT INTO counted SELECT count(*) FROM coven_members",
                 ),
             ],
         )

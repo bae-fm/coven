@@ -243,11 +243,11 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
-    let receiver = receiver_store.schema(notes(),"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TRIGGER keep_pin BEFORE DELETE ON pins BEGIN SELECT RAISE(ABORT,'pinned locally'); END").await.unwrap();
+    let receiver = receiver_store.schema(notes(),"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); CREATE TABLE pins(id INTEGER PRIMARY KEY, note TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TRIGGER keep_pin BEFORE DELETE ON pins BEGIN SELECT RAISE(ABORT,'pinned locally'); END").await.unwrap();
     sql(&source, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
     let inserted = records(&source).remove(0);
     receiver.receive(inserted.into()).await.unwrap();
-    sql(&receiver, "INSERT INTO pins VALUES('n')").await.unwrap();
+    sql(&receiver, "INSERT INTO pins VALUES(NULL,'n')").await.unwrap();
     let before = crate::tests::data(&receiver, Audience::Store);
     assert!(
         matches!(sql(&receiver,"DELETE FROM notes").await,Err(DbError::Sqlite(sqlive::rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
@@ -279,7 +279,7 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
             ("parent TEXT NOT NULL", "SET NULL", true),
         ] {
             let store = TestStore::new();
-            let base = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,note TEXT REFERENCES NOTES(id) ON DELETE {first_action}); CREATE TABLE nested({last_column} REFERENCES pins(id) ON DELETE {action})");
+            let base = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,note TEXT REFERENCES NOTES(id) ON DELETE {first_action}); CREATE TABLE nested(id INTEGER PRIMARY KEY,{last_column} REFERENCES pins(id) ON DELETE {action})");
             let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
             let result = store
                 .builder(
@@ -303,7 +303,8 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
     let store = TestStore::new();
     let db = open(&store).await;
     db.inspect_writer(|sql, _| {
-        sql.batch("CREATE TABLE pins(note TEXT REFERENCES notes(id))").unwrap()
+        sql.batch("CREATE TABLE pins(id INTEGER PRIMARY KEY, note TEXT REFERENCES notes(id))")
+            .unwrap()
     });
     db.close().await.unwrap();
     for read_only in [false, true] {
@@ -586,7 +587,7 @@ async fn an_invalid_local_child_migration_rolls_back_its_schema_and_version() {
                 Migration::addition(
                     2,
                     "pin",
-                    "CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
+                    "CREATE TABLE pins(id INTEGER PRIMARY KEY, note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
                 ),
             ],
         )

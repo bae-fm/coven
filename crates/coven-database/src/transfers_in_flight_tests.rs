@@ -292,7 +292,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
                     2,
                     "sending",
                     "CREATE VIEW mine AS SELECT _coven_sending_objects() AS files;
-                     CREATE TABLE copied(files TEXT); INSERT INTO copied SELECT files FROM mine",
+                     CREATE TABLE copied(files TEXT NOT NULL PRIMARY KEY); INSERT INTO copied SELECT files FROM mine",
                 ),
             ],
         )

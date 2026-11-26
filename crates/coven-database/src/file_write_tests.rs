@@ -176,7 +176,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
 #[tokio::test]
 async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes() {
     let store = TestStore::new();
-    let schema = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local_child(parent TEXT REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT); CREATE INDEX files_file ON files(file)";
+    let schema = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local_child(id INTEGER PRIMARY KEY, parent TEXT REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED); CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,title TEXT); CREATE INDEX files_file ON files(file)";
     let db = store
         .builder(tables(), vec![Migration::addition(1, "files", schema)])
         .namespaces(namespaces(Provenance::AppProvided))
@@ -204,7 +204,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
                         return Err(DbError::StoreClosed);
                     }
                     if failure == "commit" {
-                        sql.execute("INSERT INTO local_child VALUES('missing')", [])?;
+                        sql.execute("INSERT INTO local_child VALUES(NULL,'missing')", [])?;
                     }
                     Ok(())
                 },

@@ -1889,7 +1889,7 @@ pub enum SchemaError {
     FileColumnsChanged { table: String },
     /// A trigger declared shared isn't on the table (§9.4).
     MissingTrigger { table: String, trigger: String },
-    /// A synced table has no primary key (§9.2).
+    /// A table, synced or device-local, has no primary key (§9.2).
     NoPrimaryKey { table: String },
     /// A primary key column of a synced or device-local table allows NULL
     /// (§9.2).

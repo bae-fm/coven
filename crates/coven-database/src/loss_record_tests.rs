@@ -269,7 +269,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
 #[tokio::test]
 async fn wrong_column_table_is_a_damaged_database() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE notes(title)").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE notes(title NOT NULL PRIMARY KEY)").await.unwrap();
     let column = db.commit_writer(|sql, _| {
         crate::row_queries::frozen_column(sql, "other_table", "title").unwrap()
     });

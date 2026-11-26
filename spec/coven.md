@@ -2500,7 +2500,9 @@ Coven refuses, when the database opens and after migrating:
 - a key SQLite picks itself, such as an integer rowid alias, because two devices
   would pick the same number for different rows. An integer key derived from the
   row's content is not one of these, and is allowed;
-- a synced table with no primary key;
+- a table with no primary key, synced or device-local. Live queries learn
+  which rows a write changed by their keys, and no key names a row of such a
+  table. The refusal names the table;
 - an independent key with no text column to hold its UUID;
 - a primary-key column that allows NULL, in a synced table or a device-local
   one. SQLite lets a non-integer key column hold NULL unless it is declared `NOT
@@ -2509,9 +2511,7 @@ Coven refuses, when the database opens and after migrating:
   ([sqlive's spec, section 2](../crates/sqlive/SPEC.md#net-changes)), so a query
   reading Ben's `recent(path TEXT PRIMARY KEY)` would run again after every
   change to it. A key declared `NOT NULL`, or one in a `STRICT` or `WITHOUT
-  ROWID` table, where SQLite refuses NULL itself, opens. A local table with no
-  primary key is allowed: every change to it reaches every live query reading
-  it;
+  ROWID` table, where SQLite refuses NULL itself, opens;
 - a column that declares a collation other than `BINARY` when it is:
   - a primary-key column of a synced table;
   - a column of a synced table's unique constraint or unique index (a unique

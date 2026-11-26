@@ -36,7 +36,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         app.builder().synced_tables(vec![]).migrations(vec![Migration::addition(
             1,
             "initial content",
-            "CREATE TABLE initial_content (value TEXT NOT NULL); \
+            "CREATE TABLE initial_content (value TEXT NOT NULL PRIMARY KEY); \
                  INSERT INTO initial_content VALUES ('Household');",
         )])
     };

@@ -59,7 +59,7 @@ fn notes() -> Vec<SyncedTable> {
 }
 
 const WORDS: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL);
-     CREATE TABLE words(word TEXT NOT NULL);
+     CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY);
      CREATE INDEX words_ordered ON words(word COLLATE ordered)";
 
 /// `ordered` at version 1 sorts text backwards; version 2 sorts it forwards,
@@ -99,14 +99,14 @@ async fn opening_reports_its_steps_in_order() {
     let mut migrations = first;
     let later = clock.clone();
     migrations.push(Migration::addition_with(2, "tags", move |sql| {
-        sql.execute_batch("CREATE TABLE tags(tag TEXT NOT NULL)")?;
+        sql.execute_batch("CREATE TABLE tags(tag TEXT NOT NULL PRIMARY KEY)")?;
         later.set(SystemTime::UNIX_EPOCH + Duration::from_secs(1));
         Ok(())
     }));
     let waiting = seen.clone();
     migrations.push(Migration::addition_with(3, "colors", move |sql| {
         waiting.wait_for(at(OpenStep::Migrating, 1, 2));
-        sql.execute_batch("CREATE TABLE colors(color TEXT NOT NULL)")?;
+        sql.execute_batch("CREATE TABLE colors(color TEXT NOT NULL PRIMARY KEY)")?;
         Ok(())
     }));
     let builder = store.builder(notes(), migrations).sql_functions(ordered(2, &seen)).clock(clock);

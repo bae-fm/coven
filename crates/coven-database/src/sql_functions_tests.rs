@@ -447,7 +447,7 @@ async fn a_migration_needs_the_function_and_its_determinism() {
             Migration::addition(
                 2,
                 "words",
-                "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_folded ON words(fold(word))",
+                "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY); CREATE INDEX words_folded ON words(fold(word))",
             ),
         ]
     };
@@ -755,7 +755,7 @@ async fn analyzed_words(
                 Migration::addition(
                     2,
                     "words",
-                    "CREATE TABLE words(word TEXT NOT NULL); CREATE INDEX words_word ON words(word); INSERT INTO words VALUES ('a'),('b'),('c'); ANALYZE words",
+                    "CREATE TABLE words(word TEXT NOT NULL PRIMARY KEY); CREATE INDEX words_word ON words(word); INSERT INTO words VALUES ('a'),('b'),('c'); ANALYZE words",
                 ),
             ],
         )

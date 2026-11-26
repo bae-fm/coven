@@ -119,7 +119,11 @@ async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installati
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     let new = restored(&network, &replaced, handle, old).await;
     let mut migrations = crate::tests::migrations();
-    migrations.push(Migration::addition(2, "tags", "CREATE TABLE tags(tag TEXT NOT NULL)"));
+    migrations.push(Migration::addition(
+        2,
+        "tags",
+        "CREATE TABLE tags(tag TEXT NOT NULL PRIMARY KEY)",
+    ));
     let (_, cancel) = watch::channel(false);
     let statuses = std::cell::RefCell::new(Vec::new());
     let again = network

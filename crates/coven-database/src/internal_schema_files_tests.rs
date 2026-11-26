@@ -149,7 +149,7 @@ async fn coven_refuses_a_files_trigger_that_could_break_its_rules() {
             DbError::InternalTable { table: "coven_pins".into() },
         ),
         (
-            "CREATE TABLE seen(rows INTEGER);
+            "CREATE TABLE seen(rows INTEGER PRIMARY KEY);
              CREATE TRIGGER count AFTER INSERT ON coven_files BEGIN
                  INSERT INTO seen SELECT count(*) FROM _coven_rows;
              END",

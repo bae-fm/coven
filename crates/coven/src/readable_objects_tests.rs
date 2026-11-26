@@ -173,7 +173,7 @@ fn a_recorded_pending_record_fires_an_app_trigger_outside_a_store() {
     let connection = outside_store();
     connection
         .execute_batch(
-            "CREATE TABLE heard(operation INTEGER, subject_kind TEXT, reason_kind TEXT,
+            "CREATE TABLE heard(operation INTEGER PRIMARY KEY, subject_kind TEXT, reason_kind TEXT,
                  originals INTEGER);
              CREATE TRIGGER heard_record AFTER INSERT ON coven_pending BEGIN
                  INSERT INTO heard SELECT NEW.operation,NEW.subject_kind,NEW.reason_kind,

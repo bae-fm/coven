@@ -237,7 +237,7 @@ async fn migration_context_queries_and_parameters_use_the_actual_transaction() {
         .builder(
             vec![],
             vec![Migration::addition_with(1, "data", |sql| {
-                sql.execute_batch("CREATE TABLE local(id INTEGER, title TEXT)")?;
+                sql.execute_batch("CREATE TABLE local(id INTEGER PRIMARY KEY, title TEXT)")?;
                 assert_eq!(sql.execute("INSERT INTO local VALUES (?1, ?2)", (7, "title"))?, 1);
                 assert_eq!(
                     sql.query_row("SELECT title FROM local WHERE id=?1", [7], |r| r
@@ -261,7 +261,7 @@ async fn a_migration_statement_ends_at_its_first_nul() {
         .builder(
             vec![],
             vec![Migration::addition_with(1, "data", |sql| {
-                sql.execute_batch("CREATE TABLE local(id INTEGER)")?;
+                sql.execute_batch("CREATE TABLE local(id INTEGER PRIMARY KEY)")?;
                 assert_eq!(sql.execute("INSERT INTO local VALUES (?1) -- \0\n '", [7])?, 1);
                 sql.execute("ALTER TABLE local RENAME TO renamed -- \0\n '", [])?;
                 assert_eq!(
@@ -323,12 +323,12 @@ async fn an_implicit_sqlite_rollback_cannot_escape_the_owned_transaction() {
                 vec![],
                 vec![Migration::addition_with(1, "rollback", move |sql| {
                     sql.execute_batch(
-                        "CREATE TABLE local(id INTEGER UNIQUE); INSERT INTO local VALUES (1)",
+                        "CREATE TABLE local(id INTEGER PRIMARY KEY UNIQUE); INSERT INTO local VALUES (1)",
                     )?;
                     assert!(sql.execute("INSERT OR ROLLBACK INTO local VALUES (1)", []).is_err());
                     if continue_writing {
                         // Even an app that catches its SQL error cannot begin autocommit work.
-                        assert!(sql.execute_batch("CREATE TABLE escaped(id INTEGER)").is_err());
+                        assert!(sql.execute_batch("CREATE TABLE escaped(id INTEGER PRIMARY KEY)").is_err());
                     }
                     Ok(())
                 })],
@@ -371,7 +371,7 @@ async fn local_schema_and_views_have_no_migration_change() {
         "DROP VIEW existing",
         "DROP VIEW existing; CREATE VIEW existing AS SELECT extra FROM local",
         "CREATE TRIGGER view_insert INSTEAD OF INSERT ON existing BEGIN SELECT 1; END",
-        "CREATE TABLE another(id TEXT); CREATE INDEX another_ids ON another(id)",
+        "CREATE TABLE another(id TEXT NOT NULL PRIMARY KEY); CREATE INDEX another_ids ON another(id)",
     ] {
         let store = TestStore::new();
         let db = store.builder(notes_tables(), vec![
@@ -467,7 +467,7 @@ async fn local_changes_do_not_hide_synced_additions_or_breaks() {
     ] {
         let store = TestStore::new();
         let db = store.builder(vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)], vec![
-            Migration::addition(1, "initial", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX existing_index ON notes(title); CREATE TRIGGER existing_trigger AFTER INSERT ON notes BEGIN SELECT 1; END; CREATE TABLE local(title TEXT)"),
+            Migration::addition(1, "initial", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX existing_index ON notes(title); CREATE TRIGGER existing_trigger AFTER INSERT ON notes BEGIN SELECT 1; END; CREATE TABLE local(title TEXT NOT NULL PRIMARY KEY)"),
             if expected == MigrationChange::Breaking {
             Migration::breaking(2, "change", sql, crate::OldWrites::Drop, vec![SyncedTable::new("NOTES", RowIdentity::SharedKey)])
         } else { Migration::addition(2, "change", sql) },
@@ -484,7 +484,7 @@ async fn moving_an_index_or_trigger_between_local_and_synced_tables_is_breaking(
             [("INDEX effect ON", "INDEX"), ("TRIGGER effect AFTER INSERT ON", "TRIGGER")]
         {
             let suffix = if kind == "INDEX" { "(title)" } else { " BEGIN SELECT 1; END" };
-            let initial = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(title TEXT); CREATE {definition} {before}{suffix}");
+            let initial = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(title TEXT NOT NULL PRIMARY KEY); CREATE {definition} {before}{suffix}");
             let changed = format!("DROP {kind} effect; CREATE {definition} {after}{suffix}");
             let store = TestStore::new();
             let db = store
@@ -579,12 +579,12 @@ pub(crate) mod declarations {
         ("DELETE FROM notes", true),
         ("INSERT INTO notes VALUES('new','candidate','body')", true),
         ("ALTER TABLE notes ADD COLUMN color TEXT", false),
-        ("CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('candidate')", false),
+        ("CREATE TABLE cache(value TEXT NOT NULL PRIMARY KEY); INSERT INTO cache VALUES('candidate')", false),
         (
-            "CREATE TABLE cache(value TEXT); ALTER TABLE cache ADD COLUMN color TEXT CHECK(color <> '')",
+            "CREATE TABLE cache(value TEXT NOT NULL PRIMARY KEY); ALTER TABLE cache ADD COLUMN color TEXT CHECK(color <> '')",
             false,
         ),
-        ("CREATE TABLE cache(value TEXT); CREATE INDEX cache_values ON cache(value)", false),
+        ("CREATE TABLE cache(value TEXT NOT NULL PRIMARY KEY); CREATE INDEX cache_values ON cache(value)", false),
         ("SELECT 1", false),
     ];
 
@@ -735,7 +735,7 @@ pub(crate) mod declarations {
         let store = TestStore::new();
         let db = store.builder(notes(), vec![
             Migration::addition(1, "notes", NOTES),
-            Migration::addition(2, "local cache", "CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('kept'); CREATE INDEX cache_values ON cache(value)"),
+            Migration::addition(2, "local cache", "CREATE TABLE cache(value TEXT NOT NULL PRIMARY KEY); INSERT INTO cache VALUES('kept'); CREATE INDEX cache_values ON cache(value)"),
         ]).open().await.unwrap();
         assert_eq!(db.applied_migrations().unwrap()[1].change, crate::MigrationChange::NoChange);
         assert_eq!(db.schema_version().await.unwrap(), 2);

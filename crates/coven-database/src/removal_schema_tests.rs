@@ -297,7 +297,9 @@ async fn unnamed_check_sqlite_differential() {
     let mut schema =
         format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,n NUMERIC,{checks});");
     for (i, expression) in expressions.iter().enumerate() {
-        schema.push_str(&format!("CREATE TABLE oracle{i}(n NUMERIC CHECK({expression}));"));
+        schema.push_str(&format!(
+            "CREATE TABLE oracle{i}(id INTEGER PRIMARY KEY, n NUMERIC CHECK({expression}));"
+        ));
     }
     let fixture = TestStore::new();
     let db = fixture
@@ -346,7 +348,7 @@ async fn unnamed_check_sqlite_differential() {
             let mut expected = BTreeSet::new();
             for (i, expression) in expressions.iter().enumerate() {
                 match writer.execute(
-                    &format!("INSERT INTO oracle{i} VALUES(?1)"),
+                    &format!("INSERT INTO oracle{i}(n) VALUES(?1)"),
                     [crate::write_encoding::sql_value(&value)],
                 ) {
                     Ok(_) => {

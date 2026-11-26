@@ -642,7 +642,11 @@ async fn a_marker_queued_before_a_later_addition_serves_the_rebuild() {
     let (holder, marker) = holder.migrated(filled_migrations(FILL, OldWrites::Drop)).await;
     assert_eq!(marker.header.schema_version, 2);
     let mut migrations = filled_migrations(FILL, OldWrites::Drop);
-    migrations.push(Migration::addition(3, "extra", "CREATE TABLE extra(id TEXT)"));
+    migrations.push(Migration::addition(
+        3,
+        "extra",
+        "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY)",
+    ));
     let (_store, app) = rebuilding_app_with(&holder, migrations).await;
     let mut rebuild = rebuild_through_applied(&app, &holder).await;
     rebuild.migrate(marker.header).await.unwrap();

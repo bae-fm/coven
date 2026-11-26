@@ -184,6 +184,13 @@ impl<P: Policy> HostSql<P> {
         Ok(shapes)
     }
 
+    /// Refuse the schema if any of its tables has no primary key, naming the
+    /// table. A host calls this when it opens a database, so a keyless table
+    /// fails then and not at the first capture or live read.
+    pub fn refuse_tables_without_primary_key(&self) -> Result<(), PolicyError<P>> {
+        self.table_shapes().map(drop)
+    }
+
     /// Run `change`, which moves SQLite's schema cookie without changing any
     /// table, so the shapes stay those of the schema it leaves: the next
     /// capture reads no table again.

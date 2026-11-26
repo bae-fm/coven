@@ -343,7 +343,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
     const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT)";
     for variant in 0..9 {
         let declarations = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
-        let migration = Migration::breaking(2, "conversion", "CREATE TABLE no_key(id TEXT,title TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX titles ON notes(title)", crate::OldWrites::Convert(std::sync::Arc::new(move |row| {
+        let migration = Migration::breaking(2, "conversion", "CREATE TABLE no_key(id INTEGER PRIMARY KEY,title TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX titles ON notes(title)", crate::OldWrites::Convert(std::sync::Arc::new(move |row| {
             let column = row
                 .columns
                 .iter()

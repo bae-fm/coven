@@ -15,7 +15,7 @@ async fn analyzed_keys(store: &TestStore) -> crate::StoreDatabase {
                 Migration::addition(
                     2,
                     "keys",
-                    "CREATE TABLE keys(key BLOB NOT NULL); CREATE INDEX keys_key ON keys(key); INSERT INTO keys VALUES (coven_key('a')),(coven_key('b')),(coven_key(7,'a')); ANALYZE keys",
+                    "CREATE TABLE keys(key BLOB NOT NULL PRIMARY KEY); CREATE INDEX keys_key ON keys(key); INSERT INTO keys VALUES (coven_key('a')),(coven_key('b')),(coven_key(7,'a')); ANALYZE keys",
                 ),
             ],
         )

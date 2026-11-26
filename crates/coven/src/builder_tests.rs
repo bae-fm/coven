@@ -275,7 +275,7 @@ mod recovery {
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
     }
     fn recovery_migrations() -> Vec<Migration> {
-        vec![Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT)")]
+        vec![Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT NOT NULL PRIMARY KEY)")]
     }
 
     #[tokio::test]

@@ -34,7 +34,10 @@ async fn damaged_files_fail_before_migration_or_wal_changes() {
 async fn internal_schema_migrates_on_open_and_preserves_app_data() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')").unwrap();
+    raw.execute_batch(
+        "CREATE TABLE local(value TEXT NOT NULL PRIMARY KEY); INSERT INTO local VALUES('kept')",
+    )
+    .unwrap();
     drop(raw);
     for _ in 0..2 {
         let db = store.builder(vec![], vec![]).open().await.unwrap();
@@ -95,7 +98,10 @@ async fn creating_the_internal_schema_rolls_back_on_failure() {
 async fn read_only_refuses_a_database_without_coven_tables_and_changes_nothing() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
-    raw.execute_batch("CREATE TABLE local(value TEXT); INSERT INTO local VALUES('kept')").unwrap();
+    raw.execute_batch(
+        "CREATE TABLE local(value TEXT NOT NULL PRIMARY KEY); INSERT INTO local VALUES('kept')",
+    )
+    .unwrap();
     drop(raw);
     let before = std::fs::read(store.database_path()).unwrap();
     assert!(matches!(
@@ -248,7 +254,7 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
     for shape in [
         "id INT NOT NULL PRIMARY KEY",
         "id INT NOT NULL PRIMARY KEY,rowid TEXT,oid TEXT,_rowid_ TEXT",
-        "rowid TEXT,oid TEXT,_rowid_ TEXT,id INT",
+        "rowid TEXT,oid TEXT,_rowid_ TEXT,id INT NOT NULL PRIMARY KEY",
     ] {
         for suffix in ["", " WITHOUT ROWID"] {
             if shape.starts_with("rowid") && !suffix.is_empty() {
@@ -286,8 +292,8 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
 #[tokio::test]
 async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
     let store = TestStore::new();
-    let db=store.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(folder TEXT REFERENCES folders(id)); CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN DELETE FROM folders WHERE id='Work'; END").await.unwrap();
-    sql(&db,"INSERT INTO folders VALUES('Work'); INSERT INTO links VALUES('Work'); INSERT INTO notes VALUES('45','Groceries'),('46','Shopping')").await.unwrap();
+    let db=store.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id INTEGER PRIMARY KEY, folder TEXT REFERENCES folders(id)); CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN DELETE FROM folders WHERE id='Work'; END").await.unwrap();
+    sql(&db,"INSERT INTO folders VALUES('Work'); INSERT INTO links VALUES(NULL,'Work'); INSERT INTO notes VALUES('45','Groceries'),('46','Shopping')").await.unwrap();
     crate::tests::remote_update(
         &db,
         "notes",
@@ -365,7 +371,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
 #[tokio::test]
 async fn observation_and_local_write_sessions_cover_app_and_materialized_changes() {
     let store = TestStore::new();
-    let db=store.schema(vec![SyncedTable::new("roots",RowIdentity::SharedKey),SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],"CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT,root TEXT REFERENCES roots(id)); CREATE INDEX notes_root ON notes(root); CREATE TABLE audit(value TEXT); CREATE TRIGGER gone AFTER DELETE ON notes BEGIN INSERT INTO audit VALUES(old.title); END").await.unwrap();
+    let db=store.schema(vec![SyncedTable::new("roots",RowIdentity::SharedKey),SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],"CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT,root TEXT REFERENCES roots(id)); CREATE INDEX notes_root ON notes(root); CREATE TABLE audit(id INTEGER PRIMARY KEY, value TEXT); CREATE TRIGGER gone AFTER DELETE ON notes BEGIN INSERT INTO audit VALUES(NULL,old.title); END").await.unwrap();
     let mut notes: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
     let mut audit: crate::LiveQuery<_, DbError> = db
@@ -404,7 +410,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
 #[tokio::test]
 async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(new.value); END").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(id INTEGER PRIMARY KEY, value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(NULL,new.value); END").await.unwrap();
     // The metadata reads of a write of two updates and one of six: each
     // update and the trigger it fires read none, so the two are the same,
     // whatever the commit reads once. A first write reads the tables'
@@ -442,7 +448,7 @@ async fn local_restrict_children_are_refused_before_circle_removal() {
     let store = TestStore::new();
     let result = store.schema(
         vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE pins(id INTEGER PRIMARY KEY, note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
     ).await;
     let error = crate::tests::database_error(
         result.err().expect("local pins must not block a synced deletion"),

@@ -55,7 +55,7 @@ fn expected(columns: &[(&str, &[&str])], keys: &[(&str, &str)]) -> Registered {
 #[tokio::test]
 async fn every_synced_column_and_foreign_key_is_registered_before_any_write_names_it() {
     let steps = [
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE CASCADE,other TEXT REFERENCES notes(id) ON DELETE SET NULL); CREATE TABLE pins(note_id TEXT REFERENCES notes(id) ON DELETE CASCADE)",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE CASCADE,other TEXT REFERENCES notes(id) ON DELETE SET NULL); CREATE TABLE pins(id INTEGER PRIMARY KEY, note_id TEXT REFERENCES notes(id) ON DELETE CASCADE)",
         "CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); ALTER TABLE links ADD COLUMN extra TEXT",
         "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,note_id TEXT REFERENCES notes(id) ON DELETE CASCADE,extra TEXT); INSERT INTO rebuilt SELECT id,note_id,extra FROM links; DROP TABLE links; ALTER TABLE rebuilt RENAME TO links",
         "ALTER TABLE links RENAME COLUMN note_id TO note",
@@ -128,7 +128,7 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
     let db = store.builder(tables(true), migrations(steps.len())).open().await.unwrap();
     sql(
         &db,
-        "INSERT INTO notes VALUES('n'); INSERT INTO links VALUES('l','n','x'); INSERT INTO tags VALUES('t','n'); INSERT INTO pins VALUES('n')",
+        "INSERT INTO notes VALUES('n'); INSERT INTO links VALUES('l','n','x'); INSERT INTO tags VALUES('t','n'); INSERT INTO pins VALUES(NULL,'n')",
     )
     .await
     .unwrap();

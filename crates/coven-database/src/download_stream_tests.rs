@@ -134,7 +134,7 @@ async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
-    let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); CREATE INDEX links_parent ON links(parent); CREATE TABLE audit(value TEXT); CREATE TRIGGER edited AFTER UPDATE ON links BEGIN INSERT INTO audit VALUES('update'); END";
+    let schema="CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE); CREATE INDEX links_parent ON links(parent); CREATE TABLE audit(id INTEGER PRIMARY KEY, value TEXT); CREATE TRIGGER edited AFTER UPDATE ON links BEGIN INSERT INTO audit VALUES(NULL,'update'); END";
     let a = sa.schema(references(), schema).await.unwrap();
     let b = sb.schema(references(), schema).await.unwrap();
     sql(&a, "INSERT INTO parents VALUES('old'); INSERT INTO links VALUES('link','old')")
@@ -510,7 +510,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE guard(parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER guarded AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO guard VALUES('absent'); END";
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE guard(id INTEGER PRIMARY KEY, parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER guarded AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO guard VALUES(NULL,'absent'); END";
     let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();

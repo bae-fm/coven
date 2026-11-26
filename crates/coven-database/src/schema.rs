@@ -735,18 +735,20 @@ impl SchemaForeignKey {
     }
 }
 
-/// Refuse a device-local table whose primary key allows NULL (§9.2). Coven
-/// tells live queries which of a local table's rows a write changed by their
-/// keys, and a NULL key names no row, so every live query reading the table
-/// would run again after any change to it. Refusing such a key makes a
-/// NULL-keyed row impossible instead. A table with no primary key is told of
-/// as a whole, by design. An integer rowid alias has no key index and can't
-/// hold NULL. Virtual tables and their shadow tables are SQLite's own.
+/// Refuse a device-local table that has no primary key, or whose primary key
+/// allows NULL (§9.2). Coven tells live queries which of a local table's rows
+/// a write changed by their keys. A table with no key names no row, and
+/// sqlive refuses it. A NULL key names no row either, so every live query
+/// reading the table would run again after any change to it; refusing such a
+/// key makes a NULL-keyed row impossible instead. An integer rowid alias has
+/// no key index and can't hold NULL. Virtual tables and their shadow tables
+/// are SQLite's own.
 pub(crate) fn validate_local_keys(
     db: &StoreSql,
     schema: &Schema,
     declarations: &[SyncedTable],
 ) -> Result<(), DbError> {
+    db.refuse_tables_without_primary_key()?;
     let synced: BTreeSet<String> =
         declarations.iter().map(|table| table.name.to_ascii_lowercase()).collect();
     let sqlite_own: BTreeSet<String> = db

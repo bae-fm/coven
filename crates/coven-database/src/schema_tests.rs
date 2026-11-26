@@ -207,6 +207,13 @@ async fn primary_key_rules_have_distinct_errors() {
         SchemaError::NoPrimaryKey { table: "notes".into() },
     )
     .await;
+    // A device-local table has no key either, which sqlive refuses.
+    rejects(
+        "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY); CREATE TABLE recent (path TEXT)",
+        notes_tables(),
+        SchemaError::NoPrimaryKey { table: "recent".into() },
+    )
+    .await;
     for schema in [
         "CREATE TABLE notes (id INTEGER PRIMARY KEY)",
         "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT)",
@@ -428,7 +435,7 @@ async fn declarations_have_distinct_errors() {
     }
     for schema in [
         "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)",
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local(id TEXT); CREATE TRIGGER edited AFTER UPDATE ON local WHEN NOT coven_applying() BEGIN SELECT 1; END",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER edited AFTER UPDATE ON local WHEN NOT coven_applying() BEGIN SELECT 1; END",
     ] {
         rejects(schema, vec![shared("notes").shared_trigger("edited")], SchemaError::MissingTrigger { table: "notes".into(), trigger: "edited".into() }).await;
     }
@@ -467,7 +474,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
 async fn opening_an_existing_schema_refuses_an_impossible_local_action() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.inspect_writer(|db, _| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET NULL)").unwrap());
+    db.inspect_writer(|db, _| db.batch("CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY, parent TEXT NOT NULL REFERENCES parent(id) ON UPDATE SET NULL)").unwrap());
     db.close().await.unwrap();
     for read_only in [false, true] {
         let builder = store.builder(vec![], vec![]);
@@ -491,7 +498,7 @@ async fn nullable_set_null_actions_are_accepted() {
     ] {
         let store = TestStore::new();
         let schema = format!(
-            "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child({definition})"
+            "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id INTEGER PRIMARY KEY,{definition})"
         );
         let db = store
             .builder(
@@ -571,7 +578,7 @@ async fn device_local_nullable_primary_keys_are_refused_on_open_and_after_migrat
         "CREATE TABLE recent(path TEXT PRIMARY KEY, played TEXT) STRICT",
         "CREATE TABLE recent(path TEXT PRIMARY KEY, played TEXT) WITHOUT ROWID",
         "CREATE TABLE recent(id INTEGER PRIMARY KEY, path TEXT)",
-        "CREATE TABLE recent(path TEXT, played TEXT)",
+        "CREATE TABLE recent(path TEXT NOT NULL PRIMARY KEY, played TEXT)",
         // A virtual table and its shadow tables are SQLite's own.
         "CREATE VIRTUAL TABLE recent USING fts5(path)",
     ] {
@@ -668,7 +675,7 @@ async fn nonprimary_references_fail_migration_and_both_open_modes() {
             "FOREIGN KEY(x,y) REFERENCES Parent(a,a)",
         ),
         ("a TEXT NOT NULL,b TEXT NOT NULL,PRIMARY KEY(a,b)", "FOREIGN KEY(x) REFERENCES Parent"),
-        ("code TEXT UNIQUE", "FOREIGN KEY(x) REFERENCES Parent(code)"),
+        ("id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE", "FOREIGN KEY(x) REFERENCES Parent(code)"),
         ("id TEXT NOT NULL PRIMARY KEY", "FOREIGN KEY(x) REFERENCES absent(id)"),
     ] {
         let store = TestStore::new();

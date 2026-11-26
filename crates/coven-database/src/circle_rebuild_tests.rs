@@ -29,7 +29,7 @@ fn migrations(starts_from: Vec<SyncedTable>) -> Vec<Migration> {
             OldWrites::Drop,
             starts_from,
         ),
-        Migration::addition(3, "extra", "CREATE TABLE extra(id TEXT)"),
+        Migration::addition(3, "extra", "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY)"),
     ]
 }
 
