@@ -1,4 +1,4 @@
-use crate::SchemaProbe;
+use crate::{SchemaProbe, SelectNull};
 
 const SCHEMA: &str = "
 CREATE TABLE people (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, note TEXT) STRICT;
@@ -16,7 +16,7 @@ CREATE VIRTUAL TABLE docs USING fts5(body);";
 fn never_null(sql: &str) -> Vec<bool> {
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
-    statement.columns.iter().map(|column| !column.nulls.nullable).collect()
+    statement.columns.iter().map(|column| !column.nulls.nullable()).collect()
 }
 
 #[track_caller]
@@ -201,31 +201,45 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
 }
 
 #[test]
-fn a_column_says_whether_a_later_select_can_give_it_null() {
+fn a_column_says_what_each_select_of_a_compound_can_give_it() {
+    use SelectNull::{Computed, Literal, MissingRow, Never, Value};
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     for (sql, expected) in [
-        // The first SELECT's own NULLs are none of a later one's.
-        ("SELECT note, id FROM people", [false, false]),
-        ("SELECT note, id FROM people UNION ALL SELECT 'a', 'b'", [false, false]),
-        ("SELECT id, name FROM people UNION ALL SELECT NULL, 'b'", [true, false]),
-        ("SELECT id, name FROM people UNION SELECT id, note FROM people", [false, true]),
+        ("SELECT id, note FROM people", [vec![Never], vec![Value]]),
         (
-            "SELECT id, name FROM people UNION ALL SELECT 'a', 'b' UNION ALL VALUES ('c', NULL)",
-            [false, true],
+            "SELECT id, name FROM people UNION ALL SELECT NULL, 'b' UNION SELECT upper(id), note \
+             FROM people",
+            [vec![Never, Literal, Computed], vec![Never, Never, Value]],
         ),
         (
-            "SELECT id, name FROM people \
-             UNION ALL SELECT p.id, p.name FROM issues LEFT JOIN people AS p ON 1",
-            [true, true],
+            "SELECT p.id, p.rowid FROM issues LEFT JOIN people AS p ON 1 \
+             UNION ALL SELECT (SELECT 'a'), true",
+            [vec![MissingRow(1), Value], vec![MissingRow(1), Never]],
         ),
-        // A subquery's compound is its own.
+        // Two items' rows can be missing apart, and a padded NULL column is
+        // NULL in a row of its item too.
         (
-            "SELECT s.id, s.name FROM (SELECT id, name FROM people UNION SELECT NULL, NULL) AS s",
-            [false, false],
+            "SELECT a.id, b.note FROM issues LEFT JOIN people AS a ON 1 LEFT JOIN people AS b ON 1",
+            [vec![MissingRow(1)], vec![Value]],
+        ),
+        (
+            "SELECT 'a', upper(p.id) FROM issues LEFT JOIN people AS p ON 1 \
+             UNION ALL VALUES (NULL, 'b'), (NULL, NULL)",
+            [vec![Never, Literal], vec![Computed, Value]],
+        ),
+        // A subquery's compound and missing rows are its own.
+        (
+            "SELECT s.id, s.name FROM \
+             (SELECT id, upper(name) AS name FROM people UNION SELECT NULL, 'a') AS s",
+            [vec![Value], vec![Computed]],
+        ),
+        (
+            "SELECT s.id, s.id FROM (SELECT p.id FROM issues LEFT JOIN people AS p ON 1) AS s",
+            [vec![Value], vec![Value]],
         ),
     ] {
         let statement = probe.prepare(sql).unwrap();
-        let found = [0, 1].map(|position| statement.columns[position].nulls.null_in_later_select);
+        let found = [0, 1].map(|position| statement.columns[position].nulls.selects.clone());
         assert_eq!(found, expected, "{sql}");
     }
 }

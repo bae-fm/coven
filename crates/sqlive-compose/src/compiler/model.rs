@@ -16,10 +16,10 @@ pub(crate) enum Reading {
         /// The Rust path of the fragment's type, as the call's own code
         /// writes it.
         path: String,
-        /// The position, from the field's column, of the fragment's first
-        /// column that can't be NULL, which a fragment that holds this one
-        /// reports as its own.
-        presence: Option<usize>,
+        /// The positions, from the field's column, of the fragment's columns
+        /// that each of its rows holds a value in (`Record::required`),
+        /// which a fragment that holds this one reports as its own.
+        required: Vec<usize>,
     },
     /// The columns of a fragment that can be missing: they are all NULL then.
     MissingSpread {
@@ -85,11 +85,19 @@ pub(crate) struct Record {
     pub(crate) sql: String,
     /// How many columns it returns.
     pub(crate) width: usize,
-    /// The position of its first column that can't be NULL, which tells a
-    /// row from the NULLs of a missing row.
-    pub(crate) presence: Option<usize>,
+    /// The positions, in order, of the columns that each of its rows holds a
+    /// value in: those its type reads into a field that holds no NULL.
+    pub(crate) required: Vec<usize>,
     /// Whether it returns exactly one row for any parent row.
     pub(crate) one_row: bool,
+}
+
+impl Record {
+    /// The position of its first column that can't be NULL, which tells a
+    /// row from the NULLs of a missing row.
+    pub(crate) fn presence(&self) -> Option<usize> {
+        self.required.first().copied()
+    }
 }
 
 /// The text of a crate's manifest: the records of its fragments.

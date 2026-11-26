@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
-use crate::result_nulls::{statement_nulls, ColumnNulls, StatementNulls};
+use crate::result_nulls::{statement_nulls, ColumnNulls, SelectNull, StatementNulls};
 use crate::scope_plan::ScopePlan;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
@@ -135,24 +135,22 @@ impl SchemaProbe {
                     _ => None,
                 };
             let nulls = match &statement_nulls {
-                StatementNulls::Select(columns) => columns[position],
-                StatementNulls::Write => ColumnNulls {
-                    nullable: match &origin {
-                        Some(origin) => !table_column_never_null(
+                StatementNulls::Select(columns) => columns[position].clone(),
+                StatementNulls::Write => {
+                    let never_null = match &origin {
+                        Some(origin) => table_column_never_null(
                             &self.connection,
                             &origin.table,
                             &origin.column,
                         )?,
-                        None => true,
-                    },
-                    row_can_be_missing: false,
-                    null_in_later_select: false,
-                },
-                StatementNulls::Unknown => ColumnNulls {
-                    nullable: true,
-                    row_can_be_missing: true,
-                    null_in_later_select: true,
-                },
+                        None => false,
+                    };
+                    let null = if never_null { SelectNull::Never } else { SelectNull::Value };
+                    ColumnNulls { selects: vec![null], row_can_be_missing: false }
+                }
+                StatementNulls::Unknown => {
+                    ColumnNulls { selects: vec![SelectNull::Value], row_can_be_missing: true }
+                }
             };
             columns.push(ProbedColumn { name: metadata.name().to_owned(), origin, nulls });
         }

@@ -93,10 +93,16 @@ pub enum Cause {
         declared: String,
     },
     /// A column that can be NULL has a declared type that can't hold NULL.
-    #[error("{column} can be NULL, and the header types it {declared}, which holds no NULL")]
+    #[error(
+        "{column} can be NULL{}, and the header types it {declared}, which holds no NULL",
+        in_select(.select)
+    )]
     NullableColumn {
         /// The column.
         column: String,
+        /// The first SELECT of a compound, counted from 1, that can give it
+        /// NULL.
+        select: Option<usize>,
         /// The declared type.
         declared: String,
     },
@@ -294,6 +300,20 @@ pub enum Cause {
         /// The fragment.
         fragment: String,
     },
+    /// A later SELECT of a compound can give NULL in a column of a spread
+    /// that each row of its fragment holds a value in, in a row the reader
+    /// takes for one of the fragment's.
+    #[error("{concerns}: SELECT {select} of the compound can give NULL in {column}, where each row of {fragment} holds a value")]
+    NullInSpread {
+        /// The call's name.
+        concerns: String,
+        /// The SELECT, counted from 1.
+        select: usize,
+        /// The column, after the spread's alias.
+        column: String,
+        /// The fragment.
+        fragment: String,
+    },
     /// The result items of the statement don't add up to its columns.
     #[error("{concerns}: the compiler can't tell which result item gives which column")]
     Unaligned {
@@ -359,6 +379,11 @@ pub enum Cause {
 fn keys(names: &[String]) -> String {
     let noun = if names.len() == 1 { "key" } else { "keys" };
     format!("{noun} {}", names.join(", "))
+}
+
+/// Where a compound's error names the SELECT that can give NULL.
+fn in_select(select: &Option<usize>) -> String {
+    select.map_or_else(String::new, |select| format!(" in SELECT {select} of the compound"))
 }
 
 fn json_keys_message(column: &str, shape: &str, extra: &[String], missing: &[String]) -> String {

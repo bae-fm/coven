@@ -10,7 +10,7 @@ fn record(path: &str, sql: &str) -> Record {
         relations: vec![],
         sql: sql.into(),
         width: 1,
-        presence: Some(0),
+        required: vec![0],
         one_row: false,
     }
 }

@@ -14,8 +14,8 @@
 //!
 //! It also says of each column whether the statement can give no row of the
 //! FROM item the column comes from: a join pads that item, or an aggregate
-//! with no GROUP BY makes a row over no rows. And it says whether a later
-//! SELECT of the statement's compound can give NULL in the column.
+//! with no GROUP BY makes a row over no rows. And it says what each SELECT of
+//! the statement's compound can give the column.
 
 use rusqlite::Connection;
 use sqlite3_parser::{
@@ -34,22 +34,15 @@ use crate::schema_probe::table_column_never_null;
 use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
 use crate::sql::unparenthesized;
 
-/// Where a statement can give NULL in one of its result columns. The schema
-/// probe takes each of these to be true of a statement it can't read, and of
-/// a SELECT whose columns it can't tell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a statement can give NULL in one of its result columns. Of a
+/// statement the schema probe can't read, and of a SELECT whose columns it
+/// can't tell, it says that the column can be NULL (`SelectNull::Value`) and
+/// that its row can be missing.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnNulls {
-    /// Whether a row the statement returns can hold NULL in the column. A
-    /// table's column holds none when the table declares it `NOT NULL`, or it
-    /// is the rowid, by one of the rowid's own names or as an `INTEGER PRIMARY
-    /// KEY` column. The statement keeps it so unless a query the column passes
-    /// through gives NULL of its own: a join that pads its FROM item, an
-    /// aggregate with no GROUP BY, a SELECT of a compound or a scalar
-    /// subquery. In a SELECT, a literal other than NULL holds none either, and
-    /// every other computed column can hold NULL. In a write, only a table's
-    /// column can be one that holds none: each computed column of a
-    /// RETURNING, a literal too, can hold NULL.
-    pub nullable: bool,
+    /// What each SELECT of the statement's compound can give the column, in
+    /// order, or what its one SELECT or write can.
+    pub selects: Vec<SelectNull>,
     /// Whether the statement can give no row of the FROM item it takes the
     /// column from, and so NULL in each of that item's columns: a join pads
     /// the item, or an aggregate with no GROUP BY makes a row over no rows.
@@ -58,10 +51,70 @@ pub struct ColumnNulls {
     /// column comes from no item, and a RETURNING's column from the row the
     /// write changed, so neither has a missing row.
     pub row_can_be_missing: bool,
-    /// Whether a SELECT of the statement's compound after the first can give
-    /// NULL in the column, whatever the first can give. False in a statement
-    /// with no compound operator and in a write's RETURNING.
-    pub null_in_later_select: bool,
+}
+
+impl ColumnNulls {
+    /// Whether a row the statement returns can hold NULL in the column, as far
+    /// as the probe can tell.
+    pub fn nullable(&self) -> bool {
+        self.selects.iter().any(|select| *select != SelectNull::Never)
+    }
+}
+
+/// What one SELECT can give a result column. It takes a column through every
+/// query the column passes through. A table's column holds no NULL when the
+/// table declares it `NOT NULL`, or it is the rowid, by one of the rowid's own
+/// names or as an `INTEGER PRIMARY KEY` column. In a write, only a table's
+/// column can be one that holds none: each computed column of a RETURNING, a
+/// literal too, is one that can be NULL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectNull {
+    /// No NULL: a table's column that holds none, or a literal other than
+    /// NULL.
+    Never,
+    /// A computed value other than a literal and a scalar subquery, which can
+    /// be NULL as far as the probe can tell: the probe reads no computation.
+    Computed,
+    /// Always NULL: the literal NULL.
+    Literal,
+    /// NULL where the SELECT has no row of one of its FROM items, and in each
+    /// row it has of that item a value, or a computed one. Two columns of one
+    /// SELECT with the same number come from the same item.
+    MissingRow(usize),
+    /// A value that can be NULL otherwise: a table's column that can be, a
+    /// scalar subquery, or a column the probe can't follow.
+    Value,
+}
+
+impl SelectNull {
+    /// What the column of a query can give that each of whose SELECTs, or
+    /// rows of a VALUES, gives it one of `selects`, to the SQL that reads the
+    /// query.
+    fn through(selects: &[Self]) -> Self {
+        let every = |one_of: &[Self]| selects.iter().all(|select| one_of.contains(select));
+        if every(&[Self::Never]) {
+            Self::Never
+        } else if every(&[Self::Literal]) {
+            Self::Literal
+        } else if every(&[Self::Never, Self::Computed]) {
+            Self::Computed
+        } else {
+            // A missing row inside the query is none of its reader's.
+            Self::Value
+        }
+    }
+
+    /// What the computed expression `expr` can give.
+    fn of_computed(expr: &Expr<'_>) -> Self {
+        match unparenthesized(expr) {
+            Expr::Literal(Literal::Numeric(_) | Literal::String(_) | Literal::Blob(_)) => {
+                Self::Never
+            }
+            Expr::Literal(Literal::Null) => Self::Literal,
+            Expr::Subquery(_) => Self::Value,
+            _ => Self::Computed,
+        }
+    }
 }
 
 /// A column that a query or a FROM item gives.
@@ -70,17 +123,14 @@ struct Column {
     /// Its name, lowercase, when it has one that SQL around it can use.
     name: Option<String>,
     /// What its NULLs are. Where a core reads the column, `Item::read` says
-    /// whether the item's row can be missing, and that no later SELECT of
-    /// the core's own compound has been read.
+    /// them of that core.
     nulls: ColumnNulls,
 }
 
 impl Column {
-    /// A column called `name` that comes from no FROM item's row.
-    fn new(name: Option<String>, nullable: bool) -> Self {
-        let nulls =
-            ColumnNulls { nullable, row_can_be_missing: false, null_in_later_select: false };
-        Self { name, nulls }
+    /// A column called `name` of one SELECT, which gives it `null`.
+    fn new(name: Option<String>, null: SelectNull) -> Self {
+        Self { name, nulls: ColumnNulls { selects: vec![null], row_can_be_missing: false } }
     }
 }
 
@@ -97,6 +147,8 @@ struct Item {
     /// columns: a join gives it NULL for the rows it doesn't join, or the
     /// core's aggregate makes a row over no rows.
     padded: bool,
+    /// Its place among its core's items, which tells it from them.
+    number: usize,
     /// The columns, lowercase, that USING or NATURAL compares with an item
     /// to its left, which a bare name and a `*` take from that item.
     using: Vec<String>,
@@ -109,13 +161,15 @@ impl Item {
 
     /// `column`, one of its columns, as the core that reads the item gets it.
     fn read(&self, column: &Column) -> Column {
+        let null = match SelectNull::through(&column.nulls.selects) {
+            SelectNull::Never | SelectNull::Computed if self.padded => {
+                SelectNull::MissingRow(self.number)
+            }
+            null => null,
+        };
         Column {
             name: column.name.clone(),
-            nulls: ColumnNulls {
-                nullable: column.nulls.nullable || self.padded,
-                row_can_be_missing: self.padded,
-                null_in_later_select: false,
-            },
+            nulls: ColumnNulls { selects: vec![null], row_can_be_missing: self.padded },
         }
     }
 }
@@ -182,8 +236,8 @@ struct Analysis<'c> {
 
 impl Analysis<'_> {
     /// The columns of `select`, where its SQL can name `ctes`: those of its
-    /// first SELECT, each of which can be NULL where any SELECT of the
-    /// compound can give NULL in it.
+    /// first SELECT, each with what every SELECT of the compound can give
+    /// it.
     fn select<'a>(
         &self,
         select: &'a Select<'a>,
@@ -207,8 +261,7 @@ impl Analysis<'_> {
                 return Ok(None);
             };
             for (column, other) in columns.iter_mut().zip(arm) {
-                column.nulls.nullable |= other.nulls.nullable;
-                column.nulls.null_in_later_select |= other.nulls.nullable;
+                column.nulls.selects.extend(other.nulls.selects);
             }
         }
         Ok(Some(columns))
@@ -227,8 +280,11 @@ impl Analysis<'_> {
                     .into_iter()
                     .enumerate()
                     .map(|(position, name)| {
-                        let nullable = rows.iter().any(|row| !never_null_literal(&row[position]));
-                        Column::new(Some(name), nullable)
+                        let rows: Vec<_> = rows
+                            .iter()
+                            .map(|row| SelectNull::of_computed(&row[position]))
+                            .collect();
+                        Column::new(Some(name), SelectNull::through(&rows))
                     })
                     .collect();
                 return Ok(Some(columns));
@@ -238,6 +294,9 @@ impl Analysis<'_> {
         let mut items = Vec::new();
         if let Some(from) = from {
             self.from(from, ctes, &mut items)?;
+        }
+        for (number, item) in items.iter_mut().enumerate() {
+            item.number = number;
         }
         // An aggregate with no GROUP BY gives one row even over no rows,
         // which holds NULL in each column the core takes from a FROM item.
@@ -434,6 +493,7 @@ impl Analysis<'_> {
             columns,
             table: false,
             padded: false,
+            number: 0,
             using: Vec::new(),
         };
         match table {
@@ -476,7 +536,7 @@ impl Analysis<'_> {
         let columns: Vec<Column> = declared_columns(self.connection, stored)?
             .into_iter()
             .filter(|column| !column.hidden)
-            .map(|column| Column::new(Some(column.name.to_ascii_lowercase()), true))
+            .map(|column| Column::new(Some(column.name.to_ascii_lowercase()), SelectNull::Value))
             .collect();
         Ok((!columns.is_empty()).then_some(columns))
     }
@@ -493,7 +553,7 @@ impl Analysis<'_> {
         let names = cte.columns.map(crate::sql::column_list_names);
         let Some(inner) = ctes.reading(&declared) else {
             return Ok(names.map(|names| {
-                names.into_iter().map(|name| Column::new(Some(name), true)).collect()
+                names.into_iter().map(|name| Column::new(Some(name), SelectNull::Value)).collect()
             }));
         };
         Ok(self.select(cte.select, &inner)?.map(|columns| renamed(columns, names)))
@@ -505,8 +565,14 @@ impl Analysis<'_> {
         name: &QualifiedName<'_>,
         qualifier: Option<String>,
     ) -> rusqlite::Result<Item> {
-        let mut item =
-            Item { qualifier, columns: None, table: false, padded: false, using: Vec::new() };
+        let mut item = Item {
+            qualifier,
+            columns: None,
+            table: false,
+            padded: false,
+            number: 0,
+            using: Vec::new(),
+        };
         if name.db_name.as_ref().is_some_and(|database| *database != "main") {
             return Ok(item);
         }
@@ -543,7 +609,8 @@ impl Analysis<'_> {
                 continue;
             }
             let never_null = table_column_never_null(self.connection, &stored, &column.name)?;
-            columns.push(Column::new(Some(column.name.to_ascii_lowercase()), !never_null));
+            let null = if never_null { SelectNull::Never } else { SelectNull::Value };
+            columns.push(Column::new(Some(column.name.to_ascii_lowercase()), null));
         }
         if !columns.is_empty() {
             item.columns = Some(columns);
@@ -595,7 +662,7 @@ fn renamed(mut columns: Vec<Column>, names: Option<Vec<String>>) -> Vec<Column> 
 /// The column that the result expression `expr` of a core whose FROM items are
 /// `items` gives.
 fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
-    let computed = Column::new(None, !never_null_literal(expr));
+    let computed = Column::new(None, SelectNull::of_computed(expr));
     let (qualifier, name) = match unparenthesized(expr) {
         Expr::Id(name) => (None, name.0),
         Expr::Name(name) => (None, name.0),
@@ -617,32 +684,22 @@ fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
         }
         // An item of unknown columns may be the one that has the name.
         if item.columns.is_none() {
-            return item.read(&Column::new(Some(name), true));
+            return item.read(&Column::new(Some(name), SelectNull::Value));
         }
         if item.table {
-            rowids.push(item.padded);
+            rowids.push(item);
         }
     }
     match rowids[..] {
-        [padded] if ROWID_NAMES.contains(&name.as_str()) => Column {
-            name: Some(name),
-            nulls: ColumnNulls {
-                nullable: padded,
-                row_can_be_missing: padded,
-                null_in_later_select: false,
-            },
-        },
+        [item] if ROWID_NAMES.contains(&name.as_str()) => {
+            item.read(&Column::new(Some(name), SelectNull::Never))
+        }
+        // SQLite reads `true` and `false` as numbers where no column has the
+        // name.
+        _ if name == "true" || name == "false" => Column::new(Some(name), SelectNull::Never),
         // A name of a row around the core, or none of any item's.
-        _ => Column::new(Some(name), true),
+        _ => Column::new(Some(name), SelectNull::Value),
     }
-}
-
-/// Whether `expr` is a literal other than NULL.
-fn never_null_literal(expr: &Expr<'_>) -> bool {
-    matches!(
-        unparenthesized(expr),
-        Expr::Literal(Literal::Numeric(_) | Literal::String(_) | Literal::Blob(_))
-    )
 }
 
 /// The columns a `*` gives of `items`, as the core that reads them gets

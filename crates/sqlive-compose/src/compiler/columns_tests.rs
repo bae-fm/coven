@@ -13,7 +13,7 @@ sqlive_compose::fragment!(Verdict, r#"SELECT v.verdict_id FROM verdicts AS v"#);
     let code = code_of(&output, "Verdict.rs");
     assert!(code.contains("pub (crate) verdict_id : i64"), "{code}");
     let manifest: serde_json::Value = serde_json::from_str(&output.manifest).unwrap();
-    assert_eq!(manifest["fragments"][0]["presence"], 0);
+    assert_eq!(manifest["fragments"][0]["required"], serde_json::json!([0]));
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn a_json_column_that_can_be_null_needs_an_option() {
         assert!(code.contains("optional_json_column (row , offset) ?"), "{code}");
         let manifest: serde_json::Value = serde_json::from_str(&output.manifest).unwrap();
         // The column can be NULL in a row, so it tells no missing row.
-        assert_eq!(manifest["fragments"][0]["presence"], serde_json::Value::Null, "{sql}");
+        assert_eq!(manifest["fragments"][0]["required"], serde_json::json!([]), "{sql}");
     }
 }
 
@@ -260,5 +260,96 @@ fn a_spread_is_an_option_where_a_later_select_gives_it_no_row() {
         let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{later}: {errors:?}"));
         let code = code_of(&output, "Case.rs");
         assert!(code.contains(&format!("pub (crate) a : {ty} ,")), "{later}: {code}");
+    }
+}
+
+/// The errors of the fragment `Case`, whose header declares `declarations`,
+/// after the fragment `Person`, or none when it builds.
+fn compound_errors(declarations: &str, sql: &str) -> Vec<String> {
+    let lib = format!(
+        "sqlive_compose::fragment!(Person {{ note: Option<String> }}, r#\"\
+         SELECT p.id AS person_id, p.name, nullif(p.name, '') AS note FROM people AS p\"#);\n\
+         sqlive_compose::fragment!(Case {declarations}, r#\"{sql}\"#);"
+    );
+    compile_lib(&lib).map_or_else(|errors| messages(Err(errors)), |_| Vec::new())
+}
+
+#[test]
+fn a_compound_column_that_a_select_can_give_null_needs_an_option() {
+    for (sql, select) in [
+        ("SELECT p.name AS value FROM people AS p UNION ALL SELECT NULL", 2),
+        ("SELECT d.body AS value FROM drafts AS d UNION ALL SELECT 'x'", 1),
+        (
+            "SELECT p.name AS value FROM people AS p UNION ALL SELECT 'x' \
+             UNION ALL SELECT i.assignee_id FROM issues AS i",
+            3,
+        ),
+        (
+            "SELECT p.name AS value FROM people AS p \
+             UNION ALL SELECT s.name FROM issues AS i LEFT JOIN people AS s ON 1",
+            2,
+        ),
+        ("SELECT p.name AS value FROM people AS p UNION ALL VALUES ('x'), (NULL)", 2),
+        (
+            "SELECT p.name AS value FROM people AS p \
+             UNION ALL SELECT (SELECT s.name FROM people AS s)",
+            2,
+        ),
+    ] {
+        assert_eq!(
+            compound_errors("{ value: String }", sql),
+            [format!(
+                "src/lib.rs:2:1: value can be NULL in SELECT {select} of the compound, \
+                 and the header types it String, which holds no NULL"
+            )],
+            "{sql}"
+        );
+        assert_eq!(compound_errors("{ value: Option<String> }", sql), [""; 0], "{sql}");
+    }
+    // No SELECT gives NULL, or the header's type says what a computed one gives.
+    for sql in [
+        "SELECT p.name AS value FROM people AS p UNION ALL SELECT i.title FROM issues AS i",
+        "SELECT upper(p.name) AS value FROM people AS p UNION ALL SELECT 'x' UNION VALUES (:v)",
+    ] {
+        let declarations =
+            if sql.contains(":v") { "(v: String) { value: String }" } else { "{ value: String }" };
+        assert_eq!(compound_errors(declarations, sql), [""; 0], "{sql}");
+    }
+}
+
+#[test]
+fn a_compound_gives_a_spread_a_row_or_no_row() {
+    let first = "SELECT a.* FROM @crate::Person AS a UNION ALL";
+    for (later, column) in [
+        ("SELECT 'x', NULL, 'y'", "name"),
+        ("SELECT p.id, d.body, 'y' FROM people AS p, drafts AS d", "name"),
+        // The id and the name come from rows that can be missing apart.
+        (
+            "SELECT p.id, s.name, 'y' FROM issues AS i LEFT JOIN people AS p ON 1 \
+             LEFT JOIN people AS s ON 1",
+            "name",
+        ),
+        ("SELECT i.assignee_id, NULL, 'y' FROM issues AS i", "name"),
+    ] {
+        assert_eq!(
+            compound_errors("", &format!("{first} {later}")),
+            [format!(
+                "src/lib.rs:2:1: Case: SELECT 2 of the compound can give NULL in a.{column}, \
+                 where each row of tracker::Person holds a value"
+            )],
+            "{later}"
+        );
+    }
+    // Each later row is a row of the fragment, or none.
+    for later in [
+        "SELECT NULL, NULL, NULL",
+        // The reader tells no row by the id alone.
+        "SELECT NULL, d.body, 'y' FROM drafts AS d",
+        "SELECT p.id, p.name, NULL FROM people AS p",
+        "SELECT p.id, p.name, 'y' FROM issues AS i LEFT JOIN people AS p ON 1",
+        "SELECT b.* FROM issues AS i LEFT JOIN @crate::Person AS b ON 1",
+        "SELECT b.* FROM @crate::Person AS b",
+    ] {
+        assert_eq!(compound_errors("", &format!("{first} {later}")), [""; 0], "{later}");
     }
 }

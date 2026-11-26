@@ -113,7 +113,7 @@ sqlive_compose::fragment!(Person { person_id: PersonId }, r#"
     let record = &manifest["fragments"][0];
     assert_eq!(record["path"], "tracker::Person");
     assert_eq!(record["width"], 3);
-    assert_eq!(record["presence"], 0);
+    assert_eq!(record["required"], serde_json::json!([0, 1, 2]));
     assert_eq!(output.read, ["src/lib.rs"]);
 }
 
@@ -846,7 +846,7 @@ sqlive_compose::read!(Numbered, r#"SELECT c.id, @people::CommentAuthor(parent: 1
 #[test]
 fn a_manifest_path_that_is_no_rust_path_is_refused_where_the_manifest_is_read() {
     let manifest = r#"{"fragments":[{"path":"people::a b","parameters":[],"parent":null,
-        "relations":[],"sql":"SELECT 1","width":1,"presence":null,"one_row":false}]}"#;
+        "relations":[],"sql":"SELECT 1","width":1,"required":[],"one_row":false}]}"#;
     let errors = messages(compile("app", &[("src/lib.rs", "")], &[manifest]));
     assert_eq!(errors, ["a manifest names a fragment at people::a b, which is no Rust path"]);
 }

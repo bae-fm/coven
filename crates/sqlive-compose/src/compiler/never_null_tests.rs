@@ -141,7 +141,15 @@ fn an_aggregate_of_the_outer_rows_does_not_give_the_subquery_a_row() {
 
 #[test]
 fn a_compound_of_a_subquery_can_be_null() {
-    assert_can_be_null(&["SELECT (SELECT count(*) FROM issues) AS value UNION ALL SELECT NULL"]);
+    // A scalar subquery of a compound can be NULL, even one that never is on
+    // its own.
+    assert_eq!(
+        read("value: i64", "SELECT (SELECT count(*) FROM issues) AS value UNION ALL SELECT 0")
+            .err(),
+        Some(vec!["src/lib.rs:1:1: value can be NULL in SELECT 1 of the compound, \
+                   and the header types it i64, which holds no NULL"
+            .to_owned()])
+    );
 }
 
 #[test]

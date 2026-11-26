@@ -120,7 +120,7 @@ pub(crate) fn compile(
                 relations: relations.clone(),
                 sql: sql.to_owned(),
                 width: prepared.columns.len(),
-                presence: presence(&fields),
+                required: required(&fields),
                 one_row: outline.one_row(),
             };
             (generate::fragment(header, &fields, call.exported), Some(record))
@@ -192,15 +192,21 @@ fn own_reads(header: &Header) -> BTreeSet<String> {
         .collect()
 }
 
-/// The position, among a fragment's columns, of the first one that can't be
-/// NULL.
-fn presence(fields: &[Field]) -> Option<usize> {
-    fields.iter().find_map(|field| match &field.reading {
-        _ if field.ty.is_option() => None,
-        Reading::Value | Reading::Json => Some(field.column),
-        Reading::Spread { presence, .. } => presence.map(|inner| field.column + inner),
-        Reading::MissingSpread { .. } => None,
-    })
+/// The positions, among a fragment's columns, of those that each of its rows
+/// holds a value in.
+fn required(fields: &[Field]) -> Vec<usize> {
+    let mut required = Vec::new();
+    for field in fields {
+        match &field.reading {
+            _ if field.ty.is_option() => {}
+            Reading::Value | Reading::Json => required.push(field.column),
+            Reading::Spread { required: inner, .. } => {
+                required.extend(inner.iter().map(|inner| field.column + inner));
+            }
+            Reading::MissingSpread { .. } => {}
+        }
+    }
+    required
 }
 
 /// The Rust path of a fragment type: its crate's name, the modules it is in

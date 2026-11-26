@@ -945,9 +945,52 @@ a `WITH` clause, never gives NULL when two things hold:
   - such a value in parentheses, or another subquery that never gives NULL.
 
 The compiler takes every other scalar subquery to be one that can give NULL,
-and one in a statement with a compound operator too, whose later `SELECT`s give
-the column values of their own. It checks no computed column other than a
-scalar subquery: there the header's type says whether the column can be NULL.
+and each one in a statement with a compound operator too. It checks no computed
+column other than a scalar subquery and, in a compound, the literal `NULL`:
+elsewhere the header's type says whether the column can be NULL.
+
+**Compounds.** Each `SELECT` of a statement's compound gives the result columns
+values of its own, so the compiler checks them all. A column that the header
+types without an `Option` fails the build when one of the `SELECT`s can give it
+NULL: from a table's column that can be NULL, taken through the queries above,
+from a join or an aggregate that leaves its `FROM` item without a row, from the
+literal `NULL`, from a scalar subquery, or from a table function or a query the
+probe can't read. The error names the first such `SELECT`. Another computed
+value of a `SELECT` leaves the header's type to say whether the column can be
+NULL.
+
+```rust
+sqlive_compose::fragment!(Names { name: String }, r#"
+    SELECT p.name FROM people AS p UNION ALL SELECT NULL
+"#);
+```
+
+```text
+people/src/lib.rs:12:1: name can be NULL in SELECT 2 of the compound, and the header types it String, which holds no NULL
+```
+
+A spread in the first `SELECT` of a compound types the columns of every
+`SELECT` as its fragment. Each later `SELECT` gives rows of the fragment, which
+fill each column that the fragment types without an `Option`, or rows that hold
+none. The reader tells that a row holds none by the NULL in one column (section
+3), so a later `SELECT` gives rows that hold none where it can give NULL in
+that column, and the spread's field is then an `Option` (section 9). The build
+fails when a later `SELECT` can give NULL, as above, in another column that the
+fragment types without an `Option`, unless it gives NULL there only in rows
+where that one column is NULL too: where it gives that column the literal
+`NULL`, or takes both columns from one `FROM` item that can have no row, and
+that holds a value in the other column of each row it has. With `Person` typing
+`name` as a `String`:
+
+```rust
+sqlive_compose::fragment!(Named, r#"
+    SELECT a.* FROM @crate::Person AS a UNION ALL SELECT 'nobody', NULL
+"#);
+```
+
+```text
+people/src/lib.rs:16:1: Named: SELECT 2 of the compound can give NULL in a.name, where each row of people::Person holds a value
+```
 
 **JSON keys.** The compiler reads the `json_object` and `json_group_array` calls
 of a `json<T>` column and compares their keys, and how they nest, with `T`'s
@@ -1129,7 +1172,7 @@ on the fragment:
 | In `FROM`, where each row the statement returns has a row of it | `Fragment` |
 | In `FROM`, where a join gives it NULL: on the right of a `LEFT JOIN`, on the left of a `RIGHT JOIN`, or on either side of a `FULL JOIN`, in parentheses or not | `Option<Fragment>` |
 | In the `FROM` of a statement that calls an aggregate with no `GROUP BY` (section 8), which returns a row even over no rows | `Option<Fragment>` |
-| In the `FROM` of a compound's first `SELECT`, where a later `SELECT` can give NULL (section 8) in the column that tells a missing row from a row (section 3) | `Option<Fragment>` |
+| In the first `SELECT` of a compound, in `FROM` or as a value, where a later `SELECT` can give NULL in the column that tells a missing row from a row (sections 3 and 8) | `Option<Fragment>` |
 | As a value, when the fragment always returns one row | `Fragment` |
 | As a value otherwise | `Option<Fragment>` |
 
@@ -1249,8 +1292,9 @@ pub fn setup() -> Setup {
 
 **A crate hands its fragments to the crates that spread them** through a
 *manifest*, a JSON text that holds each fragment's Rust path, parameters, parent
-table and relations, its expanded SQL, how many columns it returns, the position
-of its first column that can't be NULL, and whether it always returns one row.
+table and relations, its expanded SQL, how many columns it returns, the positions
+of the columns that each of its rows holds a value in, the first of which tells
+a missing row from a row, and whether it always returns one row.
 Because the SQL is expanded already, a crate needs only the manifests of the
 crates it depends on directly: the manifest of `issues` holds `IssueListItem`
 with the SQL of `UnreadCount` inside it, and the tracker crate composes

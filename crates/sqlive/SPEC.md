@@ -1786,10 +1786,14 @@ statement can give no row of the FROM item that its first SELECT takes the
 column from, and so NULL in each of that item's columns: a join pads the item,
 in parentheses or not, or an aggregate with no GROUP BY makes a row over no
 rows. A computed column and a write's RETURNING column have no such item.
-`ColumnNulls::null_in_later_select` says apart from this whether a SELECT of a
-compound after the first can give NULL in the column. The probe takes all three
-to be true of every column of a statement that its parser can't read, and of a
-SELECT whose columns it can't tell. `SchemaProbe::table_columns`
+`ColumnNulls::selects` says what each SELECT of the statement's compound can
+give the column (`SelectNull`): no NULL; a computed value other than a literal
+and a scalar subquery, which can be NULL as far as the probe can tell; the
+literal NULL; NULL only where the SELECT has no row of one of its FROM items,
+which a number tells from its others; or a value that can be NULL otherwise.
+Of every column of a statement that its parser can't read, and of a SELECT
+whose columns it can't tell, the probe says that it can hold NULL and that its
+row can be missing. `SchemaProbe::table_columns`
 lists the columns of a table or view in the order of an INSERT with no column list, each
 with whether the table declares it NOT NULL, so that such a tool can check a
 value it binds against the column it fills.
