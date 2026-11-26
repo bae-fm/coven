@@ -48,55 +48,54 @@ pub struct LocalBytes {
     pub before_reset: Option<u64>,
 }
 
-/// Every namespace's budget and counters, by name.
-pub(crate) fn budgets(db: &StoreSql) -> Result<Vec<NamespaceBytes>, DbError> {
-    db.query(
-        "SELECT namespace,budget,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-            ))
-        },
-    )?
-    .into_iter()
-    .map(|(namespace, budget, cached, pinned)| {
-        Ok(NamespaceBytes {
-            namespace,
-            budget: unsigned(budget)?,
-            cached: unsigned(cached)?,
-            pinned: unsigned(pinned)?,
-        })
-    })
-    .collect()
-}
-
-/// The sum of the partial downloads' sizes.
-pub(crate) fn partials(db: &StoreSql) -> Result<u64, DbError> {
-    unsigned(db.query_row("SELECT coalesce(sum(size),0) FROM _coven_cache_partials", [], |r| {
-        r.get::<_, i64>(0)
-    })?)
-}
-
 /// What the store keeps on this device, from the transaction under way:
 /// the namespaces named in `declared`, in that order, the partial
-/// downloads, the store's own files and the archives that resets kept.
+/// downloads, the store's own files and the archives that resets kept, all
+/// from one statement, which reads the declared names as a JSON array.
 pub(crate) fn read(db: &StoreSql, declared: &[String]) -> Result<LocalBytes, DbError> {
-    let mut kept = budgets(db)?;
-    let namespaces = declared
-        .iter()
-        .filter_map(|name| {
-            kept.iter().position(|bytes| &bytes.namespace == name).map(|at| kept.swap_remove(at))
-        })
-        .collect();
+    let listed = serde_json::to_string(declared)
+        .map_err(|_unencodable| DbError::Invariant { what: "namespace names encode as JSON" })?;
+    let (namespaces, pinning, library, archives, archive_bytes) = db
+        .host_live_read(
+            "SELECT (SELECT coalesce(json_group_array(json_array(namespace,budget,cached,pinned)),'[]')
+                     FROM (SELECT b.namespace,b.budget,b.cached,b.pinned
+                           FROM json_each(?1) AS j
+                           JOIN _coven_cache_budgets AS b ON b.namespace=j.value
+                           ORDER BY j.key)),
+                    (SELECT coalesce(sum(size),0) FROM _coven_cache_partials),
+                    (SELECT coalesce(sum(bytes),0) FROM coven_library_bytes),
+                    (SELECT count(*) FROM coven_archive_bytes),
+                    (SELECT coalesce(sum(bytes),0) FROM coven_archive_bytes)",
+            [listed],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )?
+        .pop()
+        .ok_or(DbError::Invariant { what: "a statement of aggregates returns its row" })?;
+    let namespaces: Vec<(String, i64, i64, i64)> =
+        serde_json::from_str(&namespaces).map_err(|_undecodable| DbError::DamagedDatabase)?;
     Ok(LocalBytes {
-        namespaces,
-        pinning: partials(db)?,
-        library: crate::database::library_bytes::library(db)?,
-        before_reset: crate::database::archive_bytes::kept(db)?,
+        namespaces: namespaces
+            .into_iter()
+            .map(|(namespace, budget, cached, pinned)| {
+                Ok(NamespaceBytes {
+                    namespace,
+                    budget: unsigned(budget)?,
+                    cached: unsigned(cached)?,
+                    pinned: unsigned(pinned)?,
+                })
+            })
+            .collect::<Result<_, DbError>>()?,
+        pinning: unsigned(pinning)?,
+        library: unsigned(library)?,
+        before_reset: (archives != 0).then(|| unsigned(archive_bytes)).transpose()?,
     })
 }
 
@@ -128,8 +127,8 @@ impl StoreDatabase {
         self.read_committed(move |db| read(db, &declared)).await
     }
 
-    /// `local_bytes` now and after each write that changes what it reads: a
-    /// namespace's counters or budget, a partial download, a database
+    /// `local_bytes` now and after each write that changes a row it reads: a
+    /// declared namespace's counters or budget, a partial download, a database
     /// file's size after a checkpoint, a copy kept or released, a captured
     /// body, a rebuild's folder or an archive. A cached read's recency
     /// changes none of them.

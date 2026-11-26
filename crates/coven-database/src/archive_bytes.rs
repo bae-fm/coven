@@ -41,19 +41,6 @@ pub(crate) fn record_opened(writer: &mut StoreSql, directory: &StoreDir) -> Resu
     })
 }
 
-/// Return the total size of the archives that resets kept, or `None` when
-/// there are none.
-pub(crate) fn kept(db: &StoreSql) -> Result<Option<u64>, DbError> {
-    let (archives, bytes) =
-        db.query_row("SELECT count(*),coalesce(sum(bytes),0) FROM coven_archive_bytes", [], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-    if archives == 0 {
-        return Ok(None);
-    }
-    Ok(Some(crate::sqlite::unsigned(bytes)?))
-}
-
 /// Delete the archive `name`'s row, in the transaction under way.
 fn forget_archive(db: &StoreSql, name: &str) -> Result<(), DbError> {
     db.execute("DELETE FROM coven_archive_bytes WHERE archive=?1", [name])?;

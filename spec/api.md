@@ -7850,7 +7850,7 @@ impl CovenHandle {
     pub async fn local_bytes(&self) -> CovenResult<LocalBytes>;
 
     /// The same read as a live query: it runs again after each write that
-    /// changes a table it reads, such as a namespace's counters or budget, a
+    /// changes a row it reads, such as a declared namespace's counters or budget, a
     /// partial download, a database file's size after a checkpoint, a copy
     /// kept or released, a captured body, a rebuild's store or an archive. Reading a cached
     /// file updates when coven last read it, and the query does not run

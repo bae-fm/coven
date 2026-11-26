@@ -344,6 +344,29 @@ async fn cache_bytes_are_the_counters_in_declaration_order() {
     db.close().await.unwrap();
 }
 
+/// The live query of what the store keeps counts the declared namespaces
+/// only: a row for a namespace the app no longer declares starts no run.
+#[tokio::test]
+async fn the_local_bytes_query_ignores_a_namespace_the_app_no_longer_declares() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let mut bytes = db.subscribe_local_bytes::<DbError>();
+    let first = crate::tests::next(&mut bytes).await;
+    assert_eq!(first.namespaces.len(), 1);
+    db.inspect_writer(|sql, _| {
+        crate::database::file_database::declare_budgets(
+            sql,
+            &[crate::Namespace::new("retired", Provenance::AppProvided, 7)],
+        )
+        .unwrap()
+    });
+    assert!(!bytes.is_marked_for_rerun());
+    db.write(|sql| sql.set_cache_budget("files", 50)).await.unwrap();
+    let next = crate::tests::next(&mut bytes).await;
+    assert_eq!(next.namespaces.iter().map(|n| n.budget).collect::<Vec<_>>(), [50]);
+    db.close().await.unwrap();
+}
+
 /// The live query of what the store keeps delivers its first value, then a
 /// value after a change to a counter or a budget, and nothing for a cached
 /// read's recency; a read counts the partial downloads (§17.8).

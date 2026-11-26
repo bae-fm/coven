@@ -9615,8 +9615,10 @@ removal ends.
 
 So the figures come from tables alone. One read, `local_bytes`, returns
 them from a single snapshot, and `subscribe_local_bytes` is a live query
-of the same read, which runs again after each write that changes a table
-it reads ([api.md E8](api.md#e8-files-and-the-cache)). A cached read's
+of the same read, which runs again after each write that changes a row it
+reads ([api.md E8](api.md#e8-files-and-the-cache)): a declared namespace's
+row, a partial download, a size of the store's own files or an archive. The
+row of a namespace the app no longer declares starts no run. A cached read's
 recency changes none of them, so it starts no run.
 
 #### 17.9 Uploads

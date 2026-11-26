@@ -124,14 +124,14 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         }
         (
             "database_local_bytes.rs",
-            "SELECT namespace,budget,cached,pinned FROM _coven_cache_budgets ORDER BY namespace",
-            "_coven_cache_budgets",
-        ) => Some("every namespace's budget and counters, one row per namespace the app declared"),
+            "SELECT (SELECT coalesce(json_group_array(json_array(namespace,budget,cached,pinned)),'[]') FROM (SELECT b.namespace,b.budget,b.cached,b.pinned FROM json_each(?1) AS j JOIN _coven_cache_budgets AS b ON b.namespace=j.value ORDER BY j.key)), (SELECT coalesce(sum(size),0) FROM _coven_cache_partials), (SELECT coalesce(sum(bytes),0) FROM coven_library_bytes), (SELECT count(*) FROM coven_archive_bytes), (SELECT coalesce(sum(bytes),0) FROM coven_archive_bytes)",
+            "j",
+        ) => Some("the namespaces the app declared, which the statement's one JSON parameter lists"),
         (
             "database_local_bytes.rs",
-            "SELECT coalesce(sum(size),0) FROM _coven_cache_partials",
-            "_coven_cache_partials",
-        ) => Some("the sum over every partial download, which is the figure asked for"),
+            "SELECT (SELECT coalesce(json_group_array(json_array(namespace,budget,cached,pinned)),'[]') FROM (SELECT b.namespace,b.budget,b.cached,b.pinned FROM json_each(?1) AS j JOIN _coven_cache_budgets AS b ON b.namespace=j.value ORDER BY j.key)), (SELECT coalesce(sum(size),0) FROM _coven_cache_partials), (SELECT coalesce(sum(bytes),0) FROM coven_library_bytes), (SELECT count(*) FROM coven_archive_bytes), (SELECT coalesce(sum(bytes),0) FROM coven_archive_bytes)",
+            "_coven_cache_partials" | "coven_library_bytes" | "coven_archive_bytes",
+        ) => Some("the sum over every row, which is the figure asked for"),
         (
             "operation.rs",
             "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
