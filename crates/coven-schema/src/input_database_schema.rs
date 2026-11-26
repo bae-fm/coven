@@ -77,7 +77,8 @@ macro_rules! coven_input_tables {
     };
 }
 
-pub(crate) fn initial_input_schema() -> String {
+/// The SQL that makes every table of the retained-input database.
+pub fn initial_input_schema() -> String {
     let mut sql = String::new();
     macro_rules! append {
         ($table:ident, $sql:literal) => {

@@ -722,10 +722,11 @@ SQL reads, with the tables of coven's own that the views read, and registers
 coven's SQL functions, each as a store makes it
 ([api.md E4](api.md#e4-reading)). coven writes no rows on that connection.
 A build script that checks the app's SQL against those objects calls
-`readable_objects_sql`, which returns the SQL that makes them as text and
-opens no connection. Ben's test writes the rows coven would write in the tables his triggers fire
-on, and records each track's original with `record_user_file`, which writes
-what staging the original writes.
+`readable_objects_sql` of `coven-schema`, which returns the SQL that makes
+them as text, opens no connection and compiles no async runtime. Ben's test
+writes the rows coven would write in the tables his triggers fire on, and
+records each track's original with `record_user_file`, which writes what
+staging the original writes.
 
 A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
@@ -14524,7 +14525,7 @@ How the Rust is organised, and the rules a checker enforces on it.
 
 ### F.1 Crates
 
-Coven is a Cargo workspace of fourteen crates, each owning one part of this
+Coven is a Cargo workspace of fifteen crates, each owning one part of this
 document:
 
 | Crate | Owns | Sections |
@@ -14539,6 +14540,7 @@ document:
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
+| `coven-schema` | coven's local schema as SQL text: the `CREATE` statements of every table, view and trigger, each in the file of the domain that writes the table, and the text of the objects app SQL may read. It holds no connection and no runtime, so a build script takes it without compiling async code | §4, §9, api.md E4 |
 | `coven-database` | coven's policy for its SQLite connections, coven's internal tables, applying the merge's results, triggers, migrations | §4, §9, §18 |
 | `coven-storage` | each provider, and the operations coven needs from it, including upload sessions | §20, Appendix E |
 | `coven-sync` | the sequence, members, circles, snapshots, files and the cache, operations, recovery | §5, §6, §10, §11, §13 to §19 |
@@ -14582,7 +14584,7 @@ disk. Each is used directly in one place only:
 network          coven-storage's providers
 network state    coven-foundation's network watch
 cryptography     coven-crypto
-SQLite           coven-database, sqlive and sqlive-reads
+SQLite           coven-database, coven-schema, sqlive and sqlive-reads
 OS keychain      coven-crypto's custody
 current time     coven-foundation's clock
 new ids          coven-foundation's id source

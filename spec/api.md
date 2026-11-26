@@ -3936,7 +3936,9 @@ let moved = handle
   triggers and views apply and run as in a store, and the app keeps no copy
   of coven's objects or functions that could fall behind them. A build script
   that checks the app's SQL against coven's objects reads the same objects
-  as text from `readable_objects_sql`, with no connection and no function. coven writes
+  as text from `readable_objects_sql`, with no connection and no function; the
+  `coven-schema` crate has no dependency, so a build script takes it without
+  compiling coven's runtime. coven writes
   no rows on that connection. Of coven's triggers that keep the eight
   tables an app's triggers may follow in a store, those that keep
   `coven_pending` run there too: the test writes the rows coven would in
@@ -4517,8 +4519,9 @@ pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId
 /// of coven's triggers that keep `coven_pending`. It opens no connection and
 /// registers no function, so a build script that checks app SQL against these
 /// objects needs only this text. The views' SQL names coven's SQL functions,
-/// which the connection that runs the text registers itself (E4).
-#[cfg(feature = "test-utils")]
+/// which the connection that runs the text registers itself (E4). The
+/// `coven-schema` crate defines it, with no async runtime, and `coven`
+/// re-exports it.
 pub fn readable_objects_sql() -> String;
 
 /// Journals `invite` on a connection `make_readable_objects` prepared, as

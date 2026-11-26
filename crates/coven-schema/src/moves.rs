@@ -12,10 +12,10 @@
 
 /// The table of the files moving and failed moves list, which the app's
 /// triggers may follow.
-pub(crate) const MOVES: &str = "coven_moves";
+pub const MOVES: &str = "coven_moves";
 
 /// The table and its index, as every store holds them.
-pub(super) const TABLE: &str = "CREATE TABLE coven_moves (
+pub(crate) const TABLE: &str = "CREATE TABLE coven_moves (
         move INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('moving','failed')),
         file TEXT PRIMARY KEY NOT NULL

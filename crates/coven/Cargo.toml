@@ -18,6 +18,7 @@ coven-crypto.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
 coven-database.workspace = true
+coven-schema.workspace = true
 coven-storage.workspace = true
 coven-sync.workspace = true
 thiserror.workspace = true

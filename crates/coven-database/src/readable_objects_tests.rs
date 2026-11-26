@@ -96,7 +96,7 @@ async fn the_readable_objects_are_made_as_a_store_holds_them() {
 #[test]
 fn the_sql_text_makes_the_objects_on_a_bare_connection() {
     let bare = Connection::open_in_memory().unwrap();
-    bare.execute_batch(&readable_objects_sql()).unwrap();
+    bare.execute_batch(&coven_schema::readable_objects_sql()).unwrap();
     let outside = outside_store();
     let schema = |connection: &Connection| -> Vec<(String, String, Option<String>)> {
         let mut statement = connection

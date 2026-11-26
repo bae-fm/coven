@@ -28,9 +28,6 @@ use crate::sqlite::StoreSql;
 use crate::DbError;
 use std::time::SystemTime;
 
-/// The sync status table, which the app's triggers may follow.
-pub(crate) const SYNC_STATUS: &str = "coven_sync_status";
-
 /// Records the location, for `save_location` and its outside-store form.
 const SAVE_LOCATION: &str = "UPDATE coven_sync_status SET storage=?1,provider=?2,location=?5,
              moved=CASE WHEN ?4 THEN NULL ELSE moved END,
@@ -45,23 +42,6 @@ const SAVE_LOCATION: &str = "UPDATE coven_sync_status SET storage=?1,provider=?2
 /// outside-store form.
 const SAVE_LAST_PASS: &str = "UPDATE coven_sync_status SET last_pass=?1,moved=NULL
          WHERE singleton=1 AND halted=0 AND (last_pass IS NOT ?1 OR moved IS NOT NULL)";
-
-/// The table and its one row, as every store holds them from its creation.
-pub(super) const TABLE: &str = "CREATE TABLE coven_sync_status (
-        singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
-        storage TEXT NOT NULL CHECK(storage IN ('none','signed_out','connected')),
-        provider TEXT,
-        location TEXT,
-        last_pass BLOB,
-        moved TEXT CHECK(moved IN ('read','claimed')),
-        last_synced INTEGER CHECK(last_synced>=0),
-        starts INTEGER NOT NULL CHECK(starts>=0),
-        halted INTEGER NOT NULL CHECK(halted IN (0,1)),
-        CHECK((storage='none')=(provider IS NULL)),
-        CHECK((storage='none')=(location IS NULL))
-    ) STRICT;
-    INSERT INTO coven_sync_status(singleton,storage,provider,location,last_pass,moved,last_synced,starts,halted)
-        VALUES(1,'none',NULL,NULL,NULL,NULL,NULL,0,0);";
 
 /// Whether a storage location is recorded on this device, and whether this
 /// device holds credentials for it (§19.1), with the location's provider.

@@ -18,8 +18,6 @@ pub fn make_readable_objects(
     )
 }
 
-pub use coven_database::test_utils::readable_objects_sql;
-
 /// Journal `invite` on `connection`, where `make_readable_objects` made
 /// coven's objects, as a store journals an invite at its stage, so that
 /// `coven_invites` shows it. Returns the invite's operation.

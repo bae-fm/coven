@@ -3,13 +3,7 @@
 //! database finds invites' rows itself, for `coven_invites` and to end them
 //! when the installation stops for good.
 
-/// An invite's kind, as schema SQL spells it.
-macro_rules! invite_kind {
-    () => {
-        "invite"
-    };
-}
-pub(crate) use invite_kind;
+use coven_schema::invite_kind;
 
 /// An administrative change claimed in the store's sequence (§11).
 pub const SEQUENCE: &str = "sequence";

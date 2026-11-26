@@ -42,19 +42,7 @@ pub fn make_readable_objects(
             Some(sync_functions),
         )
     })?;
-    connection.execute_batch(&readable_objects_sql())
-}
-
-/// The SQL that makes every object of coven's that app SQL may read, as
-/// `make_readable_objects` runs it: the `CREATE` statements of the tables and
-/// views, their indexes, and coven's triggers that keep `coven_pending`.
-/// The text registers no function and runs nothing, so a build script that
-/// checks app SQL against these objects needs this text and no connection
-/// of coven's. A view's SQL names coven's functions (`coven_key`,
-/// `coven_file_device`, `coven_path_text`), which the connection that runs
-/// the text and then the app's SQL registers itself.
-pub fn readable_objects_sql() -> String {
-    crate::internal_schema::readable_schema()
+    connection.execute_batch(&coven_schema::readable_objects_sql())
 }
 
 /// Record on `connection`, where `make_readable_objects` made coven's

@@ -8,6 +8,7 @@ use crate::DbError;
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::{DeviceId, FileId, ObjectId};
+use coven_schema::unsent_counts;
 use std::time::SystemTime;
 
 /// One durable upload of one stored object; its plaintext chunk hashes are
@@ -141,18 +142,6 @@ impl UnsentWork {
         self.writes == 0 && self.files == 0
     }
 }
-
-/// The writes waiting in the send queue and the uploads waiting in the
-/// upload queue, counted, as two SQL expressions. Each counts a column, not
-/// rows, so that SQLite names the `coven_sync_state` view to the authorizer
-/// for the read when the view counts them (`sync_facts.rs`).
-macro_rules! unsent_counts {
-    () => {
-        "(SELECT count(w.number) FROM _coven_uploads AS w),
-         (SELECT count(q.id) FROM _coven_file_uploads AS q)"
-    };
-}
-pub(crate) use unsent_counts;
 
 pub(crate) fn unsent(db: &StoreSql) -> Result<UnsentWork, DbError> {
     db.host_live_read(concat!("SELECT ", unsent_counts!()), [], |r| {

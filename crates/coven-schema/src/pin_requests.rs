@@ -10,9 +10,9 @@
 
 /// The table of files with a pin request, which the app's triggers may
 /// follow.
-pub(crate) const PIN_REQUESTS: &str = "coven_pin_requests";
+pub const PIN_REQUESTS: &str = "coven_pin_requests";
 
 /// The table, as every store holds it.
-pub(super) const TABLE: &str = "CREATE TABLE coven_pin_requests (
+pub(crate) const TABLE: &str = "CREATE TABLE coven_pin_requests (
         file TEXT PRIMARY KEY NOT NULL
     ) STRICT, WITHOUT ROWID;";

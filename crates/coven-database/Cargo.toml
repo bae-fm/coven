@@ -14,6 +14,7 @@ coven-crypto.workspace = true
 coven-foundation.workspace = true
 coven-merge.workspace = true
 coven-format.workspace = true
+coven-schema.workspace = true
 sqlive.workspace = true
 sqlite3-parser.workspace = true
 thiserror.workspace = true

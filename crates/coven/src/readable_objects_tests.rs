@@ -287,11 +287,3 @@ fn a_recorded_last_pass_and_pending_record_give_each_pending_state() {
         ("needs_reset".to_owned(), vec!["member_keys_replaced".to_owned()])
     );
 }
-
-/// The text a build script reads is the database crate's, which makes the
-/// views the sync state reads.
-#[test]
-fn the_sql_text_names_the_views_an_app_reads() {
-    let sql = super::readable_objects_sql();
-    assert!(sql.contains("coven_sync_state"), "{sql}");
-}

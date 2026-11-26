@@ -24,24 +24,6 @@ use crate::stored_millis::{since_epoch, stored_time, Round};
 use crate::DbError;
 use std::time::SystemTime;
 
-/// The retry effect table, which the app's triggers may follow.
-pub(crate) const RETRY_EFFECT: &str = "coven_retry_effect";
-
-/// The table and its one row, as every store holds them from its creation.
-pub(super) const TABLE: &str = "CREATE TABLE coven_retry_effect (
-        singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1),
-        syncing INTEGER NOT NULL CHECK(syncing IN (0,1)),
-        held INTEGER NOT NULL CHECK(held IN (0,1)),
-        cooling_until INTEGER,
-        effect TEXT NOT NULL GENERATED ALWAYS AS (CASE
-            WHEN syncing=0 THEN 'not_syncing'
-            WHEN held=1 THEN 'failed'
-            WHEN cooling_until IS NOT NULL THEN 'cooling_down'
-            ELSE 'pass' END) STORED,
-        CHECK(syncing=1 OR cooling_until IS NULL)
-    ) STRICT;
-    INSERT INTO coven_retry_effect(singleton,syncing,held,cooling_until) VALUES(1,0,0,NULL);";
-
 /// What decides the person's retry, as `coven_retry_effect` holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetryState {

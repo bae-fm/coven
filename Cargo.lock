@@ -938,6 +938,7 @@ dependencies = [
  "coven-format",
  "coven-foundation",
  "coven-merge",
+ "coven-schema",
  "coven-storage",
  "coven-sync",
  "serde_json",
@@ -991,6 +992,7 @@ dependencies = [
  "coven-format",
  "coven-foundation",
  "coven-merge",
+ "coven-schema",
  "futures-lite",
  "proc-macro2",
  "serde",
@@ -1059,6 +1061,10 @@ dependencies = [
  "thiserror 2.0.21",
  "uuid",
 ]
+
+[[package]]
+name = "coven-schema"
+version = "0.1.0"
 
 [[package]]
 name = "coven-storage"

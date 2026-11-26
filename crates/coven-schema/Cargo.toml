@@ -1,0 +1,12 @@
+[package]
+name = "coven-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Coven's local schema as SQL text, with no connection and no runtime."
+keywords = ["sqlite", "sql", "schema"]
+categories = ["database"]
+
+[lints]
+workspace = true

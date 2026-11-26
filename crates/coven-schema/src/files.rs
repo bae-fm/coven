@@ -1,0 +1,20 @@
+//! Coven's own synced table of files (§17.2, Appendix C.1). Each row is one
+//! file's record in one audience; app rows reference it by its id. Coven
+//! writes it, and its rows travel as row changes of this table, merged like
+//! any synced row. App SQL reads it as `coven_files` and never writes it.
+//! The app's local triggers may follow it (§9.4): coven makes, stores and
+//! deletes a record with one statement on this table, as this device's own
+//! write and as it applies another device's.
+
+/// The table of files, which app SQL reads and the app's triggers may follow.
+pub const FILES: &str = "coven_files";
+
+/// The table, as every store holds it.
+pub(crate) const TABLE: &str = "CREATE TABLE coven_files (
+        id TEXT PRIMARY KEY NOT NULL,
+        audience TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        hash BLOB,
+        coordinates TEXT NOT NULL,
+        namespace TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID;";
