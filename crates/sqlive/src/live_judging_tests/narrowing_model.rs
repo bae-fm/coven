@@ -89,7 +89,29 @@ pub(super) fn pick(rng: &mut Rng, names: &[&'static str]) -> &'static str {
 pub(super) const TABLES: [&str; 4] = ["t", "u", "w", SEARCH];
 pub(super) const COLUMNS: [&str; 5] = ["id", "a", "b", "c", "n"];
 const TABLE_SQL: &str =
-    "(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE)";
+    "(id INTEGER PRIMARY KEY, a INTEGER, b, c INTEGER, n INTEGER COLLATE NOCASE, \
+     s TEXT COLLATE fold)";
+
+/// The columns of `table`: the plain tables also have `s`, a text column of
+/// the digits `0` to `3`, whose `fold` collation ties `0` with `3`, as
+/// NOCASE ties `'a'` with `'A'`. `SEARCH`'s columns have no collation.
+pub(super) fn columns(table: &str) -> Vec<&'static str> {
+    let mut columns = COLUMNS.to_vec();
+    if table != SEARCH {
+        columns.push("s");
+    }
+    columns
+}
+
+/// The order `fold` gives two strings of digits.
+pub(super) fn fold(left: &str, right: &str) -> std::cmp::Ordering {
+    let key = |text: &str| text.parse::<i64>().map(|number| number.rem_euclid(3));
+    key(left).unwrap().cmp(&key(right).unwrap())
+}
+
+fn options() -> crate::tests::TestOptions {
+    crate::tests::TestOptions { collations: vec![("fold", fold)], ..Default::default() }
+}
 /// The contentful FTS5 table, whose content table holds its rows.
 pub(super) const SEARCH: &str = "s";
 
@@ -210,15 +232,15 @@ fn schema_sql() -> String {
 
 fn schema_json() -> Json {
     let columns = |table: &str| -> Vec<Json> {
-        COLUMNS
+        self::columns(table)
             .iter()
             .map(|name| {
                 let affinity = match (table, *name) {
                     (SEARCH, _) | (_, "b") => json!("blob"),
-                    (_, "n") => Json::Null,
+                    (_, "n" | "s") => Json::Null,
                     _ => json!("numeric"),
                 };
-                json!({"name": name, "affinity": affinity})
+                json!({"name": name, "affinity": affinity, "collated": *name == "s"})
             })
             .collect()
     };
@@ -238,6 +260,11 @@ pub(super) fn value(rng: &mut Rng) -> Option<i64> {
     }
 }
 
+/// A value of the text column `s`: the digit as a string.
+pub(super) fn text_value(value: Option<i64>) -> String {
+    value.map_or_else(|| "NULL".to_owned(), |value| format!("'{value}'"))
+}
+
 pub(super) fn sql_value(value: Option<i64>) -> String {
     value.map_or_else(|| "NULL".to_owned(), |value| value.to_string())
 }
@@ -247,8 +274,13 @@ pub(super) fn sql_value(value: Option<i64>) -> String {
 pub(super) fn insert(verb: &str, table: &str, id: usize, rng: &mut Rng) -> String {
     let (rowid, key) =
         if table == SEARCH { ("rowid, ", format!("{id}, ")) } else { ("", String::new()) };
+    let (text_column, text) = if table == SEARCH {
+        (String::new(), String::new())
+    } else {
+        (", s".to_owned(), format!(", {}", text_value(value(rng))))
+    };
     format!(
-        "{verb} INTO {table}({rowid}id, a, b, c, n) VALUES ({key}{id}, {}, {}, {}, {})",
+        "{verb} INTO {table}({rowid}id, a, b, c, n{text_column}) VALUES ({key}{id}, {}, {}, {}, {}{text})",
         sql_value(value(rng)),
         sql_value(value(rng)),
         rng.below(6),
@@ -265,8 +297,16 @@ pub(super) fn write(rng: &mut Rng) -> String {
         statements.push(match rng.below(9) {
             0 | 1 => insert("INSERT OR IGNORE", table, id, rng),
             2 | 3 => {
-                let column = pick(rng, &["a", "b", "n"]);
-                format!("UPDATE {table} SET {column} = {} WHERE id = {id}", sql_value(value(rng)))
+                let column = pick(rng, &["a", "b", "n", "s"]);
+                if column == "s" && table != SEARCH {
+                    format!("UPDATE {table} SET s = {} WHERE id = {id}", text_value(value(rng)))
+                } else {
+                    let column = if column == "s" { "a" } else { column };
+                    format!(
+                        "UPDATE {table} SET {column} = {} WHERE id = {id}",
+                        sql_value(value(rng))
+                    )
+                }
             }
             4 => format!("UPDATE {table} SET c = {} WHERE id = {id}", rng.below(6)),
             5 => format!("UPDATE {table} SET c = {} WHERE a = {}", rng.below(6), rng.below(4)),
@@ -289,6 +329,14 @@ fn integers(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<Option<i64>>> {
             Ok(match row.get::<_, SqlValue>(index)? {
                 SqlValue::Null => None,
                 SqlValue::Integer(value) => Some(value),
+                // The text column `s` holds the digits the model holds as
+                // integers.
+                SqlValue::Text(text) => Some(
+                    String::from_utf8(text)
+                        .ok()
+                        .and_then(|text| text.parse().ok())
+                        .expect("a value the model holds"),
+                ),
                 other => panic!("a value the model doesn't hold: {other:?}"),
             })
         })
@@ -310,7 +358,10 @@ fn snapshot(db: &TestDatabase) -> Json {
     for name in TABLES {
         tables.insert(
             name.to_owned(),
-            json!(one_shot(db, &format!("SELECT id, a, b, c, n FROM {name} ORDER BY id"))),
+            json!(one_shot(
+                db,
+                &format!("SELECT {} FROM {name} ORDER BY id", columns(name).join(", "))
+            )),
         );
     }
     Json::Object(tables)
@@ -334,6 +385,7 @@ impl Mirror {
         use rusqlite::hooks::{Action, PreUpdateCase};
         use rusqlite::types::ValueRef;
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.create_collation("fold", fold).unwrap();
         connection.execute_batch(&schema_sql()).unwrap();
         let search = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = Arc::clone(&search);
@@ -373,8 +425,10 @@ impl Mirror {
     }
 
     fn rows(&self, table: &str) -> std::collections::BTreeMap<i64, Vec<Option<i64>>> {
-        let mut statement =
-            self.connection.prepare(&format!("SELECT id, a, b, c, n FROM {table}")).unwrap();
+        let mut statement = self
+            .connection
+            .prepare(&format!("SELECT {} FROM {table}", columns(table).join(", ")))
+            .unwrap();
         let rows = statement.query_map([], integers).unwrap();
         rows.map(|row| {
             let row = row.unwrap();
@@ -491,7 +545,7 @@ async fn run_case(
     rng: &mut Rng,
 ) -> usize {
     let sql = statement.sql();
-    let db = TestDatabase::open(&schema_sql());
+    let db = TestDatabase::open_with(&schema_sql(), options());
     register_nz(&db);
     let mut rows = Vec::new();
     for table in TABLES {

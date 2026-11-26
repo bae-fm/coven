@@ -8,7 +8,9 @@
 //! Rule 7: an order that doesn't sort by the rowid of each table, as one over
 //! a join, makes every column of the tables count as read.
 
-use super::{col, eq, item, lit, out, pick, table, Core, Expr, Join, Limit, Query, Source, TABLES};
+use super::{
+    col, eq, item, lit, out, pick, table, Core, Expr, Join, Limit, Query, Source, SEARCH, TABLES,
+};
 use crate::random_scopes::Rng;
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -71,6 +73,14 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         select_.push(out(col(other, "c")));
         select_.push(out(col(other, "id")));
     }
+    // The text column `s` of the sorted item, when its table has one, which
+    // an ORDER BY term sorts by the collation `fold`.
+    let sorted_table = if sorted == "x" { first } else { second };
+    let text = (sorted_table != SEARCH).then(|| {
+        select_.push(out(col(sorted, "s")));
+        select_.len() - 1
+    });
+    let mut collate = Vec::new();
     let order = match rng.below(if other.is_some() { 11 } else { 6 }) {
         0 => vec![(0, false)],
         1 => vec![(0, true), (1, false)],
@@ -86,9 +96,30 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
         9 => vec![(2, false), (1, false), (4, true)],
         _ => vec![(4, false), (0, true), (5, false)],
     };
+    let order = match text {
+        // Orders by `s`, which declares `fold` or has it written, ascending
+        // or descending, alone with the rowid or among the other terms.
+        Some(text) if rng.chance(40) => {
+            collate.push((text, rng.chance(50)));
+            let mut order = match rng.below(4) {
+                0 => vec![(text, false), (1, false)],
+                1 => vec![(text, true), (1, false)],
+                2 => vec![(2, false), (text, rng.chance(50)), (1, false)],
+                _ => vec![(1, true), (text, false), (3, false)],
+            };
+            // An order across a join tells its rows apart by the other
+            // item's rowid too.
+            if other.is_some() {
+                order.push((5, false));
+            }
+            order
+        }
+        _ => order,
+    };
     Query {
         arms: vec![Core { from, conditions, select: select_, group: Vec::new(), distinct: false }],
         order,
+        collate,
         order_named: rng.chance(85),
         limit: Some(Limit {
             count: 1 + rng.below(4) as u32,

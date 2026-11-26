@@ -7,7 +7,18 @@ use crate::random_scopes::Rng;
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
     let first = pick(rng, &TABLES);
-    let second = pick(rng, &TABLES);
+    // sqlive reads every column of a contentful FTS5 table a NATURAL join
+    // reads, where the model reads the columns the join compares. The
+    // plain tables have the column `s` that `SEARCH` lacks, so the join's
+    // two tables are both plain or both `SEARCH`.
+    let second = if first == super::SEARCH {
+        first
+    } else {
+        pick(
+            rng,
+            &TABLES.iter().copied().filter(|table| *table != super::SEARCH).collect::<Vec<_>>(),
+        )
+    };
     match rng.below(2) {
         0 => select(Core {
             from: vec![
@@ -16,8 +27,10 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                     "y",
                     Source::Table(second),
                     Join::Natural,
-                    ["id", "a", "b", "c", "n"]
-                        .iter()
+                    // A NATURAL join compares each column the tables share.
+                    super::columns(first)
+                        .into_iter()
+                        .filter(|column| super::columns(second).contains(column))
                         .map(|column| eq(col("y", column), col("x", column)))
                         .collect(),
                 ),

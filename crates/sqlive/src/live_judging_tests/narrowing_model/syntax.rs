@@ -14,6 +14,11 @@ pub(super) struct Query {
     pub(super) ops: Vec<&'static str>,
     /// Result column positions, each descending when `true`.
     pub(super) order: Vec<(usize, bool)>,
+    /// The ORDER BY terms, by result column position, that sort text by the
+    /// `fold` collation, which ties the digits that leave one remainder on
+    /// division by three: whether the term writes `COLLATE fold`, or its
+    /// column declares it.
+    pub(super) collate: Vec<(usize, bool)>,
     /// Whether the ORDER BY names each term's column instead of its position.
     pub(super) order_named: bool,
     pub(super) limit: Option<Limit>,
@@ -202,6 +207,10 @@ impl Query {
                         (Out::Expr(e, _), true) | (Out::Hidden(e), _) => e.sql(),
                         _ => (position + 1).to_string(),
                     };
+                    let term = match self.collate.iter().find(|(at, _)| at == position) {
+                        Some((_, true)) => format!("{term} COLLATE fold"),
+                        _ => term,
+                    };
                     if *descending {
                         format!("{term} DESC")
                     } else {
@@ -229,7 +238,14 @@ impl Query {
         let order: Vec<Json> = self
             .order
             .iter()
-            .map(|(position, descending)| json!({"position": position, "desc": descending}))
+            .map(|(position, descending)| {
+                let collation = self.collate.iter().any(|(at, _)| at == position);
+                json!({
+                    "position": position,
+                    "desc": descending,
+                    "collation": if collation { "fold" } else { "binary" },
+                })
+            })
             .collect();
         json!({
             "with": with,
