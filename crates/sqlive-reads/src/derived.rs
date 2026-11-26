@@ -522,6 +522,34 @@ pub(crate) fn pulled(planner: &Planner, item: usize, column: &str) -> Option<Sco
     Some(term)
 }
 
+/// The source, and its column, that `item`'s column `column` passes on
+/// unchanged, when `item` is a subquery or CTE that can't be read alone, of
+/// one arm that neither aggregates nor calls a window function, and sqlive
+/// can read that source alone. Each row of such an item is a row of its arm,
+/// so its column holds the value the source's row gives in a binding of the
+/// arm, and an equality with the column takes values from the source as
+/// one with the source's column would.
+pub(crate) fn passed_source(
+    planner: &Planner,
+    item: usize,
+    column: &str,
+) -> Option<(usize, String)> {
+    let found = &planner.items[item];
+    if found.source.from.is_some() {
+        return None;
+    }
+    let [arm] = &found.derived.as_ref()?.rows.as_ref()?[..] else {
+        return None;
+    };
+    let Columns::Listed(columns) = &found.columns else {
+        return None;
+    };
+    let position = columns.iter().position(|listed| listed.name.as_deref() == Some(column))?;
+    let (source, passed) = arm.get(position)?.clone()?;
+    planner.items[source].source.from.as_ref()?;
+    Some((source, passed))
+}
+
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and
 /// `edges`, which its own core's conditions put on its rows: each arm's
 /// source an output column passes on takes them as its own. A LEFT JOIN's

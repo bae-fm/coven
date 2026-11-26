@@ -163,7 +163,7 @@ impl Planner<'_> {
             let side = if constant(returned) {
                 Self::constant_side(connection, &member, returned)?
             } else {
-                self.arm_edge(arm, member.clone().into(), returned)
+                self.arm_edge(arm, member.clone().into(), returned, false)
                     .map(|edge| Side { terms: Vec::new(), edges: vec![edge] })
             };
             let Some(side) = side else {

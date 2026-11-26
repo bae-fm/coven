@@ -70,7 +70,7 @@ impl Planner<'_> {
             let taken: Vec<Edge> = edges.by_member[next]
                 .iter()
                 .map(|edge| &self.edges[*edge])
-                .filter(|edge| placed[edge.partner])
+                .filter(|edge| edge.placed(&placed))
                 .cloned()
                 .collect();
             for edge in &taken {
@@ -148,8 +148,10 @@ impl Planner<'_> {
     /// Which items wait, of those `remaining`: those whose value comes from
     /// a subquery's source not placed yet, which a column compared with a
     /// subquery's value takes (`scope_subquery.rs`), alone or in a side of
-    /// an OR, and those whose every partner waits, which couldn't take their
-    /// values from a partner that is placed after them.
+    /// an OR, or from a source a derived item's arm passes on, while it or
+    /// the derived item isn't placed (`Planner::passed_edge`), and those
+    /// whose every partner waits, which couldn't take their values from a
+    /// partner that is placed after them.
     fn waiting(&self, edges: &EdgesOfItems, placed: &[bool], remaining: &[usize]) -> Vec<bool> {
         let mut waiting = vec![false; self.items.len()];
         // The items that wait whose edges from other items aren't counted
@@ -159,16 +161,32 @@ impl Planner<'_> {
             let nested = edges.by_member[item]
                 .iter()
                 .map(|edge| &self.edges[*edge])
-                .any(|edge| edge.nested && !placed[edge.partner]);
+                .any(|edge| edge.nested && !edge.placed(placed));
             if nested || self.waits_for_or(item, placed) {
                 waiting[item] = true;
                 uncounted.push(item);
             }
         }
-        // How many of each item's edges have a partner that doesn't wait.
-        let mut not_waiting: Vec<usize> = edges.by_member.iter().map(Vec::len).collect();
+        // A derived item that a partner reads another source through gives
+        // that partner no values, so the partner's wait for it is no reason
+        // for it to wait for the partner.
+        let counted = |edge: &Edge| {
+            edges.by_member[edge.partner]
+                .iter()
+                .all(|back| self.edges[*back].through != Some(edge.member.item))
+        };
+        // How many of each item's counted edges have a partner that doesn't
+        // wait.
+        let mut not_waiting: Vec<usize> = edges
+            .by_member
+            .iter()
+            .map(|of_member| of_member.iter().filter(|edge| counted(&self.edges[**edge])).count())
+            .collect();
         while let Some(partner) = uncounted.pop() {
             for edge in &edges.by_partner[partner] {
+                if !counted(&self.edges[*edge]) {
+                    continue;
+                }
                 let member = self.edges[*edge].member.item;
                 not_waiting[member] -= 1;
                 if not_waiting[member] == 0 && !placed[member] && !waiting[member] {

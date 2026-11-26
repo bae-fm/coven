@@ -195,6 +195,14 @@ impl Planner<'_> {
         if first && partner_affinity.is_none() {
             return None;
         }
+        // A derived item of the member's core that can't be read alone gives
+        // the values of the source its arm passes the column on from.
+        if self.items[partner].source.from.is_none() {
+            if self.items[partner].core != self.items[member.item].core {
+                return None;
+            }
+            return self.passed_edge(member, partner, &partner_column);
+        }
         let value = match (partner_affinity, &member.value) {
             (Some(partner_affinity), MemberValue::Column(_)) => {
                 self.partner_column(member.affinity, partner, partner_column, partner_affinity)?
@@ -253,7 +261,40 @@ impl Planner<'_> {
         value: PartnerValue,
     ) -> Option<Edge> {
         self.items[partner].source.from.as_ref()?;
-        Some(Edge { member, partner, value, nested: false, nulls: false, pushed: false })
+        Some(Edge {
+            member,
+            partner,
+            value,
+            nested: false,
+            through: None,
+            nulls: false,
+            pushed: false,
+        })
+    }
+
+    /// The edge from `member` to the source that `derived`'s column `column`
+    /// passes on (`derived::passed_source`), through `derived`. A lookup
+    /// reads the source in its own scope, as it reads a subquery's source,
+    /// and compares as an equality with the source's column would.
+    pub(crate) fn passed_edge(&self, member: Member, derived: usize, column: &str) -> Option<Edge> {
+        let (source, passed) = crate::derived::passed_source(self, derived, column)?;
+        let source_affinity = self.items[source].columns.affinity(&passed)?;
+        let value = match &member.value {
+            MemberValue::Column(_) => {
+                self.partner_column(member.affinity, source, passed, source_affinity)?
+            }
+            // SQLite gives an expression's value the column's affinity.
+            MemberValue::Expression(_) => PartnerValue::Column(passed),
+        };
+        Some(Edge {
+            member,
+            partner: source,
+            value,
+            nested: true,
+            through: Some(derived),
+            nulls: false,
+            pushed: false,
+        })
     }
 
     /// The edge `member_expr IS other` gives: the equality's, matching a NULL
@@ -268,6 +309,11 @@ impl Planner<'_> {
         first: bool,
     ) -> Option<Edge> {
         let edge = self.edge(core, member_expr, other, first)?;
+        // A derived item's NULL says nothing of the source its arm passes
+        // the column on from.
+        if edge.through.is_some() {
+            return None;
+        }
         self.items[edge.partner].always_bound().then_some(Edge { nulls: true, ..edge })
     }
 

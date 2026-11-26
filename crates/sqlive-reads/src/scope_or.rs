@@ -138,7 +138,7 @@ impl Planner<'_> {
             .ors
             .iter()
             .flatten()
-            .any(|side| side.edges.iter().any(|edge| edge.nested && !placed[edge.partner]))
+            .any(|side| side.edges.iter().any(|edge| edge.nested && !edge.placed(placed)))
     }
 
     /// The ORs on `item` whose sides take values only from sources placed
@@ -148,7 +148,7 @@ impl Planner<'_> {
             .ors
             .iter()
             .filter(|sides| {
-                sides.iter().all(|side| side.edges.iter().all(|edge| placed[edge.partner]))
+                sides.iter().all(|side| side.edges.iter().all(|edge| edge.placed(placed)))
             })
             .map(|sides| sides.iter().map(EitherSide::of).collect())
             .collect()

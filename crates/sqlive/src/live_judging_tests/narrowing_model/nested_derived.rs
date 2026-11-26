@@ -3,9 +3,12 @@
 //! statement's own WITH, one in a WITH inside the subquery, one in FROM
 //! there, and one joined inside another CTE that the statement reads only
 //! in a subquery; and the same correlated with the row around them, which
-//! narrow by their own conditions only. Beside them sometimes stands a CTE
-//! that no query reads, whose rows SQLite would pick or whose USING join
-//! would compare columns: SQLite never runs it, and the model reads none.
+//! no lookup reads alone: a table joined to one, by an inner join or a LEFT
+//! JOIN, or a column compared with the value a subquery over one returns,
+//! takes values from the table its arm passes the column on from. Beside
+//! them sometimes stands a CTE that no query reads, whose rows SQLite would
+//! pick or whose USING join would compare columns: SQLite never runs it,
+//! and the model reads none.
 
 use super::push_down::{condition, derived, DERIVED};
 use super::{
@@ -17,12 +20,20 @@ use crate::random_scopes::Rng;
 /// A query of a derived item's shape, sometimes correlated with the item
 /// `outer` around the subquery that reads it.
 fn inner(rng: &mut Rng, outer: &str) -> Query {
-    let mut query = derived(rng);
     if rng.chance(30) {
-        let core = &mut query.arms[0];
-        let alias = core.from[0].alias.clone();
-        core.conditions.push(eq(col(&alias, "c"), col(outer, "c")));
+        correlated(rng, outer)
+    } else {
+        derived(rng)
     }
+}
+
+/// A query of a derived item's shape whose first arm names the item
+/// `outer` around the subquery that reads it.
+fn correlated(rng: &mut Rng, outer: &str) -> Query {
+    let mut query = derived(rng);
+    let core = &mut query.arms[0];
+    let alias = core.from[0].alias.clone();
+    core.conditions.push(eq(col(&alias, "c"), col(outer, "c")));
     query
 }
 
@@ -45,10 +56,11 @@ pub(super) fn reading(rng: &mut Rng, source: Source, outer: &str) -> Query {
     if rng.chance(30) {
         conditions.push(eq(col("y", "b"), col(outer, "b")));
     }
+    let join = if rng.chance(25) { Join::Left } else { Join::Inner };
     select(Core {
         from: vec![
             item("d", source, Join::Comma, Vec::new()),
-            item("y", Source::Table(table_), Join::Inner, on),
+            item("y", Source::Table(table_), join, on),
         ],
         conditions,
         select: vec![Out::Count(None)],
@@ -94,7 +106,7 @@ fn reading_statement(rng: &mut Rng) -> Query {
         where_.push(super::term::condition(rng, "x", 1));
     }
     let mut with = Vec::new();
-    let subquery = match rng.below(5) {
+    let subquery = match rng.below(6) {
         0 => {
             // A CTE of the statement's own WITH.
             with.push(("e".to_owned(), derived(rng)));
@@ -129,6 +141,38 @@ fn reading_statement(rng: &mut Rng) -> Query {
                 Box::new(pick_),
                 false,
             ));
+            return Query {
+                with,
+                ..select(Core {
+                    from: vec![table("x", first)],
+                    conditions: where_,
+                    select: super::term::columns("x"),
+                    group: Vec::new(),
+                    distinct: false,
+                })
+            };
+        }
+        4 => {
+            // A column compared with the value a subquery over a correlated
+            // FROM subquery returns.
+            let mut conditions = Vec::new();
+            if rng.chance(50) {
+                conditions.push(condition(rng, "d", &DERIVED));
+            }
+            let source = Source::Query(Box::new(correlated(rng, "x")));
+            let pick_ = select(Core {
+                from: vec![item("d", source, Join::Comma, Vec::new())],
+                conditions,
+                select: vec![out(col("d", pick(rng, &["id", "a", "c"])))],
+                group: Vec::new(),
+                distinct: false,
+            });
+            let member = col("x", pick(rng, &["id", "a", "c"]));
+            where_.push(if rng.chance(50) {
+                Cond::InQuery(member, Box::new(pick_), false)
+            } else {
+                eq(member, Expr::Sub(Box::new(pick_)))
+            });
             return Query {
                 with,
                 ..select(Core {

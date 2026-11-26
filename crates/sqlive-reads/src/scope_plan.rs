@@ -933,11 +933,22 @@ impl Narrowing {
             || self.ors.iter().any(crate::scope_or::Disjunction::may_hold_on_nulls)
     }
 
-    /// What of this narrows `item`, and the rest.
+    /// What of this, the ON of the LEFT JOIN adding `item`, narrows `item`
+    /// while the join is a LEFT JOIN's, and the rest, which waits for the
+    /// join to be an inner join's. An edge from `item` through a derived
+    /// item, and an OR of `item` with a side that holds one, wait with the
+    /// rest: the model proves such an edge only of a binding its core keeps
+    /// (`Narrowing.split` in `crates/sqlive/proofs`).
     fn split(self, item: usize) -> (Self, Self) {
         let (own, terms) = self.terms.into_iter().partition(|(narrowed, _)| *narrowed == item);
-        let (own_edges, edges) = self.edges.into_iter().partition(|edge| edge.member.item == item);
-        let (own_ors, ors) = self.ors.into_iter().partition(|or| or.item == item);
+        let (own_edges, edges) = self
+            .edges
+            .into_iter()
+            .partition(|edge| edge.member.item == item && edge.through.is_none());
+        let (own_ors, ors) = self.ors.into_iter().partition(|or| {
+            or.item == item
+                && or.sides.iter().all(|side| side.edges.iter().all(|edge| edge.through.is_none()))
+        });
         (Self { terms: own, edges: own_edges, ors: own_ors }, Self { terms, edges, ors })
     }
 
@@ -955,15 +966,29 @@ pub(crate) struct Edge {
     pub(crate) member: Member,
     pub(crate) partner: usize,
     pub(crate) value: PartnerValue,
-    /// Whether `partner` is the source of a subquery's value that the
-    /// member's column is compared with, which sits in a core inside the
-    /// member's: the member waits for it.
+    /// Whether `partner` sits in a core inside the member's: the source of a
+    /// subquery's value that the member's column is compared with, or the
+    /// source a derived item's arm passes the compared column on from
+    /// (`through`). The member waits for it.
     pub(crate) nested: bool,
+    /// The derived item that can't be read alone whose column the
+    /// equality compares, and whose one arm passes that column on
+    /// unchanged from `partner` (`derived::passed_source`). The member
+    /// waits for it too.
+    pub(crate) through: Option<usize>,
     /// Whether the condition is `IS`, which matches a NULL with a NULL.
     pub(crate) nulls: bool,
     /// Whether the planner passed the edge into a derived item's arm from
     /// an edge of the derived item.
     pub(crate) pushed: bool,
+}
+
+impl Edge {
+    /// Whether `placed` holds the partner, and the derived item the edge
+    /// reads through, if any: then the member can take the partner's values.
+    pub(crate) fn placed(&self, placed: &[bool]) -> bool {
+        placed[self.partner] && self.through.is_none_or(|through| placed[through])
+    }
 }
 
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {

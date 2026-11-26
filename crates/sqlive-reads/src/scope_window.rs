@@ -174,9 +174,13 @@ fn partition_column(
             return None;
         }
         let edge = planner.edge(core, member, other, first)?;
+        // A value around the core: not one a derived item passes on from a
+        // source of its own arm.
         match &edge.member.value {
             MemberValue::Column(column)
-                if edge.member.item == item && planner.items[edge.partner].core != core =>
+                if edge.member.item == item
+                    && edge.through.is_none()
+                    && planner.items[edge.partner].core != core =>
             {
                 Some(column.clone())
             }
