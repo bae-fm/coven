@@ -446,7 +446,7 @@ impl<'a, 'p> CapabilityBoundaryVisitor<'a, 'p> {
 }
 
 /// Whether `segments` holds one of `patterns` as adjacent segments.
-fn holds_any(segments: &[String], patterns: &[Vec<String>]) -> bool {
+pub(crate) fn holds_any(segments: &[String], patterns: &[Vec<String>]) -> bool {
     patterns.iter().any(|pattern| {
         segments
             .windows(pattern.len())

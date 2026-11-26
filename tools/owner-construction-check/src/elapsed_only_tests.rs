@@ -35,6 +35,9 @@ fn an_instant_that_reaches_anything_but_elapsed_is_a_use_of_the_clock() {
         "fn run() { Holder { at: Instant::now() }; }",
         "fn run() { let _ = Instant::now() < other; }",
         "fn run() { let started = SystemTime::now(); started.elapsed(); }",
+        "fn run() { let started = Instant::now(); if started.elapsed() > limit { stop(); } }",
+        "fn run() { let started = Instant::now(); while started.elapsed() < limit { work(); } }",
+        "fn run() { let started = Instant::now(); match started.elapsed().as_secs() { 0 => {} _ => stop() } }",
     ] {
         assert_eq!(kinds(source).len(), 1, "{source}");
     }
