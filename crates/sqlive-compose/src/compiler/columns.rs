@@ -188,6 +188,12 @@ fn column_field(
     };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {
+            if nullable && !ty.is_option() {
+                return Err(Cause::NullableColumn {
+                    column: column.name.clone(),
+                    declared: format!("json<{}>", ty.0),
+                });
+            }
             if matches!(item.kind, ItemKind::Expression | ItemKind::Subquery) {
                 json::check(sql, tokens, item.tokens.clone(), &column.name, ty, &header.shapes)?;
             }

@@ -44,7 +44,9 @@ fn read_field(field: &Field) -> TokenStream {
             quote!(row.get::<_, #ty>(#column)?)
         }
         Reading::Json => {
-            let json = path("json_column");
+            // SQL's NULL holds no JSON text, so an `Option` reads it apart.
+            let json =
+                path(if field.ty.is_option() { "optional_json_column" } else { "json_column" });
             quote!(#json(row, #column)?)
         }
         Reading::Spread { path: fragment, .. } => {

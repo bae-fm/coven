@@ -870,6 +870,15 @@ sqlive_compose::fragment!(Assignee { assignee_id: PersonId }, r#"
 issues/src/lib.rs:30:1: assignee_id can be NULL, and the header types it PersonId, which holds no NULL
 ```
 
+A `json<T>` column that can be NULL needs `T` to be an `Option`:
+
+```text
+people/src/lib.rs:8:1: author can be NULL, and the header types it json<Author>, which holds no NULL
+```
+
+The generated reader of a `json<Option<Author>>` column gives `None` for NULL
+and for a document that is JSON's `null`.
+
 A bare column name that the compiler can't place on one `FROM` item needs a
 declaration.
 

@@ -69,8 +69,28 @@ pub mod generated {
         row: &sqlive_reads::Row<'_>,
         index: usize,
     ) -> sqlive_reads::SqliteResult<T> {
-        let text: String = row.get(index)?;
-        serde_json::from_str(&text).map_err(|error| {
+        decode_json(index, &row.get::<_, String>(index)?)
+    }
+
+    /// Reads a JSON document that a column holds as text, or `None` when the
+    /// column is NULL or the document is JSON's `null`.
+    pub fn optional_json_column<T: serde::de::DeserializeOwned>(
+        row: &sqlive_reads::Row<'_>,
+        index: usize,
+    ) -> sqlive_reads::SqliteResult<Option<T>> {
+        match row.get::<_, Option<String>>(index)? {
+            Some(text) => decode_json(index, &text),
+            None => Ok(None),
+        }
+    }
+
+    /// The value of the JSON document `text`, which the column at `index`
+    /// holds.
+    fn decode_json<T: serde::de::DeserializeOwned>(
+        index: usize,
+        text: &str,
+    ) -> sqlive_reads::SqliteResult<T> {
+        serde_json::from_str(text).map_err(|error| {
             sqlive_reads::SqliteError::FromSqlConversionFailure(
                 index,
                 sqlive_reads::rusqlite::types::Type::Text,
@@ -79,3 +99,7 @@ pub mod generated {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
