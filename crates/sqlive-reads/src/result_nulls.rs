@@ -33,9 +33,7 @@ use crate::from_star::{star, StarItem};
 use crate::never_null;
 use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
-use crate::select_syntax::{
-    aggregate_call, column_qualifiers, from_names, parts, parts_outside, Functions, Part,
-};
+use crate::select_syntax::{aggregate_owners, parts, result_expressions, Functions, Part};
 use crate::sql::unparenthesized;
 
 /// Where a statement can give NULL in one of its result columns.
@@ -388,11 +386,9 @@ impl Analysis<'_> {
     }
 
     /// Whether the subquery `select` calls an aggregate that SQLite gives to
-    /// a core around it whose FROM items are `items`: one that qualifies its
-    /// columns, each with a name of `items` that no FROM between them has.
-    /// `between` holds the names of those FROMs. SQL that passes an
-    /// aggregate an outer column writes the column's qualifier (sqlive's
-    /// SPEC.md, section 12).
+    /// a core around it whose FROM items are `items`: one that goes past each
+    /// FROM between them (`aggregate_owners`) and qualifies its columns, each
+    /// with a name of `items`. `between` holds the names of those FROMs.
     fn aggregates_around<'a>(
         &self,
         select: &'a Select<'a>,
@@ -404,30 +400,18 @@ impl Analysis<'_> {
         for core in cores {
             let OneSelect::Select { columns, from, .. } = core else { continue };
             let outside = between.len();
-            if let Some(from) = from {
-                from_names(from, between);
-            }
-            let mut calls = Vec::new();
             let mut found = Vec::new();
-            for expr in result_expressions(columns) {
-                let aggregate = |expr| aggregate_call(expr, self.functions).is_some();
-                parts_outside(expr, &aggregate, &mut found, &mut calls);
-            }
-            for call in calls {
-                parts(call, &mut found);
-                let qualifiers = column_qualifiers(call);
-                let named_around = !qualifiers.is_empty()
-                    && qualifiers.iter().all(|&qualifier| {
-                        !between.iter().any(|name| *qualifier == Name(name))
-                            && items.iter().any(|item| {
-                                item.qualifier
-                                    .as_deref()
-                                    .is_some_and(|name| *qualifier == Name(name))
-                            })
-                    });
-                if named_around {
-                    return true;
-                }
+            let owners =
+                aggregate_owners(columns, from.as_ref(), between, self.functions, &mut found);
+            let named_around = |qualifiers: Vec<&Name<'_>>| {
+                qualifiers.into_iter().all(|qualifier| {
+                    items.iter().any(|item| {
+                        item.qualifier.as_deref().is_some_and(|name| *qualifier == Name(name))
+                    })
+                })
+            };
+            if owners.into_iter().flatten().any(named_around) {
+                return true;
             }
             for part in found {
                 if let Part::Subquery(inner) | Part::Select(inner) = part {
@@ -686,14 +670,6 @@ impl Analysis<'_> {
         }
         Ok(item)
     }
-}
-
-/// The expressions of the result columns `results`.
-fn result_expressions<'a>(results: &'a [ResultColumn<'a>]) -> impl Iterator<Item = &'a Expr<'a>> {
-    results.iter().filter_map(|result| match result {
-        ResultColumn::Expr(expr, _) => Some(expr),
-        ResultColumn::Star | ResultColumn::TableStar(_) => None,
-    })
 }
 
 /// `columns` under `names`, a column list that SQLite holds to their length.

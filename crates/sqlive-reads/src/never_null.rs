@@ -4,12 +4,10 @@
 //! one that can give NULL.
 
 use sqlite3_parser::ast::{
-    Expr, Literal, Name, OneSelect, Operator, ResultColumn, Select, UnaryOperator,
+    Expr, Literal, OneSelect, Operator, ResultColumn, Select, UnaryOperator,
 };
 
-use crate::select_syntax::{
-    aggregate_call, column_qualifiers, from_names, parts_outside, Functions,
-};
+use crate::select_syntax::{aggregate_owners, Functions};
 use crate::sql::unparenthesized;
 
 /// The aggregate and window functions that give a value over no rows.
@@ -36,21 +34,11 @@ pub(crate) fn subquery(select: &Select<'_>, functions: &Functions) -> bool {
         return false;
     };
     let [ResultColumn::Expr(selected, _)] = &columns[..] else { return false };
-    // An aggregate with no GROUP BY makes one row of all the rows. SQLite
-    // gives one that qualifies its columns, none with a name of this FROM, to
-    // a core around this one.
-    let mut own = Vec::new();
-    if let Some(from) = from {
-        from_names(from, &mut own);
-    }
-    let mut calls = Vec::new();
-    let aggregate = |expr| aggregate_call(expr, functions).is_some();
-    parts_outside(selected, &aggregate, &mut Vec::new(), &mut calls);
-    let one_row = calls.into_iter().any(|call| {
-        let qualifiers = column_qualifiers(call);
-        qualifiers.is_empty()
-            || qualifiers.iter().any(|qualifier| own.iter().any(|name| **qualifier == Name(name)))
-    });
+    // An aggregate of the subquery's own rows, with no GROUP BY, makes one row
+    // of all of them.
+    let owners =
+        aggregate_owners(columns, from.as_ref(), &mut Vec::new(), functions, &mut Vec::new());
+    let one_row = owners.iter().any(Option::is_none);
     one_row && expression(selected, functions)
 }
 

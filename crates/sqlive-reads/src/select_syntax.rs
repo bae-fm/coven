@@ -431,25 +431,69 @@ pub(crate) fn aggregate_call<'a>(
     })
 }
 
-/// The names that qualify the columns `expr` names, outside its subqueries.
-pub(crate) fn column_qualifiers<'a>(expr: &'a Expr<'a>) -> Vec<&'a Name<'a>> {
-    let mut found = Vec::new();
-    parts(expr, &mut found);
-    found
+/// The expressions of the result columns `results`.
+pub(crate) fn result_expressions<'a>(
+    results: &'a [ResultColumn<'a>],
+) -> impl Iterator<Item = &'a Expr<'a>> {
+    results.iter().filter_map(|result| match result {
+        ResultColumn::Expr(expr, _) => Some(expr),
+        ResultColumn::Star | ResultColumn::TableStar(_) => None,
+    })
+}
+
+/// Which core SQLite gives each aggregate call of the result columns
+/// `results` of a core whose FROM is `from`, outside their subqueries, where
+/// `between` holds the names of the FROMs between that core and one around it:
+/// the core's own are added to them. A call goes past all those FROMs when it
+/// qualifies columns, none with one of their names, and then has the names
+/// that qualify its columns. Else it stays among them, and has `None`. SQL
+/// that passes an aggregate an outer column writes the column's qualifier
+/// (sqlive's SPEC.md, section 12). Adds to `found` each part of the result
+/// columns, those of the calls too.
+pub(crate) fn aggregate_owners<'a>(
+    results: &'a [ResultColumn<'a>],
+    from: Option<&'a FromClause<'a>>,
+    between: &mut Vec<&'a str>,
+    functions: &Functions,
+    found: &mut Vec<Part<'a>>,
+) -> Vec<Option<Vec<&'a Name<'a>>>> {
+    if let Some(from) = from {
+        from_names(from, between);
+    }
+    let mut calls = Vec::new();
+    for expr in result_expressions(results) {
+        let aggregate = |expr| aggregate_call(expr, functions).is_some();
+        parts_outside(expr, &aggregate, found, &mut calls);
+    }
+    calls
         .into_iter()
-        .filter_map(|part| match part {
-            Part::Name(name) => match crate::sql::unparenthesized(name) {
-                Expr::Qualified(table, _) | Expr::DoublyQualified(_, table, _) => Some(table),
-                _ => None,
-            },
-            _ => None,
+        .map(|call| {
+            let first = found.len();
+            parts(call, found);
+            let qualifiers: Vec<_> = found[first..]
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Name(name) => match crate::sql::unparenthesized(name) {
+                        Expr::Qualified(table, _) | Expr::DoublyQualified(_, table, _) => {
+                            Some(table)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let past = !qualifiers.is_empty()
+                && qualifiers
+                    .iter()
+                    .all(|&qualifier| !between.iter().any(|name| *qualifier == Name(name)));
+            past.then_some(qualifiers)
         })
         .collect()
 }
 
 /// Adds the names that qualify the columns of `from`'s items to `names`, as
 /// the SQL writes them.
-pub(crate) fn from_names<'a>(from: &'a FromClause<'a>, names: &mut Vec<&'a str>) {
+fn from_names<'a>(from: &'a FromClause<'a>, names: &mut Vec<&'a str>) {
     let tables =
         from.select.iter().copied().chain(from.joins.iter().flatten().map(|join| &join.table));
     for table in tables {
