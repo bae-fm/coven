@@ -1021,7 +1021,8 @@ has one, by that table's collation.
 ### Joins in parentheses, table functions and FTS5
 
 A join in parentheses narrows as its joins do, as if its tables were joined
-one after another, wherever that gives the rows SQLite gives. A people
+one after another, wherever that gives the rows SQLite gives. A subquery, CTE
+or view in the parentheses counts as one of those tables. A people
 screen lists each member with their person and avatar: `FROM members AS m LEFT
 JOIN (people AS p LEFT JOIN files AS a ON a.id = p.avatar_id) ON p.id =
 m.member`. SQLite joins `people` and `files` first, and gives a member whom no

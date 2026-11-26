@@ -408,7 +408,7 @@ pub(crate) fn read_from<'a>(
                     "a parenthesized join under an alias, starting with another, or joined by USING",
                 )));
             }
-            let first = planner.items.len();
+            let before = planner.cores[core].items.len();
             let held = conditions.len();
             if let Err(unread) = read_from(
                 connection,
@@ -426,7 +426,12 @@ pub(crate) fn read_from<'a>(
                 parts(expr, found);
                 conjuncts(expr, &mut on);
             }
-            if !planner.group_flattens(core, first, left, &conditions[held..], &on) {
+            // The items the core gained: the tables in the parentheses. A
+            // subquery among them has items of its own, in its own cores,
+            // which the planner numbers among these.
+            let group = &planner.cores[core].items[before..];
+            let first = group[0];
+            if !planner.group_flattens(core, group, left, &conditions[held..], &on) {
                 return Ok(Err(Unread(
                     "a parenthesized join whose rows aren't its tables joined in turn",
                 )));
@@ -510,9 +515,10 @@ impl Planner<'_> {
         })
     }
 
-    /// Whether `JOIN (...) ON on`, or a LEFT JOIN when `left`, of the items
-    /// from `first` on, whose own joins' conditions are `inner`, gives the
-    /// rows its tables give joined one after another, the first by `on`.
+    /// Whether `JOIN (...) ON on`, or a LEFT JOIN when `left`, of `group`,
+    /// the items of `core` in the parentheses, whose own joins' conditions are
+    /// `inner`, gives the rows its tables give joined one after another, the
+    /// first by `on`.
     /// SQLite joins the parenthesized tables among themselves and keeps the
     /// rows `on` holds for; a LEFT JOIN gives a left row that no such row
     /// joins NULLs in every table of the join. An inner join's `on`, when it
@@ -525,7 +531,7 @@ impl Planner<'_> {
     pub(crate) fn group_flattens(
         &self,
         core: usize,
-        first: usize,
+        group: &[usize],
         left: bool,
         inner: &[(Written<'_>, Place)],
         on: &[&Expr<'_>],
@@ -543,20 +549,20 @@ impl Planner<'_> {
         if !left {
             return true;
         }
-        let end = self.items.len();
+        let later = &group[1..];
         let named_first = found.iter().all(|part| match part {
             Part::Name(name) => {
-                self.resolve(core, name).is_some_and(|(item, _)| !(first + 1..end).contains(&item))
+                self.resolve(core, name).is_some_and(|(item, _)| !later.contains(&item))
             }
             _ => true,
         });
         named_first
-            && (first + 1..end).all(|item| {
+            && later.iter().enumerate().all(|(position, &item)| {
                 self.items[item].left
                     && inner.iter().any(|(written, place)| {
                         *place == Place::LeftOn(item)
                             && matches!(written, Written::Expr(condition)
-                                if self.rejects(core, condition, first..item))
+                                if self.rejects(core, condition, &group[..=position]))
                     })
             })
     }
@@ -564,7 +570,7 @@ impl Planner<'_> {
     /// Whether `condition`, written in `core`, can't hold where an item of
     /// `items` has no row: a comparison other than `IS` and `IS NOT` with a
     /// column of one of them on a side.
-    fn rejects(&self, core: usize, condition: &Expr<'_>, items: std::ops::Range<usize>) -> bool {
+    fn rejects(&self, core: usize, condition: &Expr<'_>, items: &[usize]) -> bool {
         let Expr::Binary(left, op, right) = unparenthesized(condition) else {
             return false;
         };

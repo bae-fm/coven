@@ -3,10 +3,11 @@
 //! table in the join sometimes, conditions inside its ONs and on its tables
 //! in the WHERE, which make the LEFT JOIN an inner join's; an inner join of
 //! such a join, whose ON can name any of its tables; and one first in the
-//! FROM.
+//! FROM. Each item of the parentheses is a subquery over a table sometimes.
 
 use super::{
-    cmp, col, eq, item, out, pick, select, table, Core, Item, Join, Out, Query, Source, TABLES,
+    cmp, col, columns, eq, item, out, pick, select, table, Core, Item, Join, Out, Query, Source,
+    TABLES,
 };
 use crate::random_scopes::Rng;
 
@@ -31,7 +32,32 @@ fn group(rng: &mut Rng) -> Vec<Item> {
             vec![cmp(pick(rng, &["=", "<"]), col("z", "id"), col(before, "c"))],
         ));
     }
+    for item in &mut items {
+        if rng.chance(30) {
+            wrap(rng, item);
+        }
+    }
     items
+}
+
+/// Make `item`, a table, a subquery over it that gives each of its columns,
+/// with a condition of its own sometimes.
+fn wrap(rng: &mut Rng, item: &mut Item) {
+    let Source::Table(name) = item.source else { unreachable!("the group's items are tables") };
+    let alias = match item.alias.as_str() {
+        "p" => "pp",
+        "a" => "aa",
+        _ => "zz",
+    };
+    let conditions =
+        if rng.chance(30) { vec![super::term::condition(rng, alias, 1)] } else { Vec::new() };
+    item.source = Source::Query(Box::new(select(Core {
+        from: vec![table(alias, name)],
+        conditions,
+        select: columns(name).into_iter().map(|column| out(col(alias, column))).collect(),
+        group: Vec::new(),
+        distinct: false,
+    })));
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {

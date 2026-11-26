@@ -101,6 +101,17 @@ fn a_column_read_through_a_query_in_from_is_null_where_that_query_gives_null() {
 #[test]
 fn a_spread_in_a_join_in_parentheses_is_an_option_where_a_join_gives_it_null() {
     for (from, ty) in [
+        // The LEFT JOIN of the parentheses pads each item in them.
+        (
+            "issues AS i LEFT JOIN (@crate::Person AS a LEFT JOIN projects AS j \
+             ON j.id = a.person_id) ON a.person_id = i.assignee_id",
+            "Option < crate :: Person >",
+        ),
+        (
+            "issues AS i LEFT JOIN (projects AS j LEFT JOIN @crate::Person AS a \
+             ON a.person_id = j.id) ON j.id = i.project_id",
+            "Option < crate :: Person >",
+        ),
         // A LEFT JOIN between the items in the parentheses.
         (
             "issues AS i JOIN (projects AS j LEFT JOIN @crate::Person AS a \
@@ -156,8 +167,8 @@ sqlive_compose::read!(Case { said: Option<String> }, r#"
 
 #[test]
 fn a_join_pads_the_items_in_the_parentheses_it_adds() {
-    // sqlive refuses a read that LEFT JOINs a spread in parentheses, and a
-    // RIGHT or FULL join, so no compile reaches these.
+    // sqlive refuses a read with a RIGHT or FULL join, and an inner join in
+    // left-joined parentheses, so no compile reaches most of these.
     for (from, expected) in [
         ("i LEFT JOIN (a JOIN b ON 1) ON 1", [Some(true), Some(true)]),
         ("i LEFT JOIN ((a JOIN b ON 1)) ON 1", [Some(true), Some(true)]),

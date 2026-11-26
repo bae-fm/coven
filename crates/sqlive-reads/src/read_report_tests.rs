@@ -432,3 +432,29 @@ fn a_table_function_over_a_column_of_an_earlier_item_narrows_nothing() {
         assert!(report.contains("tracks: whole: nothing narrows `t`"), "{sql}: {report}");
     }
 }
+
+#[test]
+fn a_subquery_in_a_left_joined_parenthesized_join_narrows_as_a_table_does() {
+    let tracks = "(SELECT id, release_id FROM tracks) AS t";
+    let picked = "(SELECT id FROM picked) AS p";
+    for (first, second, unnarrowed) in [
+        ("tracks AS t", "picked AS p", "p"),
+        (tracks, "picked AS p", "p"),
+        ("tracks AS t", picked, "picked"),
+        (tracks, picked, "picked"),
+    ] {
+        let sql = format!(
+            "SELECT r.album, t.id, p.id FROM releases r \
+             LEFT JOIN ({first} LEFT JOIN {second} ON p.id = t.id) ON t.release_id = r.id \
+             WHERE r.id = ?1"
+        );
+        assert_eq!(
+            report(&sql),
+            format!(
+                "picked: whole: nothing narrows `{unnarrowed}`\n\
+                 releases: keyed by id\ntracks: keyed by release_id"
+            ),
+            "{sql}"
+        );
+    }
+}
