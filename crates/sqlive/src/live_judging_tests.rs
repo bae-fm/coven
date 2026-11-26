@@ -13,6 +13,8 @@ mod carried_terms;
 mod derived;
 #[path = "live_judging_tests/join_shapes.rs"]
 mod join_shapes;
+#[path = "live_judging_tests/join_through_found.rs"]
+mod join_through_found;
 #[path = "live_judging_tests/limit.rs"]
 mod limit;
 #[path = "live_judging_tests/lookup.rs"]

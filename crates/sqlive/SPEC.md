@@ -960,6 +960,19 @@ nothing out, even in a column its GROUP BY lists. A carried condition narrows
 only the table it is carried to: it doesn't change which table comes first, and
 an equality with an expression carries none.
 
+A table narrowed by a subquery's value comes after the subquery's table, and the
+tables that reach rows through it come after it. An import pane reads a cell's
+cards with `FROM found AS f JOIN matched AS m ON m.verdict_id = f.verdict_id JOIN
+label AS l ON l.verdict_id = m.verdict_id WHERE f.verdict_id = (SELECT v.verdict_id
+FROM verdict AS v WHERE v.verdict_id = ?1)`. `found` waits for `verdict`, and
+`matched` and `label` wait for `found`, since the only tables that narrow them
+are ones that wait: placed first, they would take values from no table and read
+every verdict's rows. So `matched` and `label` narrow to the cell's verdict with
+no condition of their own, and a label added to another verdict doesn't rerun the
+read. A group of joined tables waits when none of its tables has a condition of
+its own or a partner placed already, and one of them is joined to a table that
+waits.
+
 ### How a lookup compares
 
 A lookup compares as the statement does. A join on an expression, which has no

@@ -177,7 +177,59 @@ impl Planner<'_> {
                 }
             }
         }
+        self.wait_with_group(edges, placed, remaining, &mut waiting);
         waiting
+    }
+
+    /// Make the items wait that only a waiting item can narrow. Items that
+    /// join one another and no source that gives them values, a source with
+    /// conditions of its own or one with a partner already placed, give none
+    /// to each other: a chain of joins whose first item waits for a
+    /// subquery's source holds such a group after it, and placed before it,
+    /// the group's items would take no values.
+    fn wait_with_group(
+        &self,
+        edges: &EdgesOfItems,
+        placed: &[bool],
+        remaining: &[usize],
+        waiting: &mut [bool],
+    ) {
+        let neighbors = |item: usize| {
+            edges.by_member[item]
+                .iter()
+                .map(|edge| self.edges[*edge].partner)
+                .chain(edges.by_partner[item].iter().map(|edge| self.edges[*edge].member.item))
+        };
+        let gives_values = |item: usize| {
+            !waiting[item]
+                && (self.items[item].source.term.is_some()
+                    || self.items[item].source.table().is_none()
+                    || edges.by_member[item].iter().any(|edge| placed[self.edges[*edge].partner]))
+        };
+        let mut reached = vec![false; self.items.len()];
+        let mut stack: Vec<usize> =
+            remaining.iter().copied().filter(|item| gives_values(*item)).collect();
+        for item in &stack {
+            reached[*item] = true;
+        }
+        while let Some(item) = stack.pop() {
+            for next in neighbors(item) {
+                if !placed[next] && !waiting[next] && !reached[next] {
+                    reached[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+        let mut stack: Vec<usize> =
+            remaining.iter().copied().filter(|item| waiting[*item]).collect();
+        while let Some(item) = stack.pop() {
+            for next in neighbors(item) {
+                if !placed[next] && !waiting[next] && !reached[next] {
+                    waiting[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
     }
 }
 

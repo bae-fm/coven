@@ -499,7 +499,11 @@ each such item, and each step that makes an item an inner join's releases
 it for good. The restriction lets a binding hold no row only of such an
 item. `plan_order` proves that the planner places each item once, and every
 item of every core: each step places one item that is not placed yet, and
-the planner takes a step for each item. `Planned.scopes_eq` takes both.
+the planner takes a step for each item. `Planned.scopes_eq` takes both. The
+theorems hold for any order of steps, so which item the planner places next,
+and so how many rows it narrows each item to, is no part of what they prove:
+the Rust planner's test of a join chain, whose first table waits for a
+subquery's table, checks that choice.
 `plan_pushed` proves that each edge the planner passes into a derived item's
 arms comes from an edge the derived item holds, as a membership or as an edge
 passed into it, through the result column that an arm passes the target's
