@@ -855,9 +855,9 @@ issues/src/lib.rs:20:1: Titles computes the column title, and its header gives t
 ```
 
 A column that can be NULL needs an `Option`. A table's column can be NULL when
-the table doesn't declare it `NOT NULL` and it isn't the rowid, when the SQL
-places the table on the right of a `LEFT JOIN`, and when the column comes from a
-scalar subquery. A
+the table doesn't declare it `NOT NULL` and it isn't the rowid, and when the SQL
+places the table on the right of a `LEFT JOIN`. A scalar subquery as a result
+column can be NULL unless the compiler can tell that it never is (below). A
 declaration that gives such a column a type other than an `Option` fails:
 
 ```rust
@@ -880,6 +880,35 @@ column's name. Another primary key column can be NULL when the table doesn't
 declare it `NOT NULL`: an `INT PRIMARY KEY`, an `INTEGER PRIMARY KEY DESC`
 declared on the column, or a column of a primary key of two columns. A STRICT
 table and a `WITHOUT ROWID` table make each primary key column `NOT NULL`.
+
+**Scalar subqueries.** A subquery that is a whole result column, with or without
+a `WITH` clause, never gives NULL when two things hold:
+
+- *It returns exactly one row.* Its result column calls an aggregate over its
+  own rows, and it has no `GROUP BY`, `HAVING`, `LIMIT` or compound operator.
+  SQLite gives an aggregate that reads only an outer query's columns to that
+  query. The compiler sees that when the aggregate qualifies columns, and none
+  with a name of the subquery's `FROM`, so SQL that passes an aggregate an
+  outer column writes the column's qualifier.
+- *Its one value is never NULL.* The value is one of these:
+  - a number or a string;
+  - `count`, `total`, `json_group_array`, `json_group_object` or the `jsonb_`
+    form of either, with or without `FILTER`;
+  - `json_object`, `json_array` or the `jsonb_` form of either;
+  - `json` or `jsonb` of such a value, `coalesce` or `ifnull` with one among its
+    arguments, and `iif` of a condition and two such values;
+  - a `CASE` with an `ELSE`, whose every `THEN` and `ELSE` is such a value;
+  - `EXISTS`, `IS`, `IS NOT`, `ISNULL` or `NOTNULL`, whatever their operands;
+  - `NOT`, `AND`, `OR`, `||` or a comparison whose every operand is such a
+    value;
+  - `+`, `-` and `*` of counts and whole numbers (other arithmetic can give
+    NULL, as `/` by zero and infinity minus infinity do);
+  - such a value in parentheses, or another subquery that never gives NULL.
+
+The compiler takes every other scalar subquery to be one that can give NULL,
+and one in a statement with a compound operator too, whose later `SELECT`s give
+the column values of their own. It checks no computed column other than a
+scalar subquery: there the header's type says whether the column can be NULL.
 
 **JSON keys.** The compiler reads the `json_object` and `json_group_array` calls
 of a `json<T>` column and compares their keys, and how they nest, with `T`'s
@@ -1071,8 +1100,9 @@ on the fragment:
 | As a value, when the fragment always returns one row | `Fragment` |
 | As a value otherwise | `Option<Fragment>` |
 
-A fragment always returns one row when its `SELECT` calls an aggregate and has
-neither `GROUP BY` nor `HAVING`. `UnreadCount` counts, so each issue has a
+A fragment always returns one row when its `SELECT` calls an aggregate over its
+own rows and has no `GROUP BY`, `HAVING`, `LIMIT` or compound operator (section
+8). `UnreadCount` counts, so each issue has a
 count, 0 when it has no comments. `IssueLabels` gathers labels into an array,
 `[]` when there are none. With a `HAVING count(*) > 0`, the same `SELECT` would
 return no row for an issue without labels, and the field would be an `Option`.

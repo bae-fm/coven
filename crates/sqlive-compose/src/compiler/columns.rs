@@ -8,6 +8,7 @@ use super::header::{Declared, Header, RustType};
 use super::json;
 use super::lex::Token;
 use super::model::{strict_type, Field, FieldName, Reading};
+use super::never_null;
 use super::spread::{Place, Placed, Registry};
 
 /// A result item and the result columns it gives.
@@ -170,17 +171,21 @@ fn column_field(
     let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
     // SQLite names the origin of a compound's first SELECT only.
     let origin = if core.compound { None } else { column.origin.as_ref() };
-    let nullable = origin.is_some_and(|origin| !origin.never_null)
-        || joins_with_nulls(
-            core,
-            nullable_from,
-            item,
-            origin,
-            &column.name,
-            header,
-            declared.is_some(),
-        )?
-        || item.kind == ItemKind::Subquery;
+    let nullable = if item.kind == ItemKind::Subquery {
+        // The later SELECTs of a compound give the column values too.
+        core.compound || !never_null::expression(sql, &tokens[item.expression.clone()])
+    } else {
+        origin.is_some_and(|origin| !origin.never_null)
+            || joins_with_nulls(
+                core,
+                nullable_from,
+                item,
+                origin,
+                &column.name,
+                header,
+                declared.is_some(),
+            )?
+    };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {
         (Some(Declared::Json(ty)), _) => {
             if matches!(item.kind, ItemKind::Expression | ItemKind::Subquery) {

@@ -138,7 +138,14 @@ pub(crate) fn returning(sql: &str, tokens: &[Token], target: FromItem) -> Core {
             break;
         }
     }
-    Core { items, from: vec![target], aggregates: false, groups: false, compound: false }
+    Core {
+        items,
+        from: vec![target],
+        aggregates: false,
+        groups: false,
+        compound: false,
+        limited: false,
+    }
 }
 
 /// Fails when a parameter that can be NULL is the whole value of a NOT NULL

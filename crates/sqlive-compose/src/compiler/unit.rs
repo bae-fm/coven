@@ -121,7 +121,7 @@ pub(crate) fn compile(
                 sql: sql.to_owned(),
                 width: prepared.columns.len(),
                 presence: presence(&fields),
-                one_row: outline.aggregates && !outline.groups,
+                one_row: outline.one_row(),
             };
             (generate::fragment(header, &fields, call.exported), Some(record))
         }

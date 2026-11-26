@@ -157,7 +157,7 @@ sqlive_compose::read!(Counted, r#"SELECT (SELECT count(*) FROM issues AS every) 
     let output = compile_lib(
         r##"
 sqlive_compose::read!(AllIssues, r#"SELECT i.title FROM issues AS i"#);
-sqlive_compose::read!(Counted { total: i64 }, r#"SELECT (SELECT count(*) FROM issues AS every) AS total"#);
+sqlive_compose::read!(Counted { total: i64 }, r#"SELECT (SELECT max(every.number) FROM issues AS every) AS total"#);
 "##,
     );
     assert_eq!(

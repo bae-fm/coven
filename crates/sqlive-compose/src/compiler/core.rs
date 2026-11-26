@@ -77,6 +77,8 @@ pub(crate) struct Item {
     pub(crate) alias: Option<String>,
     /// The item's tokens, as indices into the statement's token list.
     pub(crate) tokens: Range<usize>,
+    /// The tokens before `AS` and its name.
+    pub(crate) expression: Range<usize>,
 }
 
 /// The first SELECT core of a statement.
@@ -91,6 +93,17 @@ pub(crate) struct Core {
     pub(crate) groups: bool,
     /// Whether a compound operator (UNION and the others) follows the core.
     pub(crate) compound: bool,
+    /// Whether the statement has a LIMIT.
+    pub(crate) limited: bool,
+}
+
+impl Core {
+    /// Whether the statement returns exactly one row, whatever its tables
+    /// hold: it aggregates all its rows into one, which no GROUP BY splits
+    /// and no HAVING, LIMIT or compound operator can drop or add to.
+    pub(crate) fn one_row(&self) -> bool {
+        self.aggregates && !self.groups && !self.compound && !self.limited
+    }
 }
 
 const AGGREGATES: [&str; 12] = [
@@ -173,6 +186,7 @@ pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
         aggregates: false,
         groups: false,
         compound: false,
+        limited: false,
     };
     let Some(select) = main_select(sql, tokens) else { return core };
     // The end of each part, at the core's own depth.
@@ -199,7 +213,8 @@ pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
     if let Some(from_at) = from_at {
         core.from = from_items(sql, tokens, from_at + 1..clause_end);
     }
-    core.aggregates = core.items.iter().any(|item| aggregates(sql, tokens, item.tokens.clone()));
+    core.aggregates =
+        core.items.iter().any(|item| aggregates(sql, tokens, item.tokens.clone(), &core.from));
     let mut depth = 0usize;
     for token in &tokens[clause_end.min(tokens.len())..] {
         if token.is_symbol(sql, '(') {
@@ -210,11 +225,34 @@ pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
             match token.text(sql).to_ascii_lowercase().as_str() {
                 "group" | "having" => core.groups = true,
                 "union" | "intersect" | "except" => core.compound = true,
+                "limit" => core.limited = true,
                 _ => {}
             }
         }
     }
     core
+}
+
+/// Whether the token at `index` is a parenthesis that opens a query.
+pub(crate) fn opens_query(sql: &str, tokens: &[Token], index: usize) -> bool {
+    tokens[index].is_symbol(sql, '(')
+        && tokens.get(index + 1).is_some_and(|next| {
+            ["select", "with", "values"].iter().any(|word| next.is_word(sql, word))
+        })
+}
+
+/// Whether `expression` is a query in parentheses, with or without more
+/// parentheses around it.
+fn is_subquery(sql: &str, mut expression: &[Token]) -> bool {
+    while expression.first().is_some_and(|open| open.is_symbol(sql, '('))
+        && matching(sql, expression, 0) == Some(expression.len() - 1)
+    {
+        if opens_query(sql, expression, 0) {
+            return true;
+        }
+        expression = &expression[1..expression.len() - 1];
+    }
+    false
 }
 
 /// The index of the SELECT whose core is the statement's first: after a WITH
@@ -302,17 +340,11 @@ fn item(sql: &str, tokens: &[Token], range: Range<usize>) -> Item {
                 name: name.name(sql).unwrap_or_default(),
             }
         }
-        [open, select, .., close]
-            if open.is_symbol(sql, '(')
-                && select.is_word(sql, "select")
-                && close.is_symbol(sql, ')')
-                && matching(sql, expression, 0) == Some(expression.len() - 1) =>
-        {
-            ItemKind::Subquery
-        }
+        _ if is_subquery(sql, expression) => ItemKind::Subquery,
         _ => ItemKind::Expression,
     };
-    Item { kind, alias, tokens: range }
+    let expression = range.start..range.start + expression.len();
+    Item { kind, alias, tokens: range, expression }
 }
 
 fn from_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<FromItem> {
@@ -452,15 +484,13 @@ pub(crate) fn from_item(
     (item, Some(next))
 }
 
-/// Whether the tokens in `range` call an aggregate function outside a
-/// subquery.
-fn aggregates(sql: &str, tokens: &[Token], range: Range<usize>) -> bool {
+/// Whether the tokens in `range` call, outside a subquery, an aggregate
+/// function that aggregates the rows of the core whose FROM items are `from`.
+fn aggregates(sql: &str, tokens: &[Token], range: Range<usize>, from: &[FromItem]) -> bool {
     let mut index = range.start;
     while index < range.end {
         let token = &tokens[index];
-        if token.is_symbol(sql, '(')
-            && tokens.get(index + 1).is_some_and(|next| next.is_word(sql, "select"))
-        {
+        if opens_query(sql, tokens, index) {
             match matching(sql, tokens, index) {
                 Some(close) => {
                     index = close + 1;
@@ -481,7 +511,8 @@ fn aggregates(sql: &str, tokens: &[Token], range: Range<usize>) -> bool {
                         after = matching(sql, tokens, after + 1).map_or(after, |close| close + 1);
                     }
                     let window = tokens.get(after).is_some_and(|next| next.is_word(sql, "over"));
-                    if !scalar && !window {
+                    let call = index + 2..after;
+                    if !scalar && !window && !reads_outer_rows_only(sql, tokens, call, from) {
                         return true;
                     }
                 }
@@ -490,6 +521,37 @@ fn aggregates(sql: &str, tokens: &[Token], range: Range<usize>) -> bool {
         index += 1;
     }
     false
+}
+
+/// Whether the aggregate call whose arguments and FILTER are `range`
+/// qualifies columns, and none with a name of `from`, outside its subqueries.
+/// SQLite gives such an aggregate to the outer query whose columns it reads,
+/// so it doesn't aggregate the core's own rows.
+fn reads_outer_rows_only(
+    sql: &str,
+    tokens: &[Token],
+    range: Range<usize>,
+    from: &[FromItem],
+) -> bool {
+    let mut qualified = false;
+    let mut index = range.start;
+    while index < range.end {
+        if opens_query(sql, tokens, index) {
+            if let Some(close) = matching(sql, tokens, index) {
+                index = close + 1;
+                continue;
+            }
+        }
+        let dot = tokens.get(index + 1).is_some_and(|dot| dot.is_symbol(sql, '.'));
+        if let Some(qualifier) = tokens[index].name(sql).filter(|_| dot) {
+            if from.iter().any(|item| item.qualifier.as_deref() == Some(qualifier.as_str())) {
+                return false;
+            }
+            qualified = true;
+        }
+        index += 1;
+    }
+    qualified
 }
 
 /// How many arguments the call whose parentheses are at `open` and `close`
