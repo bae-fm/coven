@@ -168,6 +168,36 @@ class CheckSpec(unittest.TestCase):
         self.assertIn("cites `Engine.rule_sound`, which ../crates/engine/proofs/Engine/Axioms.lean "
                       "has no `#print axioms` line for", out)
 
+    def test_a_crates_spec_is_checked_for_links_layout_and_its_proof_table(self):
+        package = [
+            ("crates/engine/proofs/Engine/Rule.lean",
+             "namespace Engine\ntheorem rule_sound : True := trivial\nend Engine\n"),
+            ("crates/engine/proofs/Engine/Axioms.lean",
+             "import Engine\n\n#print axioms Engine.rule_sound\n"),
+            ("crates/engine/proofs/README.md", "# Engine\n\n`rule_sound` holds.\n"),
+        ]
+        spec = ("crates/engine/SPEC.md",
+                "# engine\n\nSee [opening](../../spec/api.md#e1-opening) and [rules](#1-rules).\n\n"
+                "## 1. Rules\n\n| Claim | Theorems | File | Section |\n|---|---|---|---|\n"
+                "| A rule | `rule_sound` | `proofs/Engine/Rule.lean` | 1 |\n")
+        self.assertEqual(run(crate_files=package + [spec]), (0, ""))
+        broken = (spec[0], spec[1].replace("#1-rules", "#2-gone").replace("`rule_sound` |", "`gone` |")
+                  + "word " * 21 + "\n")
+        status, out = run(crate_files=package + [broken])
+        self.assertEqual(status, 1)
+        for expected in ("crates/engine/SPEC.md:3: link to #2-gone: no such heading",
+                         "crates/engine/SPEC.md:9: cites `gone`, which proofs/Engine/Rule.lean "
+                         "declares no theorem of that name",
+                         "crates/engine/SPEC.md:10: line is 105 characters"):
+            self.assertIn(expected, out)
+        unaudited = [(path, text.replace("#print axioms Engine.rule_sound\n", ""))
+                     for path, text in package]
+        status, out = run(crate_files=unaudited + [spec])
+        self.assertEqual(status, 1)
+        self.assertIn("crates/engine/SPEC.md:9: cites `Engine.rule_sound`, which "
+                      "proofs/Engine/Axioms.lean has no `#print axioms` line for", out)
+        self.assertIn("crates/engine/proofs/README.md:3: cites `Engine.rule_sound`", out)
+
     def test_long_prose_lines_fail_but_tables_code_and_links_do_not(self):
         long_prose = "word " * 21
         exempt = "\n".join([

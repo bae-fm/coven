@@ -815,8 +815,8 @@ issues/src/lib.rs:40:1: issues::A spreads itself: issues::A, issues::B, issues::
 The compiler prepares a fragment with a parent row with each `@parent.column`
 written as a subquery that reads that column of the parent table, so the
 fragment's own columns keep their tables and types. It prepares a fragment with
-a relation over an empty set of rows of the declared types. SQLite reports what it can't find, and the error holds
-SQLite's message:
+a relation over an empty set of rows of the declared types. SQLite reports what
+it can't find, and the error holds SQLite's message:
 
 ```sql
 SELECT i.id AS issue_id, i.titel FROM issues AS i
@@ -1114,11 +1114,11 @@ pub fn setup() -> Setup {
 **A crate hands its fragments to the crates that spread them** through a
 *manifest*, a JSON text that holds each fragment's Rust path, parameters, parent
 table and relations, its expanded SQL, how many columns it returns, the position
-of its first column that can't be NULL, and whether it always returns one row. Because the SQL is expanded
-already, a crate needs only the manifests of the crates it depends on directly:
-the manifest of `issues` holds `IssueListItem` with the SQL of `UnreadCount`
-inside it, and the tracker crate composes `IssueList` without the manifest of
-`comments`.
+of its first column that can't be NULL, and whether it always returns one row.
+Because the SQL is expanded already, a crate needs only the manifests of the
+crates it depends on directly: the manifest of `issues` holds `IssueListItem`
+with the SQL of `UnreadCount` inside it, and the tracker crate composes
+`IssueList` without the manifest of `comments`.
 
 Cargo passes on the manifest's path. A crate that sets `links`, as `issues` does
 above, can print metadata from its build script, and Cargo runs that script

@@ -144,7 +144,7 @@ cargo_packages() {
 }
 
 code_checks() {
-    step "spec/coven.md and spec/format.md against spec/WRITING.md"
+    step "the spec and the crates' SPEC.md files against spec/WRITING.md"
     "$(command -v python3 || command -v python)" scripts/check-spec.py
 
     step "the check scripts' own tests"

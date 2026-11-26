@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the spec readable: check every markdown file directly under spec/.
+"""Keep the spec readable: check the markdown files of spec/ and each crate's SPEC.md.
 
     scripts/check-spec.py [spec directory]
 
@@ -24,6 +24,10 @@ a machine can see:
 A proof package is a directory under spec/proofs/, or a crate's proofs/
 directory (../crates/<crate>/proofs/ from spec/), which models that crate; a
 crate's package is named for the crate.
+
+A crate's own spec, crates/<crate>/SPEC.md, gets the link and layout checks,
+and the theorem checks for every row of its proof tables; each markdown file in
+a crate's proofs/ directory is a write-up of that crate's package.
 
 Exit status 0 when every file passes, 1 with one line per finding otherwise.
 """
@@ -328,52 +332,61 @@ def package_of(packages, path):
                  if path.is_relative_to(package.directory.resolve())), None)
 
 
-def check_audits(coven, writeups, packages, findings):
-    """Each theorem Appendix G or a write-up cites is declared where cited and audited by name."""
-    spec = coven.path.parent.resolve()
+def audit_rows(document, rows, packages, findings):
+    """Each theorem a proof table's rows cite is declared in a file the row names, and audited.
 
-    def shown(path):
-        """A path as the spec's links name it, from spec/."""
-        return Path(os.path.relpath(path, spec)).as_posix()
-
-    def unaudited(document, line, package, names):
-        for name in names:
-            if name not in package.audited:
-                findings.append((document, line, f"cites `{name}`, which "
-                                 f"{shown(package.axioms)} has no "
-                                 "`#print axioms` line for"))
-
-    start = next((n for n, title in coven.headings if title.startswith("Appendix G.")), None)
-    end = next((n for n, title in coven.headings
-                if start and n > start and title.startswith("Appendix ")
-                and not title.startswith("Appendix G")), len(coven.lines) + 1)
-    for number in range(start or len(coven.lines), end - 1):
-        line = coven.lines[number]
+    `rows` are the document's line numbers to read; a row's paths are relative to the document.
+    """
+    base = document.path.parent.resolve()
+    for number in rows:
+        line = document.lines[number]
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if not line.lstrip().startswith("|") or len(cells) < 3:
             continue
-        files = {(coven.path.parent / path).resolve()
+        files = {(base / path).resolve()
                  for path in re.findall(PROOF_PATH, cells[2]) if path.endswith(".lean")}
         if not files:
             continue
         package = package_of(packages, next(iter(files)))
         if package is None:
-            findings.append((coven, number + 1, "cites a proof package with no Axioms.lean"))
+            findings.append((document, number + 1, "cites a proof package with no Axioms.lean"))
             continue
         for cited in re.findall(r"`([^`]+)`", cells[1]):
             names = package.theorems(cited, files)
             if not names:
-                findings.append((coven, number + 1, f"cites `{cited}`, which "
-                                 + ", ".join(sorted(shown(path) for path in files))
+                findings.append((document, number + 1, f"cites `{cited}`, which "
+                                 + ", ".join(sorted(shown(document, path) for path in files))
                                  + " declares no theorem of that name"))
-            unaudited(coven, number + 1, package, names)
-    for name, document in writeups.items():
+            unaudited(document, number + 1, package, names, findings)
+
+
+def shown(document, path):
+    """A path as the document's links name it, from the document's directory."""
+    return Path(os.path.relpath(path, document.path.parent.resolve())).as_posix()
+
+
+def unaudited(document, line, package, names, findings):
+    for name in names:
+        if name not in package.audited:
+            findings.append((document, line, f"cites `{name}`, which "
+                             f"{shown(document, package.axioms)} has no "
+                             "`#print axioms` line for"))
+
+
+def check_audits(coven, writeups, packages, findings):
+    """Each theorem Appendix G or a write-up cites is declared where cited and audited by name."""
+    start = next((n for n, title in coven.headings if title.startswith("Appendix G.")), None)
+    end = next((n for n, title in coven.headings
+                if start and n > start and title.startswith("Appendix ")
+                and not title.startswith("Appendix G")), len(coven.lines) + 1)
+    audit_rows(coven, range(start or len(coven.lines), end - 1), packages, findings)
+    for name, document in writeups:
         package = packages.get(name)
         if package is None:
             continue
         for match in re.finditer(r"`([A-Za-z_][\w.']*)`", document.text):
             unaudited(document, document.line_of(match.start()), package,
-                      package.theorems(match.group(1)))
+                      package.theorems(match.group(1)), findings)
 
 
 def only_links(line):
@@ -428,9 +441,22 @@ def main(argv):
         check_links(document, documents, findings)
         check_layout(document, findings)
     check_body_citations(coven, findings)
-    writeups = {path.stem: Document(path.resolve())
-                for path in sorted((spec / "proofs").glob("*.md"))}
-    check_audits(coven, writeups, proof_packages(spec), findings)
+    packages = proof_packages(spec)
+    # A crate's own spec names coven's sections only through links, so its
+    # links, its layout and its proof tables are checked, not its references.
+    crates = spec.parent / "crates"
+    for path in sorted(crates.glob("*/SPEC.md")):
+        document = documents.setdefault(path.resolve(), Document(path.resolve()))
+        check_links(document, documents, findings)
+        check_layout(document, findings)
+        audit_rows(document, range(len(document.lines)), packages, findings)
+    # A write-up under spec/proofs/ is named for its package; one in a crate's
+    # proofs/ directory writes up the crate's package.
+    writeups = [(path.stem, Document(path.resolve()))
+                for path in sorted((spec / "proofs").glob("*.md"))]
+    writeups += [(path.parent.parent.name, Document(path.resolve()))
+                 for path in sorted(crates.glob("*/proofs/*.md"))]
+    check_audits(coven, writeups, packages, findings)
     for document, line, message in sorted(findings, key=lambda f: (str(f[0].path), f[1])):
         print(f"{document.path.relative_to(spec.resolve().parent).as_posix()}:{line}: {message}")
     return 1 if findings else 0

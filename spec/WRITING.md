@@ -5,7 +5,8 @@ This is the spec's writing standard. Every edit to `spec/` follows it: [coven.md
 
 The spec is read by people deciding whether coven is right, and by people changing it. It has to
 explain, not just list rules. Read this before you change a sentence. `scripts/check-spec.py` checks
-the mechanical parts of every markdown file directly under `spec/` on every commit: references and
+the mechanical parts of every markdown file directly under `spec/`, and the links, line lengths and
+proof tables of each crate's `SPEC.md`, on every commit: references and
 links resolve, body proof citations are listed in Appendix G, lines stay short, and no paragraph is
 split by stray blank lines.
 
