@@ -18,14 +18,7 @@ pub fn make_readable_objects(
     )
 }
 
-/// The SQL that makes every object of coven's that app SQL may read, as
-/// `make_readable_objects` runs it, for a build script that checks app SQL
-/// against those objects without a connection of coven's. A view's SQL names
-/// coven's SQL functions, which the connection that runs the text registers
-/// itself.
-pub fn readable_objects_sql() -> String {
-    coven_database::test_utils::readable_objects_sql()
-}
+pub use coven_database::test_utils::readable_objects_sql;
 
 /// Journal `invite` on `connection`, where `make_readable_objects` made
 /// coven's objects, as a store journals an invite at its stage, so that
