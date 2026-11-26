@@ -589,6 +589,28 @@ fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));
 }
 
+/// The exported statement returns the row `read` decodes: an app that runs
+/// it in a query of its own decodes the status `sync_status` returns, before
+/// and after a pass finishes.
+#[tokio::test]
+async fn the_exported_statement_returns_the_row_read_decodes() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let by_statement =
+        |sql: coven_database::SqlReadContext<'_>| -> Result<SyncStatus, coven_database::DbError> {
+            let (state, last_synced) = sql.query_row(SyncStatus::READ, [], |row| {
+                Ok((row.get::<_, SyncState>(0)?, row.get::<_, Option<i64>>(1)?))
+            })?;
+            SyncStatus::from_columns(state, last_synced)
+        };
+    let before = ana.sync.database.read(by_statement).await.unwrap();
+    assert_eq!(before, sync_status(&ana.sync.database).await.unwrap());
+    group.create(&ana).await;
+    ana.sync.pass().await.unwrap();
+    let after = ana.sync.database.read(by_statement).await.unwrap();
+    assert_eq!(after, sync_status(&ana.sync.database).await.unwrap());
+}
+
 /// Follow the sync state through `coven_sync_state`, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
     Followed::new(device.sync.database.subscribe(SyncStatus::read))

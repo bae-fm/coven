@@ -6611,6 +6611,14 @@ pub struct SyncStatus {
 }
 
 impl SyncStatus {
+    /// The statement that reads `coven_sync_state`'s row: its `detail` and
+    /// `last_synced` columns, which `from_columns` decodes. An app composes
+    /// it into its own reads.
+    pub const READ: &'static str;
+    /// The status that `coven_sync_state`'s `detail` and `last_synced` columns
+    /// hold, for an app's own query that reads them; `read` calls it. A
+    /// `last_synced` the clock can't name is `DamagedDatabase`.
+    pub fn from_columns(state: SyncState, last_synced: Option<i64>) -> Result<SyncStatus, DbError>;
     /// The sync state and when sync last finished, as `coven_sync_state`
     /// shows them in the caller's read, for a live query that reads only the
     /// view.

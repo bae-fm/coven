@@ -681,14 +681,23 @@ impl SyncStatus {
         })
     }
 
+    /// The statement that reads `coven_sync_state`'s one row: the `detail`
+    /// and `last_synced` columns [`Self::from_columns`] decodes. An app
+    /// composes it into its own reads.
+    pub const READ: &'static str = "SELECT detail,last_synced FROM coven_sync_state";
+
+    /// The status that `coven_sync_state`'s `detail` and `last_synced`
+    /// columns hold, for an app that reads them in a query of its own.
+    pub fn from_columns(state: SyncState, last_synced: Option<i64>) -> Result<Self, DbError> {
+        Ok(Self { state, last_synced: last_synced.map(coven_database::stored_time).transpose()? })
+    }
+
     /// The sync state and when sync last finished, as `coven_sync_state`
     /// shows them in the caller's read.
     pub fn read(sql: SqlReadContext<'_>) -> Result<Self, DbError> {
         let (state, last_synced) =
-            sql.query_row("SELECT detail,last_synced FROM coven_sync_state", [], |row| {
-                Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?))
-            })?;
-        Ok(Self { state, last_synced: last_synced.map(coven_database::stored_time).transpose()? })
+            sql.query_row(Self::READ, [], |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?)))?;
+        Self::from_columns(state, last_synced)
     }
 
     /// A closed store's sync status (api.md E1, E5): the state opening shows
