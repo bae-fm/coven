@@ -9,9 +9,9 @@
 //! only the live queries whose scopes its rows could pass, however many
 //! wait.
 
-use crate::read_set::{ReadSet, RowChange};
-use crate::row_scope::{compare, RowImage};
-use crate::sql_value::SqlValue as Value;
+use crate::SqlValue as Value;
+use crate::{compare, RowImage};
+use crate::{ReadSet, RowChange};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

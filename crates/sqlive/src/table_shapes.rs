@@ -56,7 +56,7 @@ pub(crate) struct TableShapes {
 
 impl TableShapes {
     fn read<P: Policy>(database: &HostSql<P>) -> Result<Self, PolicyError<P>> {
-        let tables = database.query(crate::schema_objects::MAIN_TABLES, [], |r| {
+        let tables = database.query(crate::MAIN_TABLES, [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
         let columns = |table: &str| {
@@ -76,7 +76,7 @@ impl TableShapes {
         // Each contentful FTS5 table's own shape, its rowid first, as its
         // content table's `id` is, and its content table, lowercase.
         let mut contents = HashMap::new();
-        for (table, content) in database.query(crate::schema_objects::FTS5_CONTENT, [], |r| {
+        for (table, content) in database.query(crate::FTS5_CONTENT, [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })? {
             let own = columns(&table)?.into_iter().filter(|(_, _, hidden)| !hidden);

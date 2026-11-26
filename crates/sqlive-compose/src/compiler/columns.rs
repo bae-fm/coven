@@ -24,7 +24,7 @@ struct Span<'a> {
 pub(crate) fn fields(
     header: &Header,
     core: &Core,
-    prepared: &sqlive::ProbedStatement,
+    prepared: &sqlive_reads::ProbedStatement,
     placed: &[Placed],
     registry: &Registry,
     sql: &str,
@@ -163,7 +163,7 @@ fn column_field(
     core: &Core,
     nullable_from: &[bool],
     item: &Item,
-    column: &sqlive::ProbedColumn,
+    column: &sqlive_reads::ProbedColumn,
     position: usize,
     (sql, tokens): (&str, &[Token]),
 ) -> Result<Field, Cause> {
@@ -251,7 +251,7 @@ fn joins_with_nulls(
     core: &Core,
     nullable_from: &[bool],
     item: &Item,
-    origin: Option<&sqlive::ColumnOrigin>,
+    origin: Option<&sqlive_reads::ColumnOrigin>,
     column: &str,
     header: &Header,
     declared: bool,

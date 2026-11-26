@@ -4,7 +4,7 @@
 //! reads again, so a write learns them without reading every live query.
 
 use crate::change_capture::KeptColumns;
-use crate::read_set::ReadSet;
+use crate::ReadSet;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How many reads read each table, and how many of those read or test each

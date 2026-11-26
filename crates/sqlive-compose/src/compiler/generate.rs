@@ -66,7 +66,7 @@ fn fragment_path(path: &str) -> syn::Path {
 }
 
 fn row_type() -> TokenStream {
-    let row = path("sqlive::Row");
+    let row = path("sqlive_reads::Row");
     quote!(&#row<'_>)
 }
 
@@ -111,7 +111,7 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
-    let result = path("sqlive::SqliteResult");
+    let result = path("sqlive_reads::SqliteResult");
     let shapes = shapes(&header.shapes);
     quote! {
         #shapes
@@ -148,8 +148,8 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
-    let result = path("sqlive::SqliteResult");
-    let to_sql = path("sqlive::ToSql");
+    let result = path("sqlive_reads::SqliteResult");
+    let to_sql = path("sqlive_reads::ToSql");
     let params_doc = format!("What the `{}` read's request binds.", header.name);
     let row_doc = format!("A row of the `{}` read.", header.name);
     let shapes = shapes(&header.shapes);

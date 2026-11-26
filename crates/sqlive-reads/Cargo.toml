@@ -1,0 +1,21 @@
+[package]
+name = "sqlive-reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What sqlive knows of a SELECT without running it: its scope plan, its read report and its columns' origins."
+keywords = ["sqlite", "sql", "live-query"]
+categories = ["database"]
+
+[features]
+# The reports tests read back.
+test-utils = []
+
+[dependencies]
+rusqlite = { workspace = true, features = ["functions", "collation", "column_metadata"] }
+sqlite3-parser.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

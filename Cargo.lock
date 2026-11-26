@@ -3156,6 +3156,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sqlite3-parser",
+ "sqlive-reads",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3172,8 +3173,8 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
- "sqlive",
  "sqlive-compose-macros",
+ "sqlive-reads",
  "syn 3.0.6",
  "thiserror 2.0.21",
 ]
@@ -3185,6 +3186,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sqlive-reads"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sqlite3-parser",
+ "tracing",
 ]
 
 [[package]]

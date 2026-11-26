@@ -7,8 +7,8 @@ use crate::commit_scope::CommitScope;
 use crate::database_changes::DatabaseChanges;
 use crate::kept_counts::KeptCounts;
 use crate::read_index::{ReadIndex, SubscriptionId};
-use crate::read_set::{affected_by, past_row_limit};
 use crate::{affected, Answers, EngineFailure, Error, Judging, Lookups, ReadSet, RowChange};
+use crate::{affected_by, past_row_limit};
 use panic_as_error::locks::lock_unpoisoned;
 use panic_as_error::{Bug, BugSinkRef};
 use std::{

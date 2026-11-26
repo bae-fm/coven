@@ -59,7 +59,7 @@ pub enum ReadRows {
 
 impl ReadReport {
     /// What `plan` narrows.
-    pub(crate) fn of(plan: &ScopePlan) -> Self {
+    pub fn of(plan: &ScopePlan) -> Self {
         let sources = match &plan.sources {
             Ok(sources) => sources,
             Err(why) => return Self::Whole { why: why.clone() },
@@ -100,7 +100,7 @@ impl ReadReport {
 
     /// The entries whose every row the statement depends on, as text, when
     /// it has any.
-    pub(crate) fn whole(&self) -> Option<String> {
+    pub fn whole(&self) -> Option<String> {
         match self {
             Self::Whole { .. } => Some(self.to_string()),
             Self::Entries(entries) => {
@@ -172,7 +172,7 @@ fn why_whole(
 pub fn read_report(
     connection: &rusqlite::Connection,
     sql: &str,
-    whole: &crate::WholeViews,
+    whole: &crate::read_capture::WholeViews,
 ) -> rusqlite::Result<ReadReport> {
     let sql = crate::sql::up_to_nul(sql);
     let statement = connection.prepare(sql)?;

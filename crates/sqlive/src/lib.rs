@@ -30,9 +30,7 @@ mod connection;
 mod connection_setup;
 mod database;
 mod database_changes;
-mod derived;
 mod error;
-mod from_item;
 mod handle;
 mod kept_counts;
 mod live_query;
@@ -43,41 +41,17 @@ mod no_policy;
 mod planner_statistics;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod random_scopes;
-mod read_capture;
 mod read_index;
-mod read_report;
-mod read_set;
-mod row_scope;
-mod schema_objects;
-mod schema_probe;
-mod scope_edge;
-mod scope_lookup;
-mod scope_one_of;
-mod scope_or;
-mod scope_order;
-mod scope_plan;
-mod scope_row;
-mod scope_subquery;
-mod scope_term;
-mod scope_window;
-mod select_syntax;
 mod snapshot_values;
-mod source_order;
-pub mod sql;
-mod sql_value;
-mod sql_walk;
 mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_records;
-mod token_scan;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod triggered_inserts;
-mod unreported_columns;
 mod upkeep;
 mod wal_checkpoints;
-mod whole_view_names;
 
 pub use authorization::{
     FunctionCall, HostError, LocalSql, Owner, Policy, PolicyAction, PolicyError, Refresh,
@@ -103,30 +77,28 @@ pub use live_query::{
 pub use live_query_runs::LiveQueryRuns;
 pub use no_policy::{HandleFailure, NoPolicy};
 pub use panic_as_error;
-pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
-#[cfg(any(test, feature = "test-utils"))]
-pub use read_report::read_report;
-pub use read_report::{ReadEntry, ReadReport, ReadRows};
-pub use read_set::{affected, Answers, ColumnSet, ReadSet, RowChange, TableRead, ROWS_PER_TABLE};
-pub use row_scope::{RowImage, RowScope, Scopes};
 pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};
-pub use schema_probe::{ColumnOrigin, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction};
-pub use scope_lookup::{Judging, Lookup, Lookups, NoAnswer, LOOKUP_STEPS};
-pub use scope_order::LastRow;
-pub(crate) use scope_plan::ScopePlan;
-pub use scope_plan::ScopePlanSize;
-pub use scope_row::RowCondition;
-pub use scope_term::Affinity;
 pub use snapshot_values::SnapshotValue;
-pub(crate) use sql_value::parameters;
-pub use sql_value::SqlValue;
 pub use sqlite_settings::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint, CHECKPOINT_PAGES,
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
+#[cfg(any(test, feature = "test-utils"))]
+pub use sqlive_reads::read_report;
+pub use sqlive_reads::sql;
+pub use sqlive_reads::{
+    affected, Affinity, Answers, ColumnOrigin, ColumnSet, Judging, LastRow, Lookup, Lookups,
+    NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry, ReadFrame, ReadReport,
+    ReadRows, ReadSet, RowChange, RowCondition, RowImage, RowScope, SchemaProbe, ScopePlanSize,
+    Scopes, SqlValue, StandInFunction, TableRead, WholeViews, LOOKUP_STEPS, ROWS_PER_TABLE,
+};
+pub(crate) use sqlive_reads::{
+    affected_by, compare, parameters, past_row_limit, ScopePlan, ValueKey, FTS5_CONTENT,
+    MAIN_TABLES,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_records::{
     report_cost, report_time, CommitPoint, ConnectionWork, ConnectionWorkCounter, StatementLog,

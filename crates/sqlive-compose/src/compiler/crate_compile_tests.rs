@@ -126,7 +126,7 @@ sqlive_compose::read!(IssueTitle(issue: IssueId) { opened_at: Timestamp }, r#"
     let code = code_of(&output, "IssueTitle.rs");
     for part in [
         "pub struct IssueTitleParams { # [allow (missing_docs)] pub issue : IssueId",
-        "(\":issue\" , & self . issue as & dyn :: sqlive_compose :: generated :: sqlive :: ToSql)",
+        "(\":issue\" , & self . issue as & dyn :: sqlive_compose :: generated :: sqlive_reads :: ToSql)",
         "pub assignee_id : Option < String >",
         "pub opened_at : Timestamp",
         "pub const SQL",

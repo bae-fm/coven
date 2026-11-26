@@ -56,7 +56,7 @@ pub enum Cause {
     },
     /// SQLite refused the SQL.
     #[error("{}", sqlite_message(.0))]
-    Sqlite(sqlive::SqliteError),
+    Sqlite(sqlive_reads::SqliteError),
     /// The SQL reads a parameter that the header doesn't declare.
     #[error("{concerns} reads :{parameter}, which its header does not declare")]
     UndeclaredParameter {
@@ -335,7 +335,7 @@ pub enum Cause {
     ManifestRead(serde_json::Error),
     /// The schema's setup fails.
     #[error("the schema's setup fails: {0}")]
-    Setup(sqlive::SqliteError),
+    Setup(sqlive_reads::SqliteError),
     /// The crate's manifest can't be written as text.
     #[error("can't write the crate's manifest: {0}")]
     Manifest(serde_json::Error),
@@ -359,9 +359,9 @@ fn json_keys_message(column: &str, shape: &str, extra: &[String], missing: &[Str
 
 /// What SQLite says of the SQL it refused, without the SQL's text, which the
 /// error's location stands for.
-fn sqlite_message(error: &sqlive::SqliteError) -> String {
+fn sqlite_message(error: &sqlive_reads::SqliteError) -> String {
     match error {
-        sqlive::SqliteError::SqlInputError { msg, .. } => msg.clone(),
+        sqlive_reads::SqliteError::SqlInputError { msg, .. } => msg.clone(),
         other => other.to_string(),
     }
 }

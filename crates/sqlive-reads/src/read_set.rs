@@ -92,7 +92,7 @@ pub fn affected(
 }
 
 /// The tables `changes` changes more than `ROWS_PER_TABLE` rows of.
-pub(crate) fn past_row_limit(changes: &[RowChange]) -> HashSet<&str> {
+pub fn past_row_limit(changes: &[RowChange]) -> HashSet<&str> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for change in changes.iter().filter(|change| change.rows.is_some()) {
         *counts.entry(&change.table).or_default() += 1;
@@ -107,7 +107,7 @@ pub(crate) fn past_row_limit(changes: &[RowChange]) -> HashSet<&str> {
 /// Whether some of `changes`, of a write that changes more than
 /// `ROWS_PER_TABLE` rows of each table `crowded` names, could change what
 /// `reads` returned, as `affected` judges them.
-pub(crate) fn affected_by<'a>(
+pub fn affected_by<'a>(
     reads: &ReadSet,
     changes: impl IntoIterator<Item = &'a RowChange>,
     crowded: &HashSet<&str>,
@@ -184,17 +184,22 @@ impl Answers {
 /// value exactly when their keys are equal. An integer and a real that
 /// compare equal are different values, which a query can tell apart.
 #[derive(Hash, PartialEq, Eq)]
-pub(crate) enum ValueKey<'a> {
+pub enum ValueKey<'a> {
+    /// NULL.
     Null,
+    /// An integer.
     Integer(i64),
+    /// A real, by the bits of its value.
     Real(u64),
+    /// Text, by its bytes.
     Text(Cow<'a, [u8]>),
+    /// A blob, by its bytes.
     Blob(Cow<'a, [u8]>),
 }
 
 impl<'a> ValueKey<'a> {
     /// The key of `value`, which borrows its bytes.
-    pub(crate) fn of(value: &'a SqlValue) -> Self {
+    pub fn of(value: &'a SqlValue) -> Self {
         match value {
             SqlValue::Null => Self::Null,
             SqlValue::Integer(value) => Self::Integer(*value),
@@ -205,7 +210,7 @@ impl<'a> ValueKey<'a> {
     }
 
     /// The key with bytes of its own, to keep.
-    pub(crate) fn owned(self) -> ValueKey<'static> {
+    pub fn owned(self) -> ValueKey<'static> {
         match self {
             Self::Null => ValueKey::Null,
             Self::Integer(value) => ValueKey::Integer(value),
@@ -216,7 +221,7 @@ impl<'a> ValueKey<'a> {
     }
 
     /// Whether `left` and `right` are the same value.
-    pub(crate) fn same(left: &SqlValue, right: &SqlValue) -> bool {
+    pub fn same(left: &SqlValue, right: &SqlValue) -> bool {
         ValueKey::of(left) == ValueKey::of(right)
     }
 }

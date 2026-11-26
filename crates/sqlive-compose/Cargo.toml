@@ -13,7 +13,7 @@ categories = ["database"]
 compiler = ["dep:proc-macro2", "dep:quote", "dep:syn", "dep:thiserror"]
 
 [dependencies]
-sqlive.workspace = true
+sqlive-reads.workspace = true
 sqlive-compose-macros.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

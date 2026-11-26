@@ -106,7 +106,7 @@ pub(crate) fn strict_type(declared: &str) -> Option<&'static str> {
         "TEXT" => Some("String"),
         "BLOB" => Some("Vec<u8>"),
         "REAL" => Some("f64"),
-        "ANY" => Some("::sqlive_compose::generated::sqlive::SqlValue"),
+        "ANY" => Some("::sqlive_compose::generated::sqlive_reads::SqlValue"),
         _ => None,
     }
 }

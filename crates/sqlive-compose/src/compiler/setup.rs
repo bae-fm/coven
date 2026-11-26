@@ -2,7 +2,7 @@
 
 /// A SQL function that the schema's SQL names: its name, its number of
 /// arguments and whether it is deterministic.
-pub use sqlive::StandInFunction as Function;
+pub use sqlive_reads::StandInFunction as Function;
 
 /// What the compiler runs to build the schema: the SQL texts in the order to
 /// run them, and what the SQL names that SQLite doesn't have. SQLite fails to
@@ -19,7 +19,7 @@ pub struct Setup {
 }
 
 impl Setup {
-    pub(crate) fn probe(&self) -> sqlive::SqliteResult<sqlive::SchemaProbe> {
-        sqlive::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
+    pub(crate) fn probe(&self) -> sqlive_reads::SqliteResult<sqlive_reads::SchemaProbe> {
+        sqlive_reads::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
     }
 }

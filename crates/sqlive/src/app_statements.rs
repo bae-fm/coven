@@ -15,8 +15,8 @@
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
-use crate::read_report::ReadReport;
-use crate::scope_plan::ScopePlanSize;
+use crate::ReadReport;
+use crate::ScopePlanSize;
 use crate::{ReadFrame, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};

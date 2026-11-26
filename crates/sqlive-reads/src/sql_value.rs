@@ -61,7 +61,7 @@ impl ToSql for SqlValue {
 /// The values `params` binds to `statement`'s parameters, in parameter order,
 /// with one entry for each index, including anonymous parameters and indices
 /// that no parameter in the SQL uses.
-pub(crate) fn parameters<P: rusqlite::Params>(
+pub fn parameters<P: rusqlite::Params>(
     connection: &rusqlite::Connection,
     statement: &rusqlite::Statement<'_>,
     params: P,

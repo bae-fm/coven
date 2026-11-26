@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
+use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
 use crate::scope_plan::ScopePlan;
-use crate::WholeViews;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
 /// SQLite can prepare a statement that calls it. It returns NULL when called.

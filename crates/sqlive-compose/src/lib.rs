@@ -12,7 +12,7 @@ pub use sqlive_compose_macros::{fragment, read};
 #[doc(hidden)]
 pub mod generated {
     pub use serde;
-    pub use sqlive;
+    pub use sqlive_reads;
 
     /// Reads bytes that a JSON document holds as hexadecimal text.
     pub fn hex_bytes<'de, D: serde::Deserializer<'de>>(
@@ -23,20 +23,20 @@ pub mod generated {
     }
 
     /// Whether the column at `index` is NULL.
-    pub fn is_null(row: &sqlive::Row<'_>, index: usize) -> sqlive::SqliteResult<bool> {
-        Ok(row.get::<_, sqlive::SqlValue>(index)? == sqlive::SqlValue::Null)
+    pub fn is_null(row: &sqlive_reads::Row<'_>, index: usize) -> sqlive_reads::SqliteResult<bool> {
+        Ok(row.get::<_, sqlive_reads::SqlValue>(index)? == sqlive_reads::SqlValue::Null)
     }
 
     /// Reads a JSON document that a column holds as text.
     pub fn json_column<T: serde::de::DeserializeOwned>(
-        row: &sqlive::Row<'_>,
+        row: &sqlive_reads::Row<'_>,
         index: usize,
-    ) -> sqlive::SqliteResult<T> {
+    ) -> sqlive_reads::SqliteResult<T> {
         let text: String = row.get(index)?;
         serde_json::from_str(&text).map_err(|error| {
-            sqlive::SqliteError::FromSqlConversionFailure(
+            sqlive_reads::SqliteError::FromSqlConversionFailure(
                 index,
-                sqlive::rusqlite::types::Type::Text,
+                sqlive_reads::rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })

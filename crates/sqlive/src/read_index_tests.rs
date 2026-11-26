@@ -2,8 +2,8 @@
 //! row holds in each key's column, before and after the change.
 
 use super::*;
-use crate::read_set::TableRead;
-use crate::row_scope::RowScope;
+use crate::RowScope;
+use crate::TableRead;
 use std::sync::Arc;
 
 fn read(table: &str, scope: RowScope) -> TableRead {

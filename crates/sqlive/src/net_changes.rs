@@ -11,9 +11,9 @@
 //! changed nothing, so a live query judges the net change alone. The Lean
 //! model folds a write's changes the same way (`net`, `net_sound`).
 
-use crate::read_set::{RowChange, ValueKey};
-use crate::row_scope::RowImage;
-use crate::sql_value::SqlValue;
+use crate::RowImage;
+use crate::SqlValue;
+use crate::{RowChange, ValueKey};
 use std::collections::{btree_map, hash_map::Entry, BTreeMap, HashMap};
 use std::sync::Arc;
 

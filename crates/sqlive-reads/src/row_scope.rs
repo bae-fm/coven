@@ -153,7 +153,7 @@ impl RowScope {
     /// for which `equal_values` gives them. A handle files the scope's read
     /// under them, so a change to a row that holds none of them is never
     /// judged against the read (`read_index.rs`).
-    pub(crate) fn key(&self) -> Option<(&str, Vec<Value>)> {
+    pub fn key(&self) -> Option<(&str, Vec<Value>)> {
         let mut columns = Vec::new();
         self.equality_columns(&mut columns);
         columns.into_iter().find_map(|column| Some((column, self.equal_values(column)?)))
@@ -235,7 +235,7 @@ pub struct Scopes {
     /// planner couldn't tell which (`unreported_columns.rs`).
     pub(crate) unreported: std::sync::Arc<crate::unreported_columns::UnreportedColumns>,
     /// Whether a host statement made the read.
-    pub(crate) host: bool,
+    pub host: bool,
 }
 
 impl Default for Scopes {
@@ -271,7 +271,7 @@ impl RowImage {
     }
 
     /// The value of `column`, lowercase, if the write recorded it.
-    pub(crate) fn get(&self, column: &str) -> Option<&Value> {
+    pub fn get(&self, column: &str) -> Option<&Value> {
         self.columns
             .iter()
             .position(|name| name == column)
@@ -282,7 +282,7 @@ impl RowImage {
 /// SQLite's order between two values of a column with BINARY collation and
 /// no conversion between them; `None` when either is NULL, which equals and
 /// orders against nothing.
-pub(crate) fn compare(left: &Value, right: &Value) -> Option<Ordering> {
+pub fn compare(left: &Value, right: &Value) -> Option<Ordering> {
     fn rank(value: &Value) -> u8 {
         match value {
             Value::Null => 0,

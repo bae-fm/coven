@@ -14,7 +14,7 @@ use sqlite3_parser::{
 /// Every table of the main schema but SQLite's own, with its type: an
 /// ordinary table, a virtual table, or the shadow table that holds a virtual
 /// table's rows. A write can change each of them.
-pub(crate) const MAIN_TABLES: &str = "SELECT name,type FROM pragma_table_list
+pub const MAIN_TABLES: &str = "SELECT name,type FROM pragma_table_list
      WHERE schema='main' AND type IN ('table','shadow','virtual') AND name NOT GLOB 'sqlite_*'";
 
 /// The names SQLite gives a rowid table's rowid where no column has them.
@@ -26,7 +26,7 @@ pub(crate) const ROWID_NAMES: [&str; 3] = ["rowid", "oid", "_rowid_"];
 /// of the table's own. A contentless table and one whose content is another
 /// table have no such shadow table; one that keeps a locale for its values
 /// has more columns in it.
-pub(crate) const FTS5_CONTENT: &str = "SELECT v.name,c.name FROM pragma_table_list AS v
+pub const FTS5_CONTENT: &str = "SELECT v.name,c.name FROM pragma_table_list AS v
      JOIN pragma_table_list AS c ON c.schema='main' AND c.type='shadow'
        AND c.name=v.name||'_content'
      JOIN main.sqlite_schema AS s ON s.type='table' AND s.name=v.name

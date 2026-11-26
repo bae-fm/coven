@@ -17,7 +17,7 @@ use super::spread::{self, Place, Placed, Registry};
 /// What compiling a call needs of the crate it is in.
 pub(crate) struct Context<'a> {
     pub(crate) crate_name: &'a str,
-    pub(crate) probe: &'a sqlive::SchemaProbe,
+    pub(crate) probe: &'a sqlive_reads::SchemaProbe,
     pub(crate) registry: &'a Registry,
 }
 
@@ -67,12 +67,12 @@ pub(crate) fn compile(
     check_parameters(header, &prepared).map_err(&fail)?;
     let mut warnings = Vec::new();
     match context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))? {
-        sqlive::ReadReport::Whole { why } => {
+        sqlive_reads::ReadReport::Whole { why } => {
             return Err(fail(Cause::Unanalyzable { concerns: header.name.clone(), why }));
         }
-        sqlive::ReadReport::Entries(entries) if header.is_read() => {
+        sqlive_reads::ReadReport::Entries(entries) if header.is_read() => {
             for entry in entries {
-                if let sqlive::ReadRows::Whole { why } = entry.rows {
+                if let sqlive_reads::ReadRows::Whole { why } = entry.rows {
                     warnings.push(Warning {
                         location: call.location.clone(),
                         concerns: header.name.clone(),
@@ -82,7 +82,7 @@ pub(crate) fn compile(
                 }
             }
         }
-        sqlive::ReadReport::Entries(_) => {}
+        sqlive_reads::ReadReport::Entries(_) => {}
     }
     let outline = core::outline(&prepared_sql, &tokens);
     if header.parent().is_some() && prepared.columns.len() != 1 {
@@ -174,7 +174,10 @@ fn check_spreads(placed: &[Placed], from: &[core::FromItem]) -> Result<(), Cause
 
 /// Whether the parameters the statement reads are the ones the header
 /// declares, each written `:name`.
-fn check_parameters(header: &Header, prepared: &sqlive::ProbedStatement) -> Result<(), Cause> {
+fn check_parameters(
+    header: &Header,
+    prepared: &sqlive_reads::ProbedStatement,
+) -> Result<(), Cause> {
     if prepared.unnamed_parameters > 0 {
         return Err(Cause::ForeignParameter {
             concerns: header.name.clone(),

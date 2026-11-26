@@ -46,7 +46,7 @@ use sqlite3_parser::{
 
 /// The rows of each table a statement can depend on, before its values are
 /// bound.
-pub(crate) struct ScopePlan {
+pub struct ScopePlan {
     /// Why the planner couldn't read the statement, when its shape keeps
     /// every table it reads whole.
     pub(crate) sources: Result<Sources, String>,
@@ -54,7 +54,8 @@ pub(crate) struct ScopePlan {
     /// report, or unknown when the parser can't read the statement
     /// (`unreported_columns.rs`).
     unreported: Arc<UnreportedColumns>,
-    pub(crate) size: ScopePlanSize,
+    /// How much of the statement the planner read.
+    pub size: ScopePlanSize,
 }
 
 /// How much of a statement the planner read to build its plan, up to where
@@ -86,7 +87,7 @@ impl std::ops::AddAssign for ScopePlanSize {
 impl ScopePlan {
     /// The plan for `sql`, prepared as `statement`, up to the first NUL
     /// (`sql::up_to_nul`).
-    pub(crate) fn build(
+    pub fn build(
         connection: &Connection,
         sql: &str,
         statement: &Statement<'_>,
@@ -123,7 +124,7 @@ impl ScopePlan {
 
     /// Where a run bound to `parameters` finds the row its scope ends at, or
     /// `None` when no row of the run bounds it (`scope_order.rs`).
-    pub(crate) fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
+    pub fn last_row(&self, parameters: &[Value]) -> Option<LastRow> {
         self.sources.as_ref().ok()?.sorted.as_ref()?.last_row(RunValues::Run(parameters))
     }
 
@@ -131,7 +132,7 @@ impl ScopePlan {
     /// for a run bound to `parameters` that returned `last`, the ORDER BY's
     /// values of the row `last_row` names, when it returned that many rows. A
     /// table the plan doesn't name depends on every row.
-    pub(crate) fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
+    pub fn scopes(&self, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
         let mut scopes = match &self.sources {
             Ok(sources) => crate::scope_lookup::scopes(sources, parameters, last),
             Err(_) => Scopes::default(),

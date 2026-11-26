@@ -11,13 +11,14 @@ categories = ["database"]
 
 [features]
 # The hooks tests use to make the engine fail, and the counts they read back.
-test-utils = []
+test-utils = ["sqlive-reads/test-utils"]
 # Trace each statement a connection runs inside `with_profile`, with what
 # SQLite counted of it, for tests of the plans SQLite chose. Tracing slows
 # every statement, so only a crate's own tests turn it on.
 profiles = ["rusqlite/trace"]
 
 [dependencies]
+sqlive-reads.workspace = true
 panic-as-error.workspace = true
 futures-lite = { workspace = true, features = ["std"] }
 rusqlite = { workspace = true, features = ["session", "hooks", "preupdate_hook", "functions", "limits", "blob", "collation", "column_metadata"] }

@@ -39,7 +39,7 @@ statement's own, a view's, or a FROM subquery's of such a core, sees no row
 around it.
 
 [Planner.lean](../../crates/sqlive/proofs/SqliveNarrowing/Planner.lean) ports
-sqlive's planner (`scope_plan.rs`). Each core's conditions give terms on one
+the planner of sqlive-reads (`scope_plan.rs`). Each core's conditions give terms on one
 item's rows and edges between items; the planner reads the conditions that a
 row of NULLs fails first, holds back what a LEFT JOIN's ON says of other items
 until a WHERE condition makes the join an inner join's, carries each item's
