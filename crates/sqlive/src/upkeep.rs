@@ -1,6 +1,6 @@
-//! sqlive's upkeep of a database, off the commit path (§4). Each kind runs
-//! on a thread of the database's own, woken by the writer's commits,
-//! on a connection of its own: checkpointing a database's WAL
+//! sqlive's upkeep of a database, off the commit path (SPEC.md section 10).
+//! Each kind runs on a thread of the database's own, woken by the writer's
+//! commits, on a connection of its own: checkpointing a database's WAL
 //! (wal_checkpoints.rs), and gathering the query planner's statistics
 //! (planner_statistics.rs).
 //!

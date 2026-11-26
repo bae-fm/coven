@@ -1,7 +1,7 @@
-//! What a live query's statement depends on in each table and view it reads,
-//! as its plan narrows them before a run binds its values (§4): the rows a
-//! value fixes, the rows a lookup or another question finds, or every row,
-//! with the reason for each read of every row.
+//! What a live query's statement depends on in each table and view it reads, as
+//! its plan narrows them before a run binds its values (SPEC.md section 12):
+//! the rows a value fixes, the rows a lookup or another question finds, or
+//! every row, with the reason for each read of every row.
 
 use std::collections::BTreeMap;
 use std::fmt;

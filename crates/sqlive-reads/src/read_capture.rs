@@ -1,5 +1,6 @@
-//! What the statements a live query runs read, as the authorizer reports
-//! it while each is prepared, and the scope each table was read in (§4).
+//! What the statements a live query runs read, as the authorizer reports it
+//! while each is prepared, and the scope each table was read in
+//! (SPEC.md section 4).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -79,7 +80,7 @@ impl ReadCapture {
         // too, even when the statement reads none of the view's columns, as
         // a count of its rows or an EXISTS doesn't: a view can change with
         // no change to its tables, as one that calls a function of the
-        // host's state can (§4).
+        // host's state can (SPEC.md section 3).
         if let Some(view) = whole {
             frame.columns.insert((view.to_ascii_lowercase(), String::new()));
         }

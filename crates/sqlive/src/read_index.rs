@@ -1,13 +1,12 @@
-//! Which waiting live queries a write's row changes could affect (§4). A
-//! handle files each read of each subscription waiting on known reads under
-//! the read's table and, when the read's scope has a key
-//! (`RowScope::key`), under the values the key names in its column. A
-//! change to a row is judged only against the subscriptions filed under its
-//! table without a key, and those filed under a value its row holds in the
-//! key's column before or after the change: a row that holds none of a
-//! key's values passes no scope with that key. So judging a write reads
-//! only the live queries whose scopes its rows could pass, however many
-//! wait.
+//! Which waiting live queries a write's row changes could affect
+//! (SPEC.md section 7). A handle files each read of each subscription waiting
+//! on known reads under the read's table and, when the read's scope has a key
+//! (`RowScope::key`), under the values the key names in its column. A change to
+//! a row is judged only against the subscriptions filed under its table without
+//! a key, and those filed under a value its row holds in the key's column
+//! before or after the change: a row that holds none of a key's values passes
+//! no scope with that key. So judging a write reads only the live queries whose
+//! scopes its rows could pass, however many wait.
 
 use crate::SqlValue as Value;
 use crate::{compare, RowImage};

@@ -1,5 +1,5 @@
 //! The host's own statements in a live query's read, which narrow as app
-//! statements do (§4).
+//! statements do (SPEC.md section 4).
 
 use super::HostSql;
 use crate::authorization::{Policy, PolicyError};

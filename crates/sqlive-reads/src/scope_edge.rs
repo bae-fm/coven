@@ -1,9 +1,9 @@
-//! An equality between a column of one of a core's sources, or an
-//! expression over a table's own row, and a value of one other source, read
-//! as an edge the first takes values by (§4): from a condition, or from the
-//! ON a USING join stands for. `IS` reads the same
-//! way, with a NULL matching a NULL. An edge also carries what the other
-//! source's terms say of its column to the first.
+//! An equality between a column of one of a core's sources, or an expression
+//! over a table's own row, and a value of one other source, read as an edge the
+//! first takes values by (SPEC.md section 7): from a condition, or from the ON
+//! a USING join stands for. `IS` reads the same way, with a NULL matching a
+//! NULL. An edge also carries what the other source's terms say of its column
+//! to the first.
 
 use crate::from_item::Columns;
 use std::sync::Arc;

@@ -12,7 +12,7 @@ fn bundled_sqlite_has_the_session_extension() {
     db.close();
 }
 
-/// SQLite keeps a statement's journal in memory up to 124 KiB (§21.2).
+/// SQLite keeps a statement's journal in memory up to 124 KiB (coven.md §21.2).
 #[test]
 fn bundled_sqlite_keeps_a_statements_journal_in_memory_up_to_124_kib() {
     let db = TestDatabase::open("");
@@ -245,7 +245,7 @@ fn app_writes_query_no_metadata_for_each_statement_or_trigger() {
 /// A transaction whose rollback SQLite refuses fails with its own cause and
 /// the rollback's beside it, and fails the handle: the live queries end with
 /// the failure, and the writer still holds the uncommitted row until the
-/// database reopens (§4).
+/// database reopens (SPEC.md section 2).
 #[tokio::test]
 async fn a_failed_rollback_keeps_both_causes_and_fails_the_handle_until_reopen() {
     for app in [false, true] {

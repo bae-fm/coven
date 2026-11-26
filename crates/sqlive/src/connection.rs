@@ -99,14 +99,14 @@ pub struct HostSql<P: Policy> {
     /// The main schema's tables as last read, with the schema they were
     /// read in (table_shapes.rs).
     shapes: std::cell::RefCell<Option<(i64, Arc<table_shapes::TableShapes>)>>,
-    /// The writer's checkpointer, woken after each commit (§4).
+    /// The writer's checkpointer, woken after each commit (SPEC.md section 10).
     checkpoints: Option<crate::upkeep::Wake>,
     /// The database's watch of its main file's size, to which this connection
     /// sends the size after each checkpoint it runs through `wal_checkpoint`.
     /// The writer and the checkpointer hold it; a reader holds none.
     checkpointed_sizes: Option<tokio::sync::watch::Sender<u64>>,
     /// The writer's keeper of the planner's statistics, woken as its
-    /// commits change rows (§4).
+    /// commits change rows (SPEC.md section 10).
     statistics: Option<crate::planner_statistics::ChangeWake>,
     streaming: std::cell::Cell<bool>,
     /// The host's values that this connection's functions read as each
@@ -205,7 +205,8 @@ impl<P: Policy> HostSql<P> {
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
         // SQL that could damage the database file fails: writing a virtual
         // table's shadow tables directly, `PRAGMA writable_schema` and
-        // `PRAGMA schema_version = N`, and turning the journal off (§4).
+        // `PRAGMA schema_version = N`, and turning the journal off
+        // (SPEC.md section 10).
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         // A statement's plan never reads the values bound to it. Otherwise
         // SQLite marks a statement whose plan looked at a bound value, and
@@ -531,7 +532,7 @@ impl<P: Policy> HostSql<P> {
 
     /// Run one migration step inside the open migration transaction. The
     /// policy records which tables its statements write as SQLite prepares
-    /// them (§18.1).
+    /// them (coven.md §18.1).
     pub fn migrating<T, E: From<PolicyError<P>>>(
         &self,
         run: impl FnOnce() -> Result<T, E>,
@@ -626,7 +627,7 @@ impl<P: Policy> HostSql<P> {
         let parameters = crate::parameters(&self.connection, statement, params)?;
         let plan = self.live_scope_plan(sql, statement, schema)?;
         // A run that returns as many rows as its LIMIT depends only on the
-        // rows up to its last one (§4).
+        // rows up to its last one (SPEC.md section 6).
         let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
         let mut last = None;
         let mut run = |statement: &mut rusqlite::Statement<'_>| {
@@ -669,7 +670,8 @@ impl<P: Policy> HostSql<P> {
         result
     }
 
-    /// Wake `checkpoints` after each commit this writer makes (§4).
+    /// Wake `checkpoints` after each commit this writer makes
+    /// (SPEC.md section 10).
     pub(crate) fn signal_commits(&mut self, checkpoints: crate::upkeep::Wake) {
         self.checkpoints = Some(checkpoints);
     }
@@ -681,7 +683,7 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Tell `statistics` of the rows each commit this writer makes changed
-    /// (§4).
+    /// (SPEC.md section 10).
     pub(crate) fn signal_changes(&mut self, statistics: crate::planner_statistics::ChangeWake) {
         self.statistics = Some(statistics);
     }
@@ -698,7 +700,7 @@ impl<P: Policy> HostSql<P> {
         self.commit_order = order;
     }
 
-    /// Serve an open handle once opening succeeds (§4).
+    /// Serve an open handle once opening succeeds (SPEC.md section 1).
     pub(crate) fn serve(&mut self, handle: crate::Handle<P::Failure>) {
         assert!(self.handle.is_none(), "a connection serves one handle");
         self.authorization.serve(handle.clone());

@@ -1,5 +1,5 @@
-//! A column compared with a subquery's value narrows by the subquery's
-//! source: the rows whose value that source holds in its scope (§4).
+//! A column compared with a subquery's value narrows by the subquery's source:
+//! the rows whose value that source holds in its scope (SPEC.md section 8).
 
 use super::lookup::follows;
 use crate::tests::{next, TestDatabase};

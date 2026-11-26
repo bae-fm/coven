@@ -1,9 +1,9 @@
-//! A statement that orders by columns of its tables and returns as many rows
-//! as its LIMIT depends only on the rows that sort at or before its last
-//! row, as a list window read as one live query does (§4). A LIMIT whose
-//! ORDER BY doesn't tell its rows apart depends on every column of its
-//! tables, and so do an aggregate, a DISTINCT and a compound whose rows
-//! follow the order SQLite reads its rows in.
+//! A statement that orders by columns of its tables and returns as many rows as
+//! its LIMIT depends only on the rows that sort at or before its last row, as a
+//! list window read as one live query does (SPEC.md section 6). A LIMIT whose
+//! ORDER BY doesn't tell its rows apart depends on every column of its tables,
+//! and so do an aggregate, a DISTINCT and a compound whose rows follow the
+//! order SQLite reads its rows in.
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;

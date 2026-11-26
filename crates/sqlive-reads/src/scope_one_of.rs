@@ -1,5 +1,5 @@
 //! A column equal to a value that is one of several partners' values, read
-//! as an OR of what each value gives (§4).
+//! as an OR of what each value gives (SPEC.md section 7).
 //!
 //! `m.c = COALESCE(a, b, ...)` returns one of its arguments, and `m.c IN
 //! (SELECT ... UNION SELECT ...)`, or `=` with such a subquery, compares with

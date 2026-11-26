@@ -1,7 +1,7 @@
-//! SQLite's own handle to the main database file: syncing it (§4), and
-//! reading its size for the database's watch after each checkpoint. Both go
-//! through SQLite's handle, because closing any other handle to the file would
-//! drop every lock SQLite holds on it in this process.
+//! SQLite's own handle to the main database file: syncing it
+//! (SPEC.md section 10), and reading its size for the database's watch after
+//! each checkpoint. Both go through SQLite's handle, because closing any other
+//! handle to the file would drop every lock SQLite holds on it in this process.
 
 use super::HostSql;
 use crate::authorization::HostError;

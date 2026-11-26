@@ -1,5 +1,5 @@
 //! The parsed SELECT a scope plan reads: its parameters numbered in source
-//! order, and the expressions inside it (§4).
+//! order, and the expressions inside it (SPEC.md section 4).
 
 use rusqlite::{Connection, Statement};
 use std::collections::BTreeMap;

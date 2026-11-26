@@ -46,11 +46,11 @@ pub struct Options<'a, P: Policy> {
     /// every column's value before and after it.
     pub capture: Option<BTreeSet<String>>,
     /// Checkpoint the WAL on a thread of its own once it holds this many
-    /// frames not yet in the database file (§4).
+    /// frames not yet in the database file (SPEC.md section 10).
     pub checkpoint_pages: Option<NonZeroU32>,
     /// Gather the planner's statistics as the database opens, keep them on
     /// a thread of their own while it stays open, and gather them again as
-    /// it closes (§4).
+    /// it closes (SPEC.md section 10).
     pub statistics: bool,
 }
 
@@ -87,7 +87,7 @@ impl<P: Policy> Database<P> {
         // A statement's scope plan depends on its SQL, the schema, and the SQL
         // functions and whole views of its connection. `open` gives every
         // connection the same functions and views, so they share the plans
-        // they build (§4).
+        // they build (SPEC.md section 4).
         let plans = Arc::new(crate::connection::ScopePlans::new());
         let open = |read_only| {
             let mut connection = HostSql::open_sharing(

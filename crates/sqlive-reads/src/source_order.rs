@@ -1,5 +1,5 @@
 //! The order a statement's sources take values in: each after the sources
-//! whose values its memberships compare with (§4).
+//! whose values its memberships compare with (SPEC.md section 7).
 
 use crate::scope_order::SortedLimit;
 use crate::scope_plan::{Edge, Membership, Planner, Sources};

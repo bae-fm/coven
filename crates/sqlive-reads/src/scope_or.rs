@@ -1,5 +1,5 @@
 //! An OR of conditions that each narrow one source, read as a disjunction
-//! that narrows that source to the rows either side allows (§4).
+//! that narrows that source to the rows either side allows (SPEC.md section 7).
 //!
 //! `a.x = t.y OR a.id = t.z + 1` narrows `a` to the rows whose `x` some row
 //! of `t` holds in `y`, or whose `id` some row of `t` gives as `z + 1`. A row

@@ -1,4 +1,4 @@
-//! sqlive's own WAL checkpoints, off the commit path (§4).
+//! sqlive's own WAL checkpoints, off the commit path (SPEC.md section 10).
 //!
 //! A checkpoint run inside a commit, as SQLite's automatic one is, makes the
 //! commit wait for it, `F_FULLFSYNC` included on macOS and iOS. While a live

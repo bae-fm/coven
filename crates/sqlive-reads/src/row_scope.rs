@@ -1,7 +1,7 @@
 //! Which rows of a table a live query depends on, and the values of a changed
-//! row that decide whether it is one of them (§4). A join's values come from
-//! a lookup, and a condition on the row's own columns from a question to
-//! SQLite (`scope_lookup.rs`, `scope_row.rs`).
+//! row that decide whether it is one of them (SPEC.md section 5). A join's
+//! values come from a lookup, and a condition on the row's own columns from a
+//! question to SQLite (`scope_lookup.rs`, `scope_row.rs`).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};

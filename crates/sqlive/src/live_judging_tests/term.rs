@@ -1,5 +1,5 @@
-//! The truth of a condition compared with a value narrows live queries, as
-//! the windows of a list sorted by a nullable column read it (§4).
+//! The truth of a condition compared with a value narrows live queries, as the
+//! windows of a list sorted by a nullable column read it (SPEC.md section 5).
 
 use super::lookup::follows;
 use crate::tests::{next, TestDatabase};

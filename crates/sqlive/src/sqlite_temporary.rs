@@ -1,5 +1,5 @@
 //! The folder SQLite keeps temporary tables in, for every database this
-//! process opens (§21.2).
+//! process opens (coven.md §21.2).
 //!
 //! Temporary tables spill to files there once a connection's cache fills,
 //! so a staged snapshot waits on disk. SQLite finds a folder for itself
@@ -10,8 +10,8 @@ use panic_as_error::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// The folder an app names for SQLite's temporary tables (§21.2), outside
-/// the host's directories. The app creates it and names its path to
+/// The folder an app names for SQLite's temporary tables (coven.md §21.2),
+/// outside the host's directories. The app creates it and names its path to
 /// `set_temporary_directory`.
 #[derive(Debug, PartialEq, Eq)]
 struct TemporaryFolder {
@@ -102,7 +102,7 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
 /// such as a streamed write's staged rows, would then hold all of it in
 /// memory. It refuses one built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`
 /// too: each connection would keep its unused pages apart, and releasing
-/// memory on one connection would leave every other's (§4).
+/// memory on one connection would leave every other's (SPEC.md section 10).
 pub(crate) fn opening<F: HostError, R: HostError>() -> Result<(), crate::Error<F, R>> {
     // SAFETY: the option is a NUL-terminated string that outlives the call.
     if unsafe { rusqlite::ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) }

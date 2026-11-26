@@ -1,4 +1,5 @@
-//! How often a live query has run, counted for tests and benchmarks (§4).
+//! How often a live query has run, counted for tests and benchmarks
+//! (SPEC.md section 12).
 
 use crate::live_query::LiveQueryCause;
 

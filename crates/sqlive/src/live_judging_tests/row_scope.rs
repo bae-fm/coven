@@ -1,12 +1,12 @@
-//! Each way a write reaches live queries records the values their scopes
-//! test, so a write outside a scope wakes nothing and one inside it does.
-//! And over generated queries, schemas and writes, sqlive marks a live query
-//! to run again whenever a commit changes what it returns, and its rerun
-//! returns what a one-shot read of the same SQL does (§4); a failure names
-//! the seed. The writes change several tables at once, the joins chain
-//! through joined tables, and an index serves some of the lookups. sqlive
-//! runs each write's lookups for its joins in that write's own transaction.
-//! A marked query sometimes waits through more writes before it runs.
+//! Each way a write reaches live queries records the values their scopes test,
+//! so a write outside a scope wakes nothing and one inside it does. And over
+//! generated queries, schemas and writes, sqlive marks a live query to run
+//! again whenever a commit changes what it returns, and its rerun returns what
+//! a one-shot read of the same SQL does (SPEC.md section 3); a failure names
+//! the seed. The writes change several tables at once, the joins chain through
+//! joined tables, and an index serves some of the lookups. sqlive runs each
+//! write's lookups for its joins in that write's own transaction. A marked
+//! query sometimes waits through more writes before it runs.
 //! `SQLIVE_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};

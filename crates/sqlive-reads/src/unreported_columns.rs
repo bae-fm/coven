@@ -1,5 +1,5 @@
 //! The columns a statement's rows depend on that SQLite's authorizer doesn't
-//! report as read (§4). There are two kinds.
+//! report as read (SPEC.md section 4). There are two kinds.
 //!
 //! The columns a USING or NATURAL join compares. A statement's reads add them
 //! for each table the join compares directly, in any SELECT of the statement

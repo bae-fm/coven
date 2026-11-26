@@ -1,7 +1,7 @@
-//! The names SQLite can report a read through while it runs a view that
-//! sqlive reads whole (§4). SQLite's authorizer names the innermost view or
-//! CTE each read is made through, so a read inside such a view comes with
-//! the view's own name, the name of a CTE its SQL declares, or a name from
+//! The names SQLite can report a read through while it runs a view that sqlive
+//! reads whole (SPEC.md section 8). SQLite's authorizer names the innermost
+//! view or CTE each read is made through, so a read inside such a view comes
+//! with the view's own name, the name of a CTE its SQL declares, or a name from
 //! a view it reads. A statement's own CTE can share such a name, so a read
 //! reported through it may belong to the view rather than to the CTE.
 

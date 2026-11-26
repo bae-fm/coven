@@ -337,7 +337,8 @@ pub(super) enum StepsOf {
     AppRead,
     /// The app's own statement run for its changes.
     AppWrite,
-    /// sqlive's lookup judging whether a write reruns a live query (§4).
+    /// sqlive's lookup judging whether a write reruns a live query
+    /// (SPEC.md section 7).
     Lookup,
 }
 

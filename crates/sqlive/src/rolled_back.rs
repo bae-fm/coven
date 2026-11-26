@@ -7,7 +7,7 @@ use crate::authorization::PolicyError;
 
 impl<P: Policy> HostSql<P> {
     /// A one-shot read of one snapshot. Nothing runs it again, so it records
-    /// nothing of what it reads, and narrows nothing (§4).
+    /// nothing of what it reads, and narrows nothing (SPEC.md section 3).
     pub fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(&Self) -> Result<R, E>,
@@ -107,7 +107,7 @@ impl<P: Policy> HostSql<P> {
     /// ROLLBACK fails, this connection may still be inside the transaction: a
     /// writer would treat its uncommitted changes as committed and a reader
     /// would keep reading its old snapshot, so the handle refuses every later
-    /// call until the host opens the database again (§4).
+    /// call until the host opens the database again (SPEC.md section 2).
     pub(super) fn roll_back(&self) -> rusqlite::Result<()> {
         self.snapshot_values.forget();
         if self.connection.is_autocommit() {

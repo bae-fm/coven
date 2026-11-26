@@ -35,7 +35,7 @@ fn recorded<P: Policy>(writer: &mut HostSql<P>, sql: &str) -> Vec<String> {
 /// `sqlite_stat1`, which SQLite's session keys by its own columns, unlike
 /// the rowid sqlive expects of a table without a primary key; it doesn't
 /// record `sqlite_stat4`. So sqlive runs `PRAGMA optimize` only outside a
-/// captured transaction, and app writes can't analyze (§4).
+/// captured transaction, and app writes can't analyze (SPEC.md section 1).
 #[test]
 fn a_captured_transaction_records_analyzes_statistics() {
     let db = TestDatabase::open(
@@ -54,7 +54,7 @@ fn a_captured_transaction_records_analyzes_statistics() {
 
 /// A captured transaction records the tables a live query can read, and
 /// none of the tables its handle marks as unrecorded, which no live query
-/// reads (§4).
+/// reads (SPEC.md section 2).
 #[test]
 fn a_captured_transaction_skips_tables_no_live_query_reads() {
     let db = TestDatabase::open_with(

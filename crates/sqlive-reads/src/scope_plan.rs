@@ -1,6 +1,6 @@
 //! What one app statement's SQL lets a live query narrow, read from SQLite's
-//! parsed SELECT syntax once per statement and schema (§4). A shape this
-//! doesn't understand depends on whole tables rather than guessing.
+//! parsed SELECT syntax once per statement and schema (SPEC.md section 4). A
+//! shape this doesn't understand depends on whole tables rather than guessing.
 //!
 //! A statement is a tree of SELECT cores: the statement itself, each arm of
 //! a compound, and each subquery, in any clause, sitting in the core whose

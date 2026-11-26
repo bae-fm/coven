@@ -1,11 +1,11 @@
-//! A transaction is judged by each row's net change: a transaction whose
-//! writes to a row cancel out reruns no live query for that row, and a row
-//! changed more than once reruns a query as its change from before the
-//! transaction to its end does (§4). Each capture records the operations
-//! its own way, so each test runs every cancelling pair through each of
-//! them: the app's write on a device-local table and on a table whose
-//! operations it keeps whole, the host's transaction under a session, a
-//! streamed transaction, and a write whose host phase undoes its app phase.
+//! A transaction is judged by each row's net change: a transaction whose writes
+//! to a row cancel out reruns no live query for that row, and a row changed
+//! more than once reruns a query as its change from before the transaction to
+//! its end does (SPEC.md section 2). Each capture records the operations its
+//! own way, so each test runs every cancelling pair through each of them: the
+//! app's write on a device-local table and on a table whose operations it keeps
+//! whole, the host's transaction under a session, a streamed transaction, and a
+//! write whose host phase undoes its app phase.
 
 use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions};
 use crate::LiveQuery;

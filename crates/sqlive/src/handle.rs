@@ -99,9 +99,9 @@ impl CommitState {
 }
 
 enum Tracking {
-    /// A run whose reads aren't known until it ends: the commits made
-    /// since it began, kept to judge then, and the reads of the run before
-    /// it, whose scopes name the values those commits record (§4).
+    /// A run whose reads aren't known until it ends: the commits made since it
+    /// began, kept to judge then, and the reads of the run before it, whose
+    /// scopes name the values those commits record (SPEC.md section 3).
     Reading {
         commits: Vec<Arc<Vec<RowChange>>>,
         previous: Arc<ReadSet>,
@@ -771,7 +771,7 @@ impl<F: Clone + Send + Sync + 'static> Handle<F> {
     /// Judge a write's `changes`, made within `scope`, for every live query
     /// waiting on known reads that isn't already marked to run again and
     /// that the changes could affect, with `lookups` reading the write's
-    /// transaction before it commits (§4).
+    /// transaction before it commits (SPEC.md section 7).
     pub fn judge(
         &self,
         changes: Vec<RowChange>,

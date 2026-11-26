@@ -1,7 +1,7 @@
-//! These tests check that sqlive reruns no live query after a write outside
-//! the query's scope, and reruns it after a write inside the scope (§4).
-//! Each module covers one part of the scope judging, with live queries and
-//! writes over plain tables.
+//! These tests check that sqlive reruns no live query after a write outside the
+//! query's scope, and reruns it after a write inside the scope
+//! (SPEC.md section 5). Each module covers one part of the scope judging, with
+//! live queries and writes over plain tables.
 
 #[path = "live_judging_tests/burst.rs"]
 mod burst;

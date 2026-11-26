@@ -1,7 +1,7 @@
-//! A statement's scopes for one run: its constant conditions bound to the
-//! run's values, and each join as a lookup a write runs to judge whether a
-//! row it changed meets a partner row in that partner's scope (§4). A run
-//! reads nothing for its joins; the write that changes a joined table asks.
+//! A statement's scopes for one run: its constant conditions bound to the run's
+//! values, and each join as a lookup a write runs to judge whether a row it
+//! changed meets a partner row in that partner's scope (SPEC.md section 7). A
+//! run reads nothing for its joins; the write that changes a joined table asks.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -34,7 +34,8 @@ pub type Lookups<'a> = dyn FnMut(Judging<'_>) -> Result<bool, NoAnswer> + 'a;
 #[derive(Debug)]
 pub enum NoAnswer {
     /// The question ran past `LOOKUP_STEPS` and stopped. sqlive can't tell
-    /// whether the row passes, so the live query runs again (§4).
+    /// whether the row passes, so the live query runs again
+    /// (SPEC.md section 7).
     Stopped,
     /// SQLite failed.
     Failed(rusqlite::Error),

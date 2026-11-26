@@ -1,7 +1,7 @@
-//! A statement's conditions on one source's rows, read from its parsed SQL
-//! and bound to each run's values (§4). A condition it can't read, on one
-//! table's columns, becomes a `Row` term that a write judges by asking SQLite
-//! (`scope_row.rs`).
+//! A statement's conditions on one source's rows, read from its parsed SQL and
+//! bound to each run's values (SPEC.md section 5). A condition it can't read,
+//! on one table's columns, becomes a `Row` term that a write judges by asking
+//! SQLite (`scope_row.rs`).
 
 use std::cmp::Ordering;
 use std::sync::Arc;

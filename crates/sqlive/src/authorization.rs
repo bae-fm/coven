@@ -339,8 +339,8 @@ impl<P: Policy> SqlAuthorization<P> {
         ReadingSql(&self.state)
     }
 
-    /// A live query's run's SQL: it may only read, and records what it
-    /// reads, so a commit that changes it runs the query again (§4).
+    /// A live query's run's SQL: it may only read, and records what it reads,
+    /// so a commit that changes it runs the query again (SPEC.md section 3).
     pub(crate) fn live_reading(&self) -> ReadingSql<'_, P> {
         let reading = self.reading();
         lock_unpoisoned(&self.state).reads = Some(ReadCapture::new(Arc::clone(&self.whole)));

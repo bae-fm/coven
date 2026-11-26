@@ -1,7 +1,8 @@
-//! The columns of each table a handle's live queries read, whose values a
-//! write keeps of the rows it changes (§4): those the queries read and those
-//! their scopes test. The handle keeps them as it files each subscription's
-//! reads again, so a write learns them without reading every live query.
+//! The columns of each table a handle's live queries read, whose values a write
+//! keeps of the rows it changes (SPEC.md section 2): those the queries read and
+//! those their scopes test. The handle keeps them as it files each
+//! subscription's reads again, so a write learns them without reading every
+//! live query.
 
 use crate::change_capture::KeptColumns;
 use crate::ReadSet;

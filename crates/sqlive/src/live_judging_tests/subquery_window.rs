@@ -1,6 +1,6 @@
 //! A subquery that takes `ORDER BY ... LIMIT` for each row around it depends
 //! only on the rows of each window up to its LIMIT-th row, as a full list
-//! window does on the rows up to its last (§4).
+//! window does on the rows up to its last (SPEC.md section 8).
 
 use super::lookup::follows;
 use crate::tests::TestDatabase;

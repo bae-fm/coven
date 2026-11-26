@@ -1,6 +1,6 @@
-//! The SQLite settings an app may choose for a database's connections, the
-//! ones sqlive keeps fixed, and the WAL commands an app may run (§4, api.md
-//! E1).
+//! The SQLite settings an app may choose for a database's connections, the ones
+//! sqlive keeps fixed, and the WAL commands an app may run (SPEC.md section 10,
+//! api.md E1).
 
 use crate::authorization::HostError;
 use crate::authorization::Policy;
@@ -19,7 +19,7 @@ use crate::connection::HostSql;
 ///
 /// The settings sqlive's guarantees rest on have no field here: the journal
 /// mode, `synchronous`, the locking mode, foreign keys and the rest stay
-/// fixed (§4).
+/// fixed (SPEC.md section 10).
 ///
 /// ```compile_fail
 /// let _ = sqlive::SqliteSettings {
@@ -56,9 +56,9 @@ pub struct SqliteSettings {
     /// Unset is sqlive's 4 MiB.
     pub journal_size_limit: Option<JournalSizeLimit>,
     /// The WAL size at which sqlive checkpoints it, off the commit path; unset
-    /// is SQLite's 1000 pages (§4). None of a writable handle's connections
-    /// runs a checkpoint as it commits. A read-only handle's own commits, which
-    /// only its cache makes, checkpoint as SQLite's
+    /// is SQLite's 1000 pages (SPEC.md section 10). None of a writable handle's
+    /// connections runs a checkpoint as it commits. A read-only handle's own
+    /// commits, which only its cache makes, checkpoint as SQLite's
     /// `PRAGMA wal_autocheckpoint` does.
     pub wal_autocheckpoint: Option<WalAutocheckpoint>,
     /// Whether the query planner may build a temporary index for one query
@@ -89,7 +89,7 @@ pub struct SqliteSettings {
     /// auto_vacuum`). Like the page size, an existing database keeps its
     /// own. Unset is `Incremental`, and a host gives back free pages past
     /// 4 MiB through `give_back_free_pages`, as coven does each time a claim
-    /// lands (§4).
+    /// lands (SPEC.md section 10).
     pub auto_vacuum: Option<AutoVacuum>,
 }
 
@@ -316,7 +316,8 @@ impl PageSize {
 /// checkpoint copies the WAL into the database file and lets the next commit
 /// write the WAL over from its start, so each of its syncs flushes the drive's
 /// cache with `F_FULLFSYNC`: the database file holds the whole checkpoint
-/// before any of the WAL is overwritten (§3). Commits keep a plain `fsync`.
+/// before any of the WAL is overwritten (coven.md §3). Commits keep a plain
+/// `fsync`.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const CHECKPOINT_FULLFSYNC: Option<bool> = Some(true);
 /// Elsewhere SQLite's own default stands.
@@ -448,9 +449,10 @@ impl SqliteSettings {
     }
 }
 
-/// The fewest rows a table keeps the planner's statistics for (§4). SQLite
-/// 3.53 planned a full scan over a rowid range lookup for a table it counted
-/// at 2 rows, over an index lookup at 2, and over an index range at 8 to 50.
+/// The fewest rows a table keeps the planner's statistics for
+/// (SPEC.md section 10). SQLite 3.53 planned a full scan over a rowid range
+/// lookup for a table it counted at 2 rows, over an index lookup at 2, and over
+/// an index range at 8 to 50.
 const SMALL_TABLE: i64 = 100;
 
 impl<P: Policy> HostSql<P> {
@@ -480,7 +482,8 @@ impl<P: Policy> HostSql<P> {
         self.batch(&format!("PRAGMA {};", pragmas.join("; PRAGMA ")))
     }
 
-    /// Put the database in WAL mode and make every commit durable (§4).
+    /// Put the database in WAL mode and make every commit durable
+    /// (SPEC.md section 10).
     pub(crate) fn enable_wal(&self) -> Result<(), PolicyError<P>> {
         let mode: String = self.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if !mode.eq_ignore_ascii_case("wal") {
@@ -589,12 +592,13 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Gather the query planner's statistics where they are missing or stale,
-    /// outside any captured transaction, so none records them (§4).
-    /// `0x10000` checks every table, not only those this connection read;
-    /// `0x10` reads at most SQLite's 2,000 rows of each index, or the app's
-    /// own lower `analysis_limit`, and fewer in a schema of over 100 tables
-    /// and indexes; `0x02` analyzes a table never analyzed, or one whose size
-    /// changed tenfold since. Tables whose statistics hold cost no reads.
+    /// outside any captured transaction, so none records them
+    /// (SPEC.md section 10). `0x10000` checks every table, not only those this
+    /// connection read; `0x10` reads at most SQLite's 2,000 rows of each index,
+    /// or the app's own lower `analysis_limit`, and fewer in a schema of over
+    /// 100 tables and indexes; `0x02` analyzes a table never analyzed, or one
+    /// whose size changed tenfold since. Tables whose statistics hold cost no
+    /// reads.
     ///
     /// Then it forgets the statistics of each table under [`SMALL_TABLE`]
     /// rows, which SQLite may plan to read whole: once such a table grows,

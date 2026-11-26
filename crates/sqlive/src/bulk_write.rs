@@ -1,5 +1,5 @@
 //! A bulk write: the app's SQL on device-local tables alone, run as plain
-//! SQLite, with no pre-update hook watching it (§4).
+//! SQLite, with no pre-update hook watching it (SPEC.md section 9).
 //!
 //! A local write's hook records each row operation, which also keeps SQLite
 //! from emptying a table in one step. The policy refuses any statement in a

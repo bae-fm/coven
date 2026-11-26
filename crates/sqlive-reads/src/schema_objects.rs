@@ -1,5 +1,6 @@
 //! The main schema's tables and views, as the scope planner looks them up
-//! (§4): which object a name names, a table's columns, and a view's SELECT.
+//! (SPEC.md section 8): which object a name names, a table's columns, and a
+//! view's SELECT.
 
 use rusqlite::Connection;
 use sqlite3_parser::{

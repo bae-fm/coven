@@ -1,5 +1,6 @@
-//! Subqueries in FROM, CTEs and the app's views, read as cores of their
-//! own, and the conditions on their rows passed into those cores (§4).
+//! Subqueries in FROM, CTEs and the app's views, read as cores of their own,
+//! and the conditions on their rows passed into those cores
+//! (SPEC.md section 8).
 //!
 //! A row of a subquery comes from rows of its sources. When the subquery
 //! neither groups nor limits its rows, an output column that is a bare

@@ -30,13 +30,13 @@ fn cache_used(db: &TestDatabase) -> Vec<i32> {
     used
 }
 
-/// One release, on one reader, empties every connection's page cache: SQLite
-/// as sqlive builds it keeps the unused pages of every connection in one pool
-/// (§4). A SQLite built without `SQLITE_ENABLE_MEMORY_MANAGEMENT` keeps a
-/// pool per connection, and only the reader's would empty. Any release, by
-/// any test in the process, empties the pool too; so the test measures each
-/// connection's cache as it fills, and checks that a second release finds
-/// nothing more to free.
+/// One release, on one reader, empties every connection's page cache: SQLite as
+/// sqlive builds it keeps the unused pages of every connection in one pool
+/// (SPEC.md section 10). A SQLite built without
+/// `SQLITE_ENABLE_MEMORY_MANAGEMENT` keeps a pool per connection, and only the
+/// reader's would empty. Any release, by any test in the process, empties the
+/// pool too; so the test measures each connection's cache as it fills, and
+/// checks that a second release finds nothing more to free.
 #[test]
 fn one_release_empties_every_connections_page_cache() {
     let db = blobs();

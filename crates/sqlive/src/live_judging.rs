@@ -1,5 +1,5 @@
-//! A connection's part in live queries' judging of writes (§4): a live
-//! query's run, which judges the writes that committed while it ran, a
+//! A connection's part in live queries' judging of writes (SPEC.md section 7):
+//! a live query's run, which judges the writes that committed while it ran, a
 //! write's judging before it commits, and the lookups both run in their own
 //! transaction.
 
@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 impl<P: Policy> HostSql<P> {
-    /// A live query's run on one snapshot. What its statements read goes
-    /// to `judge` before the snapshot ends, which judges the writes that
-    /// committed during the run by lookups in that snapshot (§4).
+    /// A live query's run on one snapshot. What its statements read goes to
+    /// `judge` before the snapshot ends, which judges the writes that committed
+    /// during the run by lookups in that snapshot (SPEC.md section 3).
     pub fn live_read<F, R, E>(
         &self,
         judge: &mut dyn FnMut(ReadSet, &mut Lookups<'_>) -> rusqlite::Result<()>,
@@ -44,7 +44,7 @@ impl<P: Policy> HostSql<P> {
 
     /// Judge a write's changes for every waiting live query, in the
     /// write's own transaction before it commits: a lookup reads the rows
-    /// the write leaves (§4).
+    /// the write leaves (SPEC.md section 7).
     pub(super) fn judge(
         &self,
         handle: &crate::Handle<P::Failure>,
@@ -92,7 +92,7 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Whether `sql` finds a row. A question that runs past `LOOKUP_STEPS`
-    /// stops with no answer (§4).
+    /// stops with no answer (SPEC.md section 7).
     fn run_limited(&self, sql: &str, parameters: &[crate::SqlValue]) -> Result<bool, NoAnswer> {
         let mut statement = self.connection.prepare_cached(sql)?;
         for (index, value) in parameters.iter().enumerate() {

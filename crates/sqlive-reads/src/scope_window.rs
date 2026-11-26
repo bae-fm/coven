@@ -1,5 +1,5 @@
 //! A subquery that keeps the first rows of each window, as a correlated
-//! `ORDER BY ... LIMIT` does for each row around it (§4).
+//! `ORDER BY ... LIMIT` does for each row around it (SPEC.md section 8).
 //!
 //! A subquery that is one SELECT of one table, ordered by expressions over
 //! that table's columns, with a LIMIT and no OFFSET, returns for each row of

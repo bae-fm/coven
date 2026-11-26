@@ -1,5 +1,5 @@
 //! Values the host keeps in memory beside a database, which its SQL
-//! functions read as each transaction's snapshot saw them (§4).
+//! functions read as each transaction's snapshot saw them (SPEC.md section 3).
 //!
 //! A statement reads the tables from its transaction's snapshot, which fixes
 //! the commits it sees. A function that read the host's memory as each call

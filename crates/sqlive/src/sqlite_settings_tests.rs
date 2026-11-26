@@ -82,12 +82,13 @@ fn each_in_effect(db: &TestDatabase) -> Vec<SqliteSettingsInEffect> {
 }
 
 /// A writable database's writer never checkpoints as it commits: sqlive's
-/// checkpointer does, at the size its readers report (§4).
+/// checkpointer does, at the size its readers report (SPEC.md section 10).
 fn never_as_it_commits(settings: SqliteSettingsInEffect) -> SqliteSettingsInEffect {
     SqliteSettingsInEffect { wal_autocheckpoint: WalAutocheckpoint::Off, ..settings }
 }
 
-/// sqlive's settings that no host choice changes, on any connection (§4).
+/// sqlive's settings that no host choice changes, on any connection
+/// (SPEC.md section 10).
 fn assert_fixed(connection: &HostSql<NoPolicy>) {
     let read = |pragma: &str| -> i64 {
         connection.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0)).unwrap()
@@ -145,14 +146,15 @@ fn unset_settings_keep_sqlites_defaults_except_sqlives_own() {
             mmap_size: 0,
             temp_store: TempStore::Default,
             threads: 0,
-            // sqlive's own, which commits leave alone (§4).
+            // sqlive's own, which commits leave alone (SPEC.md section 10).
             journal_size_limit: JournalSizeLimit::Bytes(4 << 20),
             wal_autocheckpoint: WalAutocheckpoint::Pages(NonZeroU32::new(1000).unwrap()),
             automatic_index: true,
             cell_size_check: false,
             secure_delete: SecureDelete::Off,
             fullfsync: false,
-            // sqlive's own on macOS and iOS (§3); SQLite's off elsewhere.
+            // sqlive's own on macOS and iOS (coven.md §3); SQLite's off
+            // elsewhere.
             checkpoint_fullfsync: cfg!(any(target_os = "macos", target_os = "ios")),
             analysis_limit: AnalysisLimit::Unlimited,
             page_size: PageSize::Bytes4096,
@@ -438,7 +440,7 @@ fn would_analyze(db: &TestDatabase) -> Vec<String> {
     rows.collect::<rusqlite::Result<_>>().unwrap()
 }
 
-/// Opening gathers statistics for a table that has none (§4).
+/// Opening gathers statistics for a table that has none (SPEC.md section 10).
 #[test]
 fn opening_gathers_statistics_a_table_lacks() {
     let db = indexed_notes();
@@ -756,7 +758,7 @@ fn write_searched(db: &TestDatabase, from: usize, notes: usize) {
 /// rows, and SQLite would read the whole table to clean up each merged
 /// segment instead of looking up the segment's range. sqlive keeps no
 /// statistics for a table that small, as it opens or while the index grows,
-/// so the cleanup stays a range lookup (§4).
+/// so the cleanup stays a range lookup (SPEC.md section 10).
 #[test]
 fn a_new_databases_index_cleanup_stays_a_range_lookup_as_it_fills() {
     let db = searched_notes();
@@ -771,7 +773,7 @@ fn a_new_databases_index_cleanup_stays_a_range_lookup_as_it_fills() {
 /// Ana created her library and closed it while its index held its two rows.
 /// Closing keeps no statistics for a table that small, so when her next
 /// session imports her notes, the cleanup looks up a range from the start
-/// (§4).
+/// (SPEC.md section 10).
 #[test]
 fn closing_a_small_database_keeps_no_statistics_for_its_small_tables() {
     let db = searched_notes();
@@ -788,8 +790,8 @@ fn closing_a_small_database_keeps_no_statistics_for_its_small_tables() {
 /// Defensive mode refuses SQL that could damage the database file, on every
 /// connection sqlive opens. Ana's notes app keeps its search index through
 /// `note_search`, as FTS5 does; writing the index's own `note_search_data`
-/// table directly would leave the index disagreeing with itself, so it fails
-/// in an app's write and in the host's own transaction alike (§4).
+/// table directly would leave the index disagreeing with itself, so it fails in
+/// an app's write and in the host's own transaction alike (SPEC.md section 10).
 #[test]
 fn sql_that_could_damage_the_file_fails() {
     let refused = |result: Result<(), TestError>| match result {

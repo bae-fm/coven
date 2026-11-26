@@ -37,7 +37,7 @@ fn readers_candidate_plans(db: &TestDatabase) -> Vec<String> {
 /// A table that fills from empty in one session gets its statistics while
 /// the database stays open, so every reader, read-only as each is, looks a
 /// file root's candidates up by their index instead of reading the whole
-/// root in key order (§4).
+/// root in key order (SPEC.md section 10).
 #[tokio::test]
 async fn a_table_that_fills_in_one_session_gets_statistics_before_close() {
     let db = scan_candidates();

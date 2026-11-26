@@ -88,9 +88,9 @@ async fn checkpointed<T>(db: &TestDatabase, told: &mut UnboundedReceiver<T>) -> 
         .expect("the checkpointer runs while the database is open")
 }
 
-/// The writer never checkpoints as it commits; sqlive's checkpointer does,
-/// off the commit path, once the WAL passes the threshold, and the WAL then
-/// starts over from its beginning, a live query rerunning or not (§4).
+/// The writer never checkpoints as it commits; sqlive's checkpointer does, off
+/// the commit path, once the WAL passes the threshold, and the WAL then starts
+/// over from its beginning, a live query rerunning or not (SPEC.md section 10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlive_checkpoints_the_wal_past_its_threshold() {
     let db = blobs(checkpointed_at_100_pages());
@@ -129,7 +129,7 @@ async fn sqlive_checkpoints_the_wal_past_its_threshold() {
 /// The checkpoint also copies and syncs a commit made while it copies the
 /// WAL, before it holds the writer. Once the checkpoint holds the writer, it
 /// finds every frame already copied, so writes don't wait while it copies or
-/// syncs them (§4).
+/// syncs them (SPEC.md section 10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_during_the_copy_is_copied_before_the_checkpoint_holds_the_writer() {
     let db = blobs(checkpointed_at_100_pages());
@@ -264,11 +264,12 @@ fn a_checkpoint_that_copies_nothing_leaves_the_watch_unchanged() {
     db.close();
 }
 
-/// A commit of the statistics thread holds the writer, so it runs no
-/// checkpoint either, however many pages the WAL holds not yet copied. Every
-/// checkpoint then goes through `wal_checkpoint`, which sends the file's
-/// size after each (§4). The checkpointer here waits for far more pages than the test
-/// writes, while every connection's `wal_autocheckpoint` is SQLite's 1,000.
+/// A commit of the statistics thread holds the writer, so it runs no checkpoint
+/// either, however many pages the WAL holds not yet copied. Every checkpoint
+/// then goes through `wal_checkpoint`, which sends the file's size after each
+/// (SPEC.md section 10). The checkpointer here waits for far more pages than
+/// the test writes, while every connection's `wal_autocheckpoint` is SQLite's
+/// 1,000.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_statistics_commit_runs_no_checkpoint() {
     let db = TestDatabase::open_with(
@@ -412,7 +413,7 @@ async fn checkpointer_failure(
 /// the handle's error after it hold `HandleFailed` carrying it, and the
 /// process keeps running.
 /// Closing the handle and opening the database again starts a checkpointer
-/// that checkpoints again (§4).
+/// that checkpoints again (SPEC.md section 10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_panicking_checkpoint_fails_the_handle_with_its_bug_and_a_reopen_checkpoints_again() {
     let db = blobs(checkpointed_at_100_pages());
@@ -437,7 +438,7 @@ async fn a_panicking_checkpoint_fails_the_handle_with_its_bug_and_a_reopen_check
 
 /// When SQLite fails a checkpoint for a reason other than a busy or locked
 /// database, the checkpointer stops too, and fails the handle with SQLite's
-/// cause (§4).
+/// cause (SPEC.md section 10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
     let db = blobs(checkpointed_at_100_pages());
@@ -462,7 +463,7 @@ async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
 
 /// A database busy or locked past the busy timeout is no failure: the
 /// checkpointer tries again at the next commit's wake, and the handle keeps
-/// serving calls (§4).
+/// serving calls (SPEC.md section 10).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_checkpoint_is_tried_again() {
     let db = blobs(checkpointed_at_100_pages());
@@ -559,11 +560,11 @@ async fn hold_the_checkpoint_lock(db: &TestDatabase) -> std::thread::JoinHandle<
     }
 }
 
-/// While another connection checkpoints the WAL, it holds SQLite's
-/// checkpoint lock, and a checkpoint that finds the lock held reads nothing
-/// of the WAL: SQLite reports busy with no frames. SQLite reports a busy
-/// database, not a failure, so sqlive's checkpointer tries again at the next
-/// wake, and the handle keeps serving calls (§4). Such a checkpoint copied
+/// While another connection checkpoints the WAL, it holds SQLite's checkpoint
+/// lock, and a checkpoint that finds the lock held reads nothing of the WAL:
+/// SQLite reports busy with no frames. SQLite reports a busy database, not a
+/// failure, so sqlive's checkpointer tries again at the next wake, and the
+/// handle keeps serving calls (SPEC.md section 10). Such a checkpoint copied
 /// nothing, so the database's watch of its file's size doesn't wake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checkpoint_another_connection_holds_off_is_tried_again() {

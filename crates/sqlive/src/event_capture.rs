@@ -1,11 +1,10 @@
 //! A local write's app phase, observed one SQLite row operation at a time.
 //!
 //! Sessions record only net changes. A write's steps need each operation, in
-//! order (§9.6, D5). A connection has one pre-update hook, which a session
-//! would otherwise own, so the app phase records through this hook and no
-//! session runs until it ends. The capture keeps every operation on a
-//! recorded table, and keeps only what live queries need from any other
-//! table.
+//! order (coven.md §9.6, D5). A connection has one pre-update hook, which a
+//! session would otherwise own, so the app phase records through this hook and
+//! no session runs until it ends. The capture keeps every operation on a
+//! recorded table, and keeps only what live queries need from any other table.
 
 use super::pre_update_changes::{new_value, old_value, ImageColumns};
 use super::write_transaction::WriteTransaction;

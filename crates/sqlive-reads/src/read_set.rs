@@ -81,7 +81,7 @@ fn inserted(change: &RowChange) -> bool {
 /// count as matched without a lookup, as a table changed whole would, so a
 /// write's lookups stay bounded. A question that runs past `LOOKUP_STEPS`
 /// and stops leaves sqlive unable to tell, so `reads` count as changed
-/// whatever the other questions answer (§4).
+/// whatever the other questions answer (SPEC.md section 7).
 pub fn affected(
     reads: &ReadSet,
     changes: &[RowChange],

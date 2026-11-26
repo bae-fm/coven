@@ -1,8 +1,8 @@
 //! A walk of the SQL SQLite runs for a statement or one of the app's views:
-//! each SELECT, its CTEs, its arms and their FROM items, the views those
-//! read, and the queries inside every expression (§4). The walk resolves
-//! each FROM item's name as SQLite does, to the innermost CTE of that name
-//! or else to the main schema's table or view, reads each view's SQL once,
+//! each SELECT, its CTEs, its arms and their FROM items, the views those read,
+//! and the queries inside every expression (SPEC.md section 4). The walk
+//! resolves each FROM item's name as SQLite does, to the innermost CTE of that
+//! name or else to the main schema's table or view, reads each view's SQL once,
 //! and notes what each query reads. A `Visit` adds what one use of the walk
 //! does at a SELECT, at a core and at a FROM clause.
 

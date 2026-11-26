@@ -1,10 +1,10 @@
 //! What row operations a pre-update hook reports mean to live queries
-//! (§4.1): a local write's on device-local tables, which never sync, and a
-//! streamed transaction's on any table, as applying another device's slot.
-//! sqlive keeps of the rows only what wakes a live query: the table and the
-//! columns changed, and, where a waiting live query reads the table, each
-//! changed row's key and the values live queries read or test, folded into
-//! the row's net change over the transaction (`net_changes.rs`).
+//! (SPEC.md section 2): a local write's on device-local tables, which never
+//! sync, and a streamed transaction's on any table, as applying another
+//! device's slot. sqlive keeps of the rows only what wakes a live query: the
+//! table and the columns changed, and, where a waiting live query reads the
+//! table, each changed row's key and the values live queries read or test,
+//! folded into the row's net change over the transaction (`net_changes.rs`).
 
 use super::table_shapes::{Shadow, TableShape, TableShapes};
 use crate::authorization::HostError;

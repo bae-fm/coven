@@ -1,4 +1,5 @@
-//! The query planner's statistics while a database stays open (§4).
+//! The query planner's statistics while a database stays open
+//! (SPEC.md section 10).
 //!
 //! sqlive gathers the statistics as a writable database opens and as it closes
 //! (`optimize`, sqlite_settings.rs). A table can fill from empty within one

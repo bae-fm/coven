@@ -1,4 +1,5 @@
-//! A connection's page cache: how much it holds, and giving it back (§4).
+//! A connection's page cache: how much it holds, and giving it back
+//! (SPEC.md section 10).
 
 use super::HostSql;
 use crate::authorization::Policy;

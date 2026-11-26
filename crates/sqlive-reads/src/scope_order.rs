@@ -1,6 +1,6 @@
 //! A statement that orders by columns of its tables, or expressions over one
 //! table's columns, and has a LIMIT with no OFFSET, whose full run depends
-//! only on the rows that sort at or before its last row (§4).
+//! only on the rows that sort at or before its last row (SPEC.md section 6).
 //!
 //! When a run returns as many rows as its LIMIT, a row that sorts after its
 //! last row can't appear in the result: every result row it would give sorts
@@ -20,27 +20,26 @@
 //! which a write looks up as it looks up a join (`scope_lookup.rs`). A table
 //! that takes no value from each earlier run's table has no bound.
 //!
-//! sqlive takes the last row's values from the result columns that return
-//! them, so each ORDER BY term is a result column of the statement's only
-//! SELECT, written as the term writes it, with or without the COLLATE the
-//! term ends in, and with no NULLS FIRST or LAST. Each term reads one table
-//! of that SELECT: a stored column of BINARY collation, whose values sqlive
-//! compares as SQLite does; a stored column of another collation; or an
-//! expression over stored BINARY columns that SQLite can evaluate row by
-//! row, or a generated column whose expression names only such columns,
-//! whose value in a changed row a write asks SQLite to compare with the
-//! last row's (`scope_row.rs`). The term sorts text by its collation: the
-//! COLLATE it ends in, else its column's declared one, else BINARY. A write
-//! asks SQLite to compare in that collation, whether SQLite's own or one the
-//! app registered, so sqlive keeps no list of collations (§4). A COLLATE
-//! inside the term, anywhere but its end, gives a comparison within it a
-//! collation of its own, and the term bounds nothing. No such table is the
-//! right side of a LEFT JOIN. There,
-//! when a write adds a row that matches a left row that had no match, SQLite
-//! no longer returns the row of NULLs it returned for that left row, and that
-//! row of NULLs can sort before the last row. The SELECT has no GROUP BY and
-//! calls no aggregate or window function in its result columns, since there
-//! one result row's values depend on many table rows.
+//! sqlive takes the last row's values from the result columns that return them,
+//! so each ORDER BY term is a result column of the statement's only SELECT,
+//! written as the term writes it, with or without the COLLATE the term ends in,
+//! and with no NULLS FIRST or LAST. Each term reads one table of that SELECT: a
+//! stored column of BINARY collation, whose values sqlive compares as SQLite
+//! does; a stored column of another collation; or an expression over stored
+//! BINARY columns that SQLite can evaluate row by row, or a generated column
+//! whose expression names only such columns, whose value in a changed row a
+//! write asks SQLite to compare with the last row's (`scope_row.rs`). The term
+//! sorts text by its collation: the COLLATE it ends in, else its column's
+//! declared one, else BINARY. A write asks SQLite to compare in that collation,
+//! whether SQLite's own or one the app registered, so sqlive keeps no list of
+//! collations (SPEC.md section 6). A COLLATE inside the term, anywhere but its
+//! end, gives a comparison within it a collation of its own, and the term
+//! bounds nothing. No such table is the right side of a LEFT JOIN. There, when
+//! a write adds a row that matches a left row that had no match, SQLite no
+//! longer returns the row of NULLs it returned for that left row, and that row
+//! of NULLs can sort before the last row. The SELECT has no GROUP BY and calls
+//! no aggregate or window function in its result columns, since there one
+//! result row's values depend on many table rows.
 
 use std::cmp::Ordering;
 use std::sync::Arc;

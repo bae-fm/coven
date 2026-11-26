@@ -1,6 +1,6 @@
-//! A FROM item of a statement's core, as the scope planner reads it: a
-//! table, a contentful FTS5 table, a table function, a view read whole, or a
-//! subquery, CTE or app view read as cores of its own (§4); and a core's
+//! A FROM item of a statement's core, as the scope planner reads it: a table, a
+//! contentful FTS5 table, a table function, a view read whole, or a subquery,
+//! CTE or app view read as cores of its own (SPEC.md section 8); and a core's
 //! FROM, whose parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
@@ -31,12 +31,12 @@ pub(crate) enum ColumnValue {
     Compared(Affinity),
     /// A generated column's values, which its expression gives: one whose
     /// collation is BINARY and whose expression names only its table's
-    /// stored columns of BINARY collation (§4).
+    /// stored columns of BINARY collation (SPEC.md section 6).
     Generated(RowExpression),
     /// A stored column whose collation isn't BINARY, of this affinity and
     /// the collation it declares. No condition narrows by it, but an ORDER
     /// BY term that is the column bounds a LIMIT's rows, by a comparison
-    /// SQLite runs in the term's collation (§4).
+    /// SQLite runs in the term's collation (SPEC.md section 6).
     Collated(Affinity, String),
     /// Values no condition narrows by: a generated column sqlive can't
     /// evaluate, or a column of a view read whole.

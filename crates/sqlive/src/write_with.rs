@@ -1,6 +1,6 @@
 //! A write in two phases on one transaction: the app's SQL, while the
 //! pre-update hook keeps each row operation on the recorded tables one at a
-//! time (§9.6), then the host's work under a session.
+//! time (coven.md §9.6), then the host's work under a session.
 
 use super::event_capture::{EventCapture, Operation};
 use super::stream_capture::{StreamCapture, StreamChanges};

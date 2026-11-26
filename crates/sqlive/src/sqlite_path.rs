@@ -1,4 +1,4 @@
-//! The path SQLite opens a database by (§4).
+//! The path SQLite opens a database by (SPEC.md section 10).
 //!
 //! On Windows a database's path is canonical, and a canonical Windows path is
 //! verbatim: `\\?\D:\…`. SQLite takes any path that starts `\\` for a

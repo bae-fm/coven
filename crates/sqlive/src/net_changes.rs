@@ -1,14 +1,14 @@
-//! A transaction's net change to each row it changes (§4): the row as it was
-//! before the transaction and as it is at its end. A transaction can change
-//! one row more than once, as an insert and a delete, an update and an update
-//! back, or a delete and an insert of the same key, as `INSERT OR REPLACE`
-//! and FTS5's rewrite of an updated row make. The captures report each
-//! operation on a row that a key names (`RowOperation`), and `NetRows` folds
-//! them into the row's first image before and its last image after, with
-//! each column some operation changed and its value before the first change
-//! and after the last, where the capture kept them. A row that ends as it
-//! began changes nothing, and a column whose kept value ends as it began
-//! changed nothing, so a live query judges the net change alone. The Lean
+//! A transaction's net change to each row it changes (SPEC.md section 2): the
+//! row as it was before the transaction and as it is at its end. A transaction
+//! can change one row more than once, as an insert and a delete, an update and
+//! an update back, or a delete and an insert of the same key, as
+//! `INSERT OR REPLACE` and FTS5's rewrite of an updated row make. The captures
+//! report each operation on a row that a key names (`RowOperation`), and
+//! `NetRows` folds them into the row's first image before and its last image
+//! after, with each column some operation changed and its value before the
+//! first change and after the last, where the capture kept them. A row that
+//! ends as it began changes nothing, and a column whose kept value ends as it
+//! began changed nothing, so a live query judges the net change alone. The Lean
 //! model folds a write's changes the same way (`net`, `net_sound`).
 
 use crate::RowImage;

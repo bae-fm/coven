@@ -1,7 +1,7 @@
 //! A write is judged only against the live queries whose scopes its rows
 //! could pass: those whose equality or IN list holds a value its rows hold
 //! before or after it, and those whose scope has no such key, however many
-//! other live queries wait (§4).
+//! other live queries wait (SPEC.md section 7).
 
 use crate::tests::{next, QueryError, TestDatabase};
 use crate::{ConnectionWorkCounter, LiveQuery};

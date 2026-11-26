@@ -1,5 +1,5 @@
-//! A column, or each column of a row value, compared with the value a
-//! subquery returns, read as an edge to the subquery's source (§4).
+//! A column, or each column of a row value, compared with the value a subquery
+//! returns, read as an edge to the subquery's source (SPEC.md section 8).
 //!
 //! `col = (SELECT x.c …)`, `(SELECT x.c …) = col` and `col IN (SELECT x.c
 //! …)`, where the subquery is one SELECT whose single result column is a bare

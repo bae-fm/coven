@@ -1,7 +1,7 @@
 //! A database in memory that holds a schema and no rows, on which a build
 //! tool prepares SQL and asks what SQLite and sqlive make of it: the columns
 //! a statement returns and where each comes from, the parameters it reads,
-//! and what a live query of it depends on (§4). The compiler of
+//! and what a live query of it depends on (SPEC.md section 12). The compiler of
 //! sqlive-compose is the tool that uses it, so that no crate but sqlive
 //! opens SQLite.
 
@@ -137,9 +137,9 @@ impl SchemaProbe {
     }
 
     /// What a live query of `sql` depends on in each table it reads, as its
-    /// plan narrows them before a run binds its values (§4). A view of the
-    /// schema counts as sqlive reads it when no host names it a view to read
-    /// whole.
+    /// plan narrows them before a run binds its values (SPEC.md section 12). A
+    /// view of the schema counts as sqlive reads it when no host names it a
+    /// view to read whole.
     pub fn read_report(&self, sql: &str) -> rusqlite::Result<ReadReport> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;

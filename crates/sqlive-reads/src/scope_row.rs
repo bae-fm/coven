@@ -1,7 +1,7 @@
 //! A condition on one table's row that sqlive's own comparisons can't read,
 //! an expression over one table's row compared with another source's value,
 //! and an ORDER BY term's expression over one table's row, judged by asking
-//! SQLite (§4).
+//! SQLite (SPEC.md section 5).
 //!
 //! A WHERE or ON conjunct whose every name is a stored, BINARY column of one
 //! table of its own SELECT, and that holds no subquery, no clock and no
