@@ -118,7 +118,7 @@ pub(crate) fn compile(
             };
             (generate::fragment(header, &fields), Some(record))
         }
-        HeaderKind::Read => (generate::read(header, sql, &fields), None),
+        HeaderKind::Read => (generate::read(header, sql, &fields, call.exported), None),
     };
     Ok(Compiled { code, record, warnings, reads })
 }

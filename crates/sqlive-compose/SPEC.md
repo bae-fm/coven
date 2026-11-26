@@ -999,6 +999,14 @@ own row type: keep it, compare it and print it. Every type a row holds
 implements those traits too: the fragment structs and JSON document structs
 derive them, and a declared type, such as `IssueState`, implements them itself.
 
+**Visibility.** A read's items are `pub` when every module from the crate's
+root to the `read!` call is `pub`, and `pub(crate)` otherwise: the struct, its
+fields, `SQL`, `params` and `read`, and the structs of the read's JSON
+documents. A read in a private module therefore has no `pub` item that nothing
+can reach, and the app needs no `#[expect(unreachable_pub)]` for it. A
+fragment's items are always `pub`, because a crate that depends on this one
+spreads it by its path.
+
 The row struct has one field for each spread, named by the spread's alias, and
 one for each column that the read itself returns, as `IssueComments` returns
 `id`, `body` and `written_at`.

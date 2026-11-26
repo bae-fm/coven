@@ -70,3 +70,31 @@ fn a_call_whose_tokens_are_no_header_keeps_its_error() {
     assert_eq!(walked.calls[0].name, "Page");
     assert!(walked.calls[0].header.is_err());
 }
+
+#[test]
+fn a_call_is_exported_when_every_module_around_it_is_pub() {
+    let reader = reader(&[
+        (
+            "src/lib.rs",
+            "sqlive_compose::read!(Root, r#\"SELECT 1\"#);\npub mod open;\nmod closed;\npub(crate) mod crate_wide;\n",
+        ),
+        ("src/open.rs", "sqlive_compose::read!(Open, r#\"SELECT 1\"#);\npub mod inner { sqlive_compose::read!(Inner, r#\"SELECT 1\"#); }\nmod hidden { sqlive_compose::read!(Hidden, r#\"SELECT 1\"#); }\nsqlive_compose::read!(After, r#\"SELECT 1\"#);\n"),
+        ("src/closed.rs", "pub mod inner { sqlive_compose::read!(Closed, r#\"SELECT 1\"#); }\n"),
+        ("src/crate_wide.rs", "sqlive_compose::read!(CrateWide, r#\"SELECT 1\"#);\n"),
+    ]);
+    let walked = walk(&reader).unwrap();
+    let found: Vec<_> =
+        walked.calls.iter().map(|call| (call.name.as_str(), call.exported)).collect();
+    assert_eq!(
+        found,
+        [
+            ("Root", true),
+            ("Open", true),
+            ("Inner", true),
+            ("Hidden", false),
+            ("After", true),
+            ("Closed", false),
+            ("CrateWide", false),
+        ]
+    );
+}

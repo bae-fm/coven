@@ -3,7 +3,7 @@
 
 use std::io;
 
-use syn::{Attribute, Expr, Item, Lit, Meta};
+use syn::{Attribute, Expr, Item, Lit, Meta, Visibility};
 
 use super::error::{Cause, CompileError, Location};
 use super::header::{self, CallKind, Header, HeaderError};
@@ -17,6 +17,9 @@ pub(crate) struct Call {
     pub(crate) location: Location,
     /// The modules from the crate's root to the call's.
     pub(crate) module: Vec<String>,
+    /// Whether every module from the crate's root to the call's is `pub`,
+    /// so that the call's items can be reached from outside the crate.
+    pub(crate) exported: bool,
     /// The call's name, which names its file.
     pub(crate) name: String,
     /// The header and SQL, or why the tokens aren't one.
@@ -31,7 +34,8 @@ pub(crate) struct Walked {
 
 /// The calls of the crate whose files `reader` gives.
 pub(crate) fn walk(reader: Reader<'_>) -> Result<Walked, Vec<CompileError>> {
-    let mut walk = Walk { reader, calls: Vec::new(), read: Vec::new(), errors: Vec::new() };
+    let mut walk =
+        Walk { reader, calls: Vec::new(), read: Vec::new(), errors: Vec::new(), private: 0 };
     walk.file("src/lib.rs", "src", &mut Vec::new());
     if walk.errors.is_empty() {
         Ok(Walked { calls: walk.calls, read: walk.read })
@@ -45,6 +49,8 @@ struct Walk<'a> {
     calls: Vec<Call>,
     read: Vec<String>,
     errors: Vec<CompileError>,
+    /// How many of the modules around the walk's place are not `pub`.
+    private: usize,
 }
 
 impl Walk<'_> {
@@ -99,6 +105,7 @@ impl Walk<'_> {
                     self.calls.push(Call {
                         location,
                         module: module.clone(),
+                        exported: self.private == 0,
                         name: name.unwrap_or_default(),
                         header,
                     });
@@ -106,12 +113,15 @@ impl Walk<'_> {
                 Item::Mod(item) if !is_test_only(&item.attrs) => {
                     let name = item.ident.to_string();
                     module.push(name.clone());
+                    let hidden = !matches!(item.vis, Visibility::Public(_));
+                    self.private += usize::from(hidden);
                     match &item.content {
                         Some((_, items)) => {
                             self.items(items, file, &format!("{dir}/{name}"), module);
                         }
                         None => self.module_file(&item.attrs, &name, file, dir, module),
                     }
+                    self.private -= usize::from(hidden);
                     module.pop();
                 }
                 _ => {}

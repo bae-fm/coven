@@ -70,8 +70,9 @@ fn row_type() -> TokenStream {
     quote!(&#row<'_>)
 }
 
-/// The structs of the JSON documents the header declares the shapes of.
-fn shapes(shapes: &[Shape]) -> TokenStream {
+/// The structs of the JSON documents the header declares the shapes of, as
+/// visible as `visibility` makes them.
+fn shapes(shapes: &[Shape], visibility: &TokenStream) -> TokenStream {
     let serde = path("serde");
     let serde_text = format!("{GENERATED}::serde");
     let hex = format!("{GENERATED}::hex_bytes");
@@ -95,7 +96,7 @@ fn shapes(shapes: &[Shape]) -> TokenStream {
             #[doc = #doc]
             #[derive(Clone, Debug, PartialEq, #serde::Deserialize)]
             #[serde(crate = #serde_text)]
-            pub struct #name {
+            #visibility struct #name {
                 #(#fields)*
             }
         }
@@ -112,7 +113,7 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
     let result = path("sqlive_reads::SqliteResult");
-    let shapes = shapes(&header.shapes);
+    let shapes = shapes(&header.shapes, &quote!(pub));
     quote! {
         #shapes
 
@@ -132,8 +133,13 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     .to_string()
 }
 
-/// A read's statement, request and row.
-pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
+/// A read's statement, request and row. Its items are `pub` when `exported`,
+/// which says that every module around the call is `pub`, and `pub(crate)`
+/// otherwise, so that a read in a private module has no `pub` item that
+/// nothing can reach (`unreachable_pub`). The row derives what an app needs to
+/// keep and compare it.
+pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool) -> String {
+    let visibility = if exported { quote!(pub) } else { quote!(pub(crate)) };
     let name = ident(&header.name);
     let params_name = format_ident!("{}Params", header.name);
     let row_name = format_ident!("{}Row", header.name);
@@ -153,45 +159,45 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field]) -> String {
     let to_sql = path("sqlive_reads::ToSql");
     let params_doc = format!("What the `{}` read's request binds.", header.name);
     let row_doc = format!("A row of the `{}` read.", header.name);
-    let shapes = shapes(&header.shapes);
+    let shapes = shapes(&header.shapes, &visibility);
     quote! {
         #shapes
 
         #[doc = #doc]
-        pub struct #name;
+        #visibility struct #name;
 
         impl #name {
             /// The composed statement.
-            pub const SQL: &'static str = #sql;
+            #visibility const SQL: &'static str = #sql;
         }
 
         #[doc = #params_doc]
-        pub struct #params_name {
+        #visibility struct #params_name {
             #(
                 #[allow(missing_docs)]
-                pub #parameter_names: #parameter_types,
+                #visibility #parameter_names: #parameter_types,
             )*
         }
 
         impl #params_name {
             /// The parameters by their names in the statement.
-            pub fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
+            #visibility fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
                 vec![#((#bound, &self.#parameter_names as &dyn #to_sql),)*]
             }
         }
 
         #[doc = #row_doc]
         #[derive(Clone, Debug, PartialEq)]
-        pub struct #row_name {
+        #visibility struct #row_name {
             #(
                 #[allow(missing_docs)]
-                pub #names: #types,
+                #visibility #names: #types,
             )*
         }
 
         impl #row_name {
             /// Reads a row of the statement.
-            pub fn read(row: #row) -> #result<Self> {
+            #visibility fn read(row: #row) -> #result<Self> {
                 let offset = 0;
                 Ok(Self { #(#names: #reads,)* })
             }
