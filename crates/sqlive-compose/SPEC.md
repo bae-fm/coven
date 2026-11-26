@@ -250,10 +250,10 @@ pub struct IssueAssigneeRow {
 }
 ```
 
-The generated reader tells a missing row from a row by the fragment's first `NOT
-NULL` column: the field is `None` when that column is NULL. A fragment with no
-`NOT NULL` column gives the reader nothing to test, so a `LEFT JOIN` spread of
-one fails the build.
+The generated reader tells a missing row from a row by the fragment's first
+column that can't be NULL (section 8): the field is `None` when that column is
+NULL. A fragment with no such column gives the reader nothing to test, so a
+`LEFT JOIN` spread of one fails the build.
 
 ### As a value from a parent row
 
