@@ -36,7 +36,7 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
             (
                 column.name.as_str(),
                 origin.map(|origin| {
-                    (origin.table.as_str(), origin.declared_type.as_deref(), origin.not_null)
+                    (origin.table.as_str(), origin.declared_type.as_deref(), origin.never_null)
                 }),
             )
         })
@@ -50,6 +50,47 @@ fn a_column_names_its_table_column_unless_it_is_computed() {
             ("title", Some(("issues", Some("TEXT"), true))),
         ]
     );
+}
+
+/// Whether the one column of `sql` never holds NULL in its table, on a
+/// schema of every kind of primary key.
+fn never_null(sql: &str) -> bool {
+    let schema = "
+        CREATE TABLE verdicts (verdict_id INTEGER PRIMARY KEY, kind TEXT) STRICT;
+        CREATE TABLE loose (id INT PRIMARY KEY, name TEXT);
+        CREATE TABLE backwards (id INTEGER PRIMARY KEY DESC, name TEXT);
+        CREATE TABLE paired (first INTEGER, second INTEGER, PRIMARY KEY (first, second));
+        CREATE TABLE named (rowid TEXT, name TEXT);
+        CREATE VIRTUAL TABLE docs USING fts5(body);";
+    let probe = SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
+    let statement = probe.prepare(sql).unwrap();
+    statement.columns[0].origin.as_ref().unwrap().never_null
+}
+
+#[test]
+fn the_rowid_never_holds_null_under_any_of_its_names() {
+    for sql in [
+        "SELECT verdict_id FROM verdicts",
+        "SELECT rowid FROM verdicts",
+        "SELECT _rowid_ FROM paired",
+        "SELECT oid FROM loose",
+        "SELECT rowid FROM docs",
+    ] {
+        assert!(never_null(sql), "{sql}");
+    }
+}
+
+#[test]
+fn a_primary_key_that_is_not_the_rowid_can_hold_null() {
+    for sql in [
+        "SELECT id FROM loose",
+        "SELECT id FROM backwards",
+        "SELECT first FROM paired",
+        "SELECT rowid FROM named",
+        "SELECT kind FROM verdicts",
+    ] {
+        assert!(!never_null(sql), "{sql}");
+    }
 }
 
 #[test]

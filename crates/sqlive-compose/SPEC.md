@@ -214,13 +214,13 @@ sqlive_compose::fragment!(
 A parent row follows `on`, and a relation follows `with`. Section 3 shows both.
 
 After those, the braces hold *declarations*, each of which gives a column its
-Rust type. A column that the SQL takes unchanged from a table, such as `p.name`
-in `Person`, needs none: the compiler takes its type from the table's STRICT
-type, and whether it can be NULL from the table's `NOT NULL`. A column that the
-SQL computes, such as `count(*) AS unread`, always needs one, since SQLite gives
-a computed column no type. A declaration on a table's column replaces the type
-the schema gives, as `person_id: PersonId` does in `Person`. Section 9 gives the
-rules in full.
+Rust type. A column that the SQL takes unchanged from a table, such as
+`p.name` in `Person`, needs none: the compiler takes its type from the table's
+STRICT type, and whether it can be NULL from the table: its `NOT NULL` and its
+rowid (section 8). A column that the SQL computes, such as `count(*) AS
+unread`, always needs one, since SQLite gives a computed column no type. A
+declaration on a table's column replaces the type the schema gives, as
+`person_id: PersonId` does in `Person`. Section 9 gives the rules in full.
 
 ## 3. Three ways to spread a fragment
 
@@ -855,8 +855,9 @@ issues/src/lib.rs:20:1: Titles computes the column title, and its header gives t
 ```
 
 A column that can be NULL needs an `Option`. A table's column can be NULL when
-the table doesn't declare it `NOT NULL`, when the SQL places the table on the
-right of a `LEFT JOIN`, and when the column comes from a scalar subquery. A
+the table doesn't declare it `NOT NULL` and it isn't the rowid, when the SQL
+places the table on the right of a `LEFT JOIN`, and when the column comes from a
+scalar subquery. A
 declaration that gives such a column a type other than an `Option` fails:
 
 ```rust
@@ -871,6 +872,14 @@ issues/src/lib.rs:30:1: assignee_id can be NULL, and the header types it PersonI
 
 A bare column name that the compiler can't place on one `FROM` item needs a
 declaration.
+
+**The rowid.** No row holds NULL in its rowid. So `rowid`, `_rowid_` and `oid`
+can't be NULL, unless the table has a column of its own under that name, and
+neither can an `INTEGER PRIMARY KEY` column, which is the rowid under the
+column's name. Another primary key column can be NULL when the table doesn't
+declare it `NOT NULL`: an `INT PRIMARY KEY`, an `INTEGER PRIMARY KEY DESC`
+declared on the column, or a column of a primary key of two columns. A STRICT
+table and a `WITHOUT ROWID` table make each primary key column `NOT NULL`.
 
 **JSON keys.** The compiler reads the `json_object` and `json_group_array` calls
 of a `json<T>` column and compares their keys, and how they nest, with `T`'s

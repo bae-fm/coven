@@ -36,8 +36,10 @@ pub struct ColumnOrigin {
     /// The type the table declares for the column, as written, when it
     /// declares one.
     pub declared_type: Option<String>,
-    /// Whether the table declares the column `NOT NULL`.
-    pub not_null: bool,
+    /// Whether no row of the table holds NULL in the column: the table
+    /// declares it `NOT NULL`, or it is the rowid, by one of the rowid's own
+    /// names or as an `INTEGER PRIMARY KEY` column.
+    pub never_null: bool,
 }
 
 /// One result column of a prepared statement.
@@ -119,14 +121,17 @@ impl SchemaProbe {
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
             let origin = match statement.column_metadata(position)? {
-                Some((_, table, _, declared, _, not_null, _, _))
+                Some((_, table, column, declared, _, not_null, primary_key, _))
                     if metadata.database_name() == Some("main") =>
                 {
+                    let table = table.to_string_lossy().into_owned();
+                    let never_null = not_null
+                        || (primary_key && self.is_rowid(&table, &column.to_string_lossy())?);
                     Some(ColumnOrigin {
-                        table: table.to_string_lossy().into_owned(),
+                        table,
                         declared_type: declared
                             .map(|declared| declared.to_string_lossy().into_owned()),
-                        not_null,
+                        never_null,
                     })
                 }
                 _ => None,
@@ -152,6 +157,19 @@ impl SchemaProbe {
             unnamed_parameters,
             writes: !statement.readonly(),
         })
+    }
+
+    /// Whether `column`, which SQLite says is part of the primary key of
+    /// `table`, is the table's rowid. SQLite says that of a name of the rowid
+    /// that no column of the table has. It gives every primary key an index,
+    /// except an `INTEGER PRIMARY KEY` that is the rowid itself.
+    fn is_rowid(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
+        self.connection.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(?1, 'main') WHERE name = ?2)
+                 OR NOT EXISTS (SELECT 1 FROM pragma_index_list(?1, 'main') WHERE origin = 'pk')",
+            [table, column],
+            |row| row.get(0),
+        )
     }
 
     /// The columns of `table` in the order of an INSERT with no column list,

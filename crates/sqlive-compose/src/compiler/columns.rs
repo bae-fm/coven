@@ -170,7 +170,7 @@ fn column_field(
     let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
     // SQLite names the origin of a compound's first SELECT only.
     let origin = if core.compound { None } else { column.origin.as_ref() };
-    let nullable = origin.is_some_and(|origin| !origin.not_null)
+    let nullable = origin.is_some_and(|origin| !origin.never_null)
         || joins_with_nulls(
             core,
             nullable_from,
@@ -284,3 +284,7 @@ fn joins_with_nulls(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "columns_tests.rs"]
+mod tests;
