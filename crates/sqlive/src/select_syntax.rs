@@ -92,6 +92,19 @@ impl Part<'_> {
     pub(crate) fn many_rows(&self, functions: &Functions) -> bool {
         self.windowed() || self.aggregates(functions)
     }
+
+    /// Whether it is a call that gives the answer a lookup that evaluates it
+    /// again at a write gets: an aggregate or a window function takes its
+    /// rows' answer, and any other function must be deterministic. False for
+    /// a part that is no call.
+    pub(crate) fn answers_again(&self, functions: &Functions) -> bool {
+        match self {
+            Part::Function(name, arguments, _) => {
+                self.many_rows(functions) || functions.repeats(name, *arguments)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What an ORDER BY term sorts by, as SQLite reads it against the result

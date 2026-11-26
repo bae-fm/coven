@@ -162,9 +162,7 @@ impl Planner<'_> {
         };
         found.iter().any(|part| match part {
             Part::Clock => true,
-            Part::Function(name, arguments, _) => {
-                !part.many_rows(self.functions) && !self.functions.repeats(name, *arguments)
-            }
+            Part::Function(..) => !part.answers_again(self.functions),
             Part::Name(name) => match self.resolve(core, name) {
                 Some((item, column)) => judged(&self.items[item], &column),
                 None => self.scope_of(core).any(|scope| {

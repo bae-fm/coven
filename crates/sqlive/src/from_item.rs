@@ -321,12 +321,7 @@ pub(crate) fn read_item<'a>(
             }
             // A write's lookup asks the function again, so arguments that give
             // another answer then (a clock, `random()`) leave it unasked.
-            let alone = found.iter().all(|part| match part {
-                Part::Function(name, arguments, _) => {
-                    part.many_rows(planner.functions) || planner.functions.repeats(name, *arguments)
-                }
-                _ => false,
-            });
+            let alone = found.iter().all(|part| part.answers_again(planner.functions));
             let from = alone.then(|| match alias {
                 Some(_) => text(table),
                 None => format!("{} AS {qualifier}", text(table)),
