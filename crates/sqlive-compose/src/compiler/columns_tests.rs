@@ -438,3 +438,16 @@ sqlive_compose::fragment!(Crossed { n: i64 }, r#"SELECT count(*) AS n FROM issue
     let one_row: Vec<_> = (0..3).map(|at| manifest["fragments"][at]["one_row"].clone()).collect();
     assert_eq!(one_row, [true, false, false]);
 }
+
+#[test]
+fn a_column_that_the_where_requires_not_null_needs_no_option() {
+    // Each SELECT of a compound, as a plain one.
+    for sql in [
+        "SELECT d.body AS value FROM drafts AS d WHERE d.body IS NOT NULL",
+        "SELECT d.body AS value FROM drafts AS d WHERE d.body IS NOT NULL \
+         UNION ALL SELECT e.body FROM drafts AS e WHERE e.id <> '' AND e.body IS NOT NULL",
+    ] {
+        let errors = compound_errors("{ value: String }", sql);
+        assert!(errors.is_empty(), "{sql}: {errors:?}");
+    }
+}

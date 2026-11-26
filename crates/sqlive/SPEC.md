@@ -1788,7 +1788,11 @@ for a scalar subquery that returns exactly one row whose value is never NULL
 forms the probe knows), and for a table's column that the table declares NOT
 NULL, or that is the rowid, when no query the column passes through gives NULL
 of its own, as a join, an aggregate with no GROUP BY, a compound or another
-scalar subquery can. An aggregate in a subquery counts for the query around it
+scalar subquery can. Nor does a row hold NULL in a column that a SELECT it
+passes through requires IS NOT NULL in its WHERE, as the whole predicate or one
+of its AND terms, and such a term drops each row where a join gives the column's
+FROM item NULL (sqlive-compose's SPEC.md, section 8, says which names such a
+term requires). An aggregate in a subquery counts for the query around it
 when it qualifies columns, each with a name of that query's FROM, so SQL that
 passes an aggregate an outer column writes the column's qualifier. In an
 INSERT, UPDATE, DELETE or REPLACE, only two kinds of RETURNING column hold no
@@ -1796,8 +1800,9 @@ NULL: such a scalar subquery, and a table's column which the table declares NOT
 NULL, or which is the rowid. No other computed column does, a literal too.
 `ColumnNulls::row_can_be_missing` says whether the statement can give no row of
 the FROM item that its first SELECT takes the column from, and so NULL in each
-of that item's columns: a join pads the item, in parentheses or not, or an
-aggregate with no GROUP BY makes a row over no rows. A computed column and a
+of that item's columns: a join pads the item, in parentheses or not, and the
+WHERE keeps such a row, or an aggregate with no GROUP BY makes a row over no
+rows. A computed column and a
 write's RETURNING column have no such item. `ColumnNulls::selects` says what
 each SELECT of the statement's compound can give the column (`SelectNull`): no
 NULL; a computed value other than a literal and a scalar subquery, which can be

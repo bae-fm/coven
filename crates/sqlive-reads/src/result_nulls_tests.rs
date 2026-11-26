@@ -180,6 +180,57 @@ fn a_scalar_subquery_that_returns_one_row_holds_what_it_selects() {
 }
 
 #[test]
+fn a_column_that_the_where_requires_not_null_holds_none() {
+    assert_never_null(&[
+        ("SELECT note, id FROM people WHERE note IS NOT NULL", &[true, true]),
+        ("SELECT p.note FROM people AS p WHERE p.note NOT NULL AND p.id = 'a'", &[true]),
+        ("SELECT note FROM people WHERE (id = 'a' AND (note NOTNULL)) AND 1", &[true]),
+        (
+            "SELECT assignee_id FROM issues WHERE assignee_id IS NOT NULL
+             UNION ALL SELECT note FROM people WHERE people.note IS NOT NULL",
+            &[true],
+        ),
+        // Each SELECT of a compound is filtered by its own WHERE alone.
+        (
+            "SELECT note FROM people WHERE note IS NOT NULL UNION ALL SELECT note FROM people",
+            &[false],
+        ),
+        // A filter in a query the column passes through, and on a column that
+        // such a query passes on.
+        ("SELECT s.note FROM (SELECT note FROM people WHERE note IS NOT NULL) AS s", &[true]),
+        ("SELECT s.note FROM (SELECT note FROM people) AS s WHERE s.note IS NOT NULL", &[true]),
+        // A row of NULLs fails the filter, so no join leaves its item
+        // without a row, and the item's other columns hold what its table's
+        // do.
+        (
+            "SELECT p.note, p.name FROM issues AS i LEFT JOIN people AS p ON 0
+             WHERE p.note IS NOT NULL",
+            &[true, true],
+        ),
+        (
+            "SELECT p.name, p.note FROM issues AS i LEFT JOIN people AS p ON 0
+             WHERE p.rowid IS NOT NULL",
+            &[true, false],
+        ),
+        // Only a term that the whole WHERE requires filters.
+        ("SELECT note FROM people WHERE note IS NOT NULL OR 1", &[false]),
+        ("SELECT note FROM people WHERE NOT (note IS NOT NULL AND 0)", &[false]),
+        ("SELECT note FROM people WHERE upper(note) IS NOT NULL", &[false]),
+        ("SELECT p.note FROM people AS p, people AS q WHERE q.note IS NOT NULL", &[false]),
+        // An aggregate with no GROUP BY gives a row over no rows, after the
+        // WHERE has filtered them.
+        ("SELECT note, count(*) FROM people WHERE note IS NOT NULL", &[false, false]),
+        // SQLite reads a USING column's bare name as either side's value
+        // after a RIGHT or FULL JOIN.
+        (
+            "SELECT l.note FROM people AS l FULL JOIN people AS r USING (note)
+             WHERE note IS NOT NULL",
+            &[false],
+        ),
+    ]);
+}
+
+#[test]
 fn a_column_says_whether_its_from_item_can_have_no_row() {
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     // Each case's first two columns are of the items `a` and `b`.

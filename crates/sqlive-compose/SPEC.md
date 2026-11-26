@@ -889,7 +889,8 @@ and for a document that is JSON's `null`.
 origin of a result column that takes it unchanged, through any number of
 subqueries in `FROM`, CTEs and views. The compiler reads each of those queries
 through sqlive's schema probe. The column can be NULL when one of them, or the
-statement itself:
+statement itself, does one of these, and no `WHERE` that requires the column
+`IS NOT NULL` removes the NULLs (**A `WHERE` that requires a column**, below):
 
 - places the `FROM` item it takes the column from where a join gives that item
   NULL: on the right of a `LEFT JOIN`, on the left of a `RIGHT JOIN`, or on
@@ -912,6 +913,31 @@ FROM (SELECT p.name
 
 `people.name` is `NOT NULL`, but `assignee` can be NULL: the subquery gives
 NULL for an issue with no assignee.
+
+**A `WHERE` that requires a column.** A `SELECT` keeps only the rows that its
+`WHERE` holds true for, so a column holds no NULL in a `SELECT` whose `WHERE`
+requires it `IS NOT NULL`. This holds in each query that the column passes
+through, and in each `SELECT` of a compound, which its own `WHERE` alone
+filters. The `WHERE` requires the column when the whole predicate, or one of the
+terms it joins with `AND`, in parentheses or not, is `x IS NOT NULL`,
+`x NOT NULL` or `x NOTNULL`, where `x` is the column's name, qualified or not,
+in that `SELECT`'s `FROM`. A term under an `OR` or a `NOT`, or about a computed
+value of the column, requires nothing. Such a term also drops each row where a
+join gives the column's `FROM` item NULL, so the item's other columns hold NULL
+only where they otherwise can, and the item's row is never missing. An aggregate
+with no `GROUP BY` gives its row over no rows after the `WHERE` has filtered
+them, so that row can still hold NULL. A bare name that `USING` or `NATURAL`
+compares in a `RIGHT` or `FULL JOIN` requires neither side's column. A
+`RETURNING` takes nothing from its write's `WHERE`: an `UPDATE` can set to NULL a
+column that the `WHERE` matched.
+
+```sql
+SELECT r.group_id AS album_key FROM releases AS r WHERE r.group_id IS NOT NULL
+UNION ALL
+SELECT r.id FROM releases AS r WHERE r.group_id IS NULL
+```
+
+`releases.group_id` can be NULL, but `album_key` can't.
 
 The compiler takes each column of a statement that the probe can't read, as one
 with a comment that never ends, to be one that can be NULL, and each table

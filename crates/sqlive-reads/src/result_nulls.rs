@@ -5,9 +5,11 @@
 //! `NOT NULL` doesn't answer this.
 //!
 //! A column holds no NULL when each query it passes through takes it from a
-//! column that holds none, and gives no NULL of its own: no join pads the
-//! column's FROM item with NULLs, no aggregate without a GROUP BY makes a
-//! row over no rows, and each SELECT of a compound holds none. A scalar
+//! column that holds none, or keeps only the rows where it holds none: those
+//! of a SELECT whose WHERE requires it `IS NOT NULL`. Each query also gives
+//! no NULL of its own: no join pads the column's FROM item with NULLs in a row
+//! it keeps, no aggregate without a GROUP BY makes a row over no rows, and
+//! each SELECT of a compound holds none. A scalar
 //! subquery returns NULL when it returns no row, so it holds no NULL only
 //! where it returns one whose value never is (`never_null`). Of the other
 //! computed expressions, the analysis takes each but a literal to be one that
@@ -22,7 +24,7 @@ use rusqlite::Connection;
 use sqlite3_parser::{
     ast::{
         As, Cmd, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Literal, Name,
-        OneSelect, QualifiedName, ResultColumn, Select, SelectTable, Stmt,
+        OneSelect, Operator, QualifiedName, ResultColumn, Select, SelectTable, Stmt,
     },
     lexer::sql::Parser,
     Bump, FallibleIterator,
@@ -33,7 +35,9 @@ use crate::from_star::{star, StarItem};
 use crate::never_null;
 use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
-use crate::select_syntax::{aggregate_owners, parts, result_expressions, Functions, Part};
+use crate::select_syntax::{
+    aggregate_owners, conjuncts, parts, result_expressions, Functions, Part,
+};
 use crate::sql::unparenthesized;
 
 /// Where a statement can give NULL in one of its result columns.
@@ -63,13 +67,15 @@ impl ColumnNulls {
 /// What one SELECT can give a result column. It takes a column through every
 /// query the column passes through. A table's column holds no NULL when the
 /// table declares it `NOT NULL`, or it is the rowid, by one of the rowid's own
-/// names or as an `INTEGER PRIMARY KEY` column. In a write, only a table's
+/// names or as an `INTEGER PRIMARY KEY` column. No column holds one in a
+/// SELECT whose WHERE requires it `IS NOT NULL`. In a write, only a table's
 /// column and a scalar subquery can be ones that hold none: each other
 /// computed column of a RETURNING, a literal too, is one that can be NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectNull {
-    /// No NULL: a table's column that holds none, a literal other than NULL,
-    /// or a scalar subquery that never gives NULL.
+    /// No NULL: a table's column that holds none, a column that the WHERE
+    /// requires `IS NOT NULL`, a literal other than NULL, or a scalar subquery
+    /// that never gives NULL.
     Never,
     /// A computed value other than a literal and a scalar subquery, which can
     /// be NULL as far as the probe can tell: the probe reads no computation.
@@ -152,6 +158,9 @@ struct Item {
     /// The columns, lowercase, that USING or NATURAL compares with an item
     /// to its left, which a bare name and a `*` take from that item.
     using: Vec<String>,
+    /// Whether a RIGHT or FULL JOIN joins it, after which SQLite can read the
+    /// bare name of a column in `using` from this item.
+    right_joined: bool,
 }
 
 impl Item {
@@ -187,6 +196,98 @@ impl StarItem for Item {
 
     fn name(column: &Column) -> Option<&str> {
         column.name.as_deref()
+    }
+}
+
+/// What a column name in a core reads.
+enum Reference {
+    /// The column at `column` among those that the item at `item` lists.
+    Listed { item: usize, column: usize },
+    /// A column of an item whose columns the analysis doesn't know, which may
+    /// be the one that has the name.
+    Unlisted(usize),
+    /// A table item's rowid, by one of the rowid's own names.
+    Rowid(usize),
+    /// No item's column: a name of a row around the core, or none at all.
+    Outside,
+}
+
+/// What the column name `name`, lowercase, reads in a core whose FROM items
+/// are `items`, where `qualifier` qualifies it.
+fn reference(items: &[Item], qualifier: Option<&Name<'_>>, name: &str) -> Reference {
+    let named = items.iter().enumerate().filter(|(_, item)| match qualifier {
+        Some(qualifier) => item.qualifier.as_deref().is_some_and(|item| *qualifier == Name(item)),
+        None => true,
+    });
+    // SQLite takes a bare name that USING compares from the leftmost item.
+    let mut rowids = Vec::new();
+    for (at, item) in named {
+        let Some(listed) = item.listed() else { return Reference::Unlisted(at) };
+        if let Some(column) = listed.iter().position(|column| column.name.as_deref() == Some(name))
+        {
+            return Reference::Listed { item: at, column };
+        }
+        if item.table {
+            rowids.push(at);
+        }
+    }
+    match rowids[..] {
+        [item] if ROWID_NAMES.contains(&name) => Reference::Rowid(item),
+        _ => Reference::Outside,
+    }
+}
+
+/// The column name that `expr` is, lowercase, with the table that qualifies
+/// it, or `None` when it is no column name.
+fn column_name<'a, 'b>(expr: &'a Expr<'b>) -> Option<(Option<&'a Name<'b>>, String)> {
+    let (qualifier, name) = match unparenthesized(expr) {
+        Expr::Id(name) => (None, name.0),
+        Expr::Name(name) => (None, name.0),
+        Expr::Qualified(table, name) | Expr::DoublyQualified(_, table, name) => {
+            (Some(table), name.0)
+        }
+        _ => return None,
+    };
+    Some((qualifier, crate::sql::name(name).to_ascii_lowercase()))
+}
+
+/// What `term` holds to be other than NULL, when that is all it asks:
+/// `x IS NOT NULL`, `x NOT NULL` or `x NOTNULL`.
+fn required_not_null<'a, 'b>(term: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
+    let null = |expr: &Expr<'_>| matches!(unparenthesized(expr), Expr::Literal(Literal::Null));
+    match term {
+        Expr::NotNull(expr) => Some(expr),
+        Expr::Binary(left, Operator::IsNot, right) if null(right) => Some(left),
+        Expr::Binary(left, Operator::IsNot, right) if null(left) => Some(right),
+        _ => None,
+    }
+}
+
+/// Applies the WHERE `predicate` to `items`, its core's FROM items. A column
+/// that one of the terms it joins with AND requires `IS NOT NULL` holds no
+/// NULL in a row the core keeps, and no such row lacks a row of the column's
+/// item, which would hold NULL there.
+fn filter<'a>(items: &mut [Item], predicate: &'a Expr<'a>) {
+    let mut terms = Vec::new();
+    conjuncts(predicate, &mut terms);
+    for (qualifier, name) in terms.into_iter().filter_map(required_not_null).filter_map(column_name)
+    {
+        // Such a name's value can be another item's than the one it would
+        // read in a result column, or either's.
+        if qualifier.is_none()
+            && items.iter().any(|item| item.right_joined && item.using.contains(&name))
+        {
+            continue;
+        }
+        match reference(items, qualifier, &name) {
+            Reference::Listed { item, column } => {
+                items[item].padded = false;
+                let columns = items[item].columns.as_mut().expect("the item lists the column");
+                columns[column] = Column::new(Some(name), SelectNull::Never);
+            }
+            Reference::Rowid(item) => items[item].padded = false,
+            Reference::Unlisted(_) | Reference::Outside => {}
+        }
     }
 }
 
@@ -306,7 +407,7 @@ impl Analysis<'_> {
         core: &'a OneSelect<'a>,
         ctes: &Ctes<'a>,
     ) -> rusqlite::Result<Option<Vec<Column>>> {
-        let (results, from, group_by) = match core {
+        let (results, from, where_clause, group_by) = match core {
             OneSelect::Values(rows) => {
                 let width = rows.first().expect("a parsed VALUES has a row").len();
                 let columns = crate::sql::values_names(width)
@@ -322,7 +423,9 @@ impl Analysis<'_> {
                     .collect();
                 return Ok(Some(columns));
             }
-            OneSelect::Select { columns, from, group_by, .. } => (columns, from, group_by),
+            OneSelect::Select { columns, from, where_clause, group_by, .. } => {
+                (columns, from, where_clause, group_by)
+            }
         };
         let mut items = Vec::new();
         if let Some(from) = from {
@@ -330,6 +433,9 @@ impl Analysis<'_> {
         }
         for (number, item) in items.iter_mut().enumerate() {
             item.number = number;
+        }
+        if let Some(predicate) = where_clause {
+            filter(&mut items, predicate);
         }
         // An aggregate with no GROUP BY gives one row even over no rows,
         // which holds NULL in each column the core takes from a FROM item.
@@ -428,45 +534,24 @@ impl Analysis<'_> {
     /// The column that the result expression `expr` of a core whose FROM items
     /// are `items` gives.
     fn expression(&self, items: &[Item], expr: &Expr<'_>) -> Column {
-        let computed = Column::new(None, SelectNull::of_computed(expr, self.functions));
-        let (qualifier, name) = match unparenthesized(expr) {
-            Expr::Id(name) => (None, name.0),
-            Expr::Name(name) => (None, name.0),
-            Expr::Qualified(table, name) | Expr::DoublyQualified(_, table, name) => {
-                (Some(table), name.0)
-            }
-            _ => return computed,
+        let Some((qualifier, name)) = column_name(expr) else {
+            return Column::new(None, SelectNull::of_computed(expr, self.functions));
         };
-        let name = crate::sql::name(name).to_ascii_lowercase();
-        let named = items.iter().filter(|item| match qualifier {
-            Some(qualifier) => {
-                item.qualifier.as_deref().is_some_and(|item| *qualifier == Name(item))
+        match reference(items, qualifier, &name) {
+            Reference::Listed { item, column } => {
+                let item = &items[item];
+                item.read(&item.listed().expect("the item lists the column")[column])
             }
-            None => true,
-        });
-        // SQLite takes a bare name that USING compares from the leftmost item.
-        let mut rowids = Vec::new();
-        for item in named {
-            if let Some(column) = item.column(&name) {
-                return item.read(column);
+            Reference::Unlisted(item) => {
+                items[item].read(&Column::new(Some(name), SelectNull::Value))
             }
-            // An item of unknown columns may be the one that has the name.
-            if item.columns.is_none() {
-                return item.read(&Column::new(Some(name), SelectNull::Value));
-            }
-            if item.table {
-                rowids.push(item);
-            }
-        }
-        match rowids[..] {
-            [item] if ROWID_NAMES.contains(&name.as_str()) => {
-                item.read(&Column::new(Some(name), SelectNull::Never))
-            }
+            Reference::Rowid(item) => items[item].read(&Column::new(Some(name), SelectNull::Never)),
             // SQLite reads `true` and `false` as numbers where no column has the
             // name.
-            _ if name == "true" || name == "false" => Column::new(Some(name), SelectNull::Never),
-            // A name of a row around the core, or none of any item's.
-            _ => Column::new(Some(name), SelectNull::Value),
+            Reference::Outside if name == "true" || name == "false" => {
+                Column::new(Some(name), SelectNull::Never)
+            }
+            Reference::Outside => Column::new(Some(name), SelectNull::Value),
         }
     }
 
@@ -514,11 +599,14 @@ impl Analysis<'_> {
                 }
             }
             if kind.contains(JoinType::LEFT) {
-                for item in right {
+                for item in right.iter_mut() {
                     item.padded = true;
                 }
             }
             if kind.contains(JoinType::RIGHT) {
+                for item in right.iter_mut() {
+                    item.right_joined = true;
+                }
                 for item in &mut left[first..] {
                     item.padded = true;
                 }
@@ -547,6 +635,7 @@ impl Analysis<'_> {
             padded: false,
             number: 0,
             using: Vec::new(),
+            right_joined: false,
         };
         match table {
             SelectTable::Table(name, alias, _) => {
@@ -624,6 +713,7 @@ impl Analysis<'_> {
             padded: false,
             number: 0,
             using: Vec::new(),
+            right_joined: false,
         };
         if name.db_name.as_ref().is_some_and(|database| *database != "main") {
             return Ok(item);
