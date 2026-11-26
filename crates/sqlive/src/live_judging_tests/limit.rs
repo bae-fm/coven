@@ -711,6 +711,28 @@ INSERT INTO notes VALUES (1,'b',''),(2,'D',''),(3,'f',''),(4,'H',''),(5,'j','')"
     db.close();
 }
 
+/// A term that ends in COLLATE BINARY sorts by BINARY, whatever its column
+/// declares.
+#[tokio::test]
+async fn an_explicit_binary_term_overrides_its_columns_collation() {
+    let db = TestDatabase::open(
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT COLLATE NOCASE, body TEXT);
+INSERT INTO notes VALUES (1,'b',''),(2,'d',''),(3,'f',''),(4,'h','')",
+    );
+    // b, d and f: 'G' sorts after f by NOCASE, and before b by BINARY.
+    follows(
+        &db,
+        "SELECT title, id FROM notes ORDER BY title COLLATE BINARY, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (5,'h','')", false),
+            ("INSERT INTO notes VALUES (6,'G','')", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// A descending term and an RTRIM one, and NULLs, which sort first.
 #[tokio::test]
 async fn descending_rtrim_and_null_terms_bound_a_window() {
