@@ -277,7 +277,8 @@ pub(crate) struct Core {
     pub(crate) window: Option<Window>,
     /// Whether a lookup that evaluates the core's own clauses again at a
     /// write could get another answer than the query did
-    /// (`Planner::volatile`), a subquery in them counting by its SELECT's.
+    /// (`Planner::volatile`), a subquery in them counting by its SELECT's, or
+    /// it reads a view read whole.
     pub(crate) volatile: bool,
 }
 
@@ -466,6 +467,12 @@ impl Planner<'_> {
             })
             .collect();
         self.cores[core].names.extend(names);
+    }
+
+    /// Whether `core` reads a view read whole, which can show what the host
+    /// holds in memory as well as its tables.
+    pub(crate) fn reads_view_whole(&self, core: usize) -> bool {
+        self.cores[core].items.iter().any(|item| self.items[*item].is_view_read_whole())
     }
 
     /// Whether `select`, which the planner has read, is volatile: its cores'
@@ -746,7 +753,7 @@ fn read_core<'a>(
         Ok(subqueries) => subqueries,
         Err(unread) => return Ok(Err(unread)),
     };
-    planner.cores[core].volatile = planner.volatile(core, &found);
+    planner.cores[core].volatile = planner.volatile(core, &found) || planner.reads_view_whole(core);
     let mut read = Vec::new();
     for (condition, place) in conditions {
         let found = match condition {

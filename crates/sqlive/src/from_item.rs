@@ -153,6 +153,19 @@ pub(crate) struct FromItem {
 }
 
 impl FromItem {
+    /// Whether sqlive can't tell that a lookup that reads its column `column`
+    /// again at a write gets the query's answer: the column is volatile, or
+    /// the item is a view read whole, which can show what the host's memory
+    /// holds, or a clock, as well as its tables.
+    pub(crate) fn column_unjudged(&self, column: &str) -> bool {
+        self.columns.volatile(column) || self.is_view_read_whole()
+    }
+
+    /// Whether it is a view read whole.
+    pub(crate) fn is_view_read_whole(&self) -> bool {
+        matches!(self.source.object, Object::View { .. })
+    }
+
     /// Whether every binding of its core holds a row of it: no LEFT JOIN
     /// adds it. A lookup finds every row such an item gives a binding, and
     /// none for the NULLs a LEFT JOIN's missing row gives.

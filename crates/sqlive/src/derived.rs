@@ -274,12 +274,17 @@ fn read_derived<'a>(
                 OutputValue::Volatile | OutputValue::Other => None,
             }
         });
-        let volatile = arms.iter().any(|(_, columns, _)| {
-            columns.get(position).is_some_and(|output| match &output.value {
-                OutputValue::Volatile => true,
-                OutputValue::Passed(item, column) => planner.items[*item].columns.volatile(column),
-                OutputValue::Constant | OutputValue::Other => false,
-            })
+        let volatile = arms.iter().any(|(core, columns, _)| {
+            // Every column of a core that reads a view read whole is one
+            // sqlive can't judge.
+            planner.reads_view_whole(*core)
+                || columns.get(position).is_some_and(|output| match &output.value {
+                    OutputValue::Volatile => true,
+                    OutputValue::Passed(item, column) => {
+                        planner.items[*item].column_unjudged(column)
+                    }
+                    OutputValue::Constant | OutputValue::Other => false,
+                })
         });
         let first = affinities.next().flatten();
         let affinity = first.filter(|first| affinities.all(|other| other == Some(*first)));

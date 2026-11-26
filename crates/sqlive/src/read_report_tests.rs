@@ -367,3 +367,30 @@ fn a_column_is_volatile_by_its_own_subquery() {
         "releases: whole: nothing narrows `releases`\ntracks: looked up"
     );
 }
+
+#[test]
+fn a_column_of_a_view_read_whole_is_one_a_subquery_cannot_judge() {
+    for sql in [
+        "SELECT t.title FROM (SELECT (SELECT id FROM later) AS n) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT id AS n FROM later) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT id || '' AS n FROM unparsed) AS page
+         JOIN tracks t ON t.title = page.n",
+        "SELECT t.title FROM (SELECT r.id AS n FROM releases r, later) AS page
+         JOIN tracks t ON t.release_id = page.n",
+        "SELECT t.title FROM (SELECT 1 AS n FROM later) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT count(*) AS n FROM unparsed) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT (SELECT * FROM unparsed) AS n) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT (SELECT count(*) FROM unparsed) AS n) AS page
+         JOIN tracks t ON t.position = page.n",
+        "SELECT t.title FROM (SELECT EXISTS (SELECT 1 FROM unparsed) AS n) AS page
+         JOIN tracks t ON t.position = page.n",
+    ] {
+        let report = report(sql);
+        assert!(report.contains("tracks: whole: nothing narrows `t`"), "{sql}: {report}");
+    }
+}

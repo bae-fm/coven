@@ -138,7 +138,9 @@ impl Planner<'_> {
         // the LEFT JOIN inner (`scope_one_of.rs` reads a column equal to
         // COALESCE).
         let bound = self.items[source].always_bound() || strict(expr, self.functions);
-        (!self.volatile(core, &found) && bound).then_some(source)
+        // A view read whole narrows the tables beside it, so a join on its
+        // column does.
+        (!self.volatile_by(core, &found, false) && bound).then_some(source)
     }
 
     /// Whether a lookup that evaluates the expression `found`, written in
@@ -147,18 +149,30 @@ impl Planner<'_> {
     /// deterministic (an aggregate or a window function takes its rows'
     /// answer), names a column of a derived item that does (any such column
     /// in scope, for a name sqlive can't place), or holds a volatile subquery
-    /// (`select_volatile`).
+    /// (`select_volatile`), or names a column of a view read whole
+    /// (`FromItem::column_unjudged`).
     pub(crate) fn volatile(&self, core: usize, found: &[Part<'_>]) -> bool {
+        self.volatile_by(core, found, true)
+    }
+
+    /// `volatile`, counting the columns of a view read whole when `views`.
+    fn volatile_by(&self, core: usize, found: &[Part<'_>], views: bool) -> bool {
+        let judged = |item: &crate::from_item::FromItem, column: &str| {
+            item.columns.volatile(column) || (views && item.column_unjudged(column))
+        };
         found.iter().any(|part| match part {
             Part::Clock => true,
             Part::Function(name, arguments, _) => {
                 !part.many_rows(self.functions) && !self.functions.repeats(name, *arguments)
             }
             Part::Name(name) => match self.resolve(core, name) {
-                Some((item, column)) => self.items[item].columns.volatile(&column),
+                Some((item, column)) => judged(&self.items[item], &column),
                 None => self.scope_of(core).any(|scope| {
                     let items = &self.cores[scope].items;
-                    items.iter().any(|item| self.items[*item].columns.any_volatile())
+                    items.iter().any(|item| {
+                        let item = &self.items[*item];
+                        item.columns.any_volatile() || (views && item.is_view_read_whole())
+                    })
                 }),
             },
             Part::Select(select) | Part::Subquery(select) => self.select_volatile(select),
