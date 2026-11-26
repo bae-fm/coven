@@ -116,7 +116,7 @@ pub(crate) fn compile(
                 presence: presence(&fields),
                 one_row: outline.aggregates && !outline.groups,
             };
-            (generate::fragment(header, &fields), Some(record))
+            (generate::fragment(header, &fields, call.exported), Some(record))
         }
         HeaderKind::Read => (generate::read(header, sql, &fields, call.exported), None),
     };

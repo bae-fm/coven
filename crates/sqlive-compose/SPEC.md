@@ -1004,8 +1004,10 @@ root to the `read!` call is `pub`, and `pub(crate)` otherwise: the struct, its
 fields, `SQL`, `params` and `read`, and the structs of the read's JSON
 documents. A read in a private module therefore has no `pub` item that nothing
 can reach, and the app needs no `#[expect(unreachable_pub)]` for it. A
-fragment's items are always `pub`, because a crate that depends on this one
-spreads it by its path.
+fragment follows the same rule for its struct, its `read` and the structs of
+its JSON documents; its fields are `pub(crate)` either way. A crate that
+spreads a fragment by its path needs every module on that path to be `pub`
+anyway, so a fragment in a private module has no other crate to reach it.
 
 The row struct has one field for each spread, named by the spread's alias, and
 one for each column that the read itself returns, as `IssueComments` returns

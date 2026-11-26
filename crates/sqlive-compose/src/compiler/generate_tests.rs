@@ -13,6 +13,7 @@ fn a_fragment_reads_each_column_at_its_offset() {
     let code = fragment(
         &header,
         &[field("a", "i64", Reading::Value, 0), field("type", "Vec<Label>", Reading::Json, 1)],
+        true,
     );
     assert!(code.contains("a : row . get :: < _ , i64 > (offset) ?"), "{code}");
     assert!(
@@ -59,4 +60,28 @@ fn a_row_derives_clone_partial_eq_and_debug() {
     let header = parse(CallKind::Read, quote!(Page, r#"SELECT 1"#)).unwrap();
     let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
     assert!(code.contains("# [derive (Clone , Debug , PartialEq)] pub struct PageRow"), "{code}");
+}
+
+#[test]
+fn a_fragment_in_a_private_module_has_no_pub_item() {
+    let header = parse(
+        CallKind::Fragment,
+        quote!(
+            Thing on things {
+                struct Label { name: String }
+                labels: json<Vec<Label>>
+            },
+            r#"SELECT 1"#
+        ),
+    )
+    .unwrap();
+    let fields = [field("n", "i64", Reading::Value, 0)];
+    let private = fragment(&header, &fields, false);
+    assert_eq!(private.matches("pub").count(), private.matches("pub (crate)").count(), "{private}");
+    let exported = fragment(&header, &fields, true);
+    assert!(
+        exported.contains("pub struct Thing") && exported.contains("pub fn read"),
+        "{exported}"
+    );
+    syn::parse_file(&private).unwrap();
 }

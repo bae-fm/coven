@@ -104,8 +104,21 @@ fn shapes(shapes: &[Shape], visibility: &TokenStream) -> TokenStream {
     quote!(#(#structs)*)
 }
 
-/// A fragment's type, which reads its columns.
-pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
+/// `pub` when `exported`, which says that every module around a call is `pub`,
+/// and `pub(crate)` otherwise.
+fn visibility(exported: bool) -> TokenStream {
+    if exported {
+        quote!(pub)
+    } else {
+        quote!(pub(crate))
+    }
+}
+
+/// A fragment's type, which reads its columns. Its items are `pub` when
+/// `exported` and `pub(crate)` otherwise, as a read's are (`read`). The fields
+/// are `pub(crate)` either way.
+pub(crate) fn fragment(header: &Header, fields: &[Field], exported: bool) -> String {
+    let visibility = visibility(exported);
     let name = ident(&header.name);
     let doc = format!("The columns of `{}`.", header.name);
     let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
@@ -113,19 +126,19 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
     let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
     let row = row_type();
     let result = path("sqlive_reads::SqliteResult");
-    let shapes = shapes(&header.shapes, &quote!(pub));
+    let shapes = shapes(&header.shapes, &visibility);
     quote! {
         #shapes
 
         #[doc = #doc]
         #[derive(Clone, Debug, PartialEq)]
-        pub struct #name {
+        #visibility struct #name {
             #(pub(crate) #names: #types,)*
         }
 
         impl #name {
             /// Reads the fragment's columns from `row`, the first at `offset`.
-            pub fn read(row: #row, offset: usize) -> #result<Self> {
+            #visibility fn read(row: #row, offset: usize) -> #result<Self> {
                 Ok(Self { #(#names: #reads,)* })
             }
         }
@@ -139,7 +152,7 @@ pub(crate) fn fragment(header: &Header, fields: &[Field]) -> String {
 /// nothing can reach (`unreachable_pub`). The row derives what an app needs to
 /// keep and compare it.
 pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool) -> String {
-    let visibility = if exported { quote!(pub) } else { quote!(pub(crate)) };
+    let visibility = visibility(exported);
     let name = ident(&header.name);
     let params_name = format_ident!("{}Params", header.name);
     let row_name = format_ident!("{}Row", header.name);
