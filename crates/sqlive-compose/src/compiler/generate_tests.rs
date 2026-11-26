@@ -46,6 +46,26 @@ fn a_read_implements_the_statement_traits_a_store_takes() {
 }
 
 #[test]
+fn a_reads_request_and_row_have_no_functions_beside_the_traits() {
+    let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
+    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    let file = syn::parse_file(&code).unwrap();
+    let inherent: Vec<String> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if item.trait_.is_none() => {
+                let ty = &item.self_ty;
+                Some(quote!(#ty).to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    // The one inherent impl holds the statement's `SQL`.
+    assert_eq!(inherent, ["Page"], "{code}");
+}
+
+#[test]
 fn a_name_that_cannot_be_an_identifier_is_refused() {
     for name in ["my col", "self", "", "1st", "a-b", "\u{0301}a", "\u{00b7}"] {
         assert_eq!(FieldName::new(name), None, "{name}");

@@ -168,8 +168,7 @@ pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
 /// What a generated statement is.
 #[derive(Clone, Copy)]
 enum Form {
-    /// A read, whose items have inherent `params` and `read` functions beside
-    /// the trait impls.
+    /// A read, whose items are `pub` when `exported`.
     Read { exported: bool },
     /// A write.
     Write,
@@ -201,17 +200,6 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
         Form::Write => format!("What the `{}` write binds.", header.name),
     };
     let shapes = shapes(&header.shapes, &visibility);
-    let params_inherent = match form {
-        Form::Read { .. } => quote! {
-            impl #params_name {
-                /// The parameters by their names in the statement.
-                #visibility fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
-                    <Self as #statement>::params(self)
-                }
-            }
-        },
-        Form::Write => quote!(),
-    };
     let rows = if fields.is_empty() {
         let write_trait = quote!(::sqlive_compose::Write);
         quote!(impl #lifetime #write_trait for #params_name #lifetime {})
@@ -223,19 +211,9 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
         let result = path("sqlive_reads::SqliteResult");
         let row_doc = format!("A row of the `{}` {noun}.", header.name);
         let returning = quote!(::sqlive_compose::Returning);
-        let (marker, row_inherent) = match form {
-            Form::Read { .. } => (
-                quote!(::sqlive_compose::Read),
-                quote! {
-                    impl #row_name {
-                        /// Reads a row of the statement.
-                        #visibility fn read(row: #row) -> #result<Self> {
-                            <#params_name as #returning>::read(row)
-                        }
-                    }
-                },
-            ),
-            Form::Write => (quote!(::sqlive_compose::WriteReturning), quote!()),
+        let marker = match form {
+            Form::Read { .. } => quote!(::sqlive_compose::Read),
+            Form::Write => quote!(::sqlive_compose::WriteReturning),
         };
         quote! {
             #[doc = #row_doc]
@@ -246,8 +224,6 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
                     #visibility #names: #types,
                 )*
             }
-
-            #row_inherent
 
             impl #lifetime #returning for #params_name #lifetime {
                 type Row = #row_name;
@@ -279,8 +255,6 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
                 #visibility #parameter_names: #parameter_types,
             )*
         }
-
-        #params_inherent
 
         impl #lifetime #statement for #params_name #lifetime {
             const SQL: &'static str = #name::SQL;

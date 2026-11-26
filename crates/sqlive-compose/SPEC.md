@@ -1054,11 +1054,6 @@ pub struct IssuePageParams {
     pub issue: Option<IssueId>,
 }
 
-impl IssuePageParams {
-    /// The parameters by their names in the statement.
-    pub fn params(&self) -> Vec<(&'static str, &dyn ToSql)> { /* … */ }
-}
-
 /// A row of the read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssuePageRow {
@@ -1067,15 +1062,11 @@ pub struct IssuePageRow {
     pub project: Option<issues::Project>,
     pub assignee: Option<people::Person>,
 }
-
-impl IssuePageRow {
-    /// Reads a row of the statement.
-    pub fn read(row: &Row<'_>) -> rusqlite::Result<Self> { /* … */ }
-}
 ```
 
-The request's struct implements two traits of `sqlive-compose`, so that a store
-takes a generated read by its type and no other string:
+The request's struct implements traits of `sqlive-compose`, so that a store
+takes a generated read by its type and no other string. A caller binds the
+read's parameters and reads its rows through those traits alone:
 
 ```rust
 /// A statement the compiler generated.
@@ -1100,7 +1091,7 @@ pub trait Read: Returning {}
 
 `IssuePageParams` implements `Statement` with `IssuePage::SQL` and the
 parameters it binds, `Returning` with `Row = IssuePageRow` and the row's `read`,
-and the marker `Read`. Both traits
+and the marker `Read`. The traits
 are public whatever the visibility of the read's items.
 
 The row derives `Clone`, `PartialEq` and `Debug`, so an app can use it as its
@@ -1109,10 +1100,11 @@ implements those traits too: the fragment structs and JSON document structs
 derive them, and a declared type, such as `IssueState`, implements them itself.
 
 **Visibility.** A read's items are `pub` when every module from the crate's
-root to the `read!` call is `pub`, and `pub(crate)` otherwise: the struct, its
-fields, `SQL`, `params` and `read`, and the structs of the read's JSON
-documents. A read in a private module therefore has no `pub` item that nothing
-can reach, and the app needs no `#[expect(unreachable_pub)]` for it. A
+root to the `read!` call is `pub`, and `pub(crate)` otherwise: the unit struct
+and its `SQL`, the parameters and row structs and their fields, and the structs
+of the read's JSON documents. A read in a private module therefore has no `pub`
+item that nothing can reach, and the app needs no `#[expect(unreachable_pub)]`
+for it. A
 fragment follows the same rule for its struct, its `read` and the structs of
 its JSON documents; its fields are `pub(crate)` either way. A crate that
 spreads a fragment by its path needs every module on that path to be `pub`
