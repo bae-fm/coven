@@ -268,28 +268,40 @@ theorem Limit.run_facts {s : Statement} (hwf : s.wellFormed = true) {sorted : Li
   rw [← he]
   refine ⟨k, harms, ?_, ?_⟩
   · -- The sort key names the item, so the core's clauses name it.
-    unfold Limit.sortKey at hsk
-    split at hsk
-    · rename_i hcond
-      simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff, List.all_eq_true,
-        beq_iff_eq] at hcond
-      obtain ⟨⟨_, hne⟩, hall⟩ := hcond
-      obtain ⟨⟨j, c⟩, hjc⟩ := List.exists_mem_of_ne_nil _ hne
-      have hj : j = t'.1 := (hall _ hjc).1
-      rw [hj] at hjc
-      have hklt := ((s.wellFormed_parts hwf).arms s.root (s.wellFormed_parts hwf).root k
-        (by rw [harms]; simp)).1
-      have hp : (t'.1, c) ∈ (s.core k).refs := by
-        unfold Core.refs
-        refine List.mem_append_left _ (List.mem_append_right _ (List.mem_flatMap.mpr
-          ⟨_, List.mem_of_getElem? ho, ?_⟩))
-        simpa [OutCol.refs, OutCol.exprs] using hjc
-      obtain ⟨k', _, hjk'⟩ := (s.wellFormed_parts hwf).refs k hklt _ hp
-      have := ((s.wellFormed_parts hwf).items k' (s.core_lt hjk') _ hjk').2
-      rw [hc] at this
-      subst this
-      exact hjk'
-    · cases hsk
+    obtain ⟨c, hjc⟩ : ∃ c, (t'.1, c) ∈ e.refs := by
+      unfold Limit.termKey at hsk
+      cases hs : Limit.sortKey s t'.1 e with
+      | some k0 =>
+        unfold Limit.sortKey at hs
+        split at hs
+        · rename_i hcond
+          simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+            List.all_eq_true, beq_iff_eq] at hcond
+          obtain ⟨⟨_, hne⟩, hall⟩ := hcond
+          obtain ⟨⟨j, c⟩, hjc⟩ := List.exists_mem_of_ne_nil _ hne
+          have hj : j = t'.1 := (hall _ hjc).1
+          rw [hj] at hjc
+          exact ⟨c, hjc⟩
+        · cases hs
+      | none =>
+        rw [hs] at hsk
+        cases e <;> simp [Option.orElse_none] at hsk
+        rename_i it
+        obtain ⟨⟨hj, _⟩, _⟩ := hsk
+        subst hj
+        exact ⟨_, List.mem_singleton_self _⟩
+    have hklt := ((s.wellFormed_parts hwf).arms s.root (s.wellFormed_parts hwf).root k
+      (by rw [harms]; simp)).1
+    have hp : (t'.1, c) ∈ (s.core k).refs := by
+      unfold Core.refs
+      refine List.mem_append_left _ (List.mem_append_right _ (List.mem_flatMap.mpr
+        ⟨_, List.mem_of_getElem? ho, ?_⟩))
+      simpa [OutCol.refs, OutCol.exprs] using hjc
+    obtain ⟨k', _, hjk'⟩ := (s.wellFormed_parts hwf).refs k hklt _ hp
+    have := ((s.wellFormed_parts hwf).items k' (s.core_lt hjk') _ hjk').2
+    rw [hc] at this
+    subst this
+    exact hjk'
   · cases hfin : ((plan s).state.items t'.1).leftOn with
     | none => rfl
     | some _ =>

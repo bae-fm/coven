@@ -72,6 +72,11 @@ structure Item where
   left : Bool
   /-- Each column's affinity, or `none` where a condition on it can't narrow. -/
   columns : List (Option Affinity)
+  /-- Whether each column is a stored column of a collation other than
+  BINARY, whose values sqlive compares in an ORDER BY term only by asking
+  SQLite, and by no other condition (`ColumnValue::Collated`). A list that
+  ends early says `false` for each column past its end. -/
+  collated : List Bool := []
   /-- Whether sqlive can read its rows alone, in a lookup: a table, a view,
   and a FROM subquery or CTE outside any expression subquery or whose query
   names nothing outside it (`View.readable`). -/

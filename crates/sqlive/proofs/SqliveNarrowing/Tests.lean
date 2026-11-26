@@ -307,7 +307,7 @@ of the arm `k` that the state `st` holds no ON narrowing back for, which
 def Limit.SortedTerm (s : Statement) (st : PState) (k : Nat) (pd : Nat × Dir)
     (t : Nat × Limit.SortKey × Dir × Nat) : Prop :=
   ∃ e, (s.core k).output[pd.1]? = some (.expr e) ∧ (s.item t.1).core = k ∧
-    (st.items t.1).leftOn = none ∧ Limit.sortKey s t.1 e = some t.2.1 ∧ t.2.2.1 = pd.2 ∧
+    (st.items t.1).leftOn = none ∧ Limit.termKey s t.1 e = some t.2.1 ∧ t.2.2.1 = pd.2 ∧
     (s.core k).output[t.2.2.2]? = some (.expr e)
 
 /-- What `sortedLimit` reads: the statement's own query has one arm, which
@@ -483,7 +483,7 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
       rw [← hruns] at hrun
       have hb := hrows run hrun
       rw [hitem] at hb
-      rw [Core.outRow_cell he, Limit.sortKey_value hsk hb]
+      rw [Core.outRow_cell he, Limit.termKey_value hsk hb]
     have hlast : (Limit.SortRun.group ts).flatMap (fun run => run.terms.map fun (_, _, p) =>
         ((s.core k).outRow E' b').cell p) = Limit.orderKey (s.query s.root) ((s.core k).outRow E' b') := by
       rw [Limit.group_flatMap (fun _ t => ((s.core k).outRow E' b').cell t.2.2)]

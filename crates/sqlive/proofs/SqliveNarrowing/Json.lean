@@ -13,6 +13,9 @@ open Lean
 structure Schema where
   /-- Each table's name and its columns' names and affinities. -/
   tables : List (String × List (String × Option Affinity))
+  /-- Whether each column of each table is a stored column of a collation
+  other than BINARY (`Item.collated`), in the order of `tables`. -/
+  collated : List (List Bool) := []
   views : List (String × Json)
   /-- The tables whose first column sqlive doesn't know to hold their rowid,
   as a contentful FTS5 table's (`Item.rowidFirst`). -/
@@ -260,19 +263,20 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
   let rowidFirst := match field j "table" with
     | some (.str name) => !schema.unkeyed.contains name
     | _ => true
-  let (kind, columns, names, readable) ← match field j "table", field j "view", field j "cte", field j "query" with
+  let (kind, columns, names, readable, collated) ← match field j "table", field j "view", field j "cte", field j "query" with
     | some (.str name), _, _, _ =>
       match schema.tables.findIdx? (·.1 == name) with
       | some t =>
         let cols := (schema.tables.getD t default).2
-        pure (ItemKind.table t, cols.map (·.2), cols.map (some ·.1), true)
+        pure (ItemKind.table t, cols.map (·.2), cols.map (some ·.1), true,
+          schema.collated.getD t [])
       | none => lift (throw s!"no table {name}")
     | _, some (.str name), _, _ =>
       match schema.views.find? (·.1 == name) with
       | some (_, query) => do
         let q ← readSelect schema query none []
         let (names, columns) ← derivedColumns q
-        pure (ItemKind.derived q true, columns, names, View.readable true parent false)
+        pure (ItemKind.derived q true, columns, names, View.readable true parent false, [])
       | none => lift (throw s!"no view {name}")
     | _, _, some (.str name), _ =>
       match CteNames.resolve ctes name with
@@ -280,17 +284,19 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
         let first := (← get).queries.size
         let q ← readSelect schema query parent scope
         let (names, columns) ← derivedColumns q
-        pure (ItemKind.derived q false, columns, names, View.readable false parent (← closedSince first q))
+        pure (ItemKind.derived q false, columns, names,
+          View.readable false parent (← closedSince first q), [])
       | none => lift (throw s!"no CTE {name}")
     | _, _, _, some query => do
       let first := (← get).queries.size
       let q ← readSelect schema query parent ctes
       let (names, columns) ← derivedColumns q
-      pure (ItemKind.derived q false, columns, names, View.readable false parent (← closedSince first q))
+      pure (ItemKind.derived q false, columns, names,
+        View.readable false parent (← closedSince first q), [])
     | _, _, _, _ => lift (throw "a FROM item names no source")
   let b ← get
   set { b with
-    items := b.items.push { core := k, kind, left, columns, readable, rowidFirst }
+    items := b.items.push { core := k, kind, left, columns, collated, readable, rowidFirst }
     named := b.named.push { alias, columns := names } }
   pure b.items.size
 
@@ -430,12 +436,14 @@ def readSchema (j : Json) : Except String Schema := do
     let columns ← (list t "columns").mapM fun c => do
       pure ((← str c "name"), (← affinity ((c.getObjVal? "affinity").toOption.getD .null)))
     pure ((← str t "name"), columns)
+  let collated := (list j "tables").map fun t => (list t "columns").map fun c =>
+    ((field c "collated").bind (·.getBool?.toOption)).getD false
   let unkeyed ← (list j "tables").filterMapM fun t => do
     match (t.getObjVal? "rowid").toOption with
     | some (.bool false) => pure (some (← str t "name"))
     | _ => pure none
   let views ← (list j "views").mapM fun v => do pure ((← str v "name"), (← v.getObjVal? "query"))
-  pure { tables, views, unkeyed }
+  pure { tables, collated, views, unkeyed }
 
 /-- The statement the tree `j` holds. -/
 def readStatement (schema : Schema) (j : Json) : Except String Statement := do

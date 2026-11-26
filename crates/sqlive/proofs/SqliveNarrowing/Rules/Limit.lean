@@ -65,6 +65,15 @@ def sortKey (s : Statement) (i : Nat) (e : Expr) : Option SortKey :=
       | e => .expr e)
   else none
 
+/-- The key an ORDER BY term of a LIMIT's statement sorts item `i`'s rows by:
+`sortKey`'s, or a stored column of a collation other than BINARY, which
+sqlive compares by the term's collation alone (`term_key`). -/
+def termKey (s : Statement) (i : Nat) (e : Expr) : Option SortKey :=
+  (sortKey s i e).orElse fun _ =>
+    match e with
+    | .col j c => if j == i && ((s.item i).collated[c]?).getD false then some (.column c) else none
+    | _ => none
+
 /-- The order and LIMIT of the root query, when a full run's last row bounds
 the scopes of the items it sorts (`sorted_limit`); `st` is the state after
 the statement's conditions are read. -/
@@ -82,7 +91,7 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
     let position ← c.output.findIdx? fun
       | .expr e' => e' == e
       | _ => false
-    pure (i, (← sortKey s i e), desc, position)
+    pure (i, (← termKey s i e), desc, position)
   pure { runs := SortRun.group terms, limit := n }
 
 /-- The rows of item `i` whose key is NULL, or isn't when `not`. -/
@@ -708,6 +717,25 @@ theorem sortKey_value {s : Statement} {i : Nat} {e : Expr} {key : SortKey}
     cases h
     cases e <;> simp [SortKey.value, Expr.eval, cellOf, rowBind]
   · cases h
+
+/-- A key `termKey` reads sorts the core's bindings as its result column does. -/
+theorem termKey_value {s : Statement} {i : Nat} {e : Expr} {key : SortKey}
+    (h : termKey s i e = some key) {b : Bind} {sub : Subs} {r : Row} (hb : b i = some r) :
+    e.eval b sub = key.value r := by
+  unfold termKey at h
+  cases hs : sortKey s i e with
+  | some k =>
+    rw [hs] at h
+    simp only [Option.orElse_some, Option.some.injEq] at h
+    subst h
+    exact sortKey_value hs hb
+  | none =>
+    rw [hs] at h
+    cases e <;> simp [Option.orElse_none] at h
+    rename_i j c
+    obtain ⟨⟨hj, _⟩, rfl⟩ := h
+    subst hj
+    simp [SortKey.value, Expr.eval, cellOf, hb]
 
 /-! The bound of each item a run sorts. A key sorts at or before the last
 row's when its first run's values sort before that run's, or equal them and

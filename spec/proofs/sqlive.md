@@ -273,11 +273,12 @@ JOIN adds, so where such a part holds, its item has a row.
   rows as its LIMIT, rows that sort after its last row change nothing in the
   rows it returns. Each ORDER BY term sorts one item's rows by a key: one of
   its columns, or an expression over its columns with no subquery, and by a
-  collation. The model gives a collation as a key into the integers' order
+  collation. A stored column of a collation other than BINARY is a key only
+  as a term's own column (`Item.collated`, `termKey`). The model gives a collation as a key into the integers' order
   (`Dir`): two values compare as their keys do and tie when their keys are
   equal, as `'a'` and `'A'` do in NOCASE, so any total preorder on values is
   one. A write asks SQLite for the key's value in each row it changes
-  (`RScope.ordered`). `sortKey_value` proves that in a binding where the term's
+  (`RScope.ordered`). `sortKey_value` and `termKey_value` prove that in a binding where the term's
   item has a row, the term's result column holds the key's value in that row.
   The terms fall into runs of consecutive terms over one item.
   `sortedBefore_passes` proves that a run's scope passes exactly the rows

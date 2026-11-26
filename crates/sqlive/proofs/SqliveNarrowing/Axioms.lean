@@ -23,6 +23,7 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.limit_sound
 #print axioms SqliveNarrowing.Limit.atOrBefore_passes
 #print axioms SqliveNarrowing.Limit.sortKey_value
+#print axioms SqliveNarrowing.Limit.termKey_value
 #print axioms SqliveNarrowing.Limit.sortedBefore_passes
 #print axioms SqliveNarrowing.Limit.runBound_passes
 #print axioms SqliveNarrowing.Limit.joined_passes
