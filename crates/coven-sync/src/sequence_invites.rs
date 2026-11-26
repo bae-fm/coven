@@ -265,6 +265,11 @@ impl InviteWork {
 }
 
 impl Invite {
+    /// The statement that lists `coven_invites`, in the order the invites were
+    /// made: the `invite` and `operation` columns [`Self::from_columns`]
+    /// decodes. An app composes it into its own reads.
+    pub const LIST: &'static str = "SELECT invite,operation FROM coven_invites ORDER BY operation";
+
     /// Decode one invite from the `invite` and `operation` columns of a
     /// `coven_invites` row. `Invite::list` decodes its rows with this.
     pub fn from_columns(invite: &[u8], operation: OperationId) -> Result<Self, SyncError> {
@@ -297,20 +302,16 @@ impl Invite {
     /// `handle.subscribe(Invite::list)`. This device's invites that haven't
     /// ended, in the order they were made (§13.2).
     pub fn list(sql: coven_database::SqlReadContext<'_>) -> Result<Vec<Self>, DbError> {
-        Ok(sql.query(
-            "SELECT invite,operation FROM coven_invites ORDER BY operation",
-            [],
-            |row| {
-                let data: Vec<u8> = row.get(0)?;
-                Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {
-                    coven_database::SqliteError::FromSqlConversionFailure(
-                        0,
-                        coven_database::types::Type::Blob,
-                        Box::new(error),
-                    )
-                })
-            },
-        )?)
+        Ok(sql.query(Self::LIST, [], |row| {
+            let data: Vec<u8> = row.get(0)?;
+            Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {
+                coven_database::SqliteError::FromSqlConversionFailure(
+                    0,
+                    coven_database::types::Type::Blob,
+                    Box::new(error),
+                )
+            })
+        })?)
     }
 
     /// The code the invite shows.

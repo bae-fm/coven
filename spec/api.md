@@ -9466,6 +9466,11 @@ pub enum InviteStage {
 }
 
 impl Invite {
+    /// The statement that lists `coven_invites`, in the order the invites were
+    /// made: the `invite` and `operation` columns `from_columns` decodes. An
+    /// app composes it into its own reads.
+    pub const LIST: &'static str;
+
     /// Reads `coven_invites`, in the order the invites were made, for a
     /// read or a live query: `handle.subscribe(Invite::list)`.
     pub fn list(sql: SqlReadContext<'_>) -> Result<Vec<Invite>, DbError>;

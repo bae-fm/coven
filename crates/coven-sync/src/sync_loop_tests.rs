@@ -611,6 +611,27 @@ async fn the_exported_statement_returns_the_row_read_decodes() {
     assert_eq!(after, sync_status(&ana.sync.database).await.unwrap());
 }
 
+/// The exported statement lists the rows `list` decodes: an app that runs it
+/// in a query of its own decodes the same invites before and after one is
+/// made.
+#[tokio::test]
+async fn the_exported_statement_lists_the_rows_list_decodes() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let by_statement = |sql: coven_database::SqlReadContext<'_>| {
+        Ok::<_, coven_database::DbError>(sql.query(Invite::LIST, [], |row| {
+            let data: Vec<u8> = row.get(0)?;
+            Ok(Invite::from_columns(&data, OperationId(row.get(1)?)).unwrap())
+        })?)
+    };
+    assert!(ana.sync.database.read(by_statement).await.unwrap().is_empty());
+    let made = crate::sequence_sync::sequence_invites::tests::invite(&ana).await;
+    let listed = ana.sync.database.read(by_statement).await.unwrap();
+    assert_eq!(listed, [made]);
+    assert_eq!(listed, ana.sync.database.read(Invite::list).await.unwrap());
+}
+
 /// Follow the sync state through `coven_sync_state`, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
     Followed::new(device.sync.database.subscribe(SyncStatus::read))
