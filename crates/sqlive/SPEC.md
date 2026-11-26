@@ -915,9 +915,7 @@ equalities of one join. A lookup for a change to `found` asks whether one row of
 a row of another cell that holds the step doesn't count for this cell's
 position. One question reads the partner's scope once, where three questions
 read it three times, and a partner whose scope joins more tables repeats its
-whole chain in each. The pane's read ran past the 1,000 steps a lookup may run
-when each question read the chain of tables behind `lookup`, and so ran again for
-every label written to any verdict. The equalities of one join are one condition
+whole chain in each. The equalities of one join are one condition
 when each compares a column of the joined table by `=` with a column of the
 partner that the partner's scope doesn't fix, or with an expression over the
 partner's columns. An equality with a subquery's value, one by `IS`, one with an
