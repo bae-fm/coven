@@ -37,8 +37,7 @@ pub enum Error<F, R> {
     /// statement with this refusal.
     Refused(R),
     /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
-    /// extension, changing a hidden rowid, or changing the schema outside a
-    /// migration.
+    /// extension, or changing the schema outside a migration.
     StatementForbidden {
         /// The refused operation.
         operation: &'static str,
