@@ -32,7 +32,8 @@
 //!   module-level constant or macro is text, read where its user runs.
 //!
 //! Reads are free across domains, but SQL follows the policy's
-//! `crate_order`: a domain is in the crate its homes are in, and the
+//! `crate_order`: a domain is in the first crate that holds one of its
+//! homes, where its schema sits before the code that writes it, and the
 //! production SQL of a crate fires a trigger on, and reads, only the tables
 //! and views of its own crate's domains and of the crates before it. SQL the
 //! program builds at runtime, from `format!` or by joining pieces, names its
@@ -234,9 +235,8 @@ struct Domains<'a> {
     /// domains' tables, with those domains.
     shared_views: BTreeMap<String, BTreeSet<&'a str>>,
     schema_views: SchemaViews,
-    /// Each domain's crate, by the domain's name: the latest in
-    /// `crate_order` of the crates its homes hold sources in, with its
-    /// place there.
+    /// Each domain's crate, by the domain's name: the first in `crate_order`
+    /// of the crates its homes hold sources in, with its place there.
     crates: BTreeMap<&'a str, (usize, &'a str)>,
     /// Each crate's place in `crate_order`.
     order: BTreeMap<&'a str, usize>,
@@ -263,7 +263,7 @@ impl<'a> Domains<'a> {
             let Some((&name, &place)) = order.get_key_value(package.as_str()) else { continue };
             for domain in domains().filter(|domain| domain.holds(path)) {
                 let entry = crates.entry(domain.name.as_str()).or_insert((place, name));
-                if place > entry.0 {
+                if place < entry.0 {
                     *entry = (place, name);
                 }
             }

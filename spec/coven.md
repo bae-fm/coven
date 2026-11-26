@@ -14672,7 +14672,8 @@ shared state.
   that domain. A domain keeps its views as it keeps its tables, each
   `CREATE VIEW` in its homes: the views whose `INSTEAD OF` triggers write
   its tables alone, and the views it names. SQL follows the crate order
-  (F.1): a domain is in the crate that holds its homes, and a crate's SQL
+  (F.1): a domain is in the first crate that holds one of its homes, where
+  its schema sits before the code that writes it, and a crate's SQL
   fires triggers on, and reads, only the tables and views of its own
   crate's domains and of the crates before it. In its homes, a domain's
   writes run in its owner's methods, which open the write, or in functions

@@ -615,6 +615,32 @@ END;",
     );
 }
 
+/// A domain whose schema sits in an earlier crate than the code that writes it is in the
+/// earlier crate: SQL in the schema's crate reads its tables, which the later crate's code
+/// only writes.
+#[test]
+fn a_domain_is_in_the_first_crate_that_holds_one_of_its_homes() {
+    let mut policy = view_policy();
+    policy.crate_order = vec!["app-schema".into(), "app-database".into()];
+    let files = [
+        RustFile::fixture(
+            "crates/app-schema/src/views.rs",
+            r#"const SHOWN: &str = "SELECT id FROM note_listing";"#,
+        ),
+        RustFile::fixture("crates/app-database/src/listing.rs", "pub fn listing() {}"),
+    ];
+    let schema = [sql("crates/app-schema/src/listing/views.sql", LISTING_VIEWS)];
+    let listing = &mut policy.database.as_mut().unwrap().domains[0];
+    listing.homes =
+        vec!["crates/app-schema/src/listing/".into(), "crates/app-database/src/listing.rs".into()];
+    let violations =
+        find_database_boundary_violations(&CrateCode::fixture(&files, &schema, &policy), &policy);
+    assert!(
+        violations.iter().all(|violation| !violation.message.contains("crate_order")),
+        "{violations:?}"
+    );
+}
+
 /// SQL follows the crate order: the records' crate comes first, so its SQL
 /// neither reads the listing, which a later crate keeps, nor fires a trigger
 /// on it; the listing's crate reads the records freely. Tests are free.
