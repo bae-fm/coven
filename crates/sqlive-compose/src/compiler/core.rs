@@ -76,8 +76,6 @@ pub(crate) struct Item {
     pub(crate) alias: Option<String>,
     /// The item's tokens, as indices into the statement's token list.
     pub(crate) tokens: Range<usize>,
-    /// The tokens before `AS` and its name.
-    pub(crate) expression: Range<usize>,
 }
 
 /// The first SELECT core of a statement.
@@ -348,8 +346,7 @@ fn item(sql: &str, tokens: &[Token], range: Range<usize>) -> Item {
         _ if is_subquery(sql, expression) => ItemKind::Subquery,
         _ => ItemKind::Expression,
     };
-    let expression = range.start..range.start + expression.len();
-    Item { kind, alias, tokens: range, expression }
+    Item { kind, alias, tokens: range }
 }
 
 fn from_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<FromItem> {
