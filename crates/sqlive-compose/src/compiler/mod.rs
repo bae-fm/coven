@@ -1,5 +1,5 @@
-//! The compiler an app's build script runs: it finds a crate's `fragment!`
-//! and `read!` calls, checks each against the app's schema through sqlive,
+//! The compiler an app's build script runs: it finds a crate's `fragment!`,
+//! `read!` and `write!` calls, checks each against the app's schema through sqlive,
 //! and writes the Rust their macros include (`SPEC.md`, section 10).
 //!
 //! The compiler reads no file and no environment variable. It takes a
@@ -21,6 +21,7 @@ mod setup;
 mod source;
 mod spread;
 mod unit;
+mod write;
 
 use std::io;
 
@@ -54,7 +55,7 @@ pub struct Output {
     pub read: Vec<String>,
     /// The warnings of the crate's reads.
     pub warnings: Vec<Warning>,
-    /// Each `fragment!` and `read!` call the compiler found and compiled, in
+    /// Each `fragment!`, `read!` and `write!` call the compiler found and compiled, in
     /// the order the walk finds them: the crate's modules from `src/lib.rs`,
     /// leaving out the modules that `#[cfg(test)]` marks.
     pub calls: Vec<CompiledCall>,

@@ -1,18 +1,18 @@
 //! Composes an app's reads from SQL fragments while the app compiles
-//! (`SPEC.md`). `fragment!` and `read!` are the macros an app writes; the `compiler` feature adds
-//! the compiler its build script runs.
+//! (`SPEC.md`). `fragment!`, `read!` and `write!` are the macros an app writes;
+//! the `compiler` feature adds the compiler its build script runs.
 
 #[cfg(feature = "compiler")]
 pub mod compiler;
 
-pub use sqlive_compose_macros::{fragment, read};
+pub use sqlive_compose_macros::{fragment, read, write};
 
 use sqlive_reads::{Row, SqliteResult, ToSql};
 
 /// A statement the compiler generated: its SQL and the values it binds. The
-/// compiler implements it for the parameters struct of each `read!`, so that a
-/// store takes a generated statement by its type, and no other string
-/// (`SPEC.md`, section 9).
+/// compiler implements it for the parameters struct of each `read!` and
+/// `write!`, so that a store takes a generated statement by its type, and no
+/// other string (`SPEC.md`, section 9).
 pub trait Statement {
     /// The composed statement.
     const SQL: &'static str;
@@ -24,6 +24,23 @@ pub trait Statement {
 
 /// A generated statement that returns rows, and the row it reads them as.
 pub trait Read: Statement {
+    /// The row of the statement.
+    type Row;
+
+    /// Reads a row of the statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a column that doesn't read as its field's type.
+    fn read(row: &Row<'_>) -> SqliteResult<Self::Row>;
+}
+
+/// A generated write that returns no rows.
+pub trait Write: Statement {}
+
+/// A generated write that returns rows through RETURNING, and the row it
+/// reads them as.
+pub trait WriteReturning: Statement {
     /// The row of the statement.
     type Row;
 

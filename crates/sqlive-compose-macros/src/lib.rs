@@ -1,4 +1,4 @@
-//! The `fragment!` and `read!` macros of sqlive-compose. Each expands to one
+//! The `fragment!`, `read!` and `write!` macros of sqlive-compose. Each expands to one
 //! line that includes the Rust the compiler wrote for the call while the app's
 //! build script ran (`sqlive-compose`, section 10 of its spec). The macros
 //! read nothing of the call but its name, which is the generated file's name.
@@ -19,6 +19,13 @@ pub fn fragment(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn read(input: TokenStream) -> TokenStream {
     include_generated(input.into(), "read!").into()
+}
+
+/// Declares a write that an app runs on its store: `write!(Name …,
+/// r#"SQL"#)`.
+#[proc_macro]
+pub fn write(input: TokenStream) -> TokenStream {
+    include_generated(input.into(), "write!").into()
 }
 
 /// The line that includes the file for the call whose tokens are `input`.

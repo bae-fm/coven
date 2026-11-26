@@ -100,6 +100,30 @@ pub enum Cause {
         /// The declared type.
         declared: String,
     },
+    /// A `write!` whose SQL is not one INSERT, REPLACE, UPDATE or DELETE.
+    #[error(
+        "{concerns} is a write, and its SQL is not one INSERT, REPLACE, UPDATE or DELETE statement"
+    )]
+    NotAWrite {
+        /// The call's name.
+        concerns: String,
+    },
+    /// A fragment or a read whose SQL changes the database.
+    #[error("{concerns} changes the database, and only a write! may")]
+    WriteInRead {
+        /// The call's name.
+        concerns: String,
+    },
+    /// A parameter that can be NULL is the whole value of a NOT NULL column.
+    #[error("{concerns} binds :{parameter}, which can be NULL, to {column}, which is NOT NULL")]
+    NullIntoNotNull {
+        /// The call's name.
+        concerns: String,
+        /// The parameter.
+        parameter: String,
+        /// The column.
+        column: String,
+    },
     /// The header declares a column that the SQL doesn't return.
     #[error("{concerns} declares the column {column}, which its SQL does not return")]
     UnreturnedColumn {

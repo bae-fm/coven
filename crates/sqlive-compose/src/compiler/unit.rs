@@ -13,6 +13,7 @@ use super::model::{Field, Reading, Record};
 use super::rename;
 use super::source::Call;
 use super::spread::{self, Place, Placed, Registry};
+use super::write;
 
 /// What compiling a call needs of the crate it is in.
 pub(crate) struct Context<'a> {
@@ -44,6 +45,9 @@ pub(crate) fn compile(
         concerns: header.name.clone(),
         cause,
     };
+    if header.is_write() {
+        return compile_write(context, call, header);
+    }
     let crate_path = context.crate_name.replace('-', "_");
     let prefix = format!("{crate_path}__{}", header.name);
     let relation_names: Vec<String> =
@@ -67,6 +71,9 @@ pub(crate) fn compile(
     check_spreads(&expansion.placed, &all_from_items(&prepared_sql, &tokens)).map_err(&fail)?;
     let prepared =
         context.probe.prepare(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))?;
+    if prepared.writes {
+        return Err(fail(Cause::WriteInRead { concerns: header.name.clone() }));
+    }
     check_parameters(header, &prepared).map_err(&fail)?;
     let mut warnings = Vec::new();
     match context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))? {
@@ -119,8 +126,55 @@ pub(crate) fn compile(
             (generate::fragment(header, &fields, call.exported), Some(record))
         }
         HeaderKind::Read => (generate::read(header, sql, &fields, call.exported), None),
+        HeaderKind::Write => unreachable!("a write compiles in compile_write"),
     };
     Ok(Compiled { code, record, warnings, reads })
+}
+
+/// Compile the write `call`, whose header is `header`. It has no relations
+/// and no parent row, and sqlive analyzes none of it, since no live query
+/// runs a write.
+fn compile_write(
+    context: &Context<'_>,
+    call: &Call,
+    header: &Header,
+) -> Result<Compiled, CompileError> {
+    let fail = |cause: Cause| CompileError::Call {
+        location: call.location.clone(),
+        concerns: header.name.clone(),
+        cause,
+    };
+    let crate_path = context.crate_name.replace('-', "_");
+    let prefix = format!("{crate_path}__{}", header.name);
+    let renamed = rename::rename(&header.sql, &prefix, &[]);
+    let expansion =
+        spread::expand(context.registry, &header.name, false, &renamed).map_err(&fail)?;
+    let sql = expansion.sql.as_str();
+    let tokens = lex::tokens(sql);
+    let target = write::target(sql, &tokens)
+        .ok_or_else(|| fail(Cause::NotAWrite { concerns: header.name.clone() }))?;
+    // A spread that reads a parent row may name the table the write changes.
+    let mut from = all_from_items(sql, &tokens);
+    from.push(target.item.clone());
+    check_spreads(&expansion.placed, &from).map_err(&fail)?;
+    let prepared = context.probe.prepare(sql).map_err(|error| fail(Cause::Sqlite(error)))?;
+    check_parameters(header, &prepared).map_err(&fail)?;
+    let table = target.item.table().unwrap_or_default();
+    let table_columns =
+        context.probe.table_columns(table).map_err(|error| fail(Cause::Sqlite(error)))?;
+    let outline = core::outline(sql, &tokens);
+    write::check_not_null(header, sql, &tokens, &target, &table_columns, &outline.items)
+        .map_err(&fail)?;
+    let returning = write::returning(sql, &tokens, target.item);
+    let fields =
+        columns::fields(header, &returning, &prepared, &[], context.registry, sql, &tokens)
+            .map_err(&fail)?;
+    Ok(Compiled {
+        code: generate::write(header, sql, &fields),
+        record: None,
+        warnings: Vec::new(),
+        reads: own_reads(header),
+    })
 }
 
 /// The tables and views that `header`'s own SQL reads by name in FROM and

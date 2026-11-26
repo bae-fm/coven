@@ -108,10 +108,20 @@ const AGGREGATES: [&str; 12] = [
     "jsonb_group_object",
 ];
 
-const CLAUSE_ENDS: [&str; 9] =
-    ["where", "group", "having", "window", "order", "limit", "union", "intersect", "except"];
+const CLAUSE_ENDS: [&str; 10] = [
+    "where",
+    "group",
+    "having",
+    "window",
+    "order",
+    "limit",
+    "union",
+    "intersect",
+    "except",
+    "returning",
+];
 
-const NOT_ALIASES: [&str; 23] = [
+const NOT_ALIASES: [&str; 25] = [
     "from",
     "join",
     "left",
@@ -135,6 +145,8 @@ const NOT_ALIASES: [&str; 23] = [
     "indexed",
     "not",
     "offset",
+    "set",
+    "returning",
 ];
 
 /// The index of the token that closes the parenthesis opened at `open`.
@@ -221,7 +233,7 @@ fn main_select(sql: &str, tokens: &[Token]) -> Option<usize> {
     None
 }
 
-fn result_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<Item> {
+pub(crate) fn result_items(sql: &str, tokens: &[Token], range: Range<usize>) -> Vec<Item> {
     let mut start = range.start;
     if tokens
         .get(start)
@@ -353,12 +365,13 @@ pub(crate) fn alias_at(
     (!keyword).then_some((alias, 1))
 }
 
-/// Every FROM item of the statement, at any depth.
+/// Every FROM item of the statement, at any depth. The table that a DELETE
+/// deletes from is no FROM item: the statement reads nothing of it by naming it.
 pub(crate) fn all_from_items(sql: &str, tokens: &[Token]) -> Vec<FromItem> {
     let mut items = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
-        let distinct = index > 0 && tokens[index - 1].is_word(sql, "distinct");
-        if token.is_word(sql, "from") && !distinct {
+        let follows = |word: &str| index > 0 && tokens[index - 1].is_word(sql, word);
+        if token.is_word(sql, "from") && !follows("distinct") && !follows("delete") {
             items.extend(from_items(sql, tokens, index + 1..clause_end(sql, tokens, index)));
         }
     }

@@ -34,6 +34,8 @@ CREATE TABLE comment_reads (
     read_at INTEGER NOT NULL,
     PRIMARY KEY (issue_id, person_id)
 ) STRICT;
+CREATE TABLE drafts (id TEXT NOT NULL PRIMARY KEY, body TEXT) STRICT;
+CREATE TRIGGER drafts_broken AFTER INSERT ON drafts BEGIN INSERT INTO nowhere VALUES (1); END;
 CREATE VIRTUAL TABLE docs USING fts5(body);
 CREATE VIEW weird AS SELECT i.title FROM issues AS i RIGHT JOIN people AS p ON p.id = i.author_id;
 CREATE VIEW counting AS WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c;";
@@ -73,14 +75,14 @@ pub(crate) fn compile_lib(lib: &str) -> Result<Output, Vec<CompileError>> {
 }
 
 /// The error messages of a failed compile.
-fn messages(result: Result<Output, Vec<CompileError>>) -> Vec<String> {
+pub(crate) fn messages(result: Result<Output, Vec<CompileError>>) -> Vec<String> {
     match result {
         Ok(_) => panic!("the compile passes"),
         Err(errors) => errors.iter().map(ToString::to_string).collect(),
     }
 }
 
-fn code_of(output: &super::Output, name: &str) -> String {
+pub(crate) fn code_of(output: &super::Output, name: &str) -> String {
     let (_, text) = output.files.iter().find(|(file, _)| file == name).unwrap();
     // The generated code is Rust.
     syn::parse_file(text).unwrap();

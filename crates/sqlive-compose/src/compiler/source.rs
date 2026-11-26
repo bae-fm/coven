@@ -11,7 +11,7 @@ use super::header::{self, CallKind, Header, HeaderError};
 /// A source reader: the text of the file at a path below the crate's folder.
 pub(crate) type Reader<'a> = &'a dyn Fn(&str) -> io::Result<String>;
 
-/// One `fragment!` or `read!` call.
+/// One `fragment!`, `read!` or `write!` call.
 pub(crate) struct Call {
     /// Where the call is.
     pub(crate) location: Location,
@@ -91,6 +91,7 @@ impl Walk<'_> {
                     let kind = match segments.iter().map(String::as_str).collect::<Vec<_>>()[..] {
                         ["sqlive_compose", "fragment"] => CallKind::Fragment,
                         ["sqlive_compose", "read"] => CallKind::Read,
+                        ["sqlive_compose", "write"] => CallKind::Write,
                         _ => continue,
                     };
                     let start = item.mac.path.segments[0].ident.span().start();

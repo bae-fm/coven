@@ -1764,7 +1764,10 @@ read `tracks` whole. `SchemaProbe::prepare` also says whether the statement
 writes (`ProbedStatement::writes`): it is true for an INSERT, UPDATE, DELETE or
 REPLACE, with or without a WITH clause or RETURNING, and false for a SELECT.
 A tool that generates statements uses it to refuse a write where it expects a
-read and a read where it expects a write.
+read and a read where it expects a write. `SchemaProbe::table_columns` lists the
+columns of a table or view in the order of an INSERT with no column list, each
+with whether the table declares it NOT NULL, so that such a tool can check a
+value it binds against the column it fills.
 
 The report takes each parameter that a column is compared with to hold a value
 that isn't NULL and that SQLite compares as it is, and takes each run to return

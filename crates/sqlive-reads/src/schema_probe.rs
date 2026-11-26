@@ -65,6 +65,15 @@ pub struct ProbedStatement {
     pub writes: bool,
 }
 
+/// A column of a table that an INSERT without a column list fills.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableColumn {
+    /// The column's name, as the table declares it.
+    pub name: String,
+    /// Whether the table declares the column `NOT NULL`.
+    pub not_null: bool,
+}
+
 /// An in-memory database that holds a schema's tables, views and triggers.
 pub struct SchemaProbe {
     connection: Connection,
@@ -143,6 +152,18 @@ impl SchemaProbe {
             unnamed_parameters,
             writes: !statement.readonly(),
         })
+    }
+
+    /// The columns of `table` in the order of an INSERT with no column list,
+    /// which leaves out the hidden and generated columns. A view's columns are
+    /// never `NOT NULL`. A name that no table or view has gives no columns.
+    pub fn table_columns(&self, table: &str) -> rusqlite::Result<Vec<TableColumn>> {
+        let quoted = table.replace('"', "\"\"");
+        let mut statement = self.connection.prepare(&format!("PRAGMA table_info(\"{quoted}\")"))?;
+        let columns = statement.query_map([], |row| {
+            Ok(TableColumn { name: row.get("name")?, not_null: row.get("notnull")? })
+        })?;
+        columns.collect()
     }
 
     /// What a live query of `sql` depends on in each table it reads, as its

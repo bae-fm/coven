@@ -6,7 +6,7 @@ use super::header::{CallKind, Header};
 use super::source::Call;
 use super::Location;
 
-/// One `fragment!` or `read!` call that compiled.
+/// One `fragment!`, `read!` or `write!` call that compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledCall {
     /// Which macro the call is.

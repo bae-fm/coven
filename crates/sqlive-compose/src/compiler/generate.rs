@@ -237,6 +237,95 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool)
     .to_string()
 }
 
+/// A write's statement and parameters, and its row when it returns columns.
+/// Its items are `pub(crate)` whatever the modules around the call: only the
+/// crate that writes a table's SQL changes it, so no other crate reaches the
+/// write's items.
+pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
+    let name = ident(&header.name);
+    let params_name = format_ident!("{}Params", header.name);
+    let row_name = format_ident!("{}Row", header.name);
+    let doc = format!("The `{}` write.", header.name);
+    let sql = Literal::string(sql);
+    let parameter_names: Vec<Ident> =
+        header.parameters.iter().map(|parameter| ident(&parameter.name)).collect();
+    let parameter_types: Vec<TokenStream> =
+        header.parameters.iter().map(|Parameter { ty, .. }| rust_type(ty)).collect();
+    let bound: Vec<String> =
+        header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
+    let lifetime = if header.borrows() { quote!(<'p>) } else { quote!() };
+    let to_sql = path("sqlive_reads::ToSql");
+    let statement = quote!(::sqlive_compose::Statement);
+    let params_doc = format!("What the `{}` write binds.", header.name);
+    let shapes = shapes(&header.shapes, &quote!(pub(crate)));
+    let statement_impl = quote! {
+        impl #lifetime #statement for #params_name #lifetime {
+            const SQL: &'static str = #name::SQL;
+
+            fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
+                vec![#((#bound, &self.#parameter_names as &dyn #to_sql),)*]
+            }
+        }
+    };
+    let rows = if fields.is_empty() {
+        let write_trait = quote!(::sqlive_compose::Write);
+        quote! {
+            impl #lifetime #write_trait for #params_name #lifetime {}
+        }
+    } else {
+        let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
+        let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
+        let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
+        let row = row_type();
+        let result = path("sqlive_reads::SqliteResult");
+        let row_doc = format!("A row that the `{}` write returns.", header.name);
+        let returning = quote!(::sqlive_compose::WriteReturning);
+        quote! {
+            #[doc = #row_doc]
+            #[derive(Clone, Debug, PartialEq)]
+            pub(crate) struct #row_name {
+                #(
+                    #[allow(missing_docs)]
+                    pub(crate) #names: #types,
+                )*
+            }
+
+            impl #lifetime #returning for #params_name #lifetime {
+                type Row = #row_name;
+
+                fn read(row: #row) -> #result<#row_name> {
+                    let offset = 0;
+                    Ok(#row_name { #(#names: #reads,)* })
+                }
+            }
+        }
+    };
+    quote! {
+        #shapes
+
+        #[doc = #doc]
+        pub(crate) struct #name;
+
+        impl #name {
+            /// The composed statement.
+            pub(crate) const SQL: &'static str = #sql;
+        }
+
+        #[doc = #params_doc]
+        pub(crate) struct #params_name #lifetime {
+            #(
+                #[allow(missing_docs)]
+                pub(crate) #parameter_names: #parameter_types,
+            )*
+        }
+
+        #statement_impl
+
+        #rows
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 #[path = "generate_tests.rs"]
 mod tests;

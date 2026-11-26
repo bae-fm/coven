@@ -101,7 +101,7 @@ fn error_of(call: &Call, concerns: &str, cause: Cause) -> CompileError {
 /// The order to compile the calls in.
 struct Order {
     /// The calls' positions: fragments after the fragments they spread, then
-    /// reads.
+    /// reads and writes.
     compile: Vec<usize>,
     /// The positions of the own fragments that each call spreads.
     dependencies: Vec<Vec<usize>>,
@@ -118,7 +118,7 @@ fn order(
     let own: BTreeMap<String, usize> = calls
         .iter()
         .enumerate()
-        .filter(|(_, (_, header))| !header.is_read())
+        .filter(|(_, (_, header))| header.is_fragment())
         .map(|(position, (call, header))| {
             (fragment_path(crate_name, &call.module, &header.name), position)
         })
@@ -138,10 +138,11 @@ fn order(
         let mut stack = Vec::new();
         visit(position, calls, crate_name, &mut state, &mut stack, &mut order, errors);
     }
-    // A read is compiled after every fragment, in the order it is written.
-    let (fragments, reads): (Vec<usize>, Vec<usize>) =
-        order.compile.iter().partition(|&&position| !calls[position].1.is_read());
-    order.compile = fragments.into_iter().chain(reads).collect();
+    // A read or a write is compiled after every fragment, in the order it is
+    // written.
+    let (fragments, others): (Vec<usize>, Vec<usize>) =
+        order.compile.iter().partition(|&&position| calls[position].1.is_fragment());
+    order.compile = fragments.into_iter().chain(others).collect();
     order
 }
 

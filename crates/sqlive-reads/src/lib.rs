@@ -44,7 +44,9 @@ pub use row_scope::{compare, RowImage, RowScope, Scopes};
 pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};
 pub use schema_objects::{FTS5_CONTENT, MAIN_TABLES};
-pub use schema_probe::{ColumnOrigin, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction};
+pub use schema_probe::{
+    ColumnOrigin, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction, TableColumn,
+};
 pub use scope_lookup::{Judging, Lookup, Lookups, NoAnswer, LOOKUP_STEPS};
 pub use scope_order::LastRow;
 pub use scope_plan::{ScopePlan, ScopePlanSize};

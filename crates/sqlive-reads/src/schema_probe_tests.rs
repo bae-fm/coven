@@ -79,6 +79,21 @@ fn a_statement_says_whether_it_writes() {
 }
 
 #[test]
+fn a_table_lists_its_columns_with_their_not_null() {
+    let columns: Vec<_> = probe()
+        .table_columns("People")
+        .unwrap()
+        .into_iter()
+        .map(|column| (column.name, column.not_null))
+        .collect();
+    assert_eq!(
+        columns,
+        [("id".to_owned(), true), ("name".to_owned(), true), ("note".to_owned(), false)]
+    );
+    assert!(probe().table_columns("missing").unwrap().is_empty());
+}
+
+#[test]
 fn a_read_report_says_what_the_statement_depends_on() {
     let probe = probe();
     let ReadReport::Entries(entries) =

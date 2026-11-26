@@ -1,13 +1,15 @@
 # sqlive-compose
 
-sqlive-compose composes an app's reads from SQL fragments while the app
-compiles. The parts of the app, its domains, write the SELECTs they offer to
+sqlive-compose composes an app's reads and writes from SQL fragments while the
+app compiles. The parts of the app, its domains, write the SELECTs they offer to
 others as *fragments*. A screen's *read* names the fragments it needs, and the
 compiler puts them together into one SQL statement, checks that statement
 against the app's schema, and generates the Rust types its rows decode into. The
 statement is a constant in the app's code, and the app runs it as a live query
 of [sqlive](../sqlive/SPEC.md): a query that runs again when a write changes
-what it read. [relay](https://relay.dev) composes GraphQL the same way: each
+what it read. A *write* is one INSERT, REPLACE, UPDATE or DELETE that the
+compiler composes and checks the same way, which the app runs in place of SQL
+text it wrote by hand (section 11). [relay](https://relay.dev) composes GraphQL the same way: each
 component writes a fragment, and relay's compiler builds one operation from the
 fragments a page names.
 
@@ -811,7 +813,8 @@ A circle of fragments fails and names them:
 issues/src/lib.rs:40:1: issues::A spreads itself: issues::A, issues::B, issues::A
 ```
 
-**Prepare.** SQLite prepares each fragment on its own and each composed read.
+**Prepare.** SQLite prepares each fragment on its own and each composed read and
+write.
 The compiler prepares a fragment with a parent row with each `@parent.column`
 written as a subquery that reads that column of the parent table, so the
 fragment's own columns keep their tables and types. It prepares a fragment with
@@ -906,7 +909,7 @@ RIGHT JOIN @people::Person AS author ON author.person_id = issue.author_id
 tracker/src/issue_page.rs:6:1: sqlive can't analyze IssuePage: a NATURAL or RIGHT join
 ```
 
-Section 11 lists the shapes. The compiler asks sqlive before it types the
+Section 12 lists the shapes. The compiler asks sqlive before it types the
 columns, so a shape that sqlive can't analyze is the error a call reports, not
 the column error that the shape also causes.
 
@@ -1073,9 +1076,10 @@ can be NULL.
 ## 10. How an app's build runs the compiler
 
 The macros and the compiler are in two crates. `sqlive-compose-macros` holds
-`fragment!` and `read!`, because Rust puts procedural macros in a crate of their
-own. `sqlive-compose` re-exports them, so an app writes
-`sqlive_compose::fragment!` and `sqlive_compose::read!`. With its `compiler`
+`fragment!`, `read!` and `write!`, because Rust puts procedural macros in a crate
+of their own. `sqlive-compose` re-exports them, so an app writes
+`sqlive_compose::fragment!`, `sqlive_compose::read!` and
+`sqlive_compose::write!`. With its `compiler`
 feature, `sqlive-compose` also holds the compiler, which an app's build script
 takes as a build dependency. A crate that writes fragments lists both:
 
@@ -1104,8 +1108,8 @@ for it:
 include!(concat!(env!("OUT_DIR"), "/sqlive_compose/IssuePage.rs"));
 ```
 
-Each fragment and read has a name that no other fragment or read of its crate
-has, because the name is the file's name.
+Each fragment, read and write has a name that no other call of its crate has,
+because the name is the file's name.
 
 **The compiler takes and returns values.** The compiler reads no file and no
 environment variable, and opens its in-memory database through sqlive, so it
@@ -1131,10 +1135,11 @@ F.2](../../spec/coven.md#f2-capabilities), itself. Its one entry point is
   its name, its location, its SQL as its author wrote it, with the spreads in
   place, and the tables and views its own SQL reads. The reads are the names
   after FROM and JOIN at any depth, lowercase, with a schema's prefix dropped.
-  They leave out the call's own CTEs and relations, table-valued functions and
-  what the fragments it spreads read, so a tool that checks which tables a
-  crate's calls read takes the compiler's own list and finds the calls, reads
-  the SQL and names the tables by no rule of its own. A module marked
+  They leave out the call's own CTEs and relations, table-valued functions,
+  what the fragments it spreads read and the table that a write's INSERT, UPDATE
+  or DELETE changes, so a tool that checks which tables a crate's calls read
+  takes the compiler's own list and finds the calls, reads the SQL and names the
+  tables by no rule of its own. A module marked
   `#[cfg(test)]` is not walked, and its calls are not reported.
 
 When something fails, it returns its errors instead. Each error is a typed
@@ -1231,13 +1236,155 @@ Here the crate `tracker-schema` embeds the schema's SQL, and each build script
 takes it as a build dependency, so Cargo runs the script again when a migration
 changes.
 
-## 11. Reference
+## 11. Writes
+
+A store that takes only generated statements still has to write. The `write!`
+macro declares a write with the header of a read and one statement of SQL: an
+INSERT, REPLACE, UPDATE or DELETE, with the `OR` forms, an upsert, a WITH clause
+before it, `UPDATE … FROM` and RETURNING. A write is its own macro, and not a
+`read!` that happens to write, for two reasons. No live query runs a write, so
+sqlive analyzes none of it and a write gets no whole-table warning. A write also
+returns a count of changed rows, and rows only when it has RETURNING.
+
+The issue tracker marks a person's comments read with an upsert:
+
+```rust
+// comments/src/lib.rs
+sqlive_compose::write!(
+    MarkRead(issue: IssueId, person: PersonId, at: Timestamp),
+    r#"
+    INSERT INTO comment_reads (issue_id, person_id, read_at)
+    VALUES (:issue, :person, :at)
+    ON CONFLICT (issue_id, person_id) DO UPDATE SET read_at = excluded.read_at
+"#);
+```
+
+A write that returns rows names them after RETURNING. A column that comes from
+the table needs no declaration, and a computed one is declared in braces, as in
+a read (section 9):
+
+```rust
+// issues/src/lib.rs
+sqlive_compose::write!(
+    OpenIssue(id: IssueId, project: ProjectId, title: &'p str, author: PersonId, at: Timestamp),
+    r#"
+    INSERT INTO issues (id, project_id, number, title, state, author_id, opened_at)
+    SELECT :id, :project, COALESCE(MAX(i.number), 0) + 1, :title, 'open', :author, :at
+    FROM issues AS i
+    WHERE i.project_id = :project
+    RETURNING number
+"#);
+```
+
+**Parameters.** Each parameter has a Rust type that implements rusqlite's
+`ToSql`, and the SQL writes it `:name`. A write's parameters may borrow what the
+caller holds for the one call, so a parameter's type may name the lifetime `'p`,
+as `title: &'p str` does, or `'static`. A reference with no lifetime, and any
+other lifetime, fails the build. A read's parameters stay owned, because a live
+query keeps its request. A write has no parent row and no relations.
+
+**Spreads.** A write spreads a fragment as a read does (sections 3 and 4): in any
+`FROM` of the statement, such as the SELECT of an INSERT, the `FROM` of an
+UPDATE, or a subquery in a WHERE. The labels crate labels every open issue of a
+project with the issues crate's `OpenIssueIds`:
+
+```rust
+// labels/src/lib.rs
+sqlive_compose::write!(LabelOpenIssues(project: ProjectId, label: LabelId), r#"
+    INSERT OR IGNORE INTO issue_labels (issue_id, label_id)
+    SELECT open_issue.issue_id, :label
+    FROM @issues::OpenIssueIds(project: :project) AS open_issue
+"#);
+```
+
+The table that an UPDATE, a DELETE or an INSERT changes is a `FROM` item for the
+spread of a fragment with a parent row, under its alias or its name. So an
+UPDATE sets a column from a fragment that reads the row it changes:
+
+```sql
+UPDATE issues SET labels_seen = @labels::IssueLabelCount(parent: issues)
+WHERE id = :id
+```
+
+**What the build checks.** The compiler runs these checks on a write call, in
+this order:
+
+1. *Spreads*, as for a read (section 8).
+2. *One write.* The SQL is one statement whose first word after its WITH clause
+   is INSERT, REPLACE, UPDATE or DELETE. SQLite refuses a second statement, and
+   the compiler refuses SQL that is any other statement. A `read!` or a
+   `fragment!` whose statement writes fails too: SQLite says whether a prepared
+   statement changes the database, and only `write!` may.
+3. *Prepare.* SQLite prepares the statement on the schema. That refuses an
+   unknown table or column, an `ON CONFLICT` target that matches no primary key
+   or unique constraint, and a trigger of the schema that the statement fires
+   and whose body doesn't prepare.
+4. *Parameters*, as for a read: each `:name` is declared and each declared one
+   is read.
+5. *NULL into NOT NULL.* SQLite prepares a statement that binds NULL to a NOT
+   NULL column and refuses it only when it runs. So a parameter whose type is an
+   `Option` fails the build when it is the whole value of a NOT NULL column: an
+   item of VALUES, an item of the SELECT of an INSERT, or the value in a SET of
+   an UPDATE or of an upsert's DO UPDATE. An INSERT with no column list takes
+   the table's columns in order. A parameter inside an expression, such as
+   `:a || :b`, is not checked.
+6. *RETURNING columns*, typed by the rules of a read's result columns (section
+   9): from the table's column, or from a declaration. A RETURNING item reads
+   the table the statement changes.
+
+The compiler doesn't ask sqlive what a write depends on, so a write's own SQL
+may hold a shape that section 12 lists, such as a recursive CTE. The compiler
+checked the fragments it spreads when their crate compiled. It renames a write's
+CTEs to `<crate>__<write>__<cte>`, as it does a read's.
+
+**What it generates.** For `OpenIssue`, the compiler writes:
+
+```rust
+/// The `OpenIssue` write.
+pub(crate) struct OpenIssue;
+
+impl OpenIssue {
+    /// The composed statement.
+    pub(crate) const SQL: &'static str = "INSERT INTO issues …";
+}
+
+/// What the `OpenIssue` write binds.
+pub(crate) struct OpenIssueParams<'p> {
+    pub(crate) id: IssueId,
+    pub(crate) project: ProjectId,
+    pub(crate) title: &'p str,
+    pub(crate) author: PersonId,
+    pub(crate) at: Timestamp,
+}
+
+/// A row that the `OpenIssue` write returns.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OpenIssueRow {
+    pub(crate) number: i64,
+}
+```
+
+The parameters struct implements the traits of section 9, which a store takes:
+
+| Trait | Implemented by | What it adds to `Statement` |
+|---|---|---|
+| `Write` | the parameters of a write with no RETURNING | nothing |
+| `WriteReturning` | the parameters of a write with RETURNING | `Row`, and `read` of one row |
+
+The struct has the lifetime `'p` only when a parameter names it, and the row
+exists only when the statement returns columns. A write's items are always
+`pub(crate)`, whatever the modules around the call: only the crate of a domain
+writes its tables, and it hands other crates functions that take an open write,
+never its statements.
+
+## 12. Reference
 
 ### Headers
 
 ```text
 fragment!(Name <parameters> <parent> <relations> <declarations>, r#"SQL"#);
 read!(Name <parameters> <declarations>, r#"SQL"#);
+write!(Name <parameters> <declarations>, r#"SQL"#);
 
 parameters    (name: RustType, …)
 parent        on table
@@ -1275,7 +1422,8 @@ The compiler gives a column that comes unchanged from a table this Rust type:
 
 ### Shapes sqlive can't analyze
 
-A read that holds one of these in a place sqlive reads fails the build:
+A read that holds one of these in a place sqlive reads fails the build. A
+write's own SQL may hold them, since sqlive reads none of it:
 
 - a recursive CTE;
 - a `NATURAL` or `RIGHT` join;
@@ -1298,5 +1446,6 @@ rest of the statement, so the compiler warns and the build goes on.
 |---|---|
 | `fragment!(Person …)` | `Person`, with `read`, and one struct for each JSON shape |
 | `read!(IssuePage …)` | `IssuePage::SQL`, `IssuePageParams` with its `Statement` and `Read` impls, `IssuePageRow` |
+| `write!(OpenIssue …)` | `OpenIssue::SQL`, `OpenIssueParams` with its `Statement` and `Write` or `WriteReturning` impl, and `OpenIssueRow` when it returns columns |
 | A CTE or a relation of a fragment | `<crate>__<fragment>__<name>` |
 | The file of either macro | `OUT_DIR/sqlive_compose/<Name>.rs` |

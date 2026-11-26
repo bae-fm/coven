@@ -1,4 +1,4 @@
-//! The header of a `fragment!` or `read!` call (`SPEC.md`, section 11): its
+//! The header of a `fragment!`, `read!` or `write!` call (`SPEC.md`, section 12): its
 //! name, parameters, parent row, relations and declarations, and its SQL.
 
 use proc_macro2::TokenStream;
@@ -19,6 +19,19 @@ pub enum CallKind {
     Fragment,
     /// `read!`.
     Read,
+    /// `write!`.
+    Write,
+}
+
+impl CallKind {
+    /// The noun an error calls the macro's call by.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Fragment => "fragment",
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
 }
 
 /// A Rust type, as the call wrote it with its spacing normalized.
@@ -127,6 +140,8 @@ pub(crate) enum HeaderKind {
     Fragment { parent: Option<String>, relations: Vec<Relation> },
     /// A read.
     Read,
+    /// A write.
+    Write,
 }
 
 /// A parsed call.
@@ -145,7 +160,7 @@ impl Header {
     pub(crate) fn parent(&self) -> Option<&str> {
         match &self.kind {
             HeaderKind::Fragment { parent, .. } => parent.as_deref(),
-            HeaderKind::Read => None,
+            HeaderKind::Read | HeaderKind::Write => None,
         }
     }
 
@@ -153,7 +168,7 @@ impl Header {
     pub(crate) fn relations(&self) -> &[Relation] {
         match &self.kind {
             HeaderKind::Fragment { relations, .. } => relations,
-            HeaderKind::Read => &[],
+            HeaderKind::Read | HeaderKind::Write => &[],
         }
     }
 
@@ -162,6 +177,7 @@ impl Header {
         match self.kind {
             HeaderKind::Fragment { .. } => CallKind::Fragment,
             HeaderKind::Read => CallKind::Read,
+            HeaderKind::Write => CallKind::Write,
         }
     }
 
@@ -169,7 +185,26 @@ impl Header {
     pub(crate) fn is_read(&self) -> bool {
         self.kind == HeaderKind::Read
     }
+
+    /// Whether the call is a write.
+    pub(crate) fn is_write(&self) -> bool {
+        self.kind == HeaderKind::Write
+    }
+
+    /// Whether the call is a fragment.
+    pub(crate) fn is_fragment(&self) -> bool {
+        matches!(self.kind, HeaderKind::Fragment { .. })
+    }
+
+    /// Whether a parameter of the call borrows with the lifetime `'p`, which
+    /// gives the write's parameters struct that lifetime.
+    pub(crate) fn borrows(&self) -> bool {
+        self.parameters.iter().any(|parameter| parameter.ty.0.contains(BORROW))
+    }
 }
+
+/// The lifetime a write's parameter may borrow for.
+const BORROW: &str = "'p";
 
 /// Why a call's tokens aren't a header.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -200,6 +235,11 @@ fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
             },
             Token![,],
         )?;
+        for (_, ty) in &fields {
+            if kind == CallKind::Write {
+                check_borrows(ty)?;
+            }
+        }
         parameters = fields
             .into_iter()
             .map(|(name, ty)| Parameter { name: name.to_string(), ty: RustType::of(&ty) })
@@ -208,16 +248,18 @@ fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
     let mut parent = None;
     if input.peek(keyword::on) {
         let on: keyword::on = input.parse()?;
-        if kind == CallKind::Read {
-            return Err(syn::Error::new(on.span, "a read has no parent row"));
+        if kind != CallKind::Fragment {
+            let message = format!("a {} has no parent row", kind.noun());
+            return Err(syn::Error::new(on.span, message));
         }
         parent = Some(input.parse::<Ident>()?.to_string());
     }
     let mut relations = Vec::new();
     if input.peek(keyword::with) {
         let with: keyword::with = input.parse()?;
-        if kind == CallKind::Read {
-            return Err(syn::Error::new(with.span, "a read has no relations"));
+        if kind != CallKind::Fragment {
+            let message = format!("a {} has no relations", kind.noun());
+            return Err(syn::Error::new(with.span, message));
         }
         loop {
             relations.push(relation(input)?);
@@ -255,8 +297,37 @@ fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
     let kind = match kind {
         CallKind::Fragment => HeaderKind::Fragment { parent, relations },
         CallKind::Read => HeaderKind::Read,
+        CallKind::Write => HeaderKind::Write,
     };
     Ok(Header { kind, name: name.to_string(), parameters, declarations, shapes, sql: sql.value() })
+}
+
+/// Whether a write's parameter type borrows only with the lifetime `'p` (or
+/// `'static`): a reference with no lifetime, and any other lifetime, can't be
+/// a field of the struct the compiler writes.
+fn check_borrows(ty: &Type) -> syn::Result<()> {
+    struct Borrows(Option<syn::Error>);
+    impl<'ast> syn::visit::Visit<'ast> for Borrows {
+        fn visit_type_reference(&mut self, reference: &'ast syn::TypeReference) {
+            if reference.lifetime.is_none() {
+                let message =
+                    format!("a write's parameter that borrows names its lifetime {BORROW}");
+                self.0.get_or_insert_with(|| syn::Error::new_spanned(reference, message));
+            }
+            syn::visit::visit_type_reference(self, reference);
+        }
+
+        fn visit_lifetime(&mut self, lifetime: &'ast syn::Lifetime) {
+            let name = format!("'{}", lifetime.ident);
+            if name != BORROW && name != "'static" {
+                let message = format!("a write's parameters borrow for {BORROW}, not {name}");
+                self.0.get_or_insert_with(|| syn::Error::new_spanned(lifetime, message));
+            }
+        }
+    }
+    let mut borrows = Borrows(None);
+    syn::visit::Visit::visit_type(&mut borrows, ty);
+    borrows.0.map_or(Ok(()), Err)
 }
 
 fn relation(input: ParseStream<'_>) -> syn::Result<Relation> {
