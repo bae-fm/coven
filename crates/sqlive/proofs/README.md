@@ -1,10 +1,11 @@
 # Live query narrowing
 
-The Lean package in [crates/sqlive/proofs](../../crates/sqlive/proofs/) models
-how sqlive narrows a live query to the rows its statements can depend on (§4),
-and which writes therefore run the query again. The package states a statement
-as sqlive's planner reads it, ports the planner, and proves each rule's step:
-the rows a rule leaves out of a table's scope are rows the statement's result
+The Lean package in this directory models how sqlive narrows a live query to
+the rows its statements can depend on
+([coven's spec, §4](../../../spec/coven.md#4-writing-locally)), and which writes
+therefore run the query again. The package states a statement as sqlive's
+planner reads it, ports the planner, and proves each rule's step: the rows a
+rule leaves out of a table's scope are rows the statement's result
 doesn't depend on. `narrowing_sound` puts the steps together: for a
 well-formed statement, a write the judge lets pass leaves the statement's rows
 unchanged. A differential test runs sqlive, the model and SQLite on
@@ -12,7 +13,7 @@ random statements and writes and compares all three.
 
 ## The model
 
-[Syntax.lean](../../crates/sqlive/proofs/SqliveNarrowing/Syntax.lean) states a
+[Syntax.lean](SqliveNarrowing/Syntax.lean) states a
 statement as the planner numbers it: its FROM items, the SELECT cores that hold
 them, the queries whose arms the cores are, and the conditions on each core's
 rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
@@ -30,7 +31,7 @@ its rows that are equal. A value is NULL or an integer, and
 the differential's tables hold only those, in columns SQLite compares without
 converting a value.
 
-[Semantics.lean](../../crates/sqlive/proofs/SqliveNarrowing/Semantics.lean)
+[Semantics.lean](SqliveNarrowing/Semantics.lean)
 evaluates a statement on a database whose tables hold rows by rowid slot. A
 core joins its items left to right, keeps the bindings its conditions hold for,
 and makes a row of each binding or of each group. A LEFT JOIN gives a left row
@@ -38,7 +39,7 @@ that no right row joins a row of NULLs. A core that sits in no other core, as a
 statement's own, a view's, or a FROM subquery's of such a core, sees no row
 around it.
 
-[Planner.lean](../../crates/sqlive/proofs/SqliveNarrowing/Planner.lean) ports
+[Planner.lean](SqliveNarrowing/Planner.lean) ports
 the planner of sqlive-reads (`scope_plan.rs`). Each core's conditions give terms on one
 item's rows and edges between items; the planner reads the conditions that a
 row of NULLs fails first, holds back what a LEFT JOIN's ON says of other items
@@ -48,8 +49,8 @@ side, passes a derived item's terms into its arms, and places the items so
 each takes values from items placed before it. A run binds each item's scope; a table's scope passes a row
 that any item of the table passes.
 
-[Changes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Changes.lean) and
-[Judge.lean](../../crates/sqlive/proofs/SqliveNarrowing/Judge.lean) judge a
+[Changes.lean](SqliveNarrowing/Changes.lean) and
+[Judge.lean](SqliveNarrowing/Judge.lean) judge a
 write as sqlive does. The write's row changes are one per row that each of its
 statements changed, as sqlive's pre-update hook records them, and the judge
 reads each row's net change over the write (below). A change reruns
@@ -72,7 +73,7 @@ questions stop depends on the plan SQLite picks for them, which the model
 doesn't state, so the runner takes from sqlive whether one of the write's
 questions stopped.
 
-[WellFormed.lean](../../crates/sqlive/proofs/SqliveNarrowing/WellFormed.lean)
+[WellFormed.lean](SqliveNarrowing/WellFormed.lean)
 states what the runner's JSON reader guarantees of every statement it reads
 (`Statement.wellFormed`). The root is a query, and each query's arms are
 cores. A query has a higher number than every query its arms read, as FROM
@@ -99,11 +100,11 @@ has them.
 ## Each rule's theorem
 
 Each rule is one file under
-[Rules](../../crates/sqlive/proofs/SqliveNarrowing/Rules/), with its reader or
+[Rules](SqliveNarrowing/Rules/), with its reader or
 step and its theorem.
 
 A condition's reader keeps a promise (`ReadCondition.Sound` in
-[Reader.lean](../../crates/sqlive/proofs/SqliveNarrowing/Reader.lean)): when the
+[Reader.lean](SqliveNarrowing/Reader.lean)): when the
 condition holds of a binding, whatever its subqueries return, each term it
 reads holds of its item's row, and each edge's member column holds a value
 that its partner's row in the binding gives. A subquery's source sits in an
@@ -299,7 +300,7 @@ JOIN adds, so where such a part holds, its item has a row.
   each binding around it the first rows of that binding's window: the
   table's rows that its own conditions pass and that hold the binding's value
   in each column an equality compares with a value around it.
-  [Rules/Window.lean](../../crates/sqlive/proofs/SqliveNarrowing/Rules/Window.lean)
+  [Rules/Window.lean](SqliveNarrowing/Rules/Window.lean)
   states the reader (`Window.read`), and `read_facts` proves what it checks:
   every condition of the subquery names only the table's columns
   (`ownCond`) or compares one of them by `=` with a value around it, as the
@@ -308,7 +309,7 @@ JOIN adds, so where such a part holds, its item has a row.
   window's scope passes a row that holds no NULL in a compared column and
   that fewer than LIMIT rows of its window sort before, with the table's
   rows read as a lookup reads them (`RScope.window`).
-  [Windows.lean](../../crates/sqlive/proofs/SqliveNarrowing/Windows.lean)
+  [Windows.lean](SqliveNarrowing/Windows.lean)
   proves the rule. `window_bindings` proves that the subquery's core keeps,
   under a binding around it, a binding of each table row its conditions
   keep, and `window_kept` that the rows the conditions keep are exactly the
@@ -367,7 +368,7 @@ JOIN adds, so where such a part holds, its item has a row.
 steps below, each with its own theorem.
 
 A statement's rows depend only on the columns it reads.
-[Mask.lean](../../crates/sqlive/proofs/SqliveNarrowing/Mask.lean)
+[Mask.lean](SqliveNarrowing/Mask.lean)
 masks a database as sqlive keeps it: each row of a table the statement reads,
 masked to the columns the statement reads, and no row of any other table.
 `result_mask` proves that a statement whose cores list only items it has
@@ -375,7 +376,7 @@ returns the same rows from the masked database as from the database. So the
 judge's lookups in the masked database read the rows the statement reads.
 
 A write the judge lets pass leaves the rows each scope passes unchanged.
-[Unjudged.lean](../../crates/sqlive/proofs/SqliveNarrowing/Unjudged.lean)
+[Unjudged.lean](SqliveNarrowing/Unjudged.lean)
 states a write's row changes as steps that each change one slot of a table,
 from the change's row before to its row after (`Writes`). A slot can change
 more than once in one write, as when one statement updates a row and the next
@@ -398,7 +399,7 @@ sqlive's judge too.
 
 A lookup of a derived item reads it alone, with more fuel than the statement
 has left where the item sits.
-[Fuel.lean](../../crates/sqlive/proofs/SqliveNarrowing/Fuel.lean) proves that the
+[Fuel.lean](SqliveNarrowing/Fuel.lean) proves that the
 extra fuel changes nothing: `evalQuery_fuel` proves that a well-formed statement's
 query returns the same rows with any fuel past its number, and
 `lookupRows_derived` that a lookup of a derived item whose arms sit in no core
@@ -407,7 +408,7 @@ reads the rows the statement reads of it.
 Two databases that hold the same rows passing each item's scope give the
 statement the same rows, as long as every binding that decides those rows
 holds only rows that pass their scopes.
-[Restrict.lean](../../crates/sqlive/proofs/SqliveNarrowing/Restrict.lean)
+[Restrict.lean](SqliveNarrowing/Restrict.lean)
 proves this from a promise that it states apart from the planner (`Kept`):
 each binding a core keeps that decides the rows its query returns holds rows
 that pass their items' tests, and holds no row of a LEFT JOIN item only when
@@ -439,7 +440,7 @@ an item reading it, before and after the write.
 
 A query's cores, and the cores of the queries they read, name items of their
 own and items of the cores around them.
-[Outer.lean](../../crates/sqlive/proofs/SqliveNarrowing/Outer.lean) states the
+[Outer.lean](SqliveNarrowing/Outer.lean) states the
 bindings a run of a query reads those outer items' rows from: a binding that
 holds a row of each outer item the query names that no LEFT JOIN adds
 (`Statement.Outer`). `outer_root` proves that the statement's own query names
@@ -451,7 +452,7 @@ under a binding that holds a row of each of the core's items that no LEFT
 JOIN adds, and a subquery of an ON under a binding that holds a row of each
 such item up to the ON's own. The restriction compares each query's runs
 under these bindings.
-[Congr.lean](../../crates/sqlive/proofs/SqliveNarrowing/Congr.lean) proves
+[Congr.lean](SqliveNarrowing/Congr.lean) proves
 that a query's rows depend, of the binding a run reads around it, only on the
 rows of the outer items the query names (`evalQuery_outer_congr`): a run
 binds a core's own items as it joins them. So each ON condition of a LEFT
@@ -481,7 +482,7 @@ binding fails the windows of, what `window_queryRows` takes
 the old argument for the rest.
 
 The promise rests on what makes a row pass the scope the planner gives an
-item. [Scopes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Scopes.lean)
+item. [Scopes.lean](SqliveNarrowing/Scopes.lean)
 states it. `Planned.scopes_eq` proves that a placed item's scope reads the
 scopes of the items placed before it, which keep those scopes to the end.
 `scopeAt_passes` proves that the scope passes a row of which the item's terms
@@ -491,7 +492,7 @@ a side of each OR it keeps passes, and that its LIMIT bound passes.
 value a row of the partner in the partner's scope gives, NULL only for an `IS`
 edge, through `equalValues_passes` when the partner's scope lists its values;
 `sideScope_passes` and `bind_passes` do the same for an OR's side and a term.
-[PlannerState.lean](../../crates/sqlive/proofs/SqliveNarrowing/PlannerState.lean)
+[PlannerState.lean](SqliveNarrowing/PlannerState.lean)
 states what the planner's state keeps however it reads the conditions.
 `plan_leftOn` proves that the planned state holds an ON narrowing back only
 for an item a LEFT JOIN adds: the planner starts by holding one back for
@@ -516,7 +517,7 @@ each item's memberships, and the sides of each OR it keeps, take values from
 items the planner placed before it: the planner sets them only as it places
 the item, from the edges and sides whose partners it placed before, and no
 other step changes them.
-[ReadOrder.lean](../../crates/sqlive/proofs/SqliveNarrowing/ReadOrder.lean)
+[ReadOrder.lean](SqliveNarrowing/ReadOrder.lean)
 states the order the planner reads cores in. A core sits below another when
 it is an arm of a query the other reads, as a derived item's or a subquery's,
 at any depth. `readOrder_postorder` proves that the planner reads no core
@@ -524,7 +525,7 @@ twice, and reads every core below a core before the core itself: each core is
 an arm of one query, and one core reads each query, so the cores a core sits
 below lie on one chain.
 
-[Tests.lean](../../crates/sqlive/proofs/SqliveNarrowing/Tests.lean) states the
+[Tests.lean](SqliveNarrowing/Tests.lean) states the
 tests the restriction takes from the planner's scopes. An item's row passes
 its test when it passes the item's scope, with lookups in what sqlive keeps
 of the database the write leaves, and the scope of each edge the planner
@@ -565,7 +566,7 @@ such membership takes a subquery's value (`plan_nestedOK`), and
 BY's terms keep the terms in order, so a binding's values run by run are its
 ORDER BY values.
 
-[Facts.lean](../../crates/sqlive/proofs/SqliveNarrowing/Facts.lean) states
+[Facts.lean](SqliveNarrowing/Facts.lean) states
 what the planner's state says of the bindings a core keeps (`PState.Sem`):
 an item the state holds no ON narrowing back for has a row, each item's terms
 hold of its row, each edge and OR of an item with a row holds, and what the
@@ -583,7 +584,7 @@ when the planner has passed no edge into a derived item's arm yet and a
 derived item's row passes what its arms say of each column that isn't NULL:
 an edge an item with a row holds holds of the binding, so its partner has a
 row, and `transfer_sound` carries the partner's term to the member.
-[ReadPhase.lean](../../crates/sqlive/proofs/SqliveNarrowing/ReadPhase.lean)
+[ReadPhase.lean](SqliveNarrowing/ReadPhase.lean)
 carries the invariant through every core the planner reads. The planner
 only adds to an item's term, with AND (`PState.TermGrows`), so the term an
 item holds when the planner passes it into the item's arms is true of every
@@ -599,7 +600,7 @@ binding the arms keep, as the carry needs. `PState.Sem.readCore` proves
 that reading a core keeps the invariant, and `plan_readSem` that the state
 after the planner reads every core says only what holds of each binding a
 core keeps, and of each binding below a core that matters.
-[OrderPhase.lean](../../crates/sqlive/proofs/SqliveNarrowing/OrderPhase.lean)
+[OrderPhase.lean](SqliveNarrowing/OrderPhase.lean)
 carries it through the order the planner places items in. As the planner
 places an item, it takes the item's edges to items placed before it as
 memberships and passes them into the item's arms when the item is derived.
@@ -622,7 +623,7 @@ planned state's facts for those tests.
 planned state: the planner takes them from the state's edges as it places
 the item, and no step drops an edge, so what the invariant says of the
 state's edges it says of each membership.
-[Partners.lean](../../crates/sqlive/proofs/SqliveNarrowing/Partners.lean)
+[Partners.lean](SqliveNarrowing/Partners.lean)
 proves where the planned state's edges take their values from
 (`plan_lookups`). A condition's reader gives only edges whose partner a
 lookup reads alone, and the planner moves an edge's member only, so every
@@ -638,7 +639,7 @@ a query whose every row matters (`relevant_of_all`), and no derived item
 reads the statement's own query, so its test keeps every row
 (`queryTest_root`).
 
-[Kept.lean](../../crates/sqlive/proofs/SqliveNarrowing/Kept.lean) proves
+[Kept.lean](SqliveNarrowing/Kept.lean) proves
 the promise for the bindings that matter. Each item's test (`planTest`) asks
 of its row what the item's scope asks, with the scopes of the items placed
 before it, and what each edge passed into the item asks. In a binding that
@@ -658,7 +659,7 @@ binding that matters passes its test, and `plan_restricted` that such a
 binding holds no row only of an item the planned state still holds an ON
 narrowing back for.
 
-[Held.lean](../../crates/sqlive/proofs/SqliveNarrowing/Held.lean) proves the
+[Held.lean](SqliveNarrowing/Held.lean) proves the
 promise for a LEFT JOIN item the planned state still holds an ON narrowing
 back for. While the planner holds one back, it adds to the item only what the
 item's own ON says of it. Any other narrowing, and any pass into the item,
@@ -676,7 +677,7 @@ before the item in the order, so its row in the binding, or in a binding of
 the ON's subquery under it, passes its test, and no edge passes into the
 item.
 
-[Sound.lean](../../crates/sqlive/proofs/SqliveNarrowing/Sound.lean) puts the
+[Sound.lean](SqliveNarrowing/Sound.lean) puts the
 steps together. `plan_kept` proves that the planner's scopes keep the promise
 `Kept` at every fuel at which the databases before and after the write return
 the same rows that matter, so `agree_of_kept` gives every query but the
@@ -697,12 +698,12 @@ next deletes it, an update sets a column and a later one sets it back, or
 `INSERT OR REPLACE` deletes a row and inserts it again with the same values.
 sqlive judges each row's net change instead of each change
 (`net_changes.rs`).
-[Net.lean](../../crates/sqlive/proofs/SqliveNarrowing/Net.lean) names the
+[Net.lean](SqliveNarrowing/Net.lean) names the
 slot each change changes, as sqlive names a row by its key, and folds the
 changes of each slot into one change, from the slot's row before the write's
 first change of it to its row after the last, with none for a slot that ends
 as it began (`net`, in
-[Changes.lean](../../crates/sqlive/proofs/SqliveNarrowing/Changes.lean)).
+[Changes.lean](SqliveNarrowing/Changes.lean)).
 
 `SlotWrites.firstOld_eq` and `SlotWrites.lastNew_eq` prove that those rows are
 the slot's rows before and after the write, so the net changes take the
@@ -720,7 +721,7 @@ rows that fail the scope before and after it.
 
 ## Which live queries judge a write
 
-[Index.lean](../../crates/sqlive/proofs/SqliveNarrowing/Index.lean) models
+[Index.lean](SqliveNarrowing/Index.lean) models
 how a handle finds the live queries that a write could rerun. The handle
 files each table a waiting live query reads under the key of the table's
 scope: a column that the scope's equalities or IN lists test, and the values
@@ -817,5 +818,6 @@ with a subquery's value reads the first column the same way.
 SQLite's authorizer reports no read of the columns a USING or NATURAL join
 compares, nor of the columns that decide which rows a query whose rows SQLite
 picks keeps, or which row an aggregate takes a value from, so sqlive adds those
-columns to a statement's reads (§4), and the
+columns to a statement's reads
+([coven's spec, §4](../../../spec/coven.md#4-writing-locally)), and the
 model's reads and sqlive's agree.

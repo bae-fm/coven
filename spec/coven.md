@@ -15242,7 +15242,7 @@ Write-ups explain each model and state its assumptions:
 [sequence](proofs/sequence.md), [merge](proofs/merge.md),
 [queue](proofs/queue.md) (conversion of old writes and the reload gate),
 [IO and observable work](proofs/io.md) and
-[live query narrowing](proofs/sqlive.md).
+[live query narrowing](../crates/sqlive/proofs/README.md).
 
 ### G.1 Promises (§2)
 
@@ -15709,7 +15709,7 @@ Write-ups explain each model and state its assumptions:
 | A row a scope passes holds one of its key's values in the key's column, so the index of live queries finds each query for every change that reruns it; the judge through the index reruns each query on exactly the writes the judge of every change reruns it on, and so lets pass only writes that leave a well-formed statement's rows unchanged | `key_passes`, `lookup_complete`, `index_judges_alike`, `indexed_narrowing_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Index.lean` | §4 |
 | A write's net change of each row, from the row before its first change to the row after its last, takes the database before the write to the database after it, and holds exactly the rows that differ between the two; so the judge of the net changes lets pass only writes that leave a well-formed statement's rows unchanged, directly or through the index, its verdict depends only on the databases before and after, a write whose every row ends as it began reruns nothing, and it reruns a statement only where the judge of every change does | `firstOld_eq`, `lastNew_eq`, `net_writes`, `mem_net`, `net_sound`, `indexed_net_sound`, `net_judges_states`, `net_unchanged`, `net_reruns_imp` | `../crates/sqlive/proofs/SqliveNarrowing/Net.lean` | §4 |
 | When the judge lets a write pass, the tables before and after it hold the same rows that pass each item's test from the planner's scopes and passed edges, and a derived item's test keeps only rows that matter to its query; in a binding of the statement's own core that sorts at or before the last row, the LIMIT bound of each item the ORDER BY sorts passes the item's row when its memberships to other such items hold | `plan_restriction`, `Planned.bound_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Tests.lean` | §4 |
-| Each result's assumptions and where its model stops | (write-up) | `proofs/sqlive.md` | §4 |
+| Each result's assumptions and where its model stops | (write-up) | `../crates/sqlive/proofs/README.md` | §4 |
 
 ## Appendix H. Errors and statuses
 

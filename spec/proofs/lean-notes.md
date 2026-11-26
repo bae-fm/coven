@@ -1,7 +1,7 @@
 # Lean model boundaries
 
 The current proof packages are [sequence](sequence.md), [merge](merge.md),
-[queue](queue.md), [storage](storage.md), [io](io.md) and [sqlive](sqlive.md).
+[queue](queue.md), [storage](storage.md), [io](io.md) and [sqlive](../../crates/sqlive/proofs/README.md).
 The sqlive package lives in the crate it models, under `crates/sqlive/proofs`;
 the others live here. Each package's root imports its retained modules; its
 `Axioms.lean` names results for the audit.
