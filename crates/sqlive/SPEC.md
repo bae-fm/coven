@@ -907,6 +907,24 @@ equalities in the tables placed before that table, and an OR with a side whose
 table comes later narrows nothing there; a side that compares with a subquery's
 value waits for the subquery's table, as a column compared with one does.
 
+A join that compares several columns of a table with one partner is one
+condition. An import pane reads a cell's cards with `found.step = lookup.step
+AND found.position = lookup.position AND found.cell = lookup.cell`, three
+equalities of one join. A lookup for a change to `found` asks whether one row of
+`lookup`, in its scope, holds all three values, not whether some row holds each:
+a row of another cell that holds the step doesn't count for this cell's
+position. One question reads the partner's scope once, where three questions
+read it three times, and a partner whose scope joins more tables repeats its
+whole chain in each. The pane's read ran past the 1,000 steps a lookup may run
+when each question read the chain of tables behind `lookup`, and so ran again for
+every label written to any verdict. The equalities of one join are one condition
+when each compares a column of the joined table by `=` with a column of the
+partner that the partner's scope doesn't fix, or with an expression over the
+partner's columns. An equality with a subquery's value, one by `IS`, one with an
+expression over the joined table's own columns, and one that sqlive passes into
+a derived item's arm from an equality of the derived item each narrow alone,
+since the rows that satisfy them need not be one row of the partner.
+
 ### LEFT JOIN
 
 The ON of a
@@ -1910,7 +1928,7 @@ the model and states its assumptions.
 | A subquery of one table with an ORDER BY over that table's columns, a LIMIT and no OFFSET, each of whose conditions names only that table's columns or compares one of its columns by `=` with a value around it, returns for each binding around it the first rows of that binding's window; a row passes the window's scope exactly when it holds no NULL in a compared column and fewer than LIMIT rows its core keeps sort before it, so either every binding of the core passes, or the first LIMIT do in the database the write leaves; the subquery returns the same rows from two databases that hold the same bindings that pass; a binding that gives a row the subquery returns, as the one a comparison takes the subquery's value from, sorts after fewer than LIMIT rows in its database, and so passes the window in the database the write leaves when both databases hold the same rows that pass the table's test | `read_facts`, `partitionOf_holds`, `window_bindings`, `window_kept`, `window_passes`, `take_sortBy_before`, `count_first`, `take_sortBy_window`, `window_queryRows`, `plan_windowRows`, `query_row_at`, `givesRow_count`, `givesRow_windowTest`, `givesRow_windowPasses`, `nested_windowPasses` | `proofs/SqliveNarrowing/Rules/Window.lean`; `proofs/SqliveNarrowing/Windows.lean`; `proofs/SqliveNarrowing/Rules/Limit.lean`; `proofs/SqliveNarrowing/Restrict.lean`; `proofs/SqliveNarrowing/Rows.lean`; `proofs/SqliveNarrowing/Kept.lean` | 6 |
 | Two databases that hold the same rows passing each item's test give a core the same bindings that decide its query's rows, and the statement the same rows, when every such binding holds rows that pass their tests; an arm that aggregates makes the same rows that pass a test from the bindings whose GROUP BY values a row that passes it holds as from all its bindings; when the judge lets a write pass, each masked table holds the same rows that pass the scope of an item reading it | `joinItems_restricted`, `coreBindings_restricted`, `Core.result_filter_key`, `queryRows_restricted`, `agree_of_kept`, `result_restricted`, `scoped_rows` | `proofs/SqliveNarrowing/Restrict.lean` | 5 to 8 |
 | A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no OFFSET, whose run returned as many rows as its LIMIT, returns the same rows from two databases whose bindings that sort at or before the last row, and whose other queries' bindings, hold rows that pass their tests | `limit_restricted` | `proofs/SqliveNarrowing/Restrict.lean` | 6 |
-| A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `proofs/SqliveNarrowing/Scopes.lean` | 7 |
+| A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, and whose values of the memberships that join one partner in the same join one row of the partner gives together, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `groupScopes_passes`, `joinedAll_passes_joined`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `proofs/SqliveNarrowing/Scopes.lean` | 7 |
 | The planned state holds an ON narrowing back only for an item a LEFT JOIN adds; each edge the planner passes into a derived item's arms comes from an edge the derived item holds, through the result column an arm passes the target's column on to, and makes the target an inner join's; the planner places each item once, and every item of every core; and each edge of the planned state whose partner is a subquery's source has its partner in an arm of some core's subquery, and each item's memberships are edges from it; and each item's memberships and the ORs it keeps take values from items placed before it | `plan_leftOn`, `plan_pushed`, `plan_order`, `plan_nestedOK`, `plan_placedBefore` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | The planner reads no core twice, and reads every core that sits in an arm of a query a core reads, at any depth, before that core | `readOrder_postorder` | `proofs/SqliveNarrowing/ReadOrder.lean` | 8 |
 | The planner's state before it reads any condition, after it reads each core's conditions, and after it carries terms across a core's edges, says only what holds of every binding a core keeps: an item it holds no ON narrowing back for has a row, each term and carried term holds of its item's row, each edge and OR of an item with a row holds, and what it holds back for a LEFT JOIN's item holds where that item has a row | `PState.Sem.initial`, `PState.Sem.readConds`, `PState.Sem.carry` | `proofs/SqliveNarrowing/Facts.lean` | 5 to 8 |
