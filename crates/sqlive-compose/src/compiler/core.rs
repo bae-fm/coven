@@ -193,6 +193,12 @@ pub(crate) fn matching(sql: &str, tokens: &[Token], open: usize) -> Option<usize
     None
 }
 
+/// Whether the FROM at `index` is the one of `IS DISTINCT FROM`, which starts
+/// no clause.
+fn compares_distinct(sql: &str, tokens: &[Token], index: usize) -> bool {
+    index > 0 && tokens[index - 1].is_word(sql, "distinct")
+}
+
 /// The first SELECT core of `sql`, whose tokens are `tokens`.
 pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
     let mut core = Core {
@@ -215,7 +221,7 @@ pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
             depth = depth.saturating_sub(1);
         } else if depth == 0 && token.kind == Kind::Word {
             let word = token.text(sql).to_ascii_lowercase();
-            if word == "from" && from_at.is_none() {
+            if word == "from" && from_at.is_none() && !compares_distinct(sql, tokens, index) {
                 from_at = Some(index);
             } else if CLAUSE_ENDS.contains(&word.as_str()) {
                 clause_end = index;
@@ -429,8 +435,8 @@ pub(crate) fn alias_at(
 pub(crate) fn all_from_items(sql: &str, tokens: &[Token]) -> Vec<FromItem> {
     let mut items = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
-        let follows = |word: &str| index > 0 && tokens[index - 1].is_word(sql, word);
-        if token.is_word(sql, "from") && !follows("distinct") && !follows("delete") {
+        let deletes = index > 0 && tokens[index - 1].is_word(sql, "delete");
+        if token.is_word(sql, "from") && !compares_distinct(sql, tokens, index) && !deletes {
             let clause = from_items(sql, tokens, index + 1..clause_end(sql, tokens, index));
             items.extend(every_item(&clause).into_iter().cloned());
         }

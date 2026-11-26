@@ -192,3 +192,23 @@ fn a_table_functions_column_takes_a_declared_type_that_holds_null() {
         );
     }
 }
+
+#[test]
+fn is_distinct_from_in_a_result_column_starts_no_from_clause() {
+    for operator in ["IS DISTINCT FROM", "IS NOT DISTINCT FROM"] {
+        let lib = format!(
+            "sqlive_compose::fragment!(Person, r#\"SELECT p.id AS person_id FROM people AS p\"#);\n\
+             sqlive_compose::fragment!(Case {{ other: i64 }}, r#\"SELECT a.*, \
+             j.name {operator} 'x' AS other \
+             FROM projects AS j LEFT JOIN @crate::Person AS a ON a.person_id = j.id\"#);\n\
+             sqlive_compose::fragment!(First {{ other: i64 }}, r#\"SELECT a.*, \
+             a.person_id {operator} 'x' AS other FROM @crate::Person AS a\"#);"
+        );
+        let output = compile_lib(&lib).unwrap_or_else(|errors| panic!("{operator}: {errors:?}"));
+        assert!(code_of(&output, "Case.rs").contains("pub (crate) a : Option < crate :: Person >"));
+        assert!(code_of(&output, "First.rs").contains("pub (crate) a : crate :: Person ,"));
+        let sql = format!("SELECT j.name {operator} 'x' FROM projects AS j");
+        let core = outline(&sql, &tokens(&sql));
+        assert_eq!(padded(&core.from, "j"), Some(false), "{operator}");
+    }
+}
