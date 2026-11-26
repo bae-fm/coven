@@ -23,6 +23,7 @@ use sqlite3_parser::{
 };
 
 use crate::derived::{Ctes, Declared};
+use crate::from_star::{star, StarItem};
 use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
 use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
@@ -55,8 +56,28 @@ struct Item {
 
 impl Item {
     fn column(&self, name: &str) -> Option<&Column> {
-        let columns = self.columns.as_ref()?;
-        columns.iter().find(|column| column.name.as_deref() == Some(name))
+        self.listed()?.iter().find(|column| column.name.as_deref() == Some(name))
+    }
+
+    /// `column`, one of its columns, as the core that reads the item gets it.
+    fn read(&self, column: &Column) -> Column {
+        Column { name: column.name.clone(), nullable: column.nullable || self.padded }
+    }
+}
+
+impl StarItem for Item {
+    type Column = Column;
+
+    fn listed(&self) -> Option<&[Column]> {
+        self.columns.as_deref()
+    }
+
+    fn using(&self) -> &[String] {
+        &self.using
+    }
+
+    fn name(column: &Column) -> Option<&str> {
+        column.name.as_deref()
     }
 }
 
@@ -183,15 +204,18 @@ impl Analysis<'_> {
                     columns.push(column);
                 }
                 ResultColumn::Star => {
-                    let Some(every) = star(&items) else { return Ok(None) };
+                    let Some(every) = star_columns(&items) else { return Ok(None) };
                     columns.extend(every);
                 }
                 ResultColumn::TableStar(qualifier) => {
                     let named = items.iter().find(|item| {
                         item.qualifier.as_deref().is_some_and(|name| *qualifier == Name(name))
                     });
-                    let Some(every) = named.and_then(every_column) else { return Ok(None) };
-                    columns.extend(every);
+                    let Some((item, listed)) = named.and_then(|item| Some((item, item.listed()?)))
+                    else {
+                        return Ok(None);
+                    };
+                    columns.extend(listed.iter().map(|column| item.read(column)));
                 }
             }
         }
@@ -382,7 +406,7 @@ impl Analysis<'_> {
                 self.from(inner, ctes, items)?;
                 // Under an alias, the join's rows are a subquery's.
                 if let Some(alias) = alias_or(alias, None) {
-                    let columns = star(&items[first..]);
+                    let columns = star_columns(&items[first..]);
                     items.truncate(first);
                     items.push(derived(Some(alias), columns));
                 }
@@ -411,12 +435,7 @@ impl Analysis<'_> {
         ctes: &Ctes<'a>,
     ) -> rusqlite::Result<Option<Vec<Column>>> {
         let cte = declared.cte;
-        let names: Option<Vec<String>> = cte.columns.map(|columns| {
-            columns
-                .iter()
-                .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
-                .collect()
-        });
+        let names = cte.columns.map(crate::sql::column_list_names);
         let Some(inner) = ctes.reading(&declared) else {
             return Ok(names.map(|names| {
                 names.into_iter().map(|name| Column { name: Some(name), nullable: true }).collect()
@@ -443,12 +462,7 @@ impl Analysis<'_> {
         };
         if kind == "view" {
             let read = read_view(self.connection, &stored, |names, select| {
-                let names = names.map(|names| {
-                    names
-                        .iter()
-                        .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
-                        .collect()
-                });
+                let names = names.map(crate::sql::column_list_names);
                 Ok(self.select(select, &Ctes::default())?.map(|columns| renamed(columns, names)))
             })?;
             let columns = match read {
@@ -547,7 +561,7 @@ fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
     let mut rowids = Vec::new();
     for item in named {
         if let Some(column) = item.column(&name) {
-            return Column { name: Some(name), nullable: column.nullable || item.padded };
+            return item.read(column);
         }
         // An item of unknown columns may be the one that has the name.
         if item.columns.is_none() {
@@ -574,31 +588,10 @@ fn never_null_literal(expr: &Expr<'_>) -> bool {
     )
 }
 
-/// The columns a `*` gives of `items`.
-fn star(items: &[Item]) -> Option<Vec<Column>> {
-    let mut columns = Vec::new();
-    for item in items {
-        columns.extend(
-            every_column(item)?.into_iter().filter(|column| {
-                column.name.as_ref().is_none_or(|name| !item.using.contains(name))
-            }),
-        );
-    }
-    Some(columns)
-}
-
-/// The columns of `item`, as a core that reads it gets them.
-fn every_column(item: &Item) -> Option<Vec<Column>> {
-    let columns = item.columns.as_ref()?;
-    Some(
-        columns
-            .iter()
-            .map(|column| Column {
-                name: column.name.clone(),
-                nullable: column.nullable || item.padded,
-            })
-            .collect(),
-    )
+/// The columns a `*` gives of `items`, as the core that reads them gets
+/// them.
+fn star_columns(items: &[Item]) -> Option<Vec<Column>> {
+    Some(star(items)?.into_iter().map(|(at, column)| items[at].read(column)).collect())
 }
 
 #[cfg(test)]

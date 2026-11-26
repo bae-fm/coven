@@ -12,6 +12,7 @@
 //! in a group whose row fails it.
 
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
+use crate::from_star::StarItem;
 use crate::schema_objects::read_view;
 use crate::scope_edge::{Edge, Member, MemberValue};
 use crate::scope_one_of::constant;
@@ -179,12 +180,7 @@ pub(crate) fn read_derived_item<'a>(
             };
             planner.inlined.push(name.clone());
             let around = planner.within.replace(name.clone());
-            let names = cte.columns.map(|columns| {
-                columns
-                    .iter()
-                    .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
-                    .collect()
-            });
+            let names = cte.columns.map(crate::sql::column_list_names);
             let read = read_derived(connection, planner, cte.select, names, parent, &inner)?;
             planner.within = around;
             read.map(|(columns, derived)| {
@@ -205,12 +201,7 @@ pub(crate) fn read_derived_item<'a>(
         Named::View(stored) => {
             let around = planner.within.replace(stored.to_ascii_lowercase());
             let read = read_view(connection, stored, |columns, select| {
-                let names = columns.map(|columns| {
-                    columns
-                        .iter()
-                        .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
-                        .collect()
-                });
+                let names = columns.map(crate::sql::column_list_names);
                 // A view names only the schema's tables and views.
                 read_derived(connection, planner, select, names, None, &Ctes::default())
             })?;
@@ -465,19 +456,12 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                 found.push(Output { name, value });
             }
             ResultColumn::Star => {
-                // A USING join's right side leaves out the columns it
-                // compares, which the item on the left lists: among columns
-                // of names sqlive doesn't know, it can't tell which.
-                for item in &planner.cores[core].items {
-                    let using = &planner.items[*item].using;
-                    if !using.is_empty() && !planner.items[*item].columns.complete() {
-                        return None;
-                    }
-                    let columns = every_column(&planner.items[*item], *item)?;
-                    found.extend(columns.into_iter().filter(|output| {
-                        output.name.as_ref().is_none_or(|name| !using.contains(name))
-                    }));
-                }
+                let items = &planner.cores[core].items;
+                let listed =
+                    crate::from_star::star(items.iter().map(|item| &planner.items[*item]))?;
+                found.extend(
+                    listed.into_iter().map(|(at, column)| passed_through(items[at], column)),
+                );
             }
             ResultColumn::TableStar(qualifier) => {
                 let named = planner.cores[core]
@@ -486,29 +470,41 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     .copied()
                     .find(|item| *qualifier == Name(&planner.items[*item].source.qualifier));
                 let item = named?;
-                found.extend(every_column(&planner.items[item], item)?);
+                let listed = planner.items[item].listed()?;
+                found.extend(listed.iter().map(|column| passed_through(item, column)));
             }
         }
     }
     Some(found)
 }
 
-/// The columns a `*` gives of `item`, at position `position`.
-fn every_column(item: &FromItem, position: usize) -> Option<Vec<Output>> {
-    match &item.columns {
-        Columns::Listed(columns) => Some(
-            columns
-                .iter()
-                .map(|column| Output {
-                    name: column.name.clone(),
-                    value: match &column.name {
-                        Some(name) => OutputValue::Passed(position, name.clone()),
-                        None => OutputValue::Other,
-                    },
-                })
-                .collect(),
-        ),
-        Columns::Unknown { .. } => None,
+/// The output of a `*` that gives `column` of the item at `position`.
+fn passed_through(position: usize, column: &Column) -> Output {
+    Output {
+        name: column.name.clone(),
+        value: match &column.name {
+            Some(name) => OutputValue::Passed(position, name.clone()),
+            None => OutputValue::Other,
+        },
+    }
+}
+
+impl StarItem for FromItem {
+    type Column = Column;
+
+    fn listed(&self) -> Option<&[Column]> {
+        match &self.columns {
+            Columns::Listed(columns) => Some(columns),
+            Columns::Unknown { .. } => None,
+        }
+    }
+
+    fn using(&self) -> &[String] {
+        &self.using
+    }
+
+    fn name(column: &Column) -> Option<&str> {
+        column.name.as_deref()
     }
 }
 
