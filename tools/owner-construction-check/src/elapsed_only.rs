@@ -46,19 +46,12 @@ impl Starts<'_> {
 }
 
 impl<'ast> Visit<'ast> for Starts<'_> {
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "elapsed" {
-            self.starts.extend(self.measured_call(&node.receiver));
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-
     fn visit_block(&mut self, node: &'ast syn::Block) {
         for (index, statement) in node.stmts.iter().enumerate() {
             let syn::Stmt::Local(local) = statement else { continue };
             let (syn::Pat::Ident(name), Some(init)) = (&local.pat, &local.init) else { continue };
             let Some(start) = self.measured_call(&init.expr) else { continue };
-            let mut uses = Uses { name: name.ident.to_string(), other: 0 };
+            let mut uses = Uses { tracked: BTreeSet::from([name.ident.to_string()]), other: 0 };
             for later in &node.stmts[index + 1..] {
                 uses.visit_stmt(later);
             }
@@ -76,36 +69,43 @@ impl<'ast> Visit<'ast> for Starts<'_> {
     }
 }
 
-/// How code uses the name a measured value is bound to: it counts every use
-/// but asking `.elapsed()` for a log line or a work count. The duration
-/// decides behavior when a comparison, a condition or a `match` reads it, so
-/// any use of the name there counts too.
+/// The macros that only write a value out: a log line or a print.
+const WRITING_MACROS: [&str; 8] =
+    ["trace", "debug", "info", "warn", "error", "event", "println", "eprintln"];
+
+/// How code uses a measured value and the durations taken from it. A tracked
+/// name may be asked `.elapsed()` and its duration may be bound to a name,
+/// written by a log macro, or added into a count (`count += duration`). Every
+/// other mention, a comparison, a condition, a call, a field or a return,
+/// counts in `other`: it can decide behavior or reach stored data.
 struct Uses {
-    name: String,
-    /// Uses that are no plain `.elapsed()`.
+    tracked: BTreeSet<String>,
+    /// Mentions of a tracked name where it may not appear.
     other: usize,
 }
 
 impl Uses {
-    fn is_name(&self, expr: &syn::Expr) -> bool {
-        matches!(expr, syn::Expr::Path(path) if path.path.is_ident(&self.name))
+    fn tracks(&self, expr: &syn::Expr) -> bool {
+        matches!(expr, syn::Expr::Path(path)
+            if path.path.get_ident().is_some_and(|name| self.tracked.contains(&name.to_string())))
     }
 
-    /// Counts the uses of the name in macro arguments that do not parse as
-    /// code: the name followed by `.elapsed` is no other use.
+    /// Whether `expr` is a tracked name's duration or a tracked duration.
+    fn is_duration(&self, expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::MethodCall(call) => {
+                call.method == "elapsed" && call.args.is_empty() && self.tracks(&call.receiver)
+            }
+            _ => self.tracks(expr),
+        }
+    }
+
+    /// Counts the tracked names in macro arguments that do not parse as code.
     fn count_tokens(&mut self, tokens: TokenStream) {
-        let tokens = tokens.into_iter().collect::<Vec<_>>();
-        for (index, token) in tokens.iter().enumerate() {
+        for token in tokens {
             match token {
-                TokenTree::Ident(ident) if *ident == self.name => {
-                    let asks_elapsed = matches!(
-                        (tokens.get(index + 1), tokens.get(index + 2)),
-                        (Some(TokenTree::Punct(dot)), Some(TokenTree::Ident(method)))
-                            if dot.as_char() == '.' && method == "elapsed"
-                    );
-                    if !asks_elapsed {
-                        self.other += 1;
-                    }
+                TokenTree::Ident(ident) if self.tracked.contains(&ident.to_string()) => {
+                    self.other += 1;
                 }
                 TokenTree::Group(group) => self.count_tokens(group.stream()),
                 _ => {}
@@ -114,75 +114,42 @@ impl Uses {
     }
 }
 
-impl Uses {
-    /// Counts one other use when `expr` mentions the name at all.
-    fn decides(&mut self, expr: &syn::Expr) {
-        let mut mentions = Mentions { name: &self.name, found: false };
-        mentions.visit_expr(expr);
-        if mentions.found {
-            self.other += 1;
-        }
-    }
-}
-
-/// Whether an expression names `name` anywhere, in code or in macro tokens.
-struct Mentions<'a> {
-    name: &'a str,
-    found: bool,
-}
-
-impl<'ast> Visit<'ast> for Mentions<'_> {
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        self.found |= node.path.is_ident(self.name);
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        self.found |= node.tokens.to_string().contains(self.name);
-    }
-}
-
 impl<'ast> Visit<'ast> for Uses {
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if !(node.method == "elapsed" && node.args.is_empty() && self.is_name(&node.receiver)) {
-            visit::visit_expr_method_call(self, node);
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        let duration = node.init.as_ref().is_some_and(|init| self.is_duration(&init.expr));
+        match (&node.pat, duration) {
+            (syn::Pat::Ident(name), true) => {
+                self.tracked.insert(name.ident.to_string());
+            }
+            _ => visit::visit_local(self, node),
         }
     }
 
     fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
-        self.decides(&node.left);
-        self.decides(&node.right);
-    }
-
-    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-        self.decides(&node.cond);
-        visit::visit_block(self, &node.then_branch);
-        if let Some((_, otherwise)) = &node.else_branch {
-            self.visit_expr(otherwise);
-        }
-    }
-
-    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.decides(&node.cond);
-        visit::visit_block(self, &node.body);
-    }
-
-    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        self.decides(&node.expr);
-        for arm in &node.arms {
-            self.visit_arm(arm);
+        let adds = matches!(node.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_));
+        self.visit_expr(&node.left);
+        if !(adds && self.is_duration(&node.right)) {
+            self.visit_expr(&node.right);
         }
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if node.path.is_ident(&self.name) {
+        if self.tracks(&syn::Expr::Path(node.clone())) {
             self.other += 1;
         }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        match parse_macro_body(node) {
-            Some(body) => body.visit(self),
-            None => self.count_tokens(unparsed_tokens(node)),
+        let writes = node
+            .path
+            .segments
+            .last()
+            .is_some_and(|name| WRITING_MACROS.iter().any(|writing| name.ident == writing));
+        if !writes {
+            match parse_macro_body(node) {
+                Some(body) => body.visit(self),
+                None => self.count_tokens(unparsed_tokens(node)),
+            }
         }
     }
 }

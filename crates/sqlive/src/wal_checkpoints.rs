@@ -176,16 +176,15 @@ impl<P: Policy> Checkpoints<P> {
         // No write on the writer starts meanwhile, so the checkpoint takes
         // SQLite's writer lock at once, copies and syncs the frames
         // committed since the last pass, and waits only for readers.
-        let (restarted, held) = {
-            let _writes = lock_unpoisoned(&writer);
-            let started = Instant::now();
-            #[cfg(any(test, feature = "test-utils"))]
-            self.fault()?;
-            let restarted = connection.wal_checkpoint(CheckpointMode::Restart)?;
-            #[cfg(any(test, feature = "test-utils"))]
-            self.report(restarted);
-            (restarted, started.elapsed())
-        };
+        let writes = lock_unpoisoned(&writer);
+        let started = Instant::now();
+        #[cfg(any(test, feature = "test-utils"))]
+        self.fault()?;
+        let restarted = connection.wal_checkpoint(CheckpointMode::Restart)?;
+        #[cfg(any(test, feature = "test-utils"))]
+        self.report(restarted);
+        let held = started.elapsed();
+        drop(writes);
         tracing::debug!(frames = uncopied, passes, ?restarted, ?held, "checkpointed the WAL");
         Ok(())
     }

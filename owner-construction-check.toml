@@ -1933,8 +1933,9 @@ homes = ["crates/coven-foundation/src/clock.rs"]
 # Time a value or a decision depends on comes from the clock the code was given.
 # An `Instant` that only measures an elapsed duration, for a log line or a work
 # count, is no use of the clock (`measured_paths`): the check accepts a call
-# whose value is only asked `.elapsed()`, and refuses one that reaches a field,
-# a branch or a call.
+# whose value is only asked `.elapsed()`, and the duration only goes into a log
+# line or a `+=`. It refuses one that reaches a comparison, a condition, a call,
+# a field or a return.
 
 [[capabilities.gates]]
 kind = "system clock"
