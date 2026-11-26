@@ -812,25 +812,42 @@ The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. Coven
 reads the last row's values from the result, so the statement must also return
 each ORDER BY term as a result column, listed before any `*` and written as the
-term writes it. Each term reads one table, with no COLLATE and no NULLS
-FIRST or LAST, and is one of these:
+term writes it, with or without the COLLATE it ends in (below). Each term
+reads one table, with no NULLS FIRST or LAST, and is one of these:
 
-- a stored column whose collation is BINARY, which coven compares itself;
+- a stored column, in any collation;
 - an expression over that table's stored BINARY columns, such as `year IS
   NULL` or `coalesce(year, 0) + 1`, that holds no subquery, no `rowid`, no
   clock and no function that isn't deterministic;
 - a generated column whose collation is BINARY and whose expression names only
   that table's stored BINARY columns.
 
-To judge a write for a term that isn't a stored column, coven asks SQLite to
-compare the term's value in the changed row with the last row's, as it judges a
-condition on one table's row (below): a SELECT over the row's values that
-evaluates the expression, or a generated column's own expression. Coven
-writes the expression after a unary plus, as `+(year IS NULL) < ?3`, which
-takes away its affinity, so SQLite compares the two values as the ORDER BY
-does. For a generated column, coven gives the last row's value the column's
-type, as `CAST(?3 AS INTEGER)` in an INTEGER column, so SQLite converts the
-expression's value as it does the column's. Ben's album grid sorted by year
+A term may end in one COLLATE, as `title COLLATE NOCASE`, which gives it that
+collation. A COLLATE anywhere else in the term, or an expression over a column
+that isn't BINARY, leaves the scope as the WHERE gives it. Without a COLLATE, a
+stored column sorts in the collation it declares and any other term in BINARY,
+as SQLite sorts it. The collation can be one of SQLite's own, `BINARY`,
+`NOCASE` or `RTRIM`, or one the app registered, as described near the end of
+this section. Coven keeps no list of collations, so a collation the app adds
+later narrows with no change to coven.
+
+To judge a write for a term, coven asks SQLite to compare the term's value in
+the changed row with the last row's, as it judges a condition on one table's
+row (below): a SELECT over the row's values that evaluates the expression, the
+column or a generated column's own expression, in the term's collation. Coven
+writes the expression after a unary plus and names the collation, as
+`+(title) COLLATE natural_order < ?3`. The plus takes away the expression's
+affinity, so SQLite compares the two values as the ORDER BY does, and the
+COLLATE makes it compare text by the app's function, the same function the
+ORDER BY runs. Values that are not text compare as they always do. For a
+generated column, coven gives the last row's value the column's type, as
+`CAST(?3 AS INTEGER)` in an INTEGER column, so SQLite converts the
+expression's value as it does the column's. Two values that the collation
+ties, such as `'Rock'` and `'rock'` in NOCASE, count as equal, so a row that
+ties with the last row on every term still passes. Ana's import list sorts
+paths with `ORDER BY path COLLATE natural_order, id` and returns both terms, so
+a full window that ends at "Track 12" doesn't rerun when she adds "Track 40".
+Ben's album grid sorted by year
 orders by `year IS NULL, year, id` and returns each term, so a full window
 that ends in 1998 doesn't rerun when Ben adds an album from 2004. His storage
 list sorts by `storage_order`, a generated column that ranks how each release
@@ -865,9 +882,9 @@ before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
 and no aggregate or window function in its result columns, since there one
 result row's values depend on many table rows. A join that narrows another
 table by a sorted table's rows takes only the rows within that table's bound.
-Any other ORDER BY, such as one by a result column's position, by a NOCASE
-column or by an expression over two tables, and any OFFSET leave the scope as
-the WHERE gives it.
+Any other ORDER BY, such as one by a result column's position or by an
+expression over two tables, and any OFFSET leave the scope as the WHERE gives
+it.
 
 Which rows a LIMIT keeps can depend on columns the statement never names.
 SQLite keeps the first rows it reads, and it reads them in the order of the
@@ -15632,7 +15649,7 @@ Write-ups explain each model and state its assumptions:
 | An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/RowMember.lean` | §4 |
 | A parenthesized join gives the rows its tables give joined one after another: an inner join of one always, its ON read with the WHERE, and a LEFT JOIN of one when its ON names no table of the join but the first and each later table is a LEFT JOIN's whose ON can't hold where a table before it has no row | `left_group_flat`, `inner_group_flat` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Parenthesized.lean` | §4 |
 | A FROM item that names a CTE reads the innermost CTE of that name visible where it is, and a WITH that doesn't declare the name changes nothing of what it names inside, so an outer CTE's query reads the outer CTEs | `resolve_inner`, `resolve_outer` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/CteNames.lean` | §4 |
-| A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
+| A full run of a statement with a LIMIT depends only on the rows that sort at or before its last row; an ORDER BY term that is a column or an expression over one table's columns, in any collation that orders values by a key, gives each binding the value its key gives the table's row; a run of terms over one table bounds that table's rows at or before the last row's values of the run, a row that ties with the last row's values counting as at or before them, and a later run's table by those rows or by the rows that join an earlier run's table's rows that sort before that run's values, so each table's bound passes its row in each binding that sorts at or before the last row | `limit_sound`, `sortKey_value`, `termKey_value`, `sortedBefore_passes`, `atOrBefore_passes`, `runBound_passes`, `joined_passes` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Limit.lean` | §4 |
 | A LIMIT or OFFSET with no ORDER BY can keep any of its rows, as SQLite's plan orders them; a query that aggregates with no GROUP BY, or whose ORDER BY sorts by each table's rowid, keeps the same rows in every order; an aggregate's column outside every GROUP BY term can show any of its group's rows, `group_concat` with no ORDER BY of its own joins its values in the order SQLite reads them, and `max` and a GROUP BY term each keep the first of the values that compare equal that they read; DISTINCT, UNION, INTERSECT and EXCEPT keep one of each set of rows that compare equal, which the order they read them in decides; `row_number()` numbers rows its window's ORDER BY doesn't tell apart in the order SQLite reads them; any other SELECT gives the same rows in every order; a change to any column of a table that a query whose rows SQLite picks, or a SELECT whose rows follow that order, reads reruns it | `post_picks_any`, `fullyOrders_sound`, `bare_picks_any`, `concat_follows_order`, `max_keeps_first`, `distinct_keeps_first`, `rowNumber_follows_order`, `orderFree_rows_perm`, `picked_column_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Pick.lean` | §4 |
 | A statement read whole reruns on every change of a column it reads | `whole_sound` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Whole.lean` | §4 |
 | A row's update that FTS5 makes as a delete and an insert reruns a statement wherever the update would | `rewrite_reruns` | `../crates/sqlive/proofs/SqliveNarrowing/Rules/Virtual.lean` | §4 |
