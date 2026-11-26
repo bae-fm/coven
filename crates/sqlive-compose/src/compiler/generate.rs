@@ -152,11 +152,38 @@ pub(crate) fn fragment(header: &Header, fields: &[Field], exported: bool) -> Str
 /// nothing can reach (`unreachable_pub`). The row derives what an app needs to
 /// keep and compare it.
 pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool) -> String {
-    let visibility = visibility(exported);
+    statement(header, sql, fields, Form::Read { exported })
+}
+
+/// A write's statement and parameters, and its row when it returns columns.
+/// Its items are `pub(crate)` whatever the modules around the call: only the
+/// crate that writes a table's SQL changes it, so no other crate reaches the
+/// write's items.
+pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
+    statement(header, sql, fields, Form::Write)
+}
+
+/// What a generated statement is.
+#[derive(Clone, Copy)]
+enum Form {
+    /// A read, whose items have inherent `params` and `read` functions beside
+    /// the trait impls.
+    Read { exported: bool },
+    /// A write.
+    Write,
+}
+
+/// The unit struct with the statement, the parameters struct, the row struct
+/// when the statement returns columns, and the trait impls of the call.
+fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String {
+    let (visibility, noun) = match form {
+        Form::Read { exported } => (visibility(exported), "read"),
+        Form::Write => (visibility(false), "write"),
+    };
     let name = ident(&header.name);
     let params_name = format_ident!("{}Params", header.name);
     let row_name = format_ident!("{}Row", header.name);
-    let doc = format!("The `{}` read.", header.name);
+    let doc = format!("The `{}` {noun}.", header.name);
     let sql = Literal::string(sql);
     let parameter_names: Vec<Ident> =
         header.parameters.iter().map(|parameter| ident(&parameter.name)).collect();
@@ -164,17 +191,74 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool)
         header.parameters.iter().map(|Parameter { ty, .. }| rust_type(ty)).collect();
     let bound: Vec<String> =
         header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
-    let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
-    let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
-    let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
-    let row = row_type();
-    let result = path("sqlive_reads::SqliteResult");
+    let lifetime = if header.borrows() { quote!(<'p>) } else { quote!() };
     let to_sql = path("sqlive_reads::ToSql");
     let statement = quote!(::sqlive_compose::Statement);
-    let read_trait = quote!(::sqlive_compose::Read);
-    let params_doc = format!("What the `{}` read's request binds.", header.name);
-    let row_doc = format!("A row of the `{}` read.", header.name);
+    let params_doc = match form {
+        Form::Read { .. } => format!("What the `{}` read's request binds.", header.name),
+        Form::Write => format!("What the `{}` write binds.", header.name),
+    };
     let shapes = shapes(&header.shapes, &visibility);
+    let params_inherent = match form {
+        Form::Read { .. } => quote! {
+            impl #params_name {
+                /// The parameters by their names in the statement.
+                #visibility fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
+                    <Self as #statement>::params(self)
+                }
+            }
+        },
+        Form::Write => quote!(),
+    };
+    let rows = if fields.is_empty() {
+        let write_trait = quote!(::sqlive_compose::Write);
+        quote!(impl #lifetime #write_trait for #params_name #lifetime {})
+    } else {
+        let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
+        let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
+        let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
+        let row = row_type();
+        let result = path("sqlive_reads::SqliteResult");
+        let row_doc = format!("A row of the `{}` {noun}.", header.name);
+        let returning = quote!(::sqlive_compose::Returning);
+        let (marker, row_inherent) = match form {
+            Form::Read { .. } => (
+                quote!(::sqlive_compose::Read),
+                quote! {
+                    impl #row_name {
+                        /// Reads a row of the statement.
+                        #visibility fn read(row: #row) -> #result<Self> {
+                            <#params_name as #returning>::read(row)
+                        }
+                    }
+                },
+            ),
+            Form::Write => (quote!(::sqlive_compose::WriteReturning), quote!()),
+        };
+        quote! {
+            #[doc = #row_doc]
+            #[derive(Clone, Debug, PartialEq)]
+            #visibility struct #row_name {
+                #(
+                    #[allow(missing_docs)]
+                    #visibility #names: #types,
+                )*
+            }
+
+            #row_inherent
+
+            impl #lifetime #returning for #params_name #lifetime {
+                type Row = #row_name;
+
+                fn read(row: #row) -> #result<#row_name> {
+                    let offset = 0;
+                    Ok(#row_name { #(#names: #reads,)* })
+                }
+            }
+
+            impl #lifetime #marker for #params_name #lifetime {}
+        }
+    };
     quote! {
         #shapes
 
@@ -187,78 +271,15 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool)
         }
 
         #[doc = #params_doc]
-        #visibility struct #params_name {
+        #visibility struct #params_name #lifetime {
             #(
                 #[allow(missing_docs)]
                 #visibility #parameter_names: #parameter_types,
             )*
         }
 
-        impl #params_name {
-            /// The parameters by their names in the statement.
-            #visibility fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
-                vec![#((#bound, &self.#parameter_names as &dyn #to_sql),)*]
-            }
-        }
+        #params_inherent
 
-        impl #statement for #params_name {
-            const SQL: &'static str = #name::SQL;
-
-            fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
-                #params_name::params(self)
-            }
-        }
-
-        impl #read_trait for #params_name {
-            type Row = #row_name;
-
-            fn read(row: #row) -> #result<#row_name> {
-                #row_name::read(row)
-            }
-        }
-
-        #[doc = #row_doc]
-        #[derive(Clone, Debug, PartialEq)]
-        #visibility struct #row_name {
-            #(
-                #[allow(missing_docs)]
-                #visibility #names: #types,
-            )*
-        }
-
-        impl #row_name {
-            /// Reads a row of the statement.
-            #visibility fn read(row: #row) -> #result<Self> {
-                let offset = 0;
-                Ok(Self { #(#names: #reads,)* })
-            }
-        }
-    }
-    .to_string()
-}
-
-/// A write's statement and parameters, and its row when it returns columns.
-/// Its items are `pub(crate)` whatever the modules around the call: only the
-/// crate that writes a table's SQL changes it, so no other crate reaches the
-/// write's items.
-pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
-    let name = ident(&header.name);
-    let params_name = format_ident!("{}Params", header.name);
-    let row_name = format_ident!("{}Row", header.name);
-    let doc = format!("The `{}` write.", header.name);
-    let sql = Literal::string(sql);
-    let parameter_names: Vec<Ident> =
-        header.parameters.iter().map(|parameter| ident(&parameter.name)).collect();
-    let parameter_types: Vec<TokenStream> =
-        header.parameters.iter().map(|Parameter { ty, .. }| rust_type(ty)).collect();
-    let bound: Vec<String> =
-        header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
-    let lifetime = if header.borrows() { quote!(<'p>) } else { quote!() };
-    let to_sql = path("sqlive_reads::ToSql");
-    let statement = quote!(::sqlive_compose::Statement);
-    let params_doc = format!("What the `{}` write binds.", header.name);
-    let shapes = shapes(&header.shapes, &quote!(pub(crate)));
-    let statement_impl = quote! {
         impl #lifetime #statement for #params_name #lifetime {
             const SQL: &'static str = #name::SQL;
 
@@ -266,60 +287,6 @@ pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
                 vec![#((#bound, &self.#parameter_names as &dyn #to_sql),)*]
             }
         }
-    };
-    let rows = if fields.is_empty() {
-        let write_trait = quote!(::sqlive_compose::Write);
-        quote! {
-            impl #lifetime #write_trait for #params_name #lifetime {}
-        }
-    } else {
-        let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
-        let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
-        let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
-        let row = row_type();
-        let result = path("sqlive_reads::SqliteResult");
-        let row_doc = format!("A row that the `{}` write returns.", header.name);
-        let returning = quote!(::sqlive_compose::WriteReturning);
-        quote! {
-            #[doc = #row_doc]
-            #[derive(Clone, Debug, PartialEq)]
-            pub(crate) struct #row_name {
-                #(
-                    #[allow(missing_docs)]
-                    pub(crate) #names: #types,
-                )*
-            }
-
-            impl #lifetime #returning for #params_name #lifetime {
-                type Row = #row_name;
-
-                fn read(row: #row) -> #result<#row_name> {
-                    let offset = 0;
-                    Ok(#row_name { #(#names: #reads,)* })
-                }
-            }
-        }
-    };
-    quote! {
-        #shapes
-
-        #[doc = #doc]
-        pub(crate) struct #name;
-
-        impl #name {
-            /// The composed statement.
-            pub(crate) const SQL: &'static str = #sql;
-        }
-
-        #[doc = #params_doc]
-        pub(crate) struct #params_name #lifetime {
-            #(
-                #[allow(missing_docs)]
-                pub(crate) #parameter_names: #parameter_types,
-            )*
-        }
-
-        #statement_impl
 
         #rows
     }

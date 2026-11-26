@@ -3,7 +3,10 @@
 //! NOT NULL column (`SPEC.md`, section 8). SQLite and the schema check the
 //! rest of the statement.
 
-use super::core::{alias_at, matching, result_items, Core, FromItem, Item, Source};
+use super::core::{
+    from_item, matching, result_items, top_level_parts, Core, FromItem, Item, ItemKind, Join,
+    Source,
+};
 use super::error::Cause;
 use super::header::Header;
 use super::lex::{Kind, Token};
@@ -12,6 +15,8 @@ use super::lex::{Kind, Token};
 pub(crate) struct Target {
     /// What the write does to it.
     verb: Verb,
+    /// The table's name, lowercase.
+    pub(crate) table: String,
     /// The table as a FROM item reads it: its alias, else its name. A spread
     /// that reads a parent row may name it, since the write changes rows of
     /// the table.
@@ -57,31 +62,40 @@ pub(crate) fn target(sql: &str, tokens: &[Token]) -> Option<Target> {
         }
         _ => return None,
     };
-    let (name, at, mut after) = table_name(sql, tokens, table)?;
-    let mut alias = None;
-    if verb == Verb::Insert {
-        // An INSERT's alias follows AS, so that VALUES and SELECT are no alias.
-        if tokens.get(after).is_some_and(|token| token.is_word(sql, "as")) {
-            alias = tokens.get(after + 1).and_then(|token| token.name(sql));
-            after += 2;
-        }
-    } else if let Some((found, used)) = alias_at(sql, tokens, after, tokens.len()) {
-        alias = Some(found);
-        after += used;
-    }
-    let qualified = tokens.get(table + 1).is_some_and(|dot| dot.is_symbol(sql, '.'));
-    let source = if qualified {
-        Source::Qualified { name: name.clone() }
+    let (item, after) = if verb == Verb::Insert {
+        inserted_table(sql, tokens, table)?
     } else {
+        let (item, after) = from_item(sql, tokens, table, tokens.len(), Join::Inner);
+        (item, after?)
+    };
+    let table = item.table()?.to_owned();
+    Some(Target { verb, table, item, after })
+}
+
+/// The table an INSERT names at `at`, which a schema's name may qualify, and
+/// the index after it and its alias. An INSERT's alias follows AS, so that
+/// VALUES and SELECT are no alias.
+fn inserted_table(sql: &str, tokens: &[Token], at: usize) -> Option<(FromItem, usize)> {
+    let first = tokens.get(at)?.name(sql)?;
+    let (name, name_at, mut after) =
+        if tokens.get(at + 1).is_some_and(|dot| dot.is_symbol(sql, '.')) {
+            (tokens.get(at + 2)?.name(sql)?, at + 2, at + 3)
+        } else {
+            (first, at, at + 1)
+        };
+    let mut alias = None;
+    if tokens.get(after).is_some_and(|token| token.is_word(sql, "as")) {
+        alias = tokens.get(after + 1).and_then(|token| token.name(sql));
+        after += 2;
+    }
+    let source = if name_at == at {
         Source::Table { name: name.clone(), at }
+    } else {
+        Source::Qualified { name: name.clone() }
     };
-    let item = FromItem {
-        qualifier: alias.clone().or(Some(name)),
-        alias,
-        source,
-        join: super::core::Join::Inner,
-    };
-    Some(Target { verb, item, after })
+    let item =
+        FromItem { qualifier: alias.clone().or(Some(name)), alias, source, join: Join::Inner };
+    Some((item, after))
 }
 
 /// The index of the word that starts the statement: the first token, or the
@@ -106,17 +120,6 @@ fn statement_keyword(sql: &str, tokens: &[Token]) -> Option<usize> {
         }
     }
     None
-}
-
-/// The table named at `at`, which a schema's name may qualify: its name, the
-/// index of the token that holds it, and the index after it.
-fn table_name(sql: &str, tokens: &[Token], at: usize) -> Option<(String, usize, usize)> {
-    let first = tokens.get(at)?.name(sql)?;
-    if tokens.get(at + 1).is_some_and(|dot| dot.is_symbol(sql, '.')) {
-        let table = tokens.get(at + 2)?.name(sql)?;
-        return Some((table, at + 2, at + 3));
-    }
-    Some((first, at, at + 1))
 }
 
 /// The RETURNING items of the statement as the items of a core that reads the
@@ -214,7 +217,7 @@ fn inserted_values(
         at += 1;
         while tokens.get(at).is_some_and(|open| open.is_symbol(sql, '(')) {
             let Some(close) = matching(sql, tokens, at) else { return };
-            for (name, range) in names.iter().zip(split(sql, tokens, at + 1..close)) {
+            for (name, range) in names.iter().zip(top_level_parts(sql, tokens, at + 1..close)) {
                 if let Some(parameter) = lone_parameter(sql, tokens, range) {
                     values.push((name.clone(), parameter));
                 }
@@ -228,10 +231,7 @@ fn inserted_values(
     }
     if tokens.get(at).is_some_and(|token| token.is_word(sql, "select")) {
         for (name, item) in names.iter().zip(select_items) {
-            if matches!(
-                item.kind,
-                super::core::ItemKind::Star | super::core::ItemKind::QualifiedStar(_)
-            ) {
+            if matches!(item.kind, ItemKind::Star | ItemKind::QualifiedStar(_)) {
                 return;
             }
             if let Some(parameter) = lone_parameter(sql, tokens, item.tokens.clone()) {
@@ -239,31 +239,6 @@ fn inserted_values(
             }
         }
     }
-}
-
-/// The ranges of the comma-separated parts of `range`, at its own depth.
-fn split(
-    sql: &str,
-    tokens: &[Token],
-    range: std::ops::Range<usize>,
-) -> Vec<std::ops::Range<usize>> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = range.start;
-    for index in range.clone() {
-        if tokens[index].is_symbol(sql, '(') {
-            depth += 1;
-        } else if tokens[index].is_symbol(sql, ')') {
-            depth = depth.saturating_sub(1);
-        } else if depth == 0 && tokens[index].is_symbol(sql, ',') {
-            parts.push(start..index);
-            start = index + 1;
-        }
-    }
-    if start < range.end {
-        parts.push(start..range.end);
-    }
-    parts
 }
 
 /// The columns that `column = :parameter` assigns in the SET that follows
@@ -310,7 +285,7 @@ fn assignments_after(
         }
     }
     let mut found = Vec::new();
-    for part in split(sql, tokens, start..end) {
+    for part in top_level_parts(sql, tokens, start..end) {
         let [column, equals, ..] = &tokens[part.clone()] else { continue };
         let (Some(column), true) = (column.name(sql), equals.is_symbol(sql, '=')) else { continue };
         if let Some(parameter) = lone_parameter(sql, tokens, part.start + 2..part.end) {

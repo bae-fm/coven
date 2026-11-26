@@ -23,7 +23,7 @@ pub trait Statement {
 }
 
 /// A generated statement that returns rows, and the row it reads them as.
-pub trait Read: Statement {
+pub trait Returning: Statement {
     /// The row of the statement.
     type Row;
 
@@ -34,23 +34,15 @@ pub trait Read: Statement {
     /// Returns the error of a column that doesn't read as its field's type.
     fn read(row: &Row<'_>) -> SqliteResult<Self::Row>;
 }
+
+/// A generated read.
+pub trait Read: Returning {}
 
 /// A generated write that returns no rows.
 pub trait Write: Statement {}
 
-/// A generated write that returns rows through RETURNING, and the row it
-/// reads them as.
-pub trait WriteReturning: Statement {
-    /// The row of the statement.
-    type Row;
-
-    /// Reads a row of the statement.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of a column that doesn't read as its field's type.
-    fn read(row: &Row<'_>) -> SqliteResult<Self::Row>;
-}
+/// A generated write that returns rows through RETURNING.
+pub trait WriteReturning: Returning {}
 
 /// What the code the compiler writes names: the crates it reads rows with and
 /// decodes JSON with, so an app lists none of them.

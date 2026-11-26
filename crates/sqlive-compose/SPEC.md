@@ -1010,16 +1010,20 @@ pub trait Statement {
 }
 
 /// A generated statement that returns rows.
-pub trait Read: Statement {
+pub trait Returning: Statement {
     /// The row of the statement.
     type Row;
     /// Reads a row of the statement.
     fn read(row: &Row<'_>) -> rusqlite::Result<Self::Row>;
 }
+
+/// A generated read.
+pub trait Read: Returning {}
 ```
 
-`IssuePageParams` implements `Statement` with `IssuePage::SQL` and its own
-`params`, and `Read` with `Row = IssuePageRow` and the row's `read`. Both traits
+`IssuePageParams` implements `Statement` with `IssuePage::SQL` and the
+parameters it binds, `Returning` with `Row = IssuePageRow` and the row's `read`,
+and the marker `Read`. Both traits
 are public whatever the visibility of the read's items.
 
 The row derives `Clone`, `PartialEq` and `Debug`, so an app can use it as its
@@ -1369,7 +1373,7 @@ The parameters struct implements the traits of section 9, which a store takes:
 | Trait | Implemented by | What it adds to `Statement` |
 |---|---|---|
 | `Write` | the parameters of a write with no RETURNING | nothing |
-| `WriteReturning` | the parameters of a write with RETURNING | `Row`, and `read` of one row |
+| `WriteReturning` | the parameters of a write with RETURNING | `Returning`'s `Row` and `read` of one row |
 
 The struct has the lifetime `'p` only when a parameter names it, and the row
 exists only when the statement returns columns. A write's items are always
@@ -1445,7 +1449,7 @@ rest of the statement, so the compiler warns and the build goes on.
 | Macro call | Generated |
 |---|---|
 | `fragment!(Person …)` | `Person`, with `read`, and one struct for each JSON shape |
-| `read!(IssuePage …)` | `IssuePage::SQL`, `IssuePageParams` with its `Statement` and `Read` impls, `IssuePageRow` |
-| `write!(OpenIssue …)` | `OpenIssue::SQL`, `OpenIssueParams` with its `Statement` and `Write` or `WriteReturning` impl, and `OpenIssueRow` when it returns columns |
+| `read!(IssuePage …)` | `IssuePage::SQL`, `IssuePageParams` with its `Statement`, `Returning` and `Read` impls, `IssuePageRow` |
+| `write!(OpenIssue …)` | `OpenIssue::SQL`, `OpenIssueParams` with its `Statement` impl and its `Write` impl, or its `Returning` and `WriteReturning` impls, and `OpenIssueRow` when it returns columns |
 | A CTE or a relation of a fragment | `<crate>__<fragment>__<name>` |
 | The file of either macro | `OUT_DIR/sqlive_compose/<Name>.rs` |

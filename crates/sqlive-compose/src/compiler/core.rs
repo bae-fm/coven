@@ -241,24 +241,35 @@ pub(crate) fn result_items(sql: &str, tokens: &[Token], range: Range<usize>) -> 
     {
         start += 1;
     }
-    let mut items = Vec::new();
+    top_level_parts(sql, tokens, start..range.end)
+        .into_iter()
+        .map(|part| item(sql, tokens, part))
+        .collect()
+}
+
+/// The ranges of the comma-separated parts of `range`, at its own depth.
+pub(crate) fn top_level_parts(
+    sql: &str,
+    tokens: &[Token],
+    range: Range<usize>,
+) -> Vec<Range<usize>> {
+    let mut parts = Vec::new();
     let mut depth = 0usize;
-    let mut item_start = start;
-    for index in start..range.end {
-        let token = &tokens[index];
-        if token.is_symbol(sql, '(') {
+    let mut start = range.start;
+    for index in range.clone() {
+        if tokens[index].is_symbol(sql, '(') {
             depth += 1;
-        } else if token.is_symbol(sql, ')') {
+        } else if tokens[index].is_symbol(sql, ')') {
             depth = depth.saturating_sub(1);
-        } else if depth == 0 && token.is_symbol(sql, ',') {
-            items.push(item(sql, tokens, item_start..index));
-            item_start = index + 1;
+        } else if depth == 0 && tokens[index].is_symbol(sql, ',') {
+            parts.push(start..index);
+            start = index + 1;
         }
     }
-    if item_start < range.end {
-        items.push(item(sql, tokens, item_start..range.end));
+    if start < range.end {
+        parts.push(start..range.end);
     }
-    items
+    parts
 }
 
 fn item(sql: &str, tokens: &[Token], range: Range<usize>) -> Item {
@@ -402,7 +413,7 @@ fn clause_end(sql: &str, tokens: &[Token], from: usize) -> usize {
 
 /// The FROM item that starts at `index`, and where the next token after it
 /// is, or `None` when the tokens there aren't an item.
-fn from_item(
+pub(crate) fn from_item(
     sql: &str,
     tokens: &[Token],
     index: usize,

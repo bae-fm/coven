@@ -159,9 +159,8 @@ fn compile_write(
     check_spreads(&expansion.placed, &from).map_err(&fail)?;
     let prepared = context.probe.prepare(sql).map_err(|error| fail(Cause::Sqlite(error)))?;
     check_parameters(header, &prepared).map_err(&fail)?;
-    let table = target.item.table().unwrap_or_default();
     let table_columns =
-        context.probe.table_columns(table).map_err(|error| fail(Cause::Sqlite(error)))?;
+        context.probe.table_columns(&target.table).map_err(|error| fail(Cause::Sqlite(error)))?;
     let outline = core::outline(sql, &tokens);
     write::check_not_null(header, sql, &tokens, &target, &table_columns, &outline.items)
         .map_err(&fail)?;
