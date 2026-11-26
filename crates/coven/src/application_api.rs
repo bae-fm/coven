@@ -61,7 +61,7 @@ pub use coven_database::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_format::admin::StoreChange;
-pub use coven_schema::readable_objects_sql;
+pub use coven_schema::{readable_objects_sql, SqlFunction, SQL_FUNCTIONS};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_sync::{RecordedInvite, RecordedInviteStage, RecordedJoiner};
 

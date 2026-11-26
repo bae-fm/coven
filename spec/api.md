@@ -4219,6 +4219,22 @@ pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId
 /// re-exports it.
 pub fn readable_objects_sql() -> String;
 
+/// Every SQL function coven registers on a store's connection, by name, with
+/// its argument count (-1 for any number) and whether it is deterministic:
+/// the functions that `make_readable_objects` registers, which coven's views
+/// call and app SQL may call. A build script that checks app SQL against the
+/// objects of `readable_objects_sql` registers a stand-in for each, so the
+/// SQL prepares with no connection to a store. `coven-schema` defines the
+/// list, and `coven` re-exports it with `SqlFunction`.
+pub const SQL_FUNCTIONS: [SqlFunction; 28];
+
+/// One entry of `SQL_FUNCTIONS`.
+pub struct SqlFunction {
+    pub name: &'static str,
+    pub arguments: i32,
+    pub deterministic: bool,
+}
+
 /// Journals `invite` on a connection `make_readable_objects` prepared, as
 /// creating an invite and its later steps do, returning its operation (E4).
 #[cfg(feature = "test-utils")]

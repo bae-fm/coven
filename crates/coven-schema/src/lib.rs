@@ -12,6 +12,9 @@
 //! coven-format's snapshot field encodings inside blobs.
 
 mod shared_text;
+mod sql_functions;
+
+pub use sql_functions::{SqlFunction, SQL_FUNCTIONS};
 
 /// The chunk number of a cache entry's header.
 pub const CACHE_HEADER: i64 = -1;

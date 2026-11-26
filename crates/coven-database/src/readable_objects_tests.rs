@@ -198,3 +198,36 @@ fn an_app_trigger_reads_a_recorded_original_outside_a_store() {
         .unwrap();
     assert_eq!(original, (1, "/music/track 1.flac".to_owned(), 17, 1_700_000_000, 300));
 }
+
+/// `coven_schema::SQL_FUNCTIONS` lists exactly the functions of coven's that
+/// `make_readable_objects` registers, each with its argument count and
+/// whether it is deterministic.
+#[test]
+fn the_exported_function_list_is_what_the_connection_registers() {
+    const DETERMINISTIC: i64 = 0x800;
+    let outside = outside_store();
+    let mut statement = outside
+        .prepare(
+            "SELECT name, narg, flags FROM pragma_function_list
+             WHERE name LIKE 'coven\\_%' ESCAPE '\\' OR name LIKE '\\_coven\\_%' ESCAPE '\\'
+             ORDER BY name",
+        )
+        .unwrap();
+    let registered: Vec<coven_schema::SqlFunction> = statement
+        .query_map([], |r| {
+            let name: String = r.get(0)?;
+            Ok((name, r.get::<_, i32>(1)?, r.get::<_, i64>(2)? & DETERMINISTIC != 0))
+        })
+        .unwrap()
+        .map(|row| {
+            let (name, arguments, deterministic) = row.unwrap();
+            let listed = coven_schema::SQL_FUNCTIONS.iter().find(|function| function.name == name);
+            coven_schema::SqlFunction {
+                name: listed.map_or("(not in the list)", |function| function.name),
+                arguments,
+                deterministic,
+            }
+        })
+        .collect();
+    assert_eq!(registered, coven_schema::SQL_FUNCTIONS);
+}

@@ -727,7 +727,10 @@ coven's SQL functions, each as a store makes it
 ([api.md E4](api.md#e4-reading)). coven writes no rows on that connection.
 A build script that checks the app's SQL against those objects calls
 `readable_objects_sql` of `coven-schema`, which returns the SQL that makes
-them as text, opens no connection and compiles no async runtime. Ben's test
+them as text, opens no connection and compiles no async runtime. It reads
+`SQL_FUNCTIONS` of the same crate for the functions the SQL calls: the name,
+argument count and determinism of each function coven registers, which a
+test of coven-database keeps equal to what a connection holds. Ben's test
 writes the rows coven would write in the tables his triggers fire on, and
 records each track's original with `record_user_file`, which writes what
 staging the original writes.
