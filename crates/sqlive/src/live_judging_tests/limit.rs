@@ -315,17 +315,17 @@ async fn a_later_runs_table_that_takes_no_values_from_an_earlier_ones_has_no_bou
 }
 
 /// With an OFFSET, an ORDER BY column or expression the statement doesn't
-/// return, or a COLLATE, the scope stays as the WHERE gives it, so a row added
-/// after the window's last row reruns the window.
+/// return, or a COLLATE inside a term, the scope stays as the WHERE gives it,
+/// so a row added after the window's last row reruns the window.
 #[tokio::test]
-async fn an_offset_an_unreturned_term_or_a_collate_narrows_nothing_more() {
+async fn an_offset_an_unreturned_term_or_a_nested_collate_narrows_nothing_more() {
     let db = TestDatabase::open(NOTES);
     for sql in [
         "SELECT title, id FROM notes ORDER BY title LIMIT 2 OFFSET 1",
         "SELECT id FROM notes ORDER BY title LIMIT 2",
         "SELECT title, id FROM notes ORDER BY lower(title) LIMIT 2",
-        "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE LIMIT 2",
-        "SELECT title, id, lower(title) COLLATE NOCASE FROM notes ORDER BY lower(title) COLLATE NOCASE LIMIT 2",
+        "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE || '' LIMIT 2",
+        "SELECT title, id, (title COLLATE NOCASE) || '' FROM notes ORDER BY (title COLLATE NOCASE) || '' LIMIT 2",
     ] {
         follows(&db, sql, vec![], &[("INSERT INTO notes VALUES (7,'z','')", true)]).await;
         db.commit("DELETE FROM notes WHERE id = 7");
@@ -644,6 +644,226 @@ INSERT INTO ratings VALUES (1,2,5),(2,3,6),(3,4,7)",
     follows(&db, "SELECT r.stars, a.id FROM albums a LEFT JOIN ratings r ON r.album = a.id ORDER BY r.stars LIMIT 2", vec![], &[
         ("INSERT INTO ratings VALUES (4,1,9)", true),
     ])
+    .await;
+    db.close();
+}
+
+/// The first six titles, in letters of both cases: NOCASE sorts them b, D, f,
+/// H, j, L, and BINARY sorts the capitals first.
+const MIXED: &str = "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT, body TEXT);
+INSERT INTO notes VALUES (1,'b',''),(2,'D',''),(3,'f',''),(4,'H',''),(5,'j',''),(6,'L','')";
+
+/// A term that ends in COLLATE NOCASE bounds the window by NOCASE's order:
+/// a title that sorts after the window's last by NOCASE reruns nothing,
+/// whatever its case, and one that sorts inside it does. A title that ties
+/// with the last row's decides by the next term.
+#[tokio::test]
+async fn a_nocase_term_bounds_a_window_by_nocase() {
+    let db = TestDatabase::open(MIXED);
+    // b, D and f.
+    follows(
+        &db,
+        "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (7,'G','')", false),
+            ("INSERT INTO notes VALUES (8,'z','')", false),
+            ("UPDATE notes SET body = 'x' WHERE id = 5", false),
+            // Ties with 'f' and sorts after it by id.
+            ("INSERT INTO notes VALUES (9,'F','')", false),
+            // Sorts before the last row by BINARY too; inside by NOCASE.
+            ("INSERT INTO notes VALUES (10,'E','')", true),
+            // The window is now b, D and E.
+            ("INSERT INTO notes VALUES (11,'e','')", false),
+            ("INSERT INTO notes VALUES (0,'A','')", true),
+            ("UPDATE notes SET title = 'dd' WHERE id = 2", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// The result column may write the term without its COLLATE, and a column
+/// that declares NOCASE sorts by it with no COLLATE in the term.
+#[tokio::test]
+async fn a_declared_nocase_column_and_a_returned_column_without_the_collate_bound_a_window() {
+    let db = TestDatabase::open(
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT COLLATE NOCASE, body TEXT);
+INSERT INTO notes VALUES (1,'b',''),(2,'D',''),(3,'f',''),(4,'H',''),(5,'j','')",
+    );
+    for sql in [
+        "SELECT title, id FROM notes ORDER BY title, id LIMIT 3",
+        "SELECT title, id FROM notes ORDER BY title COLLATE NOCASE, id LIMIT 3",
+        "SELECT title COLLATE NOCASE, id FROM notes ORDER BY title, id LIMIT 3",
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[
+                ("INSERT INTO notes VALUES (7,'G','')", false),
+                ("INSERT INTO notes VALUES (8,'E','')", true),
+            ],
+        )
+        .await;
+        db.commit("DELETE FROM notes WHERE id IN (7, 8)");
+    }
+    db.close();
+}
+
+/// A descending term and an RTRIM one, and NULLs, which sort first.
+#[tokio::test]
+async fn descending_rtrim_and_null_terms_bound_a_window() {
+    let db = TestDatabase::open(
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT COLLATE RTRIM, body TEXT);
+INSERT INTO notes VALUES (1,'b',''),(2,'d ',''),(3,'f',''),(4,'h',''),(5,NULL,'')",
+    );
+    // h, f and 'd ': RTRIM ties 'd' with 'd '.
+    follows(
+        &db,
+        "SELECT title, id FROM notes ORDER BY title DESC, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (7,'c','')", false),
+            ("INSERT INTO notes VALUES (8,NULL,'')", false),
+            ("INSERT INTO notes VALUES (9,'d  ','')", false),
+            ("INSERT INTO notes VALUES (10,'d',NULL)", false),
+            ("INSERT INTO notes VALUES (0,'d','')", true),
+            ("INSERT INTO notes VALUES (11,'g','')", true),
+        ],
+    )
+    .await;
+    // NULL, then b and 'd '.
+    follows(
+        &db,
+        "SELECT title, id FROM notes WHERE id BETWEEN 1 AND 6 ORDER BY title, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (6,'e','')", false),
+            ("UPDATE notes SET title = 'c' WHERE id = 4", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// The numbers in two strings compare as numbers, which no collation of
+/// SQLite's does.
+fn natural(left: &str, right: &str) -> std::cmp::Ordering {
+    fn split(text: &str) -> Vec<(bool, String)> {
+        let mut parts: Vec<(bool, String)> = Vec::new();
+        for character in text.chars() {
+            let digit = character.is_ascii_digit();
+            match parts.last_mut() {
+                Some((last, run)) if *last == digit => run.push(character),
+                _ => parts.push((digit, character.to_string())),
+            }
+        }
+        parts
+    }
+    let (left, right) = (split(left), split(right));
+    for ((left_digit, left_run), (right_digit, right_run)) in left.iter().zip(&right) {
+        let order = if *left_digit && *right_digit {
+            let (left_run, right_run) =
+                (left_run.trim_start_matches('0'), right_run.trim_start_matches('0'));
+            left_run.len().cmp(&right_run.len()).then_with(|| left_run.cmp(right_run))
+        } else {
+            left_run.cmp(right_run)
+        };
+        if order.is_ne() {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn options(collations: Vec<crate::tests::Collation>) -> crate::tests::TestOptions {
+    crate::tests::TestOptions { collations, ..Default::default() }
+}
+
+/// A collation the app registered bounds a window by the app's own
+/// function, with no change to sqlive, whether the term names it or its
+/// column declares it, and ascending or descending.
+#[tokio::test]
+async fn an_app_collation_bounds_a_window_by_its_function() {
+    let db = TestDatabase::open_with(
+        "CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT, declared TEXT COLLATE natural_order, size INTEGER);
+INSERT INTO files VALUES (1,'n1','n1',0),(2,'n2','n2',0),(3,'n3','n3',0),(4,'n10','n10',0),(5,'n11','n11',0)",
+        options(vec![("natural_order", natural)]),
+    );
+    for sql in [
+        "SELECT path, id FROM files ORDER BY path COLLATE natural_order, id LIMIT 3",
+        "SELECT declared, id FROM files ORDER BY declared, id LIMIT 3",
+        "SELECT declared, id FROM files ORDER BY declared COLLATE \"natural_order\", id LIMIT 3",
+    ] {
+        // n1, n2 and n3: 'n20' sorts after 'n3' only by the app's order.
+        let column = if sql.contains("declared") { "declared" } else { "path" };
+        let insert = |value: &str, id: i64| {
+            format!("INSERT INTO files({column}, id, size) VALUES ('{value}', {id}, 0)")
+        };
+        let writes = [
+            (insert("n20", 20), false),
+            (insert("n4", 21), false),
+            (insert("n03", 22), false),
+            (insert("n2a", 23), true),
+        ];
+        let writes: Vec<(&str, bool)> =
+            writes.iter().map(|(sql, reruns)| (sql.as_str(), *reruns)).collect();
+        follows(&db, sql, vec![], &writes).await;
+        db.commit("DELETE FROM files WHERE id >= 20");
+    }
+    // Descending: n11, n10 and n4 by the app's order.
+    db.commit("INSERT INTO files VALUES (6,'n4','n4',0)");
+    follows(
+        &db,
+        "SELECT path, id FROM files ORDER BY path COLLATE natural_order DESC, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO files VALUES (30,'n1','n1',0)", false),
+            ("INSERT INTO files VALUES (31,'n9','n9',0)", true),
+            ("INSERT INTO files VALUES (32,'n100','n100',0)", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
+/// A reversed collation, which an app registers to sort text descending in
+/// an index, bounds a window, and an expression over BINARY columns bounds
+/// one by the collation its term ends in.
+#[tokio::test]
+async fn a_reversed_collation_and_an_expression_with_a_collation_bound_a_window() {
+    fn reversed(left: &str, right: &str) -> std::cmp::Ordering {
+        right.cmp(left)
+    }
+    let db = TestDatabase::open_with(
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY, title TEXT, body TEXT);
+INSERT INTO notes VALUES (1,'b',''),(2,'d',''),(3,'f',''),(4,'h',''),(5,'j','')",
+        options(vec![("reversed", reversed)]),
+    );
+    // j, h and f.
+    follows(
+        &db,
+        "SELECT title, id FROM notes ORDER BY title COLLATE reversed, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (7,'c','')", false),
+            ("INSERT INTO notes VALUES (8,'g','')", true),
+        ],
+    )
+    .await;
+    db.commit("DELETE FROM notes WHERE id IN (7, 8)");
+    // b, D and f, by the lowercase of the title, in NOCASE.
+    db.commit("UPDATE notes SET title = 'D' WHERE id = 2");
+    follows(
+        &db,
+        "SELECT lower(title), id FROM notes ORDER BY lower(title) COLLATE NOCASE, id LIMIT 3",
+        vec![],
+        &[
+            ("INSERT INTO notes VALUES (9,'Z','')", false),
+            ("INSERT INTO notes VALUES (10,'C','')", true),
+        ],
+    )
     .await;
     db.close();
 }

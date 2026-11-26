@@ -140,8 +140,9 @@ pub(crate) enum RowTest {
     /// That the term's value is NULL, or isn't when `not`.
     Null { not: bool },
     /// That the term's value, given `affinity`, compares with `value`, which
-    /// isn't NULL, as `ordering`, as an ORDER BY compares two values.
-    Compare { ordering: Ordering, value: Value, affinity: Affinity },
+    /// isn't NULL, as `ordering`, as an ORDER BY compares two values: text
+    /// by `collation` when the ORDER BY's isn't BINARY.
+    Compare { ordering: Ordering, value: Value, affinity: Affinity, collation: Option<String> },
     /// That the term's value equals a value some row of the lookup's
     /// partner gives in its scope, as the statement's equality compares
     /// them: a member's expression joined to its partner.
@@ -160,7 +161,7 @@ impl RowCondition {
             RowTest::Null { not } => {
                 format!("({sql}) IS {}NULL", if *not { "NOT " } else { "" })
             }
-            RowTest::Compare { ordering, value, affinity } => {
+            RowTest::Compare { ordering, value, affinity, collation } => {
                 let typed = typed(&format!("?{}", bound.len() + 1), *affinity, value)?;
                 bound.push(value.clone());
                 let operator = match ordering {
@@ -171,7 +172,10 @@ impl RowCondition {
                 // A unary plus takes away the expression's affinity, so the
                 // comparison converts its value only to the affinity the
                 // typed value carries, as a generated column's value has it.
-                format!("+({sql}) {operator} {typed}")
+                let collate = collation.as_ref().map_or_else(String::new, |name| {
+                    format!(" COLLATE {}", crate::sql::identifier(name))
+                });
+                format!("+({sql}){collate} {operator} {typed}")
             }
             RowTest::Joined(lookup) => {
                 crate::scope_lookup::joined(&format!("({sql})"), lookup, bound)

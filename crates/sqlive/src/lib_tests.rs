@@ -85,6 +85,9 @@ impl BugSink for HeardBugs {
     }
 }
 
+/// An app collation: its name and the order it gives two strings.
+pub(crate) type Collation = (&'static str, fn(&str, &str) -> std::cmp::Ordering);
+
 /// What a test database opens with beyond its schema.
 #[derive(Clone)]
 pub(crate) struct TestOptions {
@@ -106,6 +109,9 @@ pub(crate) struct TestOptions {
     /// Open the first reader before the writer, and leave the journal as it
     /// is, as a database whose opening must not write does.
     pub(crate) prepare_on_reader: bool,
+    /// The app's collations, each registered on every connection as it
+    /// opens: its name and the order it gives two strings.
+    pub(crate) collations: Vec<Collation>,
 }
 
 impl Default for TestOptions {
@@ -119,6 +125,7 @@ impl Default for TestOptions {
             unrecorded: Vec::new(),
             captured: BTreeSet::new(),
             prepare_on_reader: false,
+            collations: Vec::new(),
         }
     }
 }
@@ -164,7 +171,12 @@ impl TestDatabase {
                 prepare_on_reader: options.prepare_on_reader,
                 whole_views: Arc::new(WholeViews::new(options.whole_views)),
                 policy: &|| NoPolicy,
-                setup: &|_, _| Ok(()),
+                setup: &|setup, _| {
+                    for (name, compare) in &options.collations {
+                        setup.collation(name, *compare)?;
+                    }
+                    Ok(())
+                },
                 capture: Some(options.captured),
                 checkpoint_pages: options.checkpoint_pages,
                 statistics: options.statistics,

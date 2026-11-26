@@ -22,13 +22,20 @@
 //!
 //! sqlive takes the last row's values from the result columns that return
 //! them, so each ORDER BY term is a result column of the statement's only
-//! SELECT, written as the term writes it, with no COLLATE and no NULLS FIRST
-//! or LAST. Each term reads one table of that SELECT: a stored column of
-//! BINARY collation, whose values sqlive compares as SQLite does; or an
-//! expression over such columns that SQLite can evaluate row by row, or a
-//! generated column whose expression names only such columns, whose value in
-//! a changed row a write asks SQLite to compare with the last row's
-//! (`scope_row.rs`). No such table is the right side of a LEFT JOIN. There,
+//! SELECT, written as the term writes it, with or without the COLLATE the
+//! term ends in, and with no NULLS FIRST or LAST. Each term reads one table
+//! of that SELECT: a stored column of BINARY collation, whose values sqlive
+//! compares as SQLite does; a stored column of another collation; or an
+//! expression over stored BINARY columns that SQLite can evaluate row by
+//! row, or a generated column whose expression names only such columns,
+//! whose value in a changed row a write asks SQLite to compare with the
+//! last row's (`scope_row.rs`). The term sorts text by its collation: the
+//! COLLATE it ends in, else its column's declared one, else BINARY. A write
+//! asks SQLite to compare in that collation, whether SQLite's own or one the
+//! app registered, so sqlive keeps no list of collations (§4). A COLLATE
+//! inside the term, anywhere but its end, gives a comparison within it a
+//! collation of its own, and the term bounds nothing. No such table is the
+//! right side of a LEFT JOIN. There,
 //! when a write adds a row that matches a left row that had no match, SQLite
 //! no longer returns the row of NULLs it returned for that left row, and that
 //! row of NULLs can sort before the last row. The SELECT has no GROUP BY and
@@ -146,15 +153,20 @@ struct SortTerm {
     descending: bool,
     /// The result column, from zero, that returns its value.
     position: usize,
+    /// The collation SQLite compares its text by when it isn't BINARY: the
+    /// COLLATE the term ends in, else its column's.
+    collation: Option<String>,
 }
 
 /// What an ORDER BY term sorts its source's rows by.
 enum SortKey {
-    /// A stored column, lowercase, whose values sqlive compares itself.
+    /// A stored column of BINARY collation, lowercase, whose values sqlive
+    /// compares itself.
     Column(String),
     /// An expression over the source's stored columns, whose value in a
-    /// changed row a write asks SQLite for: a generated column's, or one the
-    /// ORDER BY writes.
+    /// changed row a write asks SQLite for, and how it compares with the last
+    /// row's in the term's collation: a generated column's, a stored column
+    /// of another collation, or one the ORDER BY writes.
     Expression(RowExpression),
 }
 
@@ -171,8 +183,14 @@ impl SortKey {
     }
 
     /// The rows whose key compares with `value`, which isn't NULL, as
-    /// `ordering`, for a run bound to `parameters`.
-    fn compare(&self, value: &Value, ordering: Ordering, parameters: &[Value]) -> RowScope {
+    /// `ordering` in `collation`, for a run bound to `parameters`.
+    fn compare(
+        &self,
+        value: &Value,
+        ordering: Ordering,
+        collation: Option<&str>,
+        parameters: &[Value],
+    ) -> RowScope {
         match self {
             Self::Column(column) => RowScope::Compare {
                 column: column.clone(),
@@ -183,7 +201,12 @@ impl SortKey {
             Self::Expression(RowExpression { term, affinity }) => row(
                 term,
                 parameters,
-                RowTest::Compare { ordering, value: value.clone(), affinity: *affinity },
+                RowTest::Compare {
+                    ordering,
+                    value: value.clone(),
+                    affinity: *affinity,
+                    collation: collation.map(str::to_owned),
+                },
             ),
         }
     }
@@ -292,14 +315,16 @@ pub(crate) fn sorted_limit(
         if term.nulls.is_some() {
             return Ok(None);
         }
-        let Some((position, item, key)) = sort_term(planner, core, columns, &term.expr) else {
+        let Some((position, item, key, collation)) = sort_term(planner, core, columns, &term.expr)
+        else {
             return Ok(None);
         };
         let from = &planner.items[item];
         if from.core != core || from.source.table().is_none() || from.left_on.is_some() {
             return Ok(None);
         }
-        let term = SortTerm { key, descending: term.order == Some(SortOrder::Desc), position };
+        let term =
+            SortTerm { key, descending: term.order == Some(SortOrder::Desc), position, collation };
         match runs.last_mut() {
             Some(run) if run.source == item => run.terms.push(term),
             _ => runs.push(SortRun { source: item, terms: vec![term] }),
@@ -308,54 +333,83 @@ pub(crate) fn sorted_limit(
     Ok((!runs.is_empty()).then_some(SortedLimit { runs, limit }))
 }
 
+/// `expr` without the COLLATE it ends in, and the collation that names,
+/// which is none when it is BINARY.
+fn without_collation<'a>(expr: &'a Expr<'a>) -> (&'a Expr<'a>, Option<String>) {
+    match unparenthesized(expr) {
+        Expr::Collate(inner, name) => {
+            let name = crate::sql::name(name);
+            (unparenthesized(inner), (!name.eq_ignore_ascii_case("BINARY")).then_some(name))
+        }
+        expr => (expr, None),
+    }
+}
+
 /// The result column that returns the ORDER BY term `expr`, the source whose
-/// rows it sorts and what it sorts them by, when a run's last row can bound
-/// them. A bare name that matches a result column's alias means that result
-/// column, as SQLite reads an ORDER BY; any other name means the column it
-/// resolves to, and any other expression the result column that writes it
-/// the same way.
+/// rows it sorts, what it sorts them by and the collation it compares text
+/// by, when a run's last row can bound them. A term may end in one COLLATE,
+/// which gives it that collation: otherwise a stored column sorts in the
+/// collation it declares and any other term in BINARY. A bare name that
+/// matches a result column's alias means that result column, as SQLite reads
+/// an ORDER BY; any other name means the column it resolves to, and any
+/// other expression the result column that writes it the same way. A result
+/// column may end in a COLLATE too, which doesn't change its value.
 fn sort_term(
     planner: &Planner,
     core: usize,
     columns: &[ResultColumn<'_>],
     expr: &Expr<'_>,
-) -> Option<(usize, usize, SortKey)> {
-    let (position, sorted) = match order_term(columns, expr) {
+) -> Option<(usize, usize, SortKey, Option<String>)> {
+    let (term, explicit) = without_collation(expr);
+    let (position, sorted) = match order_term(columns, term) {
         OrderTerm::Alias(position, listed) => (position, listed),
-        OrderTerm::Expr(expr) => {
-            let resolved = is_name(expr).then(|| planner.resolve(core, expr)).flatten();
+        OrderTerm::Expr(term) => {
+            let resolved = is_name(term).then(|| planner.resolve(core, term)).flatten();
             // sqlive doesn't know how many columns a `*` adds, so it can't
             // tell the position of a column after one.
             let position = columns
                 .iter()
                 .map_while(|column| match column {
-                    ResultColumn::Expr(expr, _) => Some(expr),
+                    ResultColumn::Expr(expr, _) => Some(without_collation(expr).0),
                     ResultColumn::Star | ResultColumn::TableStar(_) => None,
                 })
                 .position(|listed| match &resolved {
                     Some(resolved) => {
                         is_name(listed) && planner.resolve(core, listed).as_ref() == Some(resolved)
                     }
-                    None => unparenthesized(listed) == expr,
+                    None => listed == term,
                 })?;
-            (position, expr)
+            (position, term)
         }
         OrderTerm::Position(_) | OrderTerm::Unknown => return None,
     };
     if is_name(sorted) {
         let (item, column) = planner.resolve(core, sorted)?;
         let from = &planner.items[item];
-        let key = match from.columns.value(&column)? {
-            ColumnValue::Compared(_) => SortKey::Column(column),
-            ColumnValue::Generated(generated) => SortKey::Expression(generated.clone()),
+        let (key, collation) = match from.columns.value(&column)? {
+            ColumnValue::Compared(affinity) => match explicit {
+                None => (SortKey::Column(column), None),
+                // SQLite compares by the term's collation, which sqlive asks
+                // it for.
+                Some(_) => {
+                    (SortKey::Expression(column_expression(from, &column, *affinity)), explicit)
+                }
+            },
+            ColumnValue::Generated(generated) => (SortKey::Expression(generated.clone()), explicit),
+            ColumnValue::Collated(affinity, declared) => {
+                let collation = explicit.or_else(|| {
+                    (!declared.eq_ignore_ascii_case("BINARY")).then(|| declared.clone())
+                });
+                (SortKey::Expression(column_expression(from, &column, *affinity)), collation)
+            }
             ColumnValue::Unknown | ColumnValue::Hidden => return None,
         };
-        return Some((position, item, key));
+        return Some((position, item, key, collation));
     }
     let mut found = Vec::new();
     parts(sorted, &mut found);
-    // A COLLATE gives the ORDER BY its collation, by which sqlive doesn't
-    // compare the last row's value.
+    // A COLLATE inside the term gives a comparison within it a collation of
+    // its own, which sqlive doesn't know how to carry to the ORDER BY.
     if found.iter().any(|part| matches!(part, Part::Collation)) {
         return None;
     }
@@ -368,7 +422,23 @@ fn sort_term(
         return None;
     }
     let term = item_row_term(planner, core, item, sorted, &found)?;
-    Some((position, item, SortKey::Expression(RowExpression { term, affinity: Affinity::Blob })))
+    let key = SortKey::Expression(RowExpression { term, affinity: Affinity::Blob });
+    Some((position, item, key, explicit))
+}
+
+/// A stored column of `from`'s table as an expression a write asks SQLite
+/// for, of `affinity`, which the column's values are typed by.
+fn column_expression(
+    from: &crate::from_item::FromItem,
+    column: &str,
+    affinity: Affinity,
+) -> RowExpression {
+    let term = RowTerm {
+        sql: crate::sql::identifier(column),
+        qualifier: from.source.qualifier.clone(),
+        columns: vec![(column.to_owned(), affinity)],
+    };
+    RowExpression { term: Arc::new(term), affinity: Affinity::Blob }
 }
 
 /// The rows that sort before `last`, the last row's values of the terms
@@ -385,18 +455,22 @@ fn sorted_before(
     let mut scope = tied;
     for (term, value) in terms.iter().zip(last).rev() {
         let key = &term.key;
+        let collation = term.collation.as_deref();
         let equal = match value {
             Value::Null => key.null(false, parameters),
-            _ => key.compare(value, Ordering::Equal, parameters),
+            _ => key.compare(value, Ordering::Equal, collation, parameters),
         };
         // No value sorts before NULL in ascending order.
         let before = match (term.descending, value) {
             (false, Value::Null) => None,
-            (false, _) => {
-                Some(key.null(false, parameters).or(key.compare(value, Ordering::Less, parameters)))
-            }
+            (false, _) => Some(key.null(false, parameters).or(key.compare(
+                value,
+                Ordering::Less,
+                collation,
+                parameters,
+            ))),
             (true, Value::Null) => Some(key.null(true, parameters)),
-            (true, _) => Some(key.compare(value, Ordering::Greater, parameters)),
+            (true, _) => Some(key.compare(value, Ordering::Greater, collation, parameters)),
         };
         let tied = scope.map(|scope| equal.and(scope));
         scope = match (before, tied) {

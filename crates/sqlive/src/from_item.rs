@@ -33,9 +33,13 @@ pub(crate) enum ColumnValue {
     /// collation is BINARY and whose expression names only its table's
     /// stored columns of BINARY collation (§4).
     Generated(RowExpression),
-    /// Values no condition narrows by: a column whose collation isn't
-    /// BINARY, a generated column sqlive can't evaluate, or a column of a
-    /// view read whole.
+    /// A stored column whose collation isn't BINARY, of this affinity and
+    /// the collation it declares. No condition narrows by it, but an ORDER
+    /// BY term that is the column bounds a LIMIT's rows, by a comparison
+    /// SQLite runs in the term's collation (§4).
+    Collated(Affinity, String),
+    /// Values no condition narrows by: a generated column sqlive can't
+    /// evaluate, or a column of a view read whole.
     Unknown,
     /// A contentful FTS5 table's hidden column, the one that bears the
     /// table's name or `rank`, whose values depend on rows besides its own:
@@ -79,7 +83,10 @@ impl Columns {
     pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
         match self.value(column)? {
             ColumnValue::Compared(affinity) => Some(*affinity),
-            ColumnValue::Generated(_) | ColumnValue::Unknown | ColumnValue::Hidden => None,
+            ColumnValue::Generated(_)
+            | ColumnValue::Collated(..)
+            | ColumnValue::Unknown
+            | ColumnValue::Hidden => None,
         }
     }
 
@@ -587,17 +594,23 @@ pub(crate) fn columns(
     // A table's hidden columns are its generated ones.
     let mut generated = Vec::new();
     for DeclaredColumn { name: column, declared, hidden } in declared_columns(connection, table)? {
-        let binary = ordinary && {
+        let collation = if ordinary {
             let (_, collation, _, _, _) =
                 connection.column_metadata(Some("main"), table, column.as_str())?;
-            collation.is_some_and(|collation| collation.to_bytes().eq_ignore_ascii_case(b"BINARY"))
+            collation.map(|collation| collation.to_string_lossy().into_owned())
+        } else {
+            None
         };
+        let binary = collation.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("BINARY"));
         let affinity = Affinity::declared(&declared);
         if binary && hidden {
             generated.push((columns.len(), affinity));
         }
-        let value =
-            if binary && !hidden { ColumnValue::Compared(affinity) } else { ColumnValue::Unknown };
+        let value = match collation {
+            Some(_) if binary && !hidden => ColumnValue::Compared(affinity),
+            Some(collation) if !binary && !hidden => ColumnValue::Collated(affinity, collation),
+            _ => ColumnValue::Unknown,
+        };
         columns.push(Column { name: Some(column.to_ascii_lowercase()), value });
     }
     if generated.is_empty() {
@@ -657,7 +670,10 @@ fn evaluated(
             .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
         match column.value {
             ColumnValue::Compared(compared) => Some((column.name.clone()?, compared)),
-            ColumnValue::Generated(_) | ColumnValue::Unknown | ColumnValue::Hidden => None,
+            ColumnValue::Generated(_)
+            | ColumnValue::Collated(..)
+            | ColumnValue::Unknown
+            | ColumnValue::Hidden => None,
         }
     })?;
     Some(RowExpression { term, affinity })
