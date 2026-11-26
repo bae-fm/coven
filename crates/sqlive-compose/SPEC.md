@@ -994,6 +994,31 @@ impl IssuePageRow {
 }
 ```
 
+The request's struct implements two traits of `sqlive-compose`, so that a store
+takes a generated read by its type and no other string:
+
+```rust
+/// A statement the compiler generated.
+pub trait Statement {
+    /// The composed statement.
+    const SQL: &'static str;
+    /// The parameters by their names in the statement.
+    fn params(&self) -> Vec<(&'static str, &dyn ToSql)>;
+}
+
+/// A generated statement that returns rows.
+pub trait Read: Statement {
+    /// The row of the statement.
+    type Row;
+    /// Reads a row of the statement.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self::Row>;
+}
+```
+
+`IssuePageParams` implements `Statement` with `IssuePage::SQL` and its own
+`params`, and `Read` with `Row = IssuePageRow` and the row's `read`. Both traits
+are public whatever the visibility of the read's items.
+
 The row derives `Clone`, `PartialEq` and `Debug`, so an app can use it as its
 own row type: keep it, compare it and print it. Every type a row holds
 implements those traits too: the fragment structs and JSON document structs
@@ -1272,6 +1297,6 @@ rest of the statement, so the compiler warns and the build goes on.
 | Macro call | Generated |
 |---|---|
 | `fragment!(Person …)` | `Person`, with `read`, and one struct for each JSON shape |
-| `read!(IssuePage …)` | `IssuePage::SQL`, `IssuePageParams`, `IssuePageRow` |
+| `read!(IssuePage …)` | `IssuePage::SQL`, `IssuePageParams` with its `Statement` and `Read` impls, `IssuePageRow` |
 | A CTE or a relation of a fragment | `<crate>__<fragment>__<name>` |
 | The file of either macro | `OUT_DIR/sqlive_compose/<Name>.rs` |

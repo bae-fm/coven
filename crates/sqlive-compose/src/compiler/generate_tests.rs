@@ -36,6 +36,16 @@ fn a_read_binds_its_request_by_name() {
 }
 
 #[test]
+fn a_read_implements_the_statement_traits_a_store_takes() {
+    let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
+    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    assert!(code.contains("impl :: sqlive_compose :: Statement for PageParams"), "{code}");
+    assert!(code.contains("impl :: sqlive_compose :: Read for PageParams"), "{code}");
+    assert!(code.contains("type Row = PageRow"), "{code}");
+    syn::parse_file(&code).unwrap();
+}
+
+#[test]
 fn a_name_that_cannot_be_an_identifier_is_refused() {
     for name in ["my col", "self", "", "1st", "a-b", "\u{0301}a", "\u{00b7}"] {
         assert_eq!(FieldName::new(name), None, "{name}");

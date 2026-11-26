@@ -170,6 +170,8 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool)
     let row = row_type();
     let result = path("sqlive_reads::SqliteResult");
     let to_sql = path("sqlive_reads::ToSql");
+    let statement = quote!(::sqlive_compose::Statement);
+    let read_trait = quote!(::sqlive_compose::Read);
     let params_doc = format!("What the `{}` read's request binds.", header.name);
     let row_doc = format!("A row of the `{}` read.", header.name);
     let shapes = shapes(&header.shapes, &visibility);
@@ -196,6 +198,22 @@ pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool)
             /// The parameters by their names in the statement.
             #visibility fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
                 vec![#((#bound, &self.#parameter_names as &dyn #to_sql),)*]
+            }
+        }
+
+        impl #statement for #params_name {
+            const SQL: &'static str = #name::SQL;
+
+            fn params(&self) -> Vec<(&'static str, &dyn #to_sql)> {
+                #params_name::params(self)
+            }
+        }
+
+        impl #read_trait for #params_name {
+            type Row = #row_name;
+
+            fn read(row: #row) -> #result<#row_name> {
+                #row_name::read(row)
             }
         }
 
