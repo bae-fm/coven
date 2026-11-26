@@ -106,19 +106,33 @@ pub(crate) fn members(db: &StoreSql, device: DeviceId) -> Result<Vec<MemberInfo>
 }
 
 /// The circles of the member the local device registered under, as one
-/// statement: none while the device has no registration.
+/// statement: none while the device has no registration. The first arm reads
+/// the device's member, so a registration that doesn't decode fails the read
+/// whether or not the member has circles.
 pub(crate) fn circles(db: &StoreSql, device: DeviceId) -> Result<Vec<Circle>, DbError> {
-    // Ordered by the membership's circle, which the member's index holds in
-    // order; `c.circle` is the same value but would be sorted after the join.
-    Ok(db.host_live_read(
-        "SELECT c.circle,c.name FROM _coven_devices x
+    let rows = db.host_live_read(
+        "SELECT x.member,NULL,NULL FROM _coven_devices x WHERE x.device=?1
+         UNION ALL
+         SELECT NULL,c.circle,c.name FROM _coven_devices x
          JOIN _coven_circle_members m ON m.member=x.member
          JOIN _coven_circles c ON c.circle=m.circle
-         WHERE x.device=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)
-         ORDER BY m.circle",
+         WHERE x.device=?1 AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions d WHERE d.circle=c.circle)",
         [device],
-        |r| Ok(Circle { id: circle(r, 0)?, name: r.get(1)? }),
-    )?)
+        |r| {
+            Ok(match r.get_ref(0)? {
+                sqlive::rusqlite::types::ValueRef::Null => {
+                    Some(Circle { id: circle(r, 1)?, name: r.get(2)? })
+                }
+                _ => {
+                    member(r, 0)?;
+                    None
+                }
+            })
+        },
+    )?;
+    let mut circles: Vec<Circle> = rows.into_iter().flatten().collect();
+    circles.sort_by_key(|circle| circle.id);
+    Ok(circles)
 }
 
 /// A circle's members who remain in the store; none for an absent or deleted
