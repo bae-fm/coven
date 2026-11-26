@@ -41,30 +41,93 @@ def readCore (s : Statement) (st : PState) (k : Nat) : PState :=
   let st := Transfer.carry s st k
   c.items.foldl (fun st i => PushDown.pushDown s s.fuel s.fuel st i (st.items i).term []) st
 
-/-- The items of `remaining` that wait: those taking a subquery's value, or
-a value a derived item's arm passes on, from an item not placed yet, or
-through a derived item not placed yet, and those whose every partner waits
-(`Planner::waiting`). A derived item that an edge from its partner reads
-through gives that partner no values, so the partner counts as none of its
-partners. -/
-def waiting (st : PState) (order remaining : List Nat) : List Nat :=
+/-- The items `pushDown` passes a condition on item `i`'s column `c` into,
+at every depth. -/
+def PushDown.reached (s : Statement) : Nat → Nat → Nat → List Nat
+  | 0, _, _ => []
+  | fuel + 1, i, c =>
+    match PushDown.arms s i with
+    | none => []
+    | some found => found.flatMap fun arm =>
+      match (arm[c]?).join with
+      | some (t, c') => t :: PushDown.reached s fuel t c'
+      | none => []
+
+/-- The items derived item `d` can pass the edges it takes into, once it is
+placed: those an arm passes on a column an edge of `d` compares, at every
+depth (`derived::receivers`). -/
+def receivers (s : Statement) (st : PState) (d : Nat) : List Nat :=
+  (st.edges.filter (·.member == d)).flatMap fun e =>
+    match e.memberValue with
+    | .column c => PushDown.reached s s.fuel d c
+    | .expr _ => []
+
+/-- `found` with each item of `items` that `adds` takes, given those found,
+added one at a time until it takes none, in at most `fuel` steps. -/
+def closure (items : List Nat) (adds : List Nat → Nat → Bool) : Nat → List Nat → List Nat
+  | 0, found => found
+  | fuel + 1, found =>
+    match items.find? fun i => !found.contains i && adds found i with
+    | some i => closure items adds fuel (found ++ [i])
+    | none => found
+
+/-- Whether item `i` takes its values from items that all wait. A derived item
+that an edge from its partner reads through gives that partner no values, so
+the partner counts as none of its partners. -/
+def starved (st : PState) (waiting : List Nat) (i : Nat) : Bool :=
+  let counted := st.edges.filter fun e => e.member == i &&
+    !st.edges.any fun back => back.member == e.partner && back.via.map (·.1) == some i
+  let partners := counted.map (·.partner)
+  !partners.isEmpty && partners.all waiting.contains
+
+/-- Whether a waiting derived item could pass edges into item `i`: placed
+before that item, it would take none of them. -/
+def received (s : Statement) (st : PState) (waiting : List Nat) (i : Nat) : Bool :=
+  waiting.any fun d => (receivers s st d).contains i
+
+/-- Whether item `i` has values to give before any item is placed: it has
+conditions of its own, or it is a derived item that no condition passes into,
+whose rows nothing around it narrows, or one that reads an item that has
+(`Planner::gives_alone`). -/
+def givesAlone (s : Statement) (st : PState) : Nat → Nat → Bool
+  | 0, _ => false
+  | fuel + 1, i =>
+    (st.items i).term.isSome || match (s.item i).kind with
+      | .table _ => false
+      | .derived q _ => (PushDown.arms s i == some []) ||
+          (s.query q).arms.any fun k => (s.core k).items.any (givesAlone s st fuel)
+
+/-- The items of `remaining` that items giving values reach by edges, either
+way, with none of `waiting` among them: a giver has values to give on its own
+or a partner placed already. -/
+def givenValues (s : Statement) (st : PState) (order remaining waiting : List Nat) : List Nat :=
+  let gives (i : Nat) : Bool := !waiting.contains i &&
+    (givesAlone s st s.fuel i ||
+      st.edges.any fun e => e.member == i && order.contains e.partner)
+  closure remaining
+    (fun reached i => !waiting.contains i && st.edges.any fun e =>
+      (e.member == i && reached.contains e.partner) ||
+        (e.partner == i && reached.contains e.member))
+    remaining.length (remaining.filter gives)
+
+/-- The items of `remaining` that wait (`Planner::waiting`): those taking a
+subquery's value, or a value a derived item's arm passes on, from an item not
+placed yet, or through a derived item not placed yet; those whose every
+partner waits; those a waiting derived item could pass edges into; and, among
+the items that no giver of values reaches, those that take values from one
+that waits. -/
+def waiting (s : Statement) (st : PState) (order remaining : List Nat) : List Nat :=
   let first := remaining.filter fun i =>
     st.edges.any (fun e => e.nested && e.member == i && !e.placedIn order) ||
       (st.items i).ors.any fun sides => sides.any fun side =>
         side.edges.any fun e => e.nested && !e.placedIn order
-  go remaining.length first
-where
-  go : Nat → List Nat → List Nat
-    | 0, w => w
-    | f + 1, w =>
-      let starved := remaining.find? fun i =>
-        let counted := st.edges.filter fun e => e.member == i &&
-          !st.edges.any fun back => back.member == e.partner && back.via.map (·.1) == some i
-        let partners := counted.map (·.partner)
-        !w.contains i && !partners.isEmpty && partners.all w.contains
-      match starved with
-      | some i => go f (w ++ [i])
-      | none => w
+  let alone := closure remaining (fun w i => starved st w i || received s st w i)
+    remaining.length first
+  let given := givenValues s st order remaining alone
+  closure remaining
+    (fun w i => (!given.contains i && st.edges.any fun e => e.member == i && w.contains e.partner)
+      || received s st w i)
+    remaining.length alone
 
 /-- Place the items one by one, each taking as memberships its edges to
 items placed before it, through derived items placed before it, and passing
@@ -80,7 +143,7 @@ where
       match remaining with
       | [] => (st, order)
       | r :: _ =>
-        let w := waiting st order remaining
+        let w := waiting s st order remaining
         let waited := waited ++ w.filter fun i => !waited.contains i
         let released := remaining.find? fun i => waited.contains i && !w.contains i
         let free := remaining.filter fun i => !w.contains i

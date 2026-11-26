@@ -57,6 +57,37 @@ async fn a_cover_pick_narrows_covers_and_files_to_the_albums_releases() {
     db.close();
 }
 
+/// A cover and its file's version read through subqueries in FROM, as a
+/// statement spliced from other statements reads them, and keyed by the same
+/// pick: they narrow as the tables read directly do.
+#[tokio::test]
+async fn a_pick_keys_the_tables_a_subquery_in_from_reads() {
+    let db = TestDatabase::open(ALBUMS);
+    follows(
+        &db,
+        "SELECT (SELECT shown.name
+  FROM (SELECT cover.id,
+               (SELECT stored.name
+                FROM (SELECT f.id AS file, f.name FROM files AS f) AS stored
+                WHERE stored.file = cover.file) AS name
+        FROM covers AS cover) AS shown
+  WHERE shown.id = (SELECT r.id FROM releases AS r WHERE r.album_id = a.id
+                    ORDER BY r.album_order, r.id LIMIT 1)) AS cover, a.title
+FROM albums AS a WHERE a.id = 'a1'",
+        vec![],
+        &[
+            ("UPDATE covers SET file = 'f9' WHERE id = 'r3'", false),
+            ("INSERT INTO covers VALUES ('r9','f9')", false),
+            ("UPDATE files SET name = 'n3b' WHERE id = 'f3'", false),
+            ("UPDATE files SET name = 'n1b' WHERE id = 'f1'", true),
+            ("UPDATE covers SET file = 'f1' WHERE id = 'r2'", true),
+            ("UPDATE covers SET file = 'f2' WHERE id = 'r1'", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// A column compared with a subquery's value that passes through another
 /// lookup table: the credits shape, where an artist is shown as another.
 #[tokio::test]

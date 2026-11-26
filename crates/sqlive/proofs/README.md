@@ -45,8 +45,10 @@ row of NULLs fails first, holds back what a LEFT JOIN's ON says of other items
 until a WHERE condition makes the join an inner join's, carries each item's
 terms on a column an equality compares to the item on the equality's other
 side, passes a derived item's terms into its arms, and places the items so
-each takes values from items placed before it. A run binds each item's scope; a table's scope passes a row
-that any item of the table passes.
+each takes values from items placed before it. An item that takes a
+subquery's value waits for the subquery's item, and so does each item a
+waiting derived item could pass that value into. A run binds each item's
+scope; a table's scope passes a row that any item of the table passes.
 
 [Changes.lean](SqliveNarrowing/Changes.lean) and
 [Judge.lean](SqliveNarrowing/Judge.lean) judge a

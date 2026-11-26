@@ -468,7 +468,7 @@ theorem ordered_go_place (s : Statement) (fuel : Nat) (all : List Nat) (st : PSt
     · rename_i i _ hfind
       exact List.mem_of_find?_eq_some hfind
     · rename_i first tail' _ hfree
-      have hsub : ∀ x ∈ List.filter (fun i => !(waiting st order (r :: tail)).contains i) (r :: tail),
+      have hsub : ∀ x ∈ List.filter (fun i => !(waiting s st order (r :: tail)).contains i) (r :: tail),
           x ∈ r :: tail := fun x hx => (List.mem_filter.mp hx).1
       have hfirst : first ∈ r :: tail := hsub first (by rw [hfree]; simp)
       exact getD_find_mem (fun x hx => hsub x (List.mem_filter.mp hx).1) hfirst
@@ -489,6 +489,50 @@ theorem remaining_shrinks {all order : List Nat} {next : Nat}
     cases order.contains i <;> cases hi : (i == next) <;> simp_all [bne]
   rw [heq, List.length_filter_lt_length_iff_exists]
   exact ⟨next, h, by simp⟩
+
+/-- With a step for each item not yet found, a closure takes every item it
+takes given what it found. -/
+theorem closure_closed (items : List Nat) (adds : List Nat → Nat → Bool) :
+    ∀ (fuel : Nat) (found : List Nat),
+      (items.filter fun i => !found.contains i).length ≤ fuel →
+      ∀ i ∈ items, adds (closure items adds fuel found) i = true →
+        i ∈ closure items adds fuel found
+  | 0, found, hlen, i, hi, _ => by
+    have hnil : items.filter (fun i => !found.contains i) = [] :=
+      List.eq_nil_of_length_eq_zero (by omega)
+    have := List.filter_eq_nil_iff.mp hnil i hi
+    simpa [closure] using this
+  | fuel + 1, found, hlen, i, hi, hadds => by
+    unfold closure at hadds ⊢
+    cases hfind : items.find? (fun i => !found.contains i && adds found i) with
+    | none =>
+      simp only [hfind] at hadds ⊢
+      have := List.find?_eq_none.mp hfind i hi
+      cases hc : found.contains i with
+      | true => simpa using hc
+      | false =>
+        rw [hc, hadds] at this
+        exact absurd rfl this
+    | some j =>
+      simp only [hfind] at hadds ⊢
+      have hj := List.mem_of_find?_eq_some hfind
+      have hnew : found.contains j = false := by
+        have := List.find?_some hfind
+        simp only [Bool.and_eq_true, Bool.not_eq_true'] at this
+        exact this.1
+      have hshrink := remaining_shrinks (all := items) (order := found) (next := j)
+        (List.mem_filter.mpr ⟨hj, by rw [hnew]; rfl⟩)
+      exact closure_closed items adds fuel _ (by omega) i hi hadds
+
+/-- An item that a waiting derived item could pass edges into waits too, so
+the planner places it after that item, which then passes them into it. -/
+theorem waiting_receivers (s : Statement) (st : PState) (order remaining : List Nat) {d i : Nat}
+    (hd : d ∈ waiting s st order remaining) (hi : i ∈ receivers s st d) (hr : i ∈ remaining) :
+    i ∈ waiting s st order remaining := by
+  unfold waiting at hd ⊢
+  refine closure_closed _ _ _ _ (List.length_filter_le _ _) i hr ?_
+  simp only [received, Bool.or_eq_true, List.any_eq_true]
+  exact Or.inr ⟨d, hd, by simpa using hi⟩
 
 /-- Placing items from `all` after `order` adds each item once, and with fuel
 for every item left, places them all. -/

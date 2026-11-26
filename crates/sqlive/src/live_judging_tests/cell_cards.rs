@@ -105,6 +105,31 @@ async fn a_cell_s_cards_narrow_to_its_verdict_through_the_join() {
     db.close();
 }
 
+/// The labels read through a subquery in FROM narrow as the table does. The
+/// subquery waits with its group of joins, since only a table that waits for
+/// the verdict's subquery can narrow the group, so the table it reads waits
+/// for it too, and takes the values it takes.
+#[tokio::test]
+async fn a_cell_s_cards_narrow_a_table_read_through_a_subquery_in_from() {
+    let db = TestDatabase::open(LEDGER);
+    let sql = CELL_LABELS.replace(
+        "JOIN import_candidate_match_label AS label",
+        "JOIN (SELECT match_id, name FROM import_candidate_match_label) AS label",
+    );
+    follows(
+        &db,
+        // `follows` keeps the statement for as long as its query runs.
+        sql.leak(),
+        vec![Text("/a".into())],
+        &[
+            ("INSERT INTO import_candidate_match_label VALUES (20, 'v')", false),
+            ("INSERT INTO import_candidate_match_label VALUES (10, 'u')", true),
+        ],
+    )
+    .await;
+    db.close();
+}
+
 /// The labels of the cards of the cells numbered `?2`, read with the statement
 /// above and one more condition: the cell's number.
 const CELL_ONLY_LABELS: &str = "SELECT (SELECT group_concat((SELECT group_concat(label.name) \

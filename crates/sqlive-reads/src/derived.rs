@@ -114,7 +114,10 @@ pub(crate) enum Named<'a, 'v> {
 /// narrows: for each such arm, the source and column each output column
 /// passes on unchanged, if it does.
 pub(crate) struct Derived {
-    arms: Vec<Passed>,
+    /// Each arm's core.
+    pub(crate) cores: Vec<usize>,
+    /// For each arm a condition on its rows passes into.
+    pub(crate) arms: Vec<Passed>,
     /// The same for every arm, whose rows each row of the query is one of,
     /// a LIMIT or not; `None` when an arm groups or aggregates, whose rows
     /// pass on no row's own value.
@@ -254,7 +257,7 @@ fn read_derived<'a>(
             // A `*` over a table function's columns: no column is known.
             return Ok(Ok((
                 Columns::Unknown { volatile: planner.select_volatile(select) },
-                Derived { arms: Vec::new(), rows: None },
+                Derived { cores, arms: Vec::new(), rows: None },
             )));
         };
         arms.push((core, columns, arm_rows(planner, select, core, body)));
@@ -331,7 +334,7 @@ fn read_derived<'a>(
             })
             .collect()
     };
-    Ok(Ok((Columns::Listed(columns), Derived { arms, rows })))
+    Ok(Ok((Columns::Listed(columns), Derived { cores, arms, rows })))
 }
 
 /// How an arm makes its rows from its sources' rows.
@@ -644,6 +647,39 @@ pub(crate) fn push_down(
                 planner.join_inner(target);
             }
             push_down(planner, target, renamed, passed);
+        }
+    }
+}
+
+/// The items the subquery, CTE or view `item` can pass the edges it takes
+/// into, once it is placed (`push_down`): those an arm passes on a column of
+/// `compared` from, the columns its edges compare, and, through a subquery,
+/// CTE or view among them, those below it. The model states the rule as
+/// `receivers` in `crates/sqlive/proofs`.
+pub(crate) fn receivers<'a>(
+    planner: &Planner,
+    item: usize,
+    compared: impl IntoIterator<Item = &'a str>,
+) -> Vec<usize> {
+    let mut found = Vec::new();
+    for column in compared {
+        receive(planner, item, column, &mut found);
+    }
+    found
+}
+
+/// Adds to `found` the items a condition on `item`'s column `column` passes
+/// into.
+fn receive(planner: &Planner, item: usize, column: &str, found: &mut Vec<usize>) {
+    let Some(derived) = &planner.items[item].derived else {
+        return;
+    };
+    let passed = passed_on(&planner.items[item].columns, &derived.arms, column);
+    for (target, passed) in passed.into_iter().flatten() {
+        let into = &planner.items[*target];
+        if into.source.table().is_some() || into.derived.is_some() {
+            found.push(*target);
+            receive(planner, *target, passed, found);
         }
     }
 }

@@ -987,11 +987,16 @@ every verdict's rows. So `matched` and `label` narrow to the cell's verdict with
 no condition of their own, and a label added to another verdict doesn't rerun the
 read. A group of joined tables waits when none of its tables has a condition of
 its own or a partner placed already, and one of them takes values from a table
-that waits. A table that a waiting table takes its values from, such as the
-subquery's table in `a.x IN (SELECT c.y FROM c)`, never waits for it: it comes
-first even with no condition of its own. A table that takes its values through a
-FROM subquery or CTE that a lookup can't read alone (section 8) comes after the
-subquery or CTE and after the table that gives the values.
+that waits. A subquery in FROM, a CTE or a view passes the values it takes into
+the tables it reads (section 8), so while it waits, so do those tables: placed
+before it, they would take none. In a group, it counts as having a condition of
+its own only when a table it reads has one, or when no condition passes into
+it, as into one with a LIMIT. A table that a waiting table takes its values
+from, such as the subquery's table in `a.x IN (SELECT c.y FROM c)`, never waits
+for it: it comes first even with no condition of its own. A table that takes
+its values through a FROM subquery or CTE that a lookup can't read alone
+(section 8) comes after the subquery or CTE and after the table that gives the
+values.
 
 ### How a lookup compares
 
@@ -1208,9 +1213,14 @@ waiting AS f GROUP BY f.release_id) AS w ON w.release_id = r.id`. Each row of a
 group holds the group's `release_id`, so the join narrows `waiting` to this
 release's files, and a file of another release that starts to wait doesn't rerun
 the page. A condition on `n`, or on a column the query computes from the key,
-narrows nothing there. A view the host names whole (section 3) is read whole,
-since what it shows changes with what the host holds in memory too. A view
-sqlive can't read this way, as one with a recursive CTE, is read whole; a lookup
+narrows nothing there. A column compared with a subquery's value passes in as
+any other equality does, so a statement spliced into another as a subquery in
+FROM narrows as its tables written out would: the album grid can read each
+cover through `(SELECT c.id, c.file FROM covers AS c) AS shown WHERE shown.id =
+(SELECT r.id ... LIMIT 1)`, and `covers` narrows to the covers of the albums'
+releases. A view the host names whole (section 3) is read whole, since what it
+shows changes with what the host holds in memory too. A view sqlive can't read
+this way, as one with a recursive CTE, is read whole; a lookup
 still asks it, so it narrows the tables beside it. SQLite names each read inside
 a view that sqlive reads whole by the innermost view or CTE the read goes
 through. When the statement's own CTE or view has the name of one inside such a
@@ -1984,6 +1994,7 @@ the model and states its assumptions.
 | A statement whose own query is one SELECT with an ORDER BY, a LIMIT and no OFFSET, whose run returned as many rows as its LIMIT, returns the same rows from two databases whose bindings that sort at or before the last row, and whose other queries' bindings, hold rows that pass their tests | `limit_restricted` | `proofs/SqliveNarrowing/Restrict.lean` | 6 |
 | A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, and whose values of the memberships that join one partner in the same join one row of the partner gives together, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `groupScopes_passes`, `joinedAll_passes_joined`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `proofs/SqliveNarrowing/Scopes.lean` | 7 |
 | The planned state holds an ON narrowing back only for an item a LEFT JOIN adds; each edge the planner passes into a derived item's arms comes from an edge the derived item holds, through the result column an arm passes the target's column on to, and makes the target an inner join's; the planner places each item once, and every item of every core; and each edge of the planned state whose partner is a subquery's source has its partner in an arm of some core's subquery, and each item's memberships are edges from it; and each item's memberships and the ORs it keeps take values from items placed before it, and through FROM subqueries and CTEs placed before it | `plan_leftOn`, `plan_pushed`, `plan_order`, `plan_nestedOK`, `plan_before`, `plan_placedBefore` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
+| An item that a waiting derived item could pass edges into, in a step of placing the items, waits in that step too | `waiting_receivers`, `closure_closed` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | The planner reads no core twice, and reads every core that sits in an arm of a query a core reads, at any depth, before that core | `readOrder_postorder` | `proofs/SqliveNarrowing/ReadOrder.lean` | 8 |
 | The planner's state before it reads any condition, after it reads each core's conditions, and after it carries terms across a core's edges, says only what holds of every binding a core keeps: an item it holds no ON narrowing back for has a row, each term and carried term holds of its item's row, each edge and OR of an item with a row holds, and what it holds back for a LEFT JOIN's item holds where that item has a row | `PState.Sem.initial`, `PState.Sem.readConds`, `PState.Sem.carry` | `proofs/SqliveNarrowing/Facts.lean` | 5 to 8 |
 | The planner only adds to an item's term; passing a term into a derived item's arms, and reading each core after every core below it, leaves the planner's state saying only what holds of each binding a core keeps and, below a core, of each binding that matters to its derived item's test | `PState.Sem.pushDown`, `PState.Sem.readCore`, `plan_readSem` | `proofs/SqliveNarrowing/ReadPhase.lean` | 8 |

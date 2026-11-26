@@ -150,9 +150,10 @@ impl Planner<'_> {
     /// a subquery's source not placed yet, which a column compared with a
     /// subquery's value takes (`scope_subquery.rs`), alone or in a side of
     /// an OR, or from a source a derived item's arm passes on, while it or
-    /// the derived item isn't placed (`Planner::passed_edge`), and those
-    /// whose every partner waits, which couldn't take their values from a
-    /// partner that is placed after them.
+    /// the derived item isn't placed (`Planner::passed_edge`), those whose
+    /// every partner waits, which couldn't take their values from a partner
+    /// that is placed after them, and those a waiting derived item could
+    /// pass edges into (`receiving`).
     fn waiting(&self, edges: &EdgesOfItems, placed: &[bool], remaining: &[usize]) -> Vec<bool> {
         let mut waiting = vec![false; self.items.len()];
         // The items that wait whose edges from other items aren't counted
@@ -184,6 +185,12 @@ impl Planner<'_> {
             .map(|of_member| of_member.iter().filter(|edge| counted(&self.edges[**edge])).count())
             .collect();
         while let Some(partner) = uncounted.pop() {
+            for item in self.receiving(edges, partner) {
+                if !placed[item] && !waiting[item] {
+                    waiting[item] = true;
+                    uncounted.push(item);
+                }
+            }
             for edge in &edges.by_partner[partner] {
                 if !counted(&self.edges[*edge]) {
                     continue;
@@ -221,8 +228,7 @@ impl Planner<'_> {
         };
         let gives_values = |item: usize| {
             !waiting[item]
-                && (self.items[item].source.term.is_some()
-                    || self.items[item].source.table().is_none()
+                && (self.gives_alone(item)
                     || edges.by_member[item].iter().any(|edge| placed[self.edges[*edge].partner]))
         };
         let mut reached = vec![false; self.items.len()];
@@ -242,16 +248,55 @@ impl Planner<'_> {
         let mut stack: Vec<usize> =
             remaining.iter().copied().filter(|item| waiting[*item]).collect();
         // Only an item that takes values from a waiting one waits for it: the
-        // table a waiting item takes its values from goes first.
+        // table a waiting item takes its values from goes first. So does a
+        // waiting derived item before the items it could pass edges into.
         while let Some(item) = stack.pop() {
-            for edge in &edges.by_partner[item] {
-                let next = self.edges[*edge].member.item;
-                if !placed[next] && !waiting[next] && !reached[next] {
+            let takers = edges.by_partner[item]
+                .iter()
+                .map(|edge| self.edges[*edge].member.item)
+                .filter(|taker| !reached[*taker]);
+            let found: Vec<usize> = takers.chain(self.receiving(edges, item)).collect();
+            for next in found {
+                if !placed[next] && !waiting[next] {
                     waiting[next] = true;
                     stack.push(next);
                 }
             }
         }
+    }
+
+    /// Whether `item` has values to give before any item is placed: it has
+    /// conditions of its own, or it is a view read whole or a table function,
+    /// which nothing narrows, or it is a subquery, CTE or view read as its
+    /// own that no condition passes into, or one that reads an item that has.
+    /// A subquery that only passes a table's rows on has none, as the table
+    /// has none. The model states the rule as `givesAlone` in
+    /// `crates/sqlive/proofs`.
+    fn gives_alone(&self, item: usize) -> bool {
+        let found = &self.items[item];
+        if found.source.term.is_some() {
+            return true;
+        }
+        match &found.derived {
+            Some(derived) => {
+                derived.arms.is_empty()
+                    || derived.cores.iter().any(|core| {
+                        self.cores[*core].items.iter().any(|item| self.gives_alone(*item))
+                    })
+            }
+            None => found.source.table().is_none(),
+        }
+    }
+
+    /// The items the derived item `item` could pass edges into
+    /// (`derived::receivers`). Placed before it, one of them would take none
+    /// of the values the item takes, as a table that a FROM subquery reads
+    /// takes none of the values of a subquery that the subquery's column is
+    /// compared with.
+    fn receiving(&self, edges: &EdgesOfItems, item: usize) -> Vec<usize> {
+        let compared =
+            edges.by_member[item].iter().filter_map(|edge| self.edges[*edge].member.column());
+        crate::derived::receivers(self, item, compared)
     }
 }
 
