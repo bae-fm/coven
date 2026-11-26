@@ -486,7 +486,18 @@ states it. `Planned.scopes_eq` proves that a placed item's scope reads the
 scopes of the items placed before it, which keep those scopes to the end.
 `scopeAt_passes` proves that the scope passes a row of which the item's terms
 and what its edges carry hold, that each of its memberships' scopes passes, that
-a side of each OR it keeps passes, and that its LIMIT bound passes.
+a side of each OR it keeps passes, and that its LIMIT bound passes. The
+memberships that join one partner by `=`, each of a column of the partner's rows that
+no scope fixes, are the equalities of one join, which one row of the partner
+satisfies together: the scope also holds `joinedAll`, the rows that one row of
+the partner in its scope gives every such membership's value (`groupScopes`; a
+membership to a subquery's source, or passed into a derived item's arm, takes
+no part, since the rows that satisfy those need not be one row). `scopeAt_passes`
+takes for it that one row of the partner gives a row all its memberships' values,
+which a binding gives, since it holds one row of each partner of its core
+(`partner_found` says the row is the binding's); `joinedAll_passes_joined`
+proves that `joinedAll` implies each membership's own scope, which `scopeAt_parts`
+and everything after it read.
 `membershipScope_passes` proves that a membership's scope passes a row whose
 value a row of the partner in the partner's scope gives, NULL only for an `IS`
 edge, through `equalValues_passes` when the partner's scope lists its values;

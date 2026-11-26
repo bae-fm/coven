@@ -299,7 +299,7 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
               match e.memberValue with
               | .column c => (match through c with
                   | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c' }
+                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
               | .expr _ => none) → e.member = target := by
           intro target through keep e he
           obtain ⟨e0, _, c, c', _, _, rfl⟩ := PushDown.mem_passed he
@@ -751,9 +751,17 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
-        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := by
+        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
+        (e.nested = false → b e.partner = some r') := by
     intro e hm hp ⟨hread, hplain, hnest⟩ hh
     have hpi : e.partner ≠ i := fun he => hipre (he ▸ hp)
+    suffices h : ∃ r', r' ∈ lookupRows s Y e.partner ∧
+        ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
+        e.value.eval r' = e.memberValue.eval r ∧
+        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
+        (e.nested = false → (b.set i (some r)) e.partner = some r') by
+      obtain ⟨r', h1, h2, h3, h4, h5⟩ := h
+      exact ⟨r', h1, h2, h3, h4, fun hn => by rw [← hset _ hpi]; exact h5 hn⟩
     refine partner_found hm hbi hh (fun hn hab => by rw [hset _ hpi]; exact hnamed _ hpi (hplain hn).2 hab)
       (fun r' hr' => by rw [hset _ hpi] at hr'; exact hb _ r' hr') (fun hn g' hg' b' hb' hgr r' hr' => ?_)
       hread
@@ -794,15 +802,33 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
   have hscope : ((plan s).scopes last i).passes (lookupRows s Y) r = true := by
     rw [hbound]
     refine scopeAt_passes (fun t ht => hH.term i t hl ht Z f b r honAt)
-      (fun t ht => hH.carried i t hl ht Z f b r honAt haround) (fun m hmm => ?_) (fun sides hsides => ?_)
+      (fun t ht => hH.carried i t hl ht Z f b r honAt haround) (fun m hmm => ?_)
+      (fun q e0 he0 hq hn0 hp0 _ => ?_) (fun sides hsides => ?_)
       (fun sorted values found hs _ hf => ?_)
     · have hme := plan_membersEdges s i m hmm
       have hmi := ((plan_nestedOK s).2.1 i m hmm).1
       have hp := hinpre _ ((plan_placedBefore s i).1 m hmm)
       rw [membershipScope_congr (hbefore' _ hp)]
       obtain ⟨hpart, hholds⟩ := hH.edges i hl m hme hmi
-      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hpart (hholds Z f b r honAt)
+      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner m hmi hp hpart (hholds Z f b r honAt)
       exact membershipScope_passes hr' hsc hv hn
+    · subst hq
+      have hme := plan_membersEdges s i e0 he0
+      have hmi := ((plan_nestedOK s).2.1 i e0 he0).1
+      have hp := hinpre _ ((plan_placedBefore s i).1 e0 he0)
+      obtain ⟨hpart, hholds⟩ := hH.edges i hl e0 hme hmi
+      obtain ⟨r0, hr0, hsc0, _, _, hb0⟩ := hpartner e0 hmi hp hpart (hholds Z f b r honAt)
+      have hbq := hb0 hn0
+      refine ⟨r0, hr0, by rw [hbefore' _ hp]; exact hsc0, fun e he hqe hne hpe _ => ?_⟩
+      have hme' := plan_membersEdges s i e he
+      have hmi' := ((plan_nestedOK s).2.1 i e he).1
+      have hp' := hinpre _ ((plan_placedBefore s i).1 e he)
+      obtain ⟨hpart', hholds'⟩ := hH.edges i hl e hme' hmi'
+      obtain ⟨r1, _, _, hv1, hn1, hb1⟩ := hpartner e hmi' hp' hpart' (hholds' Z f b r honAt)
+      have := hb1 hne
+      rw [hqe, hbq] at this
+      obtain rfl := Option.some.inj this
+      exact ⟨hv1, hn1⟩
     · have hors := (plan_lookups hwf).2.2.1 i sides hsides
       obtain ⟨hsd, hholds⟩ := hH.ors i hl sides hors
       obtain ⟨side, hside, hterms, hedges⟩ := hholds Z f b r honAt
@@ -811,7 +837,7 @@ theorem plan_left_passes {s : Statement} {X Y : Db} {last : Option (List (List V
       obtain ⟨hmem, hpart⟩ := hsd side hside e he
       have hp := hinpre _ ((plan_placedBefore s i).2 sides hsides side hside e he)
       rw [hbefore' _ hp]
-      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner e hmem hp hpart (hedges e he)
+      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner e hmem hp hpart (hedges e he)
       exact joined_passes_of hr' hsc hv hn
     · obtain ⟨⟨run, _⟩, hpr, hri⟩ := Limit.runBound_item hf
       obtain ⟨_, _, _, hleft⟩ := Limit.run_facts hwf hs (List.of_mem_zip hpr).1

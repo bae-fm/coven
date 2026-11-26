@@ -87,6 +87,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.membershipScope_passes
 #print axioms SqliveNarrowing.sideScope_passes
 #print axioms SqliveNarrowing.scopeAt_passes
+#print axioms SqliveNarrowing.joinedAll_passes_of
+#print axioms SqliveNarrowing.joinedAll_passes_joined
+#print axioms SqliveNarrowing.groupScopes_passes
 #print axioms SqliveNarrowing.Planned.scopes_eq
 #print axioms SqliveNarrowing.plan_leftOn
 #print axioms SqliveNarrowing.plan_pushed

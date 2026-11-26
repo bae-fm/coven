@@ -164,7 +164,7 @@ theorem pushed_source_listed {s : Statement} (hwf : s.wellFormed = true) {d : Na
 item reads the statement's own query. -/
 theorem pushed_not_root {s : Statement} (hwf : s.wellFormed = true) {e : Edge}
     (he : e ∈ (plan s).state.pushed) (hroot : (s.item e.member).core ∈ (s.query s.root).arms) : False := by
-  obtain ⟨_, d, q0, v, k0, _, _, hd, _, _, hk0, _, _, hcore0, _, _, e0, he0, _⟩ := plan_pushed s he
+  obtain ⟨_, _, d, q0, v, k0, _, _, hd, _, _, hk0, _, _, hcore0, _, _, e0, he0, _⟩ := plan_pushed s he
   have hdl := pushed_source_listed hwf he0
   have hq0 : q0 ∈ s.nestedQueries (s.item d).core :=
     List.mem_append_left _ (List.mem_filterMap.mpr ⟨d, hdl, by simp [hd]⟩)
@@ -181,7 +181,7 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
     (hrel : relevant s (planRel s Y last) q k (evalQuery s Z g) b = true)
     (hbi : b i = some r) (he : e ∈ (plan s).state.pushed) (hm : e.member = i) :
     (Planned.membershipScope ((plan s).scopes last) e).passes (lookupRows s Y) r = true := by
-  obtain ⟨_, d, q0, v, k0, c, c', hd, hlim, hoff, hk0, hagg, hwin, hcore0, hout, hmv, e0, he0, hmv0, hp,
+  obtain ⟨_, _, d, q0, v, k0, c, c', hd, hlim, hoff, hk0, hagg, hwin, hcore0, hout, hmv, e0, he0, hmv0, hp,
     hv, hn⟩ := plan_pushed s he
   have hcorei : (s.item i).core = k := ((s.wellFormed_parts hwf).items k (s.core_lt hi) i hi).2
   rw [hm, hcorei] at hcore0
@@ -221,28 +221,36 @@ theorem partner_found {s : Statement} {Y : Db} {last : Option (List (List Value)
     (hread : (s.item e.partner).readable = true) :
     ∃ r', r' ∈ lookupRows s Y e.partner ∧
       ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
-      e.value.eval r' = e.memberValue.eval r ∧ ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := by
+      e.value.eval r' = e.memberValue.eval r ∧ ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
+      (e.nested = false → b e.partner = some r') := by
   have hon : e.memberValue.on (b e.member) = e.memberValue.eval r := by rw [hm, hbi, PValue.on_some]
   have fin : ∀ r', planTest s Y last e.partner r' = true → e.value.eval r' = e.memberValue.eval r →
       ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) →
+      (e.nested = false → b e.partner = some r') →
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
-        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := fun r' ht hv hn => by
+        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
+        (e.nested = false → b e.partner = some r') := fun r' ht hv hn hb => by
     obtain ⟨h1, h2⟩ := planTest_parts ht
-    exact ⟨r', h2 hread, h1, hv, hn⟩
+    exact ⟨r', h2 hread, h1, hv, hn, hb⟩
   rcases hh with ⟨x, hx, hrest⟩ | ⟨hnul, hnf, hab, hx, hval⟩ | ⟨_, hnf, hab, hp⟩
   · rw [hon] at hx
     cases hn : e.nested
     · simp only [hn, Bool.false_eq_true, ↓reduceIte] at hrest
       obtain ⟨r', hr', hv⟩ := hrest
-      exact fin r' (hplain r' hr') (by rw [hv, hx]) (Or.inl (by rw [hx]; rfl))
+      have := fin r' (hplain r' hr') (by rw [hv, hx]) (Or.inl (by rw [hx]; rfl)) (fun _ => hr')
+      rw [hn] at this
+      exact this
     · simp only [hn, ↓reduceIte] at hrest
       obtain ⟨g', hg, b', hb', hgr, r', hr', hv⟩ := hrest
-      exact fin r' (hnested hn g' hg b' hb' hgr r' hr') (by rw [hv, hx]) (Or.inl (by rw [hx]; rfl))
+      have := fin r' (hnested hn g' hg b' hb' hgr r' hr') (by rw [hv, hx]) (Or.inl (by rw [hx]; rfl))
+        (fun h => absurd h (by simp [hn]))
+      rw [hn] at this
+      exact this
   · obtain ⟨r', hr'⟩ := Option.ne_none_iff_exists'.mp (hbnd hnf hab)
     rw [hon] at hx
-    exact fin r' (hplain r' hr') (by rw [hval r' hr', hx]) (Or.inr hnul)
+    exact fin r' (hplain r' hr') (by rw [hval r' hr', hx]) (Or.inr hnul) (fun _ => hr')
   · exact absurd hp (hbnd hnf hab)
 
 /-! The LIMIT bound's runs. -/
@@ -411,7 +419,8 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
       ∃ r', r' ∈ lookupRows s Y e.partner ∧
         ((plan s).scopes last e.partner).passes (lookupRows s Y) r' = true ∧
         e.value.eval r' = e.memberValue.eval r ∧
-        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) := by
+        ((e.memberValue.eval r).isSome = true ∨ e.nulls = true) ∧
+        (e.nested = false → b e.partner = some r') := by
     intro e hm hp hh hbnd hnest hread
     refine partner_found hm hbi hh hbnd (fun r' hr' => hpre _ r' hp hr')
       (fun hn g' hg' b' hb' hgr r' hr' => ?_) hread
@@ -419,11 +428,30 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
     exact hsub Z hZ q' hq' g' hg' _ harm b' hb'
       (nested_windowPasses base hZ hp (by rw [horder]; exact List.mem_append_left _ hp) rfl
         (fun Z' hZ' => hsub Z' hZ' q' hq' g' hg' _ harm) hb' hgr) _ r' hp hr'
+  -- A membership the planner found in the item's core finds the partner's row.
+  have hinfo : ∀ m ∈ ((plan s).state.items i).memberships, m.pushed = false →
+      ∃ r', r' ∈ lookupRows s Y m.partner ∧
+        ((plan s).scopes last m.partner).passes (lookupRows s Y) r' = true ∧
+        m.value.eval r' = m.memberValue.eval r ∧
+        ((m.memberValue.eval r).isSome = true ∨ m.nulls = true) ∧
+        (m.nested = false → b m.partner = some r') := by
+    intro m hmm hpf
+    have hme := plan_membersEdges s i m hmm
+    have hmi := ((plan_nestedOK s).2.1 i m hmm).1
+    have hp := hinpre _ ((plan_placedBefore s i).1 m hmm)
+    rcases hS.edges Z g b m hme (by rw [hmi]; exact hcls) (by rw [hmi]; exact hbi') with
+      hpush | ⟨hh, _, hbnd, hnest, _⟩
+    · have := (plan_pushed s hpush).2.1
+      rw [hpf] at this
+      cases this
+    · rw [hmi, hcorei] at hnest
+      exact hpartner m hmi hp hh hbnd hnest ((plan_lookups hwf).1 m hme)
   -- The item's scope.
   have hscope : ((plan s).scopes last i).passes (lookupRows s Y) r = true := by
     rw [hbound]
     refine scopeAt_passes (hS.terms Z g b i r hcls hbi) (hS.carried Z g b i r hcls hbi)
-      (fun m hmm => ?_) (fun sides hsides => ?_) (fun sorted values found hs hl hf => ?_)
+      (fun m hmm => ?_) (fun q e0 he0 hq hn0 hp0 _ => ?_) (fun sides hsides => ?_)
+      (fun sorted values found hs hl hf => ?_)
     · have hme := plan_membersEdges s i m hmm
       have hmi := ((plan_nestedOK s).2.1 i m hmm).1
       have hp := hinpre _ ((plan_placedBefore s i).1 m hmm)
@@ -432,9 +460,19 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
         hpush | ⟨hh, _, hbnd, hnest, _⟩
       · exact pushed_passes hwf hk hi hrel hbi hpush hmi
       · rw [hmi, hcorei] at hnest
-        obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner m hmi hp hh hbnd hnest
+        obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner m hmi hp hh hbnd hnest
           ((plan_lookups hwf).1 m hme)
         exact membershipScope_passes hr' hsc hv hn
+    · subst hq
+      have hp := hinpre _ ((plan_placedBefore s i).1 e0 he0)
+      obtain ⟨r0, hr0, hsc0, _, _, hb0⟩ := hinfo e0 he0 hp0
+      have hbq := hb0 hn0
+      refine ⟨r0, hr0, by rw [hbefore' _ hp]; exact hsc0, fun e he hqe hne hpe _ => ?_⟩
+      obtain ⟨r1, _, _, hv1, hn1, hb1⟩ := hinfo e he hpe
+      have := hb1 hne
+      rw [hqe, hbq] at this
+      obtain rfl := Option.some.inj this
+      exact ⟨hv1, hn1⟩
     · have hors := (plan_lookups hwf).2.2.1 i sides hsides
       obtain ⟨⟨side, hside, hterms, hedges⟩, _, hsd⟩ := hS.ors Z g b i hcls hbi' sides hors
       refine ⟨side, hside, sideScope_passes (fun t ht => by have := hterms t ht; rwa [hbi] at this)
@@ -443,7 +481,7 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
       have hp := hinpre _ ((plan_placedBefore s i).2 sides hsides side hside e he)
       rw [hbefore' _ hp]
       rw [hcorei] at hnest
-      obtain ⟨r', hr', hsc, hv, hn⟩ := hpartner e hmem hp (hedges e he) hbnd hnest
+      obtain ⟨r', hr', hsc, hv, hn, _⟩ := hpartner e hmem hp (hedges e he) hbnd hnest
         ((plan_lookups hwf).2.1 i sides hors side hside e he)
       exact joined_passes_of hr' hsc hv hn
     · -- The LIMIT bound bounds only items of the statement's own core.

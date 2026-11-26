@@ -209,7 +209,7 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
               match e.memberValue with
               | .column c => (match through c with
                   | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c' }
+                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
               | .expr _ => none) → e.member = target := by
           intro target through keep e he
           obtain ⟨e0, _, c, c', _, _, rfl⟩ := PushDown.mem_passed he
@@ -421,6 +421,7 @@ theorem scopeAt_parts {p : Planned} {last : Option (List (List Value))} {bound :
       · exact hall _ _ h
       · exact h
     · exact h)
+  have hm := foldl_both_passes_acc id _ _ hm
   have hbase := foldl_both_passes_acc _ _ _ hm
   rw [Limit.passes_both, Bool.and_eq_true] at hbase
   refine ⟨fun t ht => ?_, fun t ht => ?_, foldl_both_passes_each _ _ _ hm⟩

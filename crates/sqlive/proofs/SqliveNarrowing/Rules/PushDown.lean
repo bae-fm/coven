@@ -59,7 +59,7 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
             fun r => !(left && r.mayHoldOnNulls)
           let passed := (edges.filter fun e => !(left && e.nulls)).filterMap fun e =>
             match e.memberValue with
-            | .column c => (rename c).map fun c' => { e with member := target, memberValue := .column c' }
+            | .column c => (rename c).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
             | .expr _ => none
           let st := match renamed with
             | some r => st.addTerm target r

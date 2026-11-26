@@ -136,6 +136,9 @@ structure Edge where
   nested : Bool
   /-- Whether the edge compares by `IS`, which matches a NULL with a NULL. -/
   nulls : Bool := false
+  /-- Whether the planner passed the edge into a derived item's arm from an
+  edge of the derived item. -/
+  pushed : Bool := false
   deriving Repr, Inhabited
 
 /-- One side of an OR as it narrows one item: terms on the item's row and
@@ -199,6 +202,11 @@ inductive RScope where
   /-- The row's `member` value equals `value` over a row of `partner` in
   `scope`; a NULL matches a NULL when `nulls`, as `IS` compares. -/
   | joined (member : PValue) (partner : Nat) (value : PValue) (scope : RScope) (nulls : Bool)
+  /-- The row's values equal those of one row of `partner` in `scope`, each
+  edge's `member` value against its `value` (a NULL matching a NULL when the
+  edge's `nulls`): the edges are equalities of one join, and one partner row
+  gives all their values. -/
+  | joinedAll (edges : List Edge) (partner : Nat) (scope : RScope)
   /-- The rows of `item` that sort at or before the `limit`-th row of the
   window they sit in: a subquery's rows for one binding around it, which are
   the rows of `item` that its `own` conditions pass and that hold one value in
@@ -276,6 +284,10 @@ def RScope.passes (rowsOf : Nat → List Row) (r : Row) : RScope → Bool
     | none => false
   | .joined m p v s nulls =>
     ((m.eval r).isSome || nulls) && (rowsOf p).any fun r' => v.eval r' == m.eval r && s.passes rowsOf r'
+  | .joinedAll es p s =>
+    (rowsOf p).any fun r' =>
+      es.all (fun e => ((e.memberValue.eval r).isSome || e.nulls) && e.value.eval r' == e.memberValue.eval r) &&
+        s.passes rowsOf r'
   | .window i own part keys n =>
     part.all (fun c => (r.cell c).isSome) &&
       decide (((rowsOf i).filter (windowBefore own part keys r)).length < n)

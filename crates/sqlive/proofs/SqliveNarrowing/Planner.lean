@@ -135,6 +135,30 @@ def Planned.membershipScope (bound : Nat → RScope) (m : Edge) : RScope :=
     | none => .joined m.memberValue m.partner m.value partner m.nulls
   | _, v => .joined m.memberValue m.partner v partner m.nulls
 
+/-- Whether a membership gives its member the rows whose value a row of its
+partner gives, as a lookup finds them, not those of a value its partner's
+scope holds: it takes values from a partner of its core, compares by `=`,
+is no edge passed into a derived item's arm, and its member is a column that compares with a
+column of the partner no scope fixes, or with an expression of the partner. -/
+def Planned.listsPartner (bound : Nat → RScope) (m : Edge) : Bool :=
+  !m.nested && !m.pushed && !m.nulls &&
+    match m.memberValue, m.value with
+    | .column _, .column c => (bound m.partner).equalValues c |>.isNone
+    | .column _, .expr _ => true
+    | .expr _, _ => false
+
+/-- The scopes the memberships of one item that join one partner give
+together: the rows one row of the partner gives every value of. A join that
+compares several columns with a partner finds one partner row, so the
+partner's rows are looked up once for all of them (`Planned.listsPartner`
+takes the memberships it covers). -/
+def Planned.groupScopes (bound : Nat → RScope) (ms : List Edge) : List RScope :=
+  let listed := ms.filter (Planned.listsPartner bound)
+  (listed.map (·.partner)).eraseDups.filterMap fun p =>
+    match listed.filter (·.partner == p) with
+    | [] | [_] => none
+    | es => some (.joinedAll es p (bound p))
+
 /-- The scope one side of an OR gives its item: its terms, and the rows its
 edges join of their partners' scopes. -/
 def Planned.sideScope (bound : Nat → RScope) (side : Side) : RScope :=
@@ -157,6 +181,7 @@ def Planned.scopeAt (p : Planned) (last : Option (List (List Value))) (bound : N
   let scope := ((item.term.map STerm.bind).getD .all).both
     ((item.carried.map STerm.bind).getD .all)
   let scope := item.memberships.foldl (fun scope m => scope.both (membershipScope bound m)) scope
+  let scope := (Planned.groupScopes bound item.memberships).foldl RScope.both scope
   let scope := item.either.foldl (fun scope sides =>
     match sides.map (sideScope bound) with
     | [] => scope

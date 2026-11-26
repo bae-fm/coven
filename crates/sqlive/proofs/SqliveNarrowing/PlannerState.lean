@@ -24,7 +24,7 @@ passes the member's column on unchanged as a result column, of which the
 derived item holds an edge, as a membership or as an edge pushed into it,
 with the same partner, partner value and NULL matching. -/
 def PState.PushedFrom (s : Statement) (st : PState) (e : Edge) : Prop :=
-  (st.items e.member).leftOn = none ∧
+  (st.items e.member).leftOn = none ∧ e.pushed = true ∧
   ∃ d q v k c c', (s.item d).kind = .derived q v ∧ (s.query q).limit = none ∧
     (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧
     ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col e.member c') = true) ∧
@@ -52,8 +52,8 @@ def PState.Keeps (s : Statement) (st st' : PState) : Prop :=
 /-- A state that grows from `st` keeps where its pushed edges come from. -/
 theorem PState.PushedFrom.mono {s : Statement} {st st' : PState} (h : st.Grows st')
     {e : Edge} (he : PState.PushedFrom s st e) : PState.PushedFrom s st' e := by
-  obtain ⟨hleft, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, he0, hrest⟩ := he
-  refine ⟨?_, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, ?_, hrest⟩
+  obtain ⟨hleft, hpushed, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, he0, hrest⟩ := he
+  refine ⟨?_, hpushed, d, q, v, k, c, c', hd, hl, ho, hk, hagg, hwin, hcore, hout, hmv, e0, ?_, hrest⟩
   · cases h' : (st'.items e.member).leftOn with
     | none => rfl
     | some _ =>
@@ -246,10 +246,10 @@ theorem PushDown.mem_passed {edges : List Edge} {keep : Edge → Bool}
       match e.memberValue with
       | .column c => (match through c with
           | some (t, c') => if t = target then some c' else none
-          | none => none).map fun c' => { e with member := target, memberValue := .column c' }
+          | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true }
       | .expr _ => none) :
     ∃ e0 ∈ edges, ∃ c c', e0.memberValue = .column c ∧ through c = some (target, c') ∧
-      e = { e0 with member := target, memberValue := .column c' } := by
+      e = { e0 with member := target, memberValue := .column c', pushed := true } := by
   obtain ⟨e0, he0, hmap⟩ := List.mem_filterMap.mp he
   refine ⟨e0, (List.mem_filter.mp he0).1, ?_⟩
   split at hmap
@@ -367,7 +367,7 @@ theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
           (fun st' h => PushDown.pushDown_keeps s narrowFuel fuel st' target _ _ h)
         obtain ⟨e0, he0, c, c', hc, hthr, rfl⟩ := PushDown.mem_passed (through := fun c => arm[c]?.join) he
         obtain ⟨hcore, hagg, hout⟩ := hthrough c target c' hthr
-        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, item, q, v, k, c, c', hkind, hlim, hoff, hk, hagg,
+        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, rfl, item, q, v, k, c, c', hkind, hlim, hoff, hk, hagg,
           hwin, hcore, hout, rfl, e0, ?_, hc, rfl, rfl, rfl⟩⟩
         rcases hpass1 e0 he0 with hm | ⟨hm, hi⟩
         · exact Or.inl (hgrow.2.1 item e0 hm)
@@ -666,7 +666,7 @@ theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
               (fun e => match e.memberValue with
                 | .column c => ((match arm[c]?.join with
                     | some (t, c') => if t = target then some c' else none
-                    | none => none).map fun c' => { e with member := target, memberValue := .column c' })
+                    | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
                 | .expr _ => none), e.NestedOK s := by
             intro e he
             obtain ⟨e0, he0, _, c', _, _, rfl⟩ := PushDown.mem_passed he

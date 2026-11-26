@@ -162,7 +162,7 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
             (fun e => match e.memberValue with
               | .column c => ((match arm[c]?.join with
                   | some (t, c') => if t = target then some c' else none
-                  | none => none).map fun c' => { e with member := target, memberValue := .column c' })
+                  | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
               | .expr _ => none),
             (s.item e.partner).readable = true ∧ e.member ∈ (s.core (s.item e.member).core).items := by
           intro e he
@@ -190,7 +190,7 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
                   (fun e => match e.memberValue with
                     | .column c => ((match arm[c]?.join with
                         | some (t, c') => if t = target then some c' else none
-                        | none => none).map fun c' => { e with member := target, memberValue := .column c' })
+                        | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
                     | .expr _ => none),
               pushed := (match renamed with
                 | some r => st1.addTerm target r
@@ -198,7 +198,7 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
                   (fun e => match e.memberValue with
                     | .column c => ((match arm[c]?.join with
                         | some (t, c') => if t = target then some c' else none
-                        | none => none).map fun c' => { e with member := target, memberValue := .column c' })
+                        | none => none).map fun c' => { e with member := target, memberValue := .column c', pushed := true })
                     | .expr _ => none) } := by
             intro renamed
             refine ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (fun he => (hpassed e he).1),

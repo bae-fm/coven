@@ -103,6 +103,65 @@ theorem joined_passes_of {rowsOf : Nat → List Row} {r : Row} {mv v : PValue} {
   simp only [RScope.passes, Bool.and_eq_true, Bool.or_eq_true, List.any_eq_true, beq_iff_eq]
   exact ⟨hn, r', hr', hv, hsc⟩
 
+/-- One row of the partner among `rowsOf`, in the partner's scope, that gives
+the row each of the edges' values, passes the edges' joined scope. -/
+theorem joinedAll_passes_of {rowsOf : Nat → List Row} {r : Row} {es : List Edge} {p : Nat}
+    {sc : RScope} {r' : Row} (hr' : r' ∈ rowsOf p) (hsc : sc.passes rowsOf r' = true)
+    (hall : ∀ e ∈ es, e.value.eval r' = e.memberValue.eval r ∧
+      ((e.memberValue.eval r).isSome = true ∨ e.nulls = true)) :
+    (RScope.joinedAll es p sc).passes rowsOf r = true := by
+  simp only [RScope.passes, Bool.and_eq_true, List.any_eq_true, List.all_eq_true, Bool.or_eq_true,
+    beq_iff_eq]
+  exact ⟨r', hr', fun e he => ⟨(hall e he).2, (hall e he).1⟩, hsc⟩
+
+/-- A scope that joins several edges to one partner row passes a row only if
+each edge's own join passes it: the one row gives each edge's value. -/
+theorem joinedAll_passes_joined {rowsOf : Nat → List Row} {r : Row} {es : List Edge} {p : Nat}
+    {sc : RScope} {e : Edge} (h : (RScope.joinedAll es p sc).passes rowsOf r = true) (he : e ∈ es) :
+    (RScope.joined e.memberValue p e.value sc e.nulls).passes rowsOf r = true := by
+  simp only [RScope.passes, Bool.and_eq_true, List.any_eq_true, List.all_eq_true, Bool.or_eq_true,
+    beq_iff_eq] at h ⊢
+  obtain ⟨r', hr', hes, hsc⟩ := h
+  obtain ⟨hn, hv⟩ := hes e he
+  exact ⟨hn, r', hr', hv, hsc⟩
+
+/-- Each scope that joins an item's memberships to one partner passes a row
+when one row of the partner gives it every value of the memberships that join
+that partner. -/
+theorem groupScopes_passes {bound : Nat → RScope} {rowsOf : Nat → List Row} {r : Row}
+    {ms : List Edge}
+    (hgroups : ∀ p, ∀ e0 ∈ ms, e0.partner = p → e0.nested = false → e0.pushed = false → e0.nulls = false →
+      ∃ r' ∈ rowsOf p, (bound p).passes rowsOf r' = true ∧
+        ∀ e ∈ ms, e.partner = p → e.nested = false → e.pushed = false → e.nulls = false →
+          e.value.eval r' = e.memberValue.eval r ∧
+            ((e.memberValue.eval r).isSome = true ∨ e.nulls = true)) :
+    ∀ g ∈ Planned.groupScopes bound ms, g.passes rowsOf r = true := by
+  intro g hg
+  unfold Planned.groupScopes at hg
+  obtain ⟨p, hp, hg⟩ := List.mem_filterMap.mp hg
+  obtain ⟨e0, he0, rfl⟩ := List.mem_map.mp (List.mem_eraseDups.mp hp)
+  simp only [List.mem_filter] at he0
+  have hlisted := he0.2
+  unfold Planned.listsPartner at hlisted
+  simp only [Bool.and_eq_true, Bool.not_eq_true'] at hlisted
+  obtain ⟨r', hr', hsc, hall⟩ := hgroups _ e0 he0.1 rfl hlisted.1.1.1 hlisted.1.1.2 hlisted.1.2
+  generalize hes : List.filter (fun x => x.partner == e0.partner)
+    (List.filter (Planned.listsPartner bound) ms) = l at hg
+  rcases l with _ | ⟨a, _ | ⟨b, c⟩⟩
+  · simp at hg
+  · simp at hg
+  · simp only [Option.some.injEq] at hg
+    subst hg
+    refine joinedAll_passes_of hr' hsc fun e he => ?_
+    have hmem : e ∈ List.filter (fun x => x.partner == e0.partner)
+        (List.filter (Planned.listsPartner bound) ms) := by
+      rw [hes]; exact he
+    simp only [List.mem_filter, beq_iff_eq] at hmem
+    have hl := hmem.1.2
+    unfold Planned.listsPartner at hl
+    simp only [Bool.and_eq_true, Bool.not_eq_true'] at hl
+    exact hall e hmem.1.1 hmem.2 hl.1.1.1 hl.1.1.2 hl.1.2
+
 /-- A membership's scope passes the member's row when a row of the partner
 among `rowsOf`, in the partner's scope, gives the row's value, NULL only for
 an `IS` edge. -/
@@ -173,6 +232,13 @@ theorem scopeAt_passes {p : Planned} {last : Option (List (List Value))} {bound 
     (hcarried : ∀ t, (p.state.items i).carried = some t → t.holds (some r) = true)
     (hmembers : ∀ m ∈ (p.state.items i).memberships,
       (Planned.membershipScope bound m).passes rowsOf r = true)
+    (hgroups : ∀ q, ∀ e0 ∈ (p.state.items i).memberships, e0.partner = q → e0.nested = false →
+      e0.pushed = false → e0.nulls = false →
+      ∃ r' ∈ rowsOf q, (bound q).passes rowsOf r' = true ∧
+        ∀ e ∈ (p.state.items i).memberships, e.partner = q → e.nested = false → e.pushed = false →
+          e.nulls = false →
+          e.value.eval r' = e.memberValue.eval r ∧
+            ((e.memberValue.eval r).isSome = true ∨ e.nulls = true))
     (heither : ∀ sides ∈ (p.state.items i).either, ∃ side ∈ sides,
       (Planned.sideScope bound side).passes rowsOf r = true)
     (hbound : ∀ sorted values found, p.sorted = some sorted → last = some values →
@@ -185,6 +251,7 @@ theorem scopeAt_passes {p : Planned} {last : Option (List (List Value))} {bound 
     cases ht : (p.state.items i).term <;> cases hc : (p.state.items i).carried <;>
       simp [RScope.passes, STerm.bind_passes, hterm, hcarried, ht, hc]
   have hm := foldl_both_passes (Planned.membershipScope bound) _ _ hbase hmembers
+  have hm := foldl_both_passes id _ _ hm (groupScopes_passes hgroups)
   have he : ∀ (l : List (List Side)) (acc : RScope), acc.passes rowsOf r = true →
       (∀ sides ∈ l, ∃ side ∈ sides, (Planned.sideScope bound side).passes rowsOf r = true) →
       (l.foldl (fun scope sides =>
