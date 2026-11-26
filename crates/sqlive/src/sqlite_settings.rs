@@ -45,8 +45,8 @@ pub struct SqliteSettings {
     /// it was built to map.
     pub mmap_size: Option<u64>,
     /// Where temporary tables and indices are kept (`PRAGMA temp_store`).
-    /// On Android, sqlive's SQLite is built to keep them in memory whatever
-    /// this says.
+    /// Opening a database refuses a SQLite built to ignore this setting
+    /// (`SQLITE_TEMP_STORE` 2 or 3).
     pub temp_store: Option<TempStore>,
     /// Helper threads one statement may use to sort (`PRAGMA threads`), at
     /// most `i32::MAX`. SQLite lowers it to the most it was built to allow.
