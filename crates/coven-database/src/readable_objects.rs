@@ -11,7 +11,7 @@ use sqlive::rusqlite::Connection;
 /// `coven_sync_status` and `coven_retry_effect` with their one row, and
 /// coven's views. The function also makes the tables of coven's own that
 /// the views read or that the outside-store writes fill, all empty
-/// (`readable_schema`). The function registers coven's SQL functions, with
+/// (`coven_schema::readable_objects_sql`). The function registers coven's SQL functions, with
 /// `device` as this device's id and `sync_functions` as the computations of
 /// the sync state and of each upload's phase, which the coven crate passes
 /// from sync as its builder does. Nothing transfers files there and
