@@ -15,7 +15,7 @@ CREATE TABLE logged_queue(position INTEGER PRIMARY KEY, track TEXT NOT NULL);
 CREATE TRIGGER logged_queue_removed AFTER DELETE ON logged_queue
 BEGIN INSERT INTO logged(track) VALUES(old.track); END;
 CREATE TABLE lanes(id INTEGER PRIMARY KEY);
-CREATE TABLE lane_tracks(lane INTEGER NOT NULL REFERENCES lanes(id) ON DELETE CASCADE, track TEXT NOT NULL);";
+CREATE TABLE lane_tracks(lane INTEGER NOT NULL REFERENCES lanes(id) ON DELETE CASCADE, track TEXT NOT NULL, PRIMARY KEY(lane, track));";
 
 /// The rows the queue holds before a bulk write clears it.
 const ROWS: i64 = 100_000;

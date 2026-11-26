@@ -20,8 +20,6 @@ pub(super) struct WriteTransaction<'a, P: Policy> {
     open: Cell<bool>,
     /// Whether its pre-update hook is set.
     operations: bool,
-    /// Whether its update hook is set.
-    rows: bool,
     /// Whether it keeps the schema cookie once read (`schema_cookie.rs`).
     cookie: bool,
     /// The first failure of one of its hooks: a read of the row that
@@ -45,7 +43,6 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
             database,
             open: Cell::new(true),
             operations: false,
-            rows: false,
             cookie: false,
             hook_failure: Arc::new(Mutex::new(None)),
         };
@@ -101,25 +98,6 @@ impl<'a, P: Policy> WriteTransaction<'a, P> {
                 .preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>)?;
             self.operations = false;
         }
-        Ok(())
-    }
-
-    /// Observe which rowid each changed row of a rowid table had, until the
-    /// transaction ends.
-    pub(super) fn observe_rows(
-        &mut self,
-        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), PolicyError<P>> + Send + 'static,
-    ) -> Result<(), PolicyError<P>> {
-        let failed = self.hook_failure.clone();
-        self.database.connection.update_hook(Some(
-            move |action, schema: &str, table: &str, rowid| {
-                let observed = panic_as_error::caught_sync("observe a changed row", || {
-                    hook(action, schema, table, rowid)
-                });
-                keep_failure::<P>(&failed, observed);
-            },
-        ))?;
-        self.rows = true;
         Ok(())
     }
 
@@ -228,10 +206,6 @@ impl<P: Policy> Drop for WriteTransaction<'_, P> {
                 .connection
                 .preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>);
             self.database.removed_hook("the pre-update hook", removed);
-        }
-        if self.rows {
-            let removed = self.database.connection.update_hook(None::<fn(Action, &str, &str, i64)>);
-            self.database.removed_hook("the update hook", removed);
         }
     }
 }

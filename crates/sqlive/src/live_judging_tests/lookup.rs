@@ -919,7 +919,7 @@ async fn a_using_join_of_another_collation_narrows_nothing_there() {
 #[tokio::test]
 async fn a_cte_of_a_using_join_lists_each_column_once() {
     let db = TestDatabase::open(
-        "CREATE TABLE a(k INTEGER, v INTEGER);
+        "CREATE TABLE a(k INTEGER PRIMARY KEY, v INTEGER);
         CREATE TABLE b(id INTEGER PRIMARY KEY, k INTEGER, w INTEGER);
         CREATE TABLE d(id INTEGER PRIMARY KEY, k INTEGER, v INTEGER, w INTEGER);
         INSERT INTO a VALUES (1,10),(2,20); INSERT INTO b VALUES (1,1,5),(2,2,6);

@@ -4,7 +4,7 @@
 
 use super::event_capture::{EventCapture, Operation};
 use super::stream_capture::{StreamCapture, StreamChanges};
-use super::transaction_capture::{ChangeCapture, SupplementalChanges};
+use super::transaction_capture::ChangeCapture;
 use super::write_transaction::WriteTransaction;
 use super::HostSql;
 use crate::authorization::Policy;
@@ -81,19 +81,15 @@ fn phases<P: Policy, A, T, E: crate::RollbackJoin<P::Failure, P::Refusal>>(
     });
     // The app phase ends: a session observes the rest of the transaction.
     let switched = match begun {
-        Ok(begun) => transaction
-            .stop_observing_operations()
-            .and_then(|()| SupplementalChanges::observe(transaction))
-            .map(|supplemental| (begun, supplemental))
-            .map_err(E::from),
+        Ok(begun) => transaction.stop_observing_operations().map(|()| begun).map_err(E::from),
         Err(error) => Err(error),
     };
-    switched.and_then(|((begun, recording), supplemental)| {
+    switched.and_then(|(begun, recording)| {
         transaction.within(|database| {
             let operations = recording.events();
             let mut changes = recording.local_changes();
             let mut capture = match &database.observation {
-                Some(_) => Some(ChangeCapture::begin(database, supplemental)?),
+                Some(_) => Some(ChangeCapture::begin(database)?),
                 None => None,
             };
             let result = host(database, &operations, begun)?;

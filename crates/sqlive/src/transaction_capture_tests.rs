@@ -1,4 +1,5 @@
 use super::*;
+use crate::connection::WriteTransaction;
 use crate::tests::{TestDatabase, TestOptions};
 use rusqlite::fallible_streaming_iterator::FallibleStreamingIterator;
 
@@ -19,10 +20,9 @@ fn tables(changeset: &[u8]) -> Vec<String> {
 /// The tables whose changes a captured transaction on `writer` records as
 /// `sql` runs.
 fn recorded<P: Policy>(writer: &mut HostSql<P>, sql: &str) -> Vec<String> {
-    let mut transaction = WriteTransaction::begin(writer, false).unwrap();
-    let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
+    let transaction = WriteTransaction::begin(writer, false).unwrap();
     let changeset = transaction.within(|writer| {
-        let mut capture = ChangeCapture::begin(writer, supplemental).unwrap();
+        let mut capture = ChangeCapture::begin(writer).unwrap();
         let _internal = writer.authorization.internal();
         writer.batch(sql).unwrap();
         capture.changeset().unwrap()

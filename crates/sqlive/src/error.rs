@@ -42,6 +42,12 @@ pub enum Error<F, R> {
         /// The refused operation.
         operation: &'static str,
     },
+    /// A table has no primary key, so no key tells its rows apart and sqlive
+    /// can't capture its changes or read it for a live query.
+    TableWithoutPrimaryKey {
+        /// The table, as SQLite names it.
+        table: String,
+    },
     /// SQLite rolled the owned transaction back itself, so it can't go on.
     TransactionEnded,
     /// The handle has closed the database.
@@ -101,6 +107,9 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for Error<F, 
             Self::Refused(refusal) => refusal.fmt(f),
             Self::StatementForbidden { operation } => {
                 write!(f, "app SQL cannot perform {operation}")
+            }
+            Self::TableWithoutPrimaryKey { table } => {
+                write!(f, "table {table} has no primary key, so sqlive can't tell its rows apart")
             }
             Self::TransactionEnded => f.write_str("SQLite ended the owned transaction"),
             Self::Closed => f.write_str("the database is closed"),

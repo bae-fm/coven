@@ -1,5 +1,5 @@
 //! Each table of a connection's main schema as sqlive's change captures read
-//! it: its columns, whether a key names its rows, and what a shadow table's
+//! it: its columns, which of them are its primary key, and what a shadow table's
 //! change means for the virtual table it belongs to. A contentful FTS5
 //! table's content table holds its rows, so the table has a shape of its
 //! own, the content table's renamed, under which a capture records each of
@@ -22,8 +22,6 @@ pub(crate) struct TableShape {
     /// name, whether it is part of the key, and whether it is hidden or
     /// generated.
     pub(crate) columns: Vec<(String, bool, bool)>,
-    /// No key can name its rows' changes: the table has no primary key.
-    pub(crate) whole: bool,
     /// What a change to it means for the virtual table it belongs to, when
     /// it is a shadow table.
     pub(crate) shadow: Option<Shadow>,
@@ -84,12 +82,7 @@ impl TableShapes {
                 .chain(own.map(|(name, _, _)| (name, false, false)))
                 .collect();
             contents.insert(content.to_ascii_lowercase(), shapes.len());
-            shapes.push(TableShape {
-                name: table.to_ascii_lowercase(),
-                columns,
-                whole: false,
-                shadow: None,
-            });
+            shapes.push(TableShape { name: table.to_ascii_lowercase(), columns, shadow: None });
         }
         // SQLite's built-in virtual modules name shadow tables with the owning
         // table's name and a suffix. Longest prefix disambiguates underscores.
@@ -106,6 +99,9 @@ impl TableShapes {
             }
             let name = table.to_ascii_lowercase();
             let columns = columns(&table)?;
+            if !columns.iter().any(|(_, key, _)| *key) {
+                return Err(crate::Error::TableWithoutPrimaryKey { table });
+            }
             let shadow = (kind == "shadow").then(|| {
                 let parent = virtuals
                     .iter()
@@ -122,12 +118,7 @@ impl TableShapes {
                 }
             });
             positions.insert(table, shapes.len());
-            shapes.push(TableShape {
-                whole: !columns.iter().any(|(_, key, _)| *key),
-                name,
-                columns,
-                shadow,
-            });
+            shapes.push(TableShape { name, columns, shadow });
         }
         Ok(Self { positions, shapes })
     }

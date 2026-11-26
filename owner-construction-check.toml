@@ -435,7 +435,6 @@ task_types = [
     "coven_database::read::Read",
     "sqlive::connection::transaction_capture::ChangeCapture",
     "sqlive::connection::stream_capture::StreamCapture",
-    "sqlive::connection::transaction_capture::SupplementalChanges",
     "sqlive::connection::Observing",
     "coven_database::migration::MigrationContext",
     "coven_database::write::SqlContext",

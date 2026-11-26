@@ -124,34 +124,68 @@ async fn every_host_statement_path_is_observed_by_the_transaction() {
     db.close();
 }
 
-/// Beside the session, an update hook watches the schema's tables that have
-/// no primary key.
+/// A table with no primary key, whichever way SQLite stores its rows, refuses
+/// the schema's shapes and so every capture and live read, naming the table.
 #[test]
-fn hook_tables_are_the_schemas_tables_with_no_primary_key() {
+fn a_table_with_no_primary_key_refuses_the_schemas_shapes() {
+    for keyless in ["CREATE TABLE unkeyed(value TEXT)", "CREATE TABLE unkeyed(value TEXT) STRICT"] {
+        let db = TestDatabase::open(&format!(
+            "CREATE TABLE keyed(id TEXT NOT NULL PRIMARY KEY,value TEXT); {keyless}"
+        ));
+        db.host(|writer| {
+            let error = writer.table_shapes().err().unwrap();
+            assert!(
+                matches!(&error, crate::Error::TableWithoutPrimaryKey { table } if table == "unkeyed"),
+                "{error:?}"
+            );
+        });
+        db.close();
+    }
+}
+
+/// Every kind of primary key keeps its table's shape.
+#[test]
+fn tables_with_a_primary_key_keep_their_shapes() {
     let db = TestDatabase::open(
         "
         CREATE TABLE keyed(id TEXT NOT NULL PRIMARY KEY,value TEXT);
         CREATE TABLE ordinary(id INTEGER PRIMARY KEY,value TEXT);
-        CREATE TABLE unkeyed(value TEXT);
-        CREATE TABLE sqliteish(value TEXT);
         CREATE TABLE composite(a TEXT NOT NULL,b INTEGER NOT NULL,PRIMARY KEY(a,b));
-        CREATE TABLE nonnull(id TEXT NOT NULL PRIMARY KEY,value TEXT);
         CREATE TABLE without_rowid(id TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID;
         CREATE TABLE strict_key(id TEXT PRIMARY KEY,value TEXT) STRICT;
         CREATE TABLE descending(id INTEGER NOT NULL PRIMARY KEY DESC,value TEXT);
         CREATE TABLE alias_descending(id INTEGER,value TEXT,PRIMARY KEY(id DESC));
     ",
     );
-    db.host(|writer| {
-        let shapes = writer.table_shapes().unwrap();
-        let mut whole: Vec<&str> = shapes
-            .iter()
-            .filter(|(_, shape)| shape.whole)
-            .map(|(_, shape)| shape.name.as_str())
-            .collect();
-        whole.sort_unstable();
-        assert_eq!(whole, ["sqliteish", "unkeyed"]);
-    });
+    db.host(|writer| assert_eq!(writer.table_shapes().unwrap().iter().count(), 7));
+    db.close();
+}
+
+/// A write that captures changes in a schema with a table that has no
+/// primary key fails, naming the table, and commits nothing.
+#[test]
+fn a_write_refuses_a_schema_with_a_table_that_has_no_primary_key() {
+    let db = TestDatabase::open(
+        "CREATE TABLE keyed(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE unkeyed(value TEXT)",
+    );
+    let error = db.write("INSERT INTO keyed VALUES('a','b')").unwrap_err();
+    assert!(format!("{error:?}").contains("TableWithoutPrimaryKey"), "{error:?}");
+    assert!(format!("{error}").contains("unkeyed"), "{error}");
+    assert_eq!(db.value::<i64>("SELECT count(*) FROM keyed"), 0);
+    db.close();
+}
+
+/// A live query that reads in a schema with a table that has no primary key
+/// fails with an error naming the table.
+#[tokio::test]
+async fn a_live_read_refuses_a_schema_with_a_table_that_has_no_primary_key() {
+    let db = TestDatabase::open(
+        "CREATE TABLE keyed(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE unkeyed(value TEXT)",
+    );
+    let mut query = db
+        .subscribe(|sql| Ok(sql.query("SELECT value FROM keyed", [], |r| r.get::<_, String>(0))?));
+    let error = crate::tests::next_result(&mut query).await.unwrap_err();
+    assert!(format!("{error:?}").contains("unkeyed"), "{error:?}");
     db.close();
 }
 
@@ -163,7 +197,7 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
         ("TEXT PRIMARY KEY", " WITHOUT ROWID", "'a'", "'b'"),
         ("TEXT PRIMARY KEY", " STRICT", "'a'", "'b'"),
     ] {
-        let db = TestDatabase::open(&format!("CREATE TABLE items(id {key},value INTEGER,extra INTEGER){suffix}; INSERT INTO items VALUES({first},10,0),({second},20,0); CREATE TABLE hook_target(value TEXT)"));
+        let db = TestDatabase::open(&format!("CREATE TABLE items(id {key},value INTEGER,extra INTEGER){suffix}; INSERT INTO items VALUES({first},10,0),({second},20,0); CREATE TABLE hook_target(id INTEGER PRIMARY KEY,value TEXT)"));
         let runs = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&runs);
         let query = format!("SELECT value FROM items WHERE id={first}");
@@ -172,7 +206,7 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
             Ok((count.fetch_add(1, Ordering::SeqCst), value))
         });
         assert_eq!(next(&mut query).await, (0, 10));
-        db.commit(&format!("UPDATE items SET extra=1 WHERE id={first}; UPDATE items SET value=21 WHERE id={second}; INSERT INTO hook_target VALUES('unrelated')"));
+        db.commit(&format!("UPDATE items SET extra=1 WHERE id={first}; UPDATE items SET value=21 WHERE id={second}; INSERT INTO hook_target(value) VALUES('unrelated')"));
         assert!(!query.is_marked_for_rerun(), "{key}{suffix}");
         assert_eq!(runs.load(Ordering::SeqCst), 1, "{key}{suffix}");
         db.commit(&format!("UPDATE items SET value=11 WHERE id={first}"));
@@ -181,44 +215,13 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
     }
 }
 
-#[tokio::test]
-async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_failure() {
-    let db = TestDatabase::open("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE local(id TEXT,value TEXT,extra INTEGER,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED); INSERT INTO local VALUES(NULL,'unchanged',0,NULL)");
-    let count = AtomicUsize::new(0);
-    let mut query = db.subscribe(move |sql| {
-        let values =
-            sql.query("SELECT value FROM local WHERE id IS NULL", [], |r| r.get::<_, String>(0))?;
-        Ok((count.fetch_add(1, Ordering::SeqCst), values))
-    });
-    assert_eq!(next(&mut query).await, (0, vec!["unchanged".into()]));
-    db.host(|writer| {
-        let result = writer.transaction::<(), TestError>(|writer| {
-            writer.batch("UPDATE local SET extra=1")?;
-            Err(crate::Error::TransactionEnded)
-        });
-        assert!(matches!(result, Err(crate::Error::TransactionEnded)));
-        assert!(!query.is_marked_for_rerun());
-        assert!(writer.transaction(|writer| writer.batch("UPDATE local SET parent=99")).is_err());
-        assert!(!query.is_marked_for_rerun());
-        // A later session-only commit must not publish stale hook changes.
-        writer.transaction(|writer| writer.batch("INSERT INTO parent VALUES(1)")).unwrap();
-    });
-    assert!(!query.is_marked_for_rerun());
-    db.commit("UPDATE local SET extra=2");
-    // Hook changes invalidate every column even when the selected value stayed equal.
-    assert_eq!(next(&mut query).await, (1, vec!["unchanged".into()]));
-    db.commit("DELETE FROM local");
-    assert_eq!(next(&mut query).await, (2, vec![]));
-    db.close();
-}
-
 /// A write of two updates and a write of six read the same metadata: no
 /// update or trigger it fires reads any, and the commit reads the same
 /// metadata once whatever the write did. The first write reads the tables'
 /// shapes, once for the schema.
 #[test]
 fn app_writes_query_no_metadata_for_each_statement_or_trigger() {
-    let db = TestDatabase::open("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(new.value); END");
+    let db = TestDatabase::open("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(id INTEGER PRIMARY KEY,value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit(value) VALUES(new.value); END");
     let metadata_reads = |updates: u8| {
         db.write_app(|writer| {
             for value in 0..updates {

@@ -103,19 +103,12 @@ pub(crate) fn changes<P: Policy>(
         for columns in changed_shapes(&shapes, operation.table_name(), &mut changes)? {
             let table = columns.name.clone();
             let first = !images.contains_key(&table);
-            // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first. Session
-            // positions otherwise omit generated columns; event positions don't.
+            // Session positions omit generated columns; event positions don't.
             let names: Vec<&str> = columns
-                .whole
-                .then_some("rowid")
-                .into_iter()
-                .chain(
-                    columns
-                        .columns
-                        .iter()
-                        .filter(|(_, _, hidden)| !hidden)
-                        .map(|(name, _, _)| name.as_str()),
-                )
+                .columns
+                .iter()
+                .filter(|(_, _, hidden)| !hidden)
+                .map(|(name, _, _)| name.as_str())
                 .collect();
             if first {
                 assert_eq!(
@@ -273,8 +266,7 @@ fn value(
 /// Each operation counts as a session change of its row would: inserts and
 /// deletes change the whole row, updates each column whose value changed,
 /// and a primary-key update deletes the old key's row and inserts the new.
-/// Each operation on a row a key names folds into the row's net change;
-/// tables with no primary key report table-wide changes.
+/// Each operation on a row a key names folds into the row's net change.
 pub(crate) fn event_changes<P: Policy>(
     database: &HostSql<P>,
     events: &[crate::connection::Operation],
@@ -286,10 +278,6 @@ pub(crate) fn event_changes<P: Policy>(
     for event in events {
         for fields in changed_shapes(&shapes, &event.table, &mut changes)? {
             let table = fields.name.clone();
-            if fields.whole {
-                changes.push(RowChange { table, column: String::new(), rows: None });
-                continue;
-            }
             let (image, positions) = images
                 .entry(table.clone())
                 .or_insert_with(|| {

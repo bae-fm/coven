@@ -177,9 +177,10 @@ again as one change from its first values to its last would.
 For each row a write changes in a table that some live query reads, sqlive keeps
 the row's key and the values of the columns live queries read or narrow by, as
 they were before the write first changed the row and after it last did. A column
-whose values sqlive doesn't keep counts as changed once a statement changes it,
-and so does every column of a table with no primary key, since no key names its
-rows.
+whose values sqlive doesn't keep counts as changed once a statement changes it.
+No key names a row of a table with no primary key, so sqlive refuses a schema
+that has one, with an error that names the table, wherever it captures changes
+or runs a live read.
 
 ### Streamed transactions
 

@@ -28,14 +28,13 @@ pub(crate) struct ImageColumns {
 
 impl ImageColumns {
     /// The row images of the tables `kept` names, by position: each one's
-    /// key and the kept columns it has. A table no key can name keeps none.
+    /// key and the kept columns it has.
     pub(crate) fn kept(
         shapes: &TableShapes,
         kept: &crate::change_capture::KeptColumns,
     ) -> HashMap<usize, ImageColumns> {
         shapes
             .iter()
-            .filter(|(_, shape)| !shape.whole)
             .filter_map(|(position, shape)| {
                 let columns = kept.get(&shape.name)?;
                 let positions: Vec<usize> = (0..shape.columns.len())
@@ -278,7 +277,7 @@ impl PreUpdateChanges {
                 self.columns.insert((position, ROW));
             }
             PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
-                if shape.whole || key_changed(shape, old, new)? {
+                if key_changed(shape, old, new)? {
                     self.columns.insert((position, ROW));
                     return Ok(());
                 }

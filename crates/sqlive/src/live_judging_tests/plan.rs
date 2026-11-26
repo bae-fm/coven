@@ -132,7 +132,7 @@ async fn separate_statements_keep_their_own_columns_and_ranges() {
 
 #[tokio::test]
 async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
-    let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE TABLE numbers(value INTEGER)");
+    let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE TABLE numbers(value INTEGER PRIMARY KEY)");
     for sql in [
         "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
@@ -319,11 +319,10 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
 
 #[tokio::test]
 async fn unsupported_key_schemas_use_whole_tables() {
-    let db = TestDatabase::open("CREATE TABLE folded(id TEXT NOT NULL COLLATE NOCASE PRIMARY KEY, value INTEGER); CREATE TABLE unkeyed(id INTEGER, value INTEGER); INSERT INTO folded VALUES ('A',0),('z',0); INSERT INTO unkeyed VALUES(1,0),(9,0)");
-    for (select, update) in [
-        ("SELECT value FROM folded WHERE id='a'", "UPDATE folded SET value=value+1 WHERE id='z'"),
-        ("SELECT value FROM unkeyed WHERE id=1", "UPDATE unkeyed SET value=value+1 WHERE id=9"),
-    ] {
+    let db = TestDatabase::open("CREATE TABLE folded(id TEXT NOT NULL COLLATE NOCASE PRIMARY KEY, value INTEGER); INSERT INTO folded VALUES ('A',0),('z',0);");
+    for (select, update) in
+        [("SELECT value FROM folded WHERE id='a'", "UPDATE folded SET value=value+1 WHERE id='z'")]
+    {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
         let mut query = db.subscribe(move |db| {

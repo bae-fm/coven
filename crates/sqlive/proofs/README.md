@@ -764,7 +764,7 @@ value. Every changed row in the model holds a value in each column, so the
 model doesn't state that a row whose value a write didn't record, or a
 change that names no row, reaches every live query sqlive filed under its
 table. The model names a row by its rowid. sqlive names it by its primary key,
-and doesn't fold the changes of a table with no primary key. The model keeps
+and refuses a table with none. The model keeps
 every column of a changed row, so it doesn't state that sqlive counts a column
 whose values it doesn't keep, one no live query reads or tests, as changed
 once a statement changes it.

@@ -110,7 +110,7 @@ fn a_schema_change_prepares_again() {
     let write = |id: &str| db.write_app(|sql| sql.app_execute(INSERT, [id])).unwrap();
     write("1");
     let before = fresh(&db);
-    db.host(|writer| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
+    db.host(|writer| writer.batch("CREATE TABLE elsewhere(id INTEGER PRIMARY KEY)").unwrap());
     write("2");
     write("3");
     assert_eq!(fresh(&db) - before, 1);
@@ -173,7 +173,7 @@ fn readers_share_a_statements_scope_plan() {
 fn a_schema_change_builds_a_scope_plan_again() {
     let (db, counter) = note_of_title();
     assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
-    db.host(|writer| writer.batch("CREATE TABLE elsewhere(x)").unwrap());
+    db.host(|writer| writer.batch("CREATE TABLE elsewhere(id INTEGER PRIMARY KEY)").unwrap());
     assert_eq!(plans_built_on_each_reader(&db, &counter), 1);
     db.close();
 }

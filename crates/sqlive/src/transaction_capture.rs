@@ -1,72 +1,30 @@
 //! Transaction observation through SQLite sessions.
 
-use super::table_shapes::TableShapes;
-use super::write_transaction::WriteTransaction;
 use super::HostSql;
 use crate::authorization::HostError;
 use crate::authorization::Policy;
 use crate::authorization::PolicyError;
 use crate::net_changes::Captured;
-use crate::RowChange;
 use crate::UnrecordedTables;
-use panic_as_error::locks::lock_unpoisoned;
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // rusqlite does not expose the session ROWID option. Keep raw handles here,
 // inside the SQLite owner; the borrow prevents the connection outliving capture.
 pub(super) struct ChangeCapture<'a, P: Policy> {
     session: *mut rusqlite::ffi::sqlite3_session,
     database: &'a HostSql<P>,
-    supplemental: SupplementalChanges,
     /// The tables the session doesn't record. The session's filter reads
     /// them through a pointer, so the capture keeps them until after it
     /// deletes the session.
     unrecorded: Arc<UnrecordedTables>,
 }
 
-/// The tables a transaction's update hook saw change that a session can't
-/// key, having no primary key, by their position in the shapes the hook
-/// read them by. A panic in the hook fails the transaction before it
-/// commits, so the lock is taken as it is.
-pub(super) struct SupplementalChanges {
-    shapes: Arc<TableShapes>,
-    changed: Arc<Mutex<BTreeSet<usize>>>,
-}
-
-impl SupplementalChanges {
-    /// Watch the tables of `transaction`'s schema that no key names; none
-    /// are watched where there are none.
-    pub(super) fn observe<P: Policy>(
-        transaction: &mut WriteTransaction<'_, P>,
-    ) -> Result<Self, PolicyError<P>> {
-        let shapes = transaction.within(HostSql::<P>::table_shapes)?;
-        let changed = Arc::new(Mutex::new(BTreeSet::new()));
-        if shapes.iter().any(|(_, shape)| shape.whole) {
-            // A session's pre-update hook disables SQLite's truncate-delete
-            // optimization, so even DELETE without WHERE reaches this hook.
-            let seen = Arc::clone(&changed);
-            let tables = Arc::clone(&shapes);
-            transaction.observe_rows(move |_, schema: &str, table: &str, _| {
-                if schema == "main" {
-                    if let Some(position) =
-                        tables.position(table).filter(|position| tables.shape(*position).whole)
-                    {
-                        lock_unpoisoned(&seen).insert(position);
-                    }
-                }
-                Ok(())
-            })?;
-        }
-        Ok(Self { shapes, changed })
-    }
-}
-
 impl<'a, P: Policy> ChangeCapture<'a, P> {
-    pub(super) fn begin(
-        database: &'a HostSql<P>,
-        supplemental: SupplementalChanges,
-    ) -> Result<Self, PolicyError<P>> {
+    /// Begins recording the transaction's changes. A table with no primary
+    /// key refuses the capture, since a session can't tell its rows apart
+    /// (`table_shapes.rs`).
+    pub(super) fn begin(database: &'a HostSql<P>) -> Result<Self, PolicyError<P>> {
+        database.table_shapes()?;
         let unrecorded = Arc::clone(
             database
                 .handle
@@ -83,16 +41,7 @@ impl<'a, P: Policy> ChangeCapture<'a, P> {
                 &mut session,
             )
         })?;
-        let capture = Self { session, database, supplemental, unrecorded };
-        let mut rowid: std::ffi::c_int = 1;
-        // SAFETY: the live session has no attached tables yet and rowid is an int.
-        sqlite_ok(unsafe {
-            rusqlite::ffi::sqlite3session_object_config(
-                session,
-                rusqlite::ffi::SQLITE_SESSION_OBJCONFIG_ROWID,
-                (&mut rowid as *mut std::ffi::c_int).cast(),
-            )
-        })?;
+        let capture = Self { session, database, unrecorded };
         // SAFETY: the filter reads only its table name and its context, the
         // tables `capture` holds, which outlive the session; null attaches
         // every current and subsequently created main table the filter admits.
@@ -112,23 +61,7 @@ impl<'a, P: Policy> ChangeCapture<'a, P> {
         let copied = self.changeset()?;
         let kept =
             self.database.handle.as_ref().map(crate::Handle::kept_columns).unwrap_or_default();
-        let mut changes = crate::change_capture::changes(self.database, &copied, &kept)?;
-        for position in std::mem::take(&mut *lock_unpoisoned(&self.supplemental.changed)) {
-            let shapes = &self.supplemental.shapes;
-            let shape = shapes.shape(position);
-            if let Some(parent) = shape.parent(shapes) {
-                changes.push(RowChange {
-                    table: parent.to_owned(),
-                    column: String::new(),
-                    rows: None,
-                });
-            }
-            changes.push(RowChange {
-                table: shape.name.clone(),
-                column: String::new(),
-                rows: None,
-            });
-        }
+        let changes = crate::change_capture::changes(self.database, &copied, &kept)?;
         Ok(changes)
     }
 }

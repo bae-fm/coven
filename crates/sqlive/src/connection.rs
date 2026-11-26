@@ -785,8 +785,7 @@ impl<P: Policy> HostSql<P> {
         let observing = if streaming {
             stream_capture::StreamCapture::begin(&mut transaction).map(Observing::Stream)
         } else if transaction.within(|database| database.observation.is_some()) {
-            transaction_capture::SupplementalChanges::observe(&mut transaction)
-                .map(Observing::Session)
+            Ok(Observing::Session)
         } else {
             Ok(Observing::Nothing)
         };
@@ -794,9 +793,7 @@ impl<P: Policy> HostSql<P> {
             transaction.within(|database| {
                 let (stream, mut session) = match observing {
                     Observing::Stream(stream) => (Some(stream), None),
-                    Observing::Session(supplemental) => {
-                        (None, Some(ChangeCapture::begin(database, supplemental)?))
-                    }
+                    Observing::Session => (None, Some(ChangeCapture::begin(database)?)),
                     Observing::Nothing => (None, None),
                 };
                 let result = run(database)?;
@@ -865,7 +862,7 @@ impl<P: Policy> HostSql<P> {
 /// stream's capture, a session, or nothing.
 enum Observing {
     Stream(stream_capture::StreamCapture),
-    Session(transaction_capture::SupplementalChanges),
+    Session,
     Nothing,
 }
 

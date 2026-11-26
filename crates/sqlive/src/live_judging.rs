@@ -13,7 +13,8 @@ use std::sync::Arc;
 impl<P: Policy> HostSql<P> {
     /// A live query's run on one snapshot. What its statements read goes to
     /// `judge` before the snapshot ends, which judges the writes that committed
-    /// during the run by lookups in that snapshot (SPEC.md section 3).
+    /// during the run by lookups in that snapshot (SPEC.md section 3). A schema
+    /// with a table that has no primary key refuses the run.
     pub fn live_read<F, R, E>(
         &self,
         judge: &mut dyn FnMut(ReadSet, &mut Lookups<'_>) -> rusqlite::Result<()>,
@@ -26,7 +27,10 @@ impl<P: Policy> HostSql<P> {
         let mut finished = false;
         let result = self.read_transaction(|| {
             let _reading = self.authorization.live_reading();
-            let result = read(self);
+            // A table with no primary key refuses the read before it starts.
+            // The shapes are metadata, so the run doesn't record reading them.
+            let shapes = self.authorization.unrecorded(|| self.table_shapes());
+            let result = shapes.map_err(E::from).and_then(|_| read(self));
             let reads = self.authorization.reads();
             finished = true;
             let judged = judge(reads, &mut |judging| self.ask_judged(judging));
