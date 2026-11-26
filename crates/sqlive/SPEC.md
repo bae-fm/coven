@@ -1773,30 +1773,32 @@ schema's table declares for it. It gives a table function's column, such as
 `SchemaProbe::prepare` also says where the statement can give NULL in it
 (`ProbedColumn::nulls`, a `ColumnNulls`). No row holds NULL in it
 (`ColumnNulls::nullable` is false), in a SELECT, for a literal other than NULL,
-and for a table's column that the table declares NOT NULL, or that is the
-rowid, when no query the column passes through gives NULL of its own, as a
-join, an aggregate with no GROUP BY, a compound or a scalar subquery can. An
-aggregate in a subquery counts for the query around it when it qualifies
-columns, each with a name of that query's FROM, so SQL that passes an aggregate
-an outer column writes the column's qualifier. In an INSERT, UPDATE, DELETE or
-REPLACE, only a RETURNING column that is a table's column which the table
-declares NOT NULL, or which is the rowid, holds no NULL, and no computed
-column does, a literal too. `ColumnNulls::row_can_be_missing` says whether the
-statement can give no row of the FROM item that its first SELECT takes the
-column from, and so NULL in each of that item's columns: a join pads the item,
-in parentheses or not, or an aggregate with no GROUP BY makes a row over no
-rows. A computed column and a write's RETURNING column have no such item.
-`ColumnNulls::selects` says what each SELECT of the statement's compound can
-give the column (`SelectNull`): no NULL; a computed value other than a literal
-and a scalar subquery, which can be NULL as far as the probe can tell; the
-literal NULL; NULL only where the SELECT has no row of one of its FROM items,
-which a number tells from its others; or a value that can be NULL otherwise.
-Of the columns of a statement that its parser can't read, and of a SELECT
-whose columns it can't tell, the probe says none of this: their `nulls` is
-`None`. `SchemaProbe::table_columns`
-lists the columns of a table or view in the order of an INSERT with no column list, each
-with whether the table declares it NOT NULL, so that such a tool can check a
-value it binds against the column it fills.
+for a scalar subquery that returns exactly one row whose value is never NULL
+(sqlive-compose's [SPEC.md](../sqlive-compose/SPEC.md), section 8, lists the
+forms the probe knows), and for a table's column that the table declares NOT
+NULL, or that is the rowid, when no query the column passes through gives NULL
+of its own, as a join, an aggregate with no GROUP BY, a compound or another
+scalar subquery can. An aggregate in a subquery counts for the query around it
+when it qualifies columns, each with a name of that query's FROM, so SQL that
+passes an aggregate an outer column writes the column's qualifier. In an
+INSERT, UPDATE, DELETE or REPLACE, only two kinds of RETURNING column hold no
+NULL: such a scalar subquery, and a table's column which the table declares NOT
+NULL, or which is the rowid. No other computed column does, a literal too.
+`ColumnNulls::row_can_be_missing` says whether the statement can give no row of
+the FROM item that its first SELECT takes the column from, and so NULL in each
+of that item's columns: a join pads the item, in parentheses or not, or an
+aggregate with no GROUP BY makes a row over no rows. A computed column and a
+write's RETURNING column have no such item. `ColumnNulls::selects` says what
+each SELECT of the statement's compound can give the column (`SelectNull`): no
+NULL; a computed value other than a literal and a scalar subquery, which can be
+NULL as far as the probe can tell; the literal NULL; NULL only where the SELECT
+has no row of one of its FROM items, which a number tells from its others; or a
+value that can be NULL otherwise. Of the columns of a statement that its parser
+can't read, and of a SELECT whose columns it can't tell, the probe says none of
+this: their `nulls` is `None`. `SchemaProbe::table_columns` lists the columns
+of a table or view in the order of an INSERT with no column list, each with
+whether the table declares it NOT NULL, so that such a tool can check a value
+it binds against the column it fills.
 
 The report takes each parameter that a column is compared with to hold a value
 that isn't NULL and that SQLite compares as it is, and takes each run to return

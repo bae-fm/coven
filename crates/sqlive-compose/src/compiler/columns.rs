@@ -10,7 +10,6 @@ use super::header::{Declared, Header, RustType};
 use super::json;
 use super::lex::Token;
 use super::model::{strict_type, Field, FieldName, Reading};
-use super::never_null;
 use super::spread::{Place, Placed, Registry};
 
 /// A result item and the result columns it gives.
@@ -226,9 +225,9 @@ fn column_field(
         // Of a statement the probe can't read, any column can be NULL.
         None => true,
         Some(_) if compound.is_some() => null_select.is_some(),
-        Some(_) if item.kind == ItemKind::Subquery => {
-            !never_null::expression(sql, &tokens[item.expression.clone()])
-        }
+        // The probe reads a scalar subquery, whose header type must hold what
+        // it can give, and no other computed column's.
+        Some(nulls) if item.kind == ItemKind::Subquery => nulls.nullable(),
         Some(nulls) => origin.is_some() && nulls.nullable(),
     };
     let (ty, reading) = match (declared.map(|declaration| &declaration.declared), origin) {

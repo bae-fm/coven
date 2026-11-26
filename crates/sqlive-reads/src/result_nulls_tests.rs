@@ -145,6 +145,35 @@ fn a_returning_column_holds_what_its_table_column_holds() {
 }
 
 #[test]
+fn a_scalar_subquery_that_returns_one_row_holds_what_it_selects() {
+    assert_never_null(&[
+        // SQLite names the subquery's table column as the column's origin.
+        (
+            "DELETE FROM issues RETURNING (SELECT title FROM issues WHERE 0),
+             ((SELECT count(*) FROM people))",
+            &[false, true],
+        ),
+        // A `*` gives several columns, so the results after it stand that far
+        // from the end.
+        (
+            "DELETE FROM issues RETURNING (SELECT count(*) FROM people), *,
+             (SELECT title FROM issues WHERE 0)",
+            &[true, true, true, false, false],
+        ),
+        (
+            "SELECT (SELECT count(*) FROM people), (SELECT max(name) FROM people)
+             UNION ALL SELECT 1, 'a'",
+            &[true, false],
+        ),
+        (
+            "SELECT s.n FROM (SELECT 0 AS n UNION ALL SELECT (SELECT total(id) FROM people)) AS s",
+            &[true],
+        ),
+        ("SELECT s.column1 FROM (VALUES ((SELECT count(*) FROM people))) AS s", &[true]),
+    ]);
+}
+
+#[test]
 fn a_column_says_whether_its_from_item_can_have_no_row() {
     let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
     // Each case's first two columns are of the items `a` and `b`.

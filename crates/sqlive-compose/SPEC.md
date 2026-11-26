@@ -898,10 +898,11 @@ statement itself:
   An aggregate in a subquery of a result column counts when SQLite gives it to
   this query: it qualifies columns, each with a name of this query's `FROM`;
 - is a compound, and one of its `SELECT`s can give NULL in the column;
-- takes the column from a scalar subquery, which can return no row;
-- takes it from `NULL` or another computed expression that isn't a literal,
-  from a table function, from a recursive CTE where it reads itself, or from a
-  view that the probe's parser can't read.
+- takes the column from a scalar subquery that can give NULL (**Scalar
+  subqueries**, below);
+- takes it from `NULL`, from a computed expression other than a literal and a
+  scalar subquery, from a table function, from a recursive CTE where it reads
+  itself, or from a view that the probe's parser can't read.
 
 ```sql
 SELECT shown.name AS assignee
@@ -925,8 +926,11 @@ declare it `NOT NULL`: an `INT PRIMARY KEY`, an `INTEGER PRIMARY KEY DESC`
 declared on the column, or a column of a primary key of two columns. A STRICT
 table and a `WITHOUT ROWID` table make each primary key column `NOT NULL`.
 
-**Scalar subqueries.** A subquery that is a whole result column, with or without
-a `WITH` clause, never gives NULL when two things hold:
+**Scalar subqueries.** A subquery that is a whole result column, with or
+without a `WITH` clause, never gives NULL when two things hold. sqlive's schema
+probe checks both for such a subquery in the statement, in each `SELECT` of a
+compound, in a `RETURNING`, in a row of a `VALUES` and in each query a column
+passes through.
 
 - *It returns exactly one row.* Its result column calls an aggregate over its
   own rows, and it has no `GROUP BY`, `HAVING`, `LIMIT` or compound operator.
@@ -949,20 +953,20 @@ a `WITH` clause, never gives NULL when two things hold:
     NULL, as `/` by zero and infinity minus infinity do);
   - such a value in parentheses, or another subquery that never gives NULL.
 
-The compiler takes every other scalar subquery to be one that can give NULL,
-and each one in a statement with a compound operator too. It checks no computed
-column other than a scalar subquery and, in a compound, the literal `NULL`:
-elsewhere the header's type says whether the column can be NULL.
+The compiler takes every other scalar subquery to be one that can give NULL. It
+checks no computed column other than a scalar subquery and, in a compound, the
+literal `NULL`: elsewhere the header's type says whether the column can be
+NULL.
 
 **Compounds.** Each `SELECT` of a statement's compound gives the result columns
 values of its own, so the compiler checks them all. A column that the header
 types without an `Option` fails the build when one of the `SELECT`s can give it
 NULL: from a table's column that can be NULL, taken through the queries above,
 from a join or an aggregate that leaves its `FROM` item without a row, from the
-literal `NULL`, from a scalar subquery, or from a table function or a query the
-probe can't read. The error names the first such `SELECT`. Another computed
-value of a `SELECT` leaves the header's type to say whether the column can be
-NULL.
+literal `NULL`, from a scalar subquery that can give NULL, or from a table
+function or a query the probe can't read. The error names the first such
+`SELECT`. Another computed value of a `SELECT` leaves the header's type to say
+whether the column can be NULL.
 
 ```rust
 sqlive_compose::fragment!(Names { name: String }, r#"

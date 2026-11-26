@@ -8,6 +8,7 @@
 mod derived;
 mod from_item;
 mod from_star;
+mod never_null;
 mod read_capture;
 mod read_report;
 mod read_set;

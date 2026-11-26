@@ -139,16 +139,24 @@ impl SchemaProbe {
                 };
             let nulls = match &statement_nulls {
                 StatementNulls::Select(columns) => Some(columns[position].clone()),
-                StatementNulls::Write => {
-                    let never_null = match &origin {
-                        Some(origin) => table_column_never_null(
-                            &self.connection,
-                            &origin.table,
-                            &origin.column,
-                        )?,
-                        None => false,
+                StatementNulls::Write(returning) => {
+                    // SQLite names a subquery's column as the origin of the
+                    // subquery, which gives NULL with no row.
+                    let null = match returning.subquery(position, statement.column_count()) {
+                        Some(null) => null,
+                        None => match &origin {
+                            Some(origin)
+                                if table_column_never_null(
+                                    &self.connection,
+                                    &origin.table,
+                                    &origin.column,
+                                )? =>
+                            {
+                                SelectNull::Never
+                            }
+                            _ => SelectNull::Value,
+                        },
                     };
-                    let null = if never_null { SelectNull::Never } else { SelectNull::Value };
                     Some(ColumnNulls { selects: vec![null], row_can_be_missing: false })
                 }
                 StatementNulls::Unknown => None,

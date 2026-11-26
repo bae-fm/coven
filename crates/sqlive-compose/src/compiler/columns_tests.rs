@@ -367,3 +367,74 @@ fn a_column_of_a_statement_the_probe_cant_read_can_be_null() {
     compile_lib(&lib.replace("value: String", "value: Option<String>"))
         .unwrap_or_else(|errors| panic!("{errors:?}"));
 }
+
+#[test]
+fn a_subquery_of_a_compound_is_never_null_where_it_is_on_its_own() {
+    for sql in [
+        "SELECT (SELECT count(*) FROM issues) AS value UNION ALL SELECT 0",
+        "SELECT 0 AS value UNION ALL SELECT (SELECT count(*) FROM issues)",
+        // A query the column passes through, in a later SELECT and in a plain one.
+        "SELECT 0 AS value UNION ALL SELECT s.n FROM (SELECT (SELECT count(*) FROM issues) AS n) AS s",
+        "SELECT s.n AS value FROM (SELECT (SELECT count(*) FROM issues) AS n) AS s",
+    ] {
+        let errors = compound_errors("{ value: i64 }", sql);
+        assert!(errors.is_empty(), "{sql}: {errors:?}");
+    }
+    // One that can be NULL on its own names the SELECT that holds it.
+    assert_eq!(
+        compound_errors(
+            "{ value: i64 }",
+            "SELECT 0 AS value UNION ALL SELECT (SELECT max(number) FROM issues)"
+        ),
+        ["src/lib.rs:2:1: value can be NULL in SELECT 2 of the compound, and the header types \
+          it i64, which holds no NULL"]
+    );
+}
+
+#[test]
+fn a_spread_in_a_later_select_keeps_its_never_null_subqueries() {
+    let lib = r##"
+sqlive_compose::fragment!(Counted { n: i64 }, r#"
+    SELECT i.id, (SELECT count(*) FROM comments AS c WHERE c.issue_id = i.id) AS n FROM issues AS i
+"#);
+sqlive_compose::fragment!(Both, r#"
+    SELECT a.* FROM @crate::Counted AS a UNION ALL SELECT b.* FROM @crate::Counted AS b
+"#);
+"##;
+    let output = compile_lib(lib).unwrap_or_else(|errors| panic!("{errors:?}"));
+    let code = code_of(&output, "Both.rs");
+    assert!(code.contains("pub (crate) a : crate :: Counted ,"), "{code}");
+}
+
+#[test]
+fn a_value_spread_that_adds_a_with_clause_types_its_alias_as_the_fragment() {
+    let output = compile_lib(
+        r##"
+sqlive_compose::fragment!(Counted on projects with wanted(id TEXT) { n: i64 }, r#"
+    SELECT count(*) AS n FROM wanted AS w WHERE w.id = @parent.id
+"#);
+sqlive_compose::read!(Counts, r#"
+    SELECT @crate::Counted(parent: j, wanted: (SELECT i.project_id FROM issues AS i)) AS counted
+    FROM projects AS j
+"#);
+"##,
+    )
+    .unwrap();
+    let code = code_of(&output, "Counts.rs");
+    assert!(code.contains("pub counted : crate :: Counted"), "{code}");
+}
+
+#[test]
+fn a_fragment_whose_limit_or_compound_can_drop_its_row_is_not_one_row() {
+    let output = compile_lib(
+        r##"
+sqlive_compose::fragment!(Counted { n: i64 }, r#"SELECT count(*) AS n FROM issues"#);
+sqlive_compose::fragment!(Skipped { n: i64 }, r#"SELECT count(*) AS n FROM issues LIMIT 1 OFFSET 1"#);
+sqlive_compose::fragment!(Crossed { n: i64 }, r#"SELECT count(*) AS n FROM issues INTERSECT SELECT 1"#);
+"##,
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&output.manifest).unwrap();
+    let one_row: Vec<_> = (0..3).map(|at| manifest["fragments"][at]["one_row"].clone()).collect();
+    assert_eq!(one_row, [true, false, false]);
+}

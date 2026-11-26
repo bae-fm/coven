@@ -8,9 +8,10 @@
 //! column that holds none, and gives no NULL of its own: no join pads the
 //! column's FROM item with NULLs, no aggregate without a GROUP BY makes a
 //! row over no rows, and each SELECT of a compound holds none. A scalar
-//! subquery returns NULL when it returns no row, and the analysis takes it,
-//! as it takes every other computed expression, to be one that can give
-//! NULL.
+//! subquery returns NULL when it returns no row, so it holds no NULL only
+//! where it returns one whose value never is (`never_null`). Of the other
+//! computed expressions, the analysis takes each but a literal to be one that
+//! can give NULL.
 //!
 //! It also says of each column whether the statement can give no row of the
 //! FROM item the column comes from: a join pads that item, or an aggregate
@@ -29,9 +30,12 @@ use sqlite3_parser::{
 
 use crate::derived::{Ctes, Declared};
 use crate::from_star::{star, StarItem};
+use crate::never_null;
 use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
-use crate::select_syntax::{aggregate_call, parts, parts_outside, Functions, Part};
+use crate::select_syntax::{
+    aggregate_call, column_qualifiers, from_names, parts, parts_outside, Functions, Part,
+};
 use crate::sql::unparenthesized;
 
 /// Where a statement can give NULL in one of its result columns.
@@ -62,12 +66,12 @@ impl ColumnNulls {
 /// query the column passes through. A table's column holds no NULL when the
 /// table declares it `NOT NULL`, or it is the rowid, by one of the rowid's own
 /// names or as an `INTEGER PRIMARY KEY` column. In a write, only a table's
-/// column can be one that holds none: each computed column of a RETURNING, a
-/// literal too, is one that can be NULL.
+/// column and a scalar subquery can be ones that hold none: each other
+/// computed column of a RETURNING, a literal too, is one that can be NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectNull {
-    /// No NULL: a table's column that holds none, or a literal other than
-    /// NULL.
+    /// No NULL: a table's column that holds none, a literal other than NULL,
+    /// or a scalar subquery that never gives NULL.
     Never,
     /// A computed value other than a literal and a scalar subquery, which can
     /// be NULL as far as the probe can tell: the probe reads no computation.
@@ -78,8 +82,8 @@ pub enum SelectNull {
     /// row it has of that item a value, or a computed one. Two columns of one
     /// SELECT with the same number come from the same item.
     MissingRow(usize),
-    /// A value that can be NULL otherwise: a table's column that can be, a
-    /// scalar subquery, or a column the probe can't follow.
+    /// A value that can be NULL otherwise: a table's column that can be,
+    /// another scalar subquery, or a column the probe can't follow.
     Value,
 }
 
@@ -102,12 +106,13 @@ impl SelectNull {
     }
 
     /// What the computed expression `expr` can give.
-    fn of_computed(expr: &Expr<'_>) -> Self {
+    fn of_computed(expr: &Expr<'_>, functions: &Functions) -> Self {
         match unparenthesized(expr) {
             Expr::Literal(Literal::Numeric(_) | Literal::String(_) | Literal::Blob(_)) => {
                 Self::Never
             }
             Expr::Literal(Literal::Null) => Self::Literal,
+            Expr::Subquery(select) if never_null::subquery(select, functions) => Self::Never,
             Expr::Subquery(_) => Self::Value,
             _ => Self::Computed,
         }
@@ -192,10 +197,57 @@ pub(crate) enum StatementNulls {
     /// A SELECT, with what it does to each result column, in order.
     Select(Vec<ColumnNulls>),
     /// A statement that writes: each column its RETURNING takes from the table
-    /// it changes holds what the table's column holds.
-    Write,
+    /// it changes holds what the table's column holds, and each scalar
+    /// subquery of it holds what the subquery gives.
+    Write(Returning),
     /// A statement the analysis can't read, which can give NULL anywhere.
     Unknown,
+}
+
+/// For each result of a RETURNING, in order, what it gives its column when it
+/// is a scalar subquery, or a `*`.
+pub(crate) struct Returning(Vec<ReturningResult>);
+
+enum ReturningResult {
+    Star,
+    Subquery(SelectNull),
+    Other,
+}
+
+impl Returning {
+    fn read(results: Option<&[ResultColumn<'_>]>, functions: &Functions) -> Self {
+        let results = results.into_iter().flatten().map(|result| match result {
+            ResultColumn::Star | ResultColumn::TableStar(_) => ReturningResult::Star,
+            ResultColumn::Expr(expr, _) => match unparenthesized(expr) {
+                Expr::Subquery(_) => {
+                    ReturningResult::Subquery(SelectNull::of_computed(expr, functions))
+                }
+                _ => ReturningResult::Other,
+            },
+        });
+        Self(results.collect())
+    }
+
+    /// What the scalar subquery gives that is the column at `position` of the
+    /// RETURNING's `width` columns, or `None` when no scalar subquery is.
+    pub(crate) fn subquery(&self, position: usize, width: usize) -> Option<SelectNull> {
+        let star = |result: &ReturningResult| matches!(result, ReturningResult::Star);
+        // A result gives one column unless it is a `*`, so a result's column
+        // is known by what stands before it or after it when no `*` does.
+        let before = self.0.iter().take_while(|result| !star(result)).count();
+        let after = self.0.iter().rev().take_while(|result| !star(result)).count();
+        let result = if position < before {
+            &self.0[position]
+        } else if position >= width - after {
+            &self.0[self.0.len() - (width - position)]
+        } else {
+            return None;
+        };
+        match result {
+            ReturningResult::Subquery(null) => Some(*null),
+            ReturningResult::Star | ReturningResult::Other => None,
+        }
+    }
 }
 
 /// What the statement `sql`, which SQLite prepared on `connection`, does to
@@ -207,11 +259,8 @@ pub(crate) fn statement_nulls(
     let bump = Bump::new();
     let mut parser = Parser::new(&bump, sql.as_bytes());
     // SQLite and the parser can accept different language versions.
-    let select = match parser.next() {
-        Ok(Some(Cmd::Stmt(Stmt::Select(select)))) => select,
-        Ok(Some(Cmd::Stmt(Stmt::Insert { .. } | Stmt::Update { .. } | Stmt::Delete { .. }))) => {
-            return Ok(StatementNulls::Write)
-        }
+    let statement = match parser.next() {
+        Ok(Some(Cmd::Stmt(statement))) => statement,
         Ok(_) => return Ok(StatementNulls::Unknown),
         Err(error) => {
             tracing::debug!(sql, %error, "the parser can't read a statement's columns");
@@ -219,6 +268,15 @@ pub(crate) fn statement_nulls(
         }
     };
     let functions = Functions::read(connection)?;
+    let select = match statement {
+        Stmt::Select(select) => select,
+        Stmt::Insert { returning, .. }
+        | Stmt::Update { returning, .. }
+        | Stmt::Delete { returning, .. } => {
+            return Ok(StatementNulls::Write(Returning::read(returning, &functions)))
+        }
+        _ => return Ok(StatementNulls::Unknown),
+    };
     let analysis = Analysis { connection, functions: &functions };
     let columns = analysis.select(select, &Ctes::default())?;
     Ok(columns.map_or(StatementNulls::Unknown, |columns| {
@@ -279,7 +337,7 @@ impl Analysis<'_> {
                     .map(|(position, name)| {
                         let rows: Vec<_> = rows
                             .iter()
-                            .map(|row| SelectNull::of_computed(&row[position]))
+                            .map(|row| SelectNull::of_computed(&row[position], self.functions))
                             .collect();
                         Column::new(Some(name), SelectNull::through(&rows))
                     })
@@ -308,7 +366,7 @@ impl Analysis<'_> {
         for result in results.iter() {
             match result {
                 ResultColumn::Expr(expr, alias) => {
-                    let mut column = expression(&items, expr);
+                    let mut column = self.expression(&items, expr);
                     if let Some(alias) = alias {
                         column.name = Some(crate::sql::alias_name(alias));
                     }
@@ -376,22 +434,10 @@ impl Analysis<'_> {
                 parts_outside(expr, &aggregate, &mut found, &mut calls);
             }
             for call in calls {
-                let first = found.len();
                 parts(call, &mut found);
-                let mut qualifiers = found[first..]
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::Name(name) => match unparenthesized(name) {
-                            Expr::Qualified(table, _) | Expr::DoublyQualified(_, table, _) => {
-                                Some(table)
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    })
-                    .peekable();
-                let named_around = qualifiers.peek().is_some()
-                    && qualifiers.all(|qualifier| {
+                let qualifiers = column_qualifiers(call);
+                let named_around = !qualifiers.is_empty()
+                    && qualifiers.iter().all(|&qualifier| {
                         !between.iter().any(|name| *qualifier == Name(name))
                             && items.iter().any(|item| {
                                 item.qualifier
@@ -413,6 +459,51 @@ impl Analysis<'_> {
             between.truncate(outside);
         }
         false
+    }
+
+    /// The column that the result expression `expr` of a core whose FROM items
+    /// are `items` gives.
+    fn expression(&self, items: &[Item], expr: &Expr<'_>) -> Column {
+        let computed = Column::new(None, SelectNull::of_computed(expr, self.functions));
+        let (qualifier, name) = match unparenthesized(expr) {
+            Expr::Id(name) => (None, name.0),
+            Expr::Name(name) => (None, name.0),
+            Expr::Qualified(table, name) | Expr::DoublyQualified(_, table, name) => {
+                (Some(table), name.0)
+            }
+            _ => return computed,
+        };
+        let name = crate::sql::name(name).to_ascii_lowercase();
+        let named = items.iter().filter(|item| match qualifier {
+            Some(qualifier) => {
+                item.qualifier.as_deref().is_some_and(|item| *qualifier == Name(item))
+            }
+            None => true,
+        });
+        // SQLite takes a bare name that USING compares from the leftmost item.
+        let mut rowids = Vec::new();
+        for item in named {
+            if let Some(column) = item.column(&name) {
+                return item.read(column);
+            }
+            // An item of unknown columns may be the one that has the name.
+            if item.columns.is_none() {
+                return item.read(&Column::new(Some(name), SelectNull::Value));
+            }
+            if item.table {
+                rowids.push(item);
+            }
+        }
+        match rowids[..] {
+            [item] if ROWID_NAMES.contains(&name.as_str()) => {
+                item.read(&Column::new(Some(name), SelectNull::Never))
+            }
+            // SQLite reads `true` and `false` as numbers where no column has the
+            // name.
+            _ if name == "true" || name == "false" => Column::new(Some(name), SelectNull::Never),
+            // A name of a row around the core, or none of any item's.
+            _ => Column::new(Some(name), SelectNull::Value),
+        }
     }
 
     /// Adds the items of `from`, a core's FROM or the tables of a join in
@@ -625,78 +716,12 @@ fn result_expressions<'a>(results: &'a [ResultColumn<'a>]) -> impl Iterator<Item
     })
 }
 
-/// Adds the names that qualify the columns of `from`'s items to `names`, as
-/// the SQL writes them.
-fn from_names<'a>(from: &'a FromClause<'a>, names: &mut Vec<&'a str>) {
-    let tables =
-        from.select.iter().copied().chain(from.joins.iter().flatten().map(|join| &join.table));
-    for table in tables {
-        let (alias, name) = match table {
-            SelectTable::Table(name, alias, _) | SelectTable::TableCall(name, _, alias) => {
-                (alias, Some(&name.name))
-            }
-            SelectTable::Select(_, alias) => (alias, None),
-            SelectTable::Sub(inner, alias) => {
-                from_names(inner, names);
-                (alias, None)
-            }
-        };
-        match alias {
-            Some(As::As(alias) | As::Elided(alias)) => names.push(alias.0),
-            None => names.extend(name.map(|name| name.0)),
-        }
-    }
-}
-
 /// `columns` under `names`, a column list that SQLite holds to their length.
 fn renamed(mut columns: Vec<Column>, names: Option<Vec<String>>) -> Vec<Column> {
     for (column, name) in columns.iter_mut().zip(names.into_iter().flatten()) {
         column.name = Some(name);
     }
     columns
-}
-
-/// The column that the result expression `expr` of a core whose FROM items are
-/// `items` gives.
-fn expression(items: &[Item], expr: &Expr<'_>) -> Column {
-    let computed = Column::new(None, SelectNull::of_computed(expr));
-    let (qualifier, name) = match unparenthesized(expr) {
-        Expr::Id(name) => (None, name.0),
-        Expr::Name(name) => (None, name.0),
-        Expr::Qualified(table, name) | Expr::DoublyQualified(_, table, name) => {
-            (Some(table), name.0)
-        }
-        _ => return computed,
-    };
-    let name = crate::sql::name(name).to_ascii_lowercase();
-    let named = items.iter().filter(|item| match qualifier {
-        Some(qualifier) => item.qualifier.as_deref().is_some_and(|item| *qualifier == Name(item)),
-        None => true,
-    });
-    // SQLite takes a bare name that USING compares from the leftmost item.
-    let mut rowids = Vec::new();
-    for item in named {
-        if let Some(column) = item.column(&name) {
-            return item.read(column);
-        }
-        // An item of unknown columns may be the one that has the name.
-        if item.columns.is_none() {
-            return item.read(&Column::new(Some(name), SelectNull::Value));
-        }
-        if item.table {
-            rowids.push(item);
-        }
-    }
-    match rowids[..] {
-        [item] if ROWID_NAMES.contains(&name.as_str()) => {
-            item.read(&Column::new(Some(name), SelectNull::Never))
-        }
-        // SQLite reads `true` and `false` as numbers where no column has the
-        // name.
-        _ if name == "true" || name == "false" => Column::new(Some(name), SelectNull::Never),
-        // A name of a row around the core, or none of any item's.
-        _ => Column::new(Some(name), SelectNull::Value),
-    }
 }
 
 /// The columns a `*` gives of `items`, as the core that reads them gets

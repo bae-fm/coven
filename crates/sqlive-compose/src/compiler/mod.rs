@@ -16,7 +16,6 @@ mod header;
 mod json;
 mod lex;
 mod model;
-mod never_null;
 mod rename;
 mod setup;
 mod source;

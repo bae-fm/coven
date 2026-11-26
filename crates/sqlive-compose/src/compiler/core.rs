@@ -239,7 +239,7 @@ pub(crate) fn outline(sql: &str, tokens: &[Token]) -> Core {
 }
 
 /// Whether the token at `index` is a parenthesis that opens a query.
-pub(crate) fn opens_query(sql: &str, tokens: &[Token], index: usize) -> bool {
+fn opens_query(sql: &str, tokens: &[Token], index: usize) -> bool {
     tokens[index].is_symbol(sql, '(')
         && tokens.get(index + 1).is_some_and(|next| {
             ["select", "with", "values"].iter().any(|word| next.is_word(sql, word))

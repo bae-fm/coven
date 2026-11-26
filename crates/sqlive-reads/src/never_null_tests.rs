@@ -1,42 +1,35 @@
-use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages};
+use crate::{SchemaProbe, SelectNull};
 
-/// The compile of a read with the declarations `declarations` and the SQL
-/// `sql`.
-fn read(declarations: &str, sql: &str) -> Result<String, Vec<String>> {
-    let lib = format!("sqlive_compose::read!(Case {{ {declarations} }}, r#\"{sql}\"#);");
-    match compile_lib(&lib) {
-        Ok(output) => Ok(code_of(&output, "Case.rs")),
-        Err(errors) => Err(messages(Err(errors))),
-    }
+const SCHEMA: &str = "
+CREATE TABLE people (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL) STRICT;
+CREATE TABLE issues (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL,
+    number INTEGER NOT NULL, opened_at TEXT NOT NULL, assignee_id TEXT) STRICT;
+CREATE TABLE verdicts (verdict_id INTEGER PRIMARY KEY, kind TEXT NOT NULL) STRICT;";
+
+/// What the one SELECT of `sql` can give its first column.
+fn first_column(sql: &str) -> Vec<SelectNull> {
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let statement = probe.prepare(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    let nulls = statement.columns[0].nulls.as_ref();
+    nulls.expect("the probe reads the statement").selects.clone()
 }
 
-/// Asserts that the header may type the column `value` of each statement
-/// `SELECT <expression> AS value` as an `i64`, which holds no NULL.
+/// Asserts that the subquery each of `expressions` is never gives NULL.
 fn assert_never_null(expressions: &[&str]) {
     for expression in expressions {
         let sql = format!("SELECT {expression} AS value");
-        if let Err(errors) = read("value: i64", &sql) {
-            panic!("{expression}: {errors:?}");
-        }
+        assert_eq!(first_column(&sql), [SelectNull::Never], "{expression}");
     }
 }
 
-/// Asserts that the compiler refuses to type the column `value` of each
-/// statement as an `i64` because it can be NULL.
+/// Asserts that the subquery each statement selects first can give NULL.
 fn assert_can_be_null(statements: &[&str]) {
     for sql in statements {
-        assert_eq!(
-            read("value: i64", sql).err(),
-            Some(vec![
-                "src/lib.rs:1:1: value can be NULL, and the header types it i64, which holds no NULL"
-                    .to_owned()
-            ]),
-            "{sql}"
-        );
+        assert_eq!(first_column(sql), [SelectNull::Value], "{sql}");
     }
 }
 
-/// `SELECT <expression> AS value` for each expression.
+/// Asserts that the subquery each of `expressions` is can give NULL.
 fn assert_expressions_can_be_null(expressions: &[&str]) {
     for expression in expressions {
         assert_can_be_null(&[&format!("SELECT {expression} AS value")]);
@@ -137,50 +130,4 @@ fn an_aggregate_of_the_outer_rows_does_not_give_the_subquery_a_row() {
     assert_can_be_null(&[
         "SELECT (SELECT count(i.id) FROM people AS p WHERE 0) AS value FROM issues AS i",
     ]);
-}
-
-#[test]
-fn a_compound_of_a_subquery_can_be_null() {
-    // A scalar subquery of a compound can be NULL, even one that never is on
-    // its own.
-    assert_eq!(
-        read("value: i64", "SELECT (SELECT count(*) FROM issues) AS value UNION ALL SELECT 0")
-            .err(),
-        Some(vec!["src/lib.rs:1:1: value can be NULL in SELECT 1 of the compound, \
-                   and the header types it i64, which holds no NULL"
-            .to_owned()])
-    );
-}
-
-#[test]
-fn a_value_spread_that_adds_a_with_clause_types_its_alias_as_the_fragment() {
-    let output = compile_lib(
-        r##"
-sqlive_compose::fragment!(Counted on projects with wanted(id TEXT) { n: i64 }, r#"
-    SELECT count(*) AS n FROM wanted AS w WHERE w.id = @parent.id
-"#);
-sqlive_compose::read!(Counts, r#"
-    SELECT @crate::Counted(parent: j, wanted: (SELECT i.project_id FROM issues AS i)) AS counted
-    FROM projects AS j
-"#);
-"##,
-    )
-    .unwrap();
-    let code = code_of(&output, "Counts.rs");
-    assert!(code.contains("pub counted : crate :: Counted"), "{code}");
-}
-
-#[test]
-fn a_fragment_whose_limit_or_compound_can_drop_its_row_is_not_one_row() {
-    let output = compile_lib(
-        r##"
-sqlive_compose::fragment!(Counted { n: i64 }, r#"SELECT count(*) AS n FROM issues"#);
-sqlive_compose::fragment!(Skipped { n: i64 }, r#"SELECT count(*) AS n FROM issues LIMIT 1 OFFSET 1"#);
-sqlive_compose::fragment!(Crossed { n: i64 }, r#"SELECT count(*) AS n FROM issues INTERSECT SELECT 1"#);
-"##,
-    )
-    .unwrap();
-    let manifest: serde_json::Value = serde_json::from_str(&output.manifest).unwrap();
-    let one_row: Vec<_> = (0..3).map(|at| manifest["fragments"][at]["one_row"].clone()).collect();
-    assert_eq!(one_row, [true, false, false]);
 }

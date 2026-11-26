@@ -5,8 +5,8 @@ use rusqlite::{Connection, Statement};
 use std::collections::BTreeMap;
 
 use sqlite3_parser::ast::{
-    As, Expr, FrameBound, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name, Operator,
-    Over, QualifiedName, ResultColumn, Select, SortedColumn, Window,
+    As, Expr, FrameBound, FromClause, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name,
+    Operator, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, Window,
 };
 use sqlite3_parser::lexer::sql::TokenType;
 
@@ -429,6 +429,45 @@ pub(crate) fn aggregate_call<'a>(
         arguments,
         order,
     })
+}
+
+/// The names that qualify the columns `expr` names, outside its subqueries.
+pub(crate) fn column_qualifiers<'a>(expr: &'a Expr<'a>) -> Vec<&'a Name<'a>> {
+    let mut found = Vec::new();
+    parts(expr, &mut found);
+    found
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Name(name) => match crate::sql::unparenthesized(name) {
+                Expr::Qualified(table, _) | Expr::DoublyQualified(_, table, _) => Some(table),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Adds the names that qualify the columns of `from`'s items to `names`, as
+/// the SQL writes them.
+pub(crate) fn from_names<'a>(from: &'a FromClause<'a>, names: &mut Vec<&'a str>) {
+    let tables =
+        from.select.iter().copied().chain(from.joins.iter().flatten().map(|join| &join.table));
+    for table in tables {
+        let (alias, name) = match table {
+            SelectTable::Table(name, alias, _) | SelectTable::TableCall(name, _, alias) => {
+                (alias, Some(&name.name))
+            }
+            SelectTable::Select(_, alias) => (alias, None),
+            SelectTable::Sub(inner, alias) => {
+                from_names(inner, names);
+                (alias, None)
+            }
+        };
+        match alias {
+            Some(As::As(alias) | As::Elided(alias)) => names.push(alias.0),
+            None => names.extend(name.map(|name| name.0)),
+        }
+    }
 }
 
 /// A parsed node written back as SQL.
