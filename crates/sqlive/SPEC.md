@@ -986,8 +986,10 @@ are ones that wait: placed first, they would take values from no table and read
 every verdict's rows. So `matched` and `label` narrow to the cell's verdict with
 no condition of their own, and a label added to another verdict doesn't rerun the
 read. A group of joined tables waits when none of its tables has a condition of
-its own or a partner placed already, and one of them is joined to a table that
-waits.
+its own or a partner placed already, and one of them takes values from a table
+that waits. A table that a waiting table takes its values from, such as the
+subquery's table in `a.x IN (SELECT c.y FROM c)`, never waits for it: it comes
+first even with no condition of its own.
 
 ### How a lookup compares
 

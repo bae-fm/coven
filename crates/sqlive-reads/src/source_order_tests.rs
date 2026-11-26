@@ -104,3 +104,8 @@ fn an_item_with_every_partner_waiting_waits_in_turn() {
         ["c", "b", "a", "d"]
     );
 }
+
+#[test]
+fn a_subquery_table_with_no_condition_goes_before_the_item_that_waits_for_it() {
+    assert_eq!(order("SELECT * FROM a WHERE a.x IN (SELECT c.y FROM c LIMIT 1)"), ["c", "a"]);
+}

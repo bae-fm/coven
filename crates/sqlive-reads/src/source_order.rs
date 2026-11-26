@@ -222,8 +222,11 @@ impl Planner<'_> {
         }
         let mut stack: Vec<usize> =
             remaining.iter().copied().filter(|item| waiting[*item]).collect();
+        // Only an item that takes values from a waiting one waits for it: the
+        // table a waiting item takes its values from goes first.
         while let Some(item) = stack.pop() {
-            for next in neighbors(item) {
+            for edge in &edges.by_partner[item] {
+                let next = self.edges[*edge].member.item;
                 if !placed[next] && !waiting[next] && !reached[next] {
                     waiting[next] = true;
                     stack.push(next);
