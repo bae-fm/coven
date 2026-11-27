@@ -36,7 +36,7 @@ pub(crate) fn column_order(
         let (_, column) = found.filter(|(found, _)| *found == item)?;
         let affinity = match planner.items[item].columns.value(&column)? {
             ColumnValue::Collated(affinity, _) => *affinity,
-            ColumnValue::Generated(generated) => generated.affinity,
+            ColumnValue::Generated(generated, _) => generated.affinity,
             _ => return None,
         };
         Some((column, affinity))

@@ -185,9 +185,8 @@ fn passed_value(value: &ColumnValue) -> ColumnValue {
         ColumnValue::Collated(affinity, collation) => {
             ColumnValue::Collated(*affinity, collation.clone())
         }
-        // A generated column's collation is BINARY.
-        ColumnValue::Generated(generated) => {
-            ColumnValue::Collated(generated.affinity, "BINARY".to_owned())
+        ColumnValue::Generated(generated, collation) => {
+            ColumnValue::Collated(generated.affinity, collation.clone())
         }
         ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => ColumnValue::Unknown,
     }

@@ -801,14 +801,14 @@ For an item that is a table, it is one of these:
 - an expression over that table's stored BINARY columns, such as `year IS
   NULL` or `coalesce(year, 0) + 1`, that holds no subquery, no `rowid`, no
   clock and no function that isn't deterministic;
-- a generated column whose collation is BINARY and whose expression names only
-  that table's stored BINARY columns.
+- a generated column, in any collation, whose expression names only that
+  table's stored BINARY columns.
 
 A term may end in one COLLATE, as `title COLLATE NOCASE`, which gives it that
 collation. The bound stops before a term with a COLLATE anywhere else, or with
-an expression over a column that isn't BINARY. Without a COLLATE, a
-stored column sorts in the collation it declares and any other term in BINARY,
-as SQLite sorts it. The collation can be one of SQLite's own, `BINARY`,
+an expression over a column that isn't BINARY. Without a COLLATE, a column,
+stored or generated, sorts in the collation it declares and any other term in
+BINARY, as SQLite sorts it. The collation can be one of SQLite's own, `BINARY`,
 `NOCASE` or `RTRIM`, or one the host registered (section 1). sqlive keeps no
 list of collations, so a collation the host adds later narrows with no change to
 sqlive.

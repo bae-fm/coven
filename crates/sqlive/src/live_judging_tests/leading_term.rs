@@ -70,6 +70,7 @@ async fn a_collated_or_generated_leading_term_bounds_a_window() {
     for title in [
         "title TEXT NOT NULL COLLATE NOCASE, name TEXT AS (title)",
         "name TEXT NOT NULL, title TEXT NOT NULL AS (upper(name))",
+        "name TEXT NOT NULL, title TEXT NOT NULL COLLATE NOCASE AS (name)",
     ] {
         let named = if title.starts_with("name") { "name" } else { "title" };
         let schema = format!(

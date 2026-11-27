@@ -42,7 +42,8 @@
 //! stored column of BINARY collation, whose values sqlive compares as SQLite
 //! does; a stored column of another collation; or an expression over stored
 //! BINARY columns that SQLite can evaluate row by row, or a generated column
-//! whose expression names only such columns, whose value in a changed row a
+//! of any collation whose expression names only such columns, whose value in a
+//! changed row a
 //! write asks SQLite to compare with the last row's (`scope_row.rs`). The term
 //! sorts text by its collation: the COLLATE it ends in, else its column's
 //! declared one, else BINARY. A write asks SQLite to compare in that collation,
@@ -549,9 +550,9 @@ fn sort_key(
                 collation,
             },
         },
-        ColumnValue::Generated(generated) => SortKey::Expression {
+        ColumnValue::Generated(generated, declared) => SortKey::Expression {
             expression: generated.clone(),
-            collation: explicit.and_then(not_binary),
+            collation: not_binary(explicit.unwrap_or_else(|| declared.clone())),
         },
         ColumnValue::Collated(affinity, declared) => SortKey::Expression {
             expression: column_expression(from, column, *affinity),

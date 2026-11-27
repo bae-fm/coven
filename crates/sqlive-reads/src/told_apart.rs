@@ -530,7 +530,9 @@ impl Telling<'_> {
                 };
                 let traits = match value {
                     ColumnValue::Compared(affinity) => compared(affinity, BINARY),
-                    ColumnValue::Generated(expression) => compared(expression.affinity, BINARY),
+                    ColumnValue::Generated(expression, collation) => {
+                        compared(expression.affinity, &collation)
+                    }
                     ColumnValue::Collated(affinity, collation) => compared(affinity, &collation),
                     ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => {
                         Traits::UNFOLLOWED

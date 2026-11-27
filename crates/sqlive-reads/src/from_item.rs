@@ -30,13 +30,13 @@ pub(crate) enum ColumnValue {
     /// condition on the column narrows: a stored column whose collation is
     /// BINARY, or a derived item's column that passes such columns on.
     Compared(Affinity),
-    /// A generated column's values, which its expression gives: one whose
-    /// collation is BINARY and whose expression names only its table's
+    /// A generated column's values, which its expression gives, and the
+    /// collation it declares: one whose expression names only its table's
     /// stored columns of BINARY collation (SPEC.md section 6).
-    Generated(RowExpression),
+    Generated(RowExpression, String),
     /// A stored column whose collation isn't BINARY, of this affinity and
     /// the collation it declares, or a derived item's column that passes one
-    /// on, or passes on a generated column, whose collation is BINARY. No
+    /// on, or passes on a generated column, of any collation. No
     /// condition narrows by it, but an ORDER BY term that is the column
     /// bounds a LIMIT's rows, by a comparison SQLite runs in the term's
     /// collation (SPEC.md section 6).
@@ -121,7 +121,7 @@ impl Columns {
     pub(crate) fn affinity(&self, column: &str) -> Option<Affinity> {
         match self.value(column)? {
             ColumnValue::Compared(affinity) => Some(*affinity),
-            ColumnValue::Generated(_)
+            ColumnValue::Generated(..)
             | ColumnValue::Collated(..)
             | ColumnValue::Unknown
             | ColumnValue::Volatile
@@ -692,8 +692,8 @@ pub(crate) fn columns(
         };
         let binary = collation.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("BINARY"));
         let affinity = Affinity::declared(declared);
-        if binary && hidden {
-            generated.push((columns.len(), affinity));
+        if let Some(collation) = collation.as_ref().filter(|_| hidden) {
+            generated.push((columns.len(), affinity, collation.clone()));
         }
         let value = match collation {
             Some(_) if binary && !hidden => ColumnValue::Compared(affinity),
@@ -707,13 +707,13 @@ pub(crate) fn columns(
     }
     let read = schema.read_generated(table, |expressions| {
         let mut found = Vec::new();
-        for (position, affinity) in generated {
+        for (position, affinity, collation) in generated {
             let name = columns[position].name.as_deref().expect("a table's columns are named");
             let expression = expressions.iter().find(|(named, _)| **named == name);
             if let Some(evaluated) = expression
                 .and_then(|(_, expr)| evaluated(functions, qualifier, &columns, expr, affinity))
             {
-                found.push((position, evaluated));
+                found.push((position, evaluated, collation));
             }
         }
         found
@@ -726,8 +726,8 @@ pub(crate) fn columns(
             Vec::new()
         }
     };
-    for (position, generated) in found {
-        columns[position].value = ColumnValue::Generated(generated);
+    for (position, generated, collation) in found {
+        columns[position].value = ColumnValue::Generated(generated, collation);
     }
     Ok(Columns::Listed(columns))
 }
@@ -759,7 +759,7 @@ fn evaluated(
             .find(|column| column.name.as_deref().is_some_and(|column| name == column))?;
         match column.value {
             ColumnValue::Compared(compared) => Some((column.name.clone()?, compared)),
-            ColumnValue::Generated(_)
+            ColumnValue::Generated(..)
             | ColumnValue::Collated(..)
             | ColumnValue::Unknown
             | ColumnValue::Volatile
