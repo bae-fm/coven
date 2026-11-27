@@ -20,10 +20,7 @@ pub(crate) fn is_rowid(
     table: &str,
     column: &str,
 ) -> rusqlite::Result<bool> {
-    let without_rowid: bool = connection
-        .prepare_cached("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1")?
-        .query_row([table], |row| row.get(0))?;
-    if without_rowid {
+    if without_rowid(connection, table)? {
         return Ok(false);
     }
     if ROWID_NAMES.contains(&column) {
@@ -32,6 +29,13 @@ pub(crate) fn is_rowid(
             .any(|found| found.name.eq_ignore_ascii_case(column)));
     }
     Ok(rowid_column(connection, table)?.is_some_and(|key| key.eq_ignore_ascii_case(column)))
+}
+
+/// Whether `table`, a table of the main schema, is WITHOUT ROWID.
+fn without_rowid(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
+    connection
+        .prepare_cached("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1")?
+        .query_row([table], |row| row.get(0))
 }
 
 /// The column of a rowid table that holds its rowid: its single primary
@@ -58,11 +62,8 @@ pub(crate) fn unique_keys(
     connection: &Connection,
     table: &str,
 ) -> rusqlite::Result<Vec<Vec<(String, String)>>> {
-    let without_rowid: bool = connection
-        .prepare_cached("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1")?
-        .query_row([table], |row| row.get(0))?;
     let mut keys = Vec::new();
-    if !without_rowid {
+    if !without_rowid(connection, table)? {
         keys.push(vec![(ROWID.to_owned(), BINARY.to_owned())]);
     }
     let indexes = connection
