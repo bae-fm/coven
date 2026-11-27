@@ -1,7 +1,8 @@
 //! The `fragment!`, `read!` and `write!` macros of sqlive-compose. Each expands to one
 //! line that includes the Rust the compiler wrote for the call while the app's
 //! build script ran (`sqlive-compose`, section 10 of its spec). The macros
-//! read nothing of the call but its name, which is the generated file's name.
+//! read nothing of the call but its name, which is the generated file's name,
+//! and which a read's `writer` mark may come before.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenTree;
@@ -33,12 +34,30 @@ fn include_generated(
     input: proc_macro2::TokenStream,
     macro_name: &str,
 ) -> proc_macro2::TokenStream {
-    let Some(TokenTree::Ident(name)) = input.into_iter().next() else {
+    let Some(name) = name_of(input) else {
         let message = format!("{macro_name} starts with the name of its call");
         return syn::Error::new(proc_macro2::Span::call_site(), message).to_compile_error();
     };
     let file = format!("/sqlive_compose/{name}.rs");
     quote!(include!(concat!(env!("OUT_DIR"), #file));)
+}
+
+/// The name of the call whose tokens are `input`. As the compiler reads a
+/// header, `writer` before a name marks the call and is not its name; alone,
+/// or before a fragment's `on` or `with` clause, it is the name.
+fn name_of(input: proc_macro2::TokenStream) -> Option<proc_macro2::Ident> {
+    let mut tokens = input.into_iter();
+    let Some(TokenTree::Ident(first)) = tokens.next() else {
+        return None;
+    };
+    match tokens.next() {
+        Some(TokenTree::Ident(second))
+            if first == "writer" && second != "on" && second != "with" =>
+        {
+            Some(second)
+        }
+        _ => Some(first),
+    }
 }
 
 #[cfg(test)]
