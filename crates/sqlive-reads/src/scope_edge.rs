@@ -70,7 +70,7 @@ impl Nesting {
     }
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// The member column `member_expr`, written in `core`, names: a bare
     /// column of one of the core's own sources that sqlive narrows by.
     pub(crate) fn member_column(

@@ -39,7 +39,8 @@ use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Fu
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use crate::unread_columns::{ColumnRef, OutputRead};
-use crate::unreported_columns::{unreported_columns, UnreportedColumns};
+use crate::unreported_columns::{unreported_columns, Node, UnreportedColumns};
+use crate::view_trees::ViewTrees;
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
     ast::{As, Cmd, Expr, Name, OneSelect, Operator, ResultColumn, Select, Stmt},
@@ -119,10 +120,14 @@ impl ScopePlan {
             return unread("the statement isn't one SELECT the parser reads");
         }
         let functions = Functions::read(connection)?;
-        let (sources, size) = Sources::read(connection, schema, select, whole, &functions)?;
+        let views = ViewTrees::new(&bump);
+        let (unreported, picked) =
+            unreported_columns(connection, schema, &functions, &views, select)?;
+        let (sources, size) =
+            Sources::read(connection, schema, select, whole, &functions, &views, &picked)?;
         Ok(Self {
             sources: sources.map_err(|Unread(why)| why.to_owned()),
-            unreported: Arc::new(unreported_columns(connection, schema, &functions, select)?),
+            unreported: Arc::new(unreported),
             size,
         })
     }
@@ -194,6 +199,9 @@ pub(crate) struct Source {
     /// Whether only a column nothing reads reads it, so the statement
     /// depends on none of its rows (`unread_columns.rs`).
     pub(crate) unread: bool,
+    /// The columns the statement reads through it, of the table it reads
+    /// (`reference_columns.rs`).
+    pub(crate) columns: Arc<BTreeSet<String>>,
     /// Columns that must equal a value an earlier source holds.
     pub(crate) memberships: Vec<Membership>,
     /// The ORs that narrow it, each a list of sides whose memberships take
@@ -282,6 +290,11 @@ pub(crate) enum PartnerValue {
 /// One SELECT core: the statement itself, an arm of a compound, or a
 /// subquery anywhere in either.
 pub(crate) struct Core {
+    /// Which core of the statement's or a view's syntax it reads.
+    pub(crate) node: Node,
+    /// Whether a `*` of its result columns spans columns sqlive doesn't
+    /// know.
+    pub(crate) unknown_star: bool,
     /// The core a subquery sits in, whose names its SQL can name too.
     parent: Option<usize>,
     /// Its FROM items, positions in the planner's items.
@@ -322,13 +335,17 @@ pub(crate) enum Place {
 }
 
 impl Sources {
-    /// The sources of `select`, and how much of it the planner read.
+    /// The sources of `select`, whose views are read in `views` and whose
+    /// SELECTs and cores `picked` keep rows SQLite picks, and how much of it
+    /// the planner read.
     fn read(
         connection: &Connection,
         schema: &MainSchema,
         select: &Select<'_>,
         whole: &WholeViews,
         functions: &Functions,
+        views: &ViewTrees<'_>,
+        picked: &BTreeSet<Node>,
     ) -> rusqlite::Result<(Result<Self, Unread>, ScopePlanSize)> {
         let mut planner = Planner {
             items: Vec::new(),
@@ -342,6 +359,8 @@ impl Sources {
             within: None,
             declared_ctes: 0,
             selects: Vec::new(),
+            queries: Vec::new(),
+            views,
             whole_names: Some(BTreeSet::new()),
         };
         let read = read_select(connection, &mut planner, select, None, &Ctes::default())?;
@@ -358,8 +377,13 @@ impl Sources {
             [core] => sorted_limit(connection, &planner, select, core)?,
             _ => None,
         };
-        for item in planner.unread_items() {
+        let live = planner.live();
+        for item in planner.unread_items(&live) {
             planner.items[item].source.unread = true;
+        }
+        let columns = planner.reference_columns(&live, picked)?;
+        for (item, columns) in planner.items.iter_mut().zip(columns) {
+            item.source.columns = Arc::new(columns);
         }
         Ok((Ok(planner.ordered(sorted)), size))
     }
@@ -368,7 +392,7 @@ impl Sources {
 /// A statement's cores, their items and the edges between them, as the
 /// `read_` functions find them; each of those gives the reason for a shape
 /// that keeps every table whole.
-pub(crate) struct Planner<'a> {
+pub(crate) struct Planner<'a, 'v> {
     pub(crate) items: Vec<FromItem>,
     /// Each core after the core it sits in.
     pub(crate) cores: Vec<Core>,
@@ -393,13 +417,17 @@ pub(crate) struct Planner<'a> {
     /// finished reading them, and whether it is volatile
     /// (`select_volatile`).
     selects: Vec<(usize, bool)>,
+    /// Each SELECT the planner has read, with its arms' cores.
+    pub(crate) queries: Vec<(Node, Vec<usize>)>,
+    /// Where the planner reads each view's syntax.
+    pub(crate) views: &'a ViewTrees<'v>,
     /// The names, lowercase, SQLite can report a read through inside the
     /// views the statement reads whole (`whole_view_names.rs`); `None` once
     /// the parser can't read one of those, whose SQL could use any name.
     pub(crate) whole_names: Option<BTreeSet<String>>,
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// Note `found`, the names SQLite can report a read through inside a
     /// view the statement reads whole (`whole_view_names.rs`).
     pub(crate) fn note_whole_view(&mut self, found: Result<BTreeSet<String>, String>) {
@@ -433,7 +461,8 @@ impl Planner<'_> {
     /// The cores whose items a name written in `core` can name: `core`, then
     /// each core it sits in, outward.
     pub(crate) fn scope_of(&self, core: usize) -> impl Iterator<Item = usize> + '_ {
-        std::iter::successors(Some(core), |current| self.cores[*current].parent)
+        let cores = &self.cores;
+        std::iter::successors(Some(core), move |current| cores[*current].parent)
     }
 
     /// The item a column name written in `core` belongs to, and the column,
@@ -613,6 +642,7 @@ pub(crate) fn read_select<'a>(
         || cores.iter().any(|core| planner.cores[*core].volatile)
         || planner.selects[read_before..].iter().any(|(_, read)| *read);
     planner.selects.push((std::ptr::from_ref(select) as usize, volatile));
+    planner.queries.push((Node::query(select), cores.clone()));
     Ok(Ok(cores))
 }
 
@@ -660,6 +690,8 @@ fn read_core<'a>(
 ) -> rusqlite::Result<Result<usize, Unread>> {
     let core = planner.cores.len();
     planner.cores.push(Core {
+        node: Node::core(select),
+        unknown_star: false,
         parent,
         items: Vec::new(),
         aliases: Vec::new(),
@@ -742,7 +774,11 @@ fn read_core<'a>(
     // every result column reads what it names then.
     let (clause_parts, outputs) = match crate::derived::arm_columns(planner, core, select) {
         Some(outputs) => (result_parts, planner.output_reads(core, &outputs, &subqueries)),
-        None => (0, Vec::new()),
+        None => {
+            planner.cores[core].unknown_star =
+                columns.iter().any(|column| !matches!(column, ResultColumn::Expr(..)));
+            (0, Vec::new())
+        }
     };
     let refs = planner.column_refs(core, &found[clause_parts..]);
     planner.cores[core].clause_refs.extend(refs);

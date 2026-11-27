@@ -7,7 +7,8 @@ statement as sqlive's planner reads it, ports the planner, and proves each
 rule's step: the rows a rule leaves out of a table's scope are rows the
 statement's result doesn't depend on. `narrowing_sound` puts the steps together:
 for a well-formed statement, a write the judge lets pass leaves the statement's
-rows unchanged. A differential test runs sqlive, the model and SQLite on random
+rows unchanged. sqlive judges with a scope for each place a statement names a
+table, and `references_sound` states the same of that judge. A differential test runs sqlive, the model and SQLite on random
 statements and writes and compares all three.
 
 ## The model
@@ -871,6 +872,25 @@ live query on exactly the writes that the judge of every change reruns it on
 the judge through the index lets pass leaves a well-formed statement's rows
 unchanged.
 
+## One read for each place a table is named
+
+sqlive judges a write against one read for each place a statement names a
+table, with that place's columns and scope (`read_capture.rs`).
+[References.lean](SqliveNarrowing/References.lean) states that judge as the
+judge above of another statement, `Statement.split`, in which each FROM item
+that names a table reads a table of its own, numbered as the item. There each
+table's columns are one item's, with every column of an item that
+`Statement.reads` gives every column of, and each table's scope is one item's.
+A column SQLite reports that no item's columns hold goes to every item of its
+table. `Db.split` gives each item's table the rows of the table it names, and
+`Statement.splitChanges` gives a write's change of a table to each of them.
+`Statement.split_wellFormed` proves that the split statement is well formed,
+`split_result` that it returns the statement's rows, and `split_writes` that
+the split changes take the one split database to the other. So
+`references_sound` is `narrowing_sound` of the split statement, and
+`references_net_sound` and `references_indexed_sound` state it of a write's
+net changes and through the index of waiting queries.
+
 ## What the proofs don't cover
 
 The theorems prove each rule's step and `narrowing_sound`, which puts the
@@ -916,13 +936,14 @@ row. The runner judges the statement the model plans, without the columns
 nothing reads (`Statement.pruned`), and checks that it and the statement as
 read are both well formed. The runner reads a CTE where a query names it, so a
 CTE that no query reads, which SQLite never runs, adds nothing to the model's
-statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether the write reruns the statement,
-whether the statement is well formed, whether the model reads the statement whole, each table's scope, and the
+statement, and it reads the CTE that SQLite resolves the name to. The runner writes whether sqlive's judge of places (`Statement.rerunsReferences`) reruns the statement,
+whether the statement is well formed, whether the model reads the statement whole, each place's scope, and the
 statement's rows before and after.
 
 The differential in sqlive (`narrowing_model` among the live judging tests)
 has one test per rule, `<rule>_matches_lean`, `mixed_shapes_match_lean`
-for statements that hold several rules, and `net_change_matches_lean`, whose
+for statements that hold several rules, `references_match_lean` for statements
+that name one table in several places, and `net_change_matches_lean`, whose
 writes change one row more than once: a pair of statements that cancel out,
 as an insert and a delete, an update and an update back, a delete and an
 insert of the same row, or a key changed and changed back, or a row changed

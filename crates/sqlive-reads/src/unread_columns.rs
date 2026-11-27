@@ -22,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::derived::Output;
 use crate::from_item::Columns;
-use crate::row_scope::RowScope;
 use crate::scope_plan::{Object, Planner, Source, Subqueries};
 use crate::select_syntax::{parts, Part};
 use sqlite3_parser::ast::Expr;
@@ -50,10 +49,10 @@ impl UnreadReads {
     /// `table` through each of `through` and, when `direct`, one through no
     /// view or CTE, and a read through one of `inlined` is one a source
     /// makes or one that gives the statement no row.
-    pub(crate) fn covers(
+    pub(crate) fn covers<T>(
         &self,
         table: &str,
-        live: &BTreeMap<String, RowScope>,
+        live: &BTreeMap<String, T>,
         direct: bool,
         through: Option<&BTreeSet<String>>,
         inlined: &BTreeSet<String>,
@@ -71,7 +70,7 @@ impl UnreadReads {
 
 /// What `sources` read only in columns nothing reads, where `live` are the
 /// tables the other sources read.
-pub(crate) fn unread_reads(sources: &[Source], live: &BTreeMap<String, RowScope>) -> UnreadReads {
+pub(crate) fn unread_reads<T>(sources: &[Source], live: &BTreeMap<String, T>) -> UnreadReads {
     // The views read whole the statement reads outside such columns, and the
     // names reads inside them can come with, unless the parser can't tell
     // those of one.
@@ -114,6 +113,14 @@ pub(crate) enum ColumnRef {
     Named(String),
 }
 
+/// Which of a statement's cores and result columns it reads.
+pub(crate) struct Live {
+    /// Whether each core sits inside a column nothing reads.
+    dead: Vec<bool>,
+    /// The columns nothing reads, each as its core and its position.
+    unread: BTreeSet<(usize, usize)>,
+}
+
 /// What one result column of a core reads.
 pub(crate) struct OutputRead {
     refs: Vec<ColumnRef>,
@@ -124,7 +131,7 @@ pub(crate) struct OutputRead {
     keeps_rows: bool,
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// The columns the names among `found`, written in `core`, name.
     pub(crate) fn column_refs(&self, core: usize, found: &[Part<'_>]) -> Vec<ColumnRef> {
         found
@@ -189,35 +196,28 @@ impl Planner<'_> {
             .collect()
     }
 
-    /// The items that only a column nothing reads reads.
-    pub(crate) fn unread_items(&self) -> Vec<usize> {
+    /// What the statement reads: every column and core but those of columns
+    /// nothing reads.
+    pub(crate) fn live(&self) -> Live {
         // The columns nothing reads, each as its core and its position, found
         // until no more are: leaving one out can leave another unnamed.
-        let mut unread: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let mut live = Live { dead: vec![false; self.cores.len()], unread: BTreeSet::new() };
         loop {
-            let dead = self.cores_inside(&unread);
+            live.dead = self.cores_inside(&live.unread);
             let (mut named, mut names) = (BTreeSet::new(), BTreeSet::new());
-            for (core, found) in self.cores.iter().enumerate().filter(|(core, _)| !dead[*core]) {
-                let outputs = found
-                    .outputs
-                    .iter()
-                    .enumerate()
-                    .filter(|(position, _)| !unread.contains(&(core, *position)))
-                    .flat_map(|(_, output)| &output.refs);
-                for column in found.clause_refs.iter().chain(outputs) {
-                    match column {
-                        ColumnRef::Of(item, column) => {
-                            named.insert((*item, column.as_str()));
-                        }
-                        ColumnRef::Named(name) => {
-                            names.insert(name.as_str());
-                        }
+            for column in self.refs_read(&live) {
+                match column {
+                    ColumnRef::Of(item, column) => {
+                        named.insert((*item, column.as_str()));
+                    }
+                    ColumnRef::Named(name) => {
+                        names.insert(name.as_str());
                     }
                 }
             }
             let mut next = BTreeSet::new();
-            let live = self.cores.iter().enumerate().filter(|(core, _)| !dead[*core]);
-            for item in live.flat_map(|(_, core)| core.items.iter().copied()) {
+            let cores = self.cores.iter().enumerate().filter(|(core, _)| !live.dead[*core]);
+            for item in cores.flat_map(|(_, core)| core.items.iter().copied()) {
                 let Some(derived) = &self.items[item].derived else { continue };
                 let Columns::Listed(columns) = &self.items[item].columns else { continue };
                 for &arm in derived.prunable_arms() {
@@ -234,14 +234,33 @@ impl Planner<'_> {
                     }
                 }
             }
-            if next == unread {
-                return (0..self.cores.len())
-                    .filter(|core| dead[*core])
-                    .flat_map(|core| self.cores[core].items.iter().copied())
-                    .collect();
+            if next == live.unread {
+                return live;
             }
-            unread = next;
+            live.unread = next;
         }
+    }
+
+    /// The columns the clauses and result columns of `live` name.
+    pub(crate) fn refs_read<'a>(&'a self, live: &'a Live) -> impl Iterator<Item = &'a ColumnRef> {
+        let cores = self.cores.iter().enumerate().filter(|(core, _)| !live.dead[*core]);
+        cores.flat_map(move |(core, found)| {
+            let outputs = found
+                .outputs
+                .iter()
+                .enumerate()
+                .filter(move |(position, _)| !live.unread.contains(&(core, *position)))
+                .flat_map(|(_, output)| &output.refs);
+            found.clause_refs.iter().chain(outputs)
+        })
+    }
+
+    /// The items that only a column nothing reads reads.
+    pub(crate) fn unread_items(&self, live: &Live) -> Vec<usize> {
+        (0..self.cores.len())
+            .filter(|core| live.dead[*core])
+            .flat_map(|core| self.cores[core].items.iter().copied())
+            .collect()
     }
 
     /// Whether each core sits inside one of the columns `unread`: a SELECT in

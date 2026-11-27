@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::row_scope::{RowScope, Scopes};
+use crate::row_scope::{Reference, RowScope, Scopes};
 use crate::scope_edge::MemberValue;
 use crate::scope_plan::{Membership, PartnerValue, Sources};
 use crate::scope_row::{RowCondition, RowTest};
@@ -53,12 +53,20 @@ impl From<rusqlite::Error> for NoAnswer {
 /// indexes.
 pub const LOOKUP_STEPS: i32 = 1_000;
 
-/// The scope of each table among `sources`, for a run bound to
+/// What each reference to a table among `sources` depends on, for a run
+/// bound to
 /// `parameters` that returned `last`, the ORDER BY's values of its last row,
 /// when it returned as many rows as its LIMIT.
 pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
     let found = source_scopes(sources, RunValues::Run(parameters), last);
-    let tables = table_scopes(sources, found);
+    let mut tables: BTreeMap<String, Vec<Reference>> = BTreeMap::new();
+    for (source, scope) in sources.sources.iter().zip(found) {
+        let Some(table) = source.table().filter(|_| !source.unread) else {
+            continue;
+        };
+        let reference = Reference { scope, columns: Arc::clone(&source.columns) };
+        tables.entry(table.to_owned()).or_default().push(reference);
+    }
     let unread = crate::unread_columns::unread_reads(&sources.sources, &tables);
     // A read through a view read whole in a column nothing reads gives the
     // statement no row, so it widens no table's scope.

@@ -145,6 +145,10 @@ pub(crate) struct FromItem {
     /// narrows yet, what its ON says of the other sources, which narrows
     /// them once one does and so makes it an inner join's.
     pub(crate) left_on: Option<crate::scope_narrowing::Narrowing>,
+    /// Whether a parenthesized join of two items or more, after the first
+    /// item of its FROM, holds it: SQLite reads such a join through a
+    /// `SELECT *` of its own, which reads every column of its tables.
+    pub(crate) grouped: bool,
     /// Whether a LEFT JOIN adds it, whatever makes the join inner later: a
     /// left row no right row joins gives NULLs in its place with no row of
     /// it, which no lookup finds.
@@ -210,6 +214,7 @@ pub(crate) fn read_item<'a>(
         using: Vec::new(),
         cte: None,
         ors: Vec::new(),
+        grouped: false,
     };
     match table {
         SelectTable::Table(name, alias, _) => {
@@ -318,6 +323,7 @@ pub(crate) fn read_item<'a>(
                     term: None,
                     carried: None,
                     unread: false,
+                    columns: Default::default(),
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },
@@ -349,6 +355,7 @@ pub(crate) fn read_item<'a>(
                     term: None,
                     carried: None,
                     unread: false,
+                    columns: Default::default(),
                     either: Vec::new(),
                     memberships: Vec::new(),
                 },
@@ -452,6 +459,12 @@ pub(crate) fn read_from<'a>(
                     "a parenthesized join whose rows aren't its tables joined in turn",
                 )));
             }
+            if join.is_some() && planner.cores[core].items.len() - before > 1 {
+                for position in before..planner.cores[core].items.len() {
+                    let item = planner.cores[core].items[position];
+                    planner.items[item].grouped = true;
+                }
+            }
             let place = if left { Place::LeftOn(first) } else { Place::Inner };
             conditions.extend(on.into_iter().map(|expr| (Written::Expr(expr), place)));
             continue;
@@ -499,7 +512,7 @@ pub(crate) fn read_from<'a>(
     Ok(Ok(()))
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// Whether a name among `found`, written in `core`, can name a
     /// contentful FTS5 table's hidden column (`ColumnValue::Hidden`): one
     /// that resolves to it, or one sqlive can't resolve that such a column

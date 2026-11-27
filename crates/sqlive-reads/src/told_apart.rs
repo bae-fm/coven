@@ -142,7 +142,9 @@ fn names_in(
             }
         }
     }
-    let mut walk = Walk::new(schema, Names::default());
+    let bump = sqlite3_parser::Bump::new();
+    let views = crate::view_trees::ViewTrees::new(&bump);
+    let mut walk = Walk::new(schema, &views, Names::default());
     walk.expr(expr)?;
     Ok(walk.visit.0)
 }
@@ -242,7 +244,7 @@ impl Telling<'_> {
     /// the equalities of its conditions tell the rows it joins apart.
     pub(crate) fn query_tells_apart(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         select: &Select<'_>,
     ) -> rusqlite::Result<bool> {
@@ -301,7 +303,7 @@ impl Telling<'_> {
     /// `where_clause` apart: a window's or an aggregate call's ORDER BY.
     pub(crate) fn core_tells_apart(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
@@ -346,7 +348,7 @@ impl Telling<'_> {
     /// RIGHT or FULL JOIN.
     fn rows<'a>(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         from: Option<&'a FromClause<'a>>,
         where_clause: Option<&'a Expr<'a>>,
@@ -436,7 +438,7 @@ impl Telling<'_> {
     /// parentheses.
     pub(crate) fn items<'a>(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         from: Option<&'a FromClause<'a>>,
     ) -> rusqlite::Result<Option<Vec<Item<'a>>>> {
@@ -545,7 +547,7 @@ impl Telling<'_> {
     /// subquery has a WITH of its own, whose names this doesn't resolve.
     fn outputs(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         select: &Select<'_>,
     ) -> rusqlite::Result<Option<Vec<Output>>> {
@@ -733,7 +735,7 @@ impl Telling<'_> {
     /// to each row of those before it, among rows that tie in `sorted`.
     fn all_told(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         rows: &Rows<'_>,
         sorted: &[Sorted],
@@ -759,7 +761,7 @@ impl Telling<'_> {
     /// tie in `sorted`.
     fn determines(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         rows: &Rows<'_>,
         sorted: &[Sorted],
@@ -854,7 +856,7 @@ impl Telling<'_> {
     /// columns `fixed` returns, tells its rows apart.
     fn one_row(
         &self,
-        scope: &crate::sql_walk::Scope<'_>,
+        scope: &crate::sql_walk::Scope<'_, '_>,
         outer: &[OuterItems],
         select: &Select<'_>,
         fixed: &[(&str, &str)],

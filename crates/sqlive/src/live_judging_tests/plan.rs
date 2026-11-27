@@ -134,7 +134,6 @@ async fn separate_statements_keep_their_own_columns_and_ranges() {
 async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     let db = TestDatabase::open("CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1,10),(9,90); CREATE TABLE numbers(value INTEGER PRIMARY KEY)");
     for sql in [
-        "SELECT value FROM items WHERE id=1 AND EXISTS(SELECT 1 FROM items)",
         "SELECT value FROM items WHERE id=1 AND value NOT IN numbers",
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT value FROM items, n WHERE id=1",
         "SELECT value FROM (SELECT * FROM items LIMIT 5) WHERE id=1",

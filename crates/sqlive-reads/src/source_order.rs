@@ -40,7 +40,7 @@ impl EdgesOfItems {
     }
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// Order the items so each comes after the sources it takes values
     /// from: core by core, each after the core it sits in; within a core,
     /// those an ordered one reaches first, so each takes the values of the

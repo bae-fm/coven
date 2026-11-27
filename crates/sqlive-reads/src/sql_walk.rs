@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::schema_objects::MainSchema;
 use crate::select_syntax::{parts, window_parts, Part};
+use crate::view_trees::ViewTrees;
 use sqlite3_parser::ast::{
     Expr, FromClause, JoinConstraint, OneSelect, QualifiedName, ResultColumn, Select, SelectTable,
     SortedColumn,
@@ -49,7 +50,7 @@ impl Reads {
 pub(crate) trait Visit {
     /// Before the walk reads what `core` holds: a SELECT inside it can name
     /// its FROM items.
-    fn enter(&mut self, _scope: &Scope<'_>, _core: &OneSelect<'_>) -> rusqlite::Result<()> {
+    fn enter(&mut self, _scope: &Scope<'_, '_>, _core: &OneSelect<'_>) -> rusqlite::Result<()> {
         Ok(())
     }
 
@@ -63,7 +64,7 @@ pub(crate) trait Visit {
     /// expression takes when `first_row`.
     fn select(
         &mut self,
-        _scope: &Scope<'_>,
+        _scope: &Scope<'_, '_>,
         _select: &Select<'_>,
         _first_row: bool,
         _reads: &Reads,
@@ -75,7 +76,7 @@ pub(crate) trait Visit {
     /// query's only one.
     fn core(
         &mut self,
-        _scope: &Scope<'_>,
+        _scope: &Scope<'_, '_>,
         _core: &OneSelect<'_>,
         _order_by: &[SortedColumn<'_>],
         _reads: &Reads,
@@ -86,7 +87,7 @@ pub(crate) trait Visit {
     /// At `from`, whose FROM items, joined ones included, are `items`.
     fn from(
         &mut self,
-        _scope: &Scope<'_>,
+        _scope: &Scope<'_, '_>,
         _from: &FromClause<'_>,
         _items: &[&SelectTable<'_>],
     ) -> rusqlite::Result<()> {
@@ -98,8 +99,10 @@ pub(crate) trait Visit {
 impl Visit for () {}
 
 /// Where the walk is, and what it has met so far.
-pub(crate) struct Scope<'c> {
+pub(crate) struct Scope<'c, 'v> {
     schema: &'c MainSchema,
+    /// Where the walk reads each view's syntax.
+    views_read: &'c ViewTrees<'v>,
     /// What each view read so far reads, by its name, lowercase, so a view
     /// read twice is read once.
     views: BTreeMap<String, Reads>,
@@ -117,7 +120,7 @@ pub(crate) struct Scope<'c> {
     unread: Option<String>,
 }
 
-impl<'c> Scope<'c> {
+impl<'c> Scope<'c, '_> {
     /// The CTE or view whose SQL the walk is reading now.
     pub(crate) fn within(&self) -> Option<Within> {
         self.within.clone()
@@ -209,16 +212,17 @@ impl<'c> Scope<'c> {
     }
 }
 
-pub(crate) struct Walk<'c, V> {
-    pub(crate) scope: Scope<'c>,
+pub(crate) struct Walk<'c, 'v, V> {
+    pub(crate) scope: Scope<'c, 'v>,
     pub(crate) visit: V,
 }
 
-impl<'c, V: Visit> Walk<'c, V> {
-    pub(crate) fn new(schema: &'c MainSchema, visit: V) -> Self {
+impl<'c, 'v, V: Visit> Walk<'c, 'v, V> {
+    pub(crate) fn new(schema: &'c MainSchema, views: &'c ViewTrees<'v>, visit: V) -> Self {
         Self {
             scope: Scope {
                 schema,
+                views_read: views,
                 views: BTreeMap::new(),
                 ctes: Vec::new(),
                 defined: Vec::new(),
@@ -385,7 +389,11 @@ impl<'c, V: Visit> Walk<'c, V> {
         // A view's SELECT names no CTE of the statement.
         let ctes = std::mem::take(&mut self.scope.ctes);
         let around = self.scope.within.replace(Within::View(name.clone()));
-        let read = schema.read_view(stored, |_, select| self.select(select, false));
+        let read = match self.scope.views_read.tree(schema, stored) {
+            Ok(Ok(tree)) => self.select(tree.select, false).map(Ok),
+            Ok(Err(why)) => Ok(Err(why)),
+            Err(error) => Err(error),
+        };
         self.scope.within = around;
         self.scope.ctes = ctes;
         match read? {

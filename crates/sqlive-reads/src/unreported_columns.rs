@@ -61,11 +61,30 @@ use crate::select_syntax::{
 };
 use crate::sql_walk::{Reads, Scope, Visit, Walk, Within};
 use crate::told_apart::{Item, OuterItems, Telling};
+use crate::view_trees::ViewTrees;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{
     CompoundOperator, Distinctness, Expr, FromClause, JoinConstraint, JoinOperator, JoinType, Name,
     OneSelect, Over, ResultColumn, Select, SelectTable, SortedColumn, WindowDef,
 };
+
+/// A SELECT or one of its cores, by the address of its syntax, which the
+/// planner reads too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Node {
+    Query(usize),
+    Core(usize),
+}
+
+impl Node {
+    pub(crate) fn query(select: &Select<'_>) -> Self {
+        Self::Query(std::ptr::from_ref(select) as usize)
+    }
+
+    pub(crate) fn core(core: &OneSelect<'_>) -> Self {
+        Self::Core(std::ptr::from_ref(core) as usize)
+    }
+}
 
 /// The columns a statement's rows depend on beyond those the authorizer
 /// reports, as (table, column) pairs, lowercase.
@@ -104,23 +123,27 @@ impl UnreportedColumns {
 }
 
 /// The columns `select`'s rows depend on that the authorizer doesn't report,
-/// with the connection's `functions`.
+/// with the connection's `functions`, and the SELECTs and cores it runs whose
+/// rows SQLite picks, every column of whose tables it reads; none of those
+/// when the columns are unknown. It reads each view in `views`.
 pub(crate) fn unreported_columns(
     connection: &Connection,
     schema: &MainSchema,
     functions: &Functions,
+    views: &ViewTrees<'_>,
     select: &Select<'_>,
-) -> rusqlite::Result<UnreportedColumns> {
+) -> rusqlite::Result<(UnreportedColumns, BTreeSet<Node>)> {
     let found = Found {
         telling: Telling { connection, schema, functions },
         outer: Vec::new(),
         picked: Vec::new(),
         found: Vec::new(),
     };
-    let mut walk = Walk::new(schema, found);
+    let mut walk = Walk::new(schema, views, found);
     let reads = walk.select(select, false)?;
     if let Some(why) = walk.scope.unread() {
-        return UnreportedColumns::unknown(schema, why.to_owned());
+        let unknown = UnreportedColumns::unknown(schema, why.to_owned())?;
+        return Ok((unknown, BTreeSet::new()));
     }
     let run = walk.scope.run(&reads);
     let counts =
@@ -133,15 +156,17 @@ pub(crate) fn unreported_columns(
         .map(|(_, column)| column.clone())
         .collect();
     let mut picked = BTreeSet::new();
-    for (_, reads) in walk.visit.picked.iter().filter(|(within, _)| counts(within)) {
+    let mut nodes = BTreeSet::new();
+    for (_, reads, node) in walk.visit.picked.iter().filter(|(within, ..)| counts(within)) {
         picked.extend(walk.scope.tables(reads));
+        nodes.insert(*node);
     }
     for table in picked {
         for column in walk.visit.columns(&table)? {
             found.insert((table.to_ascii_lowercase(), column));
         }
     }
-    Ok(UnreportedColumns::Known(found))
+    Ok((UnreportedColumns::Known(found), nodes))
 }
 
 /// What the walk finds of the columns the authorizer doesn't report, each
@@ -152,14 +177,15 @@ struct Found<'c> {
     /// The names of each SELECT's FROM items around where the walk is, the
     /// innermost last.
     outer: Vec<OuterItems>,
-    /// What each query whose rows SQLite picks reads, and where it is.
-    picked: Vec<(Option<Within>, Reads)>,
+    /// What each query or core whose rows SQLite picks reads, where it is,
+    /// and which it is.
+    picked: Vec<(Option<Within>, Reads, Node)>,
     /// The columns USING and NATURAL joins compare, and where each join is.
     found: Vec<(Option<Within>, (String, String))>,
 }
 
 impl Visit for Found<'_> {
-    fn enter(&mut self, scope: &Scope<'_>, core: &OneSelect<'_>) -> rusqlite::Result<()> {
+    fn enter(&mut self, scope: &Scope<'_, '_>, core: &OneSelect<'_>) -> rusqlite::Result<()> {
         let from = match core {
             OneSelect::Select { from, .. } => from.as_ref(),
             OneSelect::Values(_) => None,
@@ -176,7 +202,7 @@ impl Visit for Found<'_> {
     /// Note `select` when SQLite picks its rows.
     fn select(
         &mut self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         select: &Select<'_>,
         first_row: bool,
         reads: &Reads,
@@ -185,7 +211,7 @@ impl Visit for Found<'_> {
             && !self.telling.query_tells_apart(scope, &self.outer, select)?
             || self.compound_follows_order(scope, select)?
         {
-            self.picked.push((scope.within(), reads.clone()));
+            self.picked.push((scope.within(), reads.clone(), Node::query(select)));
         }
         Ok(())
     }
@@ -193,13 +219,13 @@ impl Visit for Found<'_> {
     /// Note `core` when its rows follow the order SQLite reads its rows in.
     fn core(
         &mut self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
         reads: &Reads,
     ) -> rusqlite::Result<()> {
         if self.follows_order(scope, core, order_by)? || self.distinct_follows_order(scope, core)? {
-            self.picked.push((scope.within(), reads.clone()));
+            self.picked.push((scope.within(), reads.clone(), Node::core(core)));
         }
         Ok(())
     }
@@ -211,7 +237,7 @@ impl Visit for Found<'_> {
     /// sides share.
     fn from(
         &mut self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         from: &FromClause<'_>,
         items: &[&SelectTable<'_>],
     ) -> rusqlite::Result<()> {
@@ -260,7 +286,7 @@ impl Found<'_> {
     /// The table `item` reads directly, and its columns, lowercase.
     fn table(
         &self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         item: &SelectTable<'_>,
     ) -> rusqlite::Result<Option<(String, Vec<String>)>> {
         let SelectTable::Table(name, ..) = item else { return Ok(None) };
@@ -272,7 +298,7 @@ impl Found<'_> {
     /// Count `column` of the table `item` reads directly, when it has one.
     fn table_column(
         &mut self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         item: &SelectTable<'_>,
         column: &str,
     ) -> rusqlite::Result<()> {
@@ -290,7 +316,7 @@ impl Found<'_> {
     /// SQLite names by their aliases or the columns they name.
     fn has_column(
         &self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         item: &SelectTable<'_>,
         column: &str,
     ) -> rusqlite::Result<Option<bool>> {
@@ -316,7 +342,7 @@ impl Found<'_> {
     /// whose equal values are the same (`returns_exactly`).
     fn distinct_follows_order(
         &self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         core: &OneSelect<'_>,
     ) -> rusqlite::Result<bool> {
         let OneSelect::Select { distinctness: Some(Distinctness::Distinct), .. } = core else {
@@ -332,7 +358,7 @@ impl Found<'_> {
     /// are the same (`returns_exactly`).
     fn compound_follows_order(
         &self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         select: &Select<'_>,
     ) -> rusqlite::Result<bool> {
         let Some(compounds) = &select.body.compounds else { return Ok(false) };
@@ -351,7 +377,11 @@ impl Found<'_> {
 
     /// Whether each result column of `core` is a column whose equal values
     /// are the same (`compares_exactly`) of a table of its FROM.
-    fn returns_exactly(&self, scope: &Scope<'_>, core: &OneSelect<'_>) -> rusqlite::Result<bool> {
+    fn returns_exactly(
+        &self,
+        scope: &Scope<'_, '_>,
+        core: &OneSelect<'_>,
+    ) -> rusqlite::Result<bool> {
         let OneSelect::Select { columns, from, .. } = core else { return Ok(false) };
         let Some(items) = self.telling.items(scope, &self.outer, from.as_ref())? else {
             return Ok(false);
@@ -392,7 +422,7 @@ impl Found<'_> {
     /// apart.
     fn follows_order(
         &self,
-        scope: &Scope<'_>,
+        scope: &Scope<'_, '_>,
         core: &OneSelect<'_>,
         order_by: &[SortedColumn<'_>],
     ) -> rusqlite::Result<bool> {

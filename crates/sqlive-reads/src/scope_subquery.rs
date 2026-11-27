@@ -47,7 +47,7 @@ fn values<'a>(compared: &'a Expr<'a>) -> Option<Vec<&'a Expr<'a>>> {
     }
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// The edge from the column `member_expr` names, written in `core`, to
     /// the source of the column `select` returns at `position` of `width`,
     /// when `cores` are the cores `select` was read as.

@@ -67,7 +67,7 @@ pub(crate) fn constant(expr: &Expr<'_>) -> bool {
     )
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// The side a constant gives: the member column equal to it.
     fn constant_side(
         connection: &Connection,

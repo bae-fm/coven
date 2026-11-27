@@ -13,6 +13,7 @@ mod never_null;
 mod read_capture;
 mod read_report;
 mod read_set;
+mod reference_columns;
 mod result_nulls;
 mod row_scope;
 mod schema_objects;
@@ -38,6 +39,7 @@ mod token_scan;
 mod told_apart;
 mod unread_columns;
 mod unreported_columns;
+mod view_trees;
 mod whole_view_names;
 
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};

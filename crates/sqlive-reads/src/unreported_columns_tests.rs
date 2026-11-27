@@ -29,7 +29,8 @@ fn unreported(connection: &rusqlite::Connection, sql: &str) -> UnreportedColumns
     };
     let functions = crate::select_syntax::Functions::read(connection).unwrap();
     let schema = crate::MainSchema::read(connection).unwrap();
-    unreported_columns(connection, &schema, &functions, select).unwrap()
+    let views = crate::view_trees::ViewTrees::new(&bump);
+    unreported_columns(connection, &schema, &functions, &views, select).unwrap().0
 }
 
 #[test]

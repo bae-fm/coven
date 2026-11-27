@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::view_trees::ViewTrees;
 use rusqlite::{ffi, Connection};
 use sqlite3_parser::{
     ast::{
@@ -233,7 +234,7 @@ impl MainSchema {
     }
 
     /// The SQL that made the table or view `name`.
-    fn sql(&self, name: &str) -> rusqlite::Result<&str> {
+    pub(crate) fn sql(&self, name: &str) -> rusqlite::Result<&str> {
         self.held(name)?.sql.as_deref().ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
@@ -245,15 +246,10 @@ impl MainSchema {
         stored: &str,
         read: impl FnOnce(Option<&[IndexedColumn<'_>]>, &Select<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Result<T, String>> {
-        let sql = self.sql(stored)?;
         let bump = Bump::new();
-        let mut parser = Parser::new(&bump, sql.as_bytes());
-        let result = match parser.next() {
-            Ok(Some(Cmd::Stmt(Stmt::CreateView { columns, select, .. }))) => {
-                read(columns, select).map(Ok)
-            }
-            Ok(_) => Ok(Err(format!("view {stored} holds no CREATE VIEW the parser reads"))),
-            Err(error) => Ok(Err(format!("view {stored}: {error}"))),
+        let result = match ViewTrees::new(&bump).tree(self, stored)? {
+            Ok(tree) => read(tree.columns, tree.select).map(Ok),
+            Err(why) => Ok(Err(why)),
         };
         result
     }

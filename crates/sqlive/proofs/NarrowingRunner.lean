@@ -1,4 +1,5 @@
 import SqliveNarrowing.Json
+import SqliveNarrowing.References
 import SqliveNarrowing.WellFormed
 import SqliveNarrowing.Rules.Unread
 
@@ -10,9 +11,9 @@ items name the shapes sqlive reads whole), the database `before` and `after`
 a write, the write's row `changes` in order, and whether a question that
 judged the write `stopped` at sqlive's step limit. Output: whether the write's
 net change of each row (`net`) reruns the statement the model plans
-(`Statement.pruned`, `Statement.rerunsLimited`), whether the statement and it
+(`Statement.pruned`, `Statement.rerunsReferences`), whether the statement and it
 are well formed (`Statement.wellFormed`), whether the model reads it whole,
-each table's scope, and the statement's rows before and after. -/
+each table reference's scope, and the statement's rows before and after. -/
 open Lean SqliveNarrowing
 
 def rowsJson (rows : List Row) : Json :=
@@ -28,12 +29,14 @@ def run (input : Json) : Except String Json := do
   -- sqlive plans the statement without the columns nothing reads
   -- (`Statement.pruned`).
   let planned := s.pruned
-  let scopes := planned.tableScopes db
-  let shown := (List.range schema.tables.length).filterMap fun t =>
-    (scopes.bind fun scopeOf => scopeOf t).map fun scope =>
-      ((schema.tables.getD t default).1, Lean.Json.str (toString (repr scope)))
+  let scopes := planned.split.tableScopes (db.split planned)
+  let shown := planned.itemNumbers.filterMap fun i => do
+    let t ← planned.table? i
+    let scopeOf ← scopes
+    let scope ← scopeOf i
+    pure (s!"{(schema.tables.getD t default).1}#{i}", Lean.Json.str (toString (repr scope)))
   pure <| Json.mkObj [
-    ("reruns", toJson (planned.rerunsLimited db (net changes) db' stopped)),
+    ("reruns", toJson (planned.rerunsReferences db (net changes) db' stopped)),
     ("wellFormed", toJson (s.wellFormed && planned.wellFormed)),
     ("whole", toJson scopes.isNone),
     ("scopes", Json.mkObj shown),

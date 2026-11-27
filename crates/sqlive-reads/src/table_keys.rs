@@ -30,7 +30,10 @@ pub(crate) fn is_rowid(schema: &MainSchema, table: &str, column: &str) -> rusqli
 /// The column of a rowid table that holds its rowid: its single primary
 /// key column, when SQLite keeps no index for the key: `INTEGER PRIMARY
 /// KEY`, but not `INT PRIMARY KEY` or `INTEGER PRIMARY KEY DESC`.
-fn rowid_column<'s>(schema: &'s MainSchema, table: &str) -> rusqlite::Result<Option<&'s str>> {
+pub(crate) fn rowid_column<'s>(
+    schema: &'s MainSchema,
+    table: &str,
+) -> rusqlite::Result<Option<&'s str>> {
     let mut keys = schema.columns(table)?.iter().filter(|column| column.primary_key);
     let (Some(key), None) = (keys.next(), keys.next()) else { return Ok(None) };
     let indexed = schema.indexes(table)?.iter().any(|index| index.primary_key);

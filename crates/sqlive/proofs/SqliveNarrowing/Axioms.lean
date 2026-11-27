@@ -181,3 +181,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.net_judges_states
 #print axioms SqliveNarrowing.net_unchanged
 #print axioms SqliveNarrowing.net_reruns_imp
+#print axioms SqliveNarrowing.split_result
+#print axioms SqliveNarrowing.split_writes
+#print axioms SqliveNarrowing.Statement.split_wellFormed
+#print axioms SqliveNarrowing.references_sound
+#print axioms SqliveNarrowing.references_net_sound
+#print axioms SqliveNarrowing.references_indexed_sound

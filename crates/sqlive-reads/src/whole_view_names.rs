@@ -19,7 +19,9 @@ pub(crate) fn whole_view_names(
     schema: &MainSchema,
     stored: &str,
 ) -> rusqlite::Result<Result<BTreeSet<String>, String>> {
-    let mut walk = Walk::new(schema, ());
+    let bump = sqlite3_parser::Bump::new();
+    let views = crate::view_trees::ViewTrees::new(&bump);
+    let mut walk = Walk::new(schema, &views, ());
     walk.view(stored)?;
     Ok(match walk.scope.unread() {
         Some(why) => Err(why.to_owned()),

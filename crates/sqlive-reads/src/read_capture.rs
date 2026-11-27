@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::read_set::{ColumnSet, ReadSet, TableRead};
-use crate::row_scope::{RowScope, Scopes};
+use crate::row_scope::{Reference, RowScope, Scopes};
+use crate::unreported_columns::UnreportedColumns;
 
 /// The views and tables a live query reads whole: a read through one of them
 /// depends on the object itself, which can change with no change to the
@@ -132,9 +133,9 @@ impl ReadCapture {
     }
 
     /// Record `frame`'s tables but those `scopes` says count for nothing, the
-    /// FTS5 shadow tables and the tables only an unread column reads,
-    /// each read through the scope `scopes` gives it, or whole, with the
-    /// columns its rows depend on that the authorizer
+    /// FTS5 shadow tables and the tables only an unread column reads, with a
+    /// read for each reference `scopes` gives the table, or one of every row,
+    /// with the columns its rows depend on that the authorizer
     /// didn't report (`unreported_columns.rs`): SQLite reports no read at all
     /// of a table that a subquery reads only through a USING join. A table
     /// read through a view or CTE that the
@@ -159,15 +160,49 @@ impl ReadCapture {
         {
             tables.entry(table).or_default().insert(column);
         }
-        self.completed.extend(tables.into_iter().map(|(table, columns)| TableRead {
-            scope: match scopes.tables.get(&table) {
-                Some(scope) if frame.read_inside(&table, &scopes.inlined) => scope.clone(),
-                _ => RowScope::All,
-            },
-            table,
-            columns,
-            inserted_only: false,
-            host: scopes.host,
-        }));
+        for (table, columns) in tables {
+            let read = |columns, scope| TableRead {
+                table: table.clone(),
+                columns,
+                scope,
+                inserted_only: false,
+                host: scopes.host,
+            };
+            match scopes.tables.get(&table) {
+                Some(references) if frame.read_inside(&table, &scopes.inlined) => {
+                    let columns = of_references(columns, references, &scopes.unreported);
+                    let reads = references.iter().zip(columns);
+                    self.completed.extend(
+                        reads.map(|(reference, columns)| read(columns, reference.scope.clone())),
+                    );
+                }
+                _ => self.completed.push(read(columns, RowScope::All)),
+            }
+        }
     }
+}
+
+/// The columns each of `references`, those to one table, reads among
+/// `columns`, those the statement reads of it: its own, and each that none of
+/// them reads, which this can't tell apart. Every one of `columns` when the
+/// statement's columns are `unknown`.
+fn of_references(
+    columns: BTreeSet<String>,
+    references: &[Reference],
+    unreported: &UnreportedColumns,
+) -> Vec<BTreeSet<String>> {
+    if matches!(unreported, UnreportedColumns::Unknown(_)) {
+        return references.iter().map(|_| columns.clone()).collect();
+    }
+    let unclaimed: Vec<&String> = columns
+        .iter()
+        .filter(|column| !references.iter().any(|found| found.columns.contains(*column)))
+        .collect();
+    references
+        .iter()
+        .map(|reference| {
+            let own = columns.iter().filter(|column| reference.columns.contains(*column));
+            own.chain(unclaimed.iter().copied()).cloned().collect()
+        })
+        .collect()
 }

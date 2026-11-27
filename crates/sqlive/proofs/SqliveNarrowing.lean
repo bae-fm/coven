@@ -36,3 +36,4 @@ import SqliveNarrowing.Sound
 import SqliveNarrowing.Rules.Unread
 import SqliveNarrowing.Index
 import SqliveNarrowing.Net
+import SqliveNarrowing.References

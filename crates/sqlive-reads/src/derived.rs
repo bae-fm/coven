@@ -250,15 +250,15 @@ pub(crate) fn read_derived_item<'a>(
         }
         Named::View(stored) => {
             let around = planner.within.replace(stored.to_ascii_lowercase());
-            let read = planner.schema.read_view(stored, |columns, select| {
-                let names = columns.map(crate::sql::column_list_names);
-                // A view names only the schema's tables and views.
-                read_derived(connection, planner, select, names, None, &Ctes::default())
-            })?;
-            planner.within = around;
-            let Ok(read) = read else {
+            let Ok(view) = planner.views.tree(planner.schema, stored)? else {
+                planner.within = around;
                 return Ok(Err(Unread("a view the parser can't read")));
             };
+            let names = view.columns.map(crate::sql::column_list_names);
+            // A view names only the schema's tables and views.
+            let read =
+                read_derived(connection, planner, view.select, names, None, &Ctes::default())?;
+            planner.within = around;
             read.map(|(columns, derived)| {
                 let from = Some(format!("main.{} AS {qualifier}", crate::sql::identifier(stored)));
                 (from, columns, derived)
@@ -274,6 +274,7 @@ pub(crate) fn read_derived_item<'a>(
                 term: None,
                 carried: None,
                 unread: false,
+                columns: Default::default(),
                 either: Vec::new(),
                 memberships: Vec::new(),
             },

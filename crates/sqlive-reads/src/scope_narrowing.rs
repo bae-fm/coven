@@ -55,7 +55,7 @@ impl Narrowing {
     }
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// Narrow the sources by `found`, which conditions on the joined rows
     /// give. A LEFT JOIN's right side it narrows is an inner join's then: a
     /// left row with NULLs in its place fails the condition, so no row the

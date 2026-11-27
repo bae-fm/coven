@@ -227,15 +227,26 @@ impl RowScope {
     }
 }
 
-/// What one run of a statement depends on: the scope of each table it read
-/// as one of its sources, and the app's views and the CTEs it read as
+/// What a run depends on through one reference to a table, one of the
+/// statement's sources that reads it.
+pub(crate) struct Reference {
+    /// The rows it depends on.
+    pub(crate) scope: RowScope,
+    /// The columns the statement reads through it
+    /// (`reference_columns.rs`).
+    pub(crate) columns: Arc<BTreeSet<String>>,
+}
+
+/// What one run of a statement depends on: each reference to each table it
+/// read as one of its sources, and the app's views and the CTEs it read as
 /// sources of their own, by the names SQLite reports reads through them by,
 /// whose tables' rows those scopes cover. A table read otherwise, as
 /// through a view read whole, depends on every row, but for a view read whole
 /// in a column nothing reads, whose reads give no row. Empty when the
 /// statement's shape keeps every table whole.
 pub struct Scopes {
-    pub(crate) tables: BTreeMap<String, RowScope>,
+    /// The references to each table, by its name, lowercase.
+    pub(crate) tables: BTreeMap<String, Vec<Reference>>,
     pub(crate) inlined: BTreeSet<String>,
     /// The shadow tables of the contentful FTS5 tables the statement reads,
     /// whose reads count for nothing (`Sources::fts5_shadows`).

@@ -811,3 +811,70 @@ CREATE VIEW passed AS SELECT * FROM t",
     }
     db.close();
 }
+
+/// A statement that names a table in several places depends, through each, on
+/// the columns it reads there of the rows its conditions there allow: a write
+/// reruns it only when one place reads a column the write changes in a row
+/// that place allows.
+#[tokio::test]
+async fn each_reference_to_a_table_narrows_on_its_own() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, g INTEGER, a INTEGER, b INTEGER);
+CREATE TABLE s(id INTEGER PRIMARY KEY);
+INSERT INTO t VALUES (1,1,0,0),(2,1,0,0),(3,2,0,0);
+INSERT INTO s VALUES (1);
+CREATE VIEW passed AS SELECT * FROM t",
+    );
+    for narrow in [
+        "SELECT max(x.b) FROM t AS x WHERE x.g = 1",
+        "SELECT max(x.b) FROM (SELECT * FROM t) AS x WHERE x.g = 1",
+        "SELECT max(x.b) FROM passed AS x WHERE x.g = 1",
+    ] {
+        let sql = format!("SELECT ({narrow}), (SELECT max(y.a) FROM t AS y) FROM s");
+        follows(
+            &db,
+            sql.leak(),
+            vec![],
+            &[
+                // Only the narrow place reads b, of the rows of group 1.
+                ("UPDATE t SET b = b + 1 WHERE id = 3", false),
+                ("UPDATE t SET b = b + 1 WHERE id = 1", true),
+                // The other place reads a of every row.
+                ("UPDATE t SET a = a + 1 WHERE id = 3", true),
+                ("INSERT INTO t VALUES (4,2,0,0)", true),
+                ("DELETE FROM t WHERE id = 4", true),
+            ],
+        )
+        .await;
+    }
+    // A place that reads no column depends only on which rows there are.
+    follows(
+        &db,
+        "SELECT (SELECT max(x.b) FROM t AS x WHERE x.g = 1), EXISTS (SELECT 1 FROM t) FROM s",
+        vec![],
+        &[
+            ("UPDATE t SET a = a + 1 WHERE id = 1", false),
+            ("UPDATE t SET b = b + 1 WHERE id = 3", false),
+            ("UPDATE t SET b = b + 1 WHERE id = 1", true),
+            ("INSERT INTO t VALUES (5,2,0,0)", true),
+            ("DELETE FROM t WHERE id = 5", true),
+        ],
+    )
+    .await;
+    // Two narrow places, each reading its own column of its own rows.
+    let sql = "SELECT (SELECT max(x.a) FROM t AS x WHERE x.g = 1),
+        (SELECT max(y.b) FROM t AS y WHERE y.g = 2) FROM s";
+    follows(
+        &db,
+        sql,
+        vec![],
+        &[
+            ("UPDATE t SET a = a + 1 WHERE id = 3", false),
+            ("UPDATE t SET b = b + 1 WHERE id = 1", false),
+            ("UPDATE t SET a = a + 1 WHERE id = 1", true),
+            ("UPDATE t SET b = b + 1 WHERE id = 3", true),
+        ],
+    )
+    .await;
+    db.close();
+}

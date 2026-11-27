@@ -55,6 +55,8 @@ mod or_derived;
 mod parenthesized;
 #[path = "narrowing_model/push_down.rs"]
 mod push_down;
+#[path = "narrowing_model/references.rs"]
+mod references;
 #[path = "narrowing_model/row_edge.rs"]
 mod row_edge;
 #[path = "narrowing_model/row_member.rs"]
@@ -858,6 +860,12 @@ async fn window_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn carry_matches_lean() {
     differential("carry", carry::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn references_match_lean() {
+    differential("one table in several places", references::statement).await;
 }
 
 #[tokio::test]

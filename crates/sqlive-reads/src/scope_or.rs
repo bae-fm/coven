@@ -169,7 +169,7 @@ fn disjuncts<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
     }
 }
 
-impl Planner<'_> {
+impl Planner<'_, '_> {
     /// Whether `item` waits for an OR's partner: a side compares a column of
     /// it with a subquery's value whose source isn't placed yet.
     pub(crate) fn waits_for_or(&self, item: usize, placed: &[bool]) -> bool {

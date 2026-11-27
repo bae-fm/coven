@@ -10,11 +10,12 @@ change sqlive or build a host on it.
 A database has one writer connection and several read-only connections beside
 it. A *write* is one transaction on the writer, and a *row change* is one row's
 insert, update or delete inside it. sqlive captures each row change a write
-makes. A live query's run records what its statements read: the tables, the
-columns, and the rows their conditions and joins allow, which this document
-calls each table's *scope*. When a write commits, sqlive judges each row's net
-change, from the row before the write to the row at its end, against the live
-queries whose scopes the row could pass, and runs only those again.
+makes. A live query's run records what its statements read: for each place a
+statement names a table, the columns it reads there and the rows its
+conditions and joins allow there, which this document calls that place's
+*scope*. When a write commits, sqlive judges each row's net change, from the
+row before the write to the row at its end, against the live queries with a
+scope the row could pass, and runs only those again.
 
 Take a music app's album page, which reads:
 
@@ -477,7 +478,8 @@ A live query depends on what its statements read. As SQLite prepares each
 statement, it tells sqlive the tables and columns the statement reads, and a
 commit that changes none of those columns doesn't run the query again. sqlive
 also reads the statement's SQL, to find which rows of each table its conditions
-and joins allow: its scope on each table, which sections 5 to 8 describe.
+and joins allow: a scope for each place the statement names a table, which
+sections 5 to 8 describe.
 
 SQLite leaves some columns out of what it reports, and sqlive adds them itself.
 SQLite leaves out the columns a USING or NATURAL join compares, so sqlive adds
@@ -495,6 +497,52 @@ with `LIMIT 1`. A screen's statement that reads only `scan_files` doesn't rerun
 when a write changes another row of `scan_folders`. When sqlive can't parse the
 statement, or a view it reads, sqlive counts every column of every table as
 read, so every write runs the query again.
+
+### Each place a table is named
+
+A statement can name one table in several places, as the screens of a music app
+do when they compose one statement from smaller queries. sqlive keeps each such
+place's read apart: its scope, and the columns the statement reads through it.
+A write runs the live query again only when one place reads a column the write
+changes, or the write inserts or deletes a row, and the row passes that place's
+scope. A release page can read the release's tracks and count every track of
+the library in one statement:
+
+```sql
+SELECT (SELECT json_group_array(t.title ORDER BY t.id) FROM tracks AS t
+        WHERE t.release_id = ?1),
+       (SELECT count(*) FROM tracks AS every)
+FROM releases AS r WHERE r.id = ?1
+```
+
+The count reads no column, so only a track added or deleted changes it, and a
+new title of another release's track doesn't rerun the page. With one scope for
+all of `tracks`, the count would give every row, and every track's new title
+would rerun it.
+
+A place's columns are those the statement's clauses name through it. A place
+reads every column of its table in four cases:
+
+- Section 6 says a query depends on every column of the tables it reads, and
+  the place is in that query.
+- The place is in a join in parentheses of two tables or more, after the first
+  item of its FROM. SQLite reads such a join through a `SELECT *` of its own.
+- A `*` can list the place's columns beside columns sqlive doesn't know, as a
+  table function's.
+- sqlive can't parse the statement, or a view it reads.
+
+SQLite reports the columns a statement reads by table, not by place. sqlive
+gives a column that it finds read through no place, such as one that only an
+unread column of a subquery names (section 8), to every place of its table. A
+name that sqlive can't tell the place of, as a bare name beside a table
+function, counts for every place of a table with a column of that name.
+
+The views and tables a live query reads whole (section 3), and a table SQLite
+reports reading through a view or CTE that sqlive didn't read as places of its
+own, keep one read of every row, with every column the statement reads of the
+table.
+
+### The host's statements
 
 A live query's run can also run statements of the host's own through
 `HostSql::host_live_read`, which may read tables app SQL can't. sqlive reads
@@ -1215,12 +1263,12 @@ fails if they grow.
 ### The index of waiting queries
 
 sqlive judges a write only against the live queries whose scopes its rows
-could pass. sqlive files each waiting live query under each table the query
-reads and, when an equality or an IN list narrows the table, under the
-values that the equality or list compares with. sqlive judges a change to a
-row against the queries it filed under a value the row holds before or
-after the change, and against those whose scope on the table has no
-equality. With 200 album pages open, each reading `SELECT title FROM tracks
+could pass. sqlive files each read of a waiting live query, one for each
+place it names a table, under that table and, when an equality or an IN list
+narrows the place, under the values that the equality or list compares with.
+sqlive judges a change to a row against the queries it filed under a value the
+row holds before or after the change, and against those with a place of the
+table whose scope has no equality. With 200 album pages open, each reading `SELECT title FROM tracks
 WHERE release_id = ?1` for its own release, sqlive judges a track a write adds
 to one release against that release's page alone.
 
@@ -2157,6 +2205,7 @@ the model and states its assumptions.
 | A statement read whole reruns on every write that any scopes rerun it on, so sqlive's judge, which narrows nothing for a write whose question stopped at the step limit, lets a write pass only when the judge without the limit does | `reruns_whole`, `Statement.rerunsLimited_sound` | `proofs/SqliveNarrowing/Judge.lean` | 7 |
 | A statement returns the same rows from a database masked to the columns it reads, as sqlive keeps a changed row, as from the database | `result_mask` | `proofs/SqliveNarrowing/Mask.lean` | 2 |
 | A write the judge lets pass leaves each slot whose masked row it changes holding rows that fail the table's scope before and after it, and each masked table holding the same rows that pass the table's scope, a slot it changes more than once included; a statement read whole then returns the same rows after the write | `Writes.unjudged`, `unjudged_slots`, `unjudged_rows`, `whole_narrowing_sound` | `proofs/SqliveNarrowing/Unjudged.lean` | 2 |
+| sqlive's judge of places reads each place a statement names a table with its own columns and its own scope: it is the judge of the statement in which each FROM item that names a table reads a table of its own, which returns the statement's rows, and whose tables the write changes as it changes the table each item names. A write that judge lets pass, of every row change or of each row's net change, through the index or not, leaves a well-formed statement's rows unchanged. The other rows here that speak of a table's scope and columns hold of that statement, where each table is one place's | `Statement.split_wellFormed`, `split_result`, `split_writes`, `references_sound`, `references_net_sound`, `references_indexed_sound` | `proofs/SqliveNarrowing/References.lean` | 4 |
 | A well-formed statement's query returns the same rows with any fuel past its number, so a lookup of a derived item whose arms sit in no core reads the rows the statement reads of it | `evalQuery_fuel`, `lookupRows_derived` | `proofs/SqliveNarrowing/Fuel.lean` | 8 |
 | A well-formed statement's own query names no item outside its cores, and a core run under a binding that holds a row of each outer item its query names that no LEFT JOIN adds runs its derived items' queries and its subqueries under such bindings too | `outer_root`, `outer_derived`, `outer_sub`, `outer_subOn` | `proofs/SqliveNarrowing/Outer.lean` | 8 |
 | A query returns the same rows under two bindings that hold the same rows of the outer items it names, so each ON condition of a LEFT JOIN holds of each binding its core keeps that holds a row of the join's item | `evalQuery_outer_congr`, `Statement.on_kept` | `proofs/SqliveNarrowing/Congr.lean` | 7 |
