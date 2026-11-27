@@ -224,7 +224,7 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     /// (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<crate::Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -281,7 +281,7 @@ impl<'connection> BulkSqlContext<'connection> {
     /// (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<crate::Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>

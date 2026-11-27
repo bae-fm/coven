@@ -23,7 +23,7 @@ use crate::authorization::{Judgment, Policy, PolicyError};
 use crate::MainSchema;
 use crate::ReadReport;
 use crate::ScopePlanSize;
-use crate::{CompiledPlan, CompiledStatement, ScopePlan};
+use crate::{CompiledPlan, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
@@ -443,7 +443,7 @@ impl<P: Policy> HostSql<P> {
             .plan(cookie, sql, || self.build_scope_plan(Some(cookie), sql, statement))
     }
 
-    /// The plan `statement` brings, decoded and checked against this
+    /// The plan a compiled statement brings as `encoded`, decoded and checked against this
     /// connection's schema, which `cookie` counts: kept for the database
     /// while the schema stays, and checked on each use with no cookie. A
     /// schema that shows a table, view or function the plan read otherwise
@@ -451,14 +451,14 @@ impl<P: Policy> HostSql<P> {
     /// with `CompiledSchemaDiffers`.
     pub(super) fn compiled_plan(
         &self,
-        statement: CompiledStatement,
+        encoded: &'static str,
         cookie: Option<i64>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let check = |schema: &MainSchema| {
             let failed =
                 |error: PolicyError<P>| rusqlite::Error::UserFunctionError(Box::new(error));
             let started = Instant::now();
-            let plan = CompiledPlan::decode(statement.plan)
+            let plan = CompiledPlan::decode(encoded)
                 .map_err(|error| failed(crate::Error::UndecodablePlan(error)))?;
             let checked = self.authorization.unrecorded(|| plan.check(&self.connection, schema))?;
             let checked_in = started.elapsed();
@@ -470,7 +470,7 @@ impl<P: Policy> HostSql<P> {
         };
         let read = || self.authorization.unrecorded(|| self.read_schema());
         match cookie {
-            Some(cookie) => self.app_statements.plans.compiled(cookie, statement.plan, check, read),
+            Some(cookie) => self.app_statements.plans.compiled(cookie, encoded, check, read),
             None => check(&read()?),
         }
     }

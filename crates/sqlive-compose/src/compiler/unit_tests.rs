@@ -1,8 +1,9 @@
 //! What the compiler finds of a unit's scope: the warning for a read of
-//! every row, the scope plan a read ships, and the shapes sqlive can't
-//! analyze.
+//! every row, the scope plan a read ships, the shapes sqlive can't analyze,
+//! and which handle runs a read.
 
-use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages};
+use crate::compiler::crate_compile::tests::{code_of, compile_lib, messages, setup};
+use crate::compiler::{compile_crate, CompileError, Input, Output, Setup};
 
 #[test]
 fn warnings_name_the_table_and_sqlives_reason() {
@@ -307,4 +308,95 @@ sqlive_compose::read!(Picked, r#"
         ["src/lib.rs:4:1: Picked reads a table function, so each column it names needs its \
           table: `value` has none"]
     );
+}
+
+/// Objects only the writer reads, as a host lists them: a view, and the table
+/// it reads. `shown` is an app's view over the view.
+const WRITERS: &str = "
+CREATE TABLE sync_row (state TEXT NOT NULL) STRICT;
+CREATE VIEW sync_state AS SELECT state FROM sync_row;
+CREATE VIEW shown AS SELECT state FROM sync_state;";
+
+fn compile_for_a_writer(lib: &str) -> Result<Output, Vec<CompileError>> {
+    let mut setup = setup();
+    setup.sql.push(WRITERS.to_owned());
+    compile_crate(Input {
+        crate_name: "tracker".to_owned(),
+        source_reader: &|path: &str| {
+            (path == "src/lib.rs")
+                .then(|| lib.to_owned())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        },
+        manifests: Vec::new(),
+        setup: Setup { writer_only: vec!["sync_state".into(), "Sync_Row".into()], ..setup },
+    })
+}
+
+/// A read that the writer doesn't run fails when it reads what only the
+/// writer reads, and the error names it: the first the host lists of those
+/// the read reaches, through a view of the app's or a fragment too.
+#[test]
+fn a_read_not_marked_writer_reads_nothing_only_the_writer_reads() {
+    for (sql, object) in [
+        ("SELECT s.state FROM sync_state AS s", "sync_state"),
+        ("SELECT count(*) AS state FROM sync_state", "sync_state"),
+        ("SELECT s.state FROM shown AS s", "sync_state"),
+        ("SELECT (SELECT count(*) FROM shown) AS state", "sync_state"),
+        ("SELECT r.state FROM sync_row AS r", "Sync_Row"),
+        ("SELECT s.* FROM @crate::State AS s", "sync_state"),
+    ] {
+        let lib = format!(
+            "sqlive_compose::fragment!(State, r#\"SELECT s.state FROM sync_state AS s\"#);\n\
+             sqlive_compose::read!(Picked {{ state: String }}, r#\"{sql}\"#);"
+        );
+        assert_eq!(
+            messages(compile_for_a_writer(&lib)),
+            [format!(
+                "src/lib.rs:2:1: Picked reads {object}, which only the writer reads: a read the \
+                 writer runs is `read!(writer Picked …)`"
+            )],
+            "{sql}"
+        );
+    }
+}
+
+/// `read!(writer …)` is a read the writer runs, and every other read one the
+/// read-only handle runs; its code's type says which. A fragment reads what
+/// its reads may.
+#[test]
+fn a_reads_code_says_which_handle_runs_it() {
+    let output = compile_for_a_writer(
+        r##"
+sqlive_compose::fragment!(State, r#"SELECT s.state FROM sync_state AS s"#);
+sqlive_compose::read!(writer Status, r#"SELECT s.* FROM @crate::State AS s"#);
+sqlive_compose::read!(Titles, r#"SELECT i.title FROM issues AS i"#);
+"##,
+    )
+    .unwrap();
+    for (file, handle) in [("Status.rs", "Writer"), ("Titles.rs", "ReadOnly")] {
+        let code = code_of(&output, file);
+        let associated =
+            format!("type Handle = :: sqlive_compose :: generated :: sqlive_reads :: {handle} ;");
+        assert!(code.contains(&associated), "{file}: {code}");
+    }
+}
+
+#[test]
+fn only_a_read_is_marked_writer() {
+    for (call, noun) in [("fragment!", "fragment"), ("write!", "write")] {
+        let lib = format!("sqlive_compose::{call}(writer Marked, r#\"SELECT 1\"#);");
+        assert_eq!(
+            messages(compile_for_a_writer(&lib)),
+            [format!("src/lib.rs:1:1: a {noun} isn't marked writer: only a read is")],
+        );
+    }
+}
+
+/// A read may be named `writer`.
+#[test]
+fn writer_alone_is_a_reads_name() {
+    compile_for_a_writer(
+        r##"sqlive_compose::read!(writer, r#"SELECT i.title FROM issues AS i"#);"##,
+    )
+    .unwrap();
 }

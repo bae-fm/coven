@@ -51,7 +51,7 @@ impl<'write> MemberWrite<'write> {
     /// (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> SqliteResult<Vec<T>>
@@ -64,6 +64,8 @@ impl<'write> MemberWrite<'write> {
 }
 
 impl SqlRead for MemberWrite<'_> {
+    type Handle = Writer;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> SqliteResult<T>
     where
         P: Params,
@@ -82,7 +84,7 @@ impl SqlRead for MemberWrite<'_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> SqliteResult<Vec<T>>

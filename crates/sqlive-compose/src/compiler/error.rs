@@ -140,6 +140,17 @@ pub enum Cause {
         /// The column.
         column: String,
     },
+    /// A read the writer doesn't run reads what only the writer reads.
+    #[error(
+        "{concerns} reads {object}, which only the writer reads: a read the writer runs is \
+         `read!(writer {concerns} …)`"
+    )]
+    WriterOnly {
+        /// The read's name.
+        concerns: String,
+        /// The view or table, as the setup names it.
+        object: String,
+    },
     /// SQL that reads a table function names a column without its table.
     #[error(
         "{concerns} reads a table function, so each column it names needs its table: \

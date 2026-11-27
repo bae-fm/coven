@@ -7,6 +7,7 @@ use syn::punctuated::Punctuated;
 use syn::{braced, parenthesized, token, Ident, LitStr, Token, Type};
 
 mod keyword {
+    syn::custom_keyword!(writer);
     syn::custom_keyword!(on);
     syn::custom_keyword!(with);
     syn::custom_keyword!(json);
@@ -138,10 +139,19 @@ pub(crate) struct Shape {
 pub(crate) enum HeaderKind {
     /// A fragment, which may read a parent row of a table and relations.
     Fragment { parent: Option<String>, relations: Vec<Relation> },
-    /// A read.
-    Read,
+    /// A read, which the handle runs.
+    Read(Handle),
     /// A write.
     Write,
+}
+
+/// The kind of handle that runs a read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Handle {
+    /// The one that writes the database, for a read the call marks `writer`.
+    Writer,
+    /// One that only reads it, for any other.
+    ReadOnly,
 }
 
 /// A parsed call.
@@ -160,7 +170,7 @@ impl Header {
     pub(crate) fn parent(&self) -> Option<&str> {
         match &self.kind {
             HeaderKind::Fragment { parent, .. } => parent.as_deref(),
-            HeaderKind::Read | HeaderKind::Write => None,
+            HeaderKind::Read(_) | HeaderKind::Write => None,
         }
     }
 
@@ -168,7 +178,7 @@ impl Header {
     pub(crate) fn relations(&self) -> &[Relation] {
         match &self.kind {
             HeaderKind::Fragment { relations, .. } => relations,
-            HeaderKind::Read | HeaderKind::Write => &[],
+            HeaderKind::Read(_) | HeaderKind::Write => &[],
         }
     }
 
@@ -176,14 +186,14 @@ impl Header {
     pub(crate) fn kind(&self) -> CallKind {
         match self.kind {
             HeaderKind::Fragment { .. } => CallKind::Fragment,
-            HeaderKind::Read => CallKind::Read,
+            HeaderKind::Read(_) => CallKind::Read,
             HeaderKind::Write => CallKind::Write,
         }
     }
 
     /// Whether the call is a read.
     pub(crate) fn is_read(&self) -> bool {
-        self.kind == HeaderKind::Read
+        matches!(self.kind, HeaderKind::Read(_))
     }
 
     /// Whether the call is a write.
@@ -218,6 +228,16 @@ pub(crate) fn parse(kind: CallKind, tokens: TokenStream) -> Result<Header, Heade
 }
 
 fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
+    // `writer` before a name marks the call; alone, it is the name.
+    let mut handle = Handle::ReadOnly;
+    if input.peek(keyword::writer) && input.peek2(Ident) && !is_clause(input) {
+        let writer: keyword::writer = input.parse()?;
+        if kind != CallKind::Read {
+            let message = format!("a {} isn't marked writer: only a read is", kind.noun());
+            return Err(syn::Error::new(writer.span, message));
+        }
+        handle = Handle::Writer;
+    }
     let name: Ident = input.parse()?;
     let mut parameters = Vec::new();
     if input.peek(token::Paren) {
@@ -296,10 +316,16 @@ fn header(kind: CallKind, input: ParseStream<'_>) -> syn::Result<Header> {
     }
     let kind = match kind {
         CallKind::Fragment => HeaderKind::Fragment { parent, relations },
-        CallKind::Read => HeaderKind::Read,
+        CallKind::Read => HeaderKind::Read(handle),
         CallKind::Write => HeaderKind::Write,
     };
     Ok(Header { kind, name: name.to_string(), parameters, declarations, shapes, sql: sql.value() })
+}
+
+/// Whether the second token of `input` begins the clause of a call that the
+/// first names: `on` or `with`, which only a fragment has.
+fn is_clause(input: ParseStream<'_>) -> bool {
+    input.peek2(keyword::on) || input.peek2(keyword::with)
 }
 
 /// Whether a write's parameter type borrows only with the lifetime `'p` (or

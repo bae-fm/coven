@@ -578,7 +578,7 @@ fn a_write_leaves_the_apps_statements_prepared() {
 
 /// `sql` with the scope plan sqlive-compose's compiler ships with it, built
 /// against `schema`.
-fn compiled(schema: &str, sql: &str) -> crate::CompiledStatement {
+fn compiled(schema: &str, sql: &str) -> crate::CompiledStatement<crate::Writer> {
     let probe = crate::SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
     crate::tests::compiled(&probe, sql).expect("sqlive analyzes the statement")
 }
@@ -586,7 +586,7 @@ fn compiled(schema: &str, sql: &str) -> crate::CompiledStatement {
 /// The titles the compiled `statement` reads of note 1 on `reader`.
 fn compiled_titles(
     reader: &crate::HostSql<crate::NoPolicy>,
-    statement: crate::CompiledStatement,
+    statement: crate::CompiledStatement<crate::Writer>,
 ) -> rusqlite::Result<Vec<String>> {
     reader.app_query_compiled(crate::Recorded::Yes, statement, ["1"], |r| r.get(0))
 }
@@ -599,7 +599,7 @@ const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT
 fn compiled_plans_built(
     db: &TestDatabase,
     counter: &crate::ConnectionWorkCounter,
-    statement: crate::CompiledStatement,
+    statement: crate::CompiledStatement<crate::Writer>,
 ) -> usize {
     db.with_database(|database| {
         let (first, second) = (database.reader(), database.reader());

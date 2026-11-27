@@ -3544,7 +3544,7 @@ impl CovenWrite<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> rusqlite::Result<Vec<T>>
@@ -3568,7 +3568,7 @@ impl BulkSqlContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> rusqlite::Result<Vec<T>>
@@ -3628,7 +3628,7 @@ impl CommitSql<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> rusqlite::Result<Vec<T>>
@@ -4152,12 +4152,15 @@ loop {
 ```
 
 ```rust
-/// SQL access to one read-only database snapshot (§4, E4).
-pub struct SqlReadContext<'connection> { /* private fields */ }
+/// SQL access to one read-only database snapshot (§4, E4), on the kind of
+/// handle `M` names.
+pub struct SqlReadContext<'connection, M: Mode = Writer> { /* private fields */ }
 
 /// Which handle a read or a file stream comes from: the store's one
 /// writer, or a read-only handle (E1). Sealed: these two are the only modes.
 pub trait Mode: Clone + Send + Sync + 'static {}
+/// `Writer` and `ReadOnly` are sqlive's, which a compiled read's type names
+/// (sqlive's spec, section 4); coven re-exports them.
 /// The store's writer: `CovenHandle`'s reads and streams.
 pub enum Writer {}
 /// A read-only handle: `CovenReadHandle`'s reads and streams.
@@ -4170,7 +4173,7 @@ pub struct Read<'a, F, M: Mode = Writer> { /* private fields */ }
 
 impl<F, R, E, M: Mode> Future for Read<'_, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
     E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
@@ -4262,7 +4265,7 @@ impl CovenWrite<'_> {
     pub fn dismiss_lost_values(&self, values: &[LostValue]) -> Result<(), DbError>;
 }
 
-impl SqlReadContext<'_> {
+impl<M: Mode> SqlReadContext<'_, M> {
     /// Ordinary SQL reads. A read context can't write.
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
     where
@@ -4272,9 +4275,11 @@ impl SqlReadContext<'_> {
     where
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
+    /// Runs a compiled read of the context's own kind of handle: another's
+    /// doesn't type-check.
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<M>,
         params: P,
         map: F,
     ) -> rusqlite::Result<Vec<T>>
@@ -4288,6 +4293,9 @@ impl SqlReadContext<'_> {
 /// outside one is written once. Inside a write it sees the write's own
 /// changes.
 pub trait SqlRead {
+    /// The kind of handle the context reads on, whose compiled reads alone
+    /// it runs: `Writer` for a write's contexts.
+    type Handle: Mode;
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
     where
         P: Params,
@@ -4298,13 +4306,14 @@ pub trait SqlRead {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
     /// Every row of a compiled read, a `CompiledStatement`: a read's SQL
     /// with the scope plan its compiler built, as `sqlive_compose::Read`'s
-    /// `compiled` gives it. sqlive builds no plan for it (sqlive's spec,
+    /// `compiled` gives it, whose type names the kind of handle that runs it
+    /// (sqlive-compose's spec, section 9). sqlive builds no plan for it (sqlive's spec,
     /// section 4). It fails with `CompiledSchemaDiffers` when the store's
     /// schema shows a table, view or function the plan read otherwise than
     /// the schema the read was compiled against.
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Self::Handle>,
         params: P,
         map: F,
     ) -> rusqlite::Result<Vec<T>>
@@ -4312,14 +4321,14 @@ pub trait SqlRead {
         P: Params,
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
-impl SqlRead for SqlReadContext<'_> {}
+impl<M: Mode> SqlRead for SqlReadContext<'_, M> {}
 impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 impl SqlRead for CommitSql<'_> {}
 
 impl<'a, F, R, E, M: Mode> Read<'a, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
     E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
@@ -4348,6 +4357,14 @@ pub fn make_readable_objects(connection: &rusqlite::Connection, device: DeviceId
 /// `coven-schema` crate defines it, with no async runtime, and `coven`
 /// re-exports it.
 pub fn readable_objects_sql() -> String;
+
+/// The views and tables app SQL reads that only the store's writer reads:
+/// `coven_sync_state`, `coven_upload_phases`, `coven_sync_status` and
+/// `coven_retry_effect` (E5). A build that compiles an app's reads names them
+/// as the compiler's `Setup::writer_only`, so that a read not marked
+/// `writer` that reads one fails the build (sqlive-compose's spec, section
+/// 8). `coven-schema` defines the list, and `coven` re-exports it.
+pub const WRITER_ONLY: [&str; 4];
 
 /// Every SQL function coven registers on a store's connection, by name, with
 /// its argument count (-1 for any number) and whether it is deterministic:
@@ -4594,7 +4611,7 @@ impl CovenReadHandle {
 
     pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_, ReadOnly>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<DbError> + coven::task::CarriesBug + Send + 'static;
     /// The file a row references, by the id the row holds, as
@@ -4995,7 +5012,10 @@ loop {
   behind, and no write marks its end. So app SQL on a read-only handle may
   not read either row, directly, through the app's own view or through
   `coven_sync_state`: each read fails with `StatementForbidden`; and
-  `CovenReadHandle` has no `sync_status`. The
+  `CovenReadHandle` has no `sync_status`. A compiled read that reaches one is
+  a writer's read, which no read-only handle's context runs, since
+  sqlive-compose fails the build of any other (`WRITER_ONLY`, E4). So the
+  check as a statement runs stops the SQL that isn't compiled. The
   app's trigger on them still lets a read-only handle open, since it never
   runs there.
 - A closed store's state is read under its writer lock, which shows that no
@@ -9293,7 +9313,7 @@ impl Invite {
 
     /// Reads `coven_invites`, in the order the invites were made, for a
     /// read or a live query: `handle.subscribe(Invite::list)`.
-    pub fn list(sql: SqlReadContext<'_>) -> Result<Vec<Invite>, DbError>;
+    pub fn list<M: Mode>(sql: SqlReadContext<'_, M>) -> Result<Vec<Invite>, DbError>;
 
     /// Decodes one invite from the `invite` and `operation` columns of a
     /// `coven_invites` row, for a statement that selects them beside other

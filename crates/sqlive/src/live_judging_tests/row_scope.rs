@@ -134,7 +134,7 @@ fn read(sql: &TestRead<'_>, text: &str, parameters: &[SqlValue]) -> rusqlite::Re
 
 fn read_compiled(
     sql: &TestRead<'_>,
-    statement: crate::CompiledStatement,
+    statement: crate::CompiledStatement<crate::Writer>,
     parameters: &[SqlValue],
 ) -> rusqlite::Result<Rows> {
     sql.query_compiled(statement, rusqlite::params_from_iter(parameters), values)

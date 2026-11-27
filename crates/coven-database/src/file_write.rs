@@ -381,7 +381,7 @@ impl<'a> FileWrite<'a> {
 
     pub(crate) fn query_compiled<T, P: sqlive::rusqlite::Params>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<crate::Writer>,
         params: P,
         map: impl FnMut(&sqlive::rusqlite::Row<'_>) -> sqlive::rusqlite::Result<T>,
     ) -> sqlive::rusqlite::Result<Vec<T>> {

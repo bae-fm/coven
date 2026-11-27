@@ -30,13 +30,11 @@ mod sealed {
 /// The mode a store's handle opened in: [`Writer`] or [`ReadOnly`].
 pub trait Mode: sealed::Sealed + Send + Sync + 'static {}
 
-/// The store's one writer: it writes, migrates, transfers files and keeps
-/// their records (§4).
-pub enum Writer {}
-
-/// A read-only handle: it reads synced rows and keeps its own file cache,
-/// and nothing else (E1).
-pub enum ReadOnly {}
+/// The store's one writer, which writes, migrates, transfers files and keeps
+/// their records (§4), and a read-only handle, which reads synced rows and
+/// keeps its own file cache and nothing else (E1): the kinds of handle a
+/// compiled read's type names.
+pub use sqlive::{ReadOnly, Writer};
 
 impl Mode for Writer {}
 impl Mode for ReadOnly {}

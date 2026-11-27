@@ -10,7 +10,7 @@ use super::columns;
 use super::core::{self, all_from_items};
 use super::error::{Cause, CompileError, Warning, WholePlace};
 use super::generate;
-use super::header::{Header, HeaderKind};
+use super::header::{Handle, Header, HeaderKind};
 use super::lex::{self, Origin};
 use super::model::{Field, Reading, Record};
 use super::rename;
@@ -22,6 +22,8 @@ use super::write;
 pub(crate) struct Context<'a> {
     pub(crate) crate_name: &'a str,
     pub(crate) probe: &'a sqlive_reads::SchemaProbe,
+    /// The views and tables only the writer reads.
+    pub(crate) writer_only: &'a [String],
     pub(crate) registry: &'a Registry,
 }
 
@@ -126,6 +128,12 @@ pub(crate) fn compile(
         let plan = built.map_err(|sqlive_reads::Unanalyzable { why }| {
             fail(Cause::Unanalyzable { concerns: header.name.clone(), why })
         })?;
+        if header.kind == HeaderKind::Read(Handle::ReadOnly) {
+            if let Some(object) = context.writer_only.iter().find(|object| plan.reads(object)) {
+                let concerns = header.name.clone();
+                return Err(fail(Cause::WriterOnly { concerns, object: object.clone() }));
+            }
+        }
         (plan.report(), Some(plan.encode()))
     } else {
         let report =
@@ -183,9 +191,9 @@ pub(crate) fn compile(
             };
             (generate::fragment(header, &fields, call.exported), Some(record))
         }
-        HeaderKind::Read => {
+        HeaderKind::Read(handle) => {
             let plan = plan.as_deref().expect("a read's plan is built before its columns");
-            (generate::read(header, sql, plan, &fields, call.exported), None)
+            (generate::read(header, sql, *handle, plan, &fields, call.exported), None)
         }
         HeaderKind::Write => unreachable!("a write compiles in compile_write"),
     };

@@ -590,7 +590,7 @@ const STEPS: usize = 12;
 
 /// `sql` with the plan a schema probe of the test's schema builds of it, as
 /// a compiler ships it, when sqlive can analyze it.
-fn compiled(sql: &str) -> Option<crate::CompiledStatement> {
+fn compiled(sql: &str) -> Option<crate::CompiledStatement<crate::Writer>> {
     let nz = crate::StandInFunction { name: "nz".into(), arguments: 1, deterministic: true };
     let probe = crate::SchemaProbe::open(&[schema_sql()], &[nz], &["fold".to_owned()]).unwrap();
     crate::tests::compiled(&probe, sql)

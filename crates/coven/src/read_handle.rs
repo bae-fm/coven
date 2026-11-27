@@ -18,6 +18,33 @@ use coven_database::{ReadOnly, StoreDatabase};
 ///     handle.subscribe(|_| Ok::<_, coven::CovenError>(()));
 /// }
 /// ```
+///
+/// It runs a compiled read that no `writer` marks, and no writer's read,
+/// which the other handle runs:
+///
+/// ```
+/// fn read(sql: coven::SqlReadContext<'_, coven::ReadOnly>,
+///         statement: coven::CompiledStatement<coven::ReadOnly>) {
+///     let _ = sql.query_compiled(statement, [], |row| row.get::<_, i64>(0));
+/// }
+/// async fn on_a_read_only_handle(handle: &coven::CovenReadHandle) {
+///     let _ = handle.read(|_: coven::SqlReadContext<'_, coven::ReadOnly>| {
+///         Ok::<_, coven::CovenError>(())
+///     }).await;
+/// }
+/// ```
+/// ```compile_fail,E0308
+/// fn writers_read(sql: coven::SqlReadContext<'_, coven::ReadOnly>,
+///                 statement: coven::CompiledStatement<coven::Writer>) {
+///     let _ = sql.query_compiled(statement, [], |row| row.get::<_, i64>(0));
+/// }
+/// ```
+/// ```compile_fail,E0308
+/// fn read_only_handles_read(sql: coven::SqlReadContext<'_>,
+///                           statement: coven::CompiledStatement<coven::ReadOnly>) {
+///     let _ = sql.query_compiled(statement, [], |row| row.get::<_, i64>(0));
+/// }
+/// ```
 #[derive(Clone)]
 pub struct CovenReadHandle {
     database: StoreDatabase<ReadOnly>,
@@ -39,7 +66,7 @@ impl CovenReadHandle {
     /// A read of one consistent snapshot, run when awaited.
     pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_, ReadOnly>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<DbError> + task::CarriesBug + Send + 'static,
     {

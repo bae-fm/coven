@@ -451,7 +451,7 @@ impl<'write> CovenWrite<'write> {
     /// (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> SqliteResult<Vec<T>>
@@ -464,6 +464,8 @@ impl<'write> CovenWrite<'write> {
 }
 
 impl SqlRead for CovenWrite<'_> {
+    type Handle = Writer;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> SqliteResult<T>
     where
         P: Params,
@@ -482,7 +484,7 @@ impl SqlRead for CovenWrite<'_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> SqliteResult<Vec<T>>

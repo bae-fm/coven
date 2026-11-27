@@ -5,7 +5,7 @@ use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use super::header::{FieldType, Header, Parameter, RustType, Shape};
+use super::header::{FieldType, Handle, Header, Parameter, RustType, Shape};
 use super::model::{Field, FieldName, Reading};
 
 const GENERATED: &str = "::sqlive_compose::generated";
@@ -157,11 +157,12 @@ pub(crate) fn fragment(header: &Header, fields: &[Field], exported: bool) -> Str
 pub(crate) fn read(
     header: &Header,
     sql: &str,
+    handle: Handle,
     plan: &str,
     fields: &[Field],
     exported: bool,
 ) -> String {
-    statement(header, sql, fields, Form::Read { exported, plan })
+    statement(header, sql, fields, Form::Read { exported, handle, plan })
 }
 
 /// A write's statement and parameters, and its row when it returns columns.
@@ -175,8 +176,9 @@ pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
 /// What a generated statement is.
 #[derive(Clone, Copy)]
 enum Form<'a> {
-    /// A read, whose items are `pub` when `exported`, with its scope plan.
-    Read { exported: bool, plan: &'a str },
+    /// A read, whose items are `pub` when `exported`, with the handle that
+    /// runs it and its scope plan.
+    Read { exported: bool, handle: Handle, plan: &'a str },
     /// A write.
     Write,
 }
@@ -219,10 +221,17 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form<'_>) -> St
         let row_doc = format!("A row of the `{}` {noun}.", header.name);
         let returning = quote!(::sqlive_compose::Returning);
         let marker = match form {
-            Form::Read { plan, .. } => {
+            Form::Read { handle, plan, .. } => {
+                let handle = match handle {
+                    Handle::Writer => format_ident!("Writer"),
+                    Handle::ReadOnly => format_ident!("ReadOnly"),
+                };
+                let handles = path("sqlive_reads");
                 let plan = Literal::string(plan);
                 quote! {
                     impl #lifetime ::sqlive_compose::Read for #params_name #lifetime {
+                        type Handle = #handles::#handle;
+
                         const PLAN: &'static str = #plan;
                     }
                 }

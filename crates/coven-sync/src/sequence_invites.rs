@@ -301,7 +301,9 @@ impl Invite {
     /// Read `coven_invites`, as an app's live query does:
     /// `handle.subscribe(Invite::list)`. This device's invites that haven't
     /// ended, in the order they were made (§13.2).
-    pub fn list(sql: coven_database::SqlReadContext<'_>) -> Result<Vec<Self>, DbError> {
+    pub fn list<M: coven_database::Mode>(
+        sql: coven_database::SqlReadContext<'_, M>,
+    ) -> Result<Vec<Self>, DbError> {
         Ok(sql.query(Self::LIST, [], |row| {
             let data: Vec<u8> = row.get(0)?;
             Self::from_columns(&data, OperationId(row.get(1)?)).map_err(|error| {

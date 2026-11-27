@@ -11,6 +11,8 @@ mod compiled_plan;
 mod derived;
 mod from_item;
 mod from_star;
+mod handles;
+pub use handles::{ReadOnly, Writer};
 mod never_null;
 mod read_capture;
 mod read_report;

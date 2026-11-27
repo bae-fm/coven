@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 
 use rusqlite::{Connection, Statement};
 use serde::{Deserialize, Serialize};
@@ -16,14 +17,23 @@ use crate::select_syntax::{Definition, Functions};
 use crate::table_places::Places;
 use crate::unreported_columns::UnreportedColumns;
 
-/// A read the compiler of sqlive-compose built: its SQL, and its scope plan
-/// as the compiler encoded it (`CompiledPlan::encode`).
+/// A read the compiler of sqlive-compose built: its SQL, its scope plan as
+/// the compiler encoded it (`CompiledPlan::encode`), and `H`, the kind of
+/// handle that runs it (`Writer` or `ReadOnly`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompiledStatement {
+pub struct CompiledStatement<H> {
     /// The statement.
     pub sql: &'static str,
     /// Its plan, encoded.
     pub plan: &'static str,
+    handle: PhantomData<H>,
+}
+
+impl<H> CompiledStatement<H> {
+    /// The read of `sql`, whose plan `plan` encodes.
+    pub const fn new(sql: &'static str, plan: &'static str) -> Self {
+        Self { sql, plan, handle: PhantomData }
+    }
 }
 
 /// A statement's scope plan, with what building it found in the schema.
@@ -134,6 +144,13 @@ impl CompiledPlan {
     /// Fails when `text` is no plan this sqlive's `encode` writes.
     pub fn decode(text: &str) -> Result<Self, UndecodablePlan> {
         serde_json::from_str(text).map_err(|error| UndecodablePlan(error.to_string()))
+    }
+
+    /// Whether the statement reads the table or view `name`, itself or
+    /// through a view: building its plan looked the name up and found an
+    /// object.
+    pub fn reads(&self, name: &str) -> bool {
+        self.schema.objects.get(&name.to_ascii_lowercase()).is_some_and(Option::is_some)
     }
 
     /// What the plan narrows.

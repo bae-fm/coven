@@ -536,7 +536,7 @@ async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
     for name in coven_schema::READABLE {
         let sql: &'static str = Box::leak(format!("SELECT count(*) FROM {name}").into_boxed_str());
         let plan = probe.compiled_plan(sql).unwrap().expect(name).encode();
-        let statement = sqlive::CompiledStatement { sql, plan: Box::leak(plan.into_boxed_str()) };
+        let statement = sqlive::CompiledStatement::new(sql, Box::leak(plan.into_boxed_str()));
         let mut query: crate::LiveQuery<_, DbError> = db
             .subscribe(move |read| Ok(read.query_compiled(statement, [], |r| r.get::<_, i64>(0))?));
         let answer = query.next_inline().await.unwrap();
@@ -552,4 +552,30 @@ async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
         }
     }
     db.close().await.unwrap();
+}
+
+/// `coven_schema::WRITER_ONLY` names each view and table app SQL reads that
+/// reaches a table of the writer's own sync state, which a read-only handle's
+/// policy refuses, and no other.
+#[test]
+fn the_writer_only_objects_are_those_that_read_the_writers_sync_state() {
+    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
+        .iter()
+        .map(|function| sqlive::StandInFunction {
+            name: function.name.into(),
+            arguments: function.arguments,
+            deterministic: function.deterministic,
+        })
+        .collect();
+    let probe = sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[])
+        .unwrap();
+    for name in coven_schema::READABLE {
+        let sql = format!("SELECT * FROM {name}");
+        let plan = probe.compiled_plan(&sql).expect(name).expect(name);
+        let reaches = crate::internal_schema::WRITER_STATE.iter().any(|table| plan.reads(table));
+        assert_eq!(coven_schema::WRITER_ONLY.contains(&name), reaches, "{name}");
+    }
+    for name in coven_schema::WRITER_ONLY {
+        assert!(coven_schema::READABLE.contains(&name), "{name}");
+    }
 }

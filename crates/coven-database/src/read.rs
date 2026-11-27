@@ -7,19 +7,22 @@ use sqlive::rusqlite::{Params, Row};
 use std::{
     any::Any,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
 };
 
 /// SQL access to one read-only snapshot. The connection and internal tables
 /// remain private; even SQL with RETURNING cannot write through this context.
-pub struct SqlReadContext<'connection> {
+/// `M` is the kind of handle it reads on, whose compiled reads alone it runs.
+pub struct SqlReadContext<'connection, M: Mode = Writer> {
     database: &'connection StoreSql,
+    mode: PhantomData<M>,
 }
 
-impl<'connection> SqlReadContext<'connection> {
+impl<'connection, M: Mode> SqlReadContext<'connection, M> {
     pub(crate) fn new(database: &'connection StoreSql) -> Self {
-        Self { database }
+        Self { database, mode: PhantomData }
     }
 
     /// Map the first result row of an ordinary SQL read.
@@ -44,7 +47,7 @@ impl<'connection> SqlReadContext<'connection> {
     /// brings (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<M>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -74,7 +77,7 @@ enum ReadState<F> {
 
 impl<'a, F, R, E, M: Mode> Read<'a, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
     E: From<DbError> + CarriesBug + Send + 'static,
 {
@@ -100,7 +103,7 @@ impl<F, M: Mode> Unpin for Read<'_, F, M> {}
 
 impl<F, R, E, M: Mode> Future for Read<'_, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
     E: From<DbError> + CarriesBug + Send + 'static,
 {

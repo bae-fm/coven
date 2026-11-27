@@ -56,7 +56,7 @@ impl CommitSql<'_> {
     /// changes (`SqlRead::query_compiled`).
     pub fn query_compiled<T, P, F>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<crate::Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -86,6 +86,8 @@ impl CommitSql<'_> {
 }
 
 impl crate::SqlRead for CommitSql<'_> {
+    type Handle = crate::Writer;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
@@ -104,7 +106,7 @@ impl crate::SqlRead for CommitSql<'_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: sqlive::CompiledStatement,
+        statement: sqlive::CompiledStatement<crate::Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>

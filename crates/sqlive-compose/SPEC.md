@@ -636,6 +636,23 @@ meet a third answer, *whole*: the query depends on every row, so a write to any
 issue can run it again. A read therefore compares with the request's parameter
 and uses the root only to return a row.
 
+**The handle that runs a read.** An app can open its database with the handle
+that writes it, or with one that only reads it, and some views are only the
+writer's to read, such as one that shows what the writer's own process is
+doing. So each read names the one kind of handle that runs it. A `read!` is run
+by a read-only handle unless its header starts with `writer`:
+
+```rust
+sqlive_compose::read!(writer SyncStatusRow, r#"
+    SELECT s.state FROM sync_state AS s
+"#);
+```
+
+The build fails when a read with no `writer` reads a view or table that only the
+writer reads (section 8). The generated read's type names its handle, and each
+handle's run method takes the reads of its own kind alone (section 9), so a read
+run on the other handle doesn't compile.
+
 ## 6. Joining spreads
 
 A statement may name a spread's columns in its conditions and its `ORDER BY`, as
@@ -1108,6 +1125,20 @@ compiler asks sqlive before it types the columns, so a shape that sqlive can't
 analyze is the error a call reports, not the column error that the shape also
 causes.
 
+**What only the writer reads.** The setup step names the views and tables that
+only the writer reads (section 10). A read with no `writer` fails when its
+composed statement reads one of them, itself, through a view of the app's or
+through a fragment it spreads, as building the read's scope plan finds. The
+error names the first the setup step lists among those the
+statement reads:
+
+```text
+tracker/src/sync_bar.rs:3:1: SyncBar reads sync_state, which only the writer reads: a read the writer runs is `read!(writer SyncBar …)`
+```
+
+A fragment is not checked by itself, since it runs only inside the reads that
+spread it, and neither is a `write!`, which only the writer runs.
+
 **Whole-table reads.** sqlive's report has an entry for each place a statement
 reads a table (sqlive's [SPEC.md](../sqlive/SPEC.md), section 12). For each
 place of a read that the report calls whole, the compiler gives one warning,
@@ -1228,16 +1259,20 @@ pub trait Returning: Statement {
 
 /// A generated read, with the scope plan the compiler built of it.
 pub trait Read: Returning {
+    /// The kind of handle that runs the read: `Writer` for a `read!(writer …)`,
+    /// and `ReadOnly` for any other.
+    type Handle;
     /// The read's scope plan, built against the app's schema and encoded.
     const PLAN: &'static str;
     /// The read's statement with its scope plan.
-    fn compiled() -> CompiledStatement;
+    fn compiled() -> CompiledStatement<Self::Handle>;
 }
 ```
 
 `IssuePageParams` implements `Statement` with `IssuePage::SQL` and the
 parameters it binds, `Returning` with `Row = IssuePageRow` and the row's `read`,
-and `Read` with the read's scope plan. The compiler builds the plan as sqlive
+and `Read` with the read's scope plan and `Handle`, sqlive's `Writer` or
+`ReadOnly`. The compiler builds the plan as sqlive
 would when a live query first ran the read ([sqlive's
 spec](../sqlive/SPEC.md), section 4), and a store runs the read's `compiled()`
 statement, so sqlive builds no plan as the app runs. The traits are public
@@ -1378,13 +1413,15 @@ the read's name, the table, the place and the reason. The build script turns bot
 
 **The setup step** holds the schema's SQL texts, in the order to run, and the
 name, argument count and determinism of each SQL function, and the name of each
-collation, that the schema uses. SQLite fails to prepare a statement that names
-an unknown function or collation, so the compiler registers a stand-in under
-each of those names. A store checks each read's scope plan against its own
-schema and functions before it first runs the read, and the read fails when one
-of them shows an object or a function otherwise than the compiler's schema
-did ([sqlive's spec](../sqlive/SPEC.md), section 4). The
-tracker's setup step runs its migrations in order:
+collation, that the schema uses. It also lists the views and tables that only
+the handle that writes the database reads (`writer_only`, section 5). SQLite
+fails to prepare a statement that names an unknown function or collation, so the
+compiler registers a stand-in under each of those names. A store checks each
+read's scope plan against its own schema and functions before it first runs the
+read, and the read fails when one of them shows an object or a function
+otherwise than the compiler's schema did ([sqlive's
+spec](../sqlive/SPEC.md), section 4). The tracker's setup step runs its
+migrations in order:
 
 ```rust
 // tracker-schema/src/lib.rs
@@ -1396,6 +1433,7 @@ pub fn setup() -> Setup {
         ],
         functions: vec![Function { name: "fold_case".into(), arguments: 1, deterministic: true }],
         collations: vec![],
+        writer_only: vec![],
     }
 }
 ```
@@ -1617,9 +1655,10 @@ never its statements.
 
 ```text
 fragment!(Name <parameters> <parent> <relations> <declarations>, r#"SQL"#);
-read!(Name <parameters> <declarations>, r#"SQL"#);
+read!(<writer> Name <parameters> <declarations>, r#"SQL"#);
 write!(Name <parameters> <declarations>, r#"SQL"#);
 
+writer        writer
 parameters    (name: RustType, …)
 parent        on table
 relations     with relation(column STRICT_TYPE, …), …

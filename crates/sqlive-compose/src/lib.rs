@@ -37,6 +37,10 @@ pub trait Returning: Statement {
 
 /// A generated read, with the scope plan the compiler built of it.
 pub trait Read: Returning {
+    /// The kind of handle that runs the read: `sqlive_reads::Writer` for one
+    /// the call marks `writer`, and `sqlive_reads::ReadOnly` for any other.
+    type Handle;
+
     /// The read's scope plan, built against the app's schema and encoded
     /// (`sqlive_reads::CompiledPlan`).
     const PLAN: &'static str;
@@ -44,8 +48,8 @@ pub trait Read: Returning {
     /// The read's statement with its scope plan, which sqlive runs with no
     /// plan of its own to build.
     #[must_use]
-    fn compiled() -> CompiledStatement {
-        CompiledStatement { sql: Self::SQL, plan: Self::PLAN }
+    fn compiled() -> CompiledStatement<Self::Handle> {
+        CompiledStatement::new(Self::SQL, Self::PLAN)
     }
 }
 

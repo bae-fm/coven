@@ -344,9 +344,9 @@ impl<L> DatabaseAccess<L> {
 
     /// Run `read` in one snapshot on an idle reader, reading each constant
     /// once.
-    fn read<R, E: From<DbError>>(
+    fn read<M: Mode, R, E: From<DbError>>(
         &self,
-        read: impl FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+        read: impl FnOnce(SqlReadContext<'_, M>) -> Result<R, E>,
     ) -> Result<R, E> {
         self.with_reader(|reader, call| {
             let _constants = crate::transaction_constants::keep_constants(reader, call);
@@ -528,7 +528,7 @@ impl<M: Mode> StoreDatabase<M> {
     /// the database's own as that type's `From<DbError>`.
     pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, M>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
@@ -555,7 +555,7 @@ impl<M: Mode> StoreDatabase<M> {
 
     pub(crate) fn start_read<F, R, E>(&self, read: F) -> RunningRead<R, E>
     where
-        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {

@@ -580,14 +580,15 @@ impl<P: Policy> HostSql<P> {
     /// brings: sqlive builds none. A schema that shows a table, view or
     /// function the plan read otherwise than the schema it was built against
     /// fails the read with `CompiledSchemaDiffers`.
-    pub fn app_query_compiled<T, Q: Params>(
+    pub fn app_query_compiled<T, Q: Params, H>(
         &self,
         recorded: Recorded,
-        statement: CompiledStatement,
+        statement: CompiledStatement<H>,
         params: Q,
         map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
-        self.app_every_row(recorded, AppRead::Compiled(statement), params, map)
+        let read = AppRead::Compiled { sql: statement.sql, plan: statement.plan };
+        self.app_every_row(recorded, read, params, map)
     }
 
     fn app_every_row<T, Q: Params>(
@@ -616,8 +617,7 @@ impl<P: Policy> HostSql<P> {
         each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         let sql = match read {
-            AppRead::Sql(sql) => sql,
-            AppRead::Compiled(statement) => statement.sql,
+            AppRead::Sql(sql) | AppRead::Compiled { sql, .. } => sql,
         };
         let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
@@ -629,8 +629,8 @@ impl<P: Policy> HostSql<P> {
                 AppRead::Sql(_) => self.live_scope_plan(sql, &statement, schema)?,
                 // The plan is checked in every read, so a schema it doesn't
                 // fit fails a one-shot read too.
-                AppRead::Compiled(compiled) => {
-                    let plan = self.compiled_plan(compiled, schema)?;
+                AppRead::Compiled { plan, .. } => {
+                    let plan = self.compiled_plan(plan, schema)?;
                     self.authorization.capturing_reads().then_some(plan)
                 }
             };
@@ -909,11 +909,11 @@ impl<P: Policy> HostSql<P> {
 }
 
 /// An app read: its SQL, whose scope plan sqlive builds, or a compiled
-/// statement, which brings its plan.
+/// statement's SQL and the encoded plan it brings.
 #[derive(Clone, Copy)]
 enum AppRead<'a> {
     Sql(&'a str),
-    Compiled(CompiledStatement),
+    Compiled { sql: &'static str, plan: &'static str },
 }
 
 /// What records a write transaction's changes for live queries: the

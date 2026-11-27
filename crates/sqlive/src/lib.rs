@@ -95,9 +95,9 @@ pub use sqlive_reads::SchemaDiffers;
 pub use sqlive_reads::{
     affected, Affinity, Answers, ColumnNulls, ColumnOrigin, ColumnSet, CompiledStatement, Judging,
     LastRow, Lookup, Lookups, NoAnswer, ProbedColumn, ProbedStatement, ReadCapture, ReadEntry,
-    ReadFrame, ReadPlace, ReadReport, ReadRows, ReadSet, RowChange, RowCondition, RowImage,
-    RowScope, SchemaProbe, ScopePlanSize, Scopes, SelectNull, SqlPosition, SqlValue,
-    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, LOOKUP_STEPS,
+    ReadFrame, ReadOnly, ReadPlace, ReadReport, ReadRows, ReadSet, RowChange, RowCondition,
+    RowImage, RowScope, SchemaProbe, ScopePlanSize, Scopes, SelectNull, SqlPosition, SqlValue,
+    StandInFunction, TableColumn, TableRead, Unanalyzable, UndecodablePlan, Writer, LOOKUP_STEPS,
     ROWS_PER_TABLE,
 };
 pub(crate) use sqlive_reads::{

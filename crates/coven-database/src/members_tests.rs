@@ -297,11 +297,15 @@ const DEVICES: &str = "SELECT device,member,name,state,is_self FROM coven_device
 type MemberRow = (MemberId, String, bool, bool);
 type DeviceRow = (DeviceId, MemberId, String, String, bool);
 
-fn member_rows(sql: crate::SqlReadContext<'_>) -> Result<Vec<MemberRow>, DbError> {
+fn member_rows<M: crate::Mode>(
+    sql: crate::SqlReadContext<'_, M>,
+) -> Result<Vec<MemberRow>, DbError> {
     Ok(sql.query(MEMBERS, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
 }
 
-fn device_rows(sql: crate::SqlReadContext<'_>) -> Result<Vec<DeviceRow>, DbError> {
+fn device_rows<M: crate::Mode>(
+    sql: crate::SqlReadContext<'_, M>,
+) -> Result<Vec<DeviceRow>, DbError> {
     Ok(sql.query(DEVICES, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?)
 }
 

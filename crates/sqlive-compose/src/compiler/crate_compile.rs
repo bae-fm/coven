@@ -60,8 +60,12 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
             failed.insert(position);
             continue;
         }
-        let context =
-            unit::Context { crate_name: &input.crate_name, probe: &probe, registry: &registry };
+        let context = unit::Context {
+            crate_name: &input.crate_name,
+            probe: &probe,
+            writer_only: &input.setup.writer_only,
+            registry: &registry,
+        };
         match unit::compile(&context, call, header) {
             Ok(compiled) => {
                 files.push((format!("{}.rs", header.name), compiled.code));

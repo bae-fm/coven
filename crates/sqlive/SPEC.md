@@ -610,10 +610,19 @@ compiler of [sqlive-compose](../sqlive-compose/SPEC.md) does for each read it
 composes. `SchemaProbe::compiled_plan` builds the statement's scope plan (below)
 against the app's schema, with the views and tables the host's live queries read
 whole, and `CompiledPlan::encode` gives the plan as text, which the program
-ships beside the statement. A *compiled statement* (`CompiledStatement`) is the
-SQL with that text, and the host runs it with `app_query_compiled`. sqlive
+ships beside the statement. A *compiled statement* (`CompiledStatement<H>`) is
+the SQL with that text, and the host runs it with `app_query_compiled`. sqlive
 builds no plan for it, so a live query's first run of the statement costs what
 its later runs do.
+
+`H` is the kind of handle that runs the statement, `Writer` or `ReadOnly`, the
+two types sqlive gives a host that opens a database to write or only to read.
+`app_query_compiled` takes either kind: a host's own run methods each take the
+statements of one, so that running a statement on a handle of the other kind
+doesn't type-check.
+
+`CompiledPlan::reads` says whether the statement reads a table or view, itself
+or through a view.
 
 A compiled plan holds what building it found in the schema: for each table and
 view whose name the statement's SQL looks up at any depth, found or not, the

@@ -1,6 +1,6 @@
 //! The reads every app SQL context offers.
 
-use crate::{BulkSqlContext, SqlContext, SqlReadContext};
+use crate::{BulkSqlContext, Mode, SqlContext, SqlReadContext, Writer};
 use sqlive::rusqlite::{Params, Row};
 use sqlive::CompiledStatement;
 
@@ -8,6 +8,10 @@ use sqlive::CompiledStatement;
 /// reads the same way inside a write and outside one is written once. Inside
 /// a write it sees the write's own changes.
 pub trait SqlRead {
+    /// The kind of handle the context reads on, whose compiled reads alone
+    /// it runs.
+    type Handle: Mode;
+
     /// Map the first result row.
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
@@ -26,7 +30,7 @@ pub trait SqlRead {
     /// plan read otherwise than the schema the read was compiled against.
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Self::Handle>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -35,7 +39,9 @@ pub trait SqlRead {
         F: FnMut(&Row<'_>) -> sqlive::rusqlite::Result<T>;
 }
 
-impl SqlRead for SqlReadContext<'_> {
+impl<M: Mode> SqlRead for SqlReadContext<'_, M> {
+    type Handle = M;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
@@ -54,7 +60,7 @@ impl SqlRead for SqlReadContext<'_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<M>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -67,6 +73,8 @@ impl SqlRead for SqlReadContext<'_> {
 }
 
 impl SqlRead for SqlContext<'_, '_> {
+    type Handle = Writer;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
@@ -85,7 +93,7 @@ impl SqlRead for SqlContext<'_, '_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
@@ -98,6 +106,8 @@ impl SqlRead for SqlContext<'_, '_> {
 }
 
 impl SqlRead for BulkSqlContext<'_> {
+    type Handle = Writer;
+
     fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> sqlive::rusqlite::Result<T>
     where
         P: Params,
@@ -116,7 +126,7 @@ impl SqlRead for BulkSqlContext<'_> {
 
     fn query_compiled<T, P, F>(
         &self,
-        statement: CompiledStatement,
+        statement: CompiledStatement<Writer>,
         params: P,
         map: F,
     ) -> sqlive::rusqlite::Result<Vec<T>>
