@@ -703,6 +703,57 @@ pub(crate) fn push_down(
     }
 }
 
+/// Pass `term`, which the edges carry to the subquery, CTE or view `item`,
+/// into the items its arms pass their columns on from, and through them
+/// further down: each takes what the term says of it as a term its own edges
+/// carry (`Planner::carry_terms`), unless a LEFT JOIN adds it. Each row of
+/// the item the core keeps passes the term, so a row of an arm's source that
+/// fails it gives no such row. The model states the rule as `pushCarried` in
+/// `crates/sqlive/proofs`.
+pub(crate) fn push_carried(planner: &mut Planner, item: usize, term: &ScopeTerm) {
+    let Some(derived) = &planner.items[item].derived else {
+        return;
+    };
+    let mut tested = Vec::new();
+    term.columns(&mut tested);
+    let mut given: Vec<(usize, ScopeTerm)> = Vec::new();
+    for arm in &derived.arms {
+        let passed: Vec<(&str, (usize, String))> = tested
+            .iter()
+            .filter_map(|column| {
+                let arms =
+                    passed_on(&planner.items[item].columns, std::slice::from_ref(arm), column);
+                Some((column.as_str(), arms.into_iter().next()??.clone()))
+            })
+            .collect();
+        let mut targets: Vec<usize> = Vec::new();
+        for (_, (target, _)) in &passed {
+            if !targets.contains(target) {
+                targets.push(*target);
+            }
+        }
+        for target in targets {
+            let found = &planner.items[target];
+            if (found.source.table().is_none() && found.derived.is_none()) || !found.always_bound()
+            {
+                continue;
+            }
+            let column = |column: &str| {
+                passed
+                    .iter()
+                    .find(|(reached, (into, _))| *reached == column && *into == target)
+                    .map(|(_, (_, passed))| passed.clone())
+            };
+            let renamed = term.renamed(&column, Some(&found.source.qualifier));
+            given.extend(renamed.map(|renamed| (target, renamed)));
+        }
+    }
+    for (target, term) in given {
+        ScopeTerm::add_to(&mut planner.items[target].source.carried, term.clone());
+        push_carried(planner, target, &term);
+    }
+}
+
 /// Pass `ors`, the ORs the subquery, CTE or view `item` keeps as it is
 /// placed, into the items its arms pass their columns on from: each arm's
 /// source takes an OR each of whose sides says something of it, unless a LEFT

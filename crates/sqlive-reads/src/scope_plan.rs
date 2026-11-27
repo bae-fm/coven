@@ -183,9 +183,10 @@ pub(crate) struct Source {
     /// put on it, and those passed into a subquery, CTE or view.
     pub(crate) term: Option<ScopeTerm>,
     /// What the equalities between it and the other sources of its core
-    /// carry to it from their terms (`Planner::carry_terms`). It narrows
-    /// the source's scope, and decides nothing of the order the sources take
-    /// values in.
+    /// carry to it from their terms (`Planner::carry_terms`), and what a
+    /// subquery, CTE or view around it passes in of what they carry to it
+    /// (`derived::push_carried`). It narrows the source's scope, and decides
+    /// nothing of the order the sources take values in.
     pub(crate) carried: Option<ScopeTerm>,
     /// Whether only a column nothing reads reads it, so the statement
     /// depends on none of its rows (`unread_columns.rs`).
@@ -772,6 +773,11 @@ fn read_core<'a>(
     for item in planner.cores[core].items.clone() {
         let term = planner.items[item].source.term.clone();
         crate::derived::push_down(planner, item, term, Vec::new());
+    }
+    for item in planner.cores[core].items.clone() {
+        if let Some(carried) = planner.items[item].source.carried.clone() {
+            crate::derived::push_carried(planner, item, &carried);
+        }
     }
     Ok(Ok(core))
 }

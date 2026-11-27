@@ -332,16 +332,35 @@ theorem PState.Sem.ordered_go {s : Statement} (h : s.wellFormed = true) {rel : N
         (hs.placed h hrel order (hall next (List.mem_filter.mp hnext).1)
           ((ordered_keeps s fuel all _ _ _).1.trans hfin)) hfin
 
+theorem ordered_placed_carriedGrows (s : Statement) (st : PState) (order : List Nat) (next : Nat) :
+    st.CarriedGrows (ordered.placed s st order next) := by
+  unfold ordered.placed
+  exact ((PState.carriedGrows_update rfl).trans (PushDown.carriedGrows_pushDown s _ _ _ _ _ _)).trans
+    (PState.carriedGrows_pushOrs s _ _ _)
+
+theorem ordered_carriedGrows (s : Statement) :
+    ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat),
+      st.CarriedGrows (ordered.go s fuel all st order waited).1
+  | 0, _, st, _, _ => PState.CarriedGrows.refl st
+  | fuel + 1, all, st, order, waited => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', _, heq⟩
+    · rw [heq]; exact PState.CarriedGrows.refl st
+    · rw [heq]
+      exact (ordered_placed_carriedGrows s st order next).trans (ordered_carriedGrows s fuel all _ _ _)
+
 /-- The planned state says only what holds of each binding a core keeps that
 matters to its query's test, when a row each derived item's query's test
 keeps is one that matters to the derived item in the planned state. -/
 theorem plan_sem {s : Statement} (h : s.wellFormed = true) {rel : Nat → Row → Bool}
     (hrel : ∀ d q v, d ∈ (s.core (s.item d).core).items → (s.item d).kind = .derived q v →
-      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true → Planned.Good (plan s).state d r) :
+      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true → Planned.Good (plan s).state d r)
+    (hrelC : ∀ d q v, d ∈ (s.core (s.item d).core).items → (s.item d).kind = .derived q v →
+      (s.query q).limit = none → (s.query q).offset = none → ∀ r, rel q r = true →
+      ∀ u, ((plan s).state.items d).carried = some u → u.holds (some r) = true) :
     (plan s).state.Sem s (endCls s rel) := by
   have hread := plan_readSem h (rel := rel) (Fin := (plan s).state)
-    (fun d q v hd hk hl ho r hr u hu => (hrel d q v hd hk hl ho r hr).1 u hu)
-    (ordered_termGrows s _ _ _ _ _)
+    (fun d q v hd hk hl ho r hr u hu => (hrel d q v hd hk hl ho r hr).1 u hu) hrelC
+    (ordered_termGrows s _ _ _ _ _) (ordered_carriedGrows s _ _ _ _ _)
   unfold plan ordered
   simp only
   refine PState.Sem.ordered_go h (Fin := (plan s).state) hrel _ _ _ _ _ (fun i hi => ?_)
@@ -546,12 +565,33 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
     · exact absurd hm hne
     · exact membershipScope_value hp hn
 
+/-- A row of a derived item's query, with no LIMIT and no OFFSET, that the
+query's test keeps passes what the derived item's edges carry to it: the
+derived item's scope passes it. -/
+theorem queryTest_carried {s : Statement} (last : Option (List (List Value)))
+    (rowsOf : Nat → List Row) {d q : Nat} {v : Bool} (hd : d ∈ (s.core (s.item d).core).items)
+    (hkind : (s.item d).kind = .derived q v) (hlim : (s.query q).limit = none)
+    (hoff : (s.query q).offset = none) {r : Row}
+    (hr : (plan s).queryTest s ((plan s).scopes last) rowsOf q r = true) :
+    ∀ u, ((plan s).state.items d).carried = some u → u.holds (some r) = true := by
+  have hdk : (s.item d).core < s.cores.length := s.core_lt hd
+  simp only [Planned.queryTest, hlim, hoff, Option.isSome_none, Bool.or_false, Bool.false_or,
+    List.all_eq_true, List.mem_range] at hr
+  have := hr _ hdk d hd
+  simp only [hkind, bne_self_eq_false, Bool.false_or, Planned.scopeTest, Bool.and_eq_true] at this
+  obtain ⟨hnd, hall⟩ := plan_order s
+  obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
+  have hsc := this.1.1
+  rw [hbound] at hsc
+  exact (scopeAt_parts hsc).2.1
+
 /-- The planned state says only what holds of each binding a core keeps that
 matters to its query's test, the test the planner's scopes give. -/
 theorem plan_semTests {s : Statement} (h : s.wellFormed = true) (last : Option (List (List Value)))
     (rowsOf : Nat → List Row) :
     (plan s).state.Sem s (endCls s ((plan s).queryTest s ((plan s).scopes last) rowsOf)) :=
-  plan_sem h fun _ _ _ hd hkind hlim hoff _ hr => queryTest_good last rowsOf hd hkind hlim hoff hr
+  plan_sem h (fun _ _ _ hd hkind hlim hoff _ hr => queryTest_good last rowsOf hd hkind hlim hoff hr)
+    (fun _ _ _ hd hkind hlim hoff _ hr => queryTest_carried last rowsOf hd hkind hlim hoff hr)
 
 /-! Memberships are edges of the state. -/
 
@@ -650,6 +690,8 @@ theorem edgesGrow_readCore (s : Statement) (st : PState) (k : Nat) :
     st.EdgesGrow (readCore s st k) := by
   unfold readCore
   simp only
+  refine PState.EdgesGrow.trans ?_ (PState.EdgesGrow.foldl (fun x i e he => by
+    rw [(Transfer.pushCarried_changes s _ x i _).1]; exact he) _ _)
   refine PState.EdgesGrow.trans ?_ (PState.EdgesGrow.foldl
     (fun st i => PushDown.edgesGrow_pushDown s _ _ st i _ _) _ _)
   refine PState.EdgesGrow.trans ?_ (PState.EdgesGrow.foldl (fun st (x : Nat × STerm) => by

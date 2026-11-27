@@ -413,8 +413,10 @@ structure PItem where
   of the item's own row. -/
   term : Option STerm := none
   /-- What the edges between the item and the other items of its core carry
-  to it from their own terms (`Transfer.carry`): it narrows the item's
-  scope, and decides nothing of the order the planner places items in. -/
+  to it from their own terms (`Transfer.carry`), and what a derived item
+  around it passes in of what its edges carry (`Transfer.pushCarried`): it
+  narrows the item's scope, and decides nothing of the order the planner
+  places items in. -/
   carried : Option STerm := none
   /-- The edges the item took as memberships, in order. -/
   memberships : List Edge := []

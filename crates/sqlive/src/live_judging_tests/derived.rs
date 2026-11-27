@@ -773,3 +773,41 @@ CREATE VIEW passed AS SELECT * FROM t",
     }
     db.close();
 }
+
+/// A term an equality carries onto a FROM subquery, CTE or view narrows the
+/// table its column comes from, as it narrows that table written out.
+#[tokio::test]
+async fn a_carried_term_narrows_the_table_behind_a_subquery() {
+    let db = TestDatabase::open(
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, v INTEGER);
+CREATE TABLE u(id INTEGER PRIMARY KEY, c INTEGER);
+INSERT INTO t VALUES (1,1,0),(2,2,0);
+INSERT INTO u VALUES (1,1),(2,2);
+CREATE VIEW passed AS SELECT * FROM t",
+    );
+    for from in [
+        "t AS x",
+        "(SELECT * FROM t) AS x",
+        "(SELECT * FROM (SELECT * FROM t) AS inner_rows) AS x",
+        "(SELECT * FROM t UNION ALL SELECT * FROM t) AS x",
+        "passed AS x",
+    ] {
+        let sql = format!(
+            "SELECT x.v FROM {from} JOIN (SELECT * FROM u) AS y ON y.c = x.a WHERE (x.id < 0 OR x.id >= 1) AND y.c = 1"
+        );
+        follows(
+            &db,
+            sql.leak(),
+            vec![],
+            &[
+                ("UPDATE t SET v = v + 1 WHERE id = 2", false),
+                ("UPDATE t SET v = v + 1 WHERE id = 1", true),
+                ("INSERT INTO t VALUES (3,2,0)", false),
+                ("INSERT INTO t VALUES (4,1,0)", true),
+                ("DELETE FROM t WHERE id IN (3,4)", true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}

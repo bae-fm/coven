@@ -105,6 +105,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.plan_pushed
 #print axioms SqliveNarrowing.plan_pushedOrs
 #print axioms SqliveNarrowing.pushedOr_passes
+#print axioms SqliveNarrowing.PState.Sem.pushCarried
+#print axioms SqliveNarrowing.queryTest_carried
 #print axioms SqliveNarrowing.plan_order
 #print axioms SqliveNarrowing.closure_closed
 #print axioms SqliveNarrowing.waiting_receivers

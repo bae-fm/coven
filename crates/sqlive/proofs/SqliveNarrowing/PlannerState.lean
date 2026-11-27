@@ -372,51 +372,6 @@ theorem PushDown.step_keeps {s : Statement} {narrowFuel fuel : Nat} {st1 : PStat
   rw [← hst3]
   exact List.mem_append_right _ he
 
-theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
-    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm) (edges : List Edge),
-      st.Passes item edges → PState.Keeps s st (PushDown.pushDown s narrowFuel fuel st item term edges)
-  | 0, st, _, _, _, _ => PState.Keeps.refl s st
-  | fuel + 1, st, item, term, edges, hpass => by
-    simp only [PushDown.pushDown]
-    split
-    · exact PState.Keeps.refl s st
-    · rename_i found hfound
-      split
-      · exact PState.Keeps.refl s st
-      · refine PState.Keeps.foldl_from (base := st) (fun st0 arm harm hst0 => ?_) st
-          (PState.Keeps.refl s st)
-        obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
-        have hpass0 := hpass.mono hst0.1
-        refine PState.Keeps.foldl_from (base := st0) (fun st1 target htarget hst1 => ?_) st0
-          (PState.Keeps.refl s st0)
-        have hpass1 := hpass0.mono hst1.1
-        obtain ⟨ct, ct', hct⟩ := PushDown.mem_targets htarget
-        refine PushDown.step_keeps (fun e he => ?_)
-          (fun st' h => PushDown.pushDown_keeps s narrowFuel fuel st' target _ _ h)
-        obtain ⟨e0, he0, value, hvalue, rfl⟩ := PushDown.mem_passed he
-        have hcore : (s.item target).core = k := (hthrough ct target ct' hct).1
-        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, rfl, item, q, v, k,
-          PushDown.renameInto arm target, hkind, hlim, hoff, hk, hwin, hcore,
-          fun c c' hc =>
-            ⟨(hthrough c target c' (PushDown.renameInto_some hc)).2.1,
-              (hthrough c target c' (PushDown.renameInto_some hc)).2.2⟩,
-          e0, ?_, hvalue, rfl, rfl, rfl⟩⟩
-        rcases hpass1 e0 he0 with hm | ⟨hm, hi⟩
-        · exact Or.inl (hgrow.2.1 item e0 hm)
-        · exact Or.inr ⟨hgrow.2.2 e0 hm, hi⟩
-theorem readCore_keeps (s : Statement) (st : PState) (k : Nat) :
-    PState.Keeps s st (readCore s st k) := by
-  unfold readCore
-  simp only
-  refine PState.Keeps.trans ?_ (PState.Keeps.foldl
-    (fun st i => PushDown.pushDown_keeps s _ _ st i _ _ (fun _ h => by cases h)) _ _)
-  refine PState.Keeps.trans ?_ (Transfer.carry_keeps s _ k)
-  refine PState.Keeps.foldl (fun st x => ?_) _ st
-  obtain ⟨n, p⟩ := x
-  cases p
-  · exact PState.narrow_keeps s _ _ _
-  · exact PState.narrowOn_keeps s _ _ _ _
-
 /-! Passing a derived item's ORs into its arms only adds ORs to items. -/
 
 /-- A fold each of whose steps keeps a property keeps it. -/
@@ -503,6 +458,116 @@ theorem PushDown.pushOrs_keeps (s : Statement) (st : PState) (item : Nat) (ors :
     PState.Keeps s st (PushDown.pushOrs s st item ors) :=
   ⟨PushDown.pushOrs_grows s st item ors,
     fun e he => Or.inl (by rwa [(PushDown.pushOrs_adds s st item ors).2.1] at he)⟩
+
+/-! Passing what the edges carry into a derived item's arms only changes what
+the edges carry to items. -/
+
+/-- What holds of a state and of each state that gives an item no ON narrowing
+is held back for a carried term, from one it holds of, holds of the state
+`Transfer.pushCarried` gives. -/
+theorem Transfer.pushCarried_induct {s : Statement} {P : PState → Prop}
+    (step : ∀ x target renamed, (x.items target).leftOn = none → P x →
+      P (Transfer.addCarried x target renamed)) :
+    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm), P st →
+      P (Transfer.pushCarried s fuel st item term)
+  | 0, _, _, _, h => h
+  | fuel + 1, st, item, term, h => by
+    simp only [Transfer.pushCarried]
+    split
+    · refine foldl_invariant _ (fun st0 arm _ h0 => ?_) _ h
+      refine foldl_invariant _ (fun st1 target _ h1 => ?_) _ h0
+      unfold Transfer.passCarried
+      split
+      · split
+        · rename_i hc
+          simp only [Bool.and_eq_true, Option.isNone_iff_eq_none] at hc
+          exact Transfer.pushCarried_induct step fuel _ _ _ (step _ _ _ hc.2 h1)
+        · exact h1
+      · exact h1
+    · exact h
+
+/-- `st'` is `st` with other carried terms on some items it holds no ON
+narrowing back for. -/
+def PState.ChangesCarried (st st' : PState) : Prop :=
+  st'.edges = st.edges ∧ st'.pushed = st.pushed ∧ st'.pushedOrs = st.pushedOrs ∧
+    ∀ i, (∃ c, st'.items i = { st.items i with carried := c }) ∧
+      ((st.items i).leftOn.isSome = true → st'.items i = st.items i)
+
+theorem Transfer.pushCarried_changes (s : Statement) (fuel : Nat) (st : PState) (item : Nat)
+    (term : Option STerm) : st.ChangesCarried (Transfer.pushCarried s fuel st item term) := by
+  refine Transfer.pushCarried_induct (P := st.ChangesCarried) (fun x target renamed hleft hx => ?_)
+    fuel st item term ⟨rfl, rfl, rfl, fun _ => ⟨⟨_, rfl⟩, fun _ => rfl⟩⟩
+  refine ⟨hx.1, hx.2.1, hx.2.2.1, fun i => ?_⟩
+  obtain ⟨⟨c, hc⟩, hkeep⟩ := hx.2.2.2 i
+  simp only [Transfer.addCarried, PState.update]
+  split
+  · rename_i hi
+    subst hi
+    refine ⟨⟨_, by rw [hc]⟩, fun hs => ?_⟩
+    rw [← hkeep hs, hleft] at hs
+    cases hs
+  · exact ⟨⟨c, hc⟩, hkeep⟩
+
+theorem PState.ChangesCarried.field {α : Type} {st st' : PState} (h : st.ChangesCarried st')
+    (get : PItem → α) (hget : ∀ (p : PItem) (c : Option STerm), get { p with carried := c } = get p)
+    (i : Nat) : get (st'.items i) = get (st.items i) := by
+  obtain ⟨c, hc⟩ := (h.2.2.2 i).1
+  rw [hc, hget]
+
+theorem Transfer.pushCarried_keeps (s : Statement) (fuel : Nat) (st : PState) (item : Nat)
+    (term : Option STerm) : PState.Keeps s st (Transfer.pushCarried s fuel st item term) := by
+  have h := Transfer.pushCarried_changes s fuel st item term
+  refine ⟨⟨fun i hl => ?_, fun i m hm => ?_, fun e he => by rw [h.2.1]; exact he⟩,
+    fun e he => Or.inl (by rwa [h.2.1] at he)⟩
+  · rwa [h.field (·.leftOn) (fun _ _ => rfl)] at hl
+  · rwa [h.field (·.memberships) (fun _ _ => rfl)]
+
+theorem PushDown.pushDown_keeps (s : Statement) (narrowFuel : Nat) :
+    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm) (edges : List Edge),
+      st.Passes item edges → PState.Keeps s st (PushDown.pushDown s narrowFuel fuel st item term edges)
+  | 0, st, _, _, _, _ => PState.Keeps.refl s st
+  | fuel + 1, st, item, term, edges, hpass => by
+    simp only [PushDown.pushDown]
+    split
+    · exact PState.Keeps.refl s st
+    · rename_i found hfound
+      split
+      · exact PState.Keeps.refl s st
+      · refine PState.Keeps.foldl_from (base := st) (fun st0 arm harm hst0 => ?_) st
+          (PState.Keeps.refl s st)
+        obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
+        have hpass0 := hpass.mono hst0.1
+        refine PState.Keeps.foldl_from (base := st0) (fun st1 target htarget hst1 => ?_) st0
+          (PState.Keeps.refl s st0)
+        have hpass1 := hpass0.mono hst1.1
+        obtain ⟨ct, ct', hct⟩ := PushDown.mem_targets htarget
+        refine PushDown.step_keeps (fun e he => ?_)
+          (fun st' h => PushDown.pushDown_keeps s narrowFuel fuel st' target _ _ h)
+        obtain ⟨e0, he0, value, hvalue, rfl⟩ := PushDown.mem_passed he
+        have hcore : (s.item target).core = k := (hthrough ct target ct' hct).1
+        refine ⟨rfl, fun st' hgrow hleft => ⟨hleft, rfl, item, q, v, k,
+          PushDown.renameInto arm target, hkind, hlim, hoff, hk, hwin, hcore,
+          fun c c' hc =>
+            ⟨(hthrough c target c' (PushDown.renameInto_some hc)).2.1,
+              (hthrough c target c' (PushDown.renameInto_some hc)).2.2⟩,
+          e0, ?_, hvalue, rfl, rfl, rfl⟩⟩
+        rcases hpass1 e0 he0 with hm | ⟨hm, hi⟩
+        · exact Or.inl (hgrow.2.1 item e0 hm)
+        · exact Or.inr ⟨hgrow.2.2 e0 hm, hi⟩
+theorem readCore_keeps (s : Statement) (st : PState) (k : Nat) :
+    PState.Keeps s st (readCore s st k) := by
+  unfold readCore
+  simp only
+  refine PState.Keeps.trans ?_ (PState.Keeps.foldl
+    (fun st i => Transfer.pushCarried_keeps s _ st i _) _ _)
+  refine PState.Keeps.trans ?_ (PState.Keeps.foldl
+    (fun st i => PushDown.pushDown_keeps s _ _ st i _ _ (fun _ h => by cases h)) _ _)
+  refine PState.Keeps.trans ?_ (Transfer.carry_keeps s _ k)
+  refine PState.Keeps.foldl (fun st x => ?_) _ st
+  obtain ⟨n, p⟩ := x
+  cases p
+  · exact PState.narrow_keeps s _ _ _
+  · exact PState.narrowOn_keeps s _ _ _ _
 
 theorem ordered_keeps (s : Statement) :
     ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat),
@@ -854,10 +919,21 @@ theorem Core.cond_queries {c : Core} {cd : Cond} {p : Place} (hcd : (cd, p) ∈ 
   exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_append_right _
     (List.mem_flatMap.mpr ⟨(cd, p), hcd, hq⟩)))
 
+theorem PState.NestedOK.pushCarried {s : Statement} {st : PState} (h : st.NestedOK s) (fuel item : Nat)
+    (term : Option STerm) : (Transfer.pushCarried s fuel st item term).NestedOK s := by
+  have hc := Transfer.pushCarried_changes s fuel st item term
+  refine ⟨by rw [hc.1]; exact h.1, fun i m hm => ?_, fun i n hn => ?_⟩
+  · rw [hc.field (·.memberships) (fun _ _ => rfl)] at hm
+    exact h.2.1 i m hm
+  · rw [hc.field (·.leftOn) (fun _ _ => rfl)] at hn
+    exact h.2.2 i n hn
+
 theorem PState.NestedOK.readCore {s : Statement} {st : PState} (h : st.NestedOK s) (k : Nat) :
     (SqliveNarrowing.readCore s st k).NestedOK s := by
   unfold SqliveNarrowing.readCore
   simp only
+  refine foldl_invariant (P := PState.NestedOK s) _
+    (fun st i _ hst => PState.NestedOK.pushCarried hst s.fuel i (st.items i).carried) _ ?_
   refine foldl_invariant _ (fun st i _ hst => PState.NestedOK.pushDown _ _ i _ hst (by simp)) _ ?_
   refine PState.NestedOK.carry ?_ k
   refine foldl_invariant _ (fun st x hx hst => ?_) _ h
@@ -1034,10 +1110,18 @@ theorem PushDown.sameLinks_pushDown (s : Statement) (narrowFuel : Nat) :
         · exact (h2 _).trans ((hrec _ _).trans (PState.sameLinks_joinInner _ _ _))
         · exact (h2 _).trans (hrec _ _)
 
+theorem Transfer.sameLinks_pushCarried (s : Statement) (fuel : Nat) (st : PState) (item : Nat)
+    (term : Option STerm) : st.SameLinks (Transfer.pushCarried s fuel st item term) := by
+  have hc := Transfer.pushCarried_changes s fuel st item term
+  exact fun i => ⟨hc.field (·.memberships) (fun _ _ => rfl) i, hc.field (·.either) (fun _ _ => rfl) i,
+    hc.2.2.1⟩
+
 theorem sameLinks_readCore (s : Statement) (st : PState) (k : Nat) :
     st.SameLinks (readCore s st k) := by
   unfold readCore
   simp only
+  refine PState.SameLinks.trans ?_ (PState.SameLinks.foldl
+    (fun st i => Transfer.sameLinks_pushCarried s _ st i _) _ _)
   refine PState.SameLinks.trans ?_ (PState.SameLinks.foldl
     (fun st i => PushDown.sameLinks_pushDown s _ _ st i _ _) _ _)
   refine PState.SameLinks.trans ?_ (Transfer.sameLinks_carry s _ k)
@@ -1329,6 +1413,8 @@ theorem keepsOnce_readCore (s : Statement) (st : PState) (k : Nat) :
   intro h
   unfold readCore
   simp only
+  refine PState.KeepsOnce.foldl (fun st i h => by
+    rw [(Transfer.pushCarried_changes s _ st i _).1]; exact h) _ _ ?_
   refine PState.KeepsOnce.foldl
     (fun st i => PushDown.keepsOnce_pushDown s _ _ st i _ _) _ _ ?_
   have hcarry : ∀ st : PState, st.KeepsOnce (Transfer.carry s st k) := fun st =>

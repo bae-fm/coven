@@ -199,10 +199,25 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
         · intro e he
           exact (hpassed e he).1
 
+theorem PState.Lookups.pushCarried {s : Statement} {st : PState} (h : st.Lookups s) (fuel item : Nat)
+    (term : Option STerm) : (Transfer.pushCarried s fuel st item term).Lookups s := by
+  have hc := Transfer.pushCarried_changes s fuel st item term
+  refine ⟨by rw [hc.1]; exact h.1, fun i sides hs => ?_, fun i sides hs => ?_, fun i n hn => ?_,
+    by rw [hc.2.1]; exact h.2.2.2.2⟩
+  · rw [hc.field (·.ors) (fun _ _ => rfl)] at hs
+    exact h.2.1 i sides hs
+  · rw [hc.field (·.either) (fun _ _ => rfl)] at hs
+    rw [hc.field (·.ors) (fun _ _ => rfl)]
+    exact h.2.2.1 i sides hs
+  · rw [hc.field (·.leftOn) (fun _ _ => rfl)] at hn
+    exact h.2.2.2.1 i n hn
+
 theorem PState.Lookups.readCore {s : Statement} (hwf : s.wellFormed = true) {st : PState}
     (h : st.Lookups s) (k : Nat) : (SqliveNarrowing.readCore s st k).Lookups s := by
   unfold SqliveNarrowing.readCore
   simp only
+  refine foldl_invariant (P := PState.Lookups s) _
+    (fun st i _ hst => PState.Lookups.pushCarried hst s.fuel i (st.items i).carried) _ ?_
   refine foldl_invariant _ (fun st i _ hst => PState.Lookups.pushDown hwf _ _ i _ hst (by simp)) _ ?_
   refine PState.Lookups.carry ?_ k
   refine foldl_invariant _ (fun st x hx hst => ?_) _ h

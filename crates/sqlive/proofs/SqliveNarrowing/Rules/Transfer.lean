@@ -71,13 +71,39 @@ def addCarried (st : PState) (i : Nat) (t : STerm) : PState :=
     { p with carried := some (match p.carried with | some e => .and e t | none => t) }
 
 /-- Add the terms the edges of core `k` carry, each to what its member's
-edges carry, with AND. A carried term narrows the member's scope only: it
-passes into no derived item, carries nothing further and decides nothing of
+edges carry, with AND. A carried term narrows the member's scope, and,
+through a derived item, the items its arms pass their columns on from
+(`pushCarried`): it carries nothing further and decides nothing of
 the order, so an item a carried term alone narrows still takes values from
 the items its edges join it to. A LEFT JOIN item stays one: a carried term
 holds of each of its rows that joins, and says nothing of the row of NULLs. -/
 def carry (s : Statement) (st : PState) (k : Nat) : PState :=
   (carried s st k).foldl (fun st (i, t) => addCarried st i t) st
+
+/-- Give `target` what `term`, carried to a derived item whose arm passes into
+it, says of its row, as a term its own edges carry, when no LEFT JOIN adds
+it, then pass it further with `next`. -/
+def passCarried (s : Statement) (next : PState → Nat → Option STerm → PState) (target : Nat)
+    (rename : Nat → Option Nat) (term : STerm) (st : PState) : PState :=
+  match term.renamed rename (STerm.judgedOn target rename) with
+  | some renamed =>
+    if s.alwaysBound target && (st.items target).leftOn.isNone then
+      next (addCarried st target renamed) target (some renamed)
+    else st
+  | none => st
+
+/-- Pass `term`, which the edges carry to item `item`, into the items its arms
+pass their columns on from, and through them further down
+(`derived::push_carried`). -/
+def pushCarried (s : Statement) : Nat → PState → Nat → Option STerm → PState
+  | 0, st, _, _ => st
+  | fuel + 1, st, item, term =>
+    match PushDown.arms s item, term with
+    | some found, some term => found.foldl (fun st arm =>
+        (term.columns.filterMap fun c => (arm[c]?).join.map (·.1)).eraseDups.foldl
+          (fun st target => passCarried s (pushCarried s fuel) target (PushDown.renameInto arm target) term st)
+          st) st
+    | _, _ => st
 
 /-! The proof. -/
 

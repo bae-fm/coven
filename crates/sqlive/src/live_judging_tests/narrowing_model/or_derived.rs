@@ -1,5 +1,5 @@
-//! The ORs of `or` with the tables they narrow behind FROM subqueries: one
-//! level deep or two, and a UNION ALL of a table's rows twice.
+//! The ORs of `or` with the tables they narrow behind FROM subqueries, as
+//! `wrapped` puts them there.
 
 use super::{col, columns, out, select, table, Core, Query, Source, SEARCH};
 use crate::random_scopes::Rng;
@@ -16,10 +16,16 @@ fn rows(name: &'static str) -> Query {
 }
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
-    let mut query = super::or::statement(rng);
+    let query = super::or::statement(rng);
+    wrapped(rng, query)
+}
+
+/// `query` with tables of its first SELECT's FROM behind subqueries, the
+/// first FROM item always and each other one half the time: one level deep or
+/// two, and sometimes a UNION ALL of the table's rows twice.
+pub(super) fn wrapped(rng: &mut Rng, mut query: Query) -> Query {
     for (position, item) in query.arms[0].from.iter_mut().enumerate() {
         let Source::Table(name) = item.source else { continue };
-        // The item the OR narrows is always wrapped.
         if name == SEARCH || (position == 0 && rng.chance(50)) {
             continue;
         }

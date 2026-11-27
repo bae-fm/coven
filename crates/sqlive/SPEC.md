@@ -1025,9 +1025,16 @@ tables' conditions the same way, through a column that passes a table's column
 on: `tracks` joined to `WITH r AS (SELECT id FROM releases WHERE id = ?1 LIMIT
 1)` by `t.release_id = r.id` narrows by `t.release_id = ?1`. A query with a
 SELECT that groups its rows or calls an aggregate or window function carries
-nothing out, even in a column its GROUP BY lists. A carried condition narrows
-only the table it is carried to: it doesn't change which table comes first, and
-an equality with an expression carries none.
+nothing out, even in a column its GROUP BY lists. A condition carried to a CTE,
+a subquery in FROM or a view passes into its tables too, as one of its own does:
+in each arm, a table that the arm passes the compared column on from takes it,
+through each further CTE, subquery or view, unless a LEFT JOIN inside the query
+adds that table. A music app that lists one release's tracks with `SELECT t.title
+FROM (SELECT * FROM tracks) AS t JOIN (SELECT * FROM releases) AS r ON
+t.release_id = r.id WHERE r.id = ?1 AND t.position > 0` narrows `tracks` by
+`t.release_id = ?1`, as with both tables written out. A carried condition doesn't
+change which table comes first, and an equality with an expression carries
+none.
 
 Among the tables that don't wait, as below, sqlive looks up first one that a
 table already looked up gives values to, then one with a condition of its own
@@ -2103,6 +2110,8 @@ the model and states its assumptions.
 | Each OR the planner passes into a derived item's arms comes from an OR the derived item keeps as it is placed, each side rewritten to the columns of the item the arm passes them on from, and passes that item's row in each binding that matters, as a side of the derived item's OR passes the derived item's row | `plan_pushedOrs`, `pushedOr_passes` | `proofs/SqliveNarrowing/PlannerState.lean`; `proofs/SqliveNarrowing/Kept.lean` | 8 |
 | A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row; a row of an arm that groups its rows holds, in each column its GROUP BY lists, the value of that column's item in every binding of its group | `push_down_sound`, `renamed_sound`, `group_key_sound` | `proofs/SqliveNarrowing/Rules/PushDown.lean` | 8 |
 | An equality between two items, true of a binding, carries a term true of one side's row on its compared column to the other side's column; a derived item's row whose column isn't NULL passes what each of its arms' items' terms say of the column the arm passes on | `transfer_sound`, `pulled_sound` | `proofs/SqliveNarrowing/Rules/Transfer.lean` | 7 |
+| What the edges carry to a derived item passes into each item its arms pass its columns on from that no LEFT JOIN adds, and through each further, and holds of that item's row in each binding of the arm that matters | `PState.Sem.pushCarried` | `proofs/SqliveNarrowing/ReadPhase.lean` | 7 |
+| A row of a derived item's query, with no LIMIT and no OFFSET, that the query's test keeps passes what the derived item's edges carry to it | `queryTest_carried` | `proofs/SqliveNarrowing/OrderPhase.lean` | 7 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | A FROM subquery or CTE whose SQL names no row outside it returns, under a binding of none of its own items, the rows it returns alone, so a lookup reads it alone wherever the statement reads it | `closed_eval`, `closed_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
 | An expression over one item's own columns, compared with another item's value, has in a binding the value it gives that item's row, so an equality with it narrows the item as one with its column does | `row_member_sound` | `proofs/SqliveNarrowing/Rules/RowMember.lean` | 7 |

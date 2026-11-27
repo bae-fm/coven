@@ -279,7 +279,11 @@ JOIN adds, so where such a part holds, its item has a row.
   b.y = 5 AND a.z = 1` narrows `a` by `a.x = 5` too, though `a.z = 1` makes
   `a` the item the planner places first. The carried term decides nothing
   of that order, so an item that only carried terms narrow still takes
-  values from the items it is joined to. A derived item's own terms on a
+  values from the items it is joined to. A term carried to a derived item
+  passes into the items its arms pass its columns on from, and through them
+  further down, unless a LEFT JOIN adds one (`Transfer.pushCarried`).
+  `PState.Sem.pushCarried` proves that what the target then takes holds of
+  its row in each binding of the arm that matters. A derived item's own terms on a
   column include what its arms say of it: `pulled_sound` proves that a row
   of a derived item's query whose column isn't NULL passes, joined with OR
   across the arms, the term of the item each arm passes the column on from,
@@ -697,7 +701,11 @@ planner passes in holds of the arm's item's row there, and
 invariant for such bindings. The planner reads a core after every core below
 it, so when it carries terms across a core's edges, it has passed nothing
 into its derived items' arms yet, and their items' terms hold of every
-binding the arms keep, as the carry needs. `PState.Sem.readCore` proves
+binding the arms keep, as the carry needs. Once the planner has passed a
+core's items' terms into their arms, it passes their carried terms in too,
+and `PState.Sem.pushCarried` proves that this keeps the invariant, by the
+same argument: it only adds to an item's carried term, with AND
+(`PState.CarriedGrows`). `PState.Sem.readCore` proves
 that reading a core keeps the invariant, and `plan_readSem` that the state
 after the planner reads every core says only what holds of each binding a
 core keeps, and of each binding below a core that matters.

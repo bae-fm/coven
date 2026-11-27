@@ -611,6 +611,15 @@ theorem PState.Held.readConds {s : Statement} (hwf : s.wellFormed = true) (k : N
   | inner => exact hst.untouched (PState.untouched_narrow _ _ _)
   | leftOn i => exact hst.narrowOn hwf hcd s.fuel
 
+/-- Passing what the edges carry into arms touches no item the state still
+holds an ON narrowing back for. -/
+theorem Transfer.untouched_pushCarried (s : Statement) (fuel : Nat) (st : PState) (item : Nat)
+    (term : Option STerm) : st.Untouched (Transfer.pushCarried s fuel st item term) := by
+  have hc := Transfer.pushCarried_changes s fuel st item term
+  intro i hi
+  rw [hc.field (·.leftOn) (fun _ _ => rfl)] at hi
+  exact ⟨(hc.2.2.2 i).2 hi, fun e he _ => by rwa [hc.1] at he⟩
+
 /-- Reading a core keeps the facts. -/
 theorem PState.Held.readCore {s : Statement} (hwf : s.wellFormed = true) {rel : Nat → Row → Bool}
     {done : List Nat} {st Fin : PState} (h : st.Held s Fin) (hs : st.Sem s (readCls s rel done))
@@ -620,6 +629,10 @@ theorem PState.Held.readCore {s : Statement} (hwf : s.wellFormed = true) {rel : 
   have hP : ∀ Z f k b, readCls s rel done Z f k b → s.KeptIn Z f k b := fun _ _ _ _ hb => hb.1
   unfold SqliveNarrowing.readCore at hfin ⊢
   simp only at hfin ⊢
+  have hfin := (PState.TermGrows.foldl (fun st i => Transfer.termGrows_pushCarried s _ st i _)
+    _ _).trans hfin
+  refine PState.Held.untouched ?_
+    (PState.Untouched.foldl (fun st i => Transfer.untouched_pushCarried s _ st i _) _ _)
   have hl : ∀ x ∈ ((s.core k).conds.map fun (cd, p) => (readCondition s k cd, p)).filter
         (fun (n, _) => !n.mayHoldOnNulls) ++
       ((s.core k).conds.map fun (cd, p) => (readCondition s k cd, p)).filter
@@ -672,27 +685,31 @@ theorem PState.Held.ordered {s : Statement} {Fin : PState} :
 theorem plan_held_go {s : Statement} (hwf : s.wellFormed = true) {Fin : PState} :
     ∀ (rest done : List Nat) (st : PState), done ++ rest = s.readOrder →
       st.Sem s (readCls s (fun _ _ => false) done) → st.pushed = [] → st.Held s Fin →
-      (rest.foldl (readCore s) st).TermGrows Fin → (rest.foldl (readCore s) st).Held s Fin
-  | [], _, _, _, _, _, h, _ => h
-  | k :: rest, done, st, heq, hs, hp, h, hfin => by
+      (rest.foldl (readCore s) st).TermGrows Fin → (rest.foldl (readCore s) st).CarriedGrows Fin →
+      (rest.foldl (readCore s) st).Held s Fin
+  | [], _, _, _, _, _, h, _, _ => h
+  | k :: rest, done, st, heq, hs, hp, h, hfin, hfinC => by
     have hpw := readOrder_postorder hwf
     rw [← heq] at hpw
     have hafter := (List.pairwise_append.mp hpw).2.2
     have hk : k ∉ done ∧ ∀ a ∈ done, ¬s.Below k a :=
       ⟨fun hkd => (hafter k hkd k List.mem_cons_self).1 rfl,
         fun a ha => (hafter a ha k List.mem_cons_self).2⟩
-    simp only [List.foldl_cons] at hfin ⊢
+    simp only [List.foldl_cons] at hfin hfinC ⊢
     have hfin' := (PState.TermGrows.foldl (fun st k => termGrows_readCore s st k) rest _).trans hfin
+    have hfinC' :=
+      (PState.CarriedGrows.foldl (fun st k => carriedGrows_readCore s st k) rest _).trans hfinC
     exact plan_held_go hwf rest (done ++ [k]) _ (by simpa using heq)
-      (PState.Sem.readCore hwf (fun _ _ _ _ _ _ _ _ hr => absurd hr (by simp)) hs hp hk hfin')
-      (by rw [readCore_pushed]; exact hp) (h.readCore hwf hs hk hfin') hfin
+      (PState.Sem.readCore hwf (fun _ _ _ _ _ _ _ _ hr => absurd hr (by simp))
+        (fun _ _ _ _ _ _ _ _ hr => absurd hr (by simp)) hs hp hk hfin' hfinC')
+      (by rw [readCore_pushed]; exact hp) (h.readCore hwf hs hk hfin') hfin hfinC
 
 /-- What the planned state says of each item it still holds an ON narrowing
 back for holds wherever the item's ON holds of a row of it. -/
 theorem plan_held {s : Statement} (hwf : s.wellFormed = true) : (plan s).state.Held s (plan s).state := by
   have hread := plan_held_go hwf (Fin := (plan s).state) s.readOrder [] (PState.initial s) rfl
     (PState.Sem.initial hwf fun _ _ _ _ hb => hb.1) rfl (PState.Held.initial s _)
-    (ordered_termGrows s _ _ _ _ _)
+    (ordered_termGrows s _ _ _ _ _) (ordered_carriedGrows s _ _ _ _ _)
   unfold plan ordered
   simp only
   exact PState.Held.ordered _ _ _ _ _ hread

@@ -380,7 +380,8 @@ impl Planner<'_> {
     /// the partner's column's value, so a term true of one is true of the
     /// other: `f JOIN c ON f.p = c.p WHERE c.p = ?1` narrows `f` as
     /// `f.p = ?1` would, whichever of them goes first. A carried term only
-    /// narrows the member's scope: it passes into no subquery, carries
+    /// narrows the member's scope, and, through a subquery, CTE or view, the
+    /// tables its columns come from (`derived::push_carried`): it carries
     /// nothing further, and leaves the member to take values from the sources
     /// its edges join it to. A LEFT JOIN's right side stays one: the term
     /// holds of each of its rows that joins, and says nothing of its row of

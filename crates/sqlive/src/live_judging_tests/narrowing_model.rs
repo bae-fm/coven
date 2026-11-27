@@ -23,6 +23,8 @@ use std::sync::Arc;
 mod aggregate;
 #[path = "narrowing_model/carry.rs"]
 mod carry;
+#[path = "narrowing_model/carry_derived.rs"]
+mod carry_derived;
 #[path = "narrowing_model/cte_names.rs"]
 mod cte_names;
 #[path = "narrowing_model/distinct.rs"]
@@ -856,6 +858,12 @@ async fn window_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn carry_matches_lean() {
     differential("carry", carry::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn carry_derived_matches_lean() {
+    differential("carry through subqueries", carry_derived::statement).await;
 }
 
 #[tokio::test]
