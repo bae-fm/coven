@@ -23,6 +23,10 @@ pub enum EngineFailure<F, R> {
     /// SQLite refused to remove a transaction's hook with this cause, so
     /// what the connection calls next is unknown.
     Hook(Error<F, R>),
+    /// Judging a change to the host tables failed with this cause: its read
+    /// transaction or one of its lookups. The rows had changed already, and
+    /// no write is left to fail, so a live query could miss the change.
+    HostJudge(Error<F, R>),
 }
 
 /// Why a call failed.

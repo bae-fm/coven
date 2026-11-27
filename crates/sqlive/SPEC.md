@@ -505,9 +505,11 @@ note. Say a write adds a track's first note while that track's upload starts,
 and the screen runs again before the write commits. The note joins the screen
 only through the upload's row. If the write's lookups read the rows as it
 began, they would find no upload, and the screen would never show the note. A
-lookup that fails, or a transaction for the lookups that fails to begin, leaves
-the change unjudged: each live query judges it counting every join's value as
-matched, so the change fails nothing.
+lookup of a change that fails, or a transaction for the lookups that fails to
+begin, fails the handle with `EngineFailure::HostJudge` and SQLite's cause, so
+every later call and live query fails with it until the host reopens the
+database. The rows have already changed and no write is left to fail, so a live
+query left unjudged could keep showing a row the change took away.
 
 A build tool that reads a schema which declares a host table as an ordinary
 table, as sqlive-compose does, gets the scope plan the running database gets,
@@ -2242,7 +2244,7 @@ policy refuses with.
 | `Closed` | the handle closed the database | 3 |
 | `Bug` | the call's work panicked, a bug, which the caller reports | 2 |
 | `HandleFailed` | an earlier bug may have left the handle's state wrong, so every call fails with it until the host reopens the database | 10 |
-| `Host` | the host failed the handle with its own failure, one of sqlive's `EngineFailure`s among them | 2, 10 |
+| `Host` | the host failed the handle with its own failure, one of sqlive's `EngineFailure`s among them | 2, 3, 10 |
 | `Invariant` | sqlive broke a rule it relies on: a bug, not damage | |
 | `CompiledSchemaDiffers` | a compiled statement's plan was built against a schema that shows these objects and functions otherwise than the database does | 4 |
 | `UndecodablePlan` | a compiled statement's plan is no text this sqlive's `CompiledPlan::encode` writes | 4 |
@@ -2261,6 +2263,7 @@ later call and live query fails with the host's failure built from it.
 | `Checkpoint` | one of sqlive's WAL checkpoints failed, other than on a busy or locked database, so checkpointing stopped | 10 |
 | `Statistics` | checking or gathering the planner's statistics failed, other than on a busy or locked database, so sqlive stopped keeping them | 10 |
 | `Hook` | SQLite refused to remove a transaction's hook, so what the connection calls next is unknown | 2 |
+| `HostJudge` | judging a change to the host tables failed, in its read transaction or a lookup, so a live query could miss the change | 3 |
 
 ### Constants
 

@@ -24,6 +24,10 @@ pub(crate) enum StoreFailure {
     /// keeping them.
     #[error("gathering the planner's statistics failed")]
     Statistics(Arc<DbError>),
+    /// Judging a change to the tables in memory failed with this cause, so a
+    /// live query could miss the change.
+    #[error("judging a change to the tables in memory failed")]
+    MemoryJudging(Arc<DbError>),
 }
 
 impl StoreFailure {
@@ -35,6 +39,7 @@ impl StoreFailure {
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(Arc::clone(cause)),
             Self::Statistics(cause) => DbError::StatisticsFailed(Arc::clone(cause)),
+            Self::MemoryJudging(cause) => DbError::MemoryJudgingFailed(Arc::clone(cause)),
         }
     }
 }
@@ -52,6 +57,9 @@ impl From<sqlive::EngineFailure<StoreFailure, DbError>> for StoreFailure {
                 Self::Statistics(Arc::new(DbError::from(cause)))
             }
             sqlive::EngineFailure::Hook(cause) => Self::State(Arc::new(DbError::from(cause))),
+            sqlive::EngineFailure::HostJudge(cause) => {
+                Self::MemoryJudging(Arc::new(DbError::from(cause)))
+            }
         }
     }
 }

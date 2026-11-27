@@ -1792,6 +1792,12 @@ pub enum DbError {
     /// planner plans with statistics that no longer hold, this handle and
     /// every live query fail with this same cause until reopened (§4).
     StatisticsFailed(Arc<DbError>),
+    /// Judging, for the live queries, a change to the tables coven keeps in
+    /// memory failed with this cause. The change was already made, so rather
+    /// than stay open while a live query shows what no longer holds, this
+    /// handle and every live query fail with this same cause until reopened
+    /// (§4).
+    MemoryJudgingFailed(Arc<DbError>),
     /// The handle's clock could not wait for an open invite's expiry, so
     /// the invite would outlive its lifetime. Rather than stay open
     /// without writing expiries, this handle and every live query fail with
@@ -3742,8 +3748,8 @@ let moved = handle
 - A live query's errors are results and don't end it, except the one saying
   the store closed (`StoreClosed`) or its handle fails every call
   (`RollbackFailed`, `StatePersistence`, `CheckpointFailed`,
-  `StatisticsFailed`, `WallTimer`, or `StoreFailed` for state a bug may have
-  left wrong), and one that carries a bug, as a run that panicked does
+  `StatisticsFailed`, `MemoryJudgingFailed`, `WallTimer`, or `StoreFailed`
+  for state a bug may have left wrong), and one that carries a bug, as a run that panicked does
   (`DbError::Bug`, E15): after that one, `next_blocking()` returns `None`, and
   never repeats it. The examples below call `next_blocking()` on a blocking
   thread for brevity; a program with no runtime calls it alone.

@@ -70,6 +70,9 @@ impl std::fmt::Display for HandleFailure {
             EngineFailure::Statistics(error) => {
                 write!(f, "keeping the planner's statistics failed: {error}")
             }
+            EngineFailure::HostJudge(error) => {
+                write!(f, "judging a change to the host tables failed: {error}")
+            }
             EngineFailure::Hook(error) => {
                 write!(f, "removing a transaction's hook failed: {error}")
             }
@@ -83,6 +86,7 @@ impl std::error::Error for HandleFailure {
             EngineFailure::Rollback => None,
             EngineFailure::Checkpoint(error)
             | EngineFailure::Statistics(error)
+            | EngineFailure::HostJudge(error)
             | EngineFailure::Hook(error) => Some(error),
         }
     }

@@ -156,7 +156,7 @@ A commit can be refused for these local reasons:
 | `FileUnknown`, `FileUnreferenced`, `FileWriteOnce` | a reference names no file of the row's audience, a staged file has no reference, or a write-once reference would change | §17.2, §17.3 |
 | `UndeclaredNamespace`, `NamespaceKind` and other file checks | a file is staged into an undeclared namespace or one of the other kind, or the staged file can't be used | §17.1, [api.md E3](api.md#e3-writing) |
 | `BoundFileTooLarge`, `DeviceOnly`, `NamespaceKind` | a bound reference names a file over its column's limit, a file on one device only that no bound upload stores, or a user's file | §17.4 |
-| `RollbackFailed`, `CheckpointFailed`, `StatisticsFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
+| `RollbackFailed`, `CheckpointFailed`, `StatisticsFailed`, `MemoryJudgingFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
 | `StoreFailed` | an earlier bug may have left the handle's state wrong; it carries that bug | [api.md E15](api.md#e15-background-work-panics-and-shutdown) |
 | Closed or unusable installation | nothing can be written | [api.md E1](api.md#e1-opening) |
 
@@ -806,12 +806,14 @@ gives.
 When sqlive fails the store's handle, coven names the failure, and every later
 call and live query fails with it until the store is reopened: a checkpoint
 SQLite failed, as on a full disk, with `DbError::CheckpointFailed` and SQLite's
-cause; failed planner statistics with `DbError::StatisticsFailed`; a failed
-rollback with `RollbackFailed`; and a panic in an upkeep thread with
-`DbError::StoreFailed`, carrying the bug, which the app's bug sink hears once
-(E15). Coven never reopens by itself, and the app shows the failure and offers
-the reopen. A system that refuses an upkeep thread, or the thread on which
-sqlive judges changes to the tables in memory, fails the open with
+cause; failed planner statistics with `DbError::StatisticsFailed`; a change to
+a table in memory that sqlive couldn't judge for the live queries with
+`DbError::MemoryJudgingFailed`; a failed rollback with `RollbackFailed`; and a
+panic in an upkeep thread, or while sqlive judges a change to a table in
+memory, with `DbError::StoreFailed`, carrying the bug, which the app's bug sink
+hears once (E15). Coven never reopens by itself, and the app shows the failure
+and offers the reopen. A system that refuses an upkeep thread, or the thread on
+which sqlive judges changes to the tables in memory, fails the open with
 `DbError::Thread`.
 
 The settings coven's guarantees rest on stay fixed, and the app has no way to
@@ -14781,6 +14783,7 @@ maps them are with each provider in Appendix E.
 | `DbError::CheckpointFailed` | one of coven's WAL checkpoints failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::StoreFailed` | an earlier bug may have left the handle's state wrong; the call whose work hit it returned it as `DbError::Bug`, or the bug sink heard it; every later call on that handle fails with it until the store is reopened | api.md E15 |
 | `DbError::StatisticsFailed` | checking or gathering the planner's statistics while the store stayed open failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
+| `DbError::MemoryJudgingFailed` | judging a change to a table coven keeps in memory, for the live queries, failed; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::Thread` | the system refused a thread of the store's databases, one that checkpoints a WAL, keeps the planner's statistics or judges changes to the tables in memory, so the store did not open | §4 |
 | `DbError::NotOwner`, `DbError::NotAdmin`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner or admin rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |

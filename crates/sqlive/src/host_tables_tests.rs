@@ -223,3 +223,30 @@ async fn a_compiled_read_of_a_host_table_runs_with_its_shipped_plan() {
     assert_eq!(next(&mut query).await, ["a1 0"]);
     db.close();
 }
+
+/// A lookup that fails as a change to the host rows is judged, here since
+/// another connection dropped the table it reads, fails the handle with
+/// SQLite's cause: judged without it, a live query could keep showing rows the
+/// change took away.
+#[tokio::test]
+async fn a_failed_lookup_of_a_host_change_fails_the_handle_with_its_cause() {
+    let (db, tables) = open();
+    let mut query = live(
+        &db,
+        "SELECT s.track FROM tracks AS t JOIN sending AS s ON s.track = t.id WHERE t.album = 'a'",
+    );
+    assert!(next(&mut query).await.is_empty());
+    rusqlite::Connection::open(db.path()).unwrap().execute_batch("DROP TABLE tracks").unwrap();
+    send(&tables, "a1", 0);
+    let failure = db.handle().error::<std::convert::Infallible>().expect("the handle failed");
+    let crate::Error::Host(failed) = &failure else {
+        panic!("{failure:?}");
+    };
+    let crate::EngineFailure::HostJudge(cause) = failed.engine() else {
+        panic!("{failure:?}");
+    };
+    assert!(cause.to_string().contains("no such table: main.tracks"), "{cause}");
+    let told = query.next_inline().await.expect("the query is open");
+    assert!(told.is_err(), "{told:?}");
+    db.close();
+}

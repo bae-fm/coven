@@ -12,7 +12,8 @@ impl CarriesBug for DbError {
             Self::Lock(error) => error.bug(),
             Self::StatePersistence(cause)
             | Self::CheckpointFailed(cause)
-            | Self::StatisticsFailed(cause) => cause.bug(),
+            | Self::StatisticsFailed(cause)
+            | Self::MemoryJudgingFailed(cause) => cause.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => write
                 .as_ref()
@@ -96,6 +97,13 @@ pub enum DbError {
     /// every live query fail with this same cause until reopened (§4).
     #[error("gathering the planner's statistics failed: {0}")]
     StatisticsFailed(#[source] std::sync::Arc<DbError>),
+    /// Judging, for the live queries, a change to the tables coven keeps in
+    /// memory failed with this cause. The change was already made, so rather
+    /// than stay open while a live query shows what no longer holds, this
+    /// handle and every live query fail with this same cause until reopened
+    /// (§4).
+    #[error("judging a change to the tables in memory failed: {0}")]
+    MemoryJudgingFailed(#[source] std::sync::Arc<DbError>),
     /// The handle's clock could not wait for an open invite's expiry, so
     /// the invite would outlive its lifetime. Rather than stay open
     /// without writing expiries, this handle and every live query fail with

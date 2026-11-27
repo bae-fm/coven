@@ -64,30 +64,22 @@ impl<P: Policy> HostSql<P> {
 
     /// Judge `changes` to the host tables, which no write made, for every
     /// waiting live query, in a read transaction of this connection, and
-    /// report them. A transaction or lookup that fails leaves the changes
-    /// unjudged: each live query then judges them counting every join's value
-    /// as matched, which runs it again where a lookup might not have. A panic
-    /// fails the handle.
+    /// report them. A transaction or lookup that fails, or a panic, fails
+    /// the handle: the rows have changed, so a live query left unjudged
+    /// could miss the change.
     pub(crate) fn report_host_changes(&self, changes: Vec<crate::RowChange>) {
         let handle = self.handle.as_ref().expect("a judge's connection serves a handle");
-        let told = panic_as_error::caught_sync(
-            "tell the live queries of the host's changes",
-            || {
+        let told =
+            panic_as_error::caught_sync("tell the live queries of the host's changes", || {
                 let judged: Result<crate::Judged, PolicyError<P>> = self.read_transaction(|| {
                     let _reading = self.authorization.reading();
-                    Ok(handle
-                        .judge(changes.clone(), None, &mut |judging| self.ask_judged(judging))?)
+                    Ok(handle.judge(changes, None, &mut |judging| self.ask_judged(judging))?)
                 });
-                let judged = judged.unwrap_or_else(|error| {
-                tracing::warn!(
-                    %error,
-                    "judging a change to the host tables failed, so it counts every join as matched",
-                );
-                crate::Judged::unjudged(changes)
+                match judged {
+                    Ok(judged) => handle.commit(judged, None),
+                    Err(error) => handle.fail_engine(crate::EngineFailure::HostJudge(error)),
+                }
             });
-                handle.commit(judged, None);
-            },
-        );
         if let Err(bug) = told {
             handle.fail_with_bug(bug);
         }

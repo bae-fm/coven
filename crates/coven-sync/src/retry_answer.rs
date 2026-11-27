@@ -283,6 +283,7 @@ fn failed(error: &DbError) -> RetryOutcome {
         DbError::RollbackFailed => DbError::RollbackFailed,
         DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
         DbError::StatisticsFailed(cause) => DbError::StatisticsFailed(cause.clone()),
+        DbError::MemoryJudgingFailed(cause) => DbError::MemoryJudgingFailed(cause.clone()),
         DbError::WallTimer(cause) => DbError::WallTimer(cause.clone()),
         DbError::StoreFailed(bug) => DbError::StoreFailed(bug.clone()),
         DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),
