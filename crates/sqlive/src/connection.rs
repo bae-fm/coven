@@ -432,23 +432,17 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Run the host's own SQL on the connection's cached statement, which
-    /// SQLite parses once per connection. The authorizer records reads only
-    /// while SQLite prepares a statement, so while it records, this function
-    /// prepares the statement again instead of taking the cached one.
+    /// SQLite parses once per connection (`host_statement`).
     fn with_statement<T, E: From<PolicyError<P>>>(
         &self,
         sql: &str,
         run: impl FnOnce(&mut rusqlite::Statement<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
-        if self.authorization.recording() {
-            run(&mut self.judged(self.connection.prepare(sql))?)
-        } else {
-            let mut statement = self.judged(self.connection.prepare_cached(sql))?;
-            // The statement profile reports each execution's own full scans.
-            #[cfg(any(test, feature = "profiles"))]
-            statement.reset_status(rusqlite::StatementStatus::FullscanStep);
-            run(&mut statement)
-        }
+        let mut statement = self.host_statement(sql)?;
+        // The statement profile reports each execution's own full scans.
+        #[cfg(any(test, feature = "profiles"))]
+        statement.reset_status(rusqlite::StatementStatus::FullscanStep);
+        run(&mut statement)
     }
 
     /// Prepare `sql` as the host's own statement, compiling every trigger
@@ -659,13 +653,22 @@ impl<P: Policy> HostSql<P> {
         params: Q,
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
-        let parameters = crate::parameters(&self.connection, statement, params)?;
+        // A scope plan reads the bound values, which SQLite gives back only
+        // through a statement of their own; a run with no plan binds `params`
+        // to its statement alone.
+        let (parameters, unread) = match &plan {
+            Some(_) => (crate::parameters(&self.connection, statement, params)?, None),
+            None => (Vec::new(), Some(params)),
+        };
         // A run that returns as many rows as its LIMIT depends only on the
         // rows up to its last one (SPEC.md section 6).
         let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
         let mut last = None;
-        let mut run = |statement: &mut rusqlite::Statement<'_>| {
-            let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
+        let run = |statement: &mut rusqlite::Statement<'_>| {
+            let mut rows = match unread {
+                Some(params) => statement.query(params)?,
+                None => statement.query(rusqlite::params_from_iter(&parameters))?,
+            };
             let mut returned = 0;
             loop {
                 let row = {

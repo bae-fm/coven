@@ -54,6 +54,31 @@ impl ReadFrame {
         self.indirect.get(table).is_none_or(|views| views.is_subset(inlined))
     }
 
+    /// The statement read `column` of `table`, through the view or CTE
+    /// `accessor` when it names one; `whole` names the views and tables a
+    /// live query reads whole.
+    pub fn read(&mut self, table: &str, column: &str, accessor: Option<&str>, whole: &WholeViews) {
+        let through_whole = accessor.filter(|name| whole.contains(name));
+        self.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
+        if accessor.is_none() {
+            self.direct.insert(table.to_ascii_lowercase());
+        }
+        if let Some(view) = accessor {
+            self.indirect
+                .entry(table.to_ascii_lowercase())
+                .or_default()
+                .insert(view.to_ascii_lowercase());
+        }
+        // A read through one of the views read whole reads the view itself
+        // too, even when the statement reads none of the view's columns, as
+        // a count of its rows or an EXISTS doesn't: a view can change with
+        // no change to its tables, as one that calls a function of the
+        // host's state can (SPEC.md section 3).
+        if let Some(view) = through_whole {
+            self.columns.insert((view.to_ascii_lowercase(), String::new()));
+        }
+    }
+
     fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
         self.direct.extend(other.direct.iter().cloned());
@@ -69,45 +94,17 @@ impl ReadCapture {
         Self { frames: vec![ReadFrame::default()], completed: ReadSet::new(), whole }
     }
 
-    fn current(&mut self) -> &mut ReadFrame {
-        self.frames.last_mut().expect("a read capture keeps its first frame")
-    }
-
-    /// The statement being prepared read `column` of `table`, through the
-    /// view or CTE `accessor` when it names one.
+    /// The statement being prepared read `column` of `table`
+    /// ([`ReadFrame::read`]).
     pub fn read(&mut self, table: &str, column: &str, accessor: Option<&str>) {
-        let whole = accessor.filter(|name| self.whole.contains(name));
-        let frame = self.current();
-        frame.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
-        if accessor.is_none() {
-            frame.direct.insert(table.to_ascii_lowercase());
-        }
-        if let Some(view) = accessor {
-            frame
-                .indirect
-                .entry(table.to_ascii_lowercase())
-                .or_default()
-                .insert(view.to_ascii_lowercase());
-        }
-        // A read through one of the views read whole reads the view itself
-        // too, even when the statement reads none of the view's columns, as
-        // a count of its rows or an EXISTS doesn't: a view can change with
-        // no change to its tables, as one that calls a function of the
-        // host's state can (SPEC.md section 3).
-        if let Some(view) = whole {
-            frame.columns.insert((view.to_ascii_lowercase(), String::new()));
-        }
-    }
-
-    /// What the statement being prepared has read so far.
-    pub fn statement(&mut self) -> ReadFrame {
-        self.current().clone()
+        let frame = self.frames.last_mut().expect("a read capture keeps its first frame");
+        frame.read(table, column, accessor, &self.whole);
     }
 
     /// The statement being run read what `recorded` holds when it was
     /// prepared.
     pub fn replay(&mut self, recorded: &ReadFrame) {
-        self.current().extend(recorded);
+        self.frames.last_mut().expect("a read capture keeps its first frame").extend(recorded);
     }
 
     /// A statement begins.

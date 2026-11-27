@@ -61,7 +61,8 @@ impl ToSql for SqlValue {
 
 /// The values `params` binds to `statement`'s parameters, in parameter order,
 /// with one entry for each index, including anonymous parameters and indices
-/// that no parameter in the SQL uses.
+/// that no parameter in the SQL uses. The connection keeps prepared the
+/// statement that reads them back.
 pub fn parameters<P: rusqlite::Params>(
     connection: &rusqlite::Connection,
     statement: &rusqlite::Statement<'_>,
@@ -82,7 +83,7 @@ pub fn parameters<P: rusqlite::Params>(
             .join(",");
         format!("VALUES {values}")
     };
-    let mut capture = connection.prepare(&sql)?;
+    let mut capture = connection.prepare_cached(&sql)?;
     let values = capture.query_map(params, |row| row.get(0))?.collect();
     values
 }

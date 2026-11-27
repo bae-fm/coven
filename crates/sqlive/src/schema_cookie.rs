@@ -1,5 +1,5 @@
 //! SQLite's schema cookie as a transaction reads it. The connection compares
-//! the cookie with the one it saw when it prepared each app statement and
+//! the cookie with the one it saw when it prepared its kept statements and
 //! read the tables' shapes, so a write checks it once for each app statement.
 //! A transaction that runs no DDL can't change the cookie, so while a
 //! transaction holds the cookie, the connection reads it from SQLite only
@@ -50,7 +50,7 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// SQLite's count of changes to the main schema. The connection compares
-    /// it with the cookie it saw when it prepared each kept app statement and
+    /// it with the cookie it saw when it prepared its kept statements and
     /// read the tables' shapes.
     pub(super) fn app_schema_cookie(&self) -> rusqlite::Result<i64> {
         if let Some(cookie) = self.cookie.value.get() {

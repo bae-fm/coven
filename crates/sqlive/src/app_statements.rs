@@ -1,11 +1,13 @@
-//! The app's statements, kept prepared per connection like the host's own.
+//! The statements each connection keeps prepared, the app's and the host's.
 //!
 //! SQLite compiles into each statement every trigger it can fire, and the
 //! views those read, so preparing an app write can cost far more than running
-//! it. The authorizer judges a statement and records what it reads only as
-//! SQLite prepares it, so a statement is prepared afresh the first time in
-//! each authorization context, and what it read is kept beside it: a later
-//! use from the cache is judged and recorded exactly as that first one was.
+//! it. The authorizer judges a statement and learns what it reads only as
+//! SQLite prepares it, so the connection keeps that judgment beside the
+//! prepared statement: a later run from the cache, in a one-shot read, a
+//! live query's run or a write that the judgment allows, records the same
+//! reads. The app's statements and the host's are judged by different rules,
+//! so each keeps judgments of its own.
 //!
 //! What a kept statement lets a live query narrow depends on its SQL, the
 //! schema, and the SQL functions and whole views its connection was set up
@@ -17,12 +19,11 @@
 //! read.
 
 use super::HostSql;
-use crate::authorization::AppContext;
-use crate::authorization::{Policy, PolicyError};
+use crate::authorization::{Judgment, Policy, PolicyError};
 use crate::MainSchema;
 use crate::ReadReport;
 use crate::ScopePlanSize;
-use crate::{CompiledPlan, CompiledStatement, ReadFrame, ScopePlan};
+use crate::{CompiledPlan, CompiledStatement, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
@@ -30,9 +31,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-/// How many app statements' reads a connection keeps, in every context
-/// together, and how many statements' plans a database keeps: more than an
-/// app runs, but bounded for SQL built with values in its text.
+/// How many judgments a connection keeps, and how many statements' plans a
+/// database keeps: more than an app and its host run, but bounded for SQL
+/// built with values in its text.
 const RECORDED: usize = 512;
 
 /// What each kept statement lets a live query narrow, by its SQL and the
@@ -232,14 +233,19 @@ impl Drop for PlanBuild<'_> {
 pub(super) struct AppStatements {
     /// The schema the kept statements were prepared against.
     schema: Cell<Option<i64>>,
-    /// What each statement read when it was prepared in each context.
-    reads: RefCell<HashMap<AppContext, HashMap<String, ReadFrame>>>,
+    /// What the authorizer learned of each statement as SQLite prepared it,
+    /// by whom it judged it as and the statement's SQL.
+    judgments: RefCell<HashMap<JudgedAs, HashMap<String, Judgment>>>,
     /// What each kept statement lets a live query narrow, shared with the
     /// database's other connections.
     plans: Arc<ScopePlans>,
-    /// Statements prepared afresh, for tests of the cache.
+    /// App statements SQLite prepared, for tests of the cache.
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fresh: Cell<usize>,
+    /// The host's statements SQLite prepared to be kept, for tests of the
+    /// cache.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) host_fresh: Cell<usize>,
 }
 
 impl AppStatements {
@@ -247,18 +253,21 @@ impl AppStatements {
     pub(super) fn new(plans: Arc<ScopePlans>) -> Self {
         Self {
             schema: Cell::new(None),
-            reads: RefCell::new(HashMap::new()),
+            judgments: RefCell::new(HashMap::new()),
             plans,
             #[cfg(any(test, feature = "test-utils"))]
             fresh: Cell::new(0),
+            #[cfg(any(test, feature = "test-utils"))]
+            host_fresh: Cell::new(0),
         }
     }
 }
 
 impl<P: Policy> HostSql<P> {
     /// One app statement, from the cache when this connection prepared it
-    /// before in the same context and schema. A connection opening, or
-    /// migrating, prepares each one afresh: its statements change the schema.
+    /// before against the same schema and its judgment allows it here. A
+    /// connection opening, or migrating, prepares each one afresh: its
+    /// statements change the schema.
     pub(super) fn app_statement(&self, sql: &str) -> rusqlite::Result<AppStatement<'_>> {
         let context = match self.authorization.app_context() {
             Some(context) if self.handle.is_some() => context,
@@ -269,39 +278,81 @@ impl<P: Policy> HostSql<P> {
             }
         };
         let schema = self.app_schema_cookie()?;
+        self.keep_for_schema(schema);
+        let judged_as = JudgedAs::App { policy: context.policy };
+        let statement = self.kept_statement(judged_as, sql, |judgment| judgment.allows(context))?;
+        Ok(AppStatement::Cached { statement, schema })
+    }
+
+    /// The host's own statement `sql`, from the cache when this connection
+    /// prepared it before as the host's, and, in a live query's run, against
+    /// the same schema. A run records what it reads either way.
+    pub(super) fn host_statement(&self, sql: &str) -> Result<CachedStatement<'_>, PolicyError<P>> {
+        // Outside a live query's run nothing uses what a statement reads, so
+        // only the first one needs a schema to keep its judgment for: a later
+        // run that finds another drops it.
+        if self.authorization.capturing_reads() || self.app_statements.schema.get().is_none() {
+            self.keep_for_schema(self.app_schema_cookie()?);
+        }
+        let statement = self.kept_statement(JudgedAs::Host, sql, |_| true);
+        Ok(self.authorization.app_result(statement)?)
+    }
+
+    /// Drop every kept statement and judgment unless they are of `schema`: a
+    /// statement prepared against another schema is no longer judged as it
+    /// would be now.
+    fn keep_for_schema(&self, schema: i64) {
         if self.app_statements.schema.get() != Some(schema) {
-            // A statement prepared against another schema is no longer
-            // judged as it would be now.
             self.connection.flush_prepared_statement_cache();
-            self.app_statements.reads.borrow_mut().clear();
+            self.app_statements.judgments.borrow_mut().clear();
             self.app_statements.schema.set(Some(schema));
         }
-        let recorded = self
-            .app_statements
-            .reads
-            .borrow()
-            .get(&context)
-            .and_then(|statements| statements.get(sql).cloned());
-        if let Some(reads) = recorded {
-            self.authorization.replay_reads(&reads);
-            return Ok(AppStatement::Cached {
-                statement: self.connection.prepare_cached(sql)?,
-                schema,
-            });
-        }
+    }
+
+    /// The cached statement `sql`, judged as `judged_as`: SQLite prepares it
+    /// unless the cache holds it with a judgment that `allows`, whose reads
+    /// are then recorded as preparing it would record them.
+    fn kept_statement(
+        &self,
+        judged_as: JudgedAs,
+        sql: &str,
+        allows: impl Fn(&Judgment) -> bool,
+    ) -> rusqlite::Result<CachedStatement<'_>> {
+        let prepare = || self.authorization.judging(|| self.connection.prepare_cached(sql));
+        let (statement, judgment) = prepare();
+        let mut statement = statement?;
+        let judgment = match judgment {
+            Some(judgment) => judgment,
+            None => {
+                let judgments = self.app_statements.judgments.borrow();
+                let kept = judgments.get(&judged_as).and_then(|of| of.get(sql));
+                if let Some(kept) = kept.filter(|kept| allows(kept)) {
+                    self.authorization.replay_reads(&kept.reads);
+                    return Ok(statement);
+                }
+                drop(judgments);
+                // The cache holds a statement SQLite prepared to be judged
+                // another way, or one whose judgment is gone.
+                statement.discard();
+                let (prepared, judgment) = prepare();
+                statement = prepared?;
+                judgment.unwrap_or_default()
+            }
+        };
         #[cfg(any(test, feature = "test-utils"))]
-        self.app_statements.fresh.set(self.app_statements.fresh.get() + 1);
-        // Judged and recorded in this context. The cache may hold the same SQL
-        // from another context, which this preparation stands in for.
-        drop(self.connection.prepare(sql)?);
-        let reads = self.authorization.statement_reads();
-        let mut recorded = self.app_statements.reads.borrow_mut();
-        if recorded.values().map(HashMap::len).sum::<usize>() >= RECORDED {
-            recorded.clear();
+        {
+            let count = match judged_as {
+                JudgedAs::App { .. } => &self.app_statements.fresh,
+                JudgedAs::Host => &self.app_statements.host_fresh,
+            };
+            count.set(count.get() + 1);
         }
-        recorded.entry(context).or_default().insert(sql.to_owned(), reads);
-        drop(recorded);
-        Ok(AppStatement::Cached { statement: self.connection.prepare_cached(sql)?, schema })
+        let mut judgments = self.app_statements.judgments.borrow_mut();
+        if judgments.values().map(HashMap::len).sum::<usize>() >= RECORDED {
+            judgments.clear();
+        }
+        judgments.entry(judged_as).or_default().insert(sql.to_owned(), judgment);
+        Ok(statement)
     }
 
     /// What `statement` lets the live query reading it narrow; `None`
@@ -450,6 +501,15 @@ impl<P: Policy> HostSql<P> {
         });
         Ok(Arc::new(plan))
     }
+}
+
+/// Whom the authorizer judged a kept statement as.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum JudgedAs {
+    /// The host's own statement.
+    Host,
+    /// The app's, by the policy `Policy::statement_key` names.
+    App { policy: u64 },
 }
 
 /// Whose statement's steps a connection ran (WorkCounts).

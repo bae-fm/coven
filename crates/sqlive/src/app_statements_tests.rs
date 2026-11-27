@@ -102,6 +102,91 @@ fn a_statement_cached_in_a_write_is_still_refused_in_a_read() {
     db.close();
 }
 
+/// How many app statements and how many of the host's `reader` has prepared.
+fn prepared(reader: &crate::HostSql<crate::NoPolicy>) -> (usize, usize) {
+    (reader.app_statements.fresh.get(), reader.app_statements.host_fresh.get())
+}
+
+/// Run `read` on one reader of `db` as a one-shot read, then three times as a
+/// live query's run, and return the app statements and the host statements
+/// those four runs prepared. Each run's transaction also runs sqlive's own
+/// statements, which a run before the counted ones prepares.
+fn prepared_in_four_runs(
+    db: &TestDatabase,
+    read: impl Fn(&crate::HostSql<crate::NoPolicy>) -> Result<(), TestError>,
+) -> (usize, usize) {
+    db.with_database(|database| {
+        let reader = database.reader();
+        reader.host(|reader| {
+            let live =
+                |read: &dyn Fn(&crate::HostSql<crate::NoPolicy>) -> Result<(), TestError>| {
+                    reader.live_read(&mut |_reads, _lookups| Ok(()), read).unwrap();
+                };
+            live(&|_| Ok(()));
+            let before = prepared(reader);
+            reader.read_snapshot(&read).unwrap();
+            for _ in 0..3 {
+                live(&read);
+            }
+            let after = prepared(reader);
+            (after.0 - before.0, after.1 - before.1)
+        })
+    })
+}
+
+/// A connection prepares an app read once: a one-shot read and each run of a
+/// live query then run that statement.
+#[test]
+fn one_shot_and_live_runs_share_one_prepared_statement() {
+    let db = notes();
+    let app = prepared_in_four_runs(&db, |reader| {
+        reader.app_query(crate::Recorded::No, TITLES, ["1"], |_| Ok(()))?;
+        Ok(())
+    });
+    assert_eq!(app, (1, 0));
+    db.close();
+}
+
+/// A connection prepares a host read once too, whether a live query's run
+/// records what it reads or not.
+#[test]
+fn one_shot_and_live_runs_share_one_prepared_host_statement() {
+    let db = notes();
+    let host = prepared_in_four_runs(&db, |reader| {
+        reader.host_live_read(TITLES, ["1"], |_| Ok(()))?;
+        Ok(())
+    });
+    assert_eq!(host, (0, 1));
+    db.close();
+}
+
+/// A read that a write ran is judged as reading only, so a read runs the
+/// statement the write prepared.
+#[test]
+fn a_select_a_write_prepared_is_reused_by_a_read() {
+    let db = notes();
+    let titles = db.host(|writer| {
+        let before = prepared(writer).0;
+        writer
+            .transaction(|writer| {
+                let select = |writer: &crate::HostSql<crate::NoPolicy>| {
+                    writer.app_query(crate::Recorded::No, TITLES, ["1"], |_| Ok(()))
+                };
+                {
+                    let _writing = writer.write_scope();
+                    select(writer)?;
+                }
+                let _reading = writer.authorization.reading();
+                select(writer)?;
+                Ok::<_, TestError>(())
+            })
+            .unwrap();
+        prepared(writer).0 - before
+    });
+    assert_eq!(titles, 1);
+    db.close();
+}
+
 /// A schema change drops what the cache kept: the statement is prepared and
 /// judged again against the new schema.
 #[test]

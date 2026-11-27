@@ -117,18 +117,28 @@ panic.
 
 **Edge cases.**
 
-- **Prepared statements.** Each connection keeps the app's statements prepared,
-  as it does the host's, since SQLite compiles into each one every trigger it
-  can fire and the views those read. sqlive prepares a statement afresh the
-  first time in each kind of call, read or write, because SQLite reports what a
-  statement reads, and sqlive refuses what it may not do, only as it prepares;
-  a later use from the cache records the same reads. The host's own SQL, a
-  migration's and that of the host's local scope are prepared afresh each time,
-  since preparing them has effects beyond judging. A schema change prepares
-  every statement again. A read or a write changes no schema, so each checks
-  for a change once, not before each statement. An app statement whose triggers
-  read a view of six tables took 16 µs to prepare and runs from the cache in
-  about 3 µs.
+- **Prepared statements.** Each connection prepares a statement once and runs
+  that one each time after, since SQLite compiles into each statement every
+  trigger it can fire and the views those read. SQLite reports what a statement
+  reads, and sqlive refuses what it may not do, only as SQLite prepares it, so
+  the connection keeps what it learned then beside the statement. A one-shot
+  read, each run of a live query and a write then run the same prepared
+  statement, and a live query's run records the same reads from it. A SELECT
+  that a write ran serves a later read. A statement that writes, which a write
+  ran, is prepared again when a read runs it, and refused. sqlive judges the
+  host's statements by other rules than the app's, so SQL that both run is
+  prepared once for each, and the app's again where the host's policy judges it
+  otherwise (`Policy::statement_key`). A schema change prepares every statement
+  again. A read or a write changes no schema, so each checks for a change once,
+  not before each statement. A connection keeps its 512 statements run last, so
+  one past those is prepared again. Preparing has effects beyond judging in a
+  migration, in a bulk write and in the host's local scope, and as a connection
+  opens, so sqlive prepares the app's statements afresh there each time. A live
+  query's run reads the values bound to a statement, which narrow what the
+  statement reads (section 4), through a `VALUES` statement that the
+  connection keeps prepared too; any other run binds them to the statement
+  alone. An app statement whose triggers read a view of six tables took 16 µs
+  to prepare and runs from the cache in about 3 µs.
 - **ANALYZE in a write.** App SQL in a write can't run `ANALYZE`, and fails
   with `StatementForbidden`: a write's capture records every table it admits,
   `sqlite_stat1` included, so the statistics `ANALYZE` changes would land among

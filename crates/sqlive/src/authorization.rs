@@ -100,18 +100,89 @@ pub enum Refresh {
     Changed,
 }
 
-/// The state an app statement is judged in as it is prepared: the same SQL
-/// can be allowed in one and refused in another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The state a kept app statement is judged in: the same SQL can be allowed
+/// in one and refused in another.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct AppContext {
     writing: bool,
     reading: bool,
-    /// Whether it records what it reads for a live query: a statement first
-    /// prepared in a one-shot read recorded nothing to replay.
-    capturing: bool,
     /// The policy's part of the cache key, so statements the policy judges
-    /// differently get different entries.
-    policy: u64,
+    /// differently get judgments of their own.
+    pub(crate) policy: u64,
+}
+
+/// What the authorizer learned of a statement as SQLite prepared it, which
+/// holds for each later run of it.
+#[derive(Clone, Default)]
+pub(crate) struct Judgment {
+    /// What the statement reads.
+    pub(crate) reads: ReadFrame,
+    /// Whether it does more than read, which a read refuses.
+    more_than_reads: bool,
+    /// Whether it does what a write refuses: changing the schema, or
+    /// `ANALYZE`.
+    refused_in_write: bool,
+}
+
+impl Judgment {
+    /// Whether the authorizer's own rules allow the statement in `context`,
+    /// as they would if SQLite prepared it there.
+    pub(crate) fn allows(&self, context: AppContext) -> bool {
+        !(context.reading && self.more_than_reads || context.writing && self.refused_in_write)
+    }
+
+    /// Add `action`, which SQLite reports as it prepares the statement,
+    /// through the view or CTE `accessor` when it names one.
+    fn add(&mut self, action: AuthAction<'_>, accessor: Option<&str>, whole: &WholeViews) {
+        if let AuthAction::Read { table_name, column_name } = action {
+            self.reads.read(table_name, column_name, accessor, whole);
+        }
+        if !reads_data_version(action) {
+            self.more_than_reads |= !only_reads(action);
+            self.refused_in_write |=
+                changes_schema(action) || matches!(action, AuthAction::Analyze { .. });
+        }
+    }
+}
+
+/// FTS5 reads the database's data version as it prepares a statement over its
+/// table, in a read or in a write that changes its index, as a local trigger
+/// keeping a search index does. Reading it changes nothing; app SQL can't
+/// name it, since a PRAGMA statement and the pragma_ table functions stay
+/// refused.
+fn reads_data_version(action: AuthAction<'_>) -> bool {
+    matches!(action, AuthAction::Pragma { pragma_name: "data_version", pragma_value: None })
+}
+
+fn only_reads(action: AuthAction<'_>) -> bool {
+    use AuthAction::*;
+    matches!(action, Read { .. } | Select | Function { .. } | Recursive)
+}
+
+fn changes_schema(action: AuthAction<'_>) -> bool {
+    use AuthAction::*;
+    matches!(
+        action,
+        CreateTable { .. }
+            | CreateTempTable { .. }
+            | DropTable { .. }
+            | DropTempTable { .. }
+            | CreateVtable { .. }
+            | DropVtable { .. }
+            | AlterTable { .. }
+            | CreateIndex { .. }
+            | CreateTempIndex { .. }
+            | DropIndex { .. }
+            | DropTempIndex { .. }
+            | CreateTrigger { .. }
+            | CreateTempTrigger { .. }
+            | DropTrigger { .. }
+            | DropTempTrigger { .. }
+            | CreateView { .. }
+            | CreateTempView { .. }
+            | DropView { .. }
+            | DropTempView { .. }
+    )
 }
 
 /// One call of a SQL function registered through a connection's setup.
@@ -170,6 +241,9 @@ struct AuthorizationState<P: Policy> {
     reading: bool,
     /// What a live query's statements read, while one of its runs reads.
     reads: Option<ReadCapture>,
+    /// While [`SqlAuthorization::judging`] runs: what the actions SQLite
+    /// reported make of the statement, `None` before the first one.
+    judgment: Option<Option<Judgment>>,
     altering: bool,
     denied: Option<PolicyError<P>>,
     /// The authorizer panicked with this: the state may be half-changed, so
@@ -198,6 +272,7 @@ impl<P: Policy> SqlAuthorization<P> {
                 local: false,
                 reading: false,
                 reads: None,
+                judgment: None,
                 altering: false,
                 denied: None,
                 broken: None,
@@ -246,6 +321,7 @@ impl<P: Policy> SqlAuthorization<P> {
         let state = Arc::clone(&self.state);
         let handle = Arc::clone(&self.handle);
         let policy = Arc::clone(&self.policy);
+        let whole = Arc::clone(&self.whole);
         move |context| {
             let mut state = lock_unpoisoned(&state);
             if let Some(bug) = &state.broken {
@@ -258,7 +334,7 @@ impl<P: Policy> SqlAuthorization<P> {
             // and this connection refuses every later statement, repeating
             // the bug its first refusal returned (E15).
             match panic_as_error::caught_sync("authorize a statement", || {
-                state.judge(context, &*policy)
+                state.judge(context, &*policy, &whole)
             }) {
                 Ok(authorization) => authorization,
                 Err(bug) => {
@@ -352,24 +428,16 @@ impl<P: Policy> SqlAuthorization<P> {
         state.reads.as_mut().expect("active read scope").reads()
     }
 
-    /// Whether the authorizer is recording what statements read or change.
-    /// It learns that only while a statement is prepared, so such a
-    /// statement must not come from the cache.
-    pub(crate) fn recording(&self) -> bool {
-        let state = lock_unpoisoned(&self.state);
-        state.reads.is_some() || state.observed.is_some()
-    }
-
     /// What decides how the authorizer judges an app statement it prepares,
-    /// or `None` while preparing has effects beyond judging and recording
-    /// reads, as in the host's own SQL, a migration's, a bulk write's or the
-    /// local scope's: then each statement is prepared afresh. A bulk write's
-    /// statement is also compiled for a connection with no pre-update hook,
-    /// so SQLite may empty a table in one step there; kept, it would empty
-    /// one so under a write's hook too, unseen. The policy judges a statement
-    /// of the local scope by rules of its own, so a statement a write kept
-    /// would run in the local scope without them, and one the local scope
-    /// kept would run in a write under them.
+    /// or `None` where sqlive keeps no app statement: while preparing has
+    /// effects beyond judging, as in a migration's SQL, a bulk write's or the
+    /// local scope's, and inside the host's own. A bulk write's statement is
+    /// also compiled for a connection with no pre-update hook, so SQLite may
+    /// empty a table in one step there; kept, it would empty one so under a
+    /// write's hook too, unseen. The policy judges a statement of the local
+    /// scope by rules of its own, so a statement a write kept would run in
+    /// the local scope without them, and one the local scope kept would run
+    /// in a write under them.
     pub(crate) fn app_context(&self) -> Option<AppContext> {
         let state = lock_unpoisoned(&self.state);
         if state.internal
@@ -383,19 +451,18 @@ impl<P: Policy> SqlAuthorization<P> {
         Some(AppContext {
             writing: state.writing,
             reading: state.reading,
-            capturing: state.reads.is_some(),
             policy: self.policy.statement_key(),
         })
     }
 
-    /// The reads the statement being prepared recorded, so a later use of
-    /// it, prepared already, records them too.
-    pub(crate) fn statement_reads(&self) -> ReadFrame {
-        lock_unpoisoned(&self.state)
-            .reads
-            .as_mut()
-            .map(|reads| reads.statement())
-            .unwrap_or_default()
+    /// Run `prepare` and give what the authorizer learned of the statement
+    /// SQLite prepared in it, or `None` when SQLite reported no action, as
+    /// when the statement came from the cache.
+    pub(crate) fn judging<T>(&self, prepare: impl FnOnce() -> T) -> (T, Option<Judgment>) {
+        lock_unpoisoned(&self.state).judgment = Some(None);
+        let prepared = prepare();
+        let judgment = lock_unpoisoned(&self.state).judgment.take();
+        (prepared, judgment.expect("preparing a statement judges no other"))
     }
 
     /// Record the reads an already prepared statement made when it was
@@ -616,9 +683,12 @@ impl<P: Policy> AuthorizationState<P> {
 
     /// Judge the statement being prepared, `context`, recording what it
     /// reads and changes.
-    fn judge(&mut self, context: AuthContext<'_>, policy: &P) -> Authorization {
+    fn judge(&mut self, context: AuthContext<'_>, policy: &P, whole: &WholeViews) -> Authorization {
         #[cfg(any(test, feature = "test-utils"))]
         assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
+        if let Some(judgment) = &mut self.judgment {
+            judgment.get_or_insert_default().add(context.action, context.accessor, whole);
+        }
         if let (
             AuthAction::Insert { table_name }
             | AuthAction::Update { table_name, .. }
@@ -673,45 +743,15 @@ impl<P: Policy> AuthorizationState<P> {
     /// any.
     fn refusal(&mut self, context: AuthContext<'_>) -> Result<(), PolicyError<P>> {
         use AuthAction::*;
-        // FTS5 reads the database's data version as it prepares a statement
-        // over its table, in a read or in a write that changes its index, as
-        // a local trigger keeping a search index does. Reading it changes
-        // nothing; app SQL can't name it, since a PRAGMA statement and the
-        // pragma_ table functions stay refused.
-        if matches!(context.action, Pragma { pragma_name: "data_version", pragma_value: None }) {
+        if reads_data_version(context.action) {
             return Ok(());
         }
-        if self.reading
-            && !matches!(context.action, Read { .. } | Select | Function { .. } | Recursive)
-        {
+        if self.reading && !only_reads(context.action) {
             return Err(crate::Error::StatementForbidden {
                 operation: "writing through a read context",
             });
         }
-        if self.writing
-            && matches!(
-                context.action,
-                CreateTable { .. }
-                    | CreateTempTable { .. }
-                    | DropTable { .. }
-                    | DropTempTable { .. }
-                    | CreateVtable { .. }
-                    | DropVtable { .. }
-                    | AlterTable { .. }
-                    | CreateIndex { .. }
-                    | CreateTempIndex { .. }
-                    | DropIndex { .. }
-                    | DropTempIndex { .. }
-                    | CreateTrigger { .. }
-                    | CreateTempTrigger { .. }
-                    | DropTrigger { .. }
-                    | DropTempTrigger { .. }
-                    | CreateView { .. }
-                    | CreateTempView { .. }
-                    | DropView { .. }
-                    | DropTempView { .. }
-            )
-        {
+        if self.writing && changes_schema(context.action) {
             return Err(crate::Error::StatementForbidden {
                 operation: "schema changes in a write",
             });
