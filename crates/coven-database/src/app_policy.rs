@@ -34,11 +34,11 @@ struct PolicyState {
     /// The tables, lowercase, the app statement being prepared drops: their
     /// rowid guards go with them (`rowid_policy.rs`).
     dropping: BTreeSet<String>,
-    /// Whether app SQL may read `coven_sync_status` and
-    /// `coven_retry_effect`: only on the handle that holds the writer lock,
-    /// whose own sync their rows describe. A read-only handle can't tell
-    /// whether the writer that last wrote them still runs.
-    writer_state: bool,
+    /// Whether app SQL may read what only the store's writer reads
+    /// (`coven_schema::WRITER_ONLY`): only on the handle that holds the
+    /// writer lock, whose own sync those rows describe. A read-only handle
+    /// can't tell whether the writer that last wrote them still runs.
+    reads_writer_only: bool,
 }
 
 /// The tables whose hidden rowids may have changed since coven last read
@@ -106,14 +106,13 @@ impl CovenPolicy {
         Self::judging(tables, true)
     }
 
-    /// The policy of a read-only handle's connection, which may not read the
-    /// sync status or the retry effect (`internal_schema_sync_status.rs`,
-    /// `internal_schema_retry_effect.rs`).
+    /// The policy of a read-only handle's connection, which may not read what
+    /// only the store's writer reads (`coven_schema::WRITER_ONLY`).
     pub(crate) fn read_only(tables: &[SyncedTable]) -> Self {
         Self::judging(tables, false)
     }
 
-    fn judging(tables: &[SyncedTable], writer_state: bool) -> Self {
+    fn judging(tables: &[SyncedTable], reads_writer_only: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(PolicyState {
                 applying: false,
@@ -127,7 +126,7 @@ impl CovenPolicy {
                 changed_tables: ChangedTables::None,
                 through_views: BTreeSet::new(),
                 dropping: BTreeSet::new(),
-                writer_state,
+                reads_writer_only,
             })),
         }
     }
@@ -337,11 +336,11 @@ impl PolicyState {
         // Coven judges the app's triggers when it compiles them, and they
         // never run on a read-only handle, which changes no row.
         if let Read { table_name, .. } = action.action {
-            if !self.writer_state
+            if !self.reads_writer_only
                 && action.owner == Owner::App
-                && crate::internal_schema::WRITER_STATE
+                && coven_schema::WRITER_ONLY
                     .iter()
-                    .any(|table| table_name.eq_ignore_ascii_case(table))
+                    .any(|object| table_name.eq_ignore_ascii_case(object))
             {
                 return Some(DbError::StatementForbidden {
                     operation: "reading the writer's sync state through a read-only handle",

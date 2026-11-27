@@ -514,6 +514,20 @@ over coven's own tables, so it is true in every transaction that changes them,
 and a live query that reads one reruns when coven changes what it read. The app
 reads the views and can't write them, and it still can't read coven's tables.
 
+Four of these views and tables show the writer's own sync:
+`coven_sync_status`, `coven_retry_effect`, and the two views that read them,
+`coven_sync_state` and `coven_upload_phases`. Only the writer, the handle that
+holds the store's writer lock, reads them. A read-only handle refuses app SQL
+that reads one of the four (§19.1). The build of an app refuses a compiled read
+of one unless the app marks the read for the writer to run ([sqlive-compose's
+spec, section
+8](../crates/sqlive-compose/SPEC.md#8-what-the-build-checks)). So when Ana adds
+the sync line to a screen that her photo app reads through a read-only handle,
+her build fails and names the view before anyone opens the screen. coven lists
+the four once, in `WRITER_ONLY` ([api.md E4](api.md#e4-reading)). The app's
+build and the read-only handle both check that list, so a change to the list
+changes both.
+
 `coven_files` is coven's own synced table of file records (§17.2): coven writes
 it, and app SQL reads it, as it reads the views. Each change to a record is a
 statement on the table, as this device makes, stores or deletes it and as

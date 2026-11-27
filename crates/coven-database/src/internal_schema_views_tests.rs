@@ -1,3 +1,4 @@
+use crate::test_utils::readable_objects::tests::{build_probe, sync_functions};
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::sql;
 use crate::{DbError, Migration, RowIdentity, SyncedTable};
@@ -514,6 +515,42 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
     db.close().await.unwrap();
 }
 
+/// A build refuses a read-only handle's read of a table or view of
+/// `coven_schema::WRITER_ONLY`, and a read-only handle refuses the same SQL
+/// as it runs. Both read every other table and view app SQL may read.
+#[tokio::test]
+async fn a_read_only_handle_refuses_what_a_build_refuses_it() {
+    let store = TestStore::new();
+    let migrations = || vec![Migration::addition(1, "notes", NOTES)];
+    let builder = || store.builder(notes(), migrations()).sync_functions(sync_functions());
+    let writer = builder().open().await.unwrap();
+    // With sync's computations, so that SQLite can prepare the views that
+    // call them and the policy is what refuses each.
+    let reader = builder().open_read_only().await.unwrap();
+    let probe = build_probe();
+    for name in coven_schema::READABLE {
+        for statement in [format!("SELECT * FROM {name}"), format!("SELECT count(*) FROM {name}")] {
+            let plan = probe.compiled_plan(&statement).expect(name).expect(name);
+            let build_refuses = coven_schema::WRITER_ONLY.iter().any(|object| plan.reads(object));
+            let sql = statement.clone();
+            let answer = reader.read(move |read| Ok(read.query(&sql, [], |_| Ok(()))?)).await;
+            let refusal = match answer.map_err(database_error) {
+                Ok(_) => None,
+                Err(error) => Some(error.to_string()),
+            };
+            let expected = build_refuses.then(|| {
+                DbError::StatementForbidden {
+                    operation: "reading the writer's sync state through a read-only handle",
+                }
+                .to_string()
+            });
+            assert_eq!(refusal, expected, "{statement}");
+        }
+    }
+    reader.close().await.unwrap();
+    writer.close().await.unwrap();
+}
+
 /// A build analyzes app SQL against `readable_objects_sql`, and a store
 /// runs each plan it ships: a compiled read of every table and view app SQL
 /// may read finds each as the build found it (§4).
@@ -521,16 +558,7 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
 async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
     use crate::file_write::tests::open;
     use crate::Provenance;
-    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
-        .iter()
-        .map(|function| sqlive::StandInFunction {
-            name: function.name.into(),
-            arguments: function.arguments,
-            deterministic: function.deterministic,
-        })
-        .collect();
-    let probe = sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[])
-        .unwrap();
+    let probe = build_probe();
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     for name in coven_schema::READABLE {
@@ -555,24 +583,16 @@ async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
 }
 
 /// `coven_schema::WRITER_ONLY` names each view and table app SQL reads that
-/// reaches a table of the writer's own sync state, which a read-only handle's
-/// policy refuses, and no other.
+/// reaches a table of the writer's own sync, and no other.
 #[test]
 fn the_writer_only_objects_are_those_that_read_the_writers_sync_state() {
-    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
-        .iter()
-        .map(|function| sqlive::StandInFunction {
-            name: function.name.into(),
-            arguments: function.arguments,
-            deterministic: function.deterministic,
-        })
-        .collect();
-    let probe = sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[])
-        .unwrap();
+    let probe = build_probe();
     for name in coven_schema::READABLE {
         let sql = format!("SELECT * FROM {name}");
         let plan = probe.compiled_plan(&sql).expect(name).expect(name);
-        let reaches = crate::internal_schema::WRITER_STATE.iter().any(|table| plan.reads(table));
+        let reaches = [coven_schema::SYNC_STATUS, coven_schema::RETRY_EFFECT]
+            .iter()
+            .any(|table| plan.reads(table));
         assert_eq!(coven_schema::WRITER_ONLY.contains(&name), reaches, "{name}");
     }
     for name in coven_schema::WRITER_ONLY {

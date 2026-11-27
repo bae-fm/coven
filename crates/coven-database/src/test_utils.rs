@@ -3,7 +3,7 @@
 use crate::{Migration, RowIdentity, SyncedTable};
 
 #[path = "readable_objects.rs"]
-mod readable_objects;
+pub(crate) mod readable_objects;
 pub use crate::internal_schema::sync_status::{
     save_last_pass_outside_store, save_location_outside_store,
 };

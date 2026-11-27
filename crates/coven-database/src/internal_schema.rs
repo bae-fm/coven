@@ -79,10 +79,10 @@ pub(crate) fn reserved_name(name: &str) -> bool {
     name.starts_with("_coven_") || name.starts_with("coven_")
 }
 
+pub(crate) use coven_schema::FILES;
 #[cfg(test)]
 pub(crate) use coven_schema::OUTSIDE_STORE_TABLES;
 pub(crate) use coven_schema::{initial_input_schema, initial_schema};
-pub(crate) use coven_schema::{FILES, RETRY_EFFECT, SYNC_STATUS};
 
 #[path = "internal_schema_files.rs"]
 mod files;
@@ -98,12 +98,6 @@ pub(crate) mod sync_status;
 
 #[path = "internal_schema_retry_effect.rs"]
 pub(crate) mod retry_effect;
-
-/// Coven's tables that describe this process's own sync, which only the
-/// handle holding the store's writer lock may read. A read-only handle's
-/// policy refuses app SQL that reads either, directly or through a view such
-/// as `coven_sync_state`.
-pub(crate) const WRITER_STATE: [&str; 2] = [SYNC_STATUS, RETRY_EFFECT];
 
 /// Whether `name` is one of the tables the app's triggers may follow.
 pub(crate) fn followed(name: &str) -> bool {

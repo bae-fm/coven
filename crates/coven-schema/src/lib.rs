@@ -183,8 +183,9 @@ pub use views::{MEMORY_TABLES, READABLE};
 /// the tables that describe the writer's own sync, and the views that read
 /// them (api.md E5). A build that compiles an app's reads names them as the
 /// compiler's `Setup::writer_only`, so a read not marked `writer` that reads
-/// one fails the build. The views come first, so such a failure names the
-/// view the read reads.
+/// one fails the build, and a read-only handle's policy refuses app SQL that
+/// reads one. The views come first, so a build's failure names the view the
+/// read reads.
 pub const WRITER_ONLY: [&str; 4] =
     ["coven_sync_state", "coven_upload_phases", SYNC_STATUS, RETRY_EFFECT];
 

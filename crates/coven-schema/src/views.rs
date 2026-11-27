@@ -120,7 +120,7 @@ pub(crate) const SCHEMA: &str = concat!(
     // `coven_sending`, so a live query of this view runs again as a send
     // starts or ends. The subquery also reads `coven_sync_status` and
     // `coven_retry_effect`, so on a read-only handle the policy refuses each
-    // read of this view with `StatementForbidden` (`WRITER_STATE`), and the
+    // read of this view with `StatementForbidden` (`WRITER_ONLY`), and the
     // read returns no state.
     "CREATE VIEW coven_sync_state(state,last_synced,pending,detail) AS
         SELECT x.state->>'$.state',x.last_synced,x.state->>'$.pending',
@@ -168,7 +168,7 @@ pub(crate) const SCHEMA: &str = concat!(
     // merging either subquery into the SELECT around it, which would call
     // the function once for each column. The view reads `coven_sync_status`
     // and `coven_retry_effect`, so on a read-only handle the policy refuses
-    // each read of it with `StatementForbidden` (`WRITER_STATE`).
+    // each read of it with `StatementForbidden` (`WRITER_ONLY`).
     "CREATE VIEW coven_upload_phases(file,phase,wait,at,pending) AS
         SELECT y.file,y.phase->>'$.phase',y.phase->>'$.wait',
             CASE y.phase->>'$.wait' WHEN 'retrying' THEN y.retry_at

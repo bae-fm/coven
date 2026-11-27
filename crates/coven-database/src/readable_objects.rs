@@ -69,4 +69,4 @@ pub fn record_user_file(
 
 #[cfg(test)]
 #[path = "readable_objects_tests.rs"]
-mod tests;
+pub(crate) mod tests;

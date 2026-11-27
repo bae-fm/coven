@@ -19,7 +19,7 @@ const DEVICE: DeviceId = DeviceId(7);
 /// Computations that decode the facts the views pass and show every state
 /// as synced and every upload as queued: sync's own computations are in
 /// coven-sync, which this crate can't reach.
-fn sync_functions() -> crate::SyncFunctions {
+pub(crate) fn sync_functions() -> crate::SyncFunctions {
     crate::SyncFunctions::new::<crate::sync_facts::tests::Record>(
         |_facts| {
             Ok(crate::SyncStateRow {
@@ -37,6 +37,20 @@ fn outside_store() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     make_readable_objects(&connection, DEVICE, &sync_functions()).unwrap();
     connection
+}
+
+/// The schema a build checks app SQL against, as an app's build script makes
+/// it from coven's objects.
+pub(crate) fn build_probe() -> sqlive::SchemaProbe {
+    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
+        .iter()
+        .map(|function| sqlive::StandInFunction {
+            name: function.name.into(),
+            arguments: function.arguments,
+            deterministic: function.deterministic,
+        })
+        .collect();
+    sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[]).unwrap()
 }
 
 /// Every readable object, and every table in `OUTSIDE_STORE_TABLES`.
@@ -229,4 +243,31 @@ fn the_exported_function_list_is_what_the_connection_registers() {
         })
         .collect();
     assert_eq!(registered, coven_schema::SQL_FUNCTIONS);
+}
+
+/// sqlive reads none of coven's views whole: a live query narrows each
+/// through the view's own SELECT (§4), so a read's report names the tables
+/// the view reads, and no view of coven's.
+#[test]
+fn sqlive_reads_no_view_of_covens_whole() {
+    let outside = outside_store();
+    let views: Vec<&str> = READABLE
+        .into_iter()
+        .filter(|name| {
+            outside
+                .query_row("SELECT type='view' FROM sqlite_schema WHERE name=?1", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        })
+        .collect();
+    assert!(views.contains(&"coven_uploads"), "{views:?}");
+    let probe = build_probe();
+    for name in READABLE {
+        let report = probe.read_report(&format!("SELECT * FROM {name}")).unwrap();
+        let sqlive::ReadReport::Entries(entries) = &report else { panic!("{name}: {report}") };
+        for entry in entries {
+            assert!(!views.contains(&entry.object.as_str()), "{name}: {report}");
+        }
+    }
 }

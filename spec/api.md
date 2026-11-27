@@ -4363,7 +4363,8 @@ pub fn readable_objects_sql() -> String;
 /// `coven_retry_effect` (E5). A build that compiles an app's reads names them
 /// as the compiler's `Setup::writer_only`, so that a read not marked
 /// `writer` that reads one fails the build (sqlive-compose's spec, section
-/// 8). `coven-schema` defines the list, and `coven` re-exports it.
+/// 8), and a read-only handle refuses app SQL that reads one of them (E5).
+/// `coven-schema` defines the list, and `coven` re-exports it.
 pub const WRITER_ONLY: [&str; 4];
 
 /// Every SQL function coven registers on a store's connection, by name, with
