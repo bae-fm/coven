@@ -58,6 +58,21 @@ pub enum DropboxShareJob {
     Forgotten,
 }
 
+impl StorageFolder {
+    /// The Dropbox shared folder `shared_folder_id`, named `name`, as a setup
+    /// location. An id no location can have is the provider's protocol
+    /// failure.
+    pub fn dropbox_shared(name: &str, shared_folder_id: &str) -> Result<Self, StorageError> {
+        let storage = StorageConfig::Dropbox {
+            account_label: None,
+            folder_label: None,
+            location: DropboxLocation::SharedFolder { namespace_id: shared_folder_id.into() },
+        };
+        storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
+        Ok(Self { name: name.into(), storage })
+    }
+}
+
 /// Provider metadata calls using the same session and cooldown as store setup.
 pub(super) struct OAuthFolders {
     session: OAuthSession,
@@ -354,15 +369,8 @@ impl OAuthFolders {
 /// The shared folder Dropbox's metadata `item` describes, as a setup
 /// location.
 fn dropbox_folder(item: &Value) -> Result<StorageFolder, StorageError> {
-    let storage = StorageConfig::Dropbox {
-        account_label: None,
-        folder_label: None,
-        location: DropboxLocation::SharedFolder {
-            namespace_id: http::string(item, "shared_folder_id")?.into(),
-        },
-    };
-    storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    Ok(StorageFolder { name: http::string(item, "name")?.into(), storage })
+    let id = http::string(item, "shared_folder_id")?;
+    StorageFolder::dropbox_shared(http::string(item, "name")?, id)
 }
 
 fn onedrive_parent(parent: &StorageConfig) -> Result<(&str, &str), StorageError> {

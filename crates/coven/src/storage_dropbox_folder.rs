@@ -188,14 +188,7 @@ impl StorageConnections {
             }
             DropboxFolderStep::Made { shared_folder_id, folder_name } => match found {
                 DropboxName::Taken { shared_folder_id: Some(id) } if id == shared_folder_id => {
-                    Ok(StorageFolder {
-                        name: folder_name,
-                        storage: StorageConfig::Dropbox {
-                            account_label: None,
-                            folder_label: None,
-                            location: DropboxLocation::SharedFolder { namespace_id: id },
-                        },
-                    })
+                    Ok(StorageFolder::dropbox_shared(&folder_name, &id)?)
                 }
                 DropboxName::Taken { .. } => Err(name_taken()),
                 // The person deleted or moved the folder since.
@@ -374,48 +367,42 @@ impl StorageConnections {
     }
 
     /// Follow the jobs the store opened with, each as its own work that
-    /// nobody waits for. What fails stays journaled for the next call that
-    /// asks for the folder, or the next open.
+    /// nobody waits for. A job Dropbox or its sign-in fails stays journaled
+    /// for the next call that asks for the folder, or the next open; any
+    /// other failure is a bug, which goes to the app's sink.
     pub(crate) fn resume_folder_creations(self: &Arc<Self>, opened: OpenedFolders) {
         let OpenedFolders { jobs, sign_in } = opened;
         for row in jobs {
-            let Some(bytes) = &sign_in else {
-                tracing::warn!("a Dropbox sharing job has no kept sign-in to follow it with");
-                return;
-            };
-            let bytes = coven_crypto::SecretBytes::new(bytes.as_bytes().to_vec());
+            let bytes = sign_in
+                .as_ref()
+                .map(|bytes| coven_crypto::SecretBytes::new(bytes.as_bytes().to_vec()));
             let owner = self.clone();
             let resuming = async move {
                 let work = Box::pin(owner.resume_folder(row, bytes));
                 match owner.folder_creations.run(work).await {
-                    Ok(resumed) => resumed,
+                    Ok(resumed) => resumed.or_else(left_journaled),
                     Err(Stopped::Closed | Stopped::SetUp) => Ok(()),
                 }
             };
             let bugs = self.database.bugs().clone();
-            let task = crate::task::spawn_completing("follow a Dropbox sharing job", bugs, {
-                async move {
-                    if let Err(error) = resuming.await {
-                        tracing::warn!("a Dropbox sharing job can't be followed yet: {error}");
-                    }
-                    Ok::<_, StorageSetupError>(())
-                }
-            });
-            // The task runs to its end though nobody waits for it.
-            drop(task);
+            // The task runs to its end though nobody waits for it, and the
+            // bug its failure carries goes to the sink.
+            drop(crate::task::spawn_completing(RESUMING, bugs, resuming));
         }
     }
 
     async fn resume_folder(
         &self,
         row: DropboxFolderJournal,
-        sign_in: coven_crypto::SecretBytes,
+        sign_in: Option<coven_crypto::SecretBytes>,
     ) -> Result<(), StorageSetupError> {
-        let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(sign_in.as_bytes())?
-        else {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("a folder's kept sign-in is a Dropbox sign-in")
-                .into());
+        // The sign-in is kept before its job is journaled.
+        let sign_in =
+            sign_in.ok_or_else(|| resume_bug("a journaled sharing job has no kept sign-in"))?;
+        let decoded = StorageCredentials::decode(sign_in.as_bytes())
+            .map_err(|error| resume_bug(format!("a kept sign-in can't be read: {error}")))?;
+        let StorageCredentials::OAuth(tokens) = decoded else {
+            return Err(resume_bug("a folder's kept sign-in is not an OAuth sign-in"));
         };
         let sign_in = SessionSignIn::new(tokens, self.clients.clone());
         let auth = crate::authentication::held_auth(&sign_in, CloudProvider::Dropbox)?;
@@ -432,7 +419,15 @@ impl StorageConnections {
                 Err(error) => return Err(error.into()),
             }
         };
+        // One sign-in is kept, the latest a job was followed with, so a job
+        // another account asked for waits for a call by that account.
         if row.account() != account {
+            tracing::warn!(
+                folder = row.name(),
+                asked_by = row.account(),
+                signed_in = %account,
+                "the kept sign-in reaches another account than a Dropbox sharing job's, which waits"
+            );
             return Ok(());
         }
         let one = self.folder_creations.name(row.name());
@@ -460,6 +455,29 @@ impl StorageConnections {
         }
         self.keychain.delete_dropbox_folder_credentials()?;
         Ok(())
+    }
+}
+
+/// What following a journaled job is called in a bug and its task.
+const RESUMING: &str = "follow a Dropbox sharing job";
+
+fn resume_bug(message: impl Into<String>) -> StorageSetupError {
+    StorageSetupError::Bug(crate::task::Bug::new(RESUMING, message))
+}
+
+/// A resumed follow's failure. Dropbox's and the sign-in's are expected, as
+/// when the person has signed coven out: the job stays journaled. Any other
+/// is returned as a bug.
+fn left_journaled(error: StorageSetupError) -> Result<(), StorageSetupError> {
+    if crate::task::CarriesBug::bug(&error).is_some() {
+        return Err(error);
+    }
+    match error {
+        StorageSetupError::Storage(_) | StorageSetupError::OAuth(_) => {
+            tracing::warn!("a Dropbox sharing job can't be followed yet: {error}");
+            Ok(())
+        }
+        error => Err(resume_bug(format!("{error:?}"))),
     }
 }
 

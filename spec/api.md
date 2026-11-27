@@ -873,6 +873,7 @@ pub enum DropboxName {
     },
 }
 
+#[cfg(feature = "test-utils")]
 /// What Dropbox answered a request to make a shared folder.
 pub enum DropboxShare {
     /// The folder is made and shared.
@@ -883,6 +884,7 @@ pub enum DropboxShare {
     AlreadyShared,
 }
 
+#[cfg(feature = "test-utils")]
 /// How following a sharing job ended.
 pub enum DropboxShareJob {
     /// It made and shared the folder.
@@ -5040,6 +5042,12 @@ Codes never carry a folder label.
 pub struct StorageFolder {
     pub name: String,
     pub storage: StorageConfig,
+}
+
+impl StorageFolder {
+    /// The Dropbox shared folder `shared_folder_id`, named `name`, as a setup
+    /// location. An id no location can have fails with `Protocol`.
+    pub fn dropbox_shared(name: &str, shared_folder_id: &str) -> Result<Self, StorageError>;
 }
 
 impl CovenHandle {

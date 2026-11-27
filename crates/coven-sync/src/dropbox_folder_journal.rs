@@ -5,8 +5,7 @@
 
 use crate::SyncError;
 use coven_database::{
-    operation_kind::DROPBOX_FOLDER, DbError, NewOperation, OperationId, OperationRecord,
-    OperationUpdate, StoreDatabase,
+    operation_kind::DROPBOX_FOLDER, NewOperation, OperationRecord, StoreDatabase,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +40,7 @@ struct FolderWork {
 
 /// One folder's journal row, as its owner last committed it.
 pub struct DropboxFolderJournal {
-    id: OperationId,
-    last_step: u32,
+    record: OperationRecord,
     work: FolderWork,
 }
 
@@ -59,15 +57,23 @@ impl DropboxFolderJournal {
             name: name.into(),
             step: DropboxFolderStep::Asked,
         };
+        let data = serde_json::to_vec(&work)?;
         let id = database
             .start_operation(NewOperation {
                 kind: DROPBOX_FOLDER.into(),
-                data: serde_json::to_vec(&work)?,
+                data: data.clone(),
                 started_by: DROPBOX_FOLDER.into(),
                 pauses_writes: false,
             })
             .await?;
-        Ok(Self { id, last_step: 0, work })
+        let record = OperationRecord {
+            id,
+            kind: DROPBOX_FOLDER.into(),
+            last_step: 0,
+            data,
+            started_by: DROPBOX_FOLDER.into(),
+        };
+        Ok(Self { record, work })
     }
 
     /// Every folder's row, oldest first.
@@ -90,11 +96,8 @@ impl DropboxFolderJournal {
     }
 
     fn read(record: OperationRecord) -> Result<Self, SyncError> {
-        Ok(Self {
-            id: record.id,
-            last_step: record.last_step,
-            work: serde_json::from_slice(&record.data)?,
-        })
+        let work = serde_json::from_slice(&record.data)?;
+        Ok(Self { record, work })
     }
 
     /// The Dropbox id of the account that asked.
@@ -118,26 +121,18 @@ impl DropboxFolderJournal {
         database: &StoreDatabase,
         step: DropboxFolderStep,
     ) -> Result<(), SyncError> {
-        let last_step = self
-            .last_step
-            .checked_add(1)
-            .ok_or(DbError::Invariant { what: "an operation's steps fit u32" })?;
         let work =
             FolderWork { account: self.work.account.clone(), name: self.work.name.clone(), step };
-        database
-            .advance_operation(OperationUpdate {
-                id: self.id,
-                previous: self.last_step,
-                last_step,
-                data: serde_json::to_vec(&work)?,
-            })
-            .await?;
-        (self.last_step, self.work) = (last_step, work);
+        let update = self.record.next_step(serde_json::to_vec(&work)?)?;
+        let (last_step, data) = (update.last_step, update.data.clone());
+        database.advance_operation(update).await?;
+        (self.record.last_step, self.record.data) = (last_step, data);
+        self.work = work;
         Ok(())
     }
 
     /// End the row.
     pub async fn end(&self, database: &StoreDatabase) -> Result<(), SyncError> {
-        Ok(database.finish_operation(self.id).await?)
+        Ok(database.finish_operation(self.record.id).await?)
     }
 }

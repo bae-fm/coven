@@ -253,3 +253,19 @@ async fn a_committed_setup_ends_the_folders_being_made() {
     f.fake.consumed();
     f.handle.close().await.unwrap();
 }
+
+/// A journaled job is never without the sign-in kept to follow it: opening a
+/// store that finds one so reports the bug to the app's sink.
+#[tokio::test]
+async fn a_job_without_its_kept_sign_in_is_reported_as_a_bug() {
+    let f = signed_in().await;
+    let creating = follow_offline(&f).await;
+    closes(&f.handle).await;
+    creating.await.unwrap().unwrap_err();
+    f.app.store_keychain(f.handle.store_id()).delete_dropbox_folder_credentials().unwrap();
+    let handle = f.reopen().await;
+    let bug = coven_foundation::clock::within(f.bugs.next()).await.expect("the sink hears a bug");
+    assert_eq!(bug.operation, "follow a Dropbox sharing job");
+    assert_eq!(bug.message, "a journaled sharing job has no kept sign-in");
+    handle.close().await.unwrap();
+}

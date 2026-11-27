@@ -129,11 +129,14 @@ struct Fixture {
     storage: Arc<MemoryStorage>,
     connector: Arc<Connector>,
     clock: Arc<FixedClock>,
+    /// The app's bug sink, which keeps every bug it hears of.
+    bugs: Arc<crate::task::HeardBugs>,
 }
 impl Fixture {
     async fn new(location: StorageConfig) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let app = Coven::in_memory(root.path().into());
+        let bugs = crate::task::HeardBugs::shared();
+        let app = Coven::in_memory_reporting_to(root.path().into(), bugs.clone());
         let clock = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
         let sign_in = SignIn::new().await;
         let fake = Fake::new().await;
@@ -161,7 +164,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        Self { _root: root, app, handle, sign_in, fake, storage, connector, clock }
+        Self { _root: root, app, handle, sign_in, fake, storage, connector, clock, bugs }
     }
     /// What setup reads: the account from the fake provider, then, once
     /// connected, the folder, which the memory provider names `folder`.
