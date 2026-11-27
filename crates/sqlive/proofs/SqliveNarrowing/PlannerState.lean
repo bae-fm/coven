@@ -417,6 +417,93 @@ theorem readCore_keeps (s : Statement) (st : PState) (k : Nat) :
   · exact PState.narrow_keeps s _ _ _
   · exact PState.narrowOn_keeps s _ _ _ _
 
+/-! Passing a derived item's ORs into its arms only adds ORs to items. -/
+
+/-- A fold each of whose steps keeps a property keeps it. -/
+theorem foldl_invariant {α β : Type} {P : β → Prop} {g : β → α → β} :
+    ∀ (l : List α), (∀ b x, x ∈ l → P b → P (g b x)) → ∀ b, P b → P (l.foldl g b)
+  | [], _, _, h => h
+  | x :: l, hg, b, h =>
+    foldl_invariant l (fun b' y hy => hg b' y (List.mem_cons_of_mem x hy)) _ (hg b x (by simp) h)
+
+/-- A step of `PushDown.pushOrs` gives its target the OR, or changes
+nothing. -/
+theorem PushDown.passOr_cases (s : Statement) (target : Nat) (rename : Nat → Option Nat)
+    (sides : List Side) (st : PState) :
+    PushDown.passOr s target rename sides st = st ∨
+      (sides ≠ [] ∧ (st.items target).leftOn = none ∧
+        PushDown.passOr s target rename sides st =
+          { st.update target fun p => { p with ors := p.ors ++ [sides.map (PushDown.sideInto s target rename)] } with
+            pushedOrs := st.pushedOrs ++ [(target, sides.map (PushDown.sideInto s target rename))] }) := by
+  unfold PushDown.passOr
+  simp only
+  split
+  · rename_i h
+    simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+      Option.isNone_iff_eq_none] at h
+    exact Or.inr ⟨h.1.1.1, h.1.2, rfl⟩
+  · exact Or.inl rfl
+
+/-- What holds of a state and of each state a step of `PushDown.pushOrs` gives
+from one it holds of holds of the state `pushOrs` gives. -/
+theorem PushDown.pushOrs_induct {s : Statement} {P : PState → Prop} {st : PState} {item : Nat}
+    {ors : List (List Side)} (h : P st)
+    (step : ∀ found, PushDown.arms s item = some found → ∀ arm ∈ found, ∀ sides ∈ ors, ∀ target,
+      target ∈ ((PushDown.sideColumns sides).filterMap fun c => (arm[c]?).join.map (·.1)).eraseDups →
+      ∀ x, P x → P (PushDown.passOr s target (PushDown.renameInto arm target) sides x)) :
+    P (PushDown.pushOrs s st item ors) := by
+  unfold PushDown.pushOrs
+  split
+  · exact h
+  · rename_i found hfound
+    refine foldl_invariant _ (fun st0 arm harm h0 => ?_) _ h
+    refine foldl_invariant _ (fun st1 sides hsides h1 => ?_) _ h0
+    exact foldl_invariant _ (fun st2 target htarget h2 => step found hfound arm harm sides hsides target htarget st2 h2) _ h1
+
+/-- `st'` is `st` with more ORs on some items. -/
+def PState.AddsOrs (st st' : PState) : Prop :=
+  st'.edges = st.edges ∧ st'.pushed = st.pushed ∧
+    (∀ i, ∃ more, st'.items i = { st.items i with ors := (st.items i).ors ++ more }) ∧
+    ∀ x ∈ st.pushedOrs, x ∈ st'.pushedOrs
+
+theorem PState.AddsOrs.refl (st : PState) : st.AddsOrs st :=
+  ⟨rfl, rfl, fun _ => ⟨[], by simp⟩, fun _ h => h⟩
+
+theorem PushDown.pushOrs_adds (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) :
+    st.AddsOrs (PushDown.pushOrs s st item ors) := by
+  refine PushDown.pushOrs_induct (P := st.AddsOrs) (PState.AddsOrs.refl st)
+    (fun _ _ arm _ sides _ target _ x hx => ?_)
+  rcases PushDown.passOr_cases s target (PushDown.renameInto arm target) sides x with h | ⟨_, _, h⟩
+  · rw [h]; exact hx
+  · rw [h]
+    refine ⟨hx.1, hx.2.1, fun i => ?_, fun y hy => List.mem_append_left _ (hx.2.2.2 y hy)⟩
+    obtain ⟨more, hmore⟩ := hx.2.2.1 i
+    simp only [PState.update]
+    split
+    · rename_i hi
+      subst hi
+      exact ⟨more ++ [sides.map (PushDown.sideInto s i (PushDown.renameInto arm i))],
+        by rw [hmore]; simp⟩
+    · exact ⟨more, hmore⟩
+
+theorem PState.AddsOrs.field {α : Type} {st st' : PState} (h : st.AddsOrs st') (get : PItem → α)
+    (hget : ∀ (p : PItem) (ors : List (List Side)), get { p with ors } = get p) (i : Nat) :
+    get (st'.items i) = get (st.items i) := by
+  obtain ⟨more, hmore⟩ := h.2.2.1 i
+  rw [hmore, hget]
+
+theorem PushDown.pushOrs_grows (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) :
+    st.Grows (PushDown.pushOrs s st item ors) := by
+  have h := PushDown.pushOrs_adds s st item ors
+  refine ⟨fun i hl => ?_, fun i m hm => ?_, fun e he => by rw [h.2.1]; exact he⟩
+  · rwa [h.field (·.leftOn) (fun _ _ => rfl)] at hl
+  · rwa [h.field (·.memberships) (fun _ _ => rfl)]
+
+theorem PushDown.pushOrs_keeps (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) :
+    PState.Keeps s st (PushDown.pushOrs s st item ors) :=
+  ⟨PushDown.pushOrs_grows s st item ors,
+    fun e he => Or.inl (by rwa [(PushDown.pushOrs_adds s st item ors).2.1] at he)⟩
+
 theorem ordered_keeps (s : Statement) :
     ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat),
       PState.Keeps s st (ordered.go s fuel all st order waited).1
@@ -426,6 +513,7 @@ theorem ordered_keeps (s : Statement) :
     split
     · exact PState.Keeps.refl s st
     · refine PState.Keeps.trans ?_ (ordered_keeps s fuel _ _ _ _)
+      refine PState.Keeps.trans ?_ (PushDown.pushOrs_keeps s _ _ _)
       refine PState.Keeps.trans (PState.update_keeps (fun h => h)
         (fun _ h => List.mem_append_left _ h)) (PushDown.pushDown_keeps s _ _ _ _ _ _ ?_)
       intro e he
@@ -485,7 +573,7 @@ def ordered.placed (s : Statement) (st : PState) (order : List Nat) (next : Nat)
   let either := (st.items next).ors.filter fun sides =>
     sides.all fun side => side.edges.all fun e => e.placedIn order
   let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
-  PushDown.pushDown s s.fuel s.fuel st next none taken
+  PushDown.pushOrs s (PushDown.pushDown s s.fuel s.fuel st next none taken) next either
 
 /-- A step of placing items finds none left, or places one of those left. -/
 theorem ordered_go_place (s : Statement) (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat) :
@@ -631,13 +719,6 @@ def Narrowing.NestedOK (s : Statement) (n : Narrowing) : Prop := ∀ e ∈ n.edg
 def PState.NestedOK (s : Statement) (st : PState) : Prop :=
   (∀ e ∈ st.edges, e.NestedOK s) ∧ (∀ i, ∀ m ∈ (st.items i).memberships, m.member = i ∧ m.NestedOK s) ∧
     ∀ i n, (st.items i).leftOn = some n → n.NestedOK s
-
-/-- A fold each of whose steps keeps a property keeps it. -/
-theorem foldl_invariant {α β : Type} {P : β → Prop} {g : β → α → β} :
-    ∀ (l : List α), (∀ b x, x ∈ l → P b → P (g b x)) → ∀ b, P b → P (l.foldl g b)
-  | [], _, _, h => h
-  | x :: l, hg, b, h =>
-    foldl_invariant l (fun b' y hy => hg b' y (List.mem_cons_of_mem x hy)) _ (hg b x (by simp) h)
 
 theorem PState.NestedOK.update {s : Statement} {st : PState} (h : st.NestedOK s) {i : Nat}
     {f : PItem → PItem} (hm : ∀ m ∈ (f (st.items i)).memberships, m.member = i ∧ m.NestedOK s)
@@ -805,6 +886,15 @@ theorem PState.NestedOK.readCore {s : Statement} {st : PState} (h : st.NestedOK 
   · exact PState.NestedOK.narrow _ hst hn
   · exact hst.narrowOn _ _ hn
 
+theorem PState.NestedOK.pushOrs {s : Statement} {st : PState} (h : st.NestedOK s) (item : Nat)
+    (ors : List (List Side)) : (PushDown.pushOrs s st item ors).NestedOK s := by
+  have hadds := PushDown.pushOrs_adds s st item ors
+  refine ⟨by rw [hadds.1]; exact h.1, fun i m hm => ?_, fun i n hn => ?_⟩
+  · rw [hadds.field (·.memberships) (fun _ _ => rfl)] at hm
+    exact h.2.1 i m hm
+  · rw [hadds.field (·.leftOn) (fun _ _ => rfl)] at hn
+    exact h.2.2 i n hn
+
 theorem PState.NestedOK.ordered {s : Statement} :
     ∀ (fuel : Nat) (all : List Nat) {st : PState} (order waited : List Nat), st.NestedOK s →
       (SqliveNarrowing.ordered.go s fuel all st order waited).1.NestedOK s
@@ -814,6 +904,7 @@ theorem PState.NestedOK.ordered {s : Statement} :
     split
     · exact h
     · apply PState.NestedOK.ordered fuel
+      refine PState.NestedOK.pushOrs ?_ _ _
       refine PState.NestedOK.pushDown _ _ _ _ (h.update ?_ ?_) ?_
       · intro m hm
         rcases List.mem_append.mp hm with hm | hm
@@ -845,14 +936,17 @@ memberships and the ORs it keeps only as it places the item, from edges and
 sides whose partners it placed before (`plan_placedBefore`); no other step
 changes them. -/
 
-/-- `st'` holds the memberships and kept ORs `st` holds. -/
+/-- `st'` holds the memberships and kept ORs `st` holds, and the same pushed
+ORs. -/
 def PState.SameLinks (st st' : PState) : Prop :=
-  ∀ i, (st'.items i).memberships = (st.items i).memberships ∧ (st'.items i).either = (st.items i).either
+  ∀ i, (st'.items i).memberships = (st.items i).memberships ∧
+    (st'.items i).either = (st.items i).either ∧ st'.pushedOrs = st.pushedOrs
 
-theorem PState.SameLinks.refl (st : PState) : st.SameLinks st := fun _ => ⟨rfl, rfl⟩
+theorem PState.SameLinks.refl (st : PState) : st.SameLinks st := fun _ => ⟨rfl, rfl, rfl⟩
 
 theorem PState.SameLinks.trans {a b c : PState} (hab : a.SameLinks b) (hbc : b.SameLinks c) :
-    a.SameLinks c := fun i => ⟨(hbc i).1.trans (hab i).1, (hbc i).2.trans (hab i).2⟩
+    a.SameLinks c := fun i => ⟨(hbc i).1.trans (hab i).1, (hbc i).2.1.trans (hab i).2.1,
+      (hbc i).2.2.trans (hab i).2.2⟩
 
 theorem PState.SameLinks.foldl {α : Type} {g : PState → α → PState}
     (hg : ∀ (st : PState) (x : α), st.SameLinks (g st x)) :
@@ -866,8 +960,8 @@ theorem PState.sameLinks_update {st : PState} {i : Nat} {f : PItem → PItem}
   intro j
   simp only [PState.update]
   split
-  · rename_i hji; subst hji; exact ⟨hm, he⟩
-  · exact ⟨rfl, rfl⟩
+  · rename_i hji; subst hji; exact ⟨hm, he, trivial⟩
+  · exact ⟨rfl, rfl, trivial⟩
 
 theorem PState.sameLinks_addTerm (st : PState) (i : Nat) (t : STerm) : st.SameLinks (st.addTerm i t) :=
   PState.sameLinks_update rfl rfl
@@ -877,7 +971,7 @@ theorem PState.sameLinks_add (st : PState) (n : Narrowing) : st.SameLinks (st.ad
   exact (PState.SameLinks.foldl (fun st (x : Nat × STerm) => PState.sameLinks_addTerm st x.1 x.2) _ _).trans
     ((PState.SameLinks.foldl (g := fun st (d : Disjunction) =>
       st.update d.item fun p => { p with ors := p.ors ++ [d.sides] })
-      (fun st d => PState.sameLinks_update rfl rfl) _ _).trans (fun _ => ⟨rfl, rfl⟩))
+      (fun st d => PState.sameLinks_update rfl rfl) _ _).trans (fun _ => ⟨rfl, rfl, rfl⟩))
 
 theorem PState.sameLinks_narrow : ∀ (fuel : Nat) (st : PState) (n : Narrowing),
     st.SameLinks (PState.narrow fuel st n)
@@ -935,7 +1029,7 @@ theorem PushDown.sameLinks_pushDown (s : Statement) (narrowFuel : Nat) :
           · exact PState.sameLinks_addTerm st1 target _
         have hrec : ∀ (st2 : PState) (passed : List Edge),
             st2.SameLinks { st2 with edges := addOnce st2.edges passed, pushed := st2.pushed ++ passed } :=
-          fun _ _ _ => ⟨rfl, rfl⟩
+          fun _ _ _ => ⟨rfl, rfl, rfl⟩
         split
         · exact (h2 _).trans ((hrec _ _).trans (PState.sameLinks_joinInner _ _ _))
         · exact (h2 _).trans (hrec _ _)
@@ -991,7 +1085,10 @@ theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Na
     rintro i x ⟨pre, post, heq, hx⟩
     exact ⟨pre, post ++ [next], by simp [heq], hx⟩
   intro i
-  rw [(hsame i).1, (hsame i).2]
+  have hadds := PushDown.pushOrs_adds s st'' next ((st.items next).ors.filter fun sides =>
+    sides.all fun side => side.edges.all fun e => e.placedIn order)
+  rw [hadds.field (·.memberships) (fun _ _ => rfl), hadds.field (·.either) (fun _ _ => rfl),
+    (hsame i).1, (hsame i).2.1]
   subst hst'
   simp only [PState.update]
   split
@@ -1034,7 +1131,7 @@ theorem plan_before (s : Statement) (i : Nat) :
   simp only
   refine (ordered_go_placedLinks s _ _ _ [] [] (fun j => ?_) i).2
   have hsame := PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder (PState.initial s) j
-  rw [hsame.1, hsame.2]
+  rw [hsame.1, hsame.2.1]
   simp [PState.initial]
 
 /-- Each item's memberships, and the sides of each OR it keeps, take values
@@ -1050,6 +1147,115 @@ theorem plan_placedBefore (s : Statement) (i : Nat) :
   fun sides hs side hside e he => by
     obtain ⟨pre, post, h, hb⟩ := (plan_before s i).2 sides hs side hside e he
     exact ⟨pre, post, h, hb.1⟩⟩
+
+/-! Where a pushed OR comes from. -/
+
+/-- Where a pushed OR, given to `target`, comes from: an arm of a derived
+item's query, which has no LIMIT and no OFFSET and calls no window function,
+passes columns of `target` on, and the derived item, placed in `order`, keeps
+an OR whose sides, each as it says of `target`, are the pushed OR's. -/
+def PState.PushedOrFrom (s : Statement) (st : PState) (order : List Nat) (target : Nat)
+    (sides : List Side) : Prop :=
+  ∃ d q v k rename sides0, (s.item d).kind = .derived q v ∧ (s.query q).limit = none ∧
+    (s.query q).offset = none ∧ k ∈ (s.query q).arms ∧ (s.core k).windowed = false ∧
+    (s.item target).core = k ∧ sides0 ≠ [] ∧
+    (∀ c c', rename c = some c' →
+      ((s.core k).aggregated = false ∨ (s.core k).groupBy.contains (.col target c') = true) ∧
+      (s.core k).output[c]? = some (.expr (.col target c'))) ∧
+    d ∈ order ∧ sides0 ∈ (st.items d).either ∧ sides = sides0.map (PushDown.sideInto s target rename)
+
+def PState.OrsFrom (s : Statement) (st : PState) (order : List Nat) : Prop :=
+  ∀ x ∈ st.pushedOrs, PState.PushedOrFrom s st order x.1 x.2
+
+theorem PState.OrsFrom.placed {s : Statement} {st : PState} {order : List Nat}
+    (h : st.OrsFrom s order) {next : Nat} (hnext : next ∉ order) :
+    (ordered.placed s st order next).OrsFrom s (order ++ [next]) := by
+  unfold ordered.placed
+  simp only
+  generalize hE : (st.items next).ors.filter (fun sides =>
+    sides.all fun side => side.edges.all fun e => e.placedIn order) = either
+  generalize hst' : st.update next _ = st'
+  have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
+    (st.edges.filter fun e => e.member == next && e.placedIn order)
+  generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
+  have heither : ∀ i, (st''.items i).either = if i = next then either else (st.items i).either := by
+    intro i
+    rw [(hsame i).2.1]
+    subst hst'
+    simp only [PState.update]
+    split <;> rfl
+  have hpushed : st''.pushedOrs = st.pushedOrs := by
+    rw [(hsame 0).2.2]
+    subst hst'
+    rfl
+  have hfinal : ∀ i, ((PushDown.pushOrs s st'' next either).items i).either = (st''.items i).either :=
+    fun i => (PushDown.pushOrs_adds s st'' next either).field (·.either) (fun _ _ => rfl) i
+  let P := fun x : PState => (∀ i, (x.items i).either = (st''.items i).either) ∧
+    ∀ y ∈ x.pushedOrs, y ∈ st''.pushedOrs ∨
+      ∀ z : PState, (∀ i, (z.items i).either = (st''.items i).either) →
+        PState.PushedOrFrom s z (order ++ [next]) y.1 y.2
+  have hall : P (PushDown.pushOrs s st'' next either) := by
+    refine PushDown.pushOrs_induct (P := P) ⟨fun _ => rfl, fun y hy => Or.inl hy⟩
+      (fun found hfound arm harm sides hsides target htarget x hx => ?_)
+    rcases PushDown.passOr_cases s target (PushDown.renameInto arm target) sides x with h | ⟨hne, _, h⟩
+    · rw [h]; exact hx
+    · rw [h]
+      refine ⟨fun i => ?_, fun y hy => ?_⟩
+      · simp only [PState.update]
+        split
+        · rename_i hi; subst hi; exact hx.1 i
+        · exact hx.1 i
+      · rcases List.mem_append.mp hy with hy | hy
+        · exact hx.2 y hy
+        · simp only [List.mem_singleton] at hy
+          subst hy
+          refine Or.inr fun z hz => ?_
+          obtain ⟨q, v, k, hkind, hlim, hoff, hk, hwin, hthrough⟩ := PushDown.mem_arms hfound harm
+          obtain ⟨c0, _, hc0⟩ := List.mem_filterMap.mp (List.mem_eraseDups.mp htarget)
+          obtain ⟨⟨t0, c0'⟩, hc0', ht0⟩ := Option.map_eq_some_iff.mp hc0
+          simp only at ht0
+          subst ht0
+          refine ⟨next, q, v, k, PushDown.renameInto arm t0, sides, hkind, hlim, hoff, hk, hwin,
+            (hthrough c0 t0 c0' hc0').1, hne, fun c c' hc => ?_,
+            List.mem_append_right _ (List.mem_singleton_self _), ?_, rfl⟩
+          · exact (hthrough c t0 c' (PushDown.renameInto_some hc)).2
+          · rw [hz, heither]
+            simpa using hsides
+  intro y hy
+  rcases hall.2 y hy with hold | hnew
+  · obtain ⟨d, q, v, k, rename, sides0, hkind, hlim, hoff, hk, hwin, hcore, hne, hcols, hd, hs0,
+      heq⟩ := h y (hpushed ▸ hold)
+    have hdn : d ≠ next := fun hd' => hnext (hd' ▸ hd)
+    refine ⟨d, q, v, k, rename, sides0, hkind, hlim, hoff, hk, hwin, hcore, hne, hcols,
+      List.mem_append_left _ hd, ?_, heq⟩
+    rw [hfinal, heither]
+    simpa [hdn] using hs0
+  · exact hnew _ hfinal
+
+theorem ordered_go_orsFrom (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st : PState)
+    (order waited : List Nat), st.OrsFrom s order →
+    (ordered.go s fuel all st order waited).1.OrsFrom s (ordered.go s fuel all st order waited).2
+  | 0, _, _, _, _, h => h
+  | fuel + 1, all, st, order, waited, h => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', hnext, heq⟩
+    · rw [heq]; exact h
+    · rw [heq]
+      have hnin : next ∉ order := by
+        have := (List.mem_filter.mp hnext).2
+        simpa using this
+      exact ordered_go_orsFrom s fuel all _ _ _ (h.placed hnin)
+
+/-- Each OR the planner passes into a derived item's arms comes from an OR
+the derived item keeps. -/
+theorem plan_pushedOrs (s : Statement) :
+    (plan s).state.OrsFrom s (plan s).order := by
+  unfold plan ordered
+  simp only
+  refine ordered_go_orsFrom s _ _ _ [] [] (fun x hx => ?_)
+  have hsame := PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder
+    (PState.initial s) 0
+  rw [hsame.2.2] at hx
+  simp [PState.initial] at hx
 
 /-! The planner holds each edge once. -/
 
@@ -1144,6 +1350,8 @@ theorem ordered_go_keepsOnce (s : Statement) : ∀ (fuel : Nat) (all : List Nat)
     · rw [heq]
       refine ordered_go_keepsOnce s fuel all _ _ _ ?_
       unfold ordered.placed
+      simp only
+      rw [(PushDown.pushOrs_adds s _ _ _).1]
       exact PushDown.keepsOnce_pushDown s _ _ _ _ _ _ h
 
 /-- The planned state holds each edge once, however many columns of a derived
@@ -1168,7 +1376,7 @@ theorem PState.Once.placed {s : Statement} {st : PState} {order : List Nat} (h :
     (st.edges.filter fun e => e.member == next && e.placedIn order)
   generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
   intro i
-  rw [(hsame i).1]
+  rw [(PushDown.pushOrs_adds s _ _ _).field (·.memberships) (fun _ _ => rfl), (hsame i).1]
   subst hst'
   simp only [PState.update]
   split
@@ -1191,6 +1399,8 @@ theorem ordered_go_once (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st 
         simpa using this
       refine ordered_go_once s fuel all _ _ _ ?_ (hl.placed hnin) (h.placed he hl hnin)
       unfold ordered.placed
+      simp only
+      rw [(PushDown.pushOrs_adds s _ _ _).1]
       exact PushDown.keepsOnce_pushDown s _ _ _ _ _ _ he
 
 /-- No item of the planned state has a membership twice. -/
@@ -1202,7 +1412,7 @@ theorem plan_once (s : Statement) (i : Nat) : ((plan s).state.items i).membershi
   unfold plan ordered
   simp only
   refine ordered_go_once s _ _ _ [] [] he (fun j => ?_) (fun j => ?_) i
-  · rw [(hsame j).1, (hsame j).2]
+  · rw [(hsame j).1, (hsame j).2.1]
     simp [PState.initial]
   · rw [(hsame j).1]
     simp [PState.initial]

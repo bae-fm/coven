@@ -103,6 +103,8 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Planned.scopes_eq
 #print axioms SqliveNarrowing.plan_leftOn
 #print axioms SqliveNarrowing.plan_pushed
+#print axioms SqliveNarrowing.plan_pushedOrs
+#print axioms SqliveNarrowing.pushedOr_passes
 #print axioms SqliveNarrowing.plan_order
 #print axioms SqliveNarrowing.closure_closed
 #print axioms SqliveNarrowing.waiting_receivers

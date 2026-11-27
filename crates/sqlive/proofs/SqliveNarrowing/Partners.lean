@@ -222,6 +222,29 @@ theorem PState.Lookups.readCore {s : Statement} (hwf : s.wellFormed = true) {st 
   · exact PState.Lookups.narrow _ hst hn
   · exact hst.narrowOn _ _ hn
 
+theorem PState.Lookups.pushOrs {s : Statement} {st : PState} (h : st.Lookups s) (item : Nat)
+    {ors : List (List Side)}
+    (hors : ∀ sides ∈ ors, ∀ side ∈ sides, ∀ e ∈ side.edges, (s.item e.partner).readable = true) :
+    (PushDown.pushOrs s st item ors).Lookups s := by
+  refine PushDown.pushOrs_induct (P := fun x : PState => x.Lookups s) h
+    (fun _ _ arm _ sides hsides target _ x hx => ?_)
+  rcases PushDown.passOr_cases s target (PushDown.renameInto arm target) sides x with h | ⟨_, _, h⟩
+  · rw [h]; exact hx
+  · rw [h]
+    have hup : (x.update target fun p => { p with ors := p.ors ++
+        [sides.map (PushDown.sideInto s target (PushDown.renameInto arm target))] }).Lookups s := by
+      refine hx.update (fun found hfound side hside e he => ?_)
+        (fun found hfound => List.mem_append_left _ (hx.2.2.1 target found hfound))
+        (fun n hn => hx.2.2.2.1 target n hn)
+      rcases List.mem_append.mp hfound with hfound | hfound
+      · exact hx.2.1 target found hfound side hside e he
+      · simp only [List.mem_singleton] at hfound
+        subst hfound
+        obtain ⟨side0, hside0, rfl⟩ := List.mem_map.mp hside
+        obtain ⟨e0, he0, value, _, rfl⟩ := PushDown.mem_passed he
+        exact hors sides hsides side0 hside0 e0 he0
+    exact hup
+
 theorem PState.Lookups.ordered {s : Statement} (hwf : s.wellFormed = true) :
     ∀ (fuel : Nat) (all : List Nat) {st : PState} (order waited : List Nat), st.Lookups s →
       (SqliveNarrowing.ordered.go s fuel all st order waited).1.Lookups s
@@ -233,6 +256,8 @@ theorem PState.Lookups.ordered {s : Statement} (hwf : s.wellFormed = true) :
       apply PState.Lookups.ordered hwf fuel
       unfold ordered.placed
       simp only
+      refine PState.Lookups.pushOrs ?_ _
+        (fun sides hs => h.2.1 next sides (List.mem_filter.mp hs).1)
       refine PState.Lookups.pushDown hwf _ _ _ _ (h.update (fun sides hs => h.2.1 next sides hs)
         (fun sides hs => (List.mem_filter.mp hs).1) (fun n hn => h.2.2.2.1 next n hn)) ?_
       exact fun e he => h.1 e (List.mem_filter.mp he).1

@@ -16,6 +16,7 @@ use crate::from_star::StarItem;
 use crate::schema_objects::read_view;
 use crate::scope_edge::Edge;
 use crate::scope_one_of::constant;
+use crate::scope_or::Side;
 use crate::scope_plan::{is_name, read_select, Object, Planner, Source, Unread};
 use crate::scope_term::{Affinity, ScopeTerm};
 use crate::select_syntax::{parts, text, Part};
@@ -702,9 +703,66 @@ pub(crate) fn push_down(
     }
 }
 
-/// The items the subquery, CTE or view `item` can pass the edges it takes
-/// into, once it is placed (`push_down`): those an arm passes on a column of
-/// `compared` from, the columns its edges compare, and, through a subquery,
+/// Pass `ors`, the ORs the subquery, CTE or view `item` keeps as it is
+/// placed, into the items its arms pass their columns on from: each arm's
+/// source takes an OR each of whose sides says something of it, unless a LEFT
+/// JOIN adds it, as the NULLs such a join gives a left row can pass no side.
+/// An OR goes one level: a source that takes one passes it on as it keeps it,
+/// when it is placed. The model states the rule as `pushOrs` in
+/// `crates/sqlive/proofs`.
+pub(crate) fn push_ors(planner: &mut Planner, item: usize, ors: &[Vec<Side>]) {
+    let Some(derived) = &planner.items[item].derived else {
+        return;
+    };
+    let mut given: Vec<(usize, Vec<Side>)> = Vec::new();
+    for arm in &derived.arms {
+        for sides in ors {
+            let reached: Vec<String> = sides.iter().flat_map(Side::columns).collect();
+            let passed: Vec<(&str, (usize, String))> = reached
+                .iter()
+                .map(String::as_str)
+                .filter_map(|column| {
+                    let arms =
+                        passed_on(&planner.items[item].columns, std::slice::from_ref(arm), column);
+                    Some((column, arms.into_iter().next()??.clone()))
+                })
+                .collect();
+            let mut targets: Vec<usize> = Vec::new();
+            for (_, (target, _)) in &passed {
+                if !targets.contains(target) {
+                    targets.push(*target);
+                }
+            }
+            for target in targets {
+                let found = &planner.items[target];
+                if (found.source.table().is_none() && found.derived.is_none())
+                    || !found.always_bound()
+                {
+                    continue;
+                }
+                let column = |column: &str| {
+                    passed
+                        .iter()
+                        .find(|(reached, (into, _))| *reached == column && *into == target)
+                        .map(|(_, (_, passed))| passed.clone())
+                };
+                let sides: Option<Vec<Side>> = sides
+                    .iter()
+                    .map(|side| side.over(target, &found.source.qualifier, &column))
+                    .collect();
+                given.extend(sides.map(|sides| (target, sides)));
+            }
+        }
+    }
+    for (target, sides) in given {
+        planner.items[target].ors.push(sides);
+    }
+}
+
+/// The items the subquery, CTE or view `item` can pass the edges and ORs it
+/// takes into, once it is placed (`push_down`, `push_ors`): those an arm
+/// passes on a column of `compared` from, the columns its edges compare and
+/// its ORs name, and, through a subquery,
 /// CTE or view among them, those below it. The model states the rule as
 /// `receivers` in `crates/sqlive/proofs`.
 pub(crate) fn receivers<'a>(

@@ -250,7 +250,8 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
 theorem ordered_placed_termGrows (s : Statement) (st : PState) (order : List Nat) (next : Nat) :
     st.TermGrows (ordered.placed s st order next) := by
   unfold ordered.placed
-  exact (PState.termGrows_update rfl).trans (PushDown.termGrows_pushDown s _ _ _ _ _ _)
+  exact ((PState.termGrows_update rfl).trans (PushDown.termGrows_pushDown s _ _ _ _ _ _)).trans
+    (PState.termGrows_pushOrs s _ _ _)
 
 theorem ordered_termGrows (s : Statement) :
     ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat),
@@ -297,6 +298,8 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
       (st.edges.filter fun e => e.member == next && e.placedIn order) :=
     fun e he => Or.inl (by simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he)
   have hgrow := (PushDown.pushDown_keeps s s.fuel s.fuel _ next none _ hpass).1
+  have hfin := (PushDown.pushOrs_grows s _ _ _).trans hfin
+  refine PState.Sem.pushOrs ?_ _ _
   refine PState.Sem.pushEdges h (fun _ _ _ _ hb => hb.1) (Fin := Fin)
     (Src := fun d => d ∈ (s.core (s.item d).core).items) (Good := Planned.Good Fin)
     (fun i r hg e he hm => hg.2 e (Or.inr ⟨he, hm⟩)) ?_ ?_ s.fuel s.fuel _ next _ hnext hs' hpass hfin ?_
@@ -369,14 +372,75 @@ theorem foldl_both_passes_each {α : Type} {rowsOf : Nat → List Row} {r : Row}
       exact this.2
     · exact foldl_both_passes_each g l _ h a ha
 
+/-- A row that scopes joined with OR pass is one of them passes. -/
+theorem foldl_either_parts {rowsOf : Nat → List Row} {r : Row} :
+    ∀ (l : List RScope) (acc : RScope), (l.foldl RScope.either acc).passes rowsOf r = true →
+      ∃ a ∈ acc :: l, a.passes rowsOf r = true
+  | [], acc, h => ⟨acc, List.mem_singleton_self _, h⟩
+  | b :: l, acc, h => by
+    obtain ⟨a, ha, hp⟩ := foldl_either_parts l (acc.either b) h
+    rcases List.mem_cons.mp ha with rfl | ha
+    · rw [Limit.passes_either, Bool.or_eq_true] at hp
+      rcases hp with hp | hp
+      · exact ⟨acc, List.mem_cons_self, hp⟩
+      · exact ⟨b, by simp, hp⟩
+    · exact ⟨a, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ ha), hp⟩
+
+/-- A row a side's scope passes passes each of its terms, and the rows each of
+its edges joins. -/
+theorem sideScope_parts {bound : Nat → RScope} {rowsOf : Nat → List Row} {side : Side} {r : Row}
+    (h : (Planned.sideScope bound side).passes rowsOf r = true) :
+    (∀ t ∈ side.terms, t.holds (some r) = true) ∧
+      ∀ m ∈ side.edges,
+        (RScope.joined m.memberValue m.partner m.value (bound m.partner) m.nulls).passes rowsOf r = true := by
+  unfold Planned.sideScope at h
+  refine ⟨fun t ht => ?_, foldl_both_passes_each
+    (fun m : Edge => RScope.joined m.memberValue m.partner m.value (bound m.partner) m.nulls) _ _ h⟩
+  have hterms := foldl_both_passes_acc
+    (fun m : Edge => RScope.joined m.memberValue m.partner m.value (bound m.partner) m.nulls) _ _ h
+  have := foldl_both_passes_each STerm.bind _ _ hterms t ht
+  rwa [STerm.bind_passes] at this
+
 /-- A row an item's scope passes passes what the item's terms and carried
-terms say of it, and each of its memberships' scopes. -/
+terms say of it, each of its memberships' scopes, and a side of each OR the
+item keeps. -/
 theorem scopeAt_parts {p : Planned} {last : Option (List (List Value))} {bound : Nat → RScope}
     {rowsOf : Nat → List Row} {i : Nat} {r : Row}
     (h : (p.scopeAt last bound i).passes rowsOf r = true) :
     (∀ t, (p.state.items i).term = some t → t.holds (some r) = true) ∧
       (∀ t, (p.state.items i).carried = some t → t.holds (some r) = true) ∧
-      ∀ m ∈ (p.state.items i).memberships, (Planned.membershipScope bound m).passes rowsOf r = true := by
+      (∀ m ∈ (p.state.items i).memberships, (Planned.membershipScope bound m).passes rowsOf r = true) ∧
+      ∀ sides ∈ (p.state.items i).either, sides ≠ [] →
+        ∃ side ∈ sides, (Planned.sideScope bound side).passes rowsOf r = true := by
+  have heach : ∀ (l : List (List Side)) (acc : RScope),
+      (l.foldl (fun scope sides =>
+        match sides.map (Planned.sideScope bound) with
+        | [] => scope
+        | first :: rest => scope.both (rest.foldl RScope.either first)) acc).passes rowsOf r = true →
+      (∀ (l : List (List Side)) (acc : RScope),
+        (l.foldl (fun scope sides =>
+          match sides.map (Planned.sideScope bound) with
+          | [] => scope
+          | first :: rest => scope.both (rest.foldl RScope.either first)) acc).passes rowsOf r = true →
+        acc.passes rowsOf r = true) →
+      ∀ sides ∈ l, sides ≠ [] → ∃ side ∈ sides, (Planned.sideScope bound side).passes rowsOf r = true := by
+    intro l
+    induction l with
+    | nil => intro _ _ _ sides hs; cases hs
+    | cons first l ih =>
+      intro acc h hacc sides hs hne
+      rcases List.mem_cons.mp hs with rfl | hs
+      · have hstep := hacc l _ h
+        cases hm : sides.map (Planned.sideScope bound) with
+        | nil => exact absurd (List.map_eq_nil_iff.mp hm) hne
+        | cons a rest =>
+          simp only [hm] at hstep
+          rw [Limit.passes_both, Bool.and_eq_true] at hstep
+          obtain ⟨found, hfound, hp⟩ := foldl_either_parts rest a hstep.2
+          rw [← hm] at hfound
+          obtain ⟨side, hside, rfl⟩ := List.mem_map.mp hfound
+          exact ⟨side, hside, hp⟩
+      · exact ih _ h hacc sides hs hne
   have heither : ∀ (l : List (List Side)) (acc : RScope),
       (l.foldl (fun scope sides =>
         match sides.map (Planned.sideScope bound) with
@@ -401,16 +465,25 @@ theorem scopeAt_parts {p : Planned} {last : Option (List (List Value))} {bound :
     intro found sc h
     rw [Limit.passes_both, Bool.and_eq_true] at h
     exact h.1
-  have hm := heither _ _ (by
+  have hfold : ((p.state.items i).either.foldl (fun scope sides =>
+      match sides.map (Planned.sideScope bound) with
+      | [] => scope
+      | first :: rest => scope.both (rest.foldl RScope.either first))
+      ((Planned.groupScopes bound (p.state.items i).memberships).foldl RScope.both
+        ((p.state.items i).memberships.foldl (fun scope m => scope.both (Planned.membershipScope bound m))
+          ((((p.state.items i).term.map STerm.bind).getD .all).both
+            (((p.state.items i).carried.map STerm.bind).getD .all))))).passes rowsOf r = true := by
     split at h
     · split at h
       · exact hall _ _ h
       · exact h
-    · exact h)
+    · exact h
+  have hsides := heach _ _ hfold heither
+  have hm := heither _ _ hfold
   have hm := foldl_both_passes_acc id _ _ hm
   have hbase := foldl_both_passes_acc _ _ _ hm
   rw [Limit.passes_both, Bool.and_eq_true] at hbase
-  refine ⟨fun t ht => ?_, fun t ht => ?_, foldl_both_passes_each _ _ _ hm⟩
+  refine ⟨fun t ht => ?_, fun t ht => ?_, foldl_both_passes_each _ _ _ hm, hsides⟩
   · have := hbase.1
     rw [ht] at this
     simpa [STerm.bind_passes] using this
@@ -465,7 +538,7 @@ theorem queryTest_good {s : Statement} (last : Option (List (List Value)))
   obtain ⟨hnd, hall⟩ := plan_order s
   obtain ⟨bound, hbound, _⟩ := (plan s).scopes_eq last hnd (hall _ hdk d hd)
   rw [hbound] at hsc
-  obtain ⟨hterm, _, hmem⟩ := scopeAt_parts hsc
+  obtain ⟨hterm, _, hmem, _⟩ := scopeAt_parts hsc
   refine ⟨hterm, fun e he hn => ?_⟩
   rcases he with he | ⟨he, hm⟩
   · exact membershipScope_value (hmem e he) hn
@@ -598,6 +671,14 @@ theorem PState.MembersEdges.of_same {st st' : PState} (h : st.MembersEdges) (hl 
     (he : st.EdgesGrow st') : st'.MembersEdges := fun i m hm =>
   he m (h i m (by rw [← (hl i).1]; exact hm))
 
+theorem PState.MembersEdges.pushOrs {s : Statement} {st : PState} (h : st.MembersEdges) (item : Nat)
+    (ors : List (List Side)) : (PushDown.pushOrs s st item ors).MembersEdges := by
+  have hadds := PushDown.pushOrs_adds s st item ors
+  intro i m hm
+  rw [hadds.field (·.memberships) (fun _ _ => rfl)] at hm
+  rw [hadds.1]
+  exact h i m hm
+
 theorem ordered_go_membersEdges (s : Statement) :
     ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat), st.MembersEdges →
       (ordered.go s fuel all st order waited).1.MembersEdges
@@ -609,6 +690,7 @@ theorem ordered_go_membersEdges (s : Statement) :
       refine ordered_go_membersEdges s fuel all _ _ _ ?_
       unfold ordered.placed
       simp only
+      refine PState.MembersEdges.pushOrs ?_ _ _
       refine PState.MembersEdges.of_same (fun i m hm => ?_)
         (PushDown.sameLinks_pushDown s _ _ _ _ _ _) (PushDown.edgesGrow_pushDown s _ _ _ _ _ _)
       simp only [PState.update] at hm ⊢

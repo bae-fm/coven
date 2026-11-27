@@ -52,6 +52,10 @@ theorem PState.TermGrows.foldl_until {α : Type} {g : PState → α → PState}
     PState.TermGrows.foldl_until hg l (fun st' y hy => hstep st' y (List.mem_cons_of_mem x hy)) _
       (hstep st x List.mem_cons_self h ((PState.TermGrows.foldl hg l (g st x)).trans hfin)) hfin
 
+theorem PState.termGrows_pushOrs (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) :
+    st.TermGrows (PushDown.pushOrs s st item ors) := fun i t h =>
+  ⟨t, by rwa [(PushDown.pushOrs_adds s st item ors).field (·.term) (fun _ _ => rfl)], fun _ hr => hr⟩
+
 theorem PState.termGrows_update {st : PState} {i : Nat} {f : PItem → PItem}
     (hf : (f (st.items i)).term = (st.items i).term) : st.TermGrows (st.update i f) := by
   intro j t ht

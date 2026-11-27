@@ -637,6 +637,24 @@ theorem PState.Held.readCore {s : Statement} (hwf : s.wellFormed = true) {rel : 
   exact (hX.carry hwf k hfinX (hSX.pull_lookup hwf hk)).untouched
     (PState.Untouched.foldl (fun st0 i => PushDown.untouched_pushDown s _ _ st0 i _ _) _ _)
 
+/-- Passing ORs into arms touches no item the state still holds an ON
+narrowing back for. -/
+theorem PushDown.untouched_pushOrs (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) :
+    st.Untouched (PushDown.pushOrs s st item ors) := by
+  refine PushDown.pushOrs_induct (P := st.Untouched) (PState.Untouched.refl st)
+    (fun _ _ arm _ sides _ target _ x hx => hx.trans ?_)
+  rcases PushDown.passOr_cases s target (PushDown.renameInto arm target) sides x with h | ⟨_, hleft, h⟩
+  · rw [h]; exact PState.Untouched.refl x
+  · rw [h]
+    intro i hi
+    simp only [PState.update] at hi ⊢
+    refine ⟨?_, fun e he _ => he⟩
+    split
+    · rename_i hit
+      subst hit
+      simp [hleft] at hi
+    · rfl
+
 theorem PState.Held.ordered {s : Statement} {Fin : PState} :
     ∀ (fuel : Nat) (all : List Nat) (st : PState) (order waited : List Nat), st.Held s Fin →
       (ordered.go s fuel all st order waited).1.Held s Fin
@@ -648,7 +666,8 @@ theorem PState.Held.ordered {s : Statement} {Fin : PState} :
       refine PState.Held.ordered fuel all _ _ _ ?_
       unfold ordered.placed
       simp only
-      exact (h.update_same rfl rfl rfl (fun hl => hl)).untouched (PushDown.untouched_pushDown s _ _ _ _ _ _)
+      exact (h.update_same rfl rfl rfl (fun hl => hl)).untouched
+        ((PushDown.untouched_pushDown s _ _ _ _ _ _).trans (PushDown.untouched_pushOrs s _ _ _))
 
 theorem plan_held_go {s : Statement} (hwf : s.wellFormed = true) {Fin : PState} :
     ∀ (rest done : List Nat) (st : PState), done ++ rest = s.readOrder →

@@ -203,7 +203,7 @@ abbrev Cls : Type := Db → Nat → Nat → Bind → Prop
 bindings of its own core: an item a core lists that the state holds no ON
 narrowing back for has a row; each item's term and carried term hold of its
 row; each edge from an item with a row was pushed into a derived item's arm
-or its fact holds; each OR of an item with a row has its fact; and an item
+or its fact holds, and so each OR of such an item; and an item
 the state holds an ON narrowing back for is one a LEFT JOIN adds, the held
 narrowing is on items of its core, and its facts hold where the item has a
 row. -/
@@ -216,7 +216,7 @@ structure PState.Sem (s : Statement) (P : Cls) (st : PState) : Prop where
   edges : ∀ Z f b, ∀ e ∈ st.edges, P Z f (s.item e.member).core b → b e.member ≠ none →
     e ∈ st.pushed ∨ e.Fact s Z f (s.item e.member).core b
   ors : ∀ Z f b i, P Z f (s.item i).core b → b i ≠ none → ∀ sides ∈ (st.items i).ors,
-    Disjunction.Fact s Z f (s.item i).core b ⟨i, sides⟩
+    (i, sides) ∈ st.pushedOrs ∨ Disjunction.Fact s Z f (s.item i).core b ⟨i, sides⟩
   held : ∀ i n, (st.items i).leftOn = some n → s.alwaysBound i = false ∧ n.In s (s.item i).core ∧
     ∀ Z f b, P Z f (s.item i).core b → b i ≠ none → n.Facts s Z f (s.item i).core b
 
@@ -258,7 +258,7 @@ theorem PState.Sem.update {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s
     (hcarried : ∀ Z f b r, P Z f (s.item i).core b → b i = some r →
       ∀ t, (g (st.items i)).carried = some t → t.holds (some r) = true)
     (hors : ∀ Z f b, P Z f (s.item i).core b → b i ≠ none → ∀ sides ∈ (g (st.items i)).ors,
-      Disjunction.Fact s Z f (s.item i).core b ⟨i, sides⟩)
+      (i, sides) ∈ st.pushedOrs ∨ Disjunction.Fact s Z f (s.item i).core b ⟨i, sides⟩)
     (hheld : ∀ n, (g (st.items i)).leftOn = some n → s.alwaysBound i = false ∧ n.In s (s.item i).core ∧
       ∀ Z f b, P Z f (s.item i).core b → b i ≠ none → n.Facts s Z f (s.item i).core b) :
     (st.update i g).Sem s P := by
@@ -321,7 +321,7 @@ theorem PState.Sem.add {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P)
         · exact hst.ors Z f b d.item hb hr sides hsides
         · simp only [List.mem_singleton] at hsides
           subst hsides
-          exact hn.2.2 d hd Z f b hb hr)
+          exact Or.inr (hn.2.2 d hd Z f b hb hr))
       (fun m hm => hst.held d.item m hm)) _ hterms
   refine ⟨hors.rows, hors.terms, hors.carried, fun Z f b e he hb hm => ?_, hors.ors, hors.held⟩
   rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
@@ -648,5 +648,40 @@ theorem PState.Sem.carry {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s 
       exact hpull Z f b e.partner rp y u hcp hlist' (by rw [← hcm]; exact hb) hrp (hcell hnf) hu
   have := Transfer.transfer_sound hv hm hn hh hut hr
   rwa [hbr] at this
+
+/-- Passing a derived item's ORs into its arms keeps the invariant: each OR it
+gives an item is among the pushed ones. -/
+theorem PState.Sem.pushOrs {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P) (item : Nat)
+    (ors : List (List Side)) : (PushDown.pushOrs s st item ors).Sem s P := by
+  refine PushDown.pushOrs_induct (P := fun x : PState => x.Sem s P) hs
+    (fun _ _ arm _ sides _ target _ x hx => ?_)
+  rcases PushDown.passOr_cases s target (PushDown.renameInto arm target) sides x with h | ⟨_, _, h⟩
+  · rw [h]; exact hx
+  · rw [h]
+    refine ⟨fun Z f k b hb j hj hl => ?_, fun Z f b j r hb hr t ht => ?_,
+      fun Z f b j r hb hr t ht => ?_, fun Z f b e he hb hm => hx.edges Z f b e he hb hm,
+      fun Z f b j hb hr found hfound => ?_, fun j n hn => ?_⟩
+    all_goals simp only [PState.update] at *
+    · split at hl
+      · rename_i hji; subst hji; exact hx.rows Z f k b hb j hj hl
+      · exact hx.rows Z f k b hb j hj hl
+    · split at ht
+      · rename_i hji; subst hji; exact hx.terms Z f b j r hb hr t ht
+      · exact hx.terms Z f b j r hb hr t ht
+    · split at ht
+      · rename_i hji; subst hji; exact hx.carried Z f b j r hb hr t ht
+      · exact hx.carried Z f b j r hb hr t ht
+    · split at hfound
+      · rename_i hji
+        subst hji
+        rcases List.mem_append.mp hfound with hfound | hfound
+        · exact (hx.ors Z f b j hb hr found hfound).imp_left (List.mem_append_left _)
+        · simp only [List.mem_singleton] at hfound
+          subst hfound
+          exact Or.inl (List.mem_append_right _ (List.mem_singleton_self _))
+      · exact (hx.ors Z f b j hb hr found hfound).imp_left (List.mem_append_left _)
+    · split at hn
+      · rename_i hji; subst hji; exact hx.held j n hn
+      · exact hx.held j n hn
 
 end SqliveNarrowing

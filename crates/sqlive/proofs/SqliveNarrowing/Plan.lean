@@ -436,6 +436,11 @@ structure PState where
   reads this list, which the proofs read to tell a pushed edge from one a
   condition gives. -/
   pushed : List Edge := []
+  /-- The ORs `PushDown.pushOrs` passes into derived items' arms, each with
+  the item it narrows. Each is among that item's ORs too; no step of the
+  planner reads this list, which the proofs read to tell a pushed OR from one
+  a condition gives. -/
+  pushedOrs : List (Nat × List Side) := []
 
 def PState.update (st : PState) (i : Nat) (f : PItem → PItem) : PState :=
   { st with items := fun j => if j = i then f (st.items j) else st.items j }

@@ -1342,6 +1342,15 @@ CTE narrows the tables of the CTE it reads. A statement with a recursive CTE of
 its own, or with `x IN table`, narrows nothing: it depends on every row of each
 table it read.
 
+An OR that narrows the rows of such a query passes into its tables too, once
+sqlive places the query after the tables the OR's equalities join: in each arm,
+a table that the arm passes columns on from takes the OR when each side says
+something of that table, by a condition or an equality on those columns. A music
+app finds each imported track's artist with `JOIN (SELECT * FROM artists) AS a
+ON a.id = coalesce(i.artist_id, 1)`, which sqlive reads as an OR, and an artist
+that neither side names doesn't rerun the read, as with `artists` written out. A
+table that a LEFT JOIN inside the query adds takes no OR.
+
 A column of a subquery, CTE or view that nothing reads changes no row the
 statement returns, so the live query depends on no row of a table that only the
 SELECTs inside such columns read. A music app writes one `SELECT` of releases
@@ -2091,6 +2100,7 @@ the model and states its assumptions.
 | Each column of a row value equal to or IN a subquery's row holds the value the subquery's source gives in its place, in a binding its core keeps that gives a row the subquery returns | `row_subquery_edge_sound` | `proofs/SqliveNarrowing/Rules/RowSubqueryEdge.lean` | 8 |
 | Each condition's narrowing keeps the promise of the rule that reads it | `readCondition_sound` | `proofs/SqliveNarrowing/Rules.lean` | 5 to 8 |
 | A term, an edge that compares by `=` or an OR that a row of NULLs fails, true of a binding with no row of its item, has an item no LEFT JOIN adds, or an edge's partner outside a subquery that no LEFT JOIN adds and the binding has no row of | `holds_none`, `HoldsIn.bound` | `proofs/SqliveNarrowing/Reader.lean` | 7 |
+| Each OR the planner passes into a derived item's arms comes from an OR the derived item keeps as it is placed, each side rewritten to the columns of the item the arm passes them on from, and passes that item's row in each binding that matters, as a side of the derived item's OR passes the derived item's row | `plan_pushedOrs`, `pushedOr_passes` | `proofs/SqliveNarrowing/PlannerState.lean`; `proofs/SqliveNarrowing/Kept.lean` | 8 |
 | A derived item's row holds its arm's item's value in each column the arm passes on, so a term true of the row is true of that item's row; a row of an arm that groups its rows holds, in each column its GROUP BY lists, the value of that column's item in every binding of its group | `push_down_sound`, `renamed_sound`, `group_key_sound` | `proofs/SqliveNarrowing/Rules/PushDown.lean` | 8 |
 | An equality between two items, true of a binding, carries a term true of one side's row on its compared column to the other side's column; a derived item's row whose column isn't NULL passes what each of its arms' items' terms say of the column the arm passes on | `transfer_sound`, `pulled_sound` | `proofs/SqliveNarrowing/Rules/Transfer.lean` | 7 |
 | A view, or a FROM subquery in no other core, returns the same rows under every binding, so a lookup reads it alone | `view_sound` | `proofs/SqliveNarrowing/Rules/View.lean` | 8 |
@@ -2117,7 +2127,7 @@ the model and states its assumptions.
 | A placed item's scope reads the scopes of the items placed before it, and passes a row of which its terms and carried terms hold, whose value each membership's partner gives from a row in the partner's scope, and whose values of the memberships that join one partner in the same join one row of the partner gives together, that a side of each OR it keeps passes, and that its LIMIT bound passes | `scopes_eq`, `scopeAt_passes`, `groupScopes_passes`, `joinedAll_passes_joined`, `membershipScope_passes`, `equalValues_passes`, `sideScope_passes`, `bind_passes` | `proofs/SqliveNarrowing/Scopes.lean` | 7 |
 | The planned state holds an ON narrowing back only for an item a LEFT JOIN adds; each edge the planner passes into a derived item's arms comes from an edge the derived item holds, through the result column an arm passes the target's column on to, and makes the target an inner join's; the planner places each item once, and every item of every core; and each edge of the planned state whose partner is a subquery's source has its partner in an arm of some core's subquery, and each item's memberships are edges from it; and each item's memberships and the ORs it keeps take values from items placed before it, and through FROM subqueries and CTEs placed before it | `plan_leftOn`, `plan_pushed`, `plan_order`, `plan_nestedOK`, `plan_before`, `plan_placedBefore` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | The planned state holds no edge twice, and no item of it has a membership twice | `plan_edges_once`, `plan_once` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
-| An item that a waiting derived item could pass edges into, in a step of placing the items, waits in that step too | `waiting_receivers`, `closure_closed` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
+| An item that a waiting derived item could pass edges or ORs into, in a step of placing the items, waits in that step too | `waiting_receivers`, `closure_closed` | `proofs/SqliveNarrowing/PlannerState.lean` | 7 |
 | The planner reads no core twice, and reads every core that sits in an arm of a query a core reads, at any depth, before that core | `readOrder_postorder` | `proofs/SqliveNarrowing/ReadOrder.lean` | 8 |
 | The planner's state before it reads any condition, after it reads each core's conditions, and after it carries terms across a core's edges, says only what holds of every binding a core keeps: an item it holds no ON narrowing back for has a row, each term and carried term holds of its item's row, each edge and OR of an item with a row holds, and what it holds back for a LEFT JOIN's item holds where that item has a row | `PState.Sem.initial`, `PState.Sem.readConds`, `PState.Sem.carry` | `proofs/SqliveNarrowing/Facts.lean` | 5 to 8 |
 | The planner only adds to an item's term; passing a term into a derived item's arms, and reading each core after every core below it, leaves the planner's state saying only what holds of each binding a core keeps and, below a core, of each binding that matters to its derived item's test | `PState.Sem.pushDown`, `PState.Sem.readCore`, `plan_readSem` | `proofs/SqliveNarrowing/ReadPhase.lean` | 8 |

@@ -61,7 +61,7 @@ theorem scopes_parts {s : Statement} (last : Option (List (List Value))) (rowsOf
         (Planned.membershipScope ((plan s).scopes last) m).passes rowsOf r = true := by
   obtain ⟨bound, hbound, hbefore⟩ := (plan s).scopes_eq last (plan_order s).1 hd
   rw [hbound] at h
-  obtain ⟨ht, hc, hm⟩ := scopeAt_parts h
+  obtain ⟨ht, hc, hm, _⟩ := scopeAt_parts h
   refine ⟨ht, hc, fun m hmm => ?_⟩
   rw [← membershipScope_congr (hbefore m.partner ((plan_placedBefore s d).1 m hmm))]
   exact hm m hmm
@@ -225,6 +225,54 @@ theorem pushed_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
       · exact absurd hm0 h
       · exact h
   exact membershipScope_pushed hpassed hp hv hn hcols h0
+
+/-- A pushed OR's scope passes its target's row in a binding that matters: the
+binding holds, in each column its arm passes on, the value of a row the
+derived item's test keeps, which a side of the derived item's OR passes. -/
+theorem pushedOr_passes {s : Statement} (hwf : s.wellFormed = true) {Y : Db}
+    {last : Option (List (List Value))} {Z : Db} {g q k i : Nat} {b : Bind} {r : Row}
+    {sides : List Side} (hk : k ∈ (s.query q).arms) (hi : i ∈ (s.core k).items)
+    (hrel : relevant s (planRel s Y last) q k (evalQuery s Z g) b = true)
+    (hbi : b i = some r) (he : (i, sides) ∈ (plan s).state.pushedOrs) {bound : Nat → RScope}
+    (hbound : ∀ side ∈ sides, ∀ e ∈ side.edges, bound e.partner = (plan s).scopes last e.partner) :
+    ∃ side ∈ sides, (Planned.sideScope bound side).passes (lookupRows s Y) r = true := by
+  obtain ⟨d, q0, v, k0, rename, sides0, hd, hlim, hoff, hk0, hwin, hcore0, hne, hout, hdo, hs0,
+    heq⟩ := plan_pushedOrs s (i, sides) he
+  have hcorei : (s.item i).core = k := ((s.wellFormed_parts hwf).items k (s.core_lt hi) i hi).2
+  simp only at hcore0 hout heq
+  rw [hcorei] at hcore0
+  subst hcore0
+  obtain rfl := s.wellFormed_armOf hwf hk0 hk
+  obtain ⟨r0, hr0, hcells⟩ := relevant_cells hrel hwin
+  have hcols : ∀ c c', rename c = some c' → r0.cell c = cellOf (some r) c' := by
+    intro c c' hc
+    obtain ⟨hagg, hout'⟩ := hout c c' hc
+    rw [hcells c i c' hout' hagg, hbi]
+  have hdl := plan_order_listed hwf hdo
+  have htest := queryTest_scope hdl hd hlim hoff hr0
+  simp only [Planned.scopeTest, Bool.and_eq_true] at htest
+  obtain ⟨boundd, hboundd, hbefore⟩ := (plan s).scopes_eq last (plan_order s).1 hdo
+  have hscope := htest.1.1
+  rw [hboundd] at hscope
+  obtain ⟨side0, hside0, hpass0⟩ := (scopeAt_parts hscope).2.2.2 sides0 hs0 hne
+  rw [sideScope_congr fun e he' => hbefore e.partner
+    ((plan_placedBefore s d).2 sides0 hs0 side0 hside0 e he')] at hpass0
+  obtain ⟨hterms, hedges⟩ := sideScope_parts hpass0
+  have hmem : PushDown.sideInto s i rename side0 ∈ sides := by
+    rw [heq]
+    exact List.mem_map.mpr ⟨side0, hside0, rfl⟩
+  refine ⟨_, hmem, sideScope_passes (fun t ht => ?_) (fun m hm => ?_)⟩
+  · obtain ⟨t0, ht0, hrenamed⟩ := List.mem_filterMap.mp ht
+    exact PushDown.renamed_sound hrenamed hcols (PushDown.judgedOn_sound hcols) (hterms t0 ht0)
+  · rw [hbound _ hmem m hm]
+    obtain ⟨e0, he0, value, hvalue, rfl⟩ := PushDown.mem_passed hm
+    have hsame : value.eval r = e0.memberValue.eval r0 := by
+      have := PushDown.value_passed_sound hvalue hcols
+      rwa [PValue.on_some, PValue.on_some] at this
+    have h0 := hedges e0 he0
+    simp only [RScope.passes] at h0 ⊢
+    rw [hsame]
+    exact h0
 
 /-! Partners. -/
 
@@ -608,7 +656,10 @@ theorem item_passes {s : Statement} {X Y : Db} {last : Option (List (List Value)
       obtain rfl := Option.some.inj this
       exact ⟨hv1, hn1⟩
     · have hors := (plan_lookups hwf).2.2.1 i sides hsides
-      obtain ⟨⟨side, hside, hterms, hedges⟩, _, hsd⟩ := hS.ors Z g b i hcls hbi' sides hors
+      rcases hS.ors Z g b i hcls hbi' sides hors with
+        hpushed | ⟨⟨side, hside, hterms, hedges⟩, _, hsd⟩
+      · exact pushedOr_passes hwf hk hi hrel hbi hpushed fun side hside e he =>
+          hbefore' _ (hinpre _ ((plan_placedBefore s i).2 sides hsides side hside e he))
       refine ⟨side, hside, sideScope_passes (fun t ht => by have := hterms t ht; rwa [hbi] at this)
         fun e he => ?_⟩
       obtain ⟨hmem, _, hbnd, hnest⟩ := hsd side hside e he

@@ -47,6 +47,8 @@ mod nonstrict_edge;
 mod one_of;
 #[path = "narrowing_model/or.rs"]
 mod or;
+#[path = "narrowing_model/or_derived.rs"]
+mod or_derived;
 #[path = "narrowing_model/parenthesized.rs"]
 mod parenthesized;
 #[path = "narrowing_model/push_down.rs"]
@@ -740,6 +742,12 @@ async fn is_edge_matches_lean() {
 #[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
 async fn or_matches_lean() {
     differential("or", or::statement).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SQLIVE_NARROWING_LEAN; scripts/check.sh builds narrowingRunner"]
+async fn or_derived_matches_lean() {
+    differential("or through subqueries", or_derived::statement).await;
 }
 
 #[tokio::test]

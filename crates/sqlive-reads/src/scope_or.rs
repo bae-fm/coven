@@ -35,6 +35,43 @@ pub(crate) struct Side {
 }
 
 impl Side {
+    /// The columns of its source that its terms test and its edges compare.
+    pub(crate) fn columns(&self) -> Vec<String> {
+        let mut columns = Vec::new();
+        for term in &self.terms {
+            term.columns(&mut columns);
+        }
+        for column in self.edges.iter().flat_map(|edge| edge.member.columns()) {
+            if !columns.iter().any(|found| found == column) {
+                columns.push(column.to_owned());
+            }
+        }
+        columns
+    }
+
+    /// What this side, of an OR on a subquery's, CTE's or view's rows, says
+    /// of `target`, whose rows the statement names `rows` and whose column
+    /// `column` gives for each of the side's columns it passes on; `None`
+    /// when it says nothing of `target`. No LEFT JOIN adds `target`.
+    pub(crate) fn over(
+        &self,
+        target: usize,
+        rows: &str,
+        column: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
+        let terms: Vec<ScopeTerm> =
+            self.terms.iter().filter_map(|term| term.renamed(&column, Some(rows))).collect();
+        let edges: Vec<Edge> = self
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let member = edge.member.over(target, rows, false, column)?;
+                Some(Edge { member, pushed: true, ..edge.clone() })
+            })
+            .collect();
+        (!terms.is_empty() || !edges.is_empty()).then_some(Self { terms, edges })
+    }
+
     /// Whether a row of NULLs in the source's place can pass the side.
     fn may_hold_on_nulls(&self) -> bool {
         self.terms.iter().any(ScopeTerm::may_hold_on_nulls) || self.edges.iter().any(|e| e.nulls)
@@ -145,14 +182,14 @@ impl Planner<'_> {
 
     /// The ORs on `item` whose sides take values only from sources placed
     /// before it.
-    pub(crate) fn placed_ors(&self, item: usize, placed: &[bool]) -> Vec<Vec<EitherSide>> {
+    pub(crate) fn placed_ors(&self, item: usize, placed: &[bool]) -> Vec<Vec<Side>> {
         self.items[item]
             .ors
             .iter()
             .filter(|sides| {
                 sides.iter().all(|side| side.edges.iter().all(|edge| edge.placed(placed)))
             })
-            .map(|sides| sides.iter().map(EitherSide::of).collect())
+            .cloned()
             .collect()
     }
 }

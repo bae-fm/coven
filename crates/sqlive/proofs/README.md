@@ -50,7 +50,7 @@ item's rows and edges between items; the planner reads the conditions that a
 row of NULLs fails first, holds back what a LEFT JOIN's ON says of other items
 until a WHERE condition makes the join an inner join's, carries each item's
 terms on a column an equality compares to the item on the equality's other
-side, passes a derived item's terms into its arms, and places the items so
+side, passes a derived item's terms, equalities and ORs into its arms, and places the items so
 each takes values from items placed before it. An item that takes a
 subquery's value waits for the subquery's item, and so does each item a
 waiting derived item could pass that value into. A run binds each item's
@@ -221,6 +221,16 @@ JOIN adds, so where such a part holds, its item has a row.
   proves the same of each pair of `(x.a, x.b) = (SELECT y.c, y.d ...)`, the
   subquery on either side, and of `(x.a, x.b) IN (SELECT y.c, y.d ...)`, since
   a row value comparison holds only where every pair is equal.
+- **An OR passed into a FROM subquery, CTE or view.** As the planner places a
+  derived item, it passes each OR the item keeps into the items its arms pass
+  columns on from, one level: an item that takes one keeps it, when it is
+  placed after, and passes it on then (`PushDown.pushOrs`). An item takes one when no
+  LEFT JOIN adds it and each side, rewritten to its columns, still has a term
+  or an edge. The planner keeps the ORs it passes in a list of their own
+  (`PState.pushedOrs`). `plan_pushedOrs` proves where each comes from, and
+  `pushedOr_passes` that a row that matters to the derived item passes a side
+  of the item's OR, so the target's row in its arm's binding passes that side
+  rewritten.
 - **A condition passed into a FROM subquery, CTE or view.** `push_down_sound`
   proves that a row of a derived item's query is a row of one of its arms, and
   that a row of an arm that doesn't aggregate holds, in each column that is a

@@ -54,11 +54,11 @@ def PushDown.reached (s : Statement) : Nat → Nat → Nat → List Nat
       | none => []
 
 /-- The items derived item `d` can pass the edges it takes into, once it is
-placed: those an arm passes on a column an edge of `d` compares, at every
-depth (`derived::receivers`). -/
+placed: those an arm passes on a column an edge of `d` compares, or a side of
+an OR of `d` tests or compares, at every depth (`derived::receivers`). -/
 def receivers (s : Statement) (st : PState) (d : Nat) : List Nat :=
-  (st.edges.filter (·.member == d)).flatMap fun e =>
-    e.memberValue.columns.flatMap (PushDown.reached s s.fuel d)
+  (((st.edges.filter (·.member == d)).flatMap fun e => e.memberValue.columns) ++
+    (st.items d).ors.flatMap PushDown.sideColumns).flatMap (PushDown.reached s s.fuel d)
 
 /-- `found` with each item of `items` that `adds` takes, given those found,
 added one at a time until it takes none, in at most `fuel` steps. -/
@@ -129,7 +129,8 @@ def waiting (s : Statement) (st : PState) (order remaining : List Nat) : List Na
 
 /-- Place the items one by one, each taking as memberships its edges to
 items placed before it, through derived items placed before it, and passing
-them into it when it is derived (`Planner::ordered`). -/
+them, and the ORs it keeps, into it when it is derived
+(`Planner::ordered`). -/
 def ordered (s : Statement) (st : PState) : PState × List Nat :=
   let all := s.cores.length |> List.range |>.flatMap fun k => (s.core k).items
   go all.length all st [] []
@@ -168,6 +169,7 @@ where
           sides.all fun side => side.edges.all fun e => e.placedIn order
         let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
         let st := PushDown.pushDown s s.fuel s.fuel st next none taken
+        let st := PushDown.pushOrs s st next either
         go f all st (order ++ [next]) waited
 
 /-- The planner's state once every core is read and every item placed, with

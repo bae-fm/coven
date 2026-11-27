@@ -723,3 +723,53 @@ CREATE VIEW first_cover AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM covers U
     }
     db.close();
 }
+
+/// An OR of equalities with another table's columns, as the one sqlive reads
+/// from a coalesce equality, narrows the table behind a FROM subquery, CTE or
+/// view as it narrows that table written out.
+#[tokio::test]
+async fn an_or_narrows_the_table_behind_a_subquery() {
+    let db = TestDatabase::open(
+        "CREATE TABLE u(id INTEGER PRIMARY KEY, a INTEGER, b INTEGER);
+CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER, v INTEGER);
+INSERT INTO u VALUES (1,2,10),(2,3,11);
+INSERT INTO t VALUES (1,10,0),(2,20,0),(3,30,0),(4,40,0),(11,50,0);
+CREATE VIEW passed AS SELECT * FROM t",
+    );
+    for from in [
+        "t AS y",
+        "(SELECT * FROM t) AS y",
+        "(SELECT * FROM (SELECT * FROM t) AS inner_rows) AS y",
+        "(SELECT * FROM t UNION ALL SELECT * FROM t) AS y",
+        "passed AS y",
+    ] {
+        for on in ["y.id = coalesce(x.a, 1)", "(y.id = x.a OR y.id = x.b)"] {
+            for join in ["JOIN", "LEFT JOIN"] {
+                let sql = format!("SELECT x.id, y.v FROM u AS x {join} {from} ON {on}");
+                follows(
+                    &db,
+                    sql.leak(),
+                    vec![],
+                    &[
+                        ("UPDATE t SET v = v + 1 WHERE id = 4", false),
+                        ("UPDATE t SET v = v + 1 WHERE id = 2", true),
+                        ("UPDATE t SET v = v + 1 WHERE id = 3", true),
+                    ],
+                )
+                .await;
+            }
+        }
+        let sql = format!("WITH y AS (SELECT * FROM {from}) SELECT x.id, y.v FROM u AS x, y WHERE y.id = x.a OR y.id = x.b");
+        follows(
+            &db,
+            sql.leak(),
+            vec![],
+            &[
+                ("UPDATE t SET v = v + 1 WHERE id = 4", false),
+                ("UPDATE t SET v = v + 1 WHERE id = 11", true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}

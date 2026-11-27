@@ -81,6 +81,39 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
           let st := if renamed.isSome || !passed.isEmpty then st.joinInner narrowFuel target else st
           pushDown s narrowFuel fuel st target renamed passed) st) st
 
+/-- What a side of an OR on a derived item says of `target`, whose column
+`rename c` holds the derived item's column `c`: its terms as renamed and its
+edges as passed. -/
+def sideInto (s : Statement) (target : Nat) (rename : Nat → Option Nat) (side : Side) : Side :=
+  { terms := side.terms.filterMap (·.renamed rename (STerm.judgedOn target rename)),
+    edges := passedInto s false target rename side.edges }
+
+/-- The columns of its item that the sides of an OR test or compare. -/
+def sideColumns (sides : List Side) : List Nat :=
+  sides.flatMap fun side =>
+    side.terms.flatMap STerm.columns ++ side.edges.flatMap fun e => e.memberValue.columns
+
+/-- Give `target` the OR `sides` of a derived item whose arm passes into it,
+when no LEFT JOIN adds it and each side still says something of it. -/
+def passOr (s : Statement) (target : Nat) (rename : Nat → Option Nat) (sides : List Side)
+    (st : PState) : PState :=
+  let passed := sides.map (sideInto s target rename)
+  if !sides.isEmpty && s.alwaysBound target && (st.items target).leftOn.isNone &&
+      passed.all Side.narrows then
+    { st.update target fun p => { p with ors := p.ors ++ [passed] } with
+      pushedOrs := st.pushedOrs ++ [(target, passed)] }
+  else st
+
+/-- Pass `ors`, the ORs item `item` keeps as it is placed, into the items its
+arms pass their columns on from. An OR goes one level: an item that takes one
+passes it on as it keeps it, when it is placed. -/
+def pushOrs (s : Statement) (st : PState) (item : Nat) (ors : List (List Side)) : PState :=
+  match arms s item with
+  | none => st
+  | some found => found.foldl (fun st arm => ors.foldl (fun st sides =>
+      ((sideColumns sides).filterMap fun c => (arm[c]?).join.map (·.1)).eraseDups.foldl
+        (fun st target => passOr s target (renameInto arm target) sides st) st) st) st
+
 /-! The proof: a row of a derived item's query is a row of one of its arms,
 and a row of an arm that doesn't aggregate holds, in each column the arm
 passes on, the value of the item it passes on. So a term or an edge true of

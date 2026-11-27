@@ -2,6 +2,7 @@
 //! whose values its memberships compare with (SPEC.md section 7).
 
 use crate::scope_edge::{Edge, Nesting};
+use crate::scope_or::{EitherSide, Side};
 use crate::scope_order::SortedLimit;
 use crate::scope_plan::{Membership, Planner, Sources};
 use crate::scope_term::ScopeTerm;
@@ -80,10 +81,13 @@ impl Planner<'_> {
             for edge in &taken {
                 self.items[next].source.memberships.push(Membership::of(edge));
             }
-            self.items[next].source.either = self.placed_ors(next, &placed);
+            let either = self.placed_ors(next, &placed);
+            self.items[next].source.either =
+                either.iter().map(|sides| sides.iter().map(EitherSide::of).collect()).collect();
             // A subquery's, CTE's or view's cores come later, and take
             // the same values.
             crate::derived::push_down(&mut self, next, None, taken);
+            crate::derived::push_ors(&mut self, next, &either);
             edges.add_new(&self.edges);
             remaining.retain(|item| *item != next);
             placed[next] = true;
@@ -302,7 +306,7 @@ impl Planner<'_> {
         }
     }
 
-    /// The items the derived item `item` could pass edges into
+    /// The items the derived item `item` could pass edges or ORs into
     /// (`derived::receivers`). Placed before it, one of them would take none
     /// of the values the item takes, as a table that a FROM subquery reads
     /// takes none of the values of a subquery that the subquery's column is
@@ -310,7 +314,9 @@ impl Planner<'_> {
     fn receiving(&self, edges: &EdgesOfItems, item: usize) -> Vec<usize> {
         let compared =
             edges.by_member[item].iter().flat_map(|edge| self.edges[*edge].member.columns());
-        crate::derived::receivers(self, item, compared)
+        let named: Vec<String> =
+            self.items[item].ors.iter().flatten().flat_map(Side::columns).collect();
+        crate::derived::receivers(self, item, compared.chain(named.iter().map(String::as_str)))
     }
 }
 
