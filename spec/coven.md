@@ -602,7 +602,12 @@ and `photos`. Since `coven_sending` holds at most as many files as the upload
 limit lets go out at once, counting them finds each file's photo through an
 index: on a queue of 20,000 files, finding the albums of the three being sent
 took 0.02 ms, where counting `sending` over `coven_uploads` read every queued
-file, in 1 ms. A query that reads neither isn't run again.
+file, in 1 ms. A query that reads neither isn't run again. Nor is one that reads
+them only in a column of a subquery, CTE or view that nothing reads, which
+changes no row the query returns ([sqlive's spec, section
+8](../crates/sqlive/SPEC.md#subqueries-in-from-ctes-and-views)): a photo app can
+join a subquery that counts each album's photos going out, select only the
+subquery's album names, and its query doesn't run again as an upload starts.
 
 A read sees the files being sent as they stood at its snapshot, as it sees
 coven's tables. Ana resumes her uploads while a read that fixed its snapshot
