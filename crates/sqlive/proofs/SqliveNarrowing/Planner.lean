@@ -83,24 +83,24 @@ before that item, it would take none of them. -/
 def received (s : Statement) (st : PState) (waiting : List Nat) (i : Nat) : Bool :=
   waiting.any fun d => (receivers s st d).contains i
 
-/-- Whether item `i` has values to give before any item is placed: it has
-conditions of its own, or it is a derived item that no condition passes into,
-whose rows nothing around it narrows, or one that reads an item that has
-(`Planner::gives_alone`). -/
-def givesAlone (s : Statement) (st : PState) : Nat → Nat → Bool
+/-- Whether item `i` has values to give before any item is placed: it has a
+condition of its own that `counts` takes, or it is a derived item that no
+condition passes into, whose rows nothing around it narrows, or one that reads
+an item that has (`Planner::gives_alone`). -/
+def givesAlone (s : Statement) (st : PState) (counts : STerm → Bool) : Nat → Nat → Bool
   | 0, _ => false
   | fuel + 1, i =>
-    (st.items i).term.isSome || match (s.item i).kind with
+    (st.items i).term.any counts || match (s.item i).kind with
       | .table _ => false
       | .derived q _ => (PushDown.arms s i == some []) ||
-          (s.query q).arms.any fun k => (s.core k).items.any (givesAlone s st fuel)
+          (s.query q).arms.any fun k => (s.core k).items.any (givesAlone s st counts fuel)
 
 /-- The items of `remaining` that items giving values reach by edges, either
 way, with none of `waiting` among them: a giver has values to give on its own
 or a partner placed already. -/
 def givenValues (s : Statement) (st : PState) (order remaining waiting : List Nat) : List Nat :=
   let gives (i : Nat) : Bool := !waiting.contains i &&
-    (givesAlone s st s.fuel i ||
+    (givesAlone s st STerm.compares s.fuel i ||
       st.edges.any fun e => e.member == i && order.contains e.partner)
   closure remaining
     (fun reached i => !waiting.contains i && st.edges.any fun e =>
@@ -157,9 +157,10 @@ where
                 && !st.edges.any (·.member == e.partner)
             (candidates.find? fun i => st.edges.any fun e => e.member == i && order.contains e.partner)
               |>.orElse (fun _ => candidates.find? fun i =>
-                ((st.items i).term.isSome || !readWhole i) && givesAlone s st s.fuel i
-                  && !takesUnplacedValues i)
+                ((st.items i).term.any STerm.compares || !readWhole i)
+                  && givesAlone s st STerm.compares s.fuel i && !takesUnplacedValues i)
               |>.orElse (fun _ => candidates.find? readWhole)
+              |>.orElse (fun _ => candidates.find? (givesAlone s st (fun _ => true) s.fuel))
               |>.getD first
           | none, [] => r
         let taken := st.edges.filter fun e => e.member == next && e.placedIn order

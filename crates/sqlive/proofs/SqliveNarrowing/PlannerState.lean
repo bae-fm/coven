@@ -461,9 +461,10 @@ theorem plan_pushed (s : Statement) {e : Edge} (he : e ∈ (plan s).state.pushed
 
 /-- The first of three searches of `l` that finds an item, or `first`, is in
 any list holding `l` and `first`. -/
-theorem getD_find_mem {l : List Nat} {p1 p2 p3 : Nat → Bool} {first : Nat} {S : List Nat}
+theorem getD_find_mem {l : List Nat} {p1 p2 p3 p4 : Nat → Bool} {first : Nat} {S : List Nat}
     (hl : ∀ x ∈ l, x ∈ S) (hfirst : first ∈ S) :
-    ((((l.find? p1).orElse fun _ => l.find? p2).orElse fun _ => l.find? p3).getD first) ∈ S := by
+    (((((l.find? p1).orElse fun _ => l.find? p2).orElse fun _ => l.find? p3).orElse
+      fun _ => l.find? p4).getD first) ∈ S := by
   cases h1 : l.find? p1 with
   | some x => simpa [h1] using hl x (List.mem_of_find?_eq_some h1)
   | none =>
@@ -472,7 +473,10 @@ theorem getD_find_mem {l : List Nat} {p1 p2 p3 : Nat → Bool} {first : Nat} {S 
     | none =>
       cases h3 : l.find? p3 with
       | some x => simpa [h1, h2, h3] using hl x (List.mem_of_find?_eq_some h3)
-      | none => simpa [h1, h2, h3] using hfirst
+      | none =>
+        cases h4 : l.find? p4 with
+        | some x => simpa [h1, h2, h3, h4] using hl x (List.mem_of_find?_eq_some h4)
+        | none => simpa [h1, h2, h3, h4] using hfirst
 
 /-- The state after `ordered` places `next` with the items `order` placed
 before it. -/

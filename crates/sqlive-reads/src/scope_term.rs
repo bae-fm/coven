@@ -159,6 +159,22 @@ impl ScopeTerm {
         }
     }
 
+    /// Whether it compares a column with a value sqlive reads: it does where
+    /// either side of an AND does, or each side of an OR. A condition SQLite
+    /// judges compares none.
+    pub(crate) fn compares(&self) -> bool {
+        match self {
+            Self::Compare { .. }
+            | Self::In { .. }
+            | Self::Null { .. }
+            | Self::Is { .. }
+            | Self::Truth { .. } => true,
+            Self::Row(_) => false,
+            Self::And(left, right) => left.compares() || right.compares(),
+            Self::Or(left, right) => left.compares() && right.compares(),
+        }
+    }
+
     /// Both terms.
     pub(crate) fn and(self, other: Self) -> Self {
         Self::And(Box::new(self), Box::new(other))

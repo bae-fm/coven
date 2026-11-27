@@ -1030,13 +1030,25 @@ only the table it is carried to: it doesn't change which table comes first, and
 an equality with an expression carries none.
 
 Among the tables that don't wait, as below, sqlive looks up first one that a
-table already looked up gives values to, then one with a condition of its own,
-then a table function or a subquery that no condition passes into, and then any
-other, each time the first in FROM. A subquery in FROM, a CTE or a view that
-conditions pass into goes where its tables would, written out: it has a
-condition of its own only when a table it reads has one. So `FROM albums AS a
-LEFT JOIN (SELECT * FROM releases) AS r ON r.album_id = a.id` looks `albums` up
-first, and a release added to an album the query doesn't show doesn't rerun it.
+table already looked up gives values to, then one with a condition of its own
+that compares a column with a value, then a table function or a subquery that
+no condition passes into, then one whose only conditions SQLite judges
+(section 5), and then any other, each time the first in FROM. A subquery in
+FROM, a CTE or a view that conditions pass into goes where its tables would,
+written out: it has a condition of its own only when a table it reads has one.
+So `FROM albums AS a LEFT JOIN (SELECT * FROM releases) AS r ON r.album_id =
+a.id` looks `albums` up first, and a release added to an album the query
+doesn't show doesn't rerun it.
+
+A condition SQLite judges compares no column with a value, so the rows it
+allows can be any folder's or album's. A cover picker reads the covers the
+catalogs offered one folder with `WITH folder AS (SELECT hash FROM folders
+WHERE path = ?1 LIMIT 1) SELECT ... FROM covers JOIN folder USING (hash) WHERE
+?2 IN ('all', covers.source)`. No condition passes into `folder`, which has a
+LIMIT, and `?2 IN ('all', covers.source)` is for SQLite to judge. sqlive looks
+`folder` up first, and `covers` takes the folder's hash from it, so a cover
+offered to another folder doesn't rerun the picker. With `covers` first, it
+would take no values, and a cover offered to any folder would.
 
 A table narrowed by a subquery's value comes after the subquery's table, and the
 tables that reach rows through it come after it. An import pane reads a cell's
@@ -1048,8 +1060,9 @@ are ones that wait: placed first, they would take values from no table and read
 every verdict's rows. So `matched` and `label` narrow to the cell's verdict with
 no condition of their own, and a label added to another verdict doesn't rerun the
 read. A group of joined tables waits when none of its tables has a condition of
-its own or a partner placed already, and one of them takes values from a table
-that waits. A subquery in FROM, a CTE or a view passes the values it takes into
+its own that compares a column with a value, or a partner placed already, and
+one of them takes values from a table that waits. A subquery in FROM, a CTE
+or a view passes the values it takes into
 the tables it reads (section 8), so while it waits, so do those tables: placed
 before it, they would take none. In a group, it counts as having a condition of
 its own only when a table it reads has one, or when no condition passes into

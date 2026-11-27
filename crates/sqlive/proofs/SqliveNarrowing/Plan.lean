@@ -40,6 +40,15 @@ def STerm.holds (r : Option Row) : STerm → Bool
   | .and l t => l.holds r && t.holds r
   | .or l t => l.holds r || t.holds r
 
+/-- Whether the term compares a column with a value sqlive reads: one that
+does wherever either side of an AND does, or each side of an OR. A condition
+SQLite judges compares none (`ScopeTerm::compares`). -/
+def STerm.compares : STerm → Bool
+  | .compare .. | .inList .. | .null .. => true
+  | .row .. => false
+  | .and l r => l.compares || r.compares
+  | .or l r => l.compares && r.compares
+
 /-- Whether a row of NULLs can pass the term: a NULL test that isn't `IS NOT
 NULL` and a condition SQLite judges can (`ScopeTerm::may_hold_on_nulls`). -/
 def STerm.mayHoldOnNulls : STerm → Bool

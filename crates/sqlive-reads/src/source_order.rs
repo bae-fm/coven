@@ -4,6 +4,7 @@
 use crate::scope_edge::{Edge, Nesting};
 use crate::scope_order::SortedLimit;
 use crate::scope_plan::{Membership, Planner, Sources};
+use crate::scope_term::ScopeTerm;
 
 /// A planner's edges by the items they join, each as its position in the
 /// planner's edges, in order.
@@ -42,10 +43,11 @@ impl Planner<'_> {
     /// Order the items so each comes after the sources it takes values
     /// from: core by core, each after the core it sits in; within a core,
     /// those an ordered one reaches first, so each takes the values of the
-    /// sources the core's narrowing started from, then those with values to
-    /// give of their own (`gives_alone`), then views read whole and table
-    /// functions, which nothing narrows but whose values others can take,
-    /// and then any, each in FROM order.
+    /// sources the core's narrowing started from, then those whose own
+    /// conditions compare a column with a value (`gives_alone`), then views
+    /// read whole and table functions, which nothing narrows but whose
+    /// values others can take, then those whose only conditions SQLite
+    /// judges, and then any, each in FROM order.
     pub(crate) fn ordered(mut self, sorted: Option<SortedLimit>) -> Sources {
         let mut order: Vec<usize> = Vec::new();
         let mut remaining: Vec<usize> =
@@ -145,12 +147,15 @@ impl Planner<'_> {
             .find(takes_placed_values)
             .or_else(|| {
                 candidates.iter().copied().find(|item| {
-                    (items[*item].source.term.is_some() || !read_whole(*item))
-                        && self.gives_alone(*item)
+                    let compared =
+                        items[*item].source.term.as_ref().is_some_and(ScopeTerm::compares);
+                    (compared || !read_whole(*item))
+                        && self.gives_alone(*item, ScopeTerm::compares)
                         && !takes_unplaced_values(*item)
                 })
             })
             .or_else(|| candidates.iter().copied().find(|item| read_whole(*item)))
+            .or_else(|| candidates.iter().copied().find(|item| self.gives_alone(*item, |_| true)))
             .unwrap_or(free)
     }
 
@@ -236,7 +241,7 @@ impl Planner<'_> {
         };
         let gives_values = |item: usize| {
             !waiting[item]
-                && (self.gives_alone(item)
+                && (self.gives_alone(item, ScopeTerm::compares)
                     || edges.by_member[item].iter().any(|edge| placed[self.edges[*edge].partner]))
         };
         let mut reached = vec![false; self.items.len()];
@@ -273,23 +278,24 @@ impl Planner<'_> {
         }
     }
 
-    /// Whether `item` has values to give before any item is placed: it has
-    /// conditions of its own, or it is a view read whole or a table function,
+    /// Whether `item` has values to give before any item is placed: it has a
+    /// condition of its own that `counts` takes, or it is a view read whole
+    /// or a table function,
     /// which nothing narrows, or it is a subquery, CTE or view read as its
     /// own that no condition passes into, or one that reads an item that has.
     /// A subquery that only passes a table's rows on has none, as the table
     /// has none. The model states the rule as `givesAlone` in
     /// `crates/sqlive/proofs`.
-    fn gives_alone(&self, item: usize) -> bool {
+    fn gives_alone(&self, item: usize, counts: fn(&ScopeTerm) -> bool) -> bool {
         let found = &self.items[item];
-        if found.source.term.is_some() {
+        if found.source.term.as_ref().is_some_and(counts) {
             return true;
         }
         match &found.derived {
             Some(derived) => {
                 derived.arms.is_empty()
                     || derived.cores.iter().any(|core| {
-                        self.cores[*core].items.iter().any(|item| self.gives_alone(*item))
+                        self.cores[*core].items.iter().any(|item| self.gives_alone(*item, counts))
                     })
             }
             None => found.source.table().is_none(),

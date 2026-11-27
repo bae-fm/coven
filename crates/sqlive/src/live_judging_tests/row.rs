@@ -498,3 +498,38 @@ async fn an_error_in_the_question_counts_as_a_match() {
         db.close();
     }
 }
+
+/// A condition SQLite judges compares no column with a value sqlive reads, so
+/// it starts no join: a gallery's covers take the folder's hash from the one
+/// row its CTE finds, though a filter on their source is a condition of their
+/// own. A cover of another folder wakes nothing, whether the covers are read
+/// through a subquery in FROM or written out.
+#[tokio::test]
+async fn a_judged_condition_does_not_start_a_join() {
+    let db = TestDatabase::open(
+        "CREATE TABLE folders(path TEXT PRIMARY KEY, hash TEXT NOT NULL);
+CREATE TABLE covers(id INTEGER PRIMARY KEY, hash TEXT NOT NULL, source TEXT NOT NULL);
+INSERT INTO folders VALUES ('/a', 'ha'), ('/b', 'hb')",
+    );
+    let found = "WITH folder AS (SELECT hash FROM folders WHERE path = ?1 LIMIT 1)";
+    for select in [
+        "SELECT group_concat(shown.id) FROM (SELECT covers.id, covers.source FROM covers \
+         JOIN folder USING (hash)) AS shown WHERE ?2 IN ('all', shown.source)",
+        "SELECT group_concat(covers.id) FROM covers JOIN folder USING (hash) \
+         WHERE ?2 IN ('all', covers.source)",
+    ] {
+        follows(
+            &db,
+            // `follows` keeps the statement for as long as its query runs.
+            format!("{found} {select}").leak(),
+            vec![text("/a"), text("all")],
+            &[
+                ("INSERT INTO covers VALUES (1, 'hb', 'x')", false),
+                ("INSERT INTO covers VALUES (2, 'ha', 'x')", true),
+            ],
+        )
+        .await;
+        write(&db, "DELETE FROM covers");
+    }
+    db.close();
+}
