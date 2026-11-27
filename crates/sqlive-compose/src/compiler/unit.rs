@@ -76,7 +76,20 @@ pub(crate) fn compile(
     }
     check_parameters(header, &prepared).map_err(&fail)?;
     let mut warnings = Vec::new();
-    match context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))? {
+    // A read ships its scope plan, built from the SQL it runs; a fragment
+    // runs only inside the reads that spread it.
+    let (report, plan) = if header.is_read() {
+        let built = context.probe.compiled_plan(sql).map_err(|error| fail(Cause::Sqlite(error)))?;
+        let plan = built.map_err(|sqlive_reads::Unanalyzable { why }| {
+            fail(Cause::Unanalyzable { concerns: header.name.clone(), why })
+        })?;
+        (plan.report(), Some(plan.encode()))
+    } else {
+        let report =
+            context.probe.read_report(&prepared_sql).map_err(|error| fail(Cause::Sqlite(error)))?;
+        (report, None)
+    };
+    match report {
         sqlive_reads::ReadReport::Whole { why } => {
             return Err(fail(Cause::Unanalyzable { concerns: header.name.clone(), why }));
         }
@@ -125,7 +138,10 @@ pub(crate) fn compile(
             };
             (generate::fragment(header, &fields, call.exported), Some(record))
         }
-        HeaderKind::Read => (generate::read(header, sql, &fields, call.exported), None),
+        HeaderKind::Read => {
+            let plan = plan.as_deref().expect("a read's plan is built before its columns");
+            (generate::read(header, sql, plan, &fields, call.exported), None)
+        }
         HeaderKind::Write => unreachable!("a write compiles in compile_write"),
     };
     Ok(Compiled { code, record, warnings, reads })
@@ -288,3 +304,7 @@ fn check_parameters(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "unit_tests.rs"]
+mod tests;

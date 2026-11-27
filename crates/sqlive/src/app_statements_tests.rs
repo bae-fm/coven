@@ -471,3 +471,101 @@ fn a_write_leaves_the_apps_statements_prepared() {
     assert_eq!(reprepared, 0);
     db.close();
 }
+
+/// `sql` with the scope plan sqlive-compose's compiler ships with it, built
+/// against `schema`.
+fn compiled(schema: &str, sql: &str) -> crate::CompiledStatement {
+    let probe = crate::SchemaProbe::open(&[schema.to_owned()], &[], &[], &[]).unwrap();
+    crate::tests::compiled(&probe, sql).expect("sqlive analyzes the statement")
+}
+
+/// The titles the compiled `statement` reads of note 1 on `reader`.
+fn compiled_titles(
+    reader: &crate::HostSql<crate::NoPolicy>,
+    statement: crate::CompiledStatement,
+) -> rusqlite::Result<Vec<String>> {
+    reader.app_query_compiled(crate::Recorded::Yes, statement, ["1"], |r| r.get(0))
+}
+
+const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
+
+/// Run `statement` as a live query's statement on each of `db`'s two
+/// readers, as `plans_built_on_each_reader` runs `TITLES`, and return the
+/// scope plans the runs built.
+fn compiled_plans_built(
+    db: &TestDatabase,
+    counter: &crate::ConnectionWorkCounter,
+    statement: crate::CompiledStatement,
+) -> usize {
+    db.with_database(|database| {
+        let (first, second) = (database.reader(), database.reader());
+        for reader in [&first, &second] {
+            let title = reader.host(|reader| {
+                reader.live_read(
+                    &mut |_reads, _lookups| Ok(()),
+                    |reader| -> Result<Vec<String>, TestError> {
+                        Ok(compiled_titles(reader, statement)?)
+                    },
+                )
+            });
+            assert_eq!(title.unwrap(), ["title"]);
+        }
+    });
+    counter.take().scope_plans_built
+}
+
+/// A compiled statement's first run builds no scope plan: the compiler built
+/// it, and the statement brings it.
+#[test]
+fn a_compiled_statements_first_run_builds_no_plan() {
+    let (db, counter) = note_of_title();
+    assert_eq!(compiled_plans_built(&db, &counter, compiled(NOTES, TITLES)), 0);
+    db.close();
+}
+
+/// A compiled statement's plan narrows a live query as the plan sqlive
+/// builds would: a write to another note leaves the query alone.
+#[tokio::test]
+async fn a_compiled_plan_narrows_its_live_query() {
+    let db = notes();
+    db.write_app(|sql| sql.app_execute(INSERT, ["1"])).unwrap();
+    let statement = compiled(NOTES, TITLES);
+    let mut title = db.subscribe(move |sql| Ok(compiled_titles(sql.0, statement)?));
+    assert_eq!(next(&mut title).await, ["title"]);
+    db.write("INSERT INTO notes VALUES ('2', 'other')").unwrap();
+    assert!(!title.is_marked_for_rerun());
+    db.write("UPDATE notes SET title = 'renamed' WHERE id = '1'").unwrap();
+    assert_eq!(next(&mut title).await, ["renamed"]);
+    db.close();
+}
+
+/// A statement compiled against another definition of a table it reads
+/// fails, naming the table, in a one-shot read and in a live query alike:
+/// its plan could narrow by what the open database's table doesn't hold. A
+/// plan of the same SQL that fits, checked before, doesn't stand in for it.
+#[test]
+fn a_compiled_statement_of_another_schema_fails() {
+    let (db, _counter) = note_of_title();
+    let fits = compiled(NOTES, TITLES);
+    let title = db.read_app(move |reader| Ok::<_, QueryError>(compiled_titles(reader.0, fits)?));
+    assert_eq!(title.unwrap(), ["title"]);
+    let statement = compiled(
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT)",
+        TITLES,
+    );
+    let run = move |reader: TestRead<'_>| -> Result<Vec<String>, QueryError> {
+        Ok(compiled_titles(reader.0, statement)?)
+    };
+    let live = db.subscribe(run).next_blocking().expect("the query's first result");
+    for result in [db.read_app(run), live] {
+        match result {
+            Err(QueryError(crate::Error::CompiledSchemaDiffers(crate::SchemaDiffers {
+                differ,
+            }))) => {
+                assert_eq!(differ, ["table notes"]);
+            }
+            other => panic!("expected the compiled schema to differ, got {other:?}"),
+        }
+    }
+    db.close();
+}

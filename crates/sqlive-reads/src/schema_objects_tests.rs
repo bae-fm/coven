@@ -4,7 +4,7 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::Connection;
 use sqlite3_parser::ast::Name;
 
-use super::MainSchema;
+use super::{MainSchema, SchemaLookups};
 use crate::read_capture::WholeViews;
 use crate::scope_plan::{ScopePlan, ScopePlanSize};
 
@@ -99,6 +99,7 @@ fn a_name_is_found_however_a_statement_writes_it() {
         )
         .unwrap();
     let schema = MainSchema::read(&connection).unwrap();
+    let schema = SchemaLookups::new(&schema);
     let object = |name| schema.object(&Name(name));
     assert_eq!(object("plain"), Some(("Plain", "table")));
     assert_eq!(object("\"SEEN\""), Some(("Seen", "view")));
@@ -120,6 +121,7 @@ fn a_view_over_a_dropped_table_fails_only_a_lookup_of_its_columns() {
         )
         .unwrap();
     let schema = MainSchema::read(&connection).unwrap();
+    let schema = SchemaLookups::new(&schema);
     assert_eq!(schema.columns("kept").unwrap().len(), 1);
     let Err(error) = schema.columns("dangling") else { panic!("SQLite can't list its columns") };
     assert!(error.to_string().contains("no such table: main.gone"), "{error}");

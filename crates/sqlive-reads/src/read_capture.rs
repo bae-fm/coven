@@ -191,7 +191,7 @@ fn of_references(
     references: &[Reference],
     unreported: &UnreportedColumns,
 ) -> Vec<BTreeSet<String>> {
-    if matches!(unreported, UnreportedColumns::Unknown(_)) {
+    if matches!(unreported, UnreportedColumns::Unknown { .. }) {
         return references.iter().map(|_| columns.clone()).collect();
     }
     let unclaimed: Vec<&String> = columns

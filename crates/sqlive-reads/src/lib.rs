@@ -6,6 +6,7 @@
 //! queries that run on them stay in `sqlive`.
 
 mod comparison;
+mod compiled_plan;
 mod derived;
 mod from_item;
 mod from_star;
@@ -42,6 +43,9 @@ mod unreported_columns;
 mod view_trees;
 mod whole_view_names;
 
+pub use compiled_plan::{
+    CompiledPlan, CompiledStatement, SchemaDiffers, Unanalyzable, UndecodablePlan,
+};
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
 #[cfg(any(test, feature = "test-utils"))]
 pub use read_report::read_report;

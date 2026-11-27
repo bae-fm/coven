@@ -6,12 +6,15 @@
 //! the seed. The writes change several tables at once, the joins chain through
 //! joined tables, and an index serves some of the lookups. sqlive runs each
 //! write's lookups for its joins in that write's own transaction. A marked
-//! query sometimes waits through more writes before it runs.
+//! query sometimes waits through more writes before it runs. Every other
+//! query that sqlive can analyze runs as a compiled statement, with the plan
+//! a schema probe built and encoded, so a plan read back from its text
+//! narrows as the plan sqlive builds does.
 //! `SQLIVE_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::random_scopes::{a_value, b_value, key, query, write, Generated, Rng};
 use crate::random_scopes::{CAPTURED, SCHEMA, SHAPES, TABLES};
-use crate::tests::{next, QueryError, TestDatabase, TestOptions, TestRead, HANG_GUARD};
+use crate::tests::{compiled, next, QueryError, TestDatabase, TestOptions, TestRead, HANG_GUARD};
 use crate::{LiveQuery, SqlValue};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -121,10 +124,20 @@ async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
 
 type Rows = Vec<Vec<SqlValue>>;
 
+fn values(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vec<SqlValue>> {
+    (0..row.as_ref().column_count()).map(|index| row.get::<_, SqlValue>(index)).collect()
+}
+
 fn read(sql: &TestRead<'_>, text: &str, parameters: &[SqlValue]) -> rusqlite::Result<Rows> {
-    sql.query(text, rusqlite::params_from_iter(parameters), |row| {
-        (0..row.as_ref().column_count()).map(|index| row.get::<_, SqlValue>(index)).collect()
-    })
+    sql.query(text, rusqlite::params_from_iter(parameters), values)
+}
+
+fn read_compiled(
+    sql: &TestRead<'_>,
+    statement: crate::CompiledStatement,
+    parameters: &[SqlValue],
+) -> rusqlite::Result<Rows> {
+    sql.query_compiled(statement, rusqlite::params_from_iter(parameters), values)
 }
 
 async fn one_shot(db: &TestDatabase, query: &Generated) -> Rows {
@@ -176,8 +189,9 @@ const WASTED_PERCENT: [(&str, usize); 7] = [
 ];
 
 /// What one seed found: commits that left a narrowing query's result alone
-/// without marking it, and each kind of query's precision.
-async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> usize {
+/// without marking it, the queries that ran as compiled statements, and each
+/// kind of query's precision.
+async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> (usize, usize) {
     let mut rng = Rng::seeded(seed);
     let db = TestDatabase::open_with(
         SCHEMA,
@@ -199,14 +213,22 @@ async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> usize
     }
     db.write(&rows.join("; ")).unwrap();
     let queries: Vec<Generated> = (0..16).map(|_| query(&mut rng)).collect();
+    let probe = crate::SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
     let mut live = Vec::new();
-    for query in &queries {
+    let mut compiled_queries = 0;
+    for (position, query) in queries.iter().enumerate() {
         let runs = Arc::new(AtomicUsize::new(0));
         let sql = query.sql.clone();
         let parameters = query.parameters.clone();
+        let compiled = if position % 2 == 1 { compiled(&probe, &sql) } else { None };
+        compiled_queries += usize::from(compiled.is_some());
         let mut subscription = db.subscribe(move |context| {
             let run = runs.fetch_add(1, Ordering::SeqCst);
-            Ok((run, read(&context, &sql, &parameters)?))
+            let rows = match compiled {
+                Some(statement) => read_compiled(&context, statement, &parameters)?,
+                None => read(&context, &sql, &parameters)?,
+            };
+            Ok((run, rows))
         });
         let (_, rows) = next_rows(&mut subscription).await;
         live.push((subscription, rows.clone(), rows));
@@ -258,7 +280,7 @@ async fn run_seed(seed: u64, precision: &mut BTreeMap<Kind, Precision>) -> usize
         }
     }
     db.close();
-    spared
+    (spared, compiled_queries)
 }
 
 #[tokio::test]
@@ -266,12 +288,15 @@ async fn live_queries_rerun_whenever_their_results_change() {
     let seeds: u64 = std::env::var("SQLIVE_SCOPE_SEEDS")
         .ok()
         .map_or(40, |seeds| seeds.parse().expect("SQLIVE_SCOPE_SEEDS is a count"));
-    let mut spared = 0;
+    let (mut spared, mut compiled) = (0, 0);
     let mut precision = BTreeMap::new();
     for seed in 0..seeds {
-        spared += run_seed(seed, &mut precision).await;
+        let (seed_spared, seed_compiled) = run_seed(seed, &mut precision).await;
+        spared += seed_spared;
+        compiled += seed_compiled;
     }
-    eprintln!("{seeds} seeds, {spared} reruns spared");
+    eprintln!("{seeds} seeds, {spared} reruns spared, {compiled} compiled queries");
+    assert!(compiled > 0, "no query ran as a compiled statement");
     for ((shape, narrows), count) in &precision {
         eprintln!(
             "precision {shape} narrows={narrows}: {} writes, {} reruns, {} changes, {} wasted",

@@ -7,7 +7,7 @@ pub mod compiler;
 
 pub use sqlive_compose_macros::{fragment, read, write};
 
-use sqlive_reads::{Row, SqliteResult, ToSql};
+use sqlive_reads::{CompiledStatement, Row, SqliteResult, ToSql};
 
 /// A statement the compiler generated: its SQL and the values it binds. The
 /// compiler implements it for the parameters struct of each `read!` and
@@ -35,8 +35,19 @@ pub trait Returning: Statement {
     fn read(row: &Row<'_>) -> SqliteResult<Self::Row>;
 }
 
-/// A generated read.
-pub trait Read: Returning {}
+/// A generated read, with the scope plan the compiler built of it.
+pub trait Read: Returning {
+    /// The read's scope plan, built against the app's schema and encoded
+    /// (`sqlive_reads::CompiledPlan`).
+    const PLAN: &'static str;
+
+    /// The read's statement with its scope plan, which sqlive runs with no
+    /// plan of its own to build.
+    #[must_use]
+    fn compiled() -> CompiledStatement {
+        CompiledStatement { sql: Self::SQL, plan: Self::PLAN }
+    }
+}
 
 /// A generated write that returns no rows.
 pub trait Write: Statement {}

@@ -7,7 +7,9 @@ pub use sqlive_reads::StandInFunction as Function;
 /// What the compiler runs to build the schema: the SQL texts in the order to
 /// run them, and what the SQL names that SQLite doesn't have. SQLite fails to
 /// prepare a statement that names an unknown function or collation, so the
-/// compiler registers a stand-in for each.
+/// compiler registers a stand-in for each. It also names the views and tables
+/// the host's live queries read whole, which each read's scope plan depends
+/// on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Setup {
     /// The schema's SQL texts, in the order to run.
@@ -16,10 +18,17 @@ pub struct Setup {
     pub functions: Vec<Function>,
     /// The collations the schema uses, by name.
     pub collations: Vec<String>,
+    /// The views and tables the host's live queries read whole, by name.
+    pub whole_views: Vec<String>,
 }
 
 impl Setup {
     pub(crate) fn probe(&self) -> sqlive_reads::SqliteResult<sqlive_reads::SchemaProbe> {
-        sqlive_reads::SchemaProbe::open(&self.sql, &self.functions, &self.collations)
+        sqlive_reads::SchemaProbe::open(
+            &self.sql,
+            &self.functions,
+            &self.collations,
+            &self.whole_views,
+        )
     }
 }

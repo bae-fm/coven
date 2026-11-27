@@ -4,7 +4,7 @@
 //! FROM, whose parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
-use crate::schema_objects::{DeclaredColumn, MainSchema};
+use crate::schema_objects::{DeclaredColumn, SchemaLookups};
 use crate::scope_plan::{is_name, Object, Place, Planner, Source, Unread, Written};
 use crate::scope_row::{row_term, RowExpression};
 use crate::scope_term::Affinity;
@@ -291,7 +291,7 @@ pub(crate) fn read_item<'a>(
                 let found = crate::whole_view_names::whole_view_names(schema, &stored)?;
                 let inside = found.as_ref().ok().cloned();
                 planner.note_whole_view(found);
-                Object::View { name, why, inside }
+                Object::View { name, why: why.0.to_owned(), inside }
             } else {
                 Object::Table { name, within: planner.within.clone() }
             };
@@ -623,7 +623,7 @@ fn in_main(name: &QualifiedName<'_>) -> bool {
 /// content table holds, of no affinity, which compare by BINARY; its hidden
 /// ones, the one that bears the table's name and `rank`, give values that
 /// depend on rows besides their own.
-fn fts5_columns(schema: &MainSchema, table: &str) -> rusqlite::Result<Vec<Column>> {
+fn fts5_columns(schema: &SchemaLookups<'_>, table: &str) -> rusqlite::Result<Vec<Column>> {
     let columns = schema
         .columns(table)?
         .iter()
@@ -665,7 +665,7 @@ fn fts5_content_from(table: &str, qualifier: &str, columns: &[Column]) -> String
 /// `functions` tell whether a generated column's calls repeat.
 pub(crate) fn columns(
     connection: &Connection,
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     functions: &Functions,
     qualifier: &str,
     table: &str,

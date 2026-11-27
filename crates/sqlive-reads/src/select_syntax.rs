@@ -2,7 +2,8 @@
 //! order, and the expressions inside it (SPEC.md section 4).
 
 use rusqlite::{Connection, Statement};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlite3_parser::ast::{
     As, Expr, FrameBound, FromClause, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name,
@@ -590,7 +591,8 @@ fn is_clock_function(name: &str) -> bool {
 }
 
 /// One of the definitions SQLite keeps for a function's name.
-struct Definition {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Definition {
     /// How many arguments it takes, as `pragma_function_list` reports it: a
     /// count, -1 for any number, -3 for one or more, -4 for two or more.
     arguments: i64,
@@ -617,7 +619,11 @@ impl Definition {
 /// many arguments it passes. A definition that takes exactly that many
 /// arguments wins over one that takes any number, so `max(a)` calls the
 /// aggregate and `max(a, b)` the scalar function.
-pub(crate) struct Functions(BTreeMap<String, Vec<Definition>>);
+pub(crate) struct Functions {
+    definitions: BTreeMap<String, Vec<Definition>>,
+    /// Each name asked about, lowercase.
+    asked: RefCell<BTreeSet<String>>,
+}
 
 impl Functions {
     pub(crate) fn read(connection: &Connection) -> rusqlite::Result<Self> {
@@ -641,14 +647,16 @@ impl Functions {
             let (name, definition) = row?;
             functions.entry(name).or_default().push(definition);
         }
-        Ok(Self(functions))
+        Ok(Self { definitions: functions, asked: RefCell::new(BTreeSet::new()) })
     }
 
     /// The definitions a call of `name` with `arguments` arguments can run:
     /// those that take exactly that many, or else those that take a number
     /// of arguments that includes it.
     fn called(&self, name: &str, arguments: usize) -> Vec<&Definition> {
-        let Some(definitions) = self.0.get(&name.to_ascii_lowercase()) else { return Vec::new() };
+        let name = name.to_ascii_lowercase();
+        self.asked.borrow_mut().insert(name.clone());
+        let Some(definitions) = self.definitions.get(&name) else { return Vec::new() };
         let exact: Vec<&Definition> = definitions
             .iter()
             .filter(|definition| definition.arguments >= 0 && definition.takes(arguments))
@@ -657,6 +665,19 @@ impl Functions {
             return exact;
         }
         definitions.iter().filter(|definition| definition.takes(arguments)).collect()
+    }
+
+    /// Each name asked about so far, lowercase.
+    pub(crate) fn asked(&self) -> BTreeSet<String> {
+        self.asked.borrow().clone()
+    }
+
+    /// The definitions kept under `name`, lowercase, in order.
+    pub(crate) fn definitions(&self, name: &str) -> Vec<Definition> {
+        let mut definitions: Vec<Definition> =
+            self.definitions.get(name).into_iter().flatten().cloned().collect();
+        definitions.sort();
+        definitions
     }
 
     /// Whether a call of `name` with `arguments` arguments, outside any

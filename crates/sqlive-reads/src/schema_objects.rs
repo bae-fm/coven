@@ -2,6 +2,7 @@
 //! (SPEC.md section 8): which object a name names, a table's columns, and a
 //! view's SELECT.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::view_trees::ViewTrees;
@@ -172,9 +173,69 @@ impl MainSchema {
         self.objects.get(&name.to_ascii_lowercase())
     }
 
+    /// What a compiled plan records of the table or view named `name`, in
+    /// any ASCII letter case: its stored name, its kind as an error names it,
+    /// and the SQL that made it, then each of its unique indexes with no
+    /// WHERE, by its columns and their collations. Every other fact a plan
+    /// reads of the object follows from those.
+    pub(crate) fn definition(&self, name: &str) -> Option<(String, &'static str, Vec<String>)> {
+        let object = self.named(name)?;
+        let kind = match &object.kind {
+            ObjectKind::View => "view",
+            ObjectKind::Table(table) => match table.form {
+                TableForm::Ordinary => "table",
+                TableForm::Virtual { contentful: true } => "FTS5 table",
+                TableForm::Virtual { contentful: false } => "virtual table",
+                TableForm::Shadow => "shadow table",
+            },
+        };
+        let mut definition: Vec<String> = object.sql.iter().cloned().collect();
+        if let ObjectKind::Table(table) = &object.kind {
+            let unique = table.indexes.iter().filter_map(|index| index.unique.as_ref());
+            definition.extend(unique.map(|columns| {
+                let columns: Vec<String> = columns
+                    .iter()
+                    .map(|(name, collation)| {
+                        format!("{} COLLATE {collation}", name.as_deref().unwrap_or("<expression>"))
+                    })
+                    .collect();
+                format!("UNIQUE ({})", columns.join(", "))
+            }));
+        }
+        Some((object.stored.clone(), kind, definition))
+    }
+}
+
+/// The main schema as one analysis of a statement looks names up in it,
+/// with each name it looked up: a compiled plan holds true wherever each of
+/// those names finds what it found here.
+pub(crate) struct SchemaLookups<'s> {
+    schema: &'s MainSchema,
+    /// Each name looked up, ASCII lowercased, whether it found an object or
+    /// not.
+    looked_up: RefCell<BTreeSet<String>>,
+}
+
+impl<'s> SchemaLookups<'s> {
+    /// No name of `schema` looked up yet.
+    pub(crate) fn new(schema: &'s MainSchema) -> Self {
+        Self { schema, looked_up: RefCell::new(BTreeSet::new()) }
+    }
+
+    /// Each name looked up so far, ASCII lowercased.
+    pub(crate) fn looked_up(&self) -> BTreeSet<String> {
+        self.looked_up.borrow().clone()
+    }
+
+    /// The table or view named `name`, in any ASCII letter case.
+    fn named(&self, name: &str) -> Option<&'s MainObject> {
+        self.looked_up.borrow_mut().insert(name.to_ascii_lowercase());
+        self.schema.named(name)
+    }
+
     /// The table or view named `name`, which the caller knows the schema
     /// holds.
-    fn held(&self, name: &str) -> rusqlite::Result<&MainObject> {
+    fn held(&self, name: &str) -> rusqlite::Result<&'s MainObject> {
         self.named(name).ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
@@ -182,7 +243,7 @@ impl MainSchema {
     /// `view`, or `virtual` for a contentful FTS5 table (`FTS5_CONTENT`),
     /// whose rows its content table holds. Anything else, as another virtual
     /// table, is `None`.
-    pub(crate) fn object(&self, name: &Name<'_>) -> Option<(&str, &'static str)> {
+    pub(crate) fn object(&self, name: &Name<'_>) -> Option<(&'s str, &'static str)> {
         let object = self.named(&crate::sql::name(name.0))?;
         let kind = match &object.kind {
             ObjectKind::View => "view",
@@ -196,8 +257,8 @@ impl MainSchema {
     }
 
     /// Every table of the main schema but SQLite's own (`MAIN_TABLES`).
-    pub(crate) fn tables(&self) -> impl Iterator<Item = &str> {
-        self.main_tables.iter().map(String::as_str)
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &'s str> {
+        self.schema.main_tables.iter().map(String::as_str)
     }
 
     /// Whether the schema holds a table or view named `name`.

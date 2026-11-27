@@ -56,6 +56,7 @@ use crate::authorization::PolicyError;
 use crate::authorization::SqlAuthorization;
 use crate::authorization::{Policy, Refresh};
 use crate::connection_setup::Setup;
+use crate::CompiledStatement;
 
 /// Statements kept prepared per connection, the host's and the app's: a
 /// local write in coven runs about a hundred distinct ones of its own, which
@@ -554,7 +555,7 @@ impl<P: Policy> HostSql<P> {
     ) -> rusqlite::Result<T> {
         let mut map = Some(map);
         let mut value = None;
-        self.app_rows(recorded, sql, params, |row| {
+        self.app_rows(recorded, AppRead::Sql(sql), params, |row| {
             let map = map.take().expect("the first row ends the read");
             value = Some(map(row)?);
             Ok(false)
@@ -569,10 +570,35 @@ impl<P: Policy> HostSql<P> {
         recorded: Recorded,
         sql: &str,
         params: Q,
+        map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        self.app_every_row(recorded, AppRead::Sql(sql), params, map)
+    }
+
+    /// Every row of the compiled app read `statement` with `params`, through
+    /// `map`, as `app_query` reads them, with the scope plan the statement
+    /// brings: sqlive builds none. A schema that shows a table, view or
+    /// function the plan read otherwise than the schema it was built against
+    /// fails the read with `CompiledSchemaDiffers`.
+    pub fn app_query_compiled<T, Q: Params>(
+        &self,
+        recorded: Recorded,
+        statement: CompiledStatement,
+        params: Q,
+        map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        self.app_every_row(recorded, AppRead::Compiled(statement), params, map)
+    }
+
+    fn app_every_row<T, Q: Params>(
+        &self,
+        recorded: Recorded,
+        read: AppRead<'_>,
+        params: Q,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         let mut values = Vec::new();
-        self.app_rows(recorded, sql, params, |row| {
+        self.app_rows(recorded, read, params, |row| {
             values.push(map(row)?);
             Ok(true)
         })?;
@@ -585,22 +611,34 @@ impl<P: Policy> HostSql<P> {
     fn app_rows<Q: Params>(
         &self,
         recorded: Recorded,
-        sql: &str,
+        read: AppRead<'_>,
         params: Q,
         each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
+        let sql = match read {
+            AppRead::Sql(sql) => sql,
+            AppRead::Compiled(statement) => statement.sql,
+        };
         let sql = self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
         let result = (|| {
             let mut statement = self.app_statement(sql)?;
             let schema = statement.schema();
+            let plan = match read {
+                AppRead::Sql(_) => self.live_scope_plan(sql, &statement, schema)?,
+                // The plan is checked in every read, so a schema it doesn't
+                // fit fails a one-shot read too.
+                AppRead::Compiled(compiled) => {
+                    let plan = self.compiled_plan(compiled, schema)?;
+                    self.authorization.capturing_reads().then_some(plan)
+                }
+            };
             self.run_rows(
                 recorded,
                 crate::authorization::Owner::App,
-                sql,
                 &mut statement,
-                schema,
+                plan,
                 params,
                 each,
             )
@@ -608,24 +646,20 @@ impl<P: Policy> HostSql<P> {
         self.authorization.app_result(result)
     }
 
-    /// Run the prepared `statement`, made from `sql`, and hand `each` its
-    /// rows in order until they end or `each` answers false, under the
-    /// authorizer's step scope, counting an app statement's steps. In a live
-    /// query's read, each table it read
-    /// is recorded in the scope its plan gives this run: a plan kept against
-    /// `schema` is shared with the database's other connections.
+    /// Run the prepared `statement` and hand `each` its rows in order until
+    /// they end or `each` answers false, under the authorizer's step scope,
+    /// counting an app statement's steps. In a live query's read, each table
+    /// it read is recorded in the scope `plan` gives this run.
     fn run_rows<Q: Params>(
         &self,
         recorded: Recorded,
         owner: crate::authorization::Owner,
-        sql: &str,
         statement: &mut rusqlite::Statement<'_>,
-        schema: Option<i64>,
+        plan: Option<Arc<crate::ScopePlan>>,
         params: Q,
         mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         let parameters = crate::parameters(&self.connection, statement, params)?;
-        let plan = self.live_scope_plan(sql, statement, schema)?;
         // A run that returns as many rows as its LIMIT depends only on the
         // rows up to its last one (SPEC.md section 6).
         let last_row = plan.as_ref().and_then(|plan| plan.last_row(&parameters));
@@ -856,6 +890,14 @@ impl<P: Policy> HostSql<P> {
             callback(point);
         }
     }
+}
+
+/// An app read: its SQL, whose scope plan sqlive builds, or a compiled
+/// statement, which brings its plan.
+#[derive(Clone, Copy)]
+enum AppRead<'a> {
+    Sql(&'a str),
+    Compiled(CompiledStatement),
 }
 
 /// What records a write transaction's changes for live queries: the

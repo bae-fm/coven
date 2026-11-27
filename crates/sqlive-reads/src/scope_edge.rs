@@ -478,7 +478,7 @@ impl From<MemberColumn> for Member {
 }
 
 /// What an edge compares of its member's rows.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum MemberValue {
     /// One of its columns, lowercase.
     Column(String),

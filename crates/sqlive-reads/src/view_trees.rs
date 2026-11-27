@@ -12,7 +12,7 @@ use sqlite3_parser::{
     Bump, FallibleIterator,
 };
 
-use crate::schema_objects::MainSchema;
+use crate::schema_objects::SchemaLookups;
 
 /// A view's column names, when its CREATE VIEW lists them, and its SELECT.
 #[derive(Clone, Copy)]
@@ -39,7 +39,7 @@ impl<'b> ViewTrees<'b> {
     /// parser can accept different language versions.
     pub(crate) fn tree(
         &self,
-        schema: &MainSchema,
+        schema: &SchemaLookups<'_>,
         stored: &str,
     ) -> rusqlite::Result<Result<ViewTree<'b>, String>> {
         if let Some(found) = self.read.borrow().get(stored) {

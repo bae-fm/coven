@@ -6,7 +6,9 @@
 //! sqlive and the model disagree on whether the write reruns the query, given
 //! whether one of sqlive's questions about the write stopped at its step
 //! limit, when a write either lets pass changed the statement's rows, or when
-//! the model's rows differ from SQLite's.
+//! the model's rows differ from SQLite's. Every other seed's live query runs
+//! as a compiled statement when sqlive can analyze it, with the plan a schema
+//! probe built and encoded, so the model checks the plan a compiler ships too.
 //! `SQLIVE_NARROWING_LEAN` names the runner; `SQLIVE_NARROWING_SEEDS` sets how
 //! many statements each test runs (default 60). A failure names the seed.
 
@@ -586,8 +588,26 @@ fn register_nz(db: &TestDatabase) {
 /// Each write a statement's live query sees.
 const STEPS: usize = 12;
 
+/// `sql` with the plan a schema probe of the test's schema builds of it, as
+/// a compiler ships it, when sqlive can analyze it.
+fn compiled(sql: &str) -> Option<crate::CompiledStatement> {
+    let nz = crate::StandInFunction { name: "nz".into(), arguments: 1, deterministic: true };
+    let probe =
+        crate::SchemaProbe::open(&[schema_sql()], &[nz], &["fold".to_owned()], &[]).unwrap();
+    crate::tests::compiled(&probe, sql)
+}
+
+/// What one statement found: the writes that left its live query alone, and
+/// whether the live query ran as a compiled statement.
+struct Case {
+    spared: usize,
+    compiled: bool,
+}
+
 /// Run one generated statement through `writes`, comparing sqlive's
-/// decisions with the model's and both with SQLite's rows.
+/// decisions with the model's and both with SQLite's rows. The live query
+/// runs as a compiled statement when `compile` is set and sqlive can analyze
+/// the statement.
 async fn run_case(
     runner: &std::ffi::OsStr,
     seed: u64,
@@ -595,8 +615,10 @@ async fn run_case(
     statement: &Query,
     writes: fn(&mut Rng) -> String,
     rng: &mut Rng,
-) -> usize {
+    compile: bool,
+) -> Case {
     let sql = statement.sql();
+    let shipped = if compile { compiled(&sql) } else { None };
     let db = TestDatabase::open_with(&schema_sql(), options());
     register_nz(&db);
     let mut rows = Vec::new();
@@ -616,7 +638,11 @@ async fn run_case(
     let text = sql.clone();
     let mut live = db.subscribe(move |context| {
         let run = runs.fetch_add(1, Ordering::SeqCst);
-        Ok((run, read(&context, &text)?))
+        let rows = match shipped {
+            Some(statement) => context.query_compiled(statement, [], integers)?,
+            None => read(&context, &text)?,
+        };
+        Ok((run, rows))
     });
     let mut last = next_rows(&mut live).await;
     let ordered = !statement.order.is_empty();
@@ -643,8 +669,10 @@ async fn run_case(
         let model = ask(runner, &input);
         let case = || {
             format!(
-                "{rule}, seed {seed}, step {step}: `{sql}` after `{change}`\nsqlive reruns: {marked}, the model reruns: {}, a question stopped: {stopped}\nscopes: {}\nrows before: {last:?}\nrows after: {fresh:?}\nbefore: {before}\nafter: {after}\ninput: {input}",
-                model.reruns, model.scopes
+                "{rule}, seed {seed}, step {step}: `{sql}` after `{change}`\nsqlive reruns: {marked}, the model reruns: {}, a question stopped: {stopped}, compiled: {}\nscopes: {}\nrows before: {last:?}\nrows after: {fresh:?}\nbefore: {before}\nafter: {after}\ninput: {input}",
+                model.reruns,
+                shipped.is_some(),
+                model.scopes
             )
         };
         assert!(model.well_formed, "the model's statement is not well formed: {}", case());
@@ -676,7 +704,7 @@ async fn run_case(
     }
     drop(live);
     db.close();
-    spared
+    Case { spared, compiled: shipped.is_some() }
 }
 
 /// Run `generate`'s statements, one a seed, through random writes.
@@ -696,13 +724,15 @@ async fn differential_with(
     let seeds: u64 = std::env::var("SQLIVE_NARROWING_SEEDS")
         .ok()
         .map_or(60, |seeds| seeds.parse().expect("SQLIVE_NARROWING_SEEDS is a count"));
-    let mut spared = 0;
+    let (mut spared, mut compiled) = (0, 0);
     for seed in 0..seeds {
         let mut rng = Rng::seeded(seed);
         let statement = generate(&mut rng);
-        spared += run_case(&runner, seed, rule, &statement, writes, &mut rng).await;
+        let case = run_case(&runner, seed, rule, &statement, writes, &mut rng, seed % 2 == 1).await;
+        spared += case.spared;
+        compiled += usize::from(case.compiled);
     }
-    eprintln!("{rule}: {seeds} statements, {spared} writes neither reran");
+    eprintln!("{rule}: {seeds} statements, {compiled} compiled, {spared} writes neither reran");
     assert!(spared > 0, "{rule}: every write reran its statement, so nothing narrowed");
 }
 

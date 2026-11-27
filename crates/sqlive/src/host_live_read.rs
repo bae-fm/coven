@@ -29,12 +29,12 @@ impl<P: Policy> HostSql<P> {
             } else {
                 None
             };
+            let plan = self.live_scope_plan(sql, statement, schema)?;
             self.run_rows(
                 crate::Recorded::No,
                 crate::authorization::Owner::Host,
-                sql,
                 statement,
-                schema,
+                plan,
                 params,
                 |row| {
                     values.push(map(row)?);

@@ -148,13 +148,20 @@ pub(crate) fn fragment(header: &Header, fields: &[Field], exported: bool) -> Str
     .to_string()
 }
 
-/// A read's statement, request and row. Its items are `pub` when `exported`,
-/// which says that every module around the call is `pub`, and `pub(crate)`
-/// otherwise, so that a read in a private module has no `pub` item that
-/// nothing can reach (`unreachable_pub`). The row derives what an app needs to
-/// keep and compare it.
-pub(crate) fn read(header: &Header, sql: &str, fields: &[Field], exported: bool) -> String {
-    statement(header, sql, fields, Form::Read { exported })
+/// A read's statement, request and row, and `plan`, the statement's scope
+/// plan as sqlive encodes it. Its items are `pub` when `exported`, which says
+/// that every module around the call is `pub`, and `pub(crate)` otherwise, so
+/// that a read in a private module has no `pub` item that nothing can reach
+/// (`unreachable_pub`). The row derives what an app needs to keep and compare
+/// it.
+pub(crate) fn read(
+    header: &Header,
+    sql: &str,
+    plan: &str,
+    fields: &[Field],
+    exported: bool,
+) -> String {
+    statement(header, sql, fields, Form::Read { exported, plan })
 }
 
 /// A write's statement and parameters, and its row when it returns columns.
@@ -167,18 +174,18 @@ pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
 
 /// What a generated statement is.
 #[derive(Clone, Copy)]
-enum Form {
-    /// A read, whose items are `pub` when `exported`.
-    Read { exported: bool },
+enum Form<'a> {
+    /// A read, whose items are `pub` when `exported`, with its scope plan.
+    Read { exported: bool, plan: &'a str },
     /// A write.
     Write,
 }
 
 /// The unit struct with the statement, the parameters struct, the row struct
 /// when the statement returns columns, and the trait impls of the call.
-fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String {
+fn statement(header: &Header, sql: &str, fields: &[Field], form: Form<'_>) -> String {
     let (visibility, noun) = match form {
-        Form::Read { exported } => (visibility(exported), "read"),
+        Form::Read { exported, .. } => (visibility(exported), "read"),
         Form::Write => (visibility(false), "write"),
     };
     let name = ident(&header.name);
@@ -212,8 +219,17 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
         let row_doc = format!("A row of the `{}` {noun}.", header.name);
         let returning = quote!(::sqlive_compose::Returning);
         let marker = match form {
-            Form::Read { .. } => quote!(::sqlive_compose::Read),
-            Form::Write => quote!(::sqlive_compose::WriteReturning),
+            Form::Read { plan, .. } => {
+                let plan = Literal::string(plan);
+                quote! {
+                    impl #lifetime ::sqlive_compose::Read for #params_name #lifetime {
+                        const PLAN: &'static str = #plan;
+                    }
+                }
+            }
+            Form::Write => quote! {
+                impl #lifetime ::sqlive_compose::WriteReturning for #params_name #lifetime {}
+            },
         };
         quote! {
             #[doc = #row_doc]
@@ -234,7 +250,7 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form) -> String
                 }
             }
 
-            impl #lifetime #marker for #params_name #lifetime {}
+            #marker
         }
     };
     quote! {

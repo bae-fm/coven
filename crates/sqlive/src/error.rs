@@ -65,6 +65,13 @@ pub enum Error<F, R> {
         /// The broken rule.
         what: &'static str,
     },
+    /// A compiled statement's scope plan was built against a schema that
+    /// shows tables, views or functions otherwise than the open database
+    /// does: the plan could narrow by what the database doesn't hold.
+    CompiledSchemaDiffers(sqlive_reads::SchemaDiffers),
+    /// A compiled statement's scope plan is no plan this sqlive's compiler
+    /// writes.
+    UndecodablePlan(sqlive_reads::UndecodablePlan),
     /// SQLite kept another journal mode instead of WAL.
     WalUnavailable {
         /// The journal mode SQLite selected.
@@ -122,6 +129,8 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for Error<F, 
             }
             Self::Host(failure) => failure.fmt(f),
             Self::Invariant { what } => write!(f, "sqlive invariant failed: {what}"),
+            Self::CompiledSchemaDiffers(differs) => differs.fmt(f),
+            Self::UndecodablePlan(error) => error.fmt(f),
             Self::WalUnavailable { mode } => {
                 write!(f, "SQLite kept journal mode {mode} instead of WAL")
             }
@@ -147,6 +156,8 @@ impl<F: std::error::Error + 'static, R: std::error::Error + 'static> std::error:
             Self::Bug(bug) => bug.source(),
             Self::Host(failure) => failure.source(),
             Self::UpkeepThread(error) => Some(error),
+            Self::CompiledSchemaDiffers(differs) => Some(differs),
+            Self::UndecodablePlan(error) => Some(error),
             Self::Path { source, .. } => Some(source),
             Self::Rollback { rollback, .. } => Some(rollback),
             _ => None,

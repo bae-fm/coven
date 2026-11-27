@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use crate::comparison::BINARY;
-use crate::schema_objects::{MainSchema, ROWID_NAMES};
+use crate::schema_objects::{SchemaLookups, ROWID_NAMES};
 
 /// The name a key holds for a table's rowid, whichever name a statement
 /// gives it: no column's name holds a NUL.
@@ -14,7 +14,11 @@ pub(crate) const ROWID: &str = "\0rowid";
 /// the main schema: its INTEGER PRIMARY KEY column, or `rowid`, `oid` or
 /// `_rowid_` where no column has that name. A WITHOUT ROWID table has no
 /// rowid.
-pub(crate) fn is_rowid(schema: &MainSchema, table: &str, column: &str) -> rusqlite::Result<bool> {
+pub(crate) fn is_rowid(
+    schema: &SchemaLookups<'_>,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
     if schema.without_rowid(table)? {
         return Ok(false);
     }
@@ -31,7 +35,7 @@ pub(crate) fn is_rowid(schema: &MainSchema, table: &str, column: &str) -> rusqli
 /// key column, when SQLite keeps no index for the key: `INTEGER PRIMARY
 /// KEY`, but not `INT PRIMARY KEY` or `INTEGER PRIMARY KEY DESC`.
 pub(crate) fn rowid_column<'s>(
-    schema: &'s MainSchema,
+    schema: &'s SchemaLookups<'s>,
     table: &str,
 ) -> rusqlite::Result<Option<&'s str>> {
     let mut keys = schema.columns(table)?.iter().filter(|column| column.primary_key);
@@ -45,7 +49,7 @@ pub(crate) fn rowid_column<'s>(
 /// index over columns, with no WHERE. A partial index and one over an
 /// expression let two rows hold the same values of its columns.
 pub(crate) fn unique_keys(
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     table: &str,
 ) -> rusqlite::Result<Vec<Vec<(String, String)>>> {
     let mut keys = Vec::new();
@@ -68,7 +72,7 @@ pub(crate) fn unique_keys(
 
 /// The columns of `table`, lowercase, that hold no NULL.
 pub(crate) fn not_null_columns(
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     table: &str,
 ) -> rusqlite::Result<BTreeSet<String>> {
     Ok(schema

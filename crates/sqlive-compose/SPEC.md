@@ -7,9 +7,11 @@ compiler puts them together into one SQL statement, checks that statement
 against the app's schema, and generates the Rust types its rows decode into. The
 statement is a constant in the app's code, and the app runs it as a live query
 of [sqlive](../sqlive/SPEC.md): a query that runs again when a write changes
-what it read. A *write* is one INSERT, REPLACE, UPDATE or DELETE that the
-compiler composes and checks the same way, which the app runs in place of SQL
-text it wrote by hand (section 11). [relay](https://relay.dev) composes GraphQL the same way: each
+what it read. The compiler also builds the statement's scope plan, which says
+what sqlive narrows such a query by, so that sqlive builds none as the app runs.
+A *write* is one INSERT, REPLACE, UPDATE or DELETE that the compiler composes
+and checks the same way, which the app runs in place of SQL text it wrote by
+hand (section 11). [relay](https://relay.dev) composes GraphQL the same way: each
 component writes a fragment, and relay's compiler builds one operation from the
 fragments a page names.
 
@@ -1063,9 +1065,10 @@ number, so SQL for a `bool` field makes the JSON text, as `json(iif(l.hidden,
 decode real rows.
 
 **Shapes sqlive can't analyze.** The compiler asks sqlive what each composed
-read depends on, with the same report that section 5 quotes. When sqlive can't
-analyze one part of a statement, the read depends on every row of every table
-the statement reads. So the build fails and names the reason:
+read depends on, with the same report that section 5 quotes: the report of the
+read's scope plan, which the compiler builds and ships with the read (section
+9). When sqlive can't analyze one part of a statement, the read depends on every
+row of every table the statement reads. So the build fails and names the reason:
 
 ```sql
 SELECT issue.* FROM @issues::Issue AS issue
@@ -1076,9 +1079,12 @@ RIGHT JOIN @people::Person AS author ON author.person_id = issue.author_id
 tracker/src/issue_page.rs:6:1: sqlive can't analyze IssuePage: a NATURAL or RIGHT join
 ```
 
-Section 12 lists the shapes. The compiler asks sqlive before it types the
-columns, so a shape that sqlive can't analyze is the error a call reports, not
-the column error that the shape also causes.
+Section 12 lists the shapes. A read of a view that the parser can't read fails
+too: its plan would count every column of every table in the compiler's schema
+as read, and the database the app opens holds tables that schema lacks. The
+compiler asks sqlive before it types the columns, so a shape that sqlive can't
+analyze is the error a call reports, not the column error that the shape also
+causes.
 
 **Whole-table reads.** When sqlive analyzes a statement and reports a table as
 read whole, the compiler warns and names the table and the reason. The build
@@ -1175,14 +1181,22 @@ pub trait Returning: Statement {
     fn read(row: &Row<'_>) -> rusqlite::Result<Self::Row>;
 }
 
-/// A generated read.
-pub trait Read: Returning {}
+/// A generated read, with the scope plan the compiler built of it.
+pub trait Read: Returning {
+    /// The read's scope plan, built against the app's schema and encoded.
+    const PLAN: &'static str;
+    /// The read's statement with its scope plan.
+    fn compiled() -> CompiledStatement;
+}
 ```
 
 `IssuePageParams` implements `Statement` with `IssuePage::SQL` and the
 parameters it binds, `Returning` with `Row = IssuePageRow` and the row's `read`,
-and the marker `Read`. The traits
-are public whatever the visibility of the read's items.
+and `Read` with the read's scope plan. The compiler builds the plan as sqlive
+would when a live query first ran the read ([sqlive's
+spec](../sqlive/SPEC.md), section 4), and a store runs the read's `compiled()`
+statement, so sqlive builds no plan as the app runs. The traits are public
+whatever the visibility of the read's items.
 
 The row derives `Clone`, `PartialEq` and `Debug`, so an app can use it as its
 own row type: keep it, compare it and print it. Every type a row holds
@@ -1321,7 +1335,13 @@ the table and the reason. The build script turns both into text.
 name, argument count and determinism of each SQL function, and the name of each
 collation, that the schema uses. SQLite fails to prepare a statement that names
 an unknown function or collation, so the compiler registers a stand-in under
-each of those names. The tracker's setup step runs its migrations in order:
+each of those names. The setup step also names the views and tables the host's
+live queries read whole: a read through one depends on the object itself, so
+each read's scope plan depends on the list. A store checks a plan against its
+own schema, its functions and its list before it first runs the read, and the
+read fails when one of them shows an object or a function otherwise than the
+compiler's schema did ([sqlive's spec](../sqlive/SPEC.md), section 4). The
+tracker's setup step runs its migrations in order:
 
 ```rust
 // tracker-schema/src/lib.rs
@@ -1333,6 +1353,7 @@ pub fn setup() -> Setup {
         ],
         functions: vec![Function { name: "fold_case".into(), arguments: 1, deterministic: true }],
         collations: vec![],
+        whole_views: vec![],
     }
 }
 ```

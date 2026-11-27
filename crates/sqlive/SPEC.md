@@ -81,7 +81,8 @@ since sqlive keeps SQLite's normal locking mode.
 
 The host runs its own SQL on a connection through `HostSql`'s `query`,
 `query_row`, `for_each`, `execute` and `batch`, and the app's through
-`app_query`, `app_query_row`, `app_execute` and `app_batch`. The host's SQL may
+`app_query`, `app_query_row`, `app_execute` and `app_batch`, and a compiled
+read of the app's through `app_query_compiled` (section 4). The host's SQL may
 read and write tables the app's SQL can't. Every statement passes sqlive's
 authorizer as SQLite prepares it. For app SQL, and for the app's triggers that a
 host statement runs, sqlive applies its own rules first. They refuse, with
@@ -562,11 +563,41 @@ narrows the first. One equality can give an edge each way, and the sides of an
 OR, of a COALESCE or of a compound subquery give none. When an album page is
 slow to open the first time, the log shows how large its statement is.
 
+A build tool can read a statement's SQL instead, before the program runs, as the
+compiler of [sqlive-compose](../sqlive-compose/SPEC.md) does for each read it
+composes. `SchemaProbe::compiled_plan` builds the statement's scope plan (below)
+against the app's schema, with the views and tables the host's live queries read
+whole, and `CompiledPlan::encode` gives the plan as text, which the program
+ships beside the statement. A *compiled statement* (`CompiledStatement`) is the
+SQL with that text, and the host runs it with `app_query_compiled`. sqlive
+builds no plan for it, so a live query's first run of the statement costs what
+its later runs do.
+
+A compiled plan holds what building it found in the schema: for each table and
+view whose name the statement's SQL looks up at any depth, found or not, the
+SQL that made the object, the columns and collations of each of its unique
+indexes, and whether the host's live queries read it whole; and for each
+function the SQL calls, the definitions SQLite keeps under its name. Every other
+fact the plan reads of an object follows from those. Before a connection first
+runs the statement under a schema, it checks those against the database's read
+of that schema (`MainSchema`), and the database keeps the checked plan for every
+connection while the schema stays. A schema that shows an object or a function
+otherwise fails the statement, in a one-shot read as in a live query, with
+`CompiledSchemaDiffers`, which names each that differs by its kind and name,
+such as `table tracks`. The program's build then compiled the statement against
+another schema, and the plan could narrow by a column or a key the database
+doesn't hold, so sqlive refuses the statement rather than build a plan of its
+own. A plan text that this sqlive can't decode fails the statement with
+`UndecodablePlan`. A statement that sqlive can't analyze has no compiled plan:
+one whose shape keeps every table whole, or one that reads a view the parser
+can't read, so that every column of the schema counts as read.
+
 **Edge cases.**
 
 - **One plan for every connection.** sqlive reads from each statement of a live
   query which rows of each table the query depends on, by the rules of sections
-  5 to 8, the first time a live query runs it: the statement's *scope plan*.
+  5 to 8, the first time a live query runs it, unless the statement is compiled:
+  the statement's *scope plan*.
   The plan depends on the statement's text, the schema, and the SQL functions
   and the views read whole that the connection was set up with. sqlive sets up
   every connection of a database alike, so they share the plans each one reads,
@@ -1976,7 +2007,8 @@ A test can check what a live query depends on without running a write.
 `read_report`, with sqlive's test-utils feature, says which rows of each table
 and view a statement depends on when a live query runs it, before any value is
 bound. `SchemaProbe::read_report` gives the same report for a statement over a
-schema in memory, with no rows (the crate's [README](README.md)). A test that
+schema in memory, with no rows, where the host's live queries read the views and
+tables `SchemaProbe::open` names whole (the crate's [README](README.md)). A test that
 asserts the report of an album page fails when the page's statement starts to
 read `tracks` whole. `SchemaProbe::prepare` also says whether the statement
 writes (`ProbedStatement::writes`): it is true for an INSERT, UPDATE, DELETE or
@@ -2134,6 +2166,8 @@ policy refuses with.
 | `HandleFailed` | an earlier bug may have left the handle's state wrong, so every call fails with it until the host reopens the database | 10 |
 | `Host` | the host failed the handle with its own failure, one of sqlive's `EngineFailure`s among them | 2, 10 |
 | `Invariant` | sqlive broke a rule it relies on: a bug, not damage | |
+| `CompiledSchemaDiffers` | a compiled statement's plan was built against a schema that shows these objects and functions otherwise than the database does | 4 |
+| `UndecodablePlan` | a compiled statement's plan is no text this sqlive's `CompiledPlan::encode` writes | 4 |
 | `WalUnavailable` | SQLite kept another journal mode instead of WAL | 1 |
 | `SqliteSettingOutOfRange` | a SQLite setting is larger than SQLite can hold | 10 |
 | `UpkeepThread` | the system refused a thread of sqlive's upkeep, so the database did not open | 10 |

@@ -33,7 +33,7 @@ use sqlite3_parser::{
 use crate::derived::{Ctes, Declared};
 use crate::from_star::{star, StarItem};
 use crate::never_null;
-use crate::schema_objects::{declared_columns, MainSchema, ROWID_NAMES};
+use crate::schema_objects::{declared_columns, MainSchema, SchemaLookups, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
 use crate::scope_term::null_test;
 use crate::select_syntax::{
@@ -349,7 +349,8 @@ pub(crate) fn statement_nulls(
         }
         _ => return Ok(StatementNulls::Unknown),
     };
-    let analysis = Analysis { connection, schema, functions: &functions };
+    let schema = SchemaLookups::new(schema);
+    let analysis = Analysis { connection, schema: &schema, functions: &functions };
     let columns = analysis.select(select, &Ctes::default())?;
     Ok(columns.map_or(StatementNulls::Unknown, |columns| {
         StatementNulls::Select(columns.into_iter().map(|column| column.nulls).collect())
@@ -358,7 +359,7 @@ pub(crate) fn statement_nulls(
 
 struct Analysis<'c> {
     connection: &'c Connection,
-    schema: &'c MainSchema,
+    schema: &'c SchemaLookups<'c>,
     functions: &'c Functions,
 }
 

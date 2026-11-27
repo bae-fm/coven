@@ -27,7 +27,7 @@ use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
-use crate::schema_objects::MainSchema;
+use crate::schema_objects::{MainSchema, SchemaLookups};
 use crate::scope_edge::{Edge, MemberValue};
 use crate::scope_narrowing::Narrowing;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
@@ -50,6 +50,7 @@ use sqlite3_parser::{
 
 /// The rows of each table a statement can depend on, before its values are
 /// bound.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScopePlan {
     /// Why the planner couldn't read the statement, when its shape keeps
     /// every table it reads whole.
@@ -57,7 +58,7 @@ pub struct ScopePlan {
     /// The columns its rows depend on that SQLite's authorizer doesn't
     /// report, or unknown when the parser can't read the statement
     /// (`unreported_columns.rs`).
-    unreported: Arc<UnreportedColumns>,
+    pub(crate) unreported: Arc<UnreportedColumns>,
     /// How much of the statement the planner read.
     pub size: ScopePlanSize,
 }
@@ -65,7 +66,7 @@ pub struct ScopePlan {
 /// How much of a statement the planner read to build its plan, up to where
 /// it stopped, if it did: what it holds before it passes edges into
 /// subqueries, CTEs and views as it orders the sources.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScopePlanSize {
     /// Sources: the items of each FROM, those of the subqueries, CTEs and
     /// views read as their own included.
@@ -99,12 +100,25 @@ impl ScopePlan {
         statement: &Statement<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        let unread = |why: &str| -> rusqlite::Result<Self> {
-            Ok(Self {
+        Ok(Self::read(connection, schema, sql, statement, whole)?.0)
+    }
+
+    /// The plan `build` builds, with the names it looked up.
+    pub(crate) fn read(
+        connection: &Connection,
+        schema: &MainSchema,
+        sql: &str,
+        statement: &Statement<'_>,
+        whole: &WholeViews,
+    ) -> rusqlite::Result<(Self, Found)> {
+        let schema = &SchemaLookups::new(schema);
+        let unread = |why: &str| -> rusqlite::Result<(Self, Found)> {
+            let plan = Self {
                 sources: Err(why.to_owned()),
                 unreported: Arc::new(UnreportedColumns::unknown(schema, why.to_owned())?),
                 size: ScopePlanSize::default(),
-            })
+            };
+            Ok((plan, Found::default()))
         };
         let sql = number_parameters(sql, statement)?;
         let bump = Bump::new();
@@ -125,11 +139,12 @@ impl ScopePlan {
             unreported_columns(connection, schema, &functions, &views, select)?;
         let (sources, size) =
             Sources::read(connection, schema, select, whole, &functions, &views, &picked)?;
-        Ok(Self {
+        let plan = Self {
             sources: sources.map_err(|Unread(why)| why.to_owned()),
             unreported: Arc::new(unreported),
             size,
-        })
+        };
+        Ok((plan, Found { objects: schema.looked_up(), functions: functions.asked() }))
     }
 
     /// Where a run bound to `parameters` finds the row its scope ends at, or
@@ -152,7 +167,16 @@ impl ScopePlan {
     }
 }
 
+/// What building a plan looked up: the names of the main schema's objects,
+/// ASCII lowercased, and the names of functions.
+#[derive(Default)]
+pub(crate) struct Found {
+    pub(crate) objects: BTreeSet<String>,
+    pub(crate) functions: BTreeSet<String>,
+}
+
 /// A statement's sources, in the order their scopes are found.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Sources {
     pub(crate) sources: Vec<Source>,
     /// Positions in `sources`, each after the sources its memberships use.
@@ -178,6 +202,7 @@ pub(crate) struct Sources {
     pub(crate) windows: Vec<Window>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Source {
     pub(crate) object: Object,
     /// The FROM item as sqlive's own SQL names it, with its qualifier;
@@ -221,6 +246,7 @@ impl Source {
 }
 
 /// What a source reads its rows from.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) enum Object {
     /// A table, by its name, lowercase.
     Table {
@@ -232,7 +258,7 @@ pub(crate) enum Object {
     /// A view read whole, by its name, lowercase, why it is, and the names
     /// SQLite can report a read through inside it (`whole_view_names.rs`),
     /// unless the parser can't read them.
-    View { name: String, why: Unread, inside: Option<BTreeSet<String>> },
+    View { name: String, why: String, inside: Option<BTreeSet<String>> },
     /// A table function.
     Function,
     /// A subquery, CTE or view whose own tables sqlive reads as sources of
@@ -247,7 +273,7 @@ pub(crate) struct Unread(pub(crate) &'static str);
 
 /// `member` equals `value` over some row of `partner` in its scope, a NULL
 /// matching a NULL when `nulls`.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Membership {
     pub(crate) member: MemberValue,
     pub(crate) affinity: Affinity,
@@ -277,7 +303,7 @@ impl Membership {
 }
 
 /// What a membership compares with.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PartnerValue {
     /// One of the partner's columns, lowercase, of the same affinity.
     Column(String),
@@ -340,7 +366,7 @@ impl Sources {
     /// the planner read.
     fn read(
         connection: &Connection,
-        schema: &MainSchema,
+        schema: &SchemaLookups<'_>,
         select: &Select<'_>,
         whole: &WholeViews,
         functions: &Functions,
@@ -405,7 +431,7 @@ pub(crate) struct Planner<'a, 'v> {
     /// Each core after the core it sits in.
     pub(crate) cores: Vec<Core>,
     pub(crate) edges: Vec<Edge>,
-    pub(crate) schema: &'a MainSchema,
+    pub(crate) schema: &'a SchemaLookups<'a>,
     /// The connection's functions, which tell an aggregate call from a
     /// scalar one.
     pub(crate) functions: &'a Functions,

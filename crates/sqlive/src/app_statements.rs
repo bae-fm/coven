@@ -12,15 +12,17 @@
 //! with. A database sets each of its connections up alike, so they share one
 //! map of those plans, and one of them builds each plan for all. The plans of
 //! one schema look their names up in one read of it (`MainSchema`), which the
-//! map keeps beside them.
+//! map keeps beside them. A compiled statement brings the plan its compiler
+//! built, which the map keeps once a connection has checked it against that
+//! read.
 
 use super::HostSql;
 use crate::authorization::AppContext;
-use crate::authorization::Policy;
+use crate::authorization::{Policy, PolicyError};
 use crate::MainSchema;
 use crate::ReadReport;
 use crate::ScopePlanSize;
-use crate::{ReadFrame, ScopePlan};
+use crate::{CompiledPlan, CompiledStatement, ReadFrame, ScopePlan};
 use panic_as_error::locks::{lock_unpoisoned, wait_unpoisoned};
 use rusqlite::{CachedStatement, Statement};
 use std::cell::{Cell, RefCell};
@@ -58,6 +60,12 @@ struct SchemaPlans {
     schema: Option<Arc<MainSchema>>,
     /// Each statement's plan, by its SQL.
     plans: HashMap<String, Kept>,
+    /// The plans of the compiled statements, each checked against the
+    /// schema, by the address of the plan's text: two builds of one SQL
+    /// against two schemas give two plans, and equal texts at two addresses
+    /// give equal plans. No bound keeps them: an app compiles a fixed set of
+    /// statements.
+    compiled: HashMap<usize, Arc<ScopePlan>>,
 }
 
 enum Kept {
@@ -67,14 +75,19 @@ enum Kept {
 }
 
 impl KeptPlans {
-    /// Say that `sql`'s plan against `schema` is being built. The first plan
-    /// of a schema drops what every earlier one kept, whose last readers are
-    /// ending, and leaves a later schema's kept. Once the map holds
-    /// [`RECORDED`] statements, every built plan goes.
-    fn begin(&mut self, schema: i64, sql: &str) {
+    /// Make way for the first plan of `schema`, when the map keeps none:
+    /// drop what every earlier schema kept, whose last readers are ending,
+    /// and leave a later schema's kept.
+    fn enter(&mut self, schema: i64) {
         if !self.0.contains_key(&schema) {
             self.0 = self.0.split_off(&schema);
         }
+    }
+
+    /// Say that `sql`'s plan against `schema` is being built, after `enter`.
+    /// Once the map holds [`RECORDED`] statements, every built plan goes.
+    fn begin(&mut self, schema: i64, sql: &str) {
+        self.enter(schema);
         if self.0.values().map(|of| of.plans.len()).sum::<usize>() >= RECORDED {
             for of in self.0.values_mut() {
                 of.plans.retain(|_, kept| matches!(kept, Kept::Building));
@@ -161,6 +174,36 @@ impl ScopePlans {
             of.schema = Some(Arc::clone(&schema));
         }
         Ok(schema)
+    }
+
+    /// The compiled plan whose text is `text`, which `check` decodes and
+    /// checks against the schema `cookie` counts when no connection has yet,
+    /// with the schema `read` reads when the map keeps none (`schema`). Two
+    /// connections that check one plan at once each do: a check compares a
+    /// few objects of a schema read once, where a build reads the
+    /// statement's SQL.
+    fn compiled(
+        &self,
+        cookie: i64,
+        text: &'static str,
+        check: impl FnOnce(&MainSchema) -> rusqlite::Result<Arc<ScopePlan>>,
+        read: impl FnOnce() -> rusqlite::Result<MainSchema>,
+    ) -> rusqlite::Result<Arc<ScopePlan>> {
+        let address = text.as_ptr() as usize;
+        let checked = {
+            let mut kept = lock_unpoisoned(&self.kept);
+            kept.enter(cookie);
+            kept.0.entry(cookie).or_default().compiled.get(&address).cloned()
+        };
+        if let Some(plan) = checked {
+            return Ok(plan);
+        }
+        let schema = self.schema(cookie, read)?;
+        let plan = check(&schema)?;
+        if let Some(of) = lock_unpoisoned(&self.kept).0.get_mut(&cookie) {
+            of.compiled.insert(address, Arc::clone(&plan));
+        }
+        Ok(plan)
     }
 
     /// Run `run` as the next caller waits for a plan being built.
@@ -341,6 +384,40 @@ impl<P: Policy> HostSql<P> {
         self.app_statements
             .plans
             .plan(cookie, sql, || self.build_scope_plan(Some(cookie), sql, statement))
+    }
+
+    /// The plan `statement` brings, decoded and checked against this
+    /// connection's schema, which `cookie` counts: kept for the database
+    /// while the schema stays, and checked on each use with no cookie. A
+    /// schema that shows a table, view or function the plan read otherwise
+    /// than the schema the compiler built it against fails the statement
+    /// with `CompiledSchemaDiffers`.
+    pub(super) fn compiled_plan(
+        &self,
+        statement: CompiledStatement,
+        cookie: Option<i64>,
+    ) -> rusqlite::Result<Arc<ScopePlan>> {
+        let check = |schema: &MainSchema| {
+            let failed =
+                |error: PolicyError<P>| rusqlite::Error::UserFunctionError(Box::new(error));
+            let started = Instant::now();
+            let plan = CompiledPlan::decode(statement.plan)
+                .map_err(|error| failed(crate::Error::UndecodablePlan(error)))?;
+            let whole = self.authorization.whole_views();
+            let checked =
+                self.authorization.unrecorded(|| plan.check(&self.connection, schema, whole))?;
+            let checked_in = started.elapsed();
+            tracing::debug!(?checked_in, "sqlive checked a compiled scope plan");
+            match checked {
+                Ok(()) => Ok(Arc::new(plan.into_plan())),
+                Err(differs) => Err(failed(crate::Error::CompiledSchemaDiffers(differs))),
+            }
+        };
+        let read = || self.authorization.unrecorded(|| MainSchema::read(&self.connection));
+        match cookie {
+            Some(cookie) => self.app_statements.plans.compiled(cookie, statement.plan, check, read),
+            None => check(&read()?),
+        }
     }
 
     /// Build `statement`'s plan against the schema `cookie` counts, or, with

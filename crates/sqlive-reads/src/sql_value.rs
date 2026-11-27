@@ -7,14 +7,15 @@ use rusqlite::{
 };
 
 /// A value SQLite stores.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SqlValue {
     /// NULL.
     Null,
     /// An integer.
     Integer(i64),
-    /// A floating-point number.
-    Real(f64),
+    /// A floating-point number, encoded by its bits, which JSON keeps
+    /// for every value, an infinity included.
+    Real(#[serde(with = "crate::compiled_plan::float_bits")] f64),
     /// Text, as the bytes SQLite stores, which may not be valid UTF-8.
     Text(Vec<u8>),
     /// A blob.

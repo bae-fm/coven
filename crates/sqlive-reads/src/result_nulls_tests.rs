@@ -19,7 +19,7 @@ CREATE VIRTUAL TABLE docs USING fts5(body);";
 /// Whether the probe says of each column of `sql` that no row of the
 /// statement holds NULL in it.
 fn never_null(sql: &str) -> Vec<bool> {
-    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
     statement.columns.iter().map(|column| !nulls(column).nullable()).collect()
 }
@@ -232,7 +232,7 @@ fn a_column_that_the_where_requires_not_null_holds_none() {
 
 #[test]
 fn a_column_says_whether_its_from_item_can_have_no_row() {
-    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
     // Each case's first two columns are of the items `a` and `b`.
     for (sql, expected) in [
         (
@@ -294,7 +294,7 @@ fn a_column_says_whether_its_from_item_can_have_no_row() {
 #[test]
 fn a_column_says_what_each_select_of_a_compound_can_give_it() {
     use SelectNull::{Computed, Literal, MissingRow, Never, Value};
-    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
     for (sql, expected) in [
         ("SELECT id, note FROM people", [vec![Never], vec![Value]]),
         (
@@ -338,7 +338,7 @@ fn a_column_says_what_each_select_of_a_compound_can_give_it() {
 #[test]
 fn a_statement_the_parser_cant_read_says_nothing_of_its_nulls() {
     // SQLite reads a comment that never ends, and the parser doesn't.
-    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[SCHEMA.to_owned()], &[], &[], &[]).unwrap();
     let statement =
         probe.prepare("SELECT name FROM people UNION ALL SELECT NULL /* never ends").unwrap();
     assert_eq!(statement.columns[0].nulls, None);

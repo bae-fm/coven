@@ -1577,6 +1577,14 @@ pub enum DbError {
     StatementForbidden { operation: &'static str },
     /// SQLite rolled the owned transaction back itself, so it can't go on (E3, E13).
     TransactionEnded,
+    /// A compiled read's scope plan was built against a schema that shows
+    /// tables, views or functions otherwise than the store's database does,
+    /// each of which it names by its kind and name, such as `table tracks`:
+    /// the app's build compiled the read against another schema (§4).
+    CompiledSchemaDiffers(sqlive::SchemaDiffers),
+    /// A compiled read's scope plan is no plan this coven's sqlive writes:
+    /// the app's build compiled the read with another version of it (§4).
+    UndecodablePlan(sqlive::UndecodablePlan),
     /// SQLite kept another journal mode instead of WAL (§4).
     WalUnavailable { mode: String },
     /// An app's SQLite setting is larger than SQLite can hold (E1).

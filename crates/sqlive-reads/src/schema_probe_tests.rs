@@ -11,6 +11,7 @@ fn probe() -> SchemaProbe {
         &[SCHEMA.to_owned()],
         &[StandInFunction { name: "fold_case".into(), arguments: 1, deterministic: true }],
         &["folded".to_owned()],
+        &[],
     )
     .unwrap()
 }
@@ -61,7 +62,7 @@ fn never_null(sql: &str) -> bool {
         CREATE TABLE paired (first INTEGER, second INTEGER, PRIMARY KEY (first, second));
         CREATE TABLE named (rowid TEXT, name TEXT);
         CREATE VIRTUAL TABLE docs USING fts5(body);";
-    let probe = SchemaProbe::open(&[schema.to_owned()], &[], &[]).unwrap();
+    let probe = SchemaProbe::open(&[schema.to_owned()], &[], &[], &[]).unwrap();
     let statement = probe.prepare(sql).unwrap();
     assert!(statement.columns[0].origin.is_some(), "{sql}");
     statement.columns[0].nulls.as_ref().is_some_and(|nulls| !nulls.nullable())

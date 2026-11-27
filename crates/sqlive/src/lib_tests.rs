@@ -66,6 +66,24 @@ impl TestRead<'_> {
     ) -> rusqlite::Result<Vec<T>> {
         self.0.app_query(crate::Recorded::Yes, sql, params, map)
     }
+
+    /// Every row of the compiled statement `statement`, through `map`.
+    pub(crate) fn query_compiled<T, Q: rusqlite::Params>(
+        &self,
+        statement: crate::CompiledStatement,
+        params: Q,
+        map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<Vec<T>> {
+        self.0.app_query_compiled(crate::Recorded::Yes, statement, params, map)
+    }
+}
+
+/// `sql` with the plan `probe` builds of it, as a compiler ships it, when
+/// sqlive can analyze it. The test keeps each for as long as it runs.
+pub(crate) fn compiled(probe: &crate::SchemaProbe, sql: &str) -> Option<crate::CompiledStatement> {
+    let plan = probe.compiled_plan(sql).unwrap().ok()?.encode();
+    let sql: &'static str = Box::leak(sql.to_owned().into_boxed_str());
+    Some(crate::CompiledStatement { sql, plan: Box::leak(plan.into_boxed_str()) })
 }
 
 /// The bugs a test's handle hands its sink.

@@ -15,6 +15,9 @@ test-utils = []
 [dependencies]
 rusqlite = { workspace = true, features = ["functions", "collation", "column_metadata"] }
 sqlite3-parser.workspace = true
+# A compiled scope plan's text.
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

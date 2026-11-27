@@ -29,7 +29,7 @@ fn a_fragment_reads_each_column_at_its_offset() {
 fn a_read_binds_its_request_by_name() {
     let header =
         parse(CallKind::Read, quote!(Page(a: i64, b: Option<String>), r#"SELECT 1"#)).unwrap();
-    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    let code = read(&header, "SELECT 1", "{}", &[field("n", "i64", Reading::Value, 0)], true);
     assert!(code.contains("(\":a\" , & self . a as"), "{code}");
     assert!(code.contains("(\":b\" , & self . b as"), "{code}");
     syn::parse_file(&code).unwrap();
@@ -38,9 +38,10 @@ fn a_read_binds_its_request_by_name() {
 #[test]
 fn a_read_implements_the_statement_traits_a_store_takes() {
     let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
-    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    let code = read(&header, "SELECT 1", "the plan", &[field("n", "i64", Reading::Value, 0)], true);
     assert!(code.contains("impl :: sqlive_compose :: Statement for PageParams"), "{code}");
     assert!(code.contains("impl :: sqlive_compose :: Read for PageParams"), "{code}");
+    assert!(code.contains("const PLAN : & 'static str = \"the plan\""), "{code}");
     assert!(code.contains("type Row = PageRow"), "{code}");
     syn::parse_file(&code).unwrap();
 }
@@ -48,7 +49,7 @@ fn a_read_implements_the_statement_traits_a_store_takes() {
 #[test]
 fn a_reads_request_and_row_have_no_functions_beside_the_traits() {
     let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
-    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    let code = read(&header, "SELECT 1", "{}", &[field("n", "i64", Reading::Value, 0)], true);
     let file = syn::parse_file(&code).unwrap();
     let inherent: Vec<String> = file
         .items
@@ -78,9 +79,9 @@ fn a_name_that_cannot_be_an_identifier_is_refused() {
 fn a_read_in_a_private_module_has_no_pub_item() {
     let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
     let fields = [field("n", "i64", Reading::Value, 0)];
-    let private = read(&header, "SELECT 1", &fields, false);
+    let private = read(&header, "SELECT 1", "{}", &fields, false);
     assert_eq!(private.matches("pub").count(), private.matches("pub (crate)").count(), "{private}");
-    let exported = read(&header, "SELECT 1", &fields, true);
+    let exported = read(&header, "SELECT 1", "{}", &fields, true);
     assert!(!exported.contains("pub (crate)"), "{exported}");
     syn::parse_file(&private).unwrap();
 }
@@ -88,7 +89,7 @@ fn a_read_in_a_private_module_has_no_pub_item() {
 #[test]
 fn a_row_derives_clone_partial_eq_and_debug() {
     let header = parse(CallKind::Read, quote!(Page, r#"SELECT 1"#)).unwrap();
-    let code = read(&header, "SELECT 1", &[field("n", "i64", Reading::Value, 0)], true);
+    let code = read(&header, "SELECT 1", "{}", &[field("n", "i64", Reading::Value, 0)], true);
     assert!(code.contains("# [derive (Clone , Debug , PartialEq)] pub struct PageRow"), "{code}");
 }
 

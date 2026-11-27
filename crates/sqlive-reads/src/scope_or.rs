@@ -87,6 +87,7 @@ impl Disjunction {
 
 /// One side of an OR that narrows a placed source: its terms joined with
 /// AND, and its edges as memberships of partners placed before the source.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct EitherSide {
     pub(crate) term: Option<ScopeTerm>,
     pub(crate) memberships: Vec<Membership>,

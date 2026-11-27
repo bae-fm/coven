@@ -54,7 +54,7 @@
 use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::MainSchema;
+use crate::schema_objects::SchemaLookups;
 use crate::select_syntax::{
     aggregate_call, order_term, parts, parts_outside, window_call, AggregateCall, Functions,
     OrderTerm, Part,
@@ -88,25 +88,28 @@ impl Node {
 
 /// The columns a statement's rows depend on beyond those the authorizer
 /// reports, as (table, column) pairs, lowercase.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UnreportedColumns {
     Known(ColumnSet),
-    /// The parser couldn't read the statement or a view it reads: every
-    /// column of every table in the main schema (`MAIN_TABLES`), so every
-    /// write reruns the statement.
-    Unknown(ColumnSet),
+    /// The parser couldn't read the statement or a view it reads, for the
+    /// reason `why`: every column of every table in the main schema
+    /// (`MAIN_TABLES`), so every write reruns the statement.
+    Unknown {
+        why: String,
+        columns: ColumnSet,
+    },
 }
 
 impl UnreportedColumns {
     /// The columns to count as read.
     pub(crate) fn columns(&self) -> &ColumnSet {
         match self {
-            Self::Known(columns) | Self::Unknown(columns) => columns,
+            Self::Known(columns) | Self::Unknown { columns, .. } => columns,
         }
     }
 
     /// Unknown columns, for the reason `why`, which goes to the log.
-    pub(crate) fn unknown(schema: &MainSchema, why: String) -> rusqlite::Result<Self> {
+    pub(crate) fn unknown(schema: &SchemaLookups<'_>, why: String) -> rusqlite::Result<Self> {
         tracing::warn!(
             %why,
             "the planner can't tell which columns a statement's rows depend on, so every \
@@ -118,7 +121,7 @@ impl UnreportedColumns {
                 every.insert((table.to_ascii_lowercase(), column.name.to_ascii_lowercase()));
             }
         }
-        Ok(Self::Unknown(every))
+        Ok(Self::Unknown { why, columns: every })
     }
 }
 
@@ -128,7 +131,7 @@ impl UnreportedColumns {
 /// when the columns are unknown. It reads each view in `views`.
 pub(crate) fn unreported_columns(
     connection: &Connection,
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     functions: &Functions,
     views: &ViewTrees<'_>,
     select: &Select<'_>,

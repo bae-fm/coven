@@ -48,7 +48,7 @@ use sqlite3_parser::ast::{Expr, Operator, Select, SortOrder};
 
 /// A subquery whose rows, for each row around it, are the first rows of
 /// that row's window, before the run's values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Window {
     /// The table item the subquery's one core reads.
     pub(crate) item: usize,

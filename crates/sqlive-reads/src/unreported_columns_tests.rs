@@ -29,6 +29,7 @@ fn unreported(connection: &rusqlite::Connection, sql: &str) -> UnreportedColumns
     };
     let functions = crate::select_syntax::Functions::read(connection).unwrap();
     let schema = crate::MainSchema::read(connection).unwrap();
+    let schema = crate::schema_objects::SchemaLookups::new(&schema);
     let views = crate::view_trees::ViewTrees::new(&bump);
     unreported_columns(connection, &schema, &functions, &views, select).unwrap().0
 }
@@ -52,8 +53,9 @@ fn a_using_join_names_its_column_of_each_side_and_a_view_its_natural_join() {
 fn unknown_joins_count_every_column_of_every_table() {
     let connection = connection();
     let schema = crate::MainSchema::read(&connection).unwrap();
+    let schema = crate::schema_objects::SchemaLookups::new(&schema);
     let unknown = UnreportedColumns::unknown(&schema, "a test".to_owned()).unwrap();
-    assert!(matches!(unknown, UnreportedColumns::Unknown(_)));
+    assert!(matches!(unknown, UnreportedColumns::Unknown { .. }));
     assert_eq!(
         unknown.columns(),
         &pairs(&[("a", "id"), ("a", "k"), ("a", "v"), ("b", "id"), ("b", "k"), ("b", "w"),])

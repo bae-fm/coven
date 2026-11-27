@@ -25,6 +25,8 @@ impl From<sqlive::Error<StoreFailure, DbError>> for DbError {
             sqlive::Error::HandleFailed(bug) => Self::StoreFailed(bug),
             sqlive::Error::Host(failure) => failure.error(),
             sqlive::Error::Invariant { what } => Self::Invariant { what },
+            sqlive::Error::CompiledSchemaDiffers(differs) => Self::CompiledSchemaDiffers(differs),
+            sqlive::Error::UndecodablePlan(error) => Self::UndecodablePlan(error),
             sqlive::Error::WalUnavailable { mode } => Self::WalUnavailable { mode },
             sqlive::Error::SqliteSettingOutOfRange { setting, maximum } => {
                 Self::SqliteSettingOutOfRange { setting, maximum }

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::schema_objects::MainSchema;
+use crate::schema_objects::SchemaLookups;
 use crate::select_syntax::{parts, window_parts, Part};
 use crate::view_trees::ViewTrees;
 use sqlite3_parser::ast::{
@@ -100,7 +100,7 @@ impl Visit for () {}
 
 /// Where the walk is, and what it has met so far.
 pub(crate) struct Scope<'c, 'v> {
-    schema: &'c MainSchema,
+    schema: &'c SchemaLookups<'c>,
     /// Where the walk reads each view's syntax.
     views_read: &'c ViewTrees<'v>,
     /// What each view read so far reads, by its name, lowercase, so a view
@@ -218,7 +218,7 @@ pub(crate) struct Walk<'c, 'v, V> {
 }
 
 impl<'c, 'v, V: Visit> Walk<'c, 'v, V> {
-    pub(crate) fn new(schema: &'c MainSchema, views: &'c ViewTrees<'v>, visit: V) -> Self {
+    pub(crate) fn new(schema: &'c SchemaLookups<'c>, views: &'c ViewTrees<'v>, visit: V) -> Self {
         Self {
             scope: Scope {
                 schema,

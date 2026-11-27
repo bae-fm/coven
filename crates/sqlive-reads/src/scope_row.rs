@@ -46,7 +46,7 @@ use sqlite3_parser::ast::Expr;
 
 /// An expression over one source's row, a conjunct or an ORDER BY term's
 /// value, and what it names, before a run's values.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RowTerm {
     /// The expression as SQL, its parameters numbered as the plan's
     /// statement numbers them.
@@ -62,7 +62,7 @@ pub(crate) struct RowTerm {
 }
 
 /// A column a row term's SQL names.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RowColumn {
     /// The name the SQL gives it, lowercase.
     pub(crate) name: String,
@@ -127,7 +127,7 @@ impl RowTerm {
 
 /// An expression over one table's row, with the affinity SQLite gives its
 /// value: an ORDER BY term's, which has none, or a generated column's own.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RowExpression {
     pub(crate) term: Arc<RowTerm>,
     pub(crate) affinity: Affinity,

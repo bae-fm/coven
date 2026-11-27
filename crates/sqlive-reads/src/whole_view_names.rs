@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::schema_objects::MainSchema;
+use crate::schema_objects::SchemaLookups;
 use crate::sql_walk::Walk;
 
 /// The names, lowercase, SQLite can report a read through while it runs
@@ -16,7 +16,7 @@ use crate::sql_walk::Walk;
 /// message when it can't read one of those views, whose SQL could declare
 /// any name.
 pub(crate) fn whole_view_names(
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     stored: &str,
 ) -> rusqlite::Result<Result<BTreeSet<String>, String>> {
     let bump = sqlite3_parser::Bump::new();

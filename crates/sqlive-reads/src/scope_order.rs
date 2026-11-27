@@ -71,6 +71,7 @@ use sqlite3_parser::ast::{
 };
 
 /// A statement's order and LIMIT, which a full run's last row bounds.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SortedLimit {
     /// The ORDER BY's terms, in runs of consecutive terms over one source.
     runs: Vec<SortRun>,
@@ -78,7 +79,7 @@ pub(crate) struct SortedLimit {
 }
 
 /// A LIMIT whose value a run's parameters can give.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RunLimit(Operand);
 
 impl RunLimit {
@@ -151,6 +152,7 @@ pub(crate) fn ordered_limit<'a>(
 }
 
 /// Consecutive ORDER BY terms over one source.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct SortRun {
     /// The source whose rows the terms sort.
     source: usize,
@@ -163,6 +165,7 @@ struct SortRun {
 /// A source inside a derived item that each row of the item is made from,
 /// whose columns the first terms of the item's run read: the run's bound on
 /// its rows is the item's, over those terms.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct InnerRun {
     source: usize,
     /// How the statement names the source's rows.
@@ -175,7 +178,7 @@ struct InnerRun {
 }
 
 /// One ORDER BY term of a sorted source.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SortTerm {
     /// What it sorts the source's rows by.
     key: SortKey,
@@ -186,7 +189,7 @@ struct SortTerm {
 }
 
 /// What an ORDER BY term sorts its source's rows by.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum SortKey {
     /// A stored column of BINARY collation, lowercase, whose values sqlive
     /// compares itself.

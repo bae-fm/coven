@@ -14,12 +14,13 @@ use sqlite3_parser::ast::{Expr, Literal, Operator, UnaryOperator};
 
 /// A condition on one source's rows, with values from the SQL or its
 /// parameters.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ScopeTerm {
     Compare {
         column: String,
         affinity: Affinity,
         operand: Operand,
+        #[serde(with = "crate::compiled_plan::ordering")]
         ordering: Ordering,
         inclusive: bool,
     },
@@ -40,6 +41,7 @@ pub(crate) enum ScopeTerm {
         condition: Truth,
         /// How the comparison orders the truth with the value, and whether
         /// equal passes; `is` for `IS`, which NULL equals.
+        #[serde(with = "crate::compiled_plan::ordering")]
         ordering: Ordering,
         inclusive: bool,
         is: bool,
@@ -280,7 +282,7 @@ impl ScopeTerm {
 /// The condition whose truth a term compares with a value: a NULL test, or
 /// a column compared with a value. In each row it is 1, 0 or NULL; a NULL
 /// test is never NULL, and a comparison is where its column is NULL.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Truth {
     Null {
         column: String,
@@ -290,6 +292,7 @@ pub(crate) enum Truth {
         column: String,
         affinity: Affinity,
         operand: Operand,
+        #[serde(with = "crate::compiled_plan::ordering")]
         ordering: Ordering,
         inclusive: bool,
     },
@@ -371,7 +374,7 @@ impl Truth {
 }
 
 /// A value in a condition: one the SQL spells, or a bound parameter.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Operand {
     Constant(Value),
     /// A parameter's position, from zero.
@@ -423,7 +426,7 @@ impl<'a> RunValues<'a> {
 }
 
 /// A column's affinity, as SQLite derives it from the declared type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Affinity {
     /// INTEGER, REAL or NUMERIC: they compare their values alike.
     Numeric,

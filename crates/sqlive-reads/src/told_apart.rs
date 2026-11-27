@@ -15,7 +15,7 @@ use crate::comparison::{
     at_least_as_fine, comparison_collation, keeps_values, Carried, Traits, BINARY,
 };
 use crate::from_item::{Column, ColumnValue, Columns};
-use crate::schema_objects::{MainSchema, ROWID_NAMES};
+use crate::schema_objects::{SchemaLookups, ROWID_NAMES};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{conjuncts, order_term, parts, Functions, OrderTerm, Part};
 use crate::sql::unparenthesized;
@@ -121,7 +121,7 @@ struct Output {
 /// Reads what tells a SELECT's rows apart, from the connection's schema.
 pub(crate) struct Telling<'c> {
     pub(crate) connection: &'c Connection,
-    pub(crate) schema: &'c MainSchema,
+    pub(crate) schema: &'c SchemaLookups<'c>,
     /// The connection's functions, which tell an aggregate call from a scalar
     /// one.
     pub(crate) functions: &'c Functions,
@@ -130,7 +130,7 @@ pub(crate) struct Telling<'c> {
 /// Each name `expr` could resolve to a column, in it and in every SELECT
 /// inside it, as its qualifier, as written, and its column, lowercase.
 fn names_in(
-    schema: &MainSchema,
+    schema: &SchemaLookups<'_>,
     expr: &Expr<'_>,
 ) -> rusqlite::Result<Vec<(Option<String>, String)>> {
     #[derive(Default)]

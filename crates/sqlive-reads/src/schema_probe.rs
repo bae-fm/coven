@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
+use crate::compiled_plan::{CompiledPlan, Unanalyzable};
 use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
 use crate::result_nulls::{statement_nulls, ColumnNulls, SelectNull, StatementNulls};
@@ -83,23 +84,28 @@ pub struct TableColumn {
     pub not_null: bool,
 }
 
-/// An in-memory database that holds a schema's tables, views and triggers.
+/// An in-memory database that holds a schema's tables, views and triggers,
+/// and the views and tables the host's live queries read whole.
 pub struct SchemaProbe {
     connection: Connection,
     /// The schema `open` ran, which no later call changes: the probe prepares
     /// statements and runs none.
     schema: MainSchema,
+    /// The views and tables the host's live queries read whole.
+    whole: WholeViews,
 }
 
 impl SchemaProbe {
     /// A database that has run `schema`, a list of SQL texts, in order, after
     /// `functions` and `collations` were registered under the names the
     /// schema uses: SQLite refuses to prepare SQL that names a function or a
-    /// collation it doesn't know. A collation compares text byte by byte.
+    /// collation it doesn't know. A collation compares text byte by byte. A
+    /// live query of the host reads the views and tables named `whole` whole.
     pub fn open(
         schema: &[String],
         functions: &[StandInFunction],
         collations: &[String],
+        whole: &[String],
     ) -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
         for function in functions {
@@ -121,7 +127,7 @@ impl SchemaProbe {
             connection.execute_batch(sql)?;
         }
         let schema = MainSchema::read(&connection)?;
-        Ok(Self { connection, schema })
+        Ok(Self { connection, schema, whole: WholeViews::new(whole.iter().map(String::as_str)) })
     }
 
     /// Prepare `sql` and describe it. SQLite's own error says what it can't
@@ -203,20 +209,20 @@ impl SchemaProbe {
     }
 
     /// What a live query of `sql` depends on in each table it reads, as its
-    /// plan narrows them before a run binds its values (SPEC.md section 12). A
-    /// view of the schema counts as sqlive reads it when no host names it a
-    /// view to read whole.
+    /// plan narrows them before a run binds its values (SPEC.md section 12).
     pub fn read_report(&self, sql: &str) -> rusqlite::Result<ReadReport> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let plan = ScopePlan::build(
-            &self.connection,
-            &self.schema,
-            sql,
-            &statement,
-            &WholeViews::new([]),
-        )?;
+        let plan = ScopePlan::build(&self.connection, &self.schema, sql, &statement, &self.whole)?;
         Ok(ReadReport::of(&plan))
+    }
+
+    /// The scope plan of `sql`, as a compiler ships it with the statement
+    /// (SPEC.md section 4), or why sqlive can't analyze the statement.
+    pub fn compiled_plan(&self, sql: &str) -> rusqlite::Result<Result<CompiledPlan, Unanalyzable>> {
+        let sql = crate::sql::up_to_nul(sql);
+        let statement = self.connection.prepare(sql)?;
+        CompiledPlan::build(&self.connection, &self.schema, sql, &statement, &self.whole)
     }
 }
 
