@@ -30,5 +30,9 @@ pub const STORAGE_SETUP: &str = "storage-setup";
 /// confirmed its probes and uploads gone (§11.6, §20.7); also its
 /// `started_by`.
 pub const S3_DETECTION: &str = "s3-detection";
+/// Creating a new Dropbox shared folder for the picker, from before its
+/// share request until a storage setup commits (§20.3); also its
+/// `started_by`.
+pub const DROPBOX_FOLDER: &str = "dropbox-folder";
 /// The `started_by` of an operation coven starts on its own.
 pub const COVEN: &str = "coven";

@@ -204,7 +204,7 @@ impl DropboxStorage {
             return Err(StorageFailure::Protocol.with_source("invalid Dropbox remove launch"));
         }
         let job = http::string(&value, "async_job_id")?;
-        let status = super::dropbox_job::completed(&self.session, "member removal", || async {
+        let ended = super::dropbox_job::ended(&self.session, "member removal", || async {
             http::json_response(
                 PROVIDER,
                 self.rpc_response(
@@ -216,6 +216,10 @@ impl DropboxStorage {
             .await
         })
         .await?;
+        let status = match ended {
+            super::dropbox_job::JobEnd::Complete(status) => status,
+            super::dropbox_job::JobEnd::Failed(failure) => return Err(failure),
+        };
         // MemberAccessLevelResult is a struct: Dropbox inlines its fields
         // beside .tag, including when all optional fields are absent.
         remaining_parent_access(&status, member)

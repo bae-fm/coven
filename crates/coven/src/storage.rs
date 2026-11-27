@@ -167,6 +167,8 @@ pub(crate) struct StorageConnections {
     /// This store's device-only entries, where a setup keeps its own
     /// credentials until it finishes (§11.6).
     keychain: Arc<coven_crypto::custody::StoreKeychain>,
+    /// The new Dropbox folders being made, which hold no call lock (§20.3).
+    folder_creations: dropbox_folder::FolderCreations,
     /// Where this session's storage setup stands (E5).
     setup: std::sync::Mutex<setup::SetupRun>,
     /// Wakes a setup checking the provider when the app cancels it.
@@ -244,6 +246,7 @@ impl StorageConnections {
             #[cfg(test)]
             deletion_gate: std::sync::Mutex::new(None),
             keychain,
+            folder_creations: dropbox_folder::FolderCreations::new(),
             setup: std::sync::Mutex::new(match setup_finishing {
                 true => setup::SetupRun::Finishing,
                 false => setup::SetupRun::Idle,
@@ -786,6 +789,10 @@ mod control;
 mod folders;
 #[cfg(test)]
 pub(crate) use folders::with_folder_label;
+
+#[path = "storage_dropbox_folder.rs"]
+mod dropbox_folder;
+pub(crate) use dropbox_folder::{settle_opened_folders, OpenedFolders};
 
 #[path = "storage_s3.rs"]
 mod s3;

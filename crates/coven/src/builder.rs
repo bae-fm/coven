@@ -807,12 +807,19 @@ impl OpeningStore {
         let finishing = Box::pin(crate::storage::settle_opened(&database, &owners.keychain))
             .await
             .map_err(CovenError::from)?;
+        // A Dropbox sharing job a close or a crash left is followed again
+        // once the handle exists (§20.3).
+        let folders = Box::pin(crate::storage::settle_opened_folders(&database, &owners.keychain))
+            .await
+            .map_err(CovenError::from)?;
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
         Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))
             .await
             .map_err(CovenError::from)?;
-        Ok(owners.into_handle(database, waits, configured, finishing))
+        let handle = owners.into_handle(database, waits, configured, finishing);
+        handle.resume_dropbox_folders(folders);
+        Ok(handle)
     }
 }
 

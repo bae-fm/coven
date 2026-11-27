@@ -862,6 +862,38 @@ impl IdSource for SequentialIds {
 }
 
 #[cfg(feature = "test-utils")]
+/// What stands at a name at the top of the signed-in Dropbox.
+pub enum DropboxName {
+    /// Nothing has the name.
+    Free,
+    /// A file or folder has it.
+    Taken {
+        /// The shared folder's id, when what has the name is a shared folder.
+        shared_folder_id: Option<String>,
+    },
+}
+
+/// What Dropbox answered a request to make a shared folder.
+pub enum DropboxShare {
+    /// The folder is made and shared.
+    Shared(StorageFolder),
+    /// Dropbox runs the request as the job with this id.
+    Job(String),
+    /// A shared folder already has the name.
+    AlreadyShared,
+}
+
+/// How following a sharing job ended.
+pub enum DropboxShareJob {
+    /// It made and shared the folder.
+    Shared(StorageFolder),
+    /// It failed, with the failure Dropbox names.
+    Failed(StorageError),
+    /// Dropbox no longer knows the job, so it can't say how it ended.
+    Forgotten,
+}
+
+#[cfg(feature = "test-utils")]
 /// Constructs provider connections without committing settings or credentials.
 /// Tests replace the connection boundary with in-memory storage.
 #[async_trait]
@@ -914,14 +946,48 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
-    /// Make a folder named `name` at the top of the signed-in Dropbox and
-    /// share it, refusing a name already taken.
-    async fn create_dropbox_shared_folder(
+    /// What stands at `name` at the top of the signed-in Dropbox.
+    async fn dropbox_name(
         &self,
         _name: &str,
         _auth: ProviderAuth,
         _cooldown: Arc<dyn Cooldown>,
-    ) -> Result<StorageFolder, StorageError> {
+    ) -> Result<DropboxName, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Ask Dropbox to make a folder named `name` at the top of the signed-in
+    /// Dropbox and share it. The request shares a folder that already has
+    /// the name, so the caller looks the name up first.
+    async fn share_dropbox_folder(
+        &self,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<DropboxShare, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Follow a Dropbox sharing job until Dropbox reports its end. An error
+    /// is a status check's, which leaves the job's end unknown.
+    async fn follow_dropbox_share(
+        &self,
+        _job: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<DropboxShareJob, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// The shared folder `shared_folder_id`, named `name` at the top of the
+    /// signed-in Dropbox, when this account owns it and it holds nothing.
+    async fn untouched_dropbox_folder(
+        &self,
+        _name: &str,
+        _shared_folder_id: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<Option<StorageFolder>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
@@ -4596,7 +4662,9 @@ loop {
   Coven owns the request, checked redirect and code exchange. The builder's
   presenter opens the page and returns the redirect or cancellation; it receives
   no tokens. Sign-in is held in coven's session custody until setup succeeds,
-  and from setup's journal on also in setup's own device entry (§11.6).
+  and from setup's journal on also in setup's own device entry (§11.6). While
+  Dropbox runs a new folder's sharing job, a copy is also in an entry kept for
+  following it (§20.3).
   Replacing a sign-in does not change an existing storage connection; setup
   verifies the chosen account and location before attaching it.
 - Every setup, including reconnection, reaches the candidate provider with the
@@ -4993,12 +5061,16 @@ impl CovenHandle {
 
     /// Make a folder named `name` at the top of the signed-in Dropbox and
     /// share it, for the picker's New folder (§20.3). A name already taken
-    /// fails with `AlreadyExists` and nothing is made or shared; a name with
-    /// a slash, or an empty one, fails with `InvalidConfiguration` before any
-    /// request. Requires Full Dropbox sign-in; returns a setup location
-    /// without committing it. The call lasts as long as Dropbox's sharing
-    /// job does (§20.3), and it finishes even if the app drops its
-    /// future.
+    /// fails with `AlreadyExists` and nothing is made or shared, unless the
+    /// folder there is the one an earlier call by this account asked for,
+    /// which the call returns. A name with a slash, or an empty one, fails
+    /// with `InvalidConfiguration` before any request. Requires Full Dropbox
+    /// sign-in; returns a setup location without committing it. The call
+    /// lasts as long as Dropbox's sharing job does, without holding back the
+    /// store's other storage calls, and goes on if the app drops its future.
+    /// Closing the store stops it with `KeyError::StoreClosed`, and the next
+    /// open follows the job. A setup that commits meanwhile stops it with
+    /// `LocationChangeUnsupported`.
     pub async fn create_dropbox_shared_folder(
         &self, name: &str,
     ) -> Result<StorageFolder, StorageSetupError>;

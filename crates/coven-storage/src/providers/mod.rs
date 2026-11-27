@@ -6,7 +6,7 @@ mod http_body;
 mod http_client;
 mod oauth;
 mod oauth_folders;
-pub use oauth_folders::StorageFolder;
+pub use oauth_folders::{DropboxName, DropboxShare, DropboxShareJob, StorageFolder};
 mod object_metadata;
 mod onedrive_item;
 mod pagination;

@@ -361,6 +361,8 @@ impl StorageConnections {
     /// Finish the connection's work, then release custody owners.
     pub(crate) async fn close(&self) -> Result<(), SyncError> {
         self.files.closing();
+        // A sharing job being followed stops here; the next open resumes it.
+        drop(self.folder_creations.close().await);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         let stopped = self.waits.sync_stopped().await;
         self.stopped.notify_waiters();

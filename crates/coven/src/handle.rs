@@ -212,6 +212,10 @@ impl CovenHandle {
     ) -> Result<S3Detection, StorageSetupError> {
         self.storage.detect_s3(storage, access_key_id, secret_access_key).await
     }
+    /// Follow the Dropbox sharing jobs the store opened with (§20.3).
+    pub(crate) fn resume_dropbox_folders(&self, folders: crate::storage::OpenedFolders) {
+        self.storage.resume_folder_creations(folders);
+    }
     /// Present provider sign-in and keep tokens in coven's session custody.
     /// Call setup to attach the chosen account to storage and persist credentials.
     /// Dropping the future cancels sign-in without replacing the previous tokens.

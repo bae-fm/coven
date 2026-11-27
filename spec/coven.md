@@ -3721,6 +3721,7 @@ These calls, and the work passes do for them, follow the rule:
 | Deleting a store from the device and leaving it (`delete_store`, api.md [E1](api.md#e1-opening)) | the deletion's record in the store's directory, then the removal's operation | the record, kept just before the removal's journal |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
 | Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating, which setup sends as creation kept it, before it claims Set up storage; the `Set access` claim, or committing, when reconnecting |
+| Making a new Dropbox shared folder (`create_dropbox_shared_folder`, §20.3) | a record for the account and name, kept before the share request, and, while Dropbox runs a job, a copy of the sign-in | none: it commits no location; asking again or the next open goes on from the record, and a committed setup ends it |
 | Detecting S3 settings (`detect_s3_settings`, and setup's detection, §20.7) | the run's record, kept before its first probe until a cleanup confirms its probes and uploads gone | none: it writes only probes nothing refers to |
 
 #### 11.7 What the proofs cover
@@ -11011,10 +11012,11 @@ token passes through the app:
 - Until setup or a restore publishes the store, the sign-in lives in coven's
   session custody. Setup also keeps a copy in a device entry of its own from
   its first write to storage, so a crash past its point of no return can still
-  finish it (§11.6). Publishing commits the sign-in to the device's custody,
-  and setup's own copy goes. A join commits
-  it there as soon as it has saved its invite code, so the sign-in outlasts a
-  restart while the join waits (§13.2).
+  finish it (§11.6). Making a new Dropbox folder keeps a copy in another while
+  Dropbox runs its job, so the next open can follow it (§20.3). Publishing
+  commits the sign-in to the device's custody, and setup's own copy goes. A
+  join commits it there as soon as it has saved its invite code, so the sign-in
+  outlasts a restart while the join waits (§13.2).
 - Coven uses a token until the provider rejects it with HTTP 401. It then
   refreshes once, commits the new token, and retries that one request once. If
   the refresh fails or the retry is rejected again, the caller gets the failure.
@@ -11088,20 +11090,8 @@ Before setup, the app chooses a provider location. The folder calls in Appendix 
 use coven's held sign-in to show OneDrive folders or Dropbox shared namespaces;
 they return names and location ids, without reading the files inside. Ana can pick
 Household or create a OneDrive folder for it, then pass that location to setup.
-On Dropbox she can make a new shared folder for it instead. Coven looks the name
-up at the top of her Dropbox first, and refuses one already taken with
-`StorageFailure::AlreadyExists`, so no folder of hers is shared by mistake; then
-one `sharing/share_folder` request makes the folder and shares it. A name with
-a slash is refused before any request. Choosing the location is separate from
-accessing the store's objects below it.
-
-Dropbox may run that request as a job. Coven checks the job, spaced as the
-automatic waits of §6.7, until Dropbox reports it complete or failed, however
-long that takes. Only the running call knows the job's id: if it gave up while
-the job ran, the folder would still appear, and Ana's retry would find the name
-taken. For the same reason, a check that meets a network failure or a 429 is
-sent again, after the same delays or the longer wait Dropbox asks for. Any
-other failed check ends the call with its failure.
+On Dropbox she can make a new shared folder for it instead (below). Choosing the
+location is separate from accessing the store's objects below it.
 
 Every object path starts with the store's id: slots, the floor, snapshots, files,
 the setup check's test objects, and S3 detection's probes. The one exception is
@@ -11137,6 +11127,63 @@ codes.
 
 Key copies are ordinary slots, found by reading the sequence, never by listing
 (§12.1).
+
+##### A new Dropbox shared folder
+
+One `sharing/share_folder` request makes a folder at the top of the person's
+Dropbox and shares it. That request also shares a folder already there, so coven
+first looks the name up, and refuses one taken with
+`StorageFailure::AlreadyExists`: no folder of Ana's is shared by mistake. A name
+with a slash, or an empty one, is refused before any request.
+
+Dropbox may run the share as a job, which can outlast the call, the network and
+the app. Ana taps New folder, her laptop goes offline, and she quits. Dropbox
+finishes the job all the same. A laptop that had forgotten what it asked for
+would find `Household` taken when she tries again, and the folder would stay
+behind. So making a folder is journaled (§11.6):
+
+- **Journal first.** Before the share request, the device records the name and
+  the id of the Dropbox account asking. It keeps one record for each account
+  and name, matching names without regard to case, as Dropbox does. Then it
+  records the job's id as soon as Dropbox returns it, and the shared folder's id
+  once the folder is made. These records aren't listed in `coven_operations`.
+- **The job outlives the app.** While Dropbox runs a job, a copy of the sign-in
+  stays in a device entry of its own. Opening the store follows each journaled
+  job whose account that sign-in reaches, with no call from the app. Offline, it
+  asks again after the waits of §6.7. The copy goes once no record has a job.
+- **Followed to its end.** Coven checks the job, spaced as the automatic waits
+  of §6.7, until Dropbox reports it complete or failed, however long that takes.
+  A check that meets a network failure or a 429 is sent again, after the same
+  delays or the longer wait Dropbox asks for. Any other failed check ends the
+  follow with its failure and leaves the record. A failed job made nothing, so
+  it ends the record.
+- **It holds no other call back.** Making a folder doesn't take the lock that
+  the store's other storage calls take. Closing the store stops it, and a call
+  still waiting fails with `KeyError::StoreClosed`. A call the app drops goes
+  on.
+
+Asking again for a name the account already asked for goes on from the record,
+and never fails because of the folder the record's own request made:
+
+| The record has | Asking again |
+|---|---|
+| no reply to the share request | with the name free, sends the request again; with the name taken, takes the folder if it is as that request leaves one: shared, owned by this account, and empty |
+| a job | follows it; if Dropbox no longer knows the job, goes on as with no reply |
+| the folder it made | returns that folder while the name still has its shared folder id; with the name free, as after Ana deletes the folder, makes it again |
+
+Anything else at the name is refused with `AlreadyExists`: a folder that isn't
+shared, one another account owns, one that holds anything, or, once the record
+has its folder, any other folder. Coven can't prove who made an empty shared
+folder of Ana's own. It takes one only for a name her account asked for, which
+was free when it first asked. The record stays through such a refusal, because
+Dropbox may not have finished the request. A first request that Dropbox refuses
+ends the record, as does finding a shared folder already at the name in reply to
+it: the account made nothing.
+
+A setup that commits (§20.8) is done with the folder picker. It stops any job
+still being followed, whose waiting call fails with
+`StorageSetupError::LocationChangeUnsupported`, then ends every record and
+deletes the kept sign-in.
 
 ##### A location of its own
 

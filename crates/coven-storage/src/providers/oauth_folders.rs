@@ -1,6 +1,7 @@
 //! Choosing provider folders through coven-held sign-in, before storage setup.
 
 use super::{
+    dropbox_job::JobEnd,
     http::{self, Body},
     onedrive_item::{item_kind, Kind},
     pagination::Pagination,
@@ -21,6 +22,40 @@ pub struct StorageFolder {
     pub name: String,
     /// Pass unchanged to storage setup, or as a parent when browsing OneDrive.
     pub storage: StorageConfig,
+}
+
+/// What stands at a name at the top of the signed-in Dropbox.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropboxName {
+    /// Nothing has the name.
+    Free,
+    /// A file or folder has it.
+    Taken {
+        /// The shared folder's id, when what has the name is a shared folder.
+        shared_folder_id: Option<String>,
+    },
+}
+
+/// What Dropbox answered a request to make a shared folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropboxShare {
+    /// The folder is made and shared.
+    Shared(StorageFolder),
+    /// Dropbox runs the request as the job with this id.
+    Job(String),
+    /// A shared folder already has the name.
+    AlreadyShared,
+}
+
+/// How following a sharing job ended.
+#[derive(Debug)]
+pub enum DropboxShareJob {
+    /// It made and shared the folder.
+    Shared(StorageFolder),
+    /// It failed, with the failure Dropbox names.
+    Failed(StorageError),
+    /// Dropbox no longer knows the job, so it can't say how it ended.
+    Forgotten,
 }
 
 /// Provider metadata calls using the same session and cooldown as store setup.
@@ -200,16 +235,110 @@ impl OAuthFolders {
         }
     }
 
-    /// Make a folder named `name` at the top of the signed-in Dropbox and
-    /// share it. The name is looked up first, so a name already taken fails
-    /// with `AlreadyExists` and nothing of the person's is shared; then one
-    /// `share_folder` request makes the folder and shares it, and its job, if
-    /// Dropbox runs one, is followed until Dropbox reports it complete or
-    /// failed.
-    pub(super) async fn create_dropbox_shared_folder(
+    /// What stands at `name` at the top of the signed-in Dropbox.
+    pub(super) async fn dropbox_name(&self, name: &str) -> Result<DropboxName, StorageError> {
+        let path = self.dropbox_new_folder(name)?;
+        let lookup = http::endpoint(&self.api, &["files", "get_metadata"], &[])?;
+        match self.request(Method::POST, &lookup, Body::Json(json!({ "path": path }))).await {
+            Ok(item) => {
+                let shared = match item.get("sharing_info") {
+                    Some(sharing) if http::string(&item, ".tag")? == "folder" => {
+                        http::optional_string(sharing, "shared_folder_id")?
+                    }
+                    _ => None,
+                };
+                Ok(DropboxName::Taken { shared_folder_id: shared.map(str::to_owned) })
+            }
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(DropboxName::Free),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Ask Dropbox, in one `share_folder` request, to make a folder named
+    /// `name` at the top of the signed-in Dropbox and share it. The request
+    /// shares a folder that already has the name, so the caller looks the
+    /// name up first.
+    pub(super) async fn share_dropbox_folder(
         &self,
         name: &str,
-    ) -> Result<StorageFolder, StorageError> {
+    ) -> Result<DropboxShare, StorageError> {
+        let path = self.dropbox_new_folder(name)?;
+        let share = http::endpoint(&self.api, &["sharing", "share_folder"], &[])?;
+        let body = Body::Json(json!({"path":path,"force_async":false}));
+        let launched = match self.request(Method::POST, &share, body).await {
+            Ok(launched) => launched,
+            Err(error)
+                if http::provider_json(&error).is_some_and(|reply| {
+                    reply["error"]["bad_path"][".tag"] == "already_shared"
+                }) =>
+            {
+                return Ok(DropboxShare::AlreadyShared)
+            }
+            Err(error) => return Err(error),
+        };
+        match http::string(&launched, ".tag")? {
+            "complete" => Ok(DropboxShare::Shared(dropbox_folder(&launched)?)),
+            "async_job_id" => {
+                Ok(DropboxShare::Job(http::string(&launched, "async_job_id")?.into()))
+            }
+            _ => Err(StorageFailure::Protocol.with_source("invalid Dropbox share launch")),
+        }
+    }
+
+    /// Follow the sharing job `job` until Dropbox reports its end. An error
+    /// is a status check's, which leaves the job's end unknown.
+    pub(super) async fn follow_dropbox_share(
+        &self,
+        job: &str,
+    ) -> Result<DropboxShareJob, StorageError> {
+        self.require(OAuthAccess::Dropbox(DropboxAccess::FullDropbox))?;
+        let status = http::endpoint(&self.api, &["sharing", "check_share_job_status"], &[])?;
+        let followed = super::dropbox_job::ended(&self.session, "folder sharing", || {
+            self.share_job_status(&status, job)
+        })
+        .await;
+        match followed {
+            Ok(JobEnd::Complete(shared)) => Ok(DropboxShareJob::Shared(dropbox_folder(&shared)?)),
+            Ok(JobEnd::Failed(failure)) => Ok(DropboxShareJob::Failed(failure)),
+            Err(error)
+                if http::provider_json(&error)
+                    .is_some_and(|reply| reply["error"][".tag"] == "invalid_async_job_id") =>
+            {
+                Ok(DropboxShareJob::Forgotten)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The shared folder `shared_folder_id`, named `name` at the top of the
+    /// signed-in Dropbox, when it is as a request to share a new folder
+    /// leaves it: this account owns it, and it holds nothing.
+    pub(super) async fn untouched_dropbox_folder(
+        &self,
+        name: &str,
+        shared_folder_id: &str,
+    ) -> Result<Option<StorageFolder>, StorageError> {
+        let path = self.dropbox_new_folder(name)?;
+        let metadata = http::endpoint(&self.api, &["sharing", "get_folder_metadata"], &[])?;
+        let body = Body::Json(json!({ "shared_folder_id": shared_folder_id }));
+        let shared = self.request(Method::POST, &metadata, body).await?;
+        if http::string(&shared["access_type"], ".tag")? != "owner" {
+            return Ok(None);
+        }
+        let list = http::endpoint(&self.api, &["files", "list_folder"], &[])?;
+        let page = self.request(Method::POST, &list, Body::Json(json!({ "path": path }))).await?;
+        let more = page["has_more"]
+            .as_bool()
+            .ok_or(StorageFailure::Protocol.with_source("invalid Dropbox folder listing"))?;
+        if more || !http::array(&page, "entries")?.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(dropbox_folder(&shared)?))
+    }
+
+    /// The path of a new shared folder named `name`, which only a Full
+    /// Dropbox sign-in can make.
+    fn dropbox_new_folder(&self, name: &str) -> Result<String, StorageError> {
         if self.access == OAuthAccess::Dropbox(DropboxAccess::AppFolder) {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
         }
@@ -218,34 +347,7 @@ impl OAuthFolders {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("a Dropbox folder name is one non-empty path segment"));
         }
-        let path = format!("/{name}");
-        let lookup = http::endpoint(&self.api, &["files", "get_metadata"], &[])?;
-        match self.request(Method::POST, &lookup, Body::Json(json!({ "path": path }))).await {
-            Ok(_) => {
-                return Err(StorageFailure::AlreadyExists
-                    .with_source("the Dropbox folder name is already taken"))
-            }
-            Err(error) if error.failure() == StorageFailure::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let share = http::endpoint(&self.api, &["sharing", "share_folder"], &[])?;
-        let launched = self
-            .request(Method::POST, &share, Body::Json(json!({"path":path,"force_async":false})))
-            .await?;
-        let shared = match http::string(&launched, ".tag")? {
-            "complete" => launched,
-            "async_job_id" => {
-                let job = http::string(&launched, "async_job_id")?;
-                let status =
-                    http::endpoint(&self.api, &["sharing", "check_share_job_status"], &[])?;
-                super::dropbox_job::completed(&self.session, "folder sharing", || {
-                    self.share_job_status(&status, job)
-                })
-                .await?
-            }
-            _ => return Err(StorageFailure::Protocol.with_source("invalid Dropbox share launch")),
-        };
-        dropbox_folder(&shared)
+        Ok(format!("/{name}"))
     }
 }
 

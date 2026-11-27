@@ -111,12 +111,12 @@ pub use coven_foundation::{
 pub use coven_merge::{Audience, MergeError, Slot};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use coven_storage::providers::DesktopOAuthPresenter;
-#[cfg(any(test, feature = "test-utils"))]
-pub use coven_storage::providers::StorageConnector;
 pub use coven_storage::providers::{
     DropboxClients, OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
     StorageFolder,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_storage::providers::{DropboxName, DropboxShare, DropboxShareJob, StorageConnector};
 #[cfg(feature = "dev-tools")]
 pub use coven_storage::providers::{EmptiedS3Bucket, EmptyS3BucketError};
 #[cfg(any(test, feature = "test-utils"))]

@@ -35,6 +35,8 @@ mod setup_journal;
 pub use setup_journal::SetupJournal;
 mod detection_record;
 pub use detection_record::DetectionRecord;
+mod dropbox_folder_journal;
+pub use dropbox_folder_journal::{DropboxFolderJournal, DropboxFolderStep};
 mod sign_in;
 mod slot_object;
 mod snapshot_authorship;

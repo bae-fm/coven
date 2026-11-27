@@ -590,6 +590,8 @@ impl StorageConnections {
         // setup stands, and a call that retries the delete finds it done
         // (an absent entry succeeds).
         let deleted = self.keychain.delete_setup_credentials();
+        // The picker is done with: no new Dropbox folder is waited for.
+        let folders_ended = self.end_folder_creations().await;
         let released = self.close_live(live).await;
         let started = self.activate(live, sync, start).await;
         // Custody and provider are committed, and setup read the store to its
@@ -615,6 +617,7 @@ impl StorageConnections {
             }
         }
         deleted.map_err(SyncError::from)?;
+        folders_ended?;
         Ok(restore_code)
     }
 

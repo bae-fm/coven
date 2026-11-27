@@ -1800,6 +1800,18 @@ tables = [
     "StorageConnections::start_locked",
     "StorageConnections::stop",
 ]
+# Making a new Dropbox folder runs in a task of its own that goes on once the
+# app stops waiting and that close stops (§20.3). Each store's record of that
+# work is made with its connections. Opening reads the kept sign-in on the
+# blocking pool; each sharing job the store opens with is followed in its own
+# task, in a sign-in of this session's made from the kept one.
+"crates/coven/src/storage_dropbox_folder.rs" = [
+    "FolderCreations::new",
+    "settle_opened_folders",
+    "StorageConnections::create_dropbox_shared_folder",
+    "StorageConnections::resume_folder_creations",
+    "StorageConnections::resume_folder",
+]
 # Each attempt is its own task, marked on the file layer while it lives.
 "crates/coven/src/storage_attempt.rs" = ["StorageConnections::start_attempt"]
 

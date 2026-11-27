@@ -23,6 +23,7 @@ const DEVICE_ID_ENTRY: &str = "device-id";
 const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const INVITE_CODE_ENTRY: &str = "invite-code";
 const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
+const DROPBOX_FOLDER_CREDENTIALS_ENTRY: &str = "dropbox-folder-credentials";
 const RESTORE_RECORD_ENTRY: &str = "restore-record";
 const REPLACEMENT_RECORD_ENTRY: &str = "replacement-record";
 
@@ -280,6 +281,22 @@ impl StoreKeychain {
         self.remove(SETUP_CREDENTIALS_ENTRY)
     }
 
+    /// The sign-in that follows the sharing jobs of new Dropbox folders,
+    /// kept while Dropbox runs one, so the next open can follow it (§20.3).
+    pub fn dropbox_folder_credentials(&self) -> Result<Option<SecretBytes>, KeyError> {
+        self.read(DROPBOX_FOLDER_CREDENTIALS_ENTRY)
+    }
+
+    /// Keep the sign-in that follows a Dropbox sharing job.
+    pub fn set_dropbox_folder_credentials(&self, bytes: &SecretBytes) -> Result<(), KeyError> {
+        self.write(DROPBOX_FOLDER_CREDENTIALS_ENTRY, bytes.as_bytes())
+    }
+
+    /// Remove that sign-in; an absent entry succeeds.
+    pub fn delete_dropbox_folder_credentials(&self) -> Result<(), KeyError> {
+        self.remove(DROPBOX_FOLDER_CREDENTIALS_ENTRY)
+    }
+
     /// The invite code of a join under way for this store on this device:
     /// its saved request is encrypted with the code's secret, so resuming
     /// needs the code (§13.2). It is never synced.
@@ -397,6 +414,7 @@ impl StoreKeychain {
             DEVICE_ID_ENTRY,
             CREDENTIALS_ENTRY,
             SETUP_CREDENTIALS_ENTRY,
+            DROPBOX_FOLDER_CREDENTIALS_ENTRY,
             INVITE_CODE_ENTRY,
             RESTORE_RECORD_ENTRY,
             REPLACEMENT_RECORD_ENTRY,

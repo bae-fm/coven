@@ -1,100 +1,14 @@
 use super::*;
 use crate::authentication::SignIn;
-use axum::{
-    body::{Body, Bytes},
-    extract::State,
-    http::{HeaderMap, Method, Response, Uri},
-    Router,
-};
 use coven_storage::{
     providers::{ProviderConnector, StorageConnector},
     test_utils::MemoryStorage,
 };
 use serde_json::{json, Value};
-use std::collections::VecDeque;
 
-struct Reply {
-    method: &'static str,
-    path: String,
-    body: Option<Value>,
-    value: Value,
-    status: u16,
-    token: usize,
-    retry: Option<u64>,
-}
-impl Reply {
-    fn new(method: &'static str, path: &str, body: Option<Value>, value: Value) -> Self {
-        Self { method, path: path.into(), body, value, status: 200, token: 0, retry: None }
-    }
-    fn status(mut self, status: u16) -> Self {
-        self.status = status;
-        self
-    }
-    fn token(mut self, token: usize) -> Self {
-        self.token = token;
-        self
-    }
-    fn retry(mut self, seconds: u64) -> Self {
-        self.retry = Some(seconds);
-        self
-    }
-}
-struct Fake {
-    url: String,
-    replies: Arc<std::sync::Mutex<VecDeque<Reply>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Fake {
-    async fn new() -> Self {
-        let replies = Arc::new(std::sync::Mutex::new(VecDeque::<Reply>::new()));
-        let router = Router::new()
-            .fallback(
-                |State(replies): State<Arc<std::sync::Mutex<VecDeque<Reply>>>>,
-                 method: Method,
-                 uri: Uri,
-                 headers: HeaderMap,
-                 bytes: Bytes| async move {
-                    let reply =
-                        replies.lock().unwrap().pop_front().expect("unexpected provider request");
-                    assert_eq!(method.as_str(), reply.method);
-                    assert_eq!(uri.path_and_query().unwrap().as_str(), reply.path);
-                    assert_eq!(headers["authorization"], format!("Bearer access-{}", reply.token));
-                    assert!(!headers.contains_key("Dropbox-API-Path-Root"));
-                    match reply.body {
-                        Some(body) => {
-                            assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), body)
-                        }
-                        None => assert!(bytes.is_empty()),
-                    }
-                    let mut response = Response::builder()
-                        .status(reply.status)
-                        .header("content-type", "application/json");
-                    if let Some(seconds) = reply.retry {
-                        response = response.header("Retry-After", seconds.to_string());
-                    }
-                    response.body(Body::from(reply.value.to_string())).unwrap()
-                },
-            )
-            .with_state(replies.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        Self { url, replies, task }
-    }
-    fn expect(&self, reply: Reply) {
-        self.replies.lock().unwrap().push_back(reply);
-    }
-    fn consumed(&self) {
-        assert!(self.replies.lock().unwrap().is_empty(), "provider requests were not sent");
-    }
-}
-impl Drop for Fake {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
+#[path = "storage_folders_test_server.rs"]
+mod fake;
+use fake::{Fake, Reply};
 
 struct Connector {
     native: ProviderConnector,
@@ -144,14 +58,46 @@ impl StorageConnector for Connector {
     ) -> Result<Vec<StorageFolder>, StorageError> {
         self.native.dropbox_shared_folders(auth, cooldown).await
     }
-    /// Make a Dropbox folder and share it, refusing an occupied name.
-    async fn create_dropbox_shared_folder(
+    async fn signed_in_account(
+        &self,
+
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<coven_storage::ProviderAccount, StorageError> {
+        self.native.signed_in_account(auth, cooldown).await
+    }
+    async fn dropbox_name(
         &self,
         name: &str,
         auth: ProviderAuth,
         cooldown: Arc<dyn coven_storage::Cooldown>,
-    ) -> Result<StorageFolder, StorageError> {
-        self.native.create_dropbox_shared_folder(name, auth, cooldown).await
+    ) -> Result<coven_storage::providers::DropboxName, StorageError> {
+        self.native.dropbox_name(name, auth, cooldown).await
+    }
+    async fn share_dropbox_folder(
+        &self,
+        name: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<coven_storage::providers::DropboxShare, StorageError> {
+        self.native.share_dropbox_folder(name, auth, cooldown).await
+    }
+    async fn follow_dropbox_share(
+        &self,
+        job: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<coven_storage::providers::DropboxShareJob, StorageError> {
+        self.native.follow_dropbox_share(job, auth, cooldown).await
+    }
+    async fn untouched_dropbox_folder(
+        &self,
+        name: &str,
+        shared_folder_id: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<Option<StorageFolder>, StorageError> {
+        self.native.untouched_dropbox_folder(name, shared_folder_id, auth, cooldown).await
     }
     async fn connect(
         &self,
@@ -278,6 +224,9 @@ fn failure(error: StorageSetupError) -> StorageError {
     }
 }
 
+#[path = "storage_dropbox_folder_tests.rs"]
+mod dropbox_folder;
+
 #[tokio::test]
 async fn onedrive_root_pages_and_creation_return_setup_locations_without_publishing_sign_in() {
     let f = Fixture::new(drive("household")).await;
@@ -402,8 +351,8 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
 /// Ana's picker makes a new folder in her Dropbox for the library. Coven
 /// finds the name free, then makes the folder and shares it in one request,
 /// whose job it checks until it completes, and gives back the shared folder
-/// as a setup location, recording nothing. A name already taken is refused
-/// before anything is made or shared (§20.2).
+/// as a setup location, recording no settings or credentials. A name already
+/// taken is refused before anything is made or shared (§20.3).
 #[tokio::test]
 async fn a_new_dropbox_folder_is_made_shared_and_given_as_a_setup_location() {
     let f = Fixture::new(dropbox("789")).await;
@@ -416,6 +365,11 @@ async fn a_new_dropbox_folder_is_made_shared_and_given_as_a_setup_location() {
     f.fake.expect(
         Reply::new("POST", "/files/get_metadata", lookup("/Household"), not_found).status(409),
     );
+    let account = || {
+        let signed_in = json!({"account_id":"dbid:ana","email":"ana@example.com"});
+        Reply::new("POST", "/users/get_current_account", Some(Value::Null), signed_in)
+    };
+    f.fake.expect(account());
     f.fake.expect(Reply::new(
         "POST",
         "/sharing/share_folder",
@@ -436,6 +390,7 @@ async fn a_new_dropbox_folder_is_made_shared_and_given_as_a_setup_location() {
         lookup("/Music"),
         json!({".tag":"folder","name":"Music","id":"id:music","path_display":"/Music"}),
     ));
+    f.fake.expect(account());
     let taken = failure(f.handle.create_dropbox_shared_folder("Music").await.unwrap_err());
     assert_eq!(taken.failure(), StorageFailure::AlreadyExists);
     f.fake.consumed();

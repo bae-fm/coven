@@ -1,8 +1,8 @@
 //! Provider construction from an explicit location and device credentials.
 
 use super::{
-    http_client::HttpClient, oauth_folders::OAuthFolders, DropboxStorage, OAuthSession,
-    OneDriveStorage, S3Storage, StorageFolder,
+    http_client::HttpClient, oauth_folders::OAuthFolders, DropboxName, DropboxShare,
+    DropboxShareJob, DropboxStorage, OAuthSession, OneDriveStorage, S3Storage, StorageFolder,
 };
 use crate::{
     ProviderAuth, ProviderOps, S3Credentials, S3DetectionRun, S3DetectionRuns, StorageConfig,
@@ -76,14 +76,48 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
-    /// Make a folder named `name` at the top of the signed-in Dropbox and
-    /// share it, refusing a name already taken.
-    async fn create_dropbox_shared_folder(
+    /// What stands at `name` at the top of the signed-in Dropbox.
+    async fn dropbox_name(
         &self,
         _name: &str,
         _auth: ProviderAuth,
         _cooldown: Arc<dyn crate::Cooldown>,
-    ) -> Result<StorageFolder, StorageError> {
+    ) -> Result<DropboxName, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Ask Dropbox to make a folder named `name` at the top of the signed-in
+    /// Dropbox and share it. The request shares a folder that already has
+    /// the name, so the caller looks the name up first.
+    async fn share_dropbox_folder(
+        &self,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<DropboxShare, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Follow a Dropbox sharing job until Dropbox reports its end. An error
+    /// is a status check's, which leaves the job's end unknown.
+    async fn follow_dropbox_share(
+        &self,
+        _job: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<DropboxShareJob, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// The shared folder `shared_folder_id`, named `name` at the top of the
+    /// signed-in Dropbox, when this account owns it and it holds nothing.
+    async fn untouched_dropbox_folder(
+        &self,
+        _name: &str,
+        _shared_folder_id: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Option<StorageFolder>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
@@ -293,16 +327,49 @@ impl StorageConnector for ProviderConnector {
         .await
     }
 
-    /// Make a folder named `name` at the top of the signed-in Dropbox and
-    /// share it, refusing a name already taken.
-    async fn create_dropbox_shared_folder(
+    async fn dropbox_name(
         &self,
         name: &str,
         auth: ProviderAuth,
         cooldown: Arc<dyn crate::Cooldown>,
-    ) -> Result<StorageFolder, StorageError> {
+    ) -> Result<DropboxName, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move { folders.dropbox_name(name).await })
+            .await
+    }
+
+    async fn share_dropbox_folder(
+        &self,
+        name: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<DropboxShare, StorageError> {
         self.with_folders(auth, cooldown, |folders| async move {
-            folders.create_dropbox_shared_folder(name).await
+            folders.share_dropbox_folder(name).await
+        })
+        .await
+    }
+
+    async fn follow_dropbox_share(
+        &self,
+        job: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<DropboxShareJob, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.follow_dropbox_share(job).await
+        })
+        .await
+    }
+
+    async fn untouched_dropbox_folder(
+        &self,
+        name: &str,
+        shared_folder_id: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Option<StorageFolder>, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.untouched_dropbox_folder(name, shared_folder_id).await
         })
         .await
     }
