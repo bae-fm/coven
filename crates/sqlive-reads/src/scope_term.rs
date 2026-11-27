@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::row_scope::{compare, RowScope};
+use crate::scope_order::SortKey;
 use crate::scope_row::{RowCondition, RowTerm, RowTest};
 use crate::sql_value::SqlValue as Value;
 use rusqlite::Connection;
@@ -50,6 +51,21 @@ pub(crate) enum ScopeTerm {
     /// A condition on the columns of one row that sqlive asks SQLite to judge
     /// (`scope_row.rs`).
     Row(Arc<RowTerm>),
+    /// A generated column, or one of a collation other than BINARY, ordered
+    /// against a value by `<`, `<=`, `>` or `>=`, which SQLite judges as an
+    /// ORDER BY that sorts by the column compares them
+    /// (`column_order.rs`).
+    Ordered {
+        column: String,
+        affinity: Affinity,
+        operand: Operand,
+        #[serde(with = "crate::compiled_plan::ordering")]
+        ordering: Ordering,
+        inclusive: bool,
+        /// How the column of the source the term narrows sorts, set once
+        /// every term has reached its source.
+        key: Option<SortKey>,
+    },
     /// `column IS ?`: a NULL test when the run's value is NULL, an equality
     /// otherwise.
     Is {
@@ -91,6 +107,19 @@ impl ScopeTerm {
                 parameters: values.parameters().to_vec(),
                 test: RowTest::Holds,
             }))),
+            Self::Ordered { affinity, operand, ordering, inclusive, key, .. } => {
+                let value = operand.value(values, *affinity);
+                let key = key.as_ref()?;
+                (!matches!(value, Value::Null) && affinity.compares(&value)).then(|| {
+                    let parameters = values.parameters();
+                    let strict = key.compare(&value, *ordering, parameters);
+                    if *inclusive {
+                        strict.or(key.compare(&value, Ordering::Equal, parameters))
+                    } else {
+                        strict
+                    }
+                })
+            }
             Self::Truth { condition, ordering, inclusive, is, operand } => {
                 let value = operand.known(values);
                 let passes = |truth: Option<i64>| match (truth, &value) {
@@ -155,7 +184,8 @@ impl ScopeTerm {
         match self {
             Self::Compare { .. } | Self::In { .. } => false,
             Self::Null { not, .. } => !not,
-            Self::Is { .. } | Self::Truth { .. } | Self::Row(_) => true,
+            // SQLite judges an ordering, as it does a condition on a row.
+            Self::Is { .. } | Self::Truth { .. } | Self::Row(_) | Self::Ordered { .. } => true,
             Self::And(left, right) => left.may_hold_on_nulls() && right.may_hold_on_nulls(),
             Self::Or(left, right) => left.may_hold_on_nulls() || right.may_hold_on_nulls(),
         }
@@ -171,7 +201,7 @@ impl ScopeTerm {
             | Self::Null { .. }
             | Self::Is { .. }
             | Self::Truth { .. } => true,
-            Self::Row(_) => false,
+            Self::Row(_) | Self::Ordered { .. } => false,
             Self::And(left, right) => left.compares() || right.compares(),
             Self::Or(left, right) => left.compares() && right.compares(),
         }
@@ -191,13 +221,32 @@ impl ScopeTerm {
         });
     }
 
+    /// Give each ordering of a column in it how its source's column sorts,
+    /// which `key` gives.
+    pub(crate) fn set_keys(&mut self, key: &dyn Fn(&str) -> Option<SortKey>) {
+        match self {
+            Self::Ordered { column, key: found, .. } => *found = key(column),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.set_keys(key);
+                right.set_keys(key);
+            }
+            Self::Compare { .. }
+            | Self::In { .. }
+            | Self::Null { .. }
+            | Self::Truth { .. }
+            | Self::Row(_)
+            | Self::Is { .. } => {}
+        }
+    }
+
     /// The columns it tests.
     pub(crate) fn columns(&self, into: &mut Vec<String>) {
         match self {
             Self::Compare { column, .. }
             | Self::In { column, .. }
             | Self::Null { column, .. }
-            | Self::Is { column, .. } => {
+            | Self::Is { column, .. }
+            | Self::Ordered { column, .. } => {
                 if !into.contains(column) {
                     into.push(column.clone());
                 }
@@ -253,6 +302,16 @@ impl ScopeTerm {
                 Some(Self::Null { column: column(tested)?, not: *not })
             }
             Self::Row(term) => term.over(rows?, column).map(Self::Row),
+            Self::Ordered { column: tested, affinity, operand, ordering, inclusive, .. } => {
+                Some(Self::Ordered {
+                    column: column(tested)?,
+                    affinity: *affinity,
+                    operand: operand.clone(),
+                    ordering: *ordering,
+                    inclusive: *inclusive,
+                    key: None,
+                })
+            }
             Self::Truth { condition, ordering, inclusive, is, operand } => Some(Self::Truth {
                 condition: condition.renamed(column)?,
                 ordering: *ordering,

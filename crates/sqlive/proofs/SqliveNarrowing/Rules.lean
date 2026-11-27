@@ -3,6 +3,7 @@ import SqliveNarrowing.Rules.CteNames
 import SqliveNarrowing.Rules.RowMember
 import SqliveNarrowing.Rules.Edge
 import SqliveNarrowing.Rules.RowEdge
+import SqliveNarrowing.Rules.RowOrder
 import SqliveNarrowing.Rules.IsEdge
 import SqliveNarrowing.Rules.Or
 import SqliveNarrowing.Rules.OneOf
@@ -49,10 +50,10 @@ theorem readRules_sound : ReadCondition.Sound readRules where
     obtain ⟨read, _, hread⟩ := List.exists_of_findSome?_eq_some h
     exact read.property.edges hread e he
 
-/-- The narrowing condition `cd` of core `k` gives: a column equal to one of
-several values (`OneOf`) first, then the rules, then an OR none of them
-reads. -/
-def readCondition (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=
+/-- The narrowing condition `cd` of core `k` gives as a whole: a column equal
+to one of several values (`OneOf`) first, then the rules, then an OR none of
+them reads. -/
+def readWhole (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=
   match OneOf.readCondition s k cd with
   | some n => n
   | none =>
@@ -60,15 +61,21 @@ def readCondition (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=
     | some n => { n with ors := [] }
     | none => (Or.readCondition readRules s k cd).getD {}
 
-/-- The narrowing a condition gives keeps every rule's promise. -/
-theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
-    (∀ i t, (i, t) ∈ (readCondition s k cd).terms → (s.item i).core = k ∧
+/-- The narrowing condition `cd` of core `k` gives: what it gives as a whole,
+and the terms a row value ordering's first pair gives (`RowOrder`). -/
+def readCondition (s : Statement) (k : Nat) (cd : Cond) : Narrowing :=
+  let whole := readWhole s k cd
+  { whole with terms := whole.terms ++ RowOrder.terms s k cd }
+
+/-- The narrowing a condition gives as a whole keeps every rule's promise. -/
+theorem readWhole_sound (s : Statement) (k : Nat) (cd : Cond) :
+    (∀ i t, (i, t) ∈ (readWhole s k cd).terms → (s.item i).core = k ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)) ∧
-    (∀ e ∈ (readCondition s k cd).edges, (s.item e.member).core = k ∧
+    (∀ e ∈ (readWhole s k cd).edges, (s.item e.member).core = k ∧
       (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
       (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries ∧
       ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) ∧
-    (∀ d ∈ (readCondition s k cd).ors, (s.item d.item).core = k ∧
+    (∀ d ∈ (readWhole s k cd).ors, (s.item d.item).core = k ∧
       (∀ side ∈ d.sides, side.narrows = true) ∧
       (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
         (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
@@ -92,7 +99,7 @@ theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
     refine ⟨fun i t ht => ?_, fun e he => ?_, hors⟩
     · rw [hterms] at ht; cases ht
     · rw [hedges] at he; cases he
-  unfold readCondition
+  unfold readWhole
   cases h1 : OneOf.readCondition s k cd with
   | some n => exact disjoins OneOf.one_of_sound h1
   | none =>
@@ -104,5 +111,25 @@ theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
       cases ho : Or.readCondition readRules s k cd with
       | none => simp
       | some n => exact disjoins (Or.or_sound readRules_sound) ho
+
+/-- The narrowing a condition gives keeps every rule's promise. -/
+theorem readCondition_sound (s : Statement) (k : Nat) (cd : Cond) :
+    (∀ i t, (i, t) ∈ (readCondition s k cd).terms → (s.item i).core = k ∧
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → t.holds (b i)) ∧
+    (∀ e ∈ (readCondition s k cd).edges, (s.item e.member).core = k ∧
+      (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+      (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries ∧
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → e.HoldsIn s db f b) ∧
+    (∀ d ∈ (readCondition s k cd).ors, (s.item d.item).core = k ∧
+      (∀ side ∈ d.sides, side.narrows = true) ∧
+      (∀ side ∈ d.sides, ∀ e ∈ side.edges, e.member = d.item ∧
+        (e.nested = false → e.partner ≠ e.member) ∧ (e.nested = false → e.partner ∈ cd.items) ∧
+        (s.item e.partner).readable ∧ e.memberStrict s ∧ e.NestedIn s cd.queries) ∧
+      ∀ db f b, isTrue (cd.eval b (evalQuery s db f b)) → d.HoldsIn s db f b) := by
+  obtain ⟨hterms, hedges, hors⟩ := readWhole_sound s k cd
+  refine ⟨fun i t ht => ?_, hedges, hors⟩
+  rcases List.mem_append.mp ht with ht | ht
+  · exact hterms i t ht
+  · exact RowOrder.terms_sound s k cd i t ht
 
 end SqliveNarrowing

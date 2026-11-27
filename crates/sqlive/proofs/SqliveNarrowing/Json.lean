@@ -85,14 +85,14 @@ def lift {α : Type} (e : Except String α) : M α := StateT.lift e
 
 /-- An ORDER BY term's direction and collation: `desc`, and the `collation`
 SQLite compares the term's values by, BINARY when it names none. The runner
-knows three, each a total preorder on the integers: `binary`, the integers'
-own order; `fold`, which ties the integers that leave one remainder on
+knows four, each a total preorder on the integers: `binary`, the integers'
+own order; `nocase`, the same order, as NOCASE folds no digit; `fold`, which ties the integers that leave one remainder on
 division by three, as NOCASE ties 'a' and 'A'; and `reversed`, their order
 reversed. A schema's column names its collation the same way. -/
 def readDir (term : Json) : Except String Dir := do
   let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
   match (field term "collation").bind (·.getStr?.toOption) |>.getD "binary" with
-  | "binary" => pure (Dir.plain desc)
+  | "binary" | "nocase" => pure (Dir.plain desc)
   | "fold" => pure ⟨desc, fun x => x % 3, false, by simp⟩
   | "reversed" => pure ⟨desc, fun x => -x, true, fun _ a b h => by simp only at h; omega⟩
   | other => throw s!"unknown collation {other}"
@@ -453,6 +453,11 @@ partial def readCond (schema : Schema) (j : Json) (k : Nat) (ctes : CteNames.Vis
     pure (.rowEq left right)
   else if let some q := field j "exists" then
     pure (.exists (← readSelect schema q (some k) ctes) not)
+  else if let some (.arr #[.str o, l, r, rest]) := field j "row_order" then
+    let o ← lift (op o)
+    let l ← readExpr schema l k ctes
+    let r ← readExpr schema r k ctes
+    pure (.rowOrder none o l r (← readCond schema rest k ctes))
   else if let some (.arr #[l, r]) := field j "and" then
     let l ← readCond schema l k ctes
     pure (.and l (← readCond schema r k ctes))

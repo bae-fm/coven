@@ -13,9 +13,10 @@
 //! then holds the OR of its sides' scopes (`scope_lookup.rs`). The model
 //! states the rule as `Or.readCondition` in `crates/sqlive/proofs`.
 
+use crate::scope_condition::read_condition;
 use crate::scope_edge::Edge;
 use crate::scope_narrowing::Narrowing;
-use crate::scope_plan::{read_condition, Membership, Planner, Subqueries};
+use crate::scope_plan::{Membership, Planner, Subqueries};
 use crate::scope_term::ScopeTerm;
 use rusqlite::Connection;
 use sqlite3_parser::ast::{Expr, Operator};

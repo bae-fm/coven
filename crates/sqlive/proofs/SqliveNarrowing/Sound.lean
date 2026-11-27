@@ -67,8 +67,10 @@ theorem Limit.sortedLimit_query {s : Statement} {st : PState} {sorted : Limit.So
       split at h
       · simp at h
       rename_i hcond _
-      simp only [Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
-      obtain ⟨ts, _, rfl⟩ := h
+      split at h
+      · simp at h
+      simp only [Option.pure_def, Option.bind_some, Option.some.injEq] at h
+      subst h
       simp only [not_or] at hcond
       obtain ⟨h1, _, _, h4⟩ := hcond
       refine ⟨hn, ?_, fun he => h1 (by simp [he])⟩

@@ -49,6 +49,11 @@ inductive Cond where
   | rowSub (values : List Expr) (query : Nat) (isIn : Bool) (not : Bool)
   /-- `(l1, ..., ln) = (r1, ..., rn)`. -/
   | rowEq (left right : List Expr)
+  /-- A row value ordered against another, `(left, ...) op (right, ...)`, where
+  `op` is `<`, `<=`, `>` or `>=`: its first pair, compared by the keys of
+  `collation` when it names one, and `rest`, the same comparison of the other
+  pairs, which for the last pair is `.cmp op` or `.collated`. -/
+  | rowOrder (collation : Option (Int → Int)) (op : Op) (left right : Expr) (rest : Cond)
   | and (left right : Cond)
   | or (left right : Cond)
   | not (c : Cond)
@@ -285,6 +290,7 @@ def Cond.refs : Cond → List (Nat × Nat)
   | .exists .. => []
   | .rowSub vs _ _ _ => vs.flatMap Expr.refs
   | .rowEq ls rs => ls.flatMap Expr.refs ++ rs.flatMap Expr.refs
+  | .rowOrder _ _ l r rest => l.refs ++ r.refs ++ rest.refs
   | .and l r | .or l r => l.refs ++ r.refs
   | .not c => c.refs
 
@@ -300,6 +306,8 @@ def Cond.over (target : Nat) (rename : Nat → Nat) : Cond → Cond
   | .exists q n => .exists q n
   | .rowSub vs q isIn n => .rowSub (vs.map (Expr.over target rename)) q isIn n
   | .rowEq ls rs => .rowEq (ls.map (Expr.over target rename)) (rs.map (Expr.over target rename))
+  | .rowOrder key op l r rest =>
+    .rowOrder key op (l.over target rename) (r.over target rename) (rest.over target rename)
   | .and l r => .and (l.over target rename) (r.over target rename)
   | .or l r => .or (l.over target rename) (r.over target rename)
   | .not c => .not (c.over target rename)
@@ -312,6 +320,7 @@ def Cond.queries : Cond → List Nat
   | .exists q _ => [q]
   | .rowSub vs q _ _ => vs.flatMap Expr.queries ++ [q]
   | .rowEq ls rs => ls.flatMap Expr.queries ++ rs.flatMap Expr.queries
+  | .rowOrder _ _ l r rest => l.queries ++ r.queries ++ rest.queries
   | .and l r | .or l r => l.queries ++ r.queries
   | .not c => c.queries
 
@@ -326,6 +335,7 @@ def Cond.firstRows : Cond → List Nat
   | .exists .. => []
   | .rowSub vs q isIn _ => vs.flatMap Expr.queries ++ if isIn then [] else [q]
   | .rowEq ls rs => ls.flatMap Expr.queries ++ rs.flatMap Expr.queries
+  | .rowOrder _ _ l r rest => l.queries ++ r.queries ++ rest.firstRows
   | .and l r | .or l r => l.firstRows ++ r.firstRows
   | .not c => c.firstRows
 

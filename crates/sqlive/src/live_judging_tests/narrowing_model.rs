@@ -275,6 +275,10 @@ fn schema_json() -> Json {
                 if *name == "s" {
                     column["collation"] = json!("fold");
                 }
+                // `SEARCH`'s columns declare no collation.
+                if *name == "n" && table != SEARCH {
+                    column["collation"] = json!("nocase");
+                }
                 column
             })
             .collect()

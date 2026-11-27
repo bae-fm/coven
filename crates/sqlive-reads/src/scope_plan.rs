@@ -29,12 +29,11 @@ use crate::read_report::ReadPlace;
 use crate::reference_columns::ReferenceColumns;
 use crate::row_scope::Scopes;
 use crate::schema_objects::{MainSchema, SchemaLookups};
+use crate::scope_condition::read_condition;
 use crate::scope_edge::{Edge, MemberValue};
 use crate::scope_narrowing::Narrowing;
-use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
-use crate::scope_row::item_row_term;
-use crate::scope_subquery::compared_subquery;
-use crate::scope_term::{term, Affinity, RunValues, ScopeTerm};
+use crate::scope_order::{column_sort_key, sorted_limit, LastRow, SortedLimit};
+use crate::scope_term::{Affinity, RunValues, ScopeTerm};
 use crate::scope_window::{read_window, Window};
 use crate::select_syntax::{
     conjuncts, number_parameters, one_select, parts, window_parts, Functions, Part,
@@ -47,7 +46,7 @@ use crate::unreported_columns::{unreported_columns, Node, UnreportedColumns};
 use crate::view_trees::ViewTrees;
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
-    ast::{As, Expr, Name, OneSelect, Operator, ResultColumn, Select},
+    ast::{As, Expr, Name, OneSelect, ResultColumn, Select},
     Bump,
 };
 
@@ -410,6 +409,7 @@ impl Sources {
         if let Some(written) = written {
             planner.place_items(written, select);
         }
+        planner.set_sort_keys();
         let columns = planner.reference_columns(&live, picked)?;
         for (item, columns) in planner.items.iter_mut().zip(columns) {
             item.source.columns = columns;
@@ -461,6 +461,23 @@ pub(crate) struct Planner<'a, 'v> {
 }
 
 impl Planner<'_, '_> {
+    /// Give each ordering of a column in each source's terms how that
+    /// column sorts.
+    fn set_sort_keys(&mut self) {
+        for item in 0..self.items.len() {
+            let from = &mut self.items[item];
+            let mut term = from.source.term.take();
+            let mut carried = from.source.carried.take();
+            let mut ors = std::mem::take(&mut from.ors);
+            let sides = ors.iter_mut().flatten().flat_map(|side| &mut side.terms);
+            for found in term.iter_mut().chain(&mut carried).chain(sides) {
+                found.set_keys(&|column| column_sort_key(self, item, column));
+            }
+            let from = &mut self.items[item];
+            (from.source.term, from.source.carried, from.ors) = (term, carried, ors);
+        }
+    }
+
     /// Note `found`, the names SQLite can report a read through inside a
     /// view the statement reads whole (`whole_view_names.rs`).
     pub(crate) fn note_whole_view(&mut self, found: Result<BTreeSet<String>, String>) {
@@ -872,111 +889,6 @@ pub(crate) enum Written<'a> {
 /// narrow, except a column compared with the value a subquery returns,
 /// `subqueries` being the SELECTs the core's clauses hold, and an OR whose
 /// sides narrow one source (`scope_or.rs`).
-pub(crate) fn read_condition<'a>(
-    connection: &Connection,
-    planner: &mut Planner,
-    core: usize,
-    condition: &'a Expr<'a>,
-    subqueries: &Subqueries<'a>,
-) -> rusqlite::Result<Narrowing> {
-    if let Some((values, select)) = compared_subquery(condition) {
-        let cores = subqueries.iter().find(|(read, _)| std::ptr::eq(*read, select));
-        if let Some((_, cores)) = cores {
-            // A compound's rows are its arms' rows (`scope_one_of.rs`).
-            if let ([value], [_, _, ..]) = (&values[..], &cores[..]) {
-                return planner.compound(connection, core, value, select, cores);
-            }
-            let width = values.len();
-            let edges = values
-                .into_iter()
-                .enumerate()
-                .filter_map(|(position, value)| {
-                    planner.subquery_edge(core, value, (position, width), select, cores)
-                })
-                .collect();
-            return Ok(Narrowing { edges, ..Narrowing::default() });
-        }
-    }
-    // A column equal to COALESCE of values narrows by each of them.
-    if let Expr::Binary(left, Operator::Equals, right) = crate::sql::unparenthesized(condition) {
-        for (member, other) in [(left, right), (right, left)] {
-            if let Some(found) = planner.coalesced(connection, core, member, other, subqueries)? {
-                return Ok(found);
-            }
-        }
-    }
-    let mut read = Vec::new();
-    parts(condition, &mut read);
-    // An OR of one source's columns alone is a term on that source; any
-    // other narrows by its sides.
-    let or = crate::scope_or::is_or(condition);
-    if or && read.iter().any(|part| matches!(part, Part::Select(_) | Part::Subquery(_))) {
-        return crate::scope_or::read_or(connection, planner, core, condition, subqueries);
-    }
-    let mut referenced = Vec::new();
-    for part in &read {
-        let name = match part {
-            Part::Name(name) => *name,
-            Part::Function(..) | Part::Clock => continue,
-            // A COLLATE changes only how a comparison compares: `term` and
-            // `edge` refuse the comparisons it reaches, and a NULL test
-            // looks through it.
-            Part::Collation => continue,
-            Part::Select(_) | Part::Subquery(_) | Part::Table(_) => return Ok(Narrowing::default()),
-        };
-        let Some((item, _)) = planner.resolve(core, name) else {
-            // A name sqlive can't place keeps the condition from narrowing.
-            return Ok(Narrowing::default());
-        };
-        if !referenced.contains(&item) {
-            referenced.push(item);
-        }
-    }
-    let mut found = Narrowing::default();
-    if let [item] = referenced[..] {
-        if planner.items[item].core != core {
-            return Ok(Narrowing::default());
-        }
-        let column = |expr: &Expr<'_>| {
-            let (found, column) = planner.resolve(core, expr)?;
-            let affinity =
-                (found == item).then(|| planner.items[item].columns.affinity(&column)).flatten()?;
-            Some((column, affinity))
-        };
-        // What `term` can't read, SQLite judges row by row (`scope_row.rs`).
-        let narrowed = match term(connection, &column, condition)? {
-            Some(term) => Some(term),
-            None => item_row_term(planner, core, item, condition, &read).map(ScopeTerm::Row),
-        };
-        found.terms.extend(narrowed.map(|term| (item, term)));
-    } else if or {
-        return crate::scope_or::read_or(connection, planner, core, condition, subqueries);
-    } else if let Expr::Binary(left, Operator::Is, right) = condition {
-        // `IS` is `=` that matches a NULL with a NULL.
-        for (member, other, first) in [(left, right, false), (right, left, true)] {
-            found.edges.extend(planner.is_edge(core, member, other, first));
-        }
-    } else if let Expr::Binary(left, Operator::Equals, right) = condition {
-        // A row value equality has the truth of its pairs' equalities joined
-        // by AND, NULLs included, so it narrows as they do.
-        let pairs: Vec<(&Expr<'_>, &Expr<'_>)> =
-            match (unparenthesized(left), unparenthesized(right)) {
-                (Expr::Parenthesized(lefts), Expr::Parenthesized(rights))
-                    if lefts.len() == rights.len() =>
-                {
-                    lefts.iter().zip(rights.iter()).collect()
-                }
-                _ => vec![(left, right)],
-            };
-        for (left, right) in pairs {
-            for (member, other, first) in [(left, right, false), (right, left, true)] {
-                found.edges.extend(planner.edge(core, member, other, first));
-            }
-        }
-    }
-    Ok(found)
-}
-
 pub(crate) fn is_name(expr: &Expr<'_>) -> bool {
     matches!(unparenthesized(expr), Expr::Id(_) | Expr::Qualified(..) | Expr::DoublyQualified(..))
 }

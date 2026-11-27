@@ -128,6 +128,9 @@ pub(super) enum Cond {
     },
     /// `(l1, ..., ln) = (r1, ..., rn)`.
     RowEq(Vec<Expr>, Vec<Expr>),
+    /// `(l1, ..., ln) op (r1, ..., rn)`, where `op` is `<`, `<=`, `>` or
+    /// `>=`.
+    RowOrder(&'static str, Vec<Expr>, Vec<Expr>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
@@ -522,13 +525,8 @@ impl Cond {
                     }
                 }
             }
-            Self::RowEq(left, right) => {
-                let row = |values: &[Expr]| {
-                    let values: Vec<String> = values.iter().map(Expr::sql).collect();
-                    format!("({})", values.join(", "))
-                };
-                format!("{} = {}", row(left), row(right))
-            }
+            Self::RowEq(left, right) => row_comparison("=", left, right),
+            Self::RowOrder(op, left, right) => row_comparison(op, left, right),
             Self::And(left, right) => format!("({} AND {})", left.sql(), right.sql()),
             Self::Or(left, right) => format!("({} OR {})", left.sql(), right.sql()),
             Self::Not(c) => format!("NOT ({})", c.sql()),
@@ -558,6 +556,15 @@ impl Cond {
                 left.iter().map(Expr::json).collect::<Vec<_>>(),
                 right.iter().map(Expr::json).collect::<Vec<_>>(),
             ]}),
+            // The model reads it pair by pair: each pair, and the comparison
+            // of the pairs after it, the last pair a comparison alone.
+            Self::RowOrder(op, left, right) => {
+                let mut pairs = left.iter().zip(right).rev();
+                let (l, r) = pairs.next().expect("a row value holds a pair");
+                let last = json!({"cmp": [op, l.json(), r.json()]});
+                pairs
+                    .fold(last, |rest, (l, r)| json!({"row_order": [op, l.json(), r.json(), rest]}))
+            }
             Self::And(left, right) => json!({"and": [left.json(), right.json()]}),
             Self::Or(left, right) => json!({"or": [left.json(), right.json()]}),
             Self::Not(c) => json!({"negate": c.json()}),
@@ -576,7 +583,9 @@ impl Cond {
             Self::RowSub { values, query, member, .. } => {
                 !member || values.iter().any(Expr::ambiguous) || query.ambiguous()
             }
-            Self::RowEq(left, right) => left.iter().chain(right).any(Expr::ambiguous),
+            Self::RowEq(left, right) | Self::RowOrder(_, left, right) => {
+                left.iter().chain(right).any(Expr::ambiguous)
+            }
             Self::And(left, right) | Self::Or(left, right) => left.ambiguous() || right.ambiguous(),
             Self::Not(c) => c.ambiguous(),
         }
@@ -649,4 +658,13 @@ fn order_json(order: &[(Expr, bool)]) -> Vec<Json> {
         .iter()
         .map(|(sorted, descending)| json!({"expr": sorted.json(), "desc": descending}))
         .collect()
+}
+
+/// Two row values compared by `op`.
+fn row_comparison(op: &str, left: &[Expr], right: &[Expr]) -> String {
+    let row = |values: &[Expr]| {
+        let values: Vec<String> = values.iter().map(Expr::sql).collect();
+        format!("({})", values.join(", "))
+    };
+    format!("{} {op} {}", row(left), row(right))
 }

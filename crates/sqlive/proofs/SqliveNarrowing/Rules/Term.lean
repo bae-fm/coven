@@ -53,10 +53,28 @@ def compareOf (s : Statement) (i : Nat) (op : Op) (l r : Expr) : Option STerm :=
     | _, _ => none
   | none => none
 
-/-- The term `cd` gives item `i`, if sqlive reads it as one (`term`). -/
+/-- Whether `l op r` orders a column of item `i` that declares a collation
+against a constant, on either side. -/
+def collatedOrder (s : Statement) (i : Nat) (op : Op) : Expr → Expr → Bool
+  | .col j c, .lit (some _) | .lit (some _), .col j c =>
+    (op == .lt || op == .le || op == .gt || op == .ge) && j == i &&
+      ((s.item i).collated[c]?).getD false
+  | _, _ => false
+
+/-- The term an ordering of such a column against a constant gives item `i`,
+which SQLite judges (`column_order.rs`). -/
+def orderTerm (s : Statement) (i : Nat) (op : Op) (l r : Expr) (cd : Cond) : Option STerm :=
+  if collatedOrder s i op l r then some (.row i cd) else none
+
+/-- The term `cd` gives item `i`, if sqlive reads it as one (`term`): an
+ordering of a column in its own collation against a constant is one SQLite
+judges. -/
 def read (s : Statement) (i : Nat) : Cond → Option STerm
   | .null e n => (column s i e).map (STerm.null · n)
-  | .cmp op l r => (nullOf s i op l r).orElse fun _ => compareOf s i op l r
+  | .collated key op l r => orderTerm s i op l r (.collated key op l r)
+  | .cmp op l r =>
+    ((nullOf s i op l r).orElse fun _ => compareOf s i op l r).orElse fun _ =>
+      orderTerm s i op l r (.cmp op l r)
   | .inList e vs =>
     match column s i e, vs.mapM operand with
     | some c, some values => some (.inList c values)
@@ -172,6 +190,36 @@ theorem operands_eq {vs : List Expr} {values : List Int} (h : vs.mapM operand = 
     subst this
     simp [ih hrest]
 
+/-- A judged ordering holds of the item's row wherever the condition it was
+read from, which names the columns of `l` and `r` and no subquery where both
+are a column and a constant, holds. -/
+theorem orderTerm_sound {s : Statement} {i : Nat} {op : Op} {l r : Expr} {cd : Cond} {t : STerm}
+    (h : orderTerm s i op l r cd = some t)
+    (hitems : cd.items = (l.refs ++ r.refs).map (·.1))
+    (hqueries : cd.queries = l.queries ++ r.queries) {b : Bind} {sub : Subs}
+    (hc : isTrue (cd.eval b sub)) : t.holds (b i) := by
+  unfold orderTerm at h
+  split at h
+  · rename_i horder
+    cases h
+    have hnames : (∀ j ∈ cd.items, j = i) ∧ cd.queries = [] := by
+      rw [hitems, hqueries]
+      unfold collatedOrder at horder
+      split at horder
+      all_goals first
+        | (cases horder; done)
+        | (simp only [Bool.and_eq_true, beq_iff_eq] at horder
+           obtain ⟨⟨_, hj⟩, _⟩ := horder
+           refine ⟨fun x hx => ?_, rfl⟩
+           simp only [Expr.refs, List.append_nil, List.nil_append, List.map_cons, List.map_nil,
+             List.mem_singleton] at hx
+           rw [hx]
+           exact hj)
+    have heq := cd.eval_rowBind (b := b) (sub := sub) hnames.1 hnames.2
+    rw [heq] at hc
+    exact hc
+  · cases h
+
 theorem read_sound {s : Statement} {i : Nat} {cd : Cond} {t : STerm}
     (h : read s i cd = some t) {b : Bind} {sub : Subs}
     (hc : isTrue (cd.eval b sub)) : t.holds (b i) := by
@@ -191,7 +239,14 @@ theorem read_sound {s : Statement} {i : Nat} {cd : Cond} {t : STerm}
       exact nullOf_sound hn hc
     | none =>
       rw [hn] at h
-      exact compareOf_sound h hc
+      cases hcompare : compareOf s i op l r with
+      | some t' =>
+        rw [Option.orElse_none, hcompare] at h
+        cases h
+        exact compareOf_sound hcompare hc
+      | none =>
+        rw [Option.orElse_none, hcompare, Option.orElse_none] at h
+        exact orderTerm_sound h rfl rfl hc
   | inList e vs =>
     simp only [read] at h
     split at h
@@ -220,11 +275,14 @@ theorem read_sound {s : Statement} {i : Nat} {cd : Cond} {t : STerm}
           simp [hv]
         · split at hc <;> simp_all
     · cases h
-  | collated key op l r => simp [read] at h
+  | collated key op l r =>
+    simp only [read] at h
+    exact orderTerm_sound h rfl rfl hc
   | inQuery e q n => simp [read] at h
   | «exists» q n => simp [read] at h
   | rowSub vs q isIn n => simp [read] at h
   | rowEq ls rs => simp [read] at h
+  | rowOrder key op l r rest => simp [read] at h
   | and l r ihl ihr =>
     simp only [Cond.eval, isTrue] at hc
     have hl : isTrue (l.eval b sub) ∧ isTrue (r.eval b sub) := by

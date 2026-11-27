@@ -172,17 +172,13 @@ def attach (s : Statement) (st : PState) (seen : List Nat) : List SortRun → Li
         if seen.contains run.item then [] else innerLevels s st s.items.length run.item run.terms⟩ ::
       attach s st (run.item :: seen) rest
 
-/-- The order and LIMIT of the root query, when a full run's last row bounds
-the scopes of the items it sorts (`sorted_limit`); `st` is the state after
-the statement's conditions are read. -/
-def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
-  let query := s.query s.root
-  let [k] := query.arms | none
-  let n ← query.limit
-  if query.orderBy.isEmpty ∨ !query.orderNamed ∨ n = 0 ∨ query.offset.isSome then none
-  let c := s.core k
-  if c.aggregated || c.windowed then none
-  let terms ← query.orderBy.mapM fun (p, desc) => do
+/-- The ORDER BY term `pd`, a result column and its direction, of the arm `k`,
+as a bound reads it: its item, what it sorts the item's rows by, its
+direction and the result column that returns it; `none` when no bound can
+read it. -/
+def boundTerm (s : Statement) (st : PState) (k : Nat) : Nat × Dir → Option (Nat × SortKey × Dir × Nat)
+  | (p, desc) => do
+    let c := s.core k
     let .expr e ← c.output[p]? | none
     let (i, _) ← e.refs.head?
     if (s.item i).core ≠ k ∨ (st.items i).leftOn.isSome then none
@@ -190,6 +186,30 @@ def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
       | .expr e' => e' == e
       | _ => false
     pure (i, (← termKey s i e), desc, position)
+
+/-- What `read` gives each of the first elements it reads, up to the first it
+reads nothing from. -/
+def leading {α β : Type} (read : α → Option β) : List α → List β
+  | [] => []
+  | x :: rest =>
+    match read x with
+    | some found => found :: leading read rest
+    | none => []
+
+/-- The order and LIMIT of the root query, when a full run's last row bounds
+the scopes of the items it sorts (`sorted_limit`); `st` is the state after
+the statement's conditions are read. The bound reads the ORDER BY's leading
+terms, up to the first it can't: a row that sorts after the last row on them
+sorts after it on all. -/
+def sortedLimit (s : Statement) (st : PState) : Option SortedLimit := do
+  let query := s.query s.root
+  let [k] := query.arms | none
+  let n ← query.limit
+  if query.orderBy.isEmpty ∨ !query.orderNamed ∨ n = 0 ∨ query.offset.isSome then none
+  let c := s.core k
+  if c.aggregated || c.windowed then none
+  let terms := leading (boundTerm s st k) query.orderBy
+  if terms.isEmpty then none
   pure { runs := attach s st [] (SortRun.group terms), limit := n }
 
 /-- The rows of item `i` whose key is NULL, or isn't when `not`. -/

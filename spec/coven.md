@@ -756,10 +756,18 @@ A live query reruns as sqlive's spec states ([sections 4 to
 8](../crates/sqlive/SPEC.md#4-what-a-statement-reads)): only for a commit that
 changes a column its statements read, in a row their conditions and joins allow.
 Ben's album page reads `SELECT title FROM tracks WHERE release_id = ?1 ORDER BY
-position`, and a write to another release's tracks doesn't rerun it. A live
-query of coven's own, one that follows a table app SQL can't read, runs a
-statement of coven's own, which sqlive reads as it reads an app's, so it narrows
-by the same rules.
+position`, and a write to another release's tracks doesn't rerun it. A write to
+the table a list sorts reruns a window of the list only when the written row's
+first sort column, before the write or after it, is in the window's range. Ben's
+track list reads a window of 50 tracks from a key, `WHERE (title, id) >= (?1, ?2)
+ORDER BY title, id LIMIT 50`, and an edit to a track whose title sorts before
+`?1`, or after the title of the window's last row, doesn't rerun it ([sqlive's
+sections 5 and
+6](../crates/sqlive/SPEC.md#6-limit-and-the-order-sqlite-reads-rows-in)). A
+window that returns fewer than 50 tracks reaches the list's end, so its range has
+no upper end. A live query of coven's own, one that follows a table app SQL can't
+read, runs a statement of coven's own, which sqlive reads as it reads an app's,
+so it narrows by the same rules.
 
 Applying another device's slot narrows the same way: coven applies it in one of
 sqlive's streamed transactions, which judges each row's net change as a local

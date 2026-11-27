@@ -77,6 +77,14 @@ def memberTruth (v : Value) (vs : List Value) : Truth :=
     else if vs.contains none then none
     else some false
 
+/-- A row value ordered against another, from its first pair's values `a` and
+`b`, compared by their keys, and `rest`, the truth of the other pairs'
+comparison: NULL where either value is, the first pair's order where its keys
+differ, and `rest` where they tie. -/
+def rowOrderTruth (key : Int → Int) (op : Op) : Value → Value → Truth → Truth
+  | some x, some y, rest => if key x = key y then rest else some (op.compare (key x) (key y))
+  | _, _, _ => none
+
 /-- `(a1, ..., an) = (b1, ..., bn)` in SQL: each pair equal, joined by AND. -/
 def rowEqTruth : List Value → List Value → Truth
   | a :: as, b :: bs => tand (Op.apply .eq a b) (rowEqTruth as bs)

@@ -163,6 +163,15 @@ JOIN adds, so where such a part holds, its item has a row.
   strict, as it does an expression over the partner, since the equality
   could otherwise hold of the NULLs a missing right row gives and make the
   LEFT JOIN an inner join's wrongly.
+- **A row value ordered against another.** `lead_sound`
+  ([Rules/RowOrder.lean](SqliveNarrowing/Rules/RowOrder.lean)) proves that
+  `(a, b) >= (?1, ?2)`, and the same by `<=`, `>` or `<`, is true only where
+  the first pair orders that way or ties, in the pair's collation, so
+  `terms_sound` gives the condition the terms of that comparison too, besides
+  what the rules read of the whole of it (`RowOrder.terms`). The term reader
+  reads an ordering of a column that declares a collation against a constant as
+  a condition SQLite judges (`collatedOrder`). The model has no generated
+  columns, whose orderings sqlive reads the same way.
 - **A row value equality between two items.** `row_edge_sound` proves the
   same of each pair of `(a.x, a.y) = (b.z, b.w)`, which holds only where
   every pair is equal.
@@ -352,7 +361,10 @@ JOIN adds, so where such a part holds, its item has a row.
   as a term's own column (`Item.collated`, `termKey`). The model gives a collation as a key into the integers' order
   (`Dir`): two values compare as their keys do and tie when their keys are
   equal, as `'a'` and `'A'` do in NOCASE, so any total preorder on values is
-  one. A write asks SQLite for the key's value in each row it changes
+  one. The bound reads the ORDER BY's terms up to the first it can't read
+  (`Limit.leading`): `limit_sound` keeps the rows that sort at or before the
+  last row on every term, and `keyLe_take` gives that each of them does so on
+  the leading ones, which are what each item's bound compares. A write asks SQLite for the key's value in each row it changes
   (`RScope.ordered`). `sortKey_value` and `termKey_value` prove that in a binding where the term's
   item has a row, the term's result column holds the key's value in that row.
   The terms fall into runs of consecutive terms over one item.

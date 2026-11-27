@@ -18,7 +18,11 @@ pub(super) fn condition(rng: &mut Rng, alias: &str, depth: usize) -> Cond {
     }
     let column = col(alias, pick(rng, &COLUMNS));
     let k = rng.below(4) as i64;
-    match rng.below(16) {
+    match rng.below(18) {
+        15 | 16 => {
+            let second = col(alias, pick(rng, &COLUMNS));
+            row_order(rng, vec![column, second])
+        }
         0..=3 => cmp(pick(rng, &["=", "<", "<=", ">", ">="]), column, lit(k)),
         4 => cmp(pick(rng, &["=", "<", ">="]), lit(k), column),
         5 => Cond::InList(column, vec![lit(k), lit(rng.below(4) as i64)]),
@@ -34,6 +38,17 @@ pub(super) fn condition(rng: &mut Rng, alias: &str, depth: usize) -> Cond {
         // judges row by row.
         14 => cmp(">=", Expr::Greatest(Box::new(column), Box::new(lit(1))), lit(k)),
         _ => cmp("IS NOT", column, lit(k)),
+    }
+}
+
+/// A row value of `columns` ordered against constants, either side first.
+pub(super) fn row_order(rng: &mut Rng, columns: Vec<Expr>) -> Cond {
+    let op = pick(rng, &["<", "<=", ">", ">="]);
+    let values: Vec<Expr> = columns.iter().map(|_| lit(rng.below(4) as i64)).collect();
+    if rng.chance(70) {
+        Cond::RowOrder(op, columns, values)
+    } else {
+        Cond::RowOrder(op, values, columns)
     }
 }
 

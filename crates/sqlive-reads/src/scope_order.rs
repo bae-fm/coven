@@ -10,6 +10,10 @@
 //! one could sort before it, so it passes. A run that returned fewer rows
 //! than its LIMIT holds every row its WHERE allows, and keeps its scopes.
 //!
+//! The bound compares the ORDER BY's terms from the first up to the first it
+//! can't, as the terms below can't: a row that sorts after the last row on
+//! those sorts after it on every term.
+//!
 //! The ORDER BY's terms fall into runs, each of consecutive terms over one
 //! table. A result row sorts at or before the last row when its values of
 //! the first run sort before the last row's, or equal them and the rest sort
@@ -31,10 +35,10 @@
 //! narrows the source's table, and no lookup of another source.
 //!
 //! sqlive takes the last row's values from the result columns that return them,
-//! so each ORDER BY term is a result column of the statement's only SELECT, one
-//! it writes as the term does, with or without the COLLATE the term ends in, or
-//! one a `*` lists, and with no NULLS FIRST or LAST. Each term reads one FROM
-//! item of that SELECT: a
+//! so each term the bound compares is a result column of the statement's only
+//! SELECT, one it writes as the term does, with or without the COLLATE the term
+//! ends in, or one a `*` lists, and with no NULLS FIRST or LAST. Each reads one
+//! FROM item of that SELECT: a
 //! stored column of BINARY collation, whose values sqlive compares as SQLite
 //! does; a stored column of another collation; or an expression over stored
 //! BINARY columns that SQLite can evaluate row by row, or a generated column
@@ -190,7 +194,7 @@ struct SortTerm {
 
 /// What an ORDER BY term sorts its source's rows by.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-enum SortKey {
+pub(crate) enum SortKey {
     /// A stored column of BINARY collation, lowercase, whose values sqlive
     /// compares itself.
     Column(String),
@@ -216,7 +220,12 @@ impl SortKey {
 
     /// The rows whose key compares with `value`, which isn't NULL, as
     /// `ordering`, for a run bound to `parameters`.
-    fn compare(&self, value: &Value, ordering: Ordering, parameters: &[Value]) -> RowScope {
+    pub(crate) fn compare(
+        &self,
+        value: &Value,
+        ordering: Ordering,
+        parameters: &[Value],
+    ) -> RowScope {
         match self {
             Self::Column(column) => RowScope::Compare {
                 column: column.clone(),
@@ -395,19 +404,21 @@ pub(crate) fn sorted_limit(
     // The ORDER BY's terms of each run, with the COLLATE each ends in.
     let mut written: Vec<Vec<(Sorted, Option<String>)>> = Vec::new();
     for term in order_by.iter() {
+        // A term sqlive can't bound ends the bound at the terms before it: a
+        // row that sorts after the last row on those sorts after it on all.
         if term.nulls.is_some() {
-            return Ok(None);
+            break;
         }
         let Some(found) = sort_term(planner, core, columns, &outputs, &term.expr) else {
-            return Ok(None);
+            break;
         };
         let (position, item, sorted, explicit) = found;
         let from = &planner.items[item];
         if from.core != core || from.left_on.is_some() {
-            return Ok(None);
+            break;
         }
         let Some(key) = sort_key(planner, item, &sorted, explicit.as_deref()) else {
-            return Ok(None);
+            break;
         };
         let term = SortTerm { key, descending: term.order == Some(SortOrder::Desc), position };
         match (runs.last_mut(), written.last_mut()) {
@@ -551,6 +562,12 @@ fn sort_key(
         },
         ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => return None,
     })
+}
+
+/// How the column `column` of source `item` sorts its rows with no COLLATE
+/// written: what a comparison of the column compares by too.
+pub(crate) fn column_sort_key(planner: &Planner, item: usize, column: &str) -> Option<SortKey> {
+    sort_key(planner, item, &Sorted::Column(column.to_owned()), None)
 }
 
 /// The sources inside the derived item `item` that the first terms of its

@@ -696,11 +696,25 @@ window's years doesn't rerun this window.
 ### Where sqlive compares values
 
 A condition narrows only where sqlive compares values as SQLite does. One on a
-column whose collation isn't BINARY, or on a generated column, doesn't, and nor
-does one whose value SQLite would convert first, as text compared with an
-INTEGER column: there SQLite's answer and sqlive's could differ. A NULL test
-looks through a COLLATE on its column, since a collation doesn't change whether
-a value is NULL.
+column whose collation isn't BINARY, or on a generated column, doesn't, except
+as below, and nor does one whose value SQLite would convert first, as text
+compared with an INTEGER column: there SQLite's answer and sqlive's could
+differ. A NULL test looks through a COLLATE on its column, since a collation
+doesn't change whether a value is NULL.
+
+An ordering of such a column against a value, by `<`, `<=`, `>` or `>=`, with
+no COLLATE written, does narrow. A music app lists albums by `sort_title`, a
+generated column in a collation the app registered, and a window of the list
+holds `sort_title >= ?1`. To judge a write, sqlive asks SQLite to compare the
+changed row's value with `?1` in the column's collation, as it compares an
+ORDER BY term (section 6). A generated column is one section 6 lets an ORDER BY
+sort by. The value's type is the column's, as above.
+
+A row value ordered against another, as `(sort_title, year, id) >= (?1, ?2,
+?3)`, narrows by its first pair too: it is true only where `sort_title >= ?1`
+is, and the same holds of `<=` and, with `>` and `<`, of the first pair with a
+tie. So a window that starts at a key narrows from the key's first value, and
+an album added before it doesn't rerun the window.
 
 ### Conditions SQLite judges
 
@@ -768,10 +782,20 @@ its scope stays as the WHERE gives it.
 The bound compares rows as the ORDER BY does: term by term, each in its own
 direction, with NULL first in ascending order and last in descending. sqlive
 reads the last row's values from the result, so the statement must also return
-each ORDER BY term as a result column, anywhere among them: one a `*` lists, or
-one written as the term writes it, with or without the COLLATE it ends in
-(below). Each term reads one FROM item, with no NULLS FIRST or LAST. For an
-item that is a table, it is one of these:
+each ORDER BY term the bound compares as a result column, anywhere among them:
+one a `*` lists, or one written as the term writes it, with or without the
+COLLATE it ends in (below).
+
+The bound compares the ORDER BY's terms from the first one up to the first that
+it can't, since a row that sorts after the last row on those sorts after it on
+every term. A row that ties with the last row on them passes. A music app lets
+its user pick the order of the album grid, so after `title` the grid sorts by
+`CASE ?1 WHEN 'year' THEN al.year ELSE 0 END`, an expression over a FROM
+subquery's columns that the bound can't compare. The window still doesn't rerun
+for an album whose title sorts after its last row's.
+
+Each term the bound compares reads one FROM item, with no NULLS FIRST or LAST.
+For an item that is a table, it is one of these:
 
 - a stored column, in any collation;
 - an expression over that table's stored BINARY columns, such as `year IS
@@ -781,8 +805,8 @@ item that is a table, it is one of these:
   that table's stored BINARY columns.
 
 A term may end in one COLLATE, as `title COLLATE NOCASE`, which gives it that
-collation. A COLLATE anywhere else in the term, or an expression over a column
-that isn't BINARY, leaves the scope as the WHERE gives it. Without a COLLATE, a
+collation. The bound stops before a term with a COLLATE anywhere else, or with
+an expression over a column that isn't BINARY. Without a COLLATE, a
 stored column sorts in the collation it declares and any other term in BINARY,
 as SQLite sorts it. The collation can be one of SQLite's own, `BINARY`,
 `NOCASE` or `RTRIM`, or one the host registered (section 1). sqlive keeps no
@@ -852,16 +876,16 @@ bound narrows only the writes to the inner table. Where a join narrows another
 table by the inner table's rows, it takes every such row that the conditions
 allow, within the bound or not.
 
-No FROM item a term reads is the right side of a LEFT JOIN. There, when a write
+The bound stops before a term that reads the right side of a LEFT JOIN. There, when a write
 adds a row that matches a left row that had no match, SQLite no longer returns
 the row of NULLs it returned for that left row, and that row of NULLs can sort
 before the last row. The statement is one SELECT with no OFFSET, no GROUP BY,
 and no aggregate or window function in its result columns, since there one
 result row's values depend on many table rows. A join that narrows another
 table by a sorted table's rows takes only the rows within that table's bound.
-Any other ORDER BY, such as one by a result column's position or by an
-expression over two tables, and any OFFSET leave the scope as the WHERE gives
-it.
+The bound also stops before any other term, such as a result column's position
+or an expression over two tables. An ORDER BY whose first term is one of these,
+and any OFFSET, leave the scope as the WHERE gives it.
 
 ### Which rows SQLite reads first
 
@@ -2309,6 +2333,7 @@ the model and states its assumptions.
 | An expression of which each operation gives NULL where an operand is NULL is NULL where every column it names is NULL | `eval_null` | `proofs/SqliveNarrowing/Reader.lean` | 7 |
 | COALESCE, a CASE and `IS NULL` each make an equality with them true where the item they name has no row | `nonstrict_holds_without_partner` | `proofs/SqliveNarrowing/Rules/Edge.lean` | 7 |
 | A row value equality between items, true of a binding, makes each pair's member column hold a value the partner's row gives | `row_edge_sound` | `proofs/SqliveNarrowing/Rules/RowEdge.lean` | 7 |
+| A row value ordered against another, true of a binding, makes its first pair ordered the same way or tied, and the term sqlive reads from that comparison true of the item's row | `lead_sound`, `terms_sound` | `proofs/SqliveNarrowing/Rules/RowOrder.lean` | 5 |
 | A column equal to COALESCE of values, or equal to or IN a compound's rows, true of a binding, holds the value one argument or one arm gives | `one_of_sound` | `proofs/SqliveNarrowing/Rules/OneOf.lean` | 7, 8 |
 | An OR, true of a binding, makes one side of each OR sqlive reads from it hold, each of its terms and edges as its rule promises | `or_sound` | `proofs/SqliveNarrowing/Rules/Or.lean` | 7 |
 | `IS` between two items, true of a binding, makes the member column hold a value the partner's row gives, or both NULL | `is_edge_sound` | `proofs/SqliveNarrowing/Rules/IsEdge.lean` | 7 |

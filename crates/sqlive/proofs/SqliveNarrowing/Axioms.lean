@@ -37,6 +37,9 @@ import SqliveNarrowing
 #print axioms SqliveNarrowing.Limit.inner_step
 #print axioms SqliveNarrowing.Limit.innerLevels_chain
 #print axioms SqliveNarrowing.Limit.joined_passes
+#print axioms SqliveNarrowing.Limit.keyLe_take
+#print axioms SqliveNarrowing.RowOrder.lead_sound
+#print axioms SqliveNarrowing.RowOrder.terms_sound
 #print axioms SqliveNarrowing.Pick.post_picks_any
 #print axioms SqliveNarrowing.Pick.tellsApart_separates
 #print axioms SqliveNarrowing.Pick.oneRow_sound

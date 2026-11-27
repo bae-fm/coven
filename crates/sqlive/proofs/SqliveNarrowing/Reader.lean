@@ -112,6 +112,14 @@ theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by
           simp only [Cond.queries, List.mem_append, List.mem_flatMap]; exact Or.inr ⟨v, hv, h⟩))
     rw [hls, hrs]
+  | rowOrder key op l r rest ih =>
+    simp only [Cond.eval]
+    rw [l.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))
+        (fun q h => hs q (by simp [Cond.queries, h])),
+      r.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))
+        (fun q h => hs q (by simp [Cond.queries, h])),
+      ih (fun i c h => hb i c (by simp [Cond.refs, h]))
+        (fun q h => hs q (by simp [Cond.queries, h]))]
   | and l r ihl ihr =>
     simp only [Cond.eval]
     rw [ihl (fun i c h => hb i c (by simp [Cond.refs, h]))

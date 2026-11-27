@@ -182,6 +182,11 @@ theorem cond_eval_over (target : Nat) (rename : Nat → Nat) {b b' : Bind} {sub 
         simp only [Cond.refs, List.mem_append]; exact Or.inl hc),
       evals_over target rename rs fun j c hc => h j c (by
         simp only [Cond.refs, List.mem_append]; exact Or.inr hc)]
+  | rowOrder key op l r rest ih =>
+    simp only [Cond.over, Cond.eval]
+    rw [eval_over target rename l fun j c hc => h j c (by simp [Cond.refs, hc]),
+      eval_over target rename r fun j c hc => h j c (by simp [Cond.refs, hc]),
+      ih fun j c hc => h j c (by simp [Cond.refs, hc])]
   | and l r ihl ihr | or l r ihl ihr =>
     simp only [Cond.over, Cond.eval]
     rw [ihl fun j c hc => h j c (by simp [Cond.refs, hc]),

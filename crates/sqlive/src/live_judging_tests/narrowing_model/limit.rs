@@ -55,6 +55,13 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
             vec![eq(col("y", "a"), col("x", "id"))],
         )),
     }
+    // A window starts at a key of its sort columns, which can name both
+    // items.
+    if rng.chance(25) {
+        let after = if from.len() > 1 { "y" } else { "x" };
+        let columns = vec![col("x", "c"), col(after, "a"), col("x", "id")];
+        conditions.push(super::term::row_order(rng, columns));
+    }
     // A condition on `y` decides which item the planner places first.
     if from.len() > 1 && rng.chance(25) {
         conditions.push(super::term::condition(rng, "y", 1));

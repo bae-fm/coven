@@ -315,15 +315,33 @@ def Limit.SortedTerm (s : Statement) (st : PState) (k : Nat) (pd : Nat × Dir)
     (st.items t.1).leftOn = none ∧ Limit.termKey s t.1 e = some t.2.1 ∧ t.2.2.1 = pd.2 ∧
     (s.core k).output[t.2.2.2]? = some (.expr e)
 
+/-- The first elements `read` gives something for are as many as it gives, and
+each is one element's. -/
+theorem leading_zip {α β : Type} {read : α → Option β} :
+    ∀ (l : List α), (Limit.leading read l).length ≤ l.length ∧
+      ∀ x ∈ l.zip (Limit.leading read l), read x.1 = some x.2
+  | [] => by simp [Limit.leading]
+  | a :: l => by
+    obtain ⟨hlen, hpairs⟩ := leading_zip (read := read) l
+    cases ha : read a with
+    | none => simp [Limit.leading, ha]
+    | some b =>
+      simp only [Limit.leading, ha, List.length_cons, Nat.add_le_add_iff_right]
+      refine ⟨hlen, fun x hx => ?_⟩
+      simp only [List.zip_cons_cons, List.mem_cons] at hx
+      rcases hx with rfl | hx
+      · exact ha
+      · exact hpairs x hx
+
 /-- What `sortedLimit` reads: the statement's own query has one arm, which
-neither aggregates nor calls a window function, and its ORDER BY's terms,
-grouped into runs, each as `SortedTerm` says. -/
+neither aggregates nor calls a window function, and its ORDER BY's leading
+terms, grouped into runs, each as `SortedTerm` says. -/
 theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.SortedLimit}
     (h : Limit.sortedLimit s st = some sorted) :
     ∃ k ts, (s.query s.root).arms = [k] ∧ (s.core k).aggregated = false ∧
       (s.core k).windowed = false ∧
       sorted.runs = Limit.attach s st [] (Limit.SortRun.group ts) ∧
-      ts.length = (s.query s.root).orderBy.length ∧
+      ts.length ≤ (s.query s.root).orderBy.length ∧
       ∀ x ∈ (s.query s.root).orderBy.zip ts, Limit.SortedTerm s st k x.1 x.2 := by
   unfold Limit.sortedLimit at h
   cases harms : (s.query s.root).arms with
@@ -340,13 +358,16 @@ theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.So
       · simp at h
       rename_i _ hmany
       simp only [Bool.or_eq_true, not_or, Bool.not_eq_true] at hmany
-      simp only [Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
-      obtain ⟨ts, hts, rfl⟩ := h
-      obtain ⟨hlen, hpairs⟩ := mapM_zip hts
-      refine ⟨k, ts, rfl, hmany.1, hmany.2, rfl, hlen, fun x hx => ?_⟩
+      split at h
+      · simp at h
+      simp only [Option.pure_def, Option.bind_some, Option.some.injEq] at h
+      subst h
+      obtain ⟨hlen, hpairs⟩ :=
+        leading_zip (read := Limit.boundTerm s st k) (s.query s.root).orderBy
+      refine ⟨k, _, rfl, hmany.1, hmany.2, rfl, hlen, fun x hx => ?_⟩
       have hx' := hpairs x hx
       obtain ⟨⟨p, desc⟩, t⟩ := x
-      simp only [Option.bind_eq_some_iff] at hx'
+      simp only [Limit.boundTerm, Option.bind_eq_bind, Option.bind_eq_some_iff] at hx'
       obtain ⟨o, ho, hx'⟩ := hx'
       split at hx'
       · rename_i e
@@ -357,7 +378,7 @@ theorem Limit.sortedLimit_facts {s : Statement} {st : PState} {sorted : Limit.So
         rename_i hok
         simp only [not_or, Bool.not_eq_true, Option.isSome_eq_false_iff,
           Option.isNone_iff_eq_none, ne_eq, Decidable.not_not] at hok
-        simp only [Option.bind_eq_some_iff, Option.some.injEq] at hx'
+        simp only [Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at hx'
         obtain ⟨pos, hpos, key, hkey, rfl⟩ := hx'
         obtain ⟨hlt, hmatch, _⟩ := List.findIdx?_eq_some_iff_getElem.mp hpos
         refine ⟨e, ho, hok.1, by simpa using hok.2, hkey, rfl, ?_⟩
@@ -484,18 +505,31 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
       fun st seen l => Limit.attach_flatMap s st
         (fun _ t => t.map fun (_, _, p) => ((s.core k).outRow E' b').cell p) seen l
     rw [adirs, akey, alast]
-    have hdirs : Limit.runDirections (Limit.SortRun.group ts) = (s.query s.root).orderBy.map (·.2) := by
+    -- The runs read the ORDER BY's leading terms, as many as `ts` has.
+    have htlen : ts.length = ((s.query s.root).orderBy.take ts.length).length := by
+      simp [Nat.min_eq_left hlen]
+    have hzipped : ((s.query s.root).orderBy.take ts.length).zip ts =
+        (s.query s.root).orderBy.zip ts := by
+      have h := Limit.zip_take (s.query s.root).orderBy ts
+      rwa [List.take_of_length_le hlen] at h
+    rw [← hzipped] at hts
+    have htake : ∀ r : Row, (Limit.orderKey (s.query s.root) r).take ts.length =
+        ((s.query s.root).orderBy.take ts.length).map fun (p, _) => r.cell p := fun r => by
+      simp [Limit.orderKey, List.map_take]
+    have hdirs : Limit.runDirections (Limit.SortRun.group ts) =
+        ((s.query s.root).orderBy.map (·.2)).take ts.length := by
       unfold Limit.runDirections Limit.SortRun.keys
       simp only [List.map_map, Function.comp_def]
       rw [Limit.group_flatMap (fun _ t => t.2.1)]
-      exact (map_eq_of_zip hlen fun x hx => (hts x hx).choose_spec.2.2.2.2.1.symm).symm
+      rw [← List.map_take]
+      exact (map_eq_of_zip htlen fun x hx => (hts x hx).choose_spec.2.2.2.2.1.symm).symm
     have hkey : Limit.runKey row (Limit.SortRun.group ts) =
-        Limit.orderKey (s.query s.root) ((s.core k).outRow E b) := by
+        (Limit.orderKey (s.query s.root) ((s.core k).outRow E b)).take ts.length := by
       unfold Limit.runKey Limit.SortRun.keys
       simp only [List.map_map, Function.comp_def]
       rw [Limit.group_flatMap (fun j t => t.1.value (row j))]
-      unfold Limit.orderKey
-      refine (map_eq_of_zip hlen fun x hx => ?_).symm
+      rw [htake]
+      refine (map_eq_of_zip htlen fun x hx => ?_).symm
       obtain ⟨e, he, _, _, hsk, _, _⟩ := hts x hx
       obtain ⟨⟨p, d⟩, t⟩ := x
       simp only at he hsk ⊢
@@ -507,15 +541,16 @@ theorem Planned.bound_passes {s : Statement} (hwf : s.wellFormed = true)
       rw [hsame, hitem] at hb
       rw [Core.outRow_cell he, Limit.termKey_value hsk hb]
     have hlast : (Limit.SortRun.group ts).flatMap (fun run => run.terms.map fun (_, _, p) =>
-        ((s.core k).outRow E' b').cell p) = Limit.orderKey (s.query s.root) ((s.core k).outRow E' b') := by
+        ((s.core k).outRow E' b').cell p) =
+          (Limit.orderKey (s.query s.root) ((s.core k).outRow E' b')).take ts.length := by
       rw [Limit.group_flatMap (fun _ t => ((s.core k).outRow E' b').cell t.2.2)]
-      unfold Limit.orderKey
-      refine (map_eq_of_zip hlen fun x hx => ?_).symm
+      rw [htake]
+      refine (map_eq_of_zip htlen fun x hx => ?_).symm
       obtain ⟨e, he, _, _, _, _, hpos⟩ := hts x hx
       obtain ⟨⟨p, d⟩, t⟩ := x
       simp only at he hpos ⊢
       rw [Core.outRow_cell he, Core.outRow_cell hpos]
     rw [hdirs, hkey, hlast]
-    exact hle
+    exact Limit.keyLe_take ts.length (by simp [Limit.orderKey]) (by simp [Limit.orderKey]) hle
 
 end SqliveNarrowing

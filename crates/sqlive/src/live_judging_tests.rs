@@ -21,6 +21,8 @@ mod fragment_window;
 mod join_shapes;
 #[path = "live_judging_tests/join_through_found.rs"]
 mod join_through_found;
+#[path = "live_judging_tests/leading_term.rs"]
+mod leading_term;
 #[path = "live_judging_tests/limit.rs"]
 mod limit;
 #[path = "live_judging_tests/lookup.rs"]

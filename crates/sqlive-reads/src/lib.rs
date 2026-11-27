@@ -6,6 +6,7 @@
 //! queries that run on them stay in `sqlive`.
 
 mod bare_names;
+mod column_order;
 mod comparison;
 mod compiled_plan;
 mod derived;
@@ -19,9 +20,11 @@ mod read_report;
 mod read_set;
 mod reference_columns;
 mod result_nulls;
+mod row_order;
 mod row_scope;
 mod schema_objects;
 mod schema_probe;
+mod scope_condition;
 mod scope_edge;
 mod scope_lookup;
 mod scope_narrowing;
