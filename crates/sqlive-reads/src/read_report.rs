@@ -78,7 +78,7 @@ impl ReadReport {
                 Object::Table { name, within } => {
                     (name, why_whole(sources, source, within.as_ref(), scope))
                 }
-                Object::View { name, why } => (name, Some(why.0.to_owned())),
+                Object::View { name, why, .. } => (name, Some(why.0.to_owned())),
                 Object::Function | Object::Derived => continue,
             };
             let reasons = whole.entry(object).or_default();

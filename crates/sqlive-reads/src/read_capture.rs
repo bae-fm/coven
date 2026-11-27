@@ -39,6 +39,8 @@ pub struct ReadCapture {
 #[derive(Clone, Default)]
 pub struct ReadFrame {
     columns: ColumnSet,
+    /// Tables some of whose columns it read through no view or CTE.
+    direct: BTreeSet<String>,
     /// Tables some of whose columns it read through a view or a CTE, and
     /// the names, lowercase, of the innermost each read was through.
     indirect: BTreeMap<String, BTreeSet<String>>,
@@ -53,6 +55,7 @@ impl ReadFrame {
 
     fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
+        self.direct.extend(other.direct.iter().cloned());
         for (table, views) in &other.indirect {
             self.indirect.entry(table.clone()).or_default().extend(views.iter().cloned());
         }
@@ -75,6 +78,9 @@ impl ReadCapture {
         let whole = accessor.filter(|name| self.whole.contains(name));
         let frame = self.current();
         frame.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()));
+        if accessor.is_none() {
+            frame.direct.insert(table.to_ascii_lowercase());
+        }
         if let Some(view) = accessor {
             frame
                 .indirect
@@ -142,7 +148,13 @@ impl ReadCapture {
             .chain(scopes.unreported.columns().iter().cloned())
             .filter(|(table, _)| !scopes.fts5_shadows.contains(table))
             .filter(|(table, _)| {
-                !scopes.unread.contains(table) || !frame.read_inside(table, &scopes.inlined)
+                !scopes.unread.covers(
+                    table,
+                    &scopes.tables,
+                    frame.direct.contains(table),
+                    frame.indirect.get(table),
+                    &scopes.inlined,
+                )
             })
         {
             tables.entry(table).or_default().insert(column);

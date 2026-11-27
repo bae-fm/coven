@@ -12,15 +12,99 @@
 //! compound but one of UNION ALLs alone, and one that calls an aggregate,
 //! which makes one row of many, or a window function. The model states the
 //! rule as `Statement.pruned` and proves it in `crates/sqlive/proofs`.
+//!
+//! A view read whole in such a column counts for nothing either, nor do the
+//! reads SQLite reports inside it, which name the view, or a view or CTE
+//! inside it, unless a view the statement reads whole elsewhere can report a
+//! read by the same name.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::derived::Output;
 use crate::from_item::Columns;
-use crate::scope_plan::{Planner, Subqueries};
+use crate::row_scope::RowScope;
+use crate::scope_plan::{Object, Planner, Source, Subqueries};
 use crate::select_syntax::{parts, Part};
 use crate::sql::unparenthesized;
 use sqlite3_parser::ast::Expr;
+
+/// What a statement reads only in columns nothing reads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct UnreadReads {
+    /// The tables and views read whole whose every source sits in such a
+    /// column, lowercase.
+    sources: BTreeSet<String>,
+    /// The names, lowercase, only a view read whole in such a column can
+    /// report a read through.
+    inside: BTreeSet<String>,
+}
+
+impl UnreadReads {
+    /// The names only a view read whole in such a column can report a read
+    /// through.
+    pub(crate) fn inside(&self) -> impl Iterator<Item = &String> {
+        self.inside.iter()
+    }
+
+    /// Whether the statement depends on no read of `table`, where it reads
+    /// each other table in a scope of `live`, SQLite reported a read of
+    /// `table` through each of `through` and, when `direct`, one through no
+    /// view or CTE, and a read through one of `inlined` is one a source
+    /// makes or one that gives the statement no row.
+    pub(crate) fn covers(
+        &self,
+        table: &str,
+        live: &BTreeMap<String, RowScope>,
+        direct: bool,
+        through: Option<&BTreeSet<String>>,
+        inlined: &BTreeSet<String>,
+    ) -> bool {
+        if self.sources.contains(table) {
+            return through.is_none_or(|names| names.is_subset(inlined));
+        }
+        // A table no source of the statement's reads, which only views read
+        // whole read.
+        !live.contains_key(table)
+            && !direct
+            && through.is_some_and(|names| names.is_subset(&self.inside))
+    }
+}
+
+/// What `sources` read only in columns nothing reads, where `live` are the
+/// tables the other sources read.
+pub(crate) fn unread_reads(sources: &[Source], live: &BTreeMap<String, RowScope>) -> UnreadReads {
+    // The views read whole the statement reads outside such columns, and the
+    // names reads inside them can come with, unless the parser can't tell
+    // those of one.
+    let mut live_views = BTreeSet::new();
+    let mut live_inside = Some(BTreeSet::new());
+    for source in sources.iter().filter(|source| !source.unread) {
+        let Object::View { name, inside, .. } = &source.object else { continue };
+        live_views.insert(name.as_str());
+        match (inside, &mut live_inside) {
+            (Some(inside), Some(names)) => names.extend(inside.iter().cloned()),
+            _ => live_inside = None,
+        }
+    }
+    let mut found = UnreadReads::default();
+    for source in sources.iter().filter(|source| source.unread) {
+        match &source.object {
+            Object::Table { name, .. } if !live.contains_key(name) => {
+                found.sources.insert(name.clone());
+            }
+            Object::View { name, inside, .. } => {
+                let Some(live_inside) = &live_inside else { continue };
+                if !live_views.contains(name.as_str()) && !live_inside.contains(name) {
+                    found.sources.insert(name.clone());
+                }
+                let inside = inside.iter().flatten().filter(|name| !live_inside.contains(*name));
+                found.inside.extend(inside.cloned());
+            }
+            Object::Table { .. } | Object::Function | Object::Derived => {}
+        }
+    }
+    found
+}
 
 /// A column a clause or a result column names.
 #[derive(Clone)]

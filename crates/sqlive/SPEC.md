@@ -325,7 +325,8 @@ reads whole: those whose rows change with what the host holds in memory too,
 such as coven's views of its uploads. A read through such a view reads the view
 too, so a query that only counts the view's rows, or asks whether it has any,
 and reads none of its columns, still runs again as the view changes. A view's
-own tables are read whole as well (section 8).
+own tables are read whole as well, and a view that only a column nothing reads
+reads adds no dependency (section 8).
 
 **Edge cases.**
 
@@ -1343,6 +1344,17 @@ an aggregate or a window function. A table the statement also reads elsewhere
 narrows as those reads say. SQLite reports each column the statement names,
 those an unread column names too, so a change to one of them in a row those
 reads allow still runs the query again.
+
+A view read whole in such a column adds no dependency either: the live query
+doesn't run again when the view changes, or a table that only the view reads,
+and the view widens no other table's scope. A music app's storage row counts
+the files being uploaded through a view of the host's uploads, so a statement
+that joins the row and selects none of its counts doesn't rerun when a file
+starts to upload. SQLite names each read inside such a view as the paragraph
+above says. When a view the statement reads whole elsewhere can name a read
+the same way, sqlive can't tell the two apart, so that name's reads count.
+When sqlive's parser can't read a view the statement reads whole elsewhere,
+every view read whole in an unread column counts.
 
 ### What is read whole
 

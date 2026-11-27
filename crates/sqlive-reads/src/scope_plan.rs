@@ -217,8 +217,10 @@ pub(crate) enum Object {
         /// SQLite reports its reads through.
         within: Option<String>,
     },
-    /// A view read whole, by its name, lowercase, and why it is.
-    View { name: String, why: Unread },
+    /// A view read whole, by its name, lowercase, why it is, and the names
+    /// SQLite can report a read through inside it (`whole_view_names.rs`),
+    /// unless the parser can't read them.
+    View { name: String, why: Unread, inside: Option<BTreeSet<String>> },
     /// A table function.
     Function,
     /// A subquery, CTE or view whose own tables sqlive reads as sources of

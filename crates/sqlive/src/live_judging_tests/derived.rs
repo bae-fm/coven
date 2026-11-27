@@ -662,3 +662,64 @@ CREATE VIEW covered AS SELECT a.id, (SELECT c.id FROM covers AS c WHERE c.album 
     }
     db.close();
 }
+
+/// A view read whole in a column nothing reads adds no table the statement
+/// depends on, nor does one sqlive can't read as cores of its own. A table
+/// the view reads stays whole when the statement also reads it through a
+/// view read whole or in a column it reads, and keeps the scope of the
+/// statement's other reads of it otherwise.
+#[tokio::test]
+async fn a_view_read_whole_in_an_unread_column_adds_no_table() {
+    let db = TestDatabase::open_with(
+        "CREATE TABLE a(id INTEGER PRIMARY KEY, v INTEGER);
+CREATE TABLE covers(id INTEGER PRIMARY KEY, album INTEGER);
+INSERT INTO a VALUES (1,0),(2,0);
+INSERT INTO covers VALUES (5,2);
+CREATE VIEW sending AS SELECT id, album FROM covers;
+CREATE VIEW phases AS SELECT album FROM sending;
+CREATE VIEW first_cover AS WITH RECURSIVE c(id) AS (SELECT min(id) FROM covers UNION SELECT r.id FROM covers r JOIN c ON r.id < c.id) SELECT id FROM c",
+        crate::tests::TestOptions { whole_views: vec!["sending", "phases"], ..Default::default() },
+    );
+    let wrapped =
+        |view: &str| format!("(SELECT a.id, (SELECT count(*) FROM {view}) AS n FROM a) AS s");
+    for (sql, reads_cover) in [
+        (format!("SELECT s.id FROM {} WHERE s.id = 1", wrapped("sending")), false),
+        (format!("SELECT s.id FROM {} WHERE s.id = 1", wrapped("phases")), false),
+        (format!("SELECT s.id FROM {} WHERE s.id = 1", wrapped("first_cover")), false),
+        (
+            format!(
+                "SELECT s.id || (SELECT count(*) FROM covers WHERE covers.id = 5) FROM {} WHERE s.id = 1",
+                wrapped("sending")
+            ),
+            false,
+        ),
+        (format!("SELECT s.n FROM {} WHERE s.id = 1", wrapped("sending")), true),
+        (format!("SELECT s.n FROM {} WHERE s.id = 1", wrapped("first_cover")), true),
+        (
+            format!(
+                "SELECT s.id || (SELECT count(*) FROM phases) FROM {} WHERE s.id = 1",
+                wrapped("sending")
+            ),
+            true,
+        ),
+        (
+            format!(
+                "SELECT s.id || (SELECT count(*) FROM sending) FROM {} WHERE s.id = 1",
+                wrapped("phases")
+            ),
+            true,
+        ),
+    ] {
+        follows(
+            &db,
+            sql.leak(),
+            vec![],
+            &[
+                ("INSERT INTO covers VALUES (9,1)", reads_cover),
+                ("DELETE FROM covers WHERE id = 9", reads_cover),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}

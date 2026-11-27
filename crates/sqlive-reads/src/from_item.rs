@@ -271,8 +271,9 @@ pub(crate) fn read_item<'a>(
                 // view or a CTE or view inside it, which the statement's own
                 // CTEs and views may share.
                 let found = crate::whole_view_names::whole_view_names(connection, &stored)?;
+                let inside = found.as_ref().ok().cloned();
                 planner.note_whole_view(found);
-                Object::View { name, why }
+                Object::View { name, why, inside }
             } else {
                 Object::Table { name, within: planner.within.clone() }
             };

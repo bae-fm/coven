@@ -257,7 +257,11 @@ JOIN adds, so where such a part holds, its item has a row.
   judge lets pass leaves them unchanged. SQLite reports every column the
   statement names, so the pruned statement reads, of each table it still
   reads, what the statement does (`Statement.reported`). The runner judges
-  each case with the pruned statement.
+  each case with the pruned statement. A view read whole in such a column
+  goes with its core, as any other item there does, since `result_pruned`
+  holds whatever the core's items read. The model has no names of SQLite's
+  reports, so the live judging tests check which of a view's reads sqlive
+  drops.
 - **A condition carried across an equality.** `transfer_sound` proves that
   when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
   true of `a`'s row on `x`. The planner adds such a term to `a`'s scope,

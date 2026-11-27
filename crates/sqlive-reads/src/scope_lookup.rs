@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
 use crate::scope_edge::MemberValue;
-use crate::scope_plan::{Membership, PartnerValue, Source, Sources};
+use crate::scope_plan::{Membership, PartnerValue, Sources};
 use crate::scope_row::{RowCondition, RowTest};
 use crate::scope_term::{Affinity, RunValues, ScopeTerm};
 use crate::sql_value::SqlValue as Value;
@@ -59,19 +59,15 @@ pub const LOOKUP_STEPS: i32 = 1_000;
 pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Value]>) -> Scopes {
     let found = source_scopes(sources, RunValues::Run(parameters), last);
     let tables = table_scopes(sources, found);
-    // The tables only sources nothing reads read.
-    let unread = sources
-        .sources
-        .iter()
-        .filter(|source| source.unread)
-        .filter_map(Source::table)
-        .filter(|table| !tables.contains_key(*table))
-        .map(str::to_owned)
-        .collect();
+    let unread = crate::unread_columns::unread_reads(&sources.sources, &tables);
+    // A read through a view read whole in a column nothing reads gives the
+    // statement no row, so it widens no table's scope.
+    let mut inlined = sources.inlined.clone().unwrap_or_default();
+    inlined.extend(unread.inside().cloned());
     Scopes {
         tables,
         unread,
-        inlined: sources.inlined.clone().unwrap_or_default(),
+        inlined,
         fts5_shadows: sources.fts5_shadows.clone(),
         ..Scopes::default()
     }
