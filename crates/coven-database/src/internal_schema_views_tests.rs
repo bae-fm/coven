@@ -359,3 +359,50 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
     assert!(!paused.next_inline().await.unwrap().unwrap());
     db.close().await.unwrap();
 }
+
+/// Stage `bytes` as a new file and insert row `id` pointing at it.
+async fn stage_row(db: &crate::StoreDatabase, id: &'static str, bytes: &[u8]) {
+    let bytes = bytes.to_vec();
+    db.staged_write::<_, _, _, _, DbError>(
+        move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
+        move |sql, file| {
+            sql.execute(
+                "INSERT INTO files(id,file) VALUES(?1,?2)",
+                sqlive::rusqlite::params![id, file],
+            )?;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A live query reads where one release's queued files are, through
+/// `coven_upload_queue` and `coven_file_reads`: another release's upload
+/// changes no row it reads, so it doesn't run again, and a change to its own
+/// release's file does (§4).
+#[tokio::test]
+async fn a_read_of_one_releases_uploads_ignores_another_releases_upload() {
+    use crate::file_write::tests::open;
+    use crate::Provenance;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage_row(&db, "a", b"first").await;
+    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT r.source FROM files AS f
+             JOIN coven_upload_queue AS q ON q.file=f.file
+             JOIN coven_file_reads AS r ON r.file=f.file
+             WHERE f.id='a'",
+            [],
+            |r| r.get::<_, String>(0),
+        )?)
+    });
+    assert_eq!(release.next_inline().await.unwrap().unwrap(), ["here"]);
+    stage_row(&db, "b", b"second").await;
+    assert!(!release.is_marked_for_rerun());
+    sql(&db, "UPDATE files SET file=NULL WHERE id='a'").await.unwrap();
+    assert!(release.is_marked_for_rerun());
+    assert!(release.next_inline().await.unwrap().unwrap().is_empty());
+    db.close().await.unwrap();
+}

@@ -594,9 +594,15 @@ shows every file waiting.
 A live query that reads either runs again each time an upload starts or ends, as
 if a write had changed what it read. That includes one that only counts
 `coven_sending`'s rows, or asks whether it has any, and reads none of its
-columns: coven's views are among the views sqlive reads whole, so a read through
-one reads the view too ([sqlive's spec, section
-3](../crates/sqlive/SPEC.md#views-read-whole)). Ana's photo app shows how many
+columns: sqlive reads each view that reads coven's memory whole,
+`coven_uploads`, `coven_sending`, `coven_downloading`,
+`coven_device_only_downloading`, `coven_device_only_placed` and
+`coven_network`, so a read through one reads the view too ([sqlive's spec,
+section 3](../crates/sqlive/SPEC.md#views-read-whole)). A live query narrows
+every other view of coven's through the view's own SELECT, as it narrows the
+app's views. Ben's music app reads where the files of one album come from
+through `coven_file_reads`, and an upload of another album's file doesn't rerun
+that query. Ana's photo app shows how many
 of each album's photos are going out now as one live query over `coven_sending`
 and `photos`. Since `coven_sending` holds at most as many files as the upload
 limit lets go out at once, counting them finds each file's photo through an
