@@ -88,8 +88,11 @@ fn name_positions(
         .collect();
     let mut found = BTreeMap::new();
     let mut scanner = Scanner::new(Tokenizer::new());
-    // SQL the parser read as a statement, which the tokenizer reads too.
-    while let Ok((_, Some((token, _)), _)) = scanner.scan(sql.as_bytes()) {
+    // The planner finds places only in SQL the parser read to its end, so
+    // each of its tokens reads again.
+    while let (_, Some((token, _)), _) =
+        scanner.scan(sql.as_bytes()).expect("SQL the parser read tokenizes")
+    {
         let text = std::str::from_utf8(token).expect("a token of a string is a string");
         if text.is_empty() || !names.contains(&crate::sql::name(text).to_ascii_lowercase()) {
             continue;
