@@ -29,10 +29,10 @@ sqlive_compose::write!(
         "pub (crate) struct MarkRead ;",
         "pub (crate) struct MarkReadParams {",
         "pub (crate) issue : IssueId",
-        "impl :: sqlive_compose :: Statement for MarkReadParams",
+        "impl :: sqlive_compose :: generated :: Statement for MarkReadParams",
         "const SQL : & 'static str = MarkRead :: SQL",
         "(\":person\" , & self . person as & dyn :: sqlive_compose :: generated :: sqlive_reads :: ToSql)",
-        "impl :: sqlive_compose :: Write for MarkReadParams { }",
+        "impl :: sqlive_compose :: generated :: Write for MarkReadParams { }",
     ] {
         assert!(code.contains(part), "{part} in {code}");
     }
@@ -60,17 +60,17 @@ sqlive_compose::write!(
     for part in [
         "pub (crate) struct OpenIssueParams < 'p > {",
         "pub (crate) title : &'p str",
-        "impl < 'p > :: sqlive_compose :: Statement for OpenIssueParams < 'p >",
+        "impl < 'p > :: sqlive_compose :: generated :: Statement for OpenIssueParams < 'p >",
         "pub (crate) struct OpenIssueRow {",
         "pub (crate) number : i64",
         "pub (crate) title : String",
         "pub (crate) assignee_id : Option < String >",
-        "impl < 'p > :: sqlive_compose :: WriteReturning for OpenIssueParams < 'p >",
+        "impl < 'p > :: sqlive_compose :: generated :: WriteReturning for OpenIssueParams < 'p >",
         "type Row = OpenIssueRow",
     ] {
         assert!(code.contains(part), "{part} in {code}");
     }
-    assert!(!code.contains("sqlive_compose :: Write for"), "{code}");
+    assert!(!code.contains("generated :: Write for"), "{code}");
     let call = &output.calls[0];
     assert_eq!(call.kind, CallKind::Write);
     assert_eq!(call.reads.iter().map(String::as_str).collect::<Vec<_>>(), ["issues"]);

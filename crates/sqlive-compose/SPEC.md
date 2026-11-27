@@ -1349,7 +1349,9 @@ The macros and the compiler are in two crates. `sqlive-compose-macros` holds
 `fragment!`, `read!` and `write!`, because Rust puts procedural macros in a crate
 of their own. `sqlive-compose` re-exports them, so an app writes
 `sqlive_compose::fragment!`, `sqlive_compose::read!` and
-`sqlive_compose::write!`. With its `compiler`
+`sqlive_compose::write!`. Another crate can re-export the macros, with
+`sqlive-compose`'s hidden `generated` module beside them, so that an app names
+them through that crate: a coven app writes `coven::read!`. With its `compiler`
 feature, `sqlive-compose` also holds the compiler, which an app's build script
 takes as a build dependency. A crate that writes fragments lists both:
 
@@ -1388,13 +1390,20 @@ F.2](../../spec/coven.md#f2-capabilities), itself. Its one entry point is
 `compile_crate`, which takes:
 
 - the crate's name;
+- the *macros' crate*, the crate through which its code names the macros, such as
+  `coven` or `sqlive_compose`;
 - a *source reader*, a function that the build script hands in, which takes a
   module file's path and returns the file's text;
 - the fragment manifest of each crate the crate depends on directly, as text;
 - the *setup step*, the schema as data.
 
-`compile_crate` finds the crate's macro calls by walking its modules from
-`src/lib.rs`, with the source reader. When everything passes, it returns:
+`compile_crate` finds the crate's macro calls, those written
+`<macros' crate>::fragment!`, `<macros' crate>::read!` and `<macros'
+crate>::write!`, by walking its modules from `src/lib.rs` with the source
+reader. The code it writes names the statement traits and everything else it
+uses in `::<macros' crate>::generated`, so the crate it compiles needs no
+dependency on `sqlive-compose` when its macros' crate is another one. A macros'
+crate that isn't one Rust identifier fails the build. When everything passes, it returns:
 
 - each generated file's name and text;
 - the crate's own fragment manifest, as text;
@@ -1483,6 +1492,7 @@ fn main() {
 
     let output = match compile_crate(Input {
         crate_name: "tracker".into(),
+        macros_crate: "sqlive_compose".into(),
         source_reader: &|path| fs::read_to_string(root.join(path)),
         manifests,
         setup: tracker_schema::setup(),

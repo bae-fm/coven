@@ -59,10 +59,13 @@ pub trait Write: Statement {}
 /// A generated write that returns rows through RETURNING.
 pub trait WriteReturning: Returning {}
 
-/// What the code the compiler writes names: the crates it reads rows with and
-/// decodes JSON with, so an app lists none of them.
+/// What the code the compiler writes names: the statement traits, and the
+/// crates it reads rows with and decodes JSON with, so an app lists none of
+/// them. A crate that re-exports the macros re-exports this module beside
+/// them.
 #[doc(hidden)]
 pub mod generated {
+    pub use crate::{Read, Returning, Statement, Write, WriteReturning};
     pub use serde;
     pub use sqlive_reads;
 

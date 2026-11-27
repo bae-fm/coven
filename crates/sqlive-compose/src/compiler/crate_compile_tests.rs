@@ -66,6 +66,7 @@ fn compile(
     };
     compile_crate(Input {
         crate_name: name.to_owned(),
+        macros_crate: "sqlive_compose".into(),
         source_reader: &reader,
         manifests: manifests.iter().map(|manifest| (*manifest).to_owned()).collect(),
         setup: setup(),
@@ -90,6 +91,45 @@ pub(crate) fn code_of(output: &super::Output, name: &str) -> String {
     // The generated code is Rust.
     syn::parse_file(text).unwrap();
     text.clone()
+}
+
+#[test]
+fn the_generated_code_names_only_the_macros_crate() {
+    let lib = r##"
+coven::fragment!(Person { person_id: PersonId }, r#"
+    SELECT p.id AS person_id, p.name FROM people AS p
+"#);
+coven::read!(People { labels: json<Vec<Label>> struct Label { name: String } }, r#"
+    SELECT person.*, json_array() AS labels FROM @crate::Person AS person
+"#);
+coven::write!(Rename(id: PersonId, name: String), r#"
+    UPDATE people SET name = :name WHERE id = :id RETURNING name
+"#);
+"##;
+    let compiled = |macros_crate: &str| {
+        compile_crate(Input {
+            crate_name: "tracker".to_owned(),
+            macros_crate: macros_crate.to_owned(),
+            source_reader: &|path: &str| {
+                (path == "src/lib.rs")
+                    .then(|| lib.to_owned())
+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            },
+            manifests: Vec::new(),
+            setup: setup(),
+        })
+    };
+    let output = compiled("coven").unwrap();
+    assert_eq!(output.calls.len(), 3);
+    for name in ["Person.rs", "People.rs", "Rename.rs"] {
+        let code = code_of(&output, name);
+        assert!(!code.contains("sqlive_compose"), "{code}");
+        assert!(code.contains(":: coven :: generated"), "{code}");
+    }
+    assert_eq!(
+        messages(compiled("not a crate")),
+        ["the macros' crate is named \"not a crate\", which is no crate's name"]
+    );
 }
 
 #[test]

@@ -35,6 +35,12 @@ pub use setup::{Function, Setup};
 pub struct Input<'a> {
     /// The crate's name.
     pub crate_name: String,
+    /// The crate through which the crate's code names the macros, such as
+    /// `coven` or `sqlive_compose`. The compiler finds the calls written
+    /// `<macros_crate>::read!`, `fragment!` and `write!`, and the code it
+    /// writes names what it uses in `::<macros_crate>::generated`, so a crate
+    /// that depends on that crate needs no other to build it.
+    pub macros_crate: String,
     /// The text of the file at a path below the crate's folder.
     pub source_reader: &'a dyn Fn(&str) -> io::Result<String>,
     /// The manifest of each crate it depends on directly that writes

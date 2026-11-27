@@ -7,6 +7,7 @@ use syn::{Attribute, Expr, Item, Lit, Meta, Visibility};
 
 use super::error::{Cause, CompileError, Location};
 use super::header::{self, CallKind, Header, HeaderError};
+use super::model::MacrosCrate;
 
 /// A source reader: the text of the file at a path below the crate's folder.
 pub(crate) type Reader<'a> = &'a dyn Fn(&str) -> io::Result<String>;
@@ -33,9 +34,15 @@ pub(crate) struct Walked {
 }
 
 /// The calls of the crate whose files `reader` gives.
-pub(crate) fn walk(reader: Reader<'_>) -> Result<Walked, Vec<CompileError>> {
-    let mut walk =
-        Walk { reader, calls: Vec::new(), read: Vec::new(), errors: Vec::new(), private: 0 };
+pub(crate) fn walk(reader: Reader<'_>, macros: &MacrosCrate) -> Result<Walked, Vec<CompileError>> {
+    let mut walk = Walk {
+        reader,
+        macros,
+        calls: Vec::new(),
+        read: Vec::new(),
+        errors: Vec::new(),
+        private: 0,
+    };
     walk.file("src/lib.rs", "src", &mut Vec::new());
     if walk.errors.is_empty() {
         Ok(Walked { calls: walk.calls, read: walk.read })
@@ -46,6 +53,7 @@ pub(crate) fn walk(reader: Reader<'_>) -> Result<Walked, Vec<CompileError>> {
 
 struct Walk<'a> {
     reader: Reader<'a>,
+    macros: &'a MacrosCrate,
     calls: Vec<Call>,
     read: Vec<String>,
     errors: Vec<CompileError>,
@@ -89,9 +97,12 @@ impl Walk<'_> {
                         .map(|segment| segment.ident.to_string())
                         .collect();
                     let kind = match segments.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-                        ["sqlive_compose", "fragment"] => CallKind::Fragment,
-                        ["sqlive_compose", "read"] => CallKind::Read,
-                        ["sqlive_compose", "write"] => CallKind::Write,
+                        [krate, name] if self.macros.is(krate) => match name {
+                            "fragment" => CallKind::Fragment,
+                            "read" => CallKind::Read,
+                            "write" => CallKind::Write,
+                            _ => continue,
+                        },
                         _ => continue,
                     };
                     let start = item.mac.path.segments[0].ident.span().start();

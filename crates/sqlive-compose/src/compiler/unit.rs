@@ -12,7 +12,7 @@ use super::error::{Cause, CompileError, Warning, WholePlace};
 use super::generate;
 use super::header::{Handle, Header, HeaderKind};
 use super::lex::{self, Origin};
-use super::model::{Field, Reading, Record};
+use super::model::{Field, MacrosCrate, Reading, Record};
 use super::rename;
 use super::source::Call;
 use super::spread::{self, Expansion, Place, Placed, Registry};
@@ -25,6 +25,7 @@ pub(crate) struct Context<'a> {
     /// The views and tables only the writer reads.
     pub(crate) writer_only: &'a [String],
     pub(crate) registry: &'a Registry,
+    pub(crate) macros: &'a MacrosCrate,
 }
 
 /// The Rust of a call, or what it is written from.
@@ -178,7 +179,7 @@ pub(crate) fn compile(
         &outline,
         &prepared,
         &expansion.placed,
-        context.registry,
+        context,
         &prepared_sql,
         &tokens,
     )
@@ -199,7 +200,9 @@ pub(crate) fn compile(
         }
         HeaderKind::Read(handle) => {
             let plan = plan.as_deref().expect("a read's plan is built before its columns");
-            let code = generate::read(header, sql, *handle, plan, &fields, call.exported);
+            let visibility = call.exported;
+            let code =
+                generate::read(header, sql, *handle, plan, &fields, visibility, context.macros);
             Product::Statement { code, fields }
         }
         HeaderKind::Write => unreachable!("a write compiles in compile_write"),
@@ -241,10 +244,9 @@ fn compile_write(
     write::check_not_null(header, sql, &tokens, &target, &table_columns, &outline.items)
         .map_err(&fail)?;
     let returning = write::returning(sql, &tokens, target.item);
-    let fields =
-        columns::fields(header, &returning, &prepared, &[], context.registry, sql, &tokens)
-            .map_err(&fail)?;
-    let code = generate::write(header, sql, &fields);
+    let fields = columns::fields(header, &returning, &prepared, &[], context, sql, &tokens)
+        .map_err(&fail)?;
+    let code = generate::write(header, sql, &fields, context.macros);
     Ok(Compiled {
         product: Product::Statement { code, fields },
         warnings: Vec::new(),

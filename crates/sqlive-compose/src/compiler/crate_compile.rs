@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::error::{Cause, CompileError, Location};
 use super::header::Header;
+use super::model::MacrosCrate;
 use super::source::Call;
 use super::spread::{spread_paths, Registry};
 use super::unit::{self, fragment_path, Product};
@@ -11,8 +12,10 @@ use super::{generate, model, source, CompiledCall, Input, Output};
 
 /// Compile the crate `input` describes, or return every error.
 pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
-    let walked = source::walk(input.source_reader)?;
     let setup_error = |cause: Cause| vec![CompileError::Crate { cause }];
+    let macros = MacrosCrate::new(&input.macros_crate)
+        .ok_or_else(|| setup_error(Cause::BadMacrosCrate { name: input.macros_crate.clone() }))?;
+    let walked = source::walk(input.source_reader, &macros)?;
     let probe = input.setup.probe().map_err(|error| setup_error(Cause::Setup(error)))?;
     let mut registry = Registry::new(&input.crate_name);
     for text in &input.manifests {
@@ -65,6 +68,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
             probe: &probe,
             writer_only: &input.setup.writer_only,
             registry: &registry,
+            macros: &macros,
         };
         match unit::compile(&context, call, header) {
             Ok(compiled) => {
@@ -90,7 +94,7 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
     let manifest = serde_json::to_string_pretty(&manifest)
         .map_err(|error| setup_error(Cause::Manifest(error)))?;
     Ok(Output {
-        files: files(&registry, products),
+        files: files(&registry, &macros, products),
         manifest,
         read: walked.read,
         warnings,
@@ -105,7 +109,11 @@ pub fn compile_crate(input: Input<'_>) -> Result<Output, Vec<CompileError>> {
 /// read's row names it, itself or through the field of a type that is written.
 /// No code names the type of any other fragment, whose file is empty, so a
 /// crate that refuses dead code can spread it in writes and FROM clauses alone.
-fn files(registry: &Registry, products: Vec<(&Call, &Header, Product)>) -> Vec<(String, String)> {
+fn files(
+    registry: &Registry,
+    macros: &MacrosCrate,
+    products: Vec<(&Call, &Header, Product)>,
+) -> Vec<(String, String)> {
     let mut named = BTreeSet::new();
     let mut files: Vec<(String, String)> = products
         .into_iter()
@@ -116,7 +124,7 @@ fn files(registry: &Registry, products: Vec<(&Call, &Header, Product)>) -> Vec<(
                 Product::Fragment { record, fields }
                     if call.exported || named.contains(&record.path) =>
                 {
-                    (generate::fragment(header, &fields, call.exported), fields)
+                    (generate::fragment(header, &fields, call.exported, macros), fields)
                 }
                 Product::Fragment { .. } => (String::new(), Vec::new()),
             };

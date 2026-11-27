@@ -367,6 +367,13 @@ pub enum Cause {
         /// The name.
         name: String,
     },
+    /// The crate the input says the macros are named through is no crate's
+    /// name.
+    #[error("the macros' crate is named {name:?}, which is no crate's name")]
+    BadMacrosCrate {
+        /// The name.
+        name: String,
+    },
     /// A dependency's manifest names a fragment by a path that isn't Rust's.
     #[error("a manifest names a fragment at {path}, which is no Rust path")]
     BadPath {

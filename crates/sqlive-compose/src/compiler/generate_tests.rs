@@ -1,10 +1,14 @@
 use super::{fragment, read};
 use crate::compiler::header::{parse, CallKind, Handle, RustType};
-use crate::compiler::model::{Field, FieldName, Reading};
+use crate::compiler::model::{Field, FieldName, MacrosCrate, Reading};
 use quote::quote;
 
 fn field(name: &str, ty: &str, reading: Reading, column: usize) -> Field {
     Field { name: FieldName::new(name).unwrap(), ty: RustType(ty.into()), reading, column }
+}
+
+fn macros() -> MacrosCrate {
+    MacrosCrate::new("sqlive_compose").unwrap()
 }
 
 #[test]
@@ -14,6 +18,7 @@ fn a_fragment_reads_each_column_at_its_offset() {
         &header,
         &[field("a", "i64", Reading::Value, 0), field("type", "Vec<Label>", Reading::Json, 1)],
         true,
+        &macros(),
     );
     assert!(code.contains("a : row . get :: < _ , i64 > (offset) ?"), "{code}");
     assert!(
@@ -36,6 +41,7 @@ fn a_read_binds_its_request_by_name() {
         "{}",
         &[field("n", "i64", Reading::Value, 0)],
         true,
+        &macros(),
     );
     assert!(code.contains("(\":a\" , & self . a as"), "{code}");
     assert!(code.contains("(\":b\" , & self . b as"), "{code}");
@@ -52,9 +58,13 @@ fn a_read_implements_the_statement_traits_a_store_takes() {
         "the plan",
         &[field("n", "i64", Reading::Value, 0)],
         true,
+        &macros(),
     );
-    assert!(code.contains("impl :: sqlive_compose :: Statement for PageParams"), "{code}");
-    assert!(code.contains("impl :: sqlive_compose :: Read for PageParams"), "{code}");
+    assert!(
+        code.contains("impl :: sqlive_compose :: generated :: Statement for PageParams"),
+        "{code}"
+    );
+    assert!(code.contains("impl :: sqlive_compose :: generated :: Read for PageParams"), "{code}");
     assert!(code.contains("const PLAN : & 'static str = \"the plan\""), "{code}");
     assert!(code.contains("type Row = PageRow"), "{code}");
     syn::parse_file(&code).unwrap();
@@ -70,6 +80,7 @@ fn a_reads_request_and_row_have_no_functions_beside_the_traits() {
         "{}",
         &[field("n", "i64", Reading::Value, 0)],
         true,
+        &macros(),
     );
     let file = syn::parse_file(&code).unwrap();
     let inherent: Vec<String> = file
@@ -100,9 +111,9 @@ fn a_name_that_cannot_be_an_identifier_is_refused() {
 fn a_read_in_a_private_module_has_no_pub_item() {
     let header = parse(CallKind::Read, quote!(Page(a: i64), r#"SELECT 1"#)).unwrap();
     let fields = [field("n", "i64", Reading::Value, 0)];
-    let private = read(&header, "SELECT 1", Handle::ReadOnly, "{}", &fields, false);
+    let private = read(&header, "SELECT 1", Handle::ReadOnly, "{}", &fields, false, &macros());
     assert_eq!(private.matches("pub").count(), private.matches("pub (crate)").count(), "{private}");
-    let exported = read(&header, "SELECT 1", Handle::ReadOnly, "{}", &fields, true);
+    let exported = read(&header, "SELECT 1", Handle::ReadOnly, "{}", &fields, true, &macros());
     assert!(!exported.contains("pub (crate)"), "{exported}");
     syn::parse_file(&private).unwrap();
 }
@@ -117,6 +128,7 @@ fn a_row_derives_clone_partial_eq_and_debug() {
         "{}",
         &[field("n", "i64", Reading::Value, 0)],
         true,
+        &macros(),
     );
     assert!(code.contains("# [derive (Clone , Debug , PartialEq)] pub struct PageRow"), "{code}");
 }
@@ -135,9 +147,9 @@ fn a_fragment_in_a_private_module_has_no_pub_item() {
     )
     .unwrap();
     let fields = [field("n", "i64", Reading::Value, 0)];
-    let private = fragment(&header, &fields, false);
+    let private = fragment(&header, &fields, false, &macros());
     assert_eq!(private.matches("pub").count(), private.matches("pub (crate)").count(), "{private}");
-    let exported = fragment(&header, &fields, true);
+    let exported = fragment(&header, &fields, true, &macros());
     assert!(
         exported.contains("pub struct Thing") && exported.contains("pub fn read"),
         "{exported}"

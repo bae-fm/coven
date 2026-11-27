@@ -118,13 +118,36 @@ pub(crate) struct Manifest {
 
 /// The Rust type that a table column of the STRICT type `declared` reads
 /// as, when it has one.
-pub(crate) fn strict_type(declared: &str) -> Option<&'static str> {
-    match declared.to_ascii_uppercase().as_str() {
-        "INTEGER" | "INT" => Some("i64"),
-        "TEXT" => Some("String"),
-        "BLOB" => Some("Vec<u8>"),
-        "REAL" => Some("f64"),
-        "ANY" => Some("::sqlive_compose::generated::sqlive_reads::SqlValue"),
-        _ => None,
+pub(crate) fn strict_type(declared: &str, macros: &MacrosCrate) -> Option<String> {
+    let name = match declared.to_ascii_uppercase().as_str() {
+        "INTEGER" | "INT" => "i64",
+        "TEXT" => "String",
+        "BLOB" => "Vec<u8>",
+        "REAL" => "f64",
+        "ANY" => return Some(macros.generated("sqlive_reads::SqlValue")),
+        _ => return None,
+    };
+    Some(name.to_owned())
+}
+
+/// The crate through which the compiled crate's code names the macros
+/// (`Input::macros_crate`). The generated code names everything it uses in
+/// that crate's `generated` module.
+pub(crate) struct MacrosCrate(syn::Ident);
+
+impl MacrosCrate {
+    /// The crate named `name`, when `name` is one Rust identifier.
+    pub(crate) fn new(name: &str) -> Option<Self> {
+        syn::parse_str(name).ok().map(Self)
+    }
+
+    /// Whether `name` is the crate's name.
+    pub(crate) fn is(&self, name: &str) -> bool {
+        self.0 == name
+    }
+
+    /// The path of `tail` in the crate's `generated` module.
+    pub(crate) fn generated(&self, tail: &str) -> String {
+        format!("::{}::generated::{tail}", self.0)
     }
 }

@@ -6,9 +6,7 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use super::header::{FieldType, Handle, Header, Parameter, RustType, Shape};
-use super::model::{Field, FieldName, Reading};
-
-const GENERATED: &str = "::sqlive_compose::generated";
+use super::model::{Field, FieldName, MacrosCrate, Reading};
 
 /// The identifier of a name the header's parser read as one.
 fn ident(name: &str) -> Ident {
@@ -19,8 +17,8 @@ fn rust_type(ty: &RustType) -> TokenStream {
     ty.0.parse().expect("a type the header's parser read, or one the compiler wrote")
 }
 
-fn path(tail: &str) -> TokenStream {
-    format!("{GENERATED}::{tail}").parse().expect("a path of constants")
+fn path(macros: &MacrosCrate, tail: &str) -> TokenStream {
+    macros.generated(tail).parse().expect("a path of a crate's name and constants")
 }
 
 /// The index of the column `column` places after the row's offset: `offset`
@@ -36,7 +34,7 @@ fn column_at(column: usize) -> TokenStream {
 
 /// The expression that reads `field` from `row`, the column at `offset` plus
 /// the field's own position.
-fn read_field(field: &Field) -> TokenStream {
+fn read_field(field: &Field, macros: &MacrosCrate) -> TokenStream {
     let column = column_at(field.column);
     match &field.reading {
         Reading::Value => {
@@ -45,8 +43,8 @@ fn read_field(field: &Field) -> TokenStream {
         }
         Reading::Json => {
             // SQL's NULL holds no JSON text, so an `Option` reads it apart.
-            let json =
-                path(if field.ty.is_option() { "optional_json_column" } else { "json_column" });
+            let reader = if field.ty.is_option() { "optional_json_column" } else { "json_column" };
+            let json = path(macros, reader);
             quote!(#json(row, #column)?)
         }
         Reading::Spread { path: fragment, .. } => {
@@ -56,7 +54,7 @@ fn read_field(field: &Field) -> TokenStream {
         Reading::MissingSpread { path: fragment, presence } => {
             let fragment = fragment_path(fragment);
             let at = column_at(field.column + presence);
-            let is_null = path("is_null");
+            let is_null = path(macros, "is_null");
             quote!(if #is_null(row, #at)? { None } else { Some(#fragment::read(row, #column)?) })
         }
     }
@@ -67,17 +65,17 @@ fn fragment_path(path: &str) -> syn::Path {
     syn::parse_str(path).expect("a fragment path that the compile of the columns checked")
 }
 
-fn row_type() -> TokenStream {
-    let row = path("sqlive_reads::Row");
+fn row_type(macros: &MacrosCrate) -> TokenStream {
+    let row = path(macros, "sqlive_reads::Row");
     quote!(&#row<'_>)
 }
 
 /// The structs of the JSON documents the header declares the shapes of, as
 /// visible as `visibility` makes them.
-fn shapes(shapes: &[Shape], visibility: &TokenStream) -> TokenStream {
-    let serde = path("serde");
-    let serde_text = format!("{GENERATED}::serde");
-    let hex = format!("{GENERATED}::hex_bytes");
+fn shapes(shapes: &[Shape], visibility: &TokenStream, macros: &MacrosCrate) -> TokenStream {
+    let serde = path(macros, "serde");
+    let serde_text = macros.generated("serde");
+    let hex = macros.generated("hex_bytes");
     let structs = shapes.iter().map(|shape| {
         let name = ident(&shape.name);
         let doc = format!("A JSON document of the shape `{}`.", shape.name);
@@ -119,16 +117,21 @@ fn visibility(exported: bool) -> TokenStream {
 /// A fragment's type, which reads its columns. Its items are `pub` when
 /// `exported` and `pub(crate)` otherwise, as a read's are (`read`). The fields
 /// are `pub(crate)` either way.
-pub(crate) fn fragment(header: &Header, fields: &[Field], exported: bool) -> String {
+pub(crate) fn fragment(
+    header: &Header,
+    fields: &[Field],
+    exported: bool,
+    macros: &MacrosCrate,
+) -> String {
     let visibility = visibility(exported);
     let name = ident(&header.name);
     let doc = format!("The columns of `{}`.", header.name);
     let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
     let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
-    let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
-    let row = row_type();
-    let result = path("sqlive_reads::SqliteResult");
-    let shapes = shapes(&header.shapes, &visibility);
+    let reads: Vec<TokenStream> = fields.iter().map(|field| read_field(field, macros)).collect();
+    let row = row_type(macros);
+    let result = path(macros, "sqlive_reads::SqliteResult");
+    let shapes = shapes(&header.shapes, &visibility, macros);
     quote! {
         #shapes
 
@@ -161,16 +164,17 @@ pub(crate) fn read(
     plan: &str,
     fields: &[Field],
     exported: bool,
+    macros: &MacrosCrate,
 ) -> String {
-    statement(header, sql, fields, Form::Read { exported, handle, plan })
+    statement(header, sql, fields, Form::Read { exported, handle, plan }, macros)
 }
 
 /// A write's statement and parameters, and its row when it returns columns.
 /// Its items are `pub(crate)` whatever the modules around the call: only the
 /// crate that writes a table's SQL changes it, so no other crate reaches the
 /// write's items.
-pub(crate) fn write(header: &Header, sql: &str, fields: &[Field]) -> String {
-    statement(header, sql, fields, Form::Write)
+pub(crate) fn write(header: &Header, sql: &str, fields: &[Field], macros: &MacrosCrate) -> String {
+    statement(header, sql, fields, Form::Write, macros)
 }
 
 /// What a generated statement is.
@@ -185,7 +189,13 @@ enum Form<'a> {
 
 /// The unit struct with the statement, the parameters struct, the row struct
 /// when the statement returns columns, and the trait impls of the call.
-fn statement(header: &Header, sql: &str, fields: &[Field], form: Form<'_>) -> String {
+fn statement(
+    header: &Header,
+    sql: &str,
+    fields: &[Field],
+    form: Form<'_>,
+    macros: &MacrosCrate,
+) -> String {
     let (visibility, noun) = match form {
         Form::Read { exported, .. } => (visibility(exported), "read"),
         Form::Write => (visibility(false), "write"),
@@ -202,43 +212,46 @@ fn statement(header: &Header, sql: &str, fields: &[Field], form: Form<'_>) -> St
     let bound: Vec<String> =
         header.parameters.iter().map(|parameter| format!(":{}", parameter.name)).collect();
     let lifetime = if header.borrows() { quote!(<'p>) } else { quote!() };
-    let to_sql = path("sqlive_reads::ToSql");
-    let statement = quote!(::sqlive_compose::Statement);
+    let to_sql = path(macros, "sqlive_reads::ToSql");
+    let statement = path(macros, "Statement");
     let params_doc = match form {
         Form::Read { .. } => format!("What the `{}` read's request binds.", header.name),
         Form::Write => format!("What the `{}` write binds.", header.name),
     };
-    let shapes = shapes(&header.shapes, &visibility);
+    let shapes = shapes(&header.shapes, &visibility, macros);
     let rows = if fields.is_empty() {
-        let write_trait = quote!(::sqlive_compose::Write);
+        let write_trait = path(macros, "Write");
         quote!(impl #lifetime #write_trait for #params_name #lifetime {})
     } else {
         let names: Vec<Ident> = fields.iter().map(|field| field.name.ident()).collect();
         let types: Vec<TokenStream> = fields.iter().map(|field| rust_type(&field.ty)).collect();
-        let reads: Vec<TokenStream> = fields.iter().map(read_field).collect();
-        let row = row_type();
-        let result = path("sqlive_reads::SqliteResult");
+        let reads: Vec<TokenStream> =
+            fields.iter().map(|field| read_field(field, macros)).collect();
+        let row = row_type(macros);
+        let result = path(macros, "sqlive_reads::SqliteResult");
         let row_doc = format!("A row of the `{}` {noun}.", header.name);
-        let returning = quote!(::sqlive_compose::Returning);
+        let returning = path(macros, "Returning");
         let marker = match form {
             Form::Read { handle, plan, .. } => {
                 let handle = match handle {
                     Handle::Writer => format_ident!("Writer"),
                     Handle::ReadOnly => format_ident!("ReadOnly"),
                 };
-                let handles = path("sqlive_reads");
+                let handles = path(macros, "sqlive_reads");
                 let plan = Literal::string(plan);
+                let read_trait = path(macros, "Read");
                 quote! {
-                    impl #lifetime ::sqlive_compose::Read for #params_name #lifetime {
+                    impl #lifetime #read_trait for #params_name #lifetime {
                         type Handle = #handles::#handle;
 
                         const PLAN: &'static str = #plan;
                     }
                 }
             }
-            Form::Write => quote! {
-                impl #lifetime ::sqlive_compose::WriteReturning for #params_name #lifetime {}
-            },
+            Form::Write => {
+                let write_trait = path(macros, "WriteReturning");
+                quote!(impl #lifetime #write_trait for #params_name #lifetime {})
+            }
         };
         quote! {
             #[doc = #row_doc]

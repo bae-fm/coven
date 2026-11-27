@@ -10,6 +10,7 @@ fn compile(lib: &str) -> Result<(), Vec<String>> {
     };
     let compiled = compile_crate(Input {
         crate_name: "photos".to_owned(),
+        macros_crate: "sqlive_compose".to_owned(),
         source_reader: &reader,
         manifests: Vec::new(),
         setup: compiler_setup(),

@@ -322,6 +322,7 @@ fn compile_for_a_writer(lib: &str) -> Result<Output, Vec<CompileError>> {
     setup.sql.push(WRITERS.to_owned());
     compile_crate(Input {
         crate_name: "tracker".to_owned(),
+        macros_crate: "sqlive_compose".into(),
         source_reader: &|path: &str| {
             (path == "src/lib.rs")
                 .then(|| lib.to_owned())

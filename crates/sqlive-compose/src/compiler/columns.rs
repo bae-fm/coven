@@ -9,8 +9,9 @@ use super::error::Cause;
 use super::header::{Declared, Header, RustType};
 use super::json;
 use super::lex::Token;
-use super::model::{strict_type, Field, FieldName, Reading};
+use super::model::{strict_type, Field, FieldName, MacrosCrate, Reading};
 use super::spread::{Place, Placed, Registry};
+use super::unit::Context;
 
 /// A result item and the result columns it gives.
 struct Span<'a> {
@@ -28,7 +29,7 @@ pub(crate) fn fields(
     core: &Core,
     prepared: &sqlive_reads::ProbedStatement,
     placed: &[Placed],
-    registry: &Registry,
+    context: &Context<'_>,
     sql: &str,
     tokens: &[Token],
 ) -> Result<Vec<Field>, Cause> {
@@ -37,13 +38,14 @@ pub(crate) fn fields(
     for span in &spans {
         if let Some((spread, alias)) = span.spread {
             let columns = &prepared.columns[span.start..span.start + span.width];
-            let field = spread_field(header, columns, span, (spread, alias), registry)?;
+            let field = spread_field(header, columns, span, (spread, alias), context.registry)?;
             push(header, &mut fields, field)?;
             continue;
         }
         let columns = prepared.columns.iter().enumerate().skip(span.start).take(span.width);
         for (position, column) in columns {
-            let field = column_field(header, span.item, column, position, (sql, tokens))?;
+            let macros = context.macros;
+            let field = column_field(header, span.item, column, position, (sql, tokens), macros)?;
             push(header, &mut fields, field)?;
         }
     }
@@ -207,6 +209,7 @@ fn column_field(
     column: &sqlive_reads::ProbedColumn,
     position: usize,
     (sql, tokens): (&str, &[Token]),
+    macros: &MacrosCrate,
 ) -> Result<Field, Cause> {
     let declared = header.declarations.iter().find(|declaration| declaration.column == column.name);
     let compound = column.nulls.as_ref().filter(|nulls| nulls.selects.len() > 1);
@@ -247,18 +250,16 @@ fn column_field(
             (ty.clone(), Reading::Value)
         }
         (None, Some(origin)) => {
-            let mapped =
-                origin.declared_type.as_deref().and_then(strict_type).ok_or_else(|| {
-                    Cause::UnmappedType {
-                        concerns: header.name.clone(),
-                        column: column.name.clone(),
-                        declared: origin
-                            .declared_type
-                            .clone()
-                            .unwrap_or_else(|| "no type".to_owned()),
-                    }
+            let mapped = origin
+                .declared_type
+                .as_deref()
+                .and_then(|declared| strict_type(declared, macros))
+                .ok_or_else(|| Cause::UnmappedType {
+                    concerns: header.name.clone(),
+                    column: column.name.clone(),
+                    declared: origin.declared_type.clone().unwrap_or_else(|| "no type".to_owned()),
                 })?;
-            let ty = if nullable { format!("Option<{mapped}>") } else { mapped.to_owned() };
+            let ty = if nullable { format!("Option<{mapped}>") } else { mapped };
             (RustType(ty), Reading::Value)
         }
         (None, None) => {
