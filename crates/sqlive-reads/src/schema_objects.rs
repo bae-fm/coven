@@ -46,6 +46,8 @@ pub struct MainSchema {
     /// Each table and view, by its name, ASCII lowercased as SQLite compares
     /// names.
     objects: HashMap<String, MainObject>,
+    /// The tables `MAIN_TABLES` lists, each by its stored name.
+    main_tables: Vec<String>,
 }
 
 /// One table or view of the main schema.
@@ -157,7 +159,11 @@ impl MainSchema {
                 Ok((object.stored.to_ascii_lowercase(), object))
             })
             .collect::<rusqlite::Result<_>>()?;
-        Ok(Self { objects })
+        let main_tables = connection
+            .prepare_cached(MAIN_TABLES)?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Self { objects, main_tables })
     }
 
     /// The table or view named `name`, in any ASCII letter case.
@@ -188,15 +194,9 @@ impl MainSchema {
         Some((&object.stored, kind))
     }
 
-    /// Every table of the main schema but SQLite's own, of each type
-    /// `MAIN_TABLES` lists.
+    /// Every table of the main schema but SQLite's own (`MAIN_TABLES`).
     pub(crate) fn tables(&self) -> impl Iterator<Item = &str> {
-        self.objects
-            .values()
-            .filter(|object| {
-                matches!(object.kind, ObjectKind::Table(_)) && !object.stored.starts_with("sqlite_")
-            })
-            .map(|object| object.stored.as_str())
+        self.main_tables.iter().map(String::as_str)
     }
 
     /// Whether the schema holds a table or view named `name`.
