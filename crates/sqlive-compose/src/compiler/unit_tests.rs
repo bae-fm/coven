@@ -266,6 +266,7 @@ fn sql_that_reads_a_table_function_qualifies_every_column() {
     }
     for sql in [
         "SELECT w.value + 0 AS n FROM json_each('[1]') AS w WHERE true ORDER BY n, w.key",
+        "SELECT w.value + 0 AS n FROM json_each('[1]') AS w ORDER BY (n)",
         "SELECT w.value + 0 AS n FROM json_each('[1]') AS w \
          UNION SELECT i.rowid FROM issues AS i ORDER BY n",
         "SELECT i.rowid AS n FROM issues AS i WHERE title = ''",

@@ -5,14 +5,13 @@
 
 use std::collections::BTreeSet;
 
-use sqlite3_parser::ast::{
-    As, Expr, FromClause, Name, OneSelect, ResultColumn, Select, SelectTable,
-};
+use sqlite3_parser::ast::{Expr, FromClause, Name, OneSelect, ResultColumn, Select, SelectTable};
 use sqlite3_parser::Bump;
 
 use crate::compiled_plan::Unanalyzable;
 use crate::schema_objects::{MainSchema, SchemaLookups};
-use crate::select_syntax::one_select;
+use crate::select_syntax::{one_select, order_term, OrderTerm};
+use crate::sql::unparenthesized;
 use crate::sql_walk::{Reads, Scope, Visit, Walk};
 use crate::view_trees::ViewTrees;
 
@@ -39,6 +38,16 @@ pub fn bare_column_beside_table_function(
     let BareNames { table_function, names, result_names } = walk.visit;
     let bare = names.into_iter().find(|(address, _)| !result_names.contains(address));
     Ok(Ok(bare.filter(|_| table_function).map(|(_, name)| name)))
+}
+
+/// Whether `expr`, a bare name, is the name of a column that one of
+/// `columns` takes with no AS.
+fn selects(columns: &[ResultColumn<'_>], expr: &Expr<'_>) -> bool {
+    let Expr::Id(term) = expr else { return false };
+    columns.iter().any(|column| {
+        matches!(column, ResultColumn::Expr(Expr::Qualified(_, name), None)
+            if Name(term.0) == Name(name.0))
+    })
 }
 
 /// What the walk of a statement finds.
@@ -76,29 +85,26 @@ impl Visit for BareNames {
         _first_row: bool,
         _reads: &Reads,
     ) -> rusqlite::Result<()> {
-        // A single SELECT's ORDER BY term names a result column by the name
-        // its AS gives; a compound's, which can name nothing else, also by
+        // An ORDER BY term names a result column of an arm by the name its
+        // AS gives it; a compound's, which can name nothing else, also by
         // the name of the column an arm selects.
-        let compounds = select.body.compounds.iter().flatten();
         let compound = select.body.compounds.is_some();
-        let arms = std::iter::once(&select.body.select).chain(compounds.map(|arm| &arm.select));
-        let columns = arms.filter_map(|arm| match arm {
-            OneSelect::Select { columns, .. } => Some(columns.iter()),
-            OneSelect::Values(_) => None,
-        });
-        let given: Vec<&str> = columns
-            .flatten()
-            .filter_map(|column| match column {
-                ResultColumn::Expr(_, Some(As::As(alias) | As::Elided(alias))) => Some(alias.0),
-                ResultColumn::Expr(Expr::Qualified(_, name), None) if compound => Some(name.0),
-                _ => None,
+        let compounds = select.body.compounds.iter().flatten();
+        let arms: Vec<&[ResultColumn<'_>]> = std::iter::once(&select.body.select)
+            .chain(compounds.map(|arm| &arm.select))
+            .filter_map(|arm| match arm {
+                OneSelect::Select { columns, .. } => Some(&columns[..]),
+                OneSelect::Values(_) => None,
             })
             .collect();
         for term in select.order_by.iter().flat_map(|terms| terms.iter()) {
-            if let Expr::Id(name) = &term.expr {
-                if given.iter().any(|given| Name(name.0) == Name(given)) {
-                    self.result_names.insert(address(&term.expr));
-                }
+            let expr = unparenthesized(&term.expr);
+            let names_a_column = arms.iter().any(|columns| {
+                matches!(order_term(columns, expr), OrderTerm::Alias(_))
+                    || compound && selects(columns, expr)
+            });
+            if names_a_column {
+                self.result_names.insert(address(expr));
             }
         }
         Ok(())
