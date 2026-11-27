@@ -77,22 +77,6 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
     }
 }
 
-/// The scope of each table among `sources`, whose own scopes are `found`.
-pub(crate) fn table_scopes(sources: &Sources, found: Vec<RowScope>) -> BTreeMap<String, RowScope> {
-    let mut scopes: BTreeMap<String, RowScope> = BTreeMap::new();
-    for (source, scope) in sources.sources.iter().zip(found) {
-        let Some(table) = source.table().filter(|_| !source.unread) else {
-            continue;
-        };
-        let scope = match scopes.remove(table) {
-            Some(other) => other.or(scope),
-            None => scope,
-        };
-        scopes.insert(table.to_owned(), scope);
-    }
-    scopes
-}
-
 /// The scope each of `sources` gives its rows, for a run bound to `values`
 /// that returned `last`, as `scopes` does. The sources placed after a sorted
 /// one look its rows up within its bound too.

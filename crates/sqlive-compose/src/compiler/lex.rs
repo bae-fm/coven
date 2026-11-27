@@ -173,6 +173,33 @@ pub(crate) fn tokens(sql: &str) -> Vec<Token> {
     tokens
 }
 
+/// Where the byte at `offset` of `apply`'s result under `edits` comes from.
+pub(crate) enum Origin<'a> {
+    /// The byte at this offset of the SQL, which no edit replaces.
+    Kept(usize),
+    /// The text of the edit that replaces this range of the SQL.
+    Edit(&'a Range<usize>),
+}
+
+/// Where the byte at `offset` of `apply(sql, edits)` comes from.
+pub(crate) fn origin(edits: &[(Range<usize>, String)], offset: usize) -> Origin<'_> {
+    let mut sorted: Vec<&(Range<usize>, String)> = edits.iter().collect();
+    sorted.sort_by_key(|(range, _)| range.start);
+    // The end of the last edit before `offset`, in the SQL and in the result.
+    let (mut replaced, mut written) = (0, 0);
+    for (range, text) in sorted {
+        let start = written + (range.start - replaced);
+        if offset < start {
+            break;
+        }
+        if offset < start + text.len() {
+            return Origin::Edit(range);
+        }
+        (replaced, written) = (range.end, start + text.len());
+    }
+    Origin::Kept(replaced + (offset - written))
+}
+
 /// Replace each range of `sql` that `edits` names, which don't overlap, in
 /// order of position.
 pub(crate) fn apply(sql: &str, edits: &[(Range<usize>, String)]) -> String {

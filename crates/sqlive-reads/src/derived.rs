@@ -273,6 +273,7 @@ pub(crate) fn read_derived_item<'a>(
                 qualifier,
                 term: None,
                 carried: None,
+                place: None,
                 unread: false,
                 columns: Default::default(),
                 either: Vec::new(),

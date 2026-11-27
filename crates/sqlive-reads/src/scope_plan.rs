@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
+use crate::read_report::ReadPlace;
 use crate::row_scope::Scopes;
 use crate::schema_objects::{MainSchema, SchemaLookups};
 use crate::scope_edge::{Edge, MemberValue};
@@ -38,6 +39,7 @@ use crate::scope_window::{read_window, Window};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
+use crate::table_places::Places;
 use crate::unread_columns::{ColumnRef, OutputRead};
 use crate::unreported_columns::{unreported_columns, Node, UnreportedColumns};
 use crate::view_trees::ViewTrees;
@@ -100,7 +102,7 @@ impl ScopePlan {
         statement: &Statement<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Self> {
-        Ok(Self::read(connection, schema, sql, statement, whole)?.0)
+        Ok(Self::read(connection, schema, sql, statement, whole, Places::Skip)?.0)
     }
 
     /// The plan `build` builds, with the names it looked up.
@@ -110,6 +112,7 @@ impl ScopePlan {
         sql: &str,
         statement: &Statement<'_>,
         whole: &WholeViews,
+        places: Places,
     ) -> rusqlite::Result<(Self, Found)> {
         let schema = &SchemaLookups::new(schema);
         let unread = |why: &str| -> rusqlite::Result<(Self, Found)> {
@@ -120,6 +123,7 @@ impl ScopePlan {
             };
             Ok((plan, Found::default()))
         };
+        let written = sql;
         let sql = number_parameters(sql, statement)?;
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
@@ -137,8 +141,9 @@ impl ScopePlan {
         let views = ViewTrees::new(&bump);
         let (unreported, picked) =
             unreported_columns(connection, schema, &functions, &views, select)?;
+        let written = (places == Places::Find).then_some(written);
         let (sources, size) =
-            Sources::read(connection, schema, select, whole, &functions, &views, &picked)?;
+            Sources::read(connection, schema, select, whole, &functions, &views, &picked, written)?;
         let plan = Self {
             sources: sources.map_err(|Unread(why)| why.to_owned()),
             unreported: Arc::new(unreported),
@@ -221,6 +226,10 @@ pub(crate) struct Source {
     /// (`derived::push_carried`). It narrows the source's scope, and decides
     /// nothing of the order the sources take values in.
     pub(crate) carried: Option<ScopeTerm>,
+    /// Where the SQL names its table or view: the CTE or view that writes
+    /// it, when one does, or the statement's own SQL, in a plan built to
+    /// report its places.
+    pub(crate) place: Option<ReadPlace>,
     /// Whether only a column nothing reads reads it, so the statement
     /// depends on none of its rows (`unread_columns.rs`).
     pub(crate) unread: bool,
@@ -372,6 +381,7 @@ impl Sources {
         functions: &Functions,
         views: &ViewTrees<'_>,
         picked: &BTreeSet<Node>,
+        written: Option<&str>,
     ) -> rusqlite::Result<(Result<Self, Unread>, ScopePlanSize)> {
         let mut planner = Planner {
             items: Vec::new(),
@@ -405,6 +415,9 @@ impl Sources {
         let live = planner.live();
         for item in planner.unread_items(&live) {
             planner.items[item].source.unread = true;
+        }
+        if let Some(written) = written {
+            planner.place_items(written, select);
         }
         let columns = planner.reference_columns(&live, picked)?;
         for (item, columns) in planner.items.iter_mut().zip(columns) {

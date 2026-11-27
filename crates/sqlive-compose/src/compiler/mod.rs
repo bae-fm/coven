@@ -27,7 +27,7 @@ use std::io;
 
 pub use crate_compile::compile_crate;
 pub use crate_report::CompiledCall;
-pub use error::{Cause, CompileError, Location, Warning};
+pub use error::{Cause, CompileError, Location, Warning, WholePlace};
 pub use header::{CallKind, HeaderError};
 pub use setup::{Function, Setup};
 

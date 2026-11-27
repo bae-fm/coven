@@ -52,7 +52,11 @@ fn a_plan_read_back_from_its_text_narrows_as_it_did() {
     let plan = compiled(&probe, TRACKS_OF);
     let decoded = CompiledPlan::decode(&plan.encode()).unwrap();
     assert_eq!(decoded.report(), plan.report());
-    assert_eq!(decoded.report().to_string(), "releases: keyed by id\ntracks: keyed by release_id");
+    assert_eq!(
+        decoded.report().to_string(),
+        "releases at line 1, column 38: keyed by id\n\
+         tracks at line 1, column 21: keyed by release_id"
+    );
     let connection = database(SCHEMA, true);
     let schema = MainSchema::read(&connection).unwrap();
     let checked = decoded.check(&connection, &schema, &WholeViews::new([])).unwrap();

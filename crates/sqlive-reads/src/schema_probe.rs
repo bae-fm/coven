@@ -16,6 +16,7 @@ use crate::read_report::ReadReport;
 use crate::result_nulls::{statement_nulls, ColumnNulls, SelectNull, StatementNulls};
 use crate::schema_objects::MainSchema;
 use crate::scope_plan::ScopePlan;
+use crate::table_places::Places;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
 /// SQLite can prepare a statement that calls it. It returns NULL when called.
@@ -213,7 +214,14 @@ impl SchemaProbe {
     pub fn read_report(&self, sql: &str) -> rusqlite::Result<ReadReport> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let plan = ScopePlan::build(&self.connection, &self.schema, sql, &statement, &self.whole)?;
+        let (plan, _) = ScopePlan::read(
+            &self.connection,
+            &self.schema,
+            sql,
+            &statement,
+            &self.whole,
+            Places::Find,
+        )?;
         Ok(ReadReport::of(&plan))
     }
 

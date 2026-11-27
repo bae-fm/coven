@@ -734,11 +734,9 @@ the page draws them together. A read may hold as much as it can without reading
 a table whole, and the author judges where one concern ends. The compiler checks
 only for whole-table reads.
 
-Across concerns, one statement reruns more than separate ones. For a read of the
-list and the selected issue together, sqlive reports `issues` as `looked up`,
-because sqlive keeps one scope for each table of a statement: one part fixes
-`project_id` and the other fixes `id`, and no single column is fixed in both.
-Selecting another issue would also run the list again.
+Across concerns, one statement reruns more than separate ones. A read of the
+list and the selected issue together runs both again after a write to the rows
+of either, and selecting another issue would also run the list again.
 
 A count of every issue in the tracker, added to the issue page, makes it depend
 on every issue:
@@ -749,9 +747,10 @@ FROM @issues::Issue AS issue
 WHERE issue.issue_id = :issue
 ```
 
-sqlive reports ``issues: whole: nothing narrows `every` ``, so a write to any
-issue runs the issue page again. The compiler warns on such a read (section 8),
-and the author moves the count into a read of its own.
+sqlive reports `issues` whole where the count names it, with the reason
+``nothing narrows `every` ``, so a write to any issue runs the issue page again.
+The compiler warns on such a read (section 8), and the author moves the count
+into a read of its own.
 
 **A list inside a row.** SQLite returns a flat set of rows, so a row with
 several lists needs a form for them.
@@ -776,9 +775,9 @@ SELECT issue.* FROM @issues::Issue AS issue
 WHERE :project IS NULL OR issue.project_id = :project
 ```
 
-sqlive reports this one as ``issues: whole: nothing narrows `i` ``. As two
-reads, `ProjectIssues` is keyed by `project_id`, and only `AllIssues` reads
-every issue.
+sqlive reports this one's `issues` whole, with the reason
+``nothing narrows `i` ``. As two reads, `ProjectIssues` is keyed by
+`project_id`, and only `AllIssues` reads every issue.
 
 A list whose length the request decides, such as the issues the person selected,
 goes in one parameter: a JSON array of their ids, read with `json_each`. SQL
@@ -1086,13 +1085,36 @@ compiler asks sqlive before it types the columns, so a shape that sqlive can't
 analyze is the error a call reports, not the column error that the shape also
 causes.
 
-**Whole-table reads.** When sqlive analyzes a statement and reports a table as
-read whole, the compiler warns and names the table and the reason. The build
-goes on, because some reads need every row, as `AllIssues` does:
+**Whole-table reads.** sqlive's report has an entry for each place a statement
+reads a table (sqlive's [SPEC.md](../sqlive/SPEC.md), section 12). For each
+place of a read that the report calls whole, the compiler gives one warning,
+which names the table, the place and the reason, so the author knows which place
+to change. A place that the statement narrows gets no warning, even when another
+place reads the same table whole. The build goes on, because some reads need
+every row, as `AllIssues` does:
+
+```sql
+SELECT issue.* FROM @issues::Issue AS issue
+```
 
 ```text
-warning: tracker/src/all_issues.rs:5:1: AllIssues reads every row of issues: nothing narrows `i`
+warning: tracker/src/all_issues.rs:5:1: AllIssues reads every row of issues in @issues::Issue, spread at line 1, column 21 of its SQL: nothing narrows `i`
 ```
+
+A line and a column count from 1 in the text of the call's SQL, and a column
+counts characters. The warning says where a place is in one of three ways:
+
+- Where the call's own SQL names the table, it gives the line and column of the
+  name: `at line 3, column 34 of its SQL`.
+- Where a spread brings the name, in its fragment's SQL or in SQL that its
+  arguments write, it gives the spread's marker and the marker's line and
+  column, as above. So two such places of one spread give two warnings that
+  name the same spread.
+- Where a view's SQL names the table, it gives the view, or the CTE of the
+  view's SQL that names it: ``in `assignees` ``.
+
+A CTE of the SQL that a read runs gives one warning for each place it reads a
+table whole, however many names read the CTE.
 
 The warning names what sqlive reruns the read for, not what SQLite reads on
 each run. A fragment that groups its rows and joins as a table can read every
@@ -1329,7 +1351,7 @@ F.2](../../spec/coven.md#f2-capabilities), itself. Its one entry point is
 When something fails, it returns its errors instead. Each error is a typed
 variant that holds its location, what it concerns and its cause, such as
 SQLite's own error in the example of section 8. A warning holds its location,
-the table and the reason. The build script turns both into text.
+the read's name, the table, the place and the reason. The build script turns both into text.
 
 **The setup step** holds the schema's SQL texts, in the order to run, and the
 name, argument count and determinism of each SQL function, and the name of each

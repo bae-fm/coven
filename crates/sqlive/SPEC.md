@@ -2063,15 +2063,31 @@ it binds against the column it fills.
 
 The report takes each parameter that a column is compared with to hold a value
 that isn't NULL and that SQLite compares as it is, and takes each run to return
-as many rows as its LIMIT. A table is *keyed* by a column when every read of it
-compares that column by `=`, `IN` or `IS` with a value, or joins it to a column
-that the joined read itself compares so. A table is *looked up* when sqlive
-narrows every read of it but no one column is compared in all of them. A table
-is *whole* when some read of it depends on every row, and the report then gives
-the reason for each such read. A view read whole is whole too, and so is each
-table the view reads, whatever the report says of that table's other reads. A
-statement sqlive can't narrow at all has one reason and no entries. The report's
-text holds one line for each entry.
+as many rows as its LIMIT. The report has one entry for each place the
+statement reads a table, and for each place it reads a view whole: each item of
+a FROM that names one. So a statement that reads one table by its key in one
+place and reads every row of it in another has two entries, and the second says
+which place to change. An entry gives the line and column where the statement's
+SQL writes the name, each from 1, and the column in characters. A name that a
+view's SQL writes has no such place, so its entry names the view, or the CTE of
+the view's SQL that writes it. Where two items of one view or such a CTE read
+one table by one name, they have one entry. A CTE that several names read gives
+each place in its SQL one entry.
+
+A place is *keyed* by a column when every read it gives compares that column by
+`=`, `IN` or `IS` with a value, or joins it to a column that the joined read
+itself compares so. A place is *looked up* when sqlive narrows every read it
+gives but no one column is compared in all of them. A place is *whole* when some
+read it gives depends on every row, and the entry then gives the reason for each
+such read. A view read whole is whole too, and so is each table the view reads,
+whatever the entries of that table's other places say. A statement sqlive can't
+narrow at all has one reason and no entries. The report's text holds one line
+for each entry, as in
+``tracks at line 2, column 25: whole: nothing narrows `b` ``.
+
+A plan that sqlive builds when it prepares a statement at run time doesn't look
+for the places in the statement's own SQL, because only a report shows them. A
+compiled plan (section 4) holds them.
 
 A test can also count the work. A connection's `test_track_work` counts into a
 `ConnectionWorkCounter`, whose `take` returns the `ConnectionWork` since the last
@@ -2104,15 +2120,36 @@ pub enum ReadReport {
     /// sqlive can't narrow the statement: it depends on every row of each
     /// table it reads.
     Whole { why: String },
-    /// One entry for each table it narrows or reads whole and each view it
-    /// reads whole, by name.
+    /// One entry for each place it reads a table or a view it reads whole,
+    /// by the object's name and then the place.
     Entries(Vec<ReadEntry>),
 }
 
 pub struct ReadEntry {
     /// The table or view, lowercase.
     pub object: String,
+    /// The place that reads it. A plan built to run a statement has none
+    /// for a name the statement's own SQL writes outside every CTE.
+    pub place: Option<ReadPlace>,
     pub rows: ReadRows,
+}
+
+/// Where SQL names a table or view a statement reads.
+pub enum ReadPlace {
+    /// Here in the statement's own SQL.
+    Statement(SqlPosition),
+    /// In the SQL of this view, or of this CTE that a view declares.
+    Within(String),
+}
+
+/// A place in a statement's SQL.
+pub struct SqlPosition {
+    /// The bytes before it.
+    pub offset: usize,
+    /// Its line, from 1.
+    pub line: usize,
+    /// Its column, from 1, in characters.
+    pub column: usize,
 }
 
 /// Which rows of one table or view a statement depends on.

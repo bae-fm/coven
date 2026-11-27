@@ -24,8 +24,18 @@ fn report_with(sql: &str, whole: &[&str]) -> ReadReport {
     read_report(&connection, sql, &WholeViews::new(whole.iter().copied())).unwrap()
 }
 
+/// The report of `sql` as `unplaced` writes it.
 fn report(sql: &str) -> String {
-    report_with(sql, &[]).to_string()
+    unplaced(report_with(sql, &[]))
+}
+
+/// `report`'s text without its places, for what each place's rows are; the
+/// tests of places are in `read_report_tests/places.rs`.
+fn unplaced(mut report: ReadReport) -> String {
+    if let ReadReport::Entries(entries) = &mut report {
+        entries.iter_mut().for_each(|entry| entry.place = None);
+    }
+    report.to_string()
 }
 
 #[track_caller]
@@ -128,7 +138,7 @@ fn a_view_sqlive_cannot_read_is_whole_beside_a_narrowed_table() {
 #[test]
 fn a_view_the_live_query_reads_whole_is_whole() {
     assert_eq!(
-        report_with("SELECT id FROM shown", &["shown"]).to_string(),
+        unplaced(report_with("SELECT id FROM shown", &["shown"])),
         "shown: whole: a view the live query reads whole"
     );
 }
@@ -151,7 +161,7 @@ fn a_join_is_keyed_by_its_own_partner_and_not_by_the_partners_other_reads() {
             "SELECT t.title, (SELECT count(*) FROM releases b)
              FROM releases r JOIN tracks t ON t.release_id = r.id WHERE r.id = ?1"
         ),
-        "releases: whole: nothing narrows `b`\ntracks: keyed by release_id"
+        "releases: whole: nothing narrows `b`\nreleases: keyed by id\ntracks: keyed by release_id"
     );
 }
 
@@ -186,8 +196,6 @@ fn a_table_narrowed_by_no_one_column_is_looked_up() {
         "SELECT title FROM tracks WHERE (id = 5) = ?1",
         "SELECT title FROM tracks WHERE (position > 2) > ?1",
         "SELECT title FROM tracks WHERE (release_id IS NULL) = ?1",
-        "SELECT title FROM tracks WHERE id = ?1 UNION ALL
-         SELECT title FROM tracks WHERE release_id = ?2",
     ] {
         assert_eq!(report(sql), "tracks: looked up", "{sql}");
     }
@@ -206,25 +214,13 @@ fn a_subquerys_window_is_looked_up() {
 }
 
 #[test]
-fn a_table_one_read_narrows_and_another_does_not_is_whole() {
-    assert_eq!(
-        report(
-            "SELECT (SELECT a.title FROM tracks a WHERE a.id = ?1),
-                    (SELECT count(*) FROM tracks b)"
-        ),
-        "tracks: whole: nothing narrows `b`"
-    );
-}
-
-#[test]
 fn a_table_read_through_a_name_of_a_view_read_whole_is_whole() {
     assert_eq!(
-        report_with(
+        unplaced(report_with(
             "WITH c AS (SELECT id, title FROM tracks WHERE id = ?1)
              SELECT c.title FROM c JOIN shown s",
             &["shown"]
-        )
-        .to_string(),
+        )),
         "shown: whole: a view the live query reads whole\n\
          tracks: whole: read through `c`, which a view read whole also names"
     );
@@ -239,18 +235,6 @@ fn a_table_read_through_a_cte_beside_a_view_the_parser_cannot_read_is_whole() {
         ),
         "tracks: whole: a view read whole that the parser can't read\n\
          unparsed: whole: a view the parser can't read"
-    );
-}
-
-#[test]
-fn each_reason_a_table_is_whole_is_listed_once() {
-    assert_eq!(
-        report("SELECT count(*) FROM tracks a, tracks b, tracks c WHERE c.id = ?1"),
-        "tracks: whole: nothing narrows `a`, nothing narrows `b`"
-    );
-    assert_eq!(
-        report("SELECT (SELECT count(*) FROM tracks a), (SELECT max(id) FROM tracks a)"),
-        "tracks: whole: nothing narrows `a`"
     );
 }
 
@@ -459,3 +443,6 @@ fn a_subquery_in_a_left_joined_parenthesized_join_narrows_as_a_table_does() {
         );
     }
 }
+
+#[path = "read_report_tests/places.rs"]
+mod places;

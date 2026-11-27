@@ -15,7 +15,7 @@ sqlive_compose::read!(AllIssues, r#"SELECT i.title FROM issues AS i"#);
     .unwrap();
     assert_eq!(
         output.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        ["src/lib.rs:2:1: AllIssues reads every row of issues: nothing narrows `i`"]
+        ["src/lib.rs:2:1: AllIssues reads every row of issues at line 1, column 21 of its SQL: nothing narrows `i`"]
     );
 }
 
@@ -68,12 +68,12 @@ sqlive_compose::read!(Assignee(issue: String), r#"
     assert!(output.warnings.is_empty());
     assert_eq!(
         shipped_plan(&code_of(&output, "Assignee.rs")).to_string(),
-        "issues: keyed by id\npeople: looked up"
+        "issues in `assignees`: keyed by id\npeople in `assignees`: looked up"
     );
     let output = compile(vec!["assignees".to_owned()]);
     assert_eq!(
         shipped_plan(&code_of(&output, "Assignee.rs")).to_string(),
-        "assignees: whole: a view the live query reads whole"
+        "assignees at line 2, column 24: whole: a view the live query reads whole"
     );
 }
 
@@ -209,8 +209,52 @@ sqlive_compose::read!(Counting { n: Option<i64> }, r#"SELECT w.n AS n FROM count
     assert_eq!(
         output.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
-            "src/lib.rs:2:1: Weird reads every row of weird: a NATURAL or RIGHT join",
-            "src/lib.rs:3:1: Counting reads every row of counting: a recursive CTE",
+            "src/lib.rs:2:1: Weird reads every row of weird at line 1, column 26 of its SQL: a NATURAL or RIGHT join",
+            "src/lib.rs:3:1: Counting reads every row of counting at line 1, column 22 of its SQL: a recursive CTE",
+        ]
+    );
+}
+
+/// Each place a statement reads a table whole is a warning that says where
+/// the call's own SQL writes it, by line and column, or which spread brings
+/// it. A place of the same table that the statement narrows gets none.
+#[test]
+fn each_place_read_whole_is_a_warning_that_says_where_it_is() {
+    let output = compile_lib(
+        r##"
+sqlive_compose::fragment!(Total { total: i64 }, r#"SELECT count(*) AS total FROM issues AS counted"#);
+sqlive_compose::read!(IssueAndTotal(issue: String) { total: i64 }, r#"
+    SELECT i.title,
+           (SELECT count(*) FROM issues AS every) AS total
+    FROM issues AS i WHERE i.id = :issue
+"#);
+sqlive_compose::read!(Twice { first: i64, second: i64 }, r#"
+    SELECT (SELECT count(*) FROM issues AS i) AS first,
+      (SELECT count(*) FROM issues AS i) AS second
+"#);
+sqlive_compose::read!(Spreading, r#"SELECT t.* FROM @crate::Total AS t"#);
+sqlive_compose::read!(After { total: i64, titles: i64 }, r#"
+    WITH spread AS (SELECT t.total FROM @crate::Total AS t)
+    SELECT spread.total, (SELECT count(*) FROM issues AS late) AS titles FROM spread
+"#);
+"##,
+    )
+    .unwrap();
+    assert_eq!(
+        output.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "src/lib.rs:3:1: IssueAndTotal reads every row of issues at line 3, column 34 of its \
+             SQL: nothing narrows `every`",
+            "src/lib.rs:8:1: Twice reads every row of issues at line 2, column 34 of its SQL: \
+             nothing narrows `i`",
+            "src/lib.rs:8:1: Twice reads every row of issues at line 3, column 29 of its SQL: \
+             nothing narrows `i`",
+            "src/lib.rs:12:1: Spreading reads every row of issues in @crate::Total, spread at \
+             line 1, column 17 of its SQL: nothing narrows `counted`",
+            "src/lib.rs:13:1: After reads every row of issues in @crate::Total, spread at \
+             line 2, column 41 of its SQL: nothing narrows `counted`",
+            "src/lib.rs:13:1: After reads every row of issues at line 3, column 48 of its SQL: \
+             nothing narrows `late`",
         ]
     );
 }

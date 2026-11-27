@@ -4,6 +4,7 @@
 //! FROM, whose parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
+use crate::read_report::ReadPlace;
 use crate::schema_objects::{DeclaredColumn, SchemaLookups};
 use crate::scope_plan::{is_name, Object, Place, Planner, Source, Unread, Written};
 use crate::scope_row::{row_term, RowExpression};
@@ -165,6 +166,9 @@ pub(crate) struct FromItem {
     pub(crate) cte: Option<usize>,
     /// The sides of each OR that narrows it (`scope_or.rs`).
     pub(crate) ors: Vec<Vec<crate::scope_or::Side>>,
+    /// The address of the text of the table's or view's name in the syntax
+    /// tree its FROM was read from (`table_places.rs`).
+    pub(crate) named: Option<usize>,
 }
 
 impl FromItem {
@@ -215,6 +219,7 @@ pub(crate) fn read_item<'a>(
         cte: None,
         ors: Vec::new(),
         grouped: false,
+        named: None,
     };
     match table {
         SelectTable::Table(name, alias, _) => {
@@ -249,6 +254,7 @@ pub(crate) fn read_item<'a>(
             let ordinary = kind == "table";
             let contentful = kind == "virtual";
             let stored = stored.to_owned();
+            let written = name.name.0;
             let name = stored.to_ascii_lowercase();
             let object = if kind == "view" {
                 let why = if planner.whole.contains(&stored) {
@@ -315,13 +321,14 @@ pub(crate) fn read_item<'a>(
                     stored_from,
                 )
             };
-            Ok(Ok(item(
+            let found = item(
                 Source {
                     object,
                     from: Some(from),
                     qualifier,
                     term: None,
                     carried: None,
+                    place: planner.within.clone().map(ReadPlace::Within),
                     unread: false,
                     columns: Default::default(),
                     either: Vec::new(),
@@ -329,7 +336,8 @@ pub(crate) fn read_item<'a>(
                 },
                 columns,
                 None,
-            )))
+            );
+            Ok(Ok(FromItem { named: Some(written.as_ptr() as usize), ..found }))
         }
         SelectTable::TableCall(name, args, alias) => {
             if !in_main(name) {
@@ -354,6 +362,7 @@ pub(crate) fn read_item<'a>(
                     qualifier,
                     term: None,
                     carried: None,
+                    place: None,
                     unread: false,
                     columns: Default::default(),
                     either: Vec::new(),

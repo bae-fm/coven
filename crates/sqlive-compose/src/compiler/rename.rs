@@ -28,11 +28,16 @@ pub(crate) fn renamed(prefix: &str, name: &str) -> String {
 /// table, named by `prefix`. A table read without an alias keeps its old
 /// name as one, so the columns the SQL qualifies by it still resolve.
 pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
+    lex::apply(sql, &edits(sql, prefix, relations))
+}
+
+/// The edits by which `rename` renames.
+pub(crate) fn edits(sql: &str, prefix: &str, relations: &[String]) -> Vec<(Range<usize>, String)> {
     let tokens = lex::tokens(sql);
     let declared = declarations(sql, &tokens);
     let names = renamed_names(sql, relations);
     if names.is_empty() {
-        return sql.to_owned();
+        return Vec::new();
     }
     let mut edits = Vec::new();
     for cte in &declared {
@@ -54,7 +59,7 @@ pub(crate) fn rename(sql: &str, prefix: &str, relations: &[String]) -> String {
         let text = if item.alias.is_some() { new } else { format!("{new} AS {original}") };
         edits.push((tokens[*at].range.clone(), text));
     }
-    lex::apply(sql, &edits)
+    edits
 }
 
 /// The names `rename` renames, lowercase: the CTEs the SQL declares, at any

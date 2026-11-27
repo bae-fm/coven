@@ -77,6 +77,8 @@ pub(crate) struct Placed {
 pub(crate) struct Expansion {
     pub(crate) sql: String,
     pub(crate) placed: Vec<Placed>,
+    /// Each spread's range in the SQL before, and the text that replaces it.
+    pub(crate) edits: Vec<(Range<usize>, String)>,
 }
 
 /// The paths the markers of `sql` name, as written, and not `@parent`.
@@ -167,7 +169,7 @@ pub(crate) fn expand(
         placed.push(Placed { alias, record: record.clone(), place });
         index = next;
     }
-    Ok(Expansion { sql: lex::apply(sql, &edits), placed })
+    Ok(Expansion { sql: lex::apply(sql, &edits), placed, edits })
 }
 
 fn arguments_of(

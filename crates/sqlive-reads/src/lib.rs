@@ -36,6 +36,7 @@ pub mod sql;
 mod sql_value;
 mod sql_walk;
 mod table_keys;
+mod table_places;
 mod token_scan;
 mod told_apart;
 mod unread_columns;
@@ -49,7 +50,7 @@ pub use compiled_plan::{
 pub use read_capture::{ReadCapture, ReadFrame, WholeViews};
 #[cfg(any(test, feature = "test-utils"))]
 pub use read_report::read_report;
-pub use read_report::{ReadEntry, ReadReport, ReadRows};
+pub use read_report::{ReadEntry, ReadPlace, ReadReport, ReadRows};
 pub use read_set::{
     affected, affected_by, past_row_limit, Answers, ColumnSet, ReadSet, RowChange, TableRead,
     ValueKey, ROWS_PER_TABLE,
@@ -68,3 +69,4 @@ pub use scope_plan::{ScopePlan, ScopePlanSize};
 pub use scope_row::RowCondition;
 pub use scope_term::Affinity;
 pub use sql_value::{parameters, SqlValue};
+pub use table_places::SqlPosition;

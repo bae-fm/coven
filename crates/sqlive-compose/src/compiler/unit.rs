@@ -2,17 +2,20 @@
 //! against the schema, its columns typed, and its Rust written.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
+
+use sqlive_reads::{ReadPlace, SqlPosition};
 
 use super::columns;
 use super::core::{self, all_from_items};
-use super::error::{Cause, CompileError, Warning};
+use super::error::{Cause, CompileError, Warning, WholePlace};
 use super::generate;
 use super::header::{Header, HeaderKind};
-use super::lex;
+use super::lex::{self, Origin};
 use super::model::{Field, Reading, Record};
 use super::rename;
 use super::source::Call;
-use super::spread::{self, Place, Placed, Registry};
+use super::spread::{self, Expansion, Place, Placed, Registry};
 use super::write;
 
 /// What compiling a call needs of the crate it is in.
@@ -34,6 +37,42 @@ pub(crate) struct Compiled {
     pub(crate) reads: BTreeSet<String>,
 }
 
+/// Where a call whose SQL is `written` reads a table or view whole: `place`
+/// is where the SQL the read runs names it, which `renames` and then
+/// `expansion`'s spreads made of `written`.
+fn whole_place(
+    written: &str,
+    renames: &[(Range<usize>, String)],
+    expansion: &Expansion,
+    place: ReadPlace,
+) -> WholePlace {
+    // A rename replaces a CTE's or relation's name with text that starts
+    // where the name does.
+    let unrenamed = |offset| match lex::origin(renames, offset) {
+        Origin::Kept(offset) => offset,
+        Origin::Edit(range) => range.start,
+    };
+    let position = |offset| {
+        let SqlPosition { line, column, .. } = SqlPosition::at(written, offset);
+        (line, column)
+    };
+    match place {
+        ReadPlace::Within(name) => WholePlace::Within(name),
+        ReadPlace::Statement(run) => match lex::origin(&expansion.edits, run.offset) {
+            Origin::Kept(offset) => {
+                let (line, column) = position(unrenamed(offset));
+                WholePlace::Sql { line, column }
+            }
+            Origin::Edit(spread) => {
+                let at = unrenamed(spread.start);
+                let marker = lex::tokens(&written[at..])[0].text(&written[at..]).to_owned();
+                let (line, column) = position(at);
+                WholePlace::Spread { marker, line, column }
+            }
+        },
+    }
+}
+
 /// Compile `call`, whose header is `header`.
 pub(crate) fn compile(
     context: &Context<'_>,
@@ -52,7 +91,8 @@ pub(crate) fn compile(
     let prefix = format!("{crate_path}__{}", header.name);
     let relation_names: Vec<String> =
         header.relations().iter().map(|relation| relation.name.clone()).collect();
-    let renamed = rename::rename(&header.sql, &prefix, &relation_names);
+    let renames = rename::edits(&header.sql, &prefix, &relation_names);
+    let renamed = lex::apply(&header.sql, &renames);
     let reads = own_reads(header);
     let expansion =
         spread::expand(context.registry, &header.name, header.parent().is_some(), &renamed)
@@ -96,10 +136,12 @@ pub(crate) fn compile(
         sqlive_reads::ReadReport::Entries(entries) if header.is_read() => {
             for entry in entries {
                 if let sqlive_reads::ReadRows::Whole { why } = entry.rows {
+                    let place = entry.place.expect("a compiled plan's report has each place");
                     warnings.push(Warning {
                         location: call.location.clone(),
                         concerns: header.name.clone(),
                         table: entry.object,
+                        place: whole_place(&header.sql, &renames, &expansion, place),
                         reason: why.join(", "),
                     });
                 }

@@ -450,8 +450,47 @@ impl std::error::Error for CompileError {
     }
 }
 
-/// A read that sqlive analyzes and reports whole in a table: the build goes
-/// on.
+/// Where a read reads a table or view whole. A line and a column count from
+/// 1 in the SQL the read's call writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WholePlace {
+    /// Where the call's SQL names it.
+    Sql {
+        /// The line of the name.
+        line: usize,
+        /// The column of the name.
+        column: usize,
+    },
+    /// In the SQL that a spread brings, a fragment's or one the spread's
+    /// arguments write.
+    Spread {
+        /// The spread's marker.
+        marker: String,
+        /// The line of the marker.
+        line: usize,
+        /// The column of the marker.
+        column: usize,
+    },
+    /// In the SQL of this view, or of this CTE that a view declares.
+    Within(String),
+}
+
+impl fmt::Display for WholePlace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sql { line, column } => {
+                write!(formatter, "at line {line}, column {column} of its SQL")
+            }
+            Self::Spread { marker, line, column } => {
+                write!(formatter, "in {marker}, spread at line {line}, column {column} of its SQL")
+            }
+            Self::Within(name) => write!(formatter, "in `{name}`"),
+        }
+    }
+}
+
+/// A place where a read that sqlive analyzes reads a table whole: the build
+/// goes on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Warning {
     /// The read's place.
@@ -460,6 +499,8 @@ pub struct Warning {
     pub concerns: String,
     /// The table or view the read depends on every row of.
     pub table: String,
+    /// The place that reads it.
+    pub place: WholePlace,
     /// sqlive's reasons.
     pub reason: String,
 }
@@ -468,8 +509,8 @@ impl fmt::Display for Warning {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}: {} reads every row of {}: {}",
-            self.location, self.concerns, self.table, self.reason
+            "{}: {} reads every row of {} {}: {}",
+            self.location, self.concerns, self.table, self.place, self.reason
         )
     }
 }

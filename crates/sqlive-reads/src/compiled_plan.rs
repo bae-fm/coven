@@ -14,6 +14,7 @@ use crate::read_report::ReadReport;
 use crate::schema_objects::MainSchema;
 use crate::scope_plan::{Found, ScopePlan};
 use crate::select_syntax::{Definition, Functions};
+use crate::table_places::Places;
 use crate::unreported_columns::UnreportedColumns;
 
 /// A read the compiler of sqlive-compose built: its SQL, and its scope plan
@@ -113,7 +114,8 @@ impl CompiledPlan {
         statement: &Statement<'_>,
         whole: &WholeViews,
     ) -> rusqlite::Result<Result<Self, Unanalyzable>> {
-        let (plan, found) = ScopePlan::read(connection, schema, sql, statement, whole)?;
+        let (plan, found) =
+            ScopePlan::read(connection, schema, sql, statement, whole, Places::Find)?;
         if let ReadReport::Whole { why } = ReadReport::of(&plan) {
             return Ok(Err(Unanalyzable { why }));
         }

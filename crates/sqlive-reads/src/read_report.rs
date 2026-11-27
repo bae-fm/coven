@@ -7,9 +7,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::row_scope::RowScope;
-use crate::scope_lookup::{source_scopes, table_scopes};
+use crate::scope_lookup::source_scopes;
 use crate::scope_plan::{Object, ScopePlan, Source, Sources};
 use crate::scope_term::RunValues;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::table_places::Places;
+use crate::table_places::SqlPosition;
 
 /// What a live query's statement depends on, as its plan narrows what it
 /// reads. It also depends on every row of each table a view read whole reads,
@@ -22,39 +25,64 @@ pub enum ReadReport {
         /// Why the planner can't read it.
         why: String,
     },
-    /// One entry for each table the plan reads as a source and each view it
-    /// reads whole, by name.
+    /// One entry for each place the statement reads a table or a view it
+    /// reads whole, by the object's name and then the place.
     Entries(Vec<ReadEntry>),
 }
 
-/// What a statement depends on in one table, or one view read whole.
+/// What a statement depends on through one place that reads a table, or a
+/// view read whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadEntry {
     /// The table or view, lowercase.
     pub object: String,
+    /// The place that reads it. A plan built to run a statement finds no
+    /// place in the statement's own SQL, so its report has none for a name
+    /// written there outside every CTE.
+    pub place: Option<ReadPlace>,
     /// The rows the statement depends on.
     pub rows: ReadRows,
+}
+
+/// Where SQL names a table or view a statement reads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum ReadPlace {
+    /// Here in the statement's own SQL.
+    Statement(SqlPosition),
+    /// In the SQL of this view, or of this CTE that a view declares.
+    Within(String),
 }
 
 /// Which rows of one table or view a statement depends on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadRows {
-    /// Those that hold one of a few values in `column`: each read of the
-    /// table compares the column with a value by `=`, `IN` or `IS`, or with
+    /// Those that hold one of a few values in `column`: each read the place
+    /// gives compares the column with a value by `=`, `IN` or `IS`, or with
     /// another table's column that holds such values.
     Keyed {
         /// The column, lowercase.
         column: String,
     },
-    /// Those each read of the table narrows it to with no one column that
-    /// every read fixes: by a join, which a write looks up, a condition or a
-    /// LIMIT that a write asks SQLite about, an OR or a range.
+    /// Those the place narrows the table to with no one column that every
+    /// read it gives fixes: by a join, which a write looks up, a condition
+    /// or a LIMIT that a write asks SQLite about, an OR or a range.
     LookedUp,
     /// Every row.
     Whole {
-        /// Why, for each read of the table or view that nothing narrows.
+        /// Why, for each read the place gives that nothing narrows.
         why: Vec<String>,
     },
+}
+
+/// A table or view, a place that reads it and the name the place reads it
+/// by, which tells apart two places within one view.
+type PlaceKey<'a> = (&'a str, Option<&'a ReadPlace>, &'a str);
+
+/// What the reads one place gives depend on.
+#[derive(Default)]
+struct PlaceReads {
+    why: Vec<String>,
+    scope: Option<RowScope>,
 }
 
 impl ReadReport {
@@ -70,31 +98,38 @@ impl ReadReport {
             .and_then(|sorted| sorted.last_row(RunValues::Any))
             .map(|last| last.any_values());
         let scopes = source_scopes(sources, RunValues::Any, last.as_deref());
-        // Why each table is read whole, when it is, and each view is.
-        let mut whole: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        let read = sources.sources.iter().zip(&scopes).filter(|(source, _)| !source.unread);
-        for (source, scope) in read {
+        // The reads of each place, and why each is whole when it is: the
+        // planner reads a CTE's SQL once for each name that reads the CTE.
+        let mut places: BTreeMap<PlaceKey<'_>, PlaceReads> = BTreeMap::new();
+        for (source, scope) in sources.sources.iter().zip(scopes) {
+            if source.unread {
+                continue;
+            }
             let (object, why) = match &source.object {
                 Object::Table { name, within } => {
-                    (name, why_whole(sources, source, within.as_ref(), scope))
+                    (name, why_whole(sources, source, within.as_ref(), &scope))
                 }
                 Object::View { name, why, .. } => (name, Some(why.clone())),
                 Object::Function | Object::Derived => continue,
             };
-            let reasons = whole.entry(object).or_default();
-            reasons.extend(why.filter(|why| !reasons.contains(why)));
+            let key = (object.as_str(), source.place.as_ref(), source.qualifier.as_str());
+            let reads = places.entry(key).or_default();
+            reads.why.extend(why.filter(|why| !reads.why.contains(why)));
+            reads.scope = Some(match reads.scope.take() {
+                Some(other) => other.or(scope),
+                None => scope,
+            });
         }
-        let tables = table_scopes(sources, scopes);
-        let entries = whole.into_iter().map(|(object, why)| {
+        let entries = places.into_iter().map(|((object, place, _), PlaceReads { why, scope })| {
             let rows = if why.is_empty() {
-                match tables[object].key() {
+                match scope.as_ref().and_then(RowScope::key) {
                     Some((column, _)) => ReadRows::Keyed { column: column.to_owned() },
                     None => ReadRows::LookedUp,
                 }
             } else {
                 ReadRows::Whole { why }
             };
-            ReadEntry { object: object.to_owned(), rows }
+            ReadEntry { object: object.to_owned(), place: place.cloned(), rows }
         });
         Self::Entries(entries.collect())
     }
@@ -137,10 +172,25 @@ impl fmt::Display for ReadReport {
 impl fmt::Display for ReadEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let object = &self.object;
+        write!(formatter, "{object}")?;
+        if let Some(place) = &self.place {
+            write!(formatter, " {place}")?;
+        }
         match &self.rows {
-            ReadRows::Keyed { column } => write!(formatter, "{object}: keyed by {column}"),
-            ReadRows::LookedUp => write!(formatter, "{object}: looked up"),
-            ReadRows::Whole { why } => write!(formatter, "{object}: whole: {}", why.join(", ")),
+            ReadRows::Keyed { column } => write!(formatter, ": keyed by {column}"),
+            ReadRows::LookedUp => write!(formatter, ": looked up"),
+            ReadRows::Whole { why } => write!(formatter, ": whole: {}", why.join(", ")),
+        }
+    }
+}
+
+impl fmt::Display for ReadPlace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Statement(SqlPosition { line, column, .. }) => {
+                write!(formatter, "at line {line}, column {column}")
+            }
+            Self::Within(name) => write!(formatter, "in `{name}`"),
         }
     }
 }
@@ -178,7 +228,8 @@ pub fn read_report(
     let sql = crate::sql::up_to_nul(sql);
     let statement = connection.prepare(sql)?;
     let schema = crate::schema_objects::MainSchema::read(connection)?;
-    Ok(ReadReport::of(&ScopePlan::build(connection, &schema, sql, &statement, whole)?))
+    let (plan, _) = ScopePlan::read(connection, &schema, sql, &statement, whole, Places::Find)?;
+    Ok(ReadReport::of(&plan))
 }
 
 #[cfg(test)]
