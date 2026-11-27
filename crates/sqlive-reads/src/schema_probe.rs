@@ -84,8 +84,7 @@ pub struct TableColumn {
     pub not_null: bool,
 }
 
-/// An in-memory database that holds a schema's tables, views and triggers,
-/// and the views and tables the host's live queries read whole.
+/// An in-memory database that holds a schema's tables, views and triggers.
 pub struct SchemaProbe {
     connection: Connection,
     /// The schema `open` ran, which no later call changes: the probe prepares
@@ -97,8 +96,7 @@ impl SchemaProbe {
     /// A database that has run `schema`, a list of SQL texts, in order, after
     /// `functions` and `collations` were registered under the names the
     /// schema uses: SQLite refuses to prepare SQL that names a function or a
-    /// collation it doesn't know. A collation compares text byte by byte. A
-    /// live query of the host reads the views and tables named `whole` whole.
+    /// collation it doesn't know. A collation compares text byte by byte.
     pub fn open(
         schema: &[String],
         functions: &[StandInFunction],

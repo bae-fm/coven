@@ -515,10 +515,9 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
     db.close().await.unwrap();
 }
 
-/// A build analyzes app SQL against `readable_objects_sql`, naming no view
-/// to read whole, and a store runs each plan it ships: a compiled read of
-/// every table and view app SQL may read finds each as the build found it
-/// (§4).
+/// A build analyzes app SQL against `readable_objects_sql`, and a store
+/// runs each plan it ships: a compiled read of every table and view app SQL
+/// may read finds each as the build found it (§4).
 #[tokio::test]
 async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
     use crate::file_write::tests::open;
