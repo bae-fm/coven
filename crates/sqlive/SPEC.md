@@ -985,6 +985,15 @@ nothing out, even in a column its GROUP BY lists. A carried condition narrows
 only the table it is carried to: it doesn't change which table comes first, and
 an equality with an expression carries none.
 
+Among the tables that don't wait, as below, sqlive looks up first one that a
+table already looked up gives values to, then one with a condition of its own,
+then a table function or a subquery that no condition passes into, and then any
+other, each time the first in FROM. A subquery in FROM, a CTE or a view that
+conditions pass into goes where its tables would, written out: it has a
+condition of its own only when a table it reads has one. So `FROM albums AS a
+LEFT JOIN (SELECT * FROM releases) AS r ON r.album_id = a.id` looks `albums` up
+first, and a release added to an album the query doesn't show doesn't rerun it.
+
 A table narrowed by a subquery's value comes after the subquery's table, and the
 tables that reach rows through it come after it. An import pane reads a cell's
 cards with `FROM found AS f JOIN matched AS m ON m.verdict_id = f.verdict_id JOIN

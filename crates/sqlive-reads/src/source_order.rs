@@ -42,9 +42,10 @@ impl Planner<'_> {
     /// Order the items so each comes after the sources it takes values
     /// from: core by core, each after the core it sits in; within a core,
     /// those an ordered one reaches first, so each takes the values of the
-    /// sources the core's narrowing started from, then those with
-    /// conditions of their own, then views and table functions, which
-    /// nothing narrows but whose values others can take, in FROM order.
+    /// sources the core's narrowing started from, then those with values to
+    /// give of their own (`gives_alone`), then views read whole and table
+    /// functions, which nothing narrows but whose values others can take,
+    /// and then any, each in FROM order.
     pub(crate) fn ordered(mut self, sorted: Option<SortedLimit>) -> Sources {
         let mut order: Vec<usize> = Vec::new();
         let mut remaining: Vec<usize> =
@@ -119,13 +120,20 @@ impl Planner<'_> {
             self.cores[core].items.iter().copied().filter(|item| is_candidate(*item)).collect();
         let partners =
             |item: usize| edges.by_member[item].iter().map(|edge| self.edges[*edge].partner);
+        // A FROM item that conditions don't pass through, as a table function
+        // or a subquery with a LIMIT. A subquery, CTE or view that they do
+        // pass through goes as the tables it reads would, written out.
+        let read_whole = |item: usize| {
+            items[item].source.table().is_none()
+                && items[item].derived.as_ref().is_none_or(|derived| derived.arms.is_empty())
+        };
         // An item that takes values from a FROM item nothing narrows, a
         // table function whose columns no equality joins to another source,
         // goes after it, as the values are all of its narrowing.
         let takes_unplaced_values = |item: usize| {
             partners(item).any(|partner| {
                 is_candidate(partner)
-                    && items[partner].source.table().is_none()
+                    && read_whole(partner)
                     && items[partner].source.term.is_none()
                     && edges.by_member[partner].is_empty()
             })
@@ -137,12 +145,12 @@ impl Planner<'_> {
             .find(takes_placed_values)
             .or_else(|| {
                 candidates.iter().copied().find(|item| {
-                    items[*item].source.term.is_some() && !takes_unplaced_values(*item)
+                    (items[*item].source.term.is_some() || !read_whole(*item))
+                        && self.gives_alone(*item)
+                        && !takes_unplaced_values(*item)
                 })
             })
-            .or_else(|| {
-                candidates.iter().copied().find(|item| items[*item].source.table().is_none())
-            })
+            .or_else(|| candidates.iter().copied().find(|item| read_whole(*item)))
             .unwrap_or(free)
     }
 

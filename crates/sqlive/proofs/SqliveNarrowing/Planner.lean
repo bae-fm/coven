@@ -150,14 +150,16 @@ where
           | none, first :: _ =>
             let core := (s.item first).core
             let candidates := free.filter fun i => (s.item i).core == core
+            let readWhole (i : Nat) : Bool := PushDown.arms s i == some []
             let takesUnplacedValues (i : Nat) : Bool := st.edges.any fun e =>
               e.member == i && candidates.contains e.partner
-                && (s.table? e.partner).isNone && (st.items e.partner).term.isNone
+                && readWhole e.partner && (st.items e.partner).term.isNone
                 && !st.edges.any (·.member == e.partner)
             (candidates.find? fun i => st.edges.any fun e => e.member == i && order.contains e.partner)
               |>.orElse (fun _ => candidates.find? fun i =>
-                (st.items i).term.isSome && !takesUnplacedValues i)
-              |>.orElse (fun _ => candidates.find? fun i => (s.table? i).isNone)
+                ((st.items i).term.isSome || !readWhole i) && givesAlone s st s.fuel i
+                  && !takesUnplacedValues i)
+              |>.orElse (fun _ => candidates.find? readWhole)
               |>.getD first
           | none, [] => r
         let taken := st.edges.filter fun e => e.member == next && e.placedIn order

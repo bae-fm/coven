@@ -515,3 +515,38 @@ INSERT INTO u VALUES (1,2),(2,3)",
     .await;
     db.close();
 }
+
+/// A join looks a subquery's table up in the order it would the table
+/// written out: a subquery with no condition of its own, a LEFT JOIN's right
+/// side here, comes after the table it takes its values from, and one with a
+/// condition inside comes first. So a write to a row no joined row holds wakes
+/// nothing.
+#[tokio::test]
+async fn a_join_looks_a_subquerys_table_up_as_the_table_written_out() {
+    let db = TestDatabase::open(
+        "CREATE TABLE s(id INTEGER PRIMARY KEY);
+CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);
+INSERT INTO s VALUES (1),(2);
+INSERT INTO t VALUES (1,1),(2,2)",
+    );
+    follows(
+        &db,
+        "SELECT x.id, y.id FROM s AS x LEFT JOIN (SELECT * FROM t) AS y ON y.c = x.id ORDER BY 1, 2",
+        vec![],
+        &[
+            ("INSERT INTO t VALUES (3,9)", false),
+            ("DELETE FROM t WHERE id = 3", false),
+            ("INSERT INTO t VALUES (3,1)", true),
+            ("DELETE FROM t WHERE id = 3", true),
+        ],
+    )
+    .await;
+    follows(
+        &db,
+        "SELECT x.id FROM s AS x JOIN (SELECT * FROM t WHERE c < 10) AS y ON y.c = x.id ORDER BY 1",
+        vec![],
+        &[("INSERT INTO s VALUES (7)", false), ("DELETE FROM s WHERE id = 7", false)],
+    )
+    .await;
+    db.close();
+}
