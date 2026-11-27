@@ -359,7 +359,6 @@ impl Sources {
             within: None,
             declared_ctes: 0,
             selects: Vec::new(),
-            queries: Vec::new(),
             views,
             whole_names: Some(BTreeSet::new()),
         };
@@ -389,6 +388,15 @@ impl Sources {
     }
 }
 
+/// One SELECT the planner has read.
+pub(crate) struct ReadSelect {
+    pub(crate) node: Node,
+    /// Its arms' cores.
+    pub(crate) cores: Vec<usize>,
+    /// Whether it is volatile (`Planner::select_volatile`).
+    volatile: bool,
+}
+
 /// A statement's cores, their items and the edges between them, as the
 /// `read_` functions find them; each of those gives the reason for a shape
 /// that keeps every table whole.
@@ -413,12 +421,9 @@ pub(crate) struct Planner<'a, 'v> {
     pub(crate) within: Option<String>,
     /// How many CTEs the WITHs read so far declare, which numbers each.
     pub(crate) declared_ctes: usize,
-    /// Each SELECT the planner has read, by address, in the order it
-    /// finished reading them, and whether it is volatile
-    /// (`select_volatile`).
-    selects: Vec<(usize, bool)>,
-    /// Each SELECT the planner has read, with its arms' cores.
-    pub(crate) queries: Vec<(Node, Vec<usize>)>,
+    /// Each SELECT the planner has read, in the order it finished reading
+    /// them.
+    pub(crate) selects: Vec<ReadSelect>,
     /// Where the planner reads each view's syntax.
     pub(crate) views: &'a ViewTrees<'v>,
     /// The names, lowercase, SQLite can report a read through inside the
@@ -545,14 +550,13 @@ impl Planner<'_, '_> {
     /// clauses, ORDER BY and LIMIT, or any SELECT it read (its subqueries, and
     /// the subqueries, CTEs and views in its FROM).
     pub(crate) fn select_volatile(&self, select: &Select<'_>) -> bool {
-        let address = std::ptr::from_ref(select) as usize;
-        let (_, volatile) = self
-            .selects
+        let node = Node::query(select);
+        self.selects
             .iter()
             .rev()
-            .find(|(read, _)| *read == address)
-            .expect("the planner reads a SELECT before it asks whether it is volatile");
-        *volatile
+            .find(|read| read.node == node)
+            .expect("the planner reads a SELECT before it asks whether it is volatile")
+            .volatile
     }
 
     /// Whether a FROM subquery or CTE read in a core that sits in `parent`,
@@ -640,9 +644,8 @@ pub(crate) fn read_select<'a>(
     }
     volatile |= planner.volatile(cores[0], &found)
         || cores.iter().any(|core| planner.cores[*core].volatile)
-        || planner.selects[read_before..].iter().any(|(_, read)| *read);
-    planner.selects.push((std::ptr::from_ref(select) as usize, volatile));
-    planner.queries.push((Node::query(select), cores.clone()));
+        || planner.selects[read_before..].iter().any(|read| read.volatile);
+    planner.selects.push(ReadSelect { node: Node::query(select), cores: cores.clone(), volatile });
     Ok(Ok(cores))
 }
 

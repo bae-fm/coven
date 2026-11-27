@@ -75,10 +75,10 @@ impl Planner<'_, '_> {
         // its cores read, and those of the subqueries, CTEs and views they
         // read.
         let mut waiting: Vec<usize> = self
-            .queries
+            .selects
             .iter()
-            .filter(|(node, _)| picked.contains(node))
-            .flat_map(|(_, cores)| cores.iter().copied())
+            .filter(|read| picked.contains(&read.node))
+            .flat_map(|read| read.cores.iter().copied())
             .collect();
         waiting
             .extend((0..self.cores.len()).filter(|core| picked.contains(&self.cores[*core].node)));
