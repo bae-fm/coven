@@ -38,7 +38,7 @@ pub fn make_readable_objects(
         crate::coven_functions::register_views(
             setup,
             device,
-            &crate::memory_facts::ProcessFacts::new(observer),
+            &crate::memory_facts::ProcessFacts::new(observer)?,
             Some(sync_functions),
         )
     })?;

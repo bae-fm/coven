@@ -591,18 +591,19 @@ there: `coven_uploads.sending` is 1 for each file being sent, and
 `coven_sending` lists those files, one per upload in flight. A reopened store
 shows every file waiting.
 
-A live query that reads either runs again each time an upload starts or ends, as
-if a write had changed what it read. That includes one that only counts
-`coven_sending`'s rows, or asks whether it has any, and reads none of its
-columns: sqlive reads each view that reads coven's memory whole,
-`coven_uploads`, `coven_sending`, `coven_downloading`,
-`coven_device_only_downloading`, `coven_device_only_placed` and
-`coven_network`, so a read through one reads the view too ([sqlive's spec,
-section 3](../crates/sqlive/SPEC.md#views-read-whole)). A live query narrows
-every other view of coven's through the view's own SELECT, as it narrows the
-app's views. Ben's music app reads where the files of one album come from
-through `coven_file_reads`, and an upload of another album's file doesn't rerun
-that query. Ana's photo app shows how many
+The files being sent are the rows of a table coven keeps in memory,
+`_coven_sending`, one for each stored object in flight, keyed by its id
+([sqlive's spec, section
+3](../crates/sqlive/SPEC.md#tables-the-host-keeps-in-memory)). A live query
+judges an upload starting or ending as it judges a write that adds or deletes a
+row. It runs again when the object is one its read joins, and that includes one
+that only counts `coven_sending`'s rows, or asks whether it has any, and reads
+none of its columns. A live query narrows every view of coven's through the
+view's own SELECT, as it narrows the app's views. Ben's music app reads one
+album's uploads from `coven_upload_queue` joined to `coven_file_reads`, which
+says where each file comes from, and an upload of another album's file starting
+or ending doesn't run that query again. A query that read each view whole would
+run for every upload in the store. Ana's photo app shows how many
 of each album's photos are going out now as one live query over `coven_sending`
 and `photos`. Since `coven_sending` holds at most as many files as the upload
 limit lets go out at once, counting them finds each file's photo through an
@@ -622,9 +623,9 @@ before the read's statement gets to it. The read shows the photo paused and not
 being sent, as the store stood at its snapshot. If the read took the sending
 files from memory as its statement ran, it would show the photo paused, from its
 snapshot, and being sent, from after the resume, a state the store never held.
-So the files in flight are one of the values coven keeps in memory beside the
-database, which each read copies as it fixes its snapshot ([sqlive's spec,
-section 3](../crates/sqlive/SPEC.md#values-the-host-keeps-in-memory)).
+So each read takes the table of files in flight as it fixes its snapshot, and
+reads it as it stood then until it ends ([sqlive's spec, section
+3](../crates/sqlive/SPEC.md#tables-the-host-keeps-in-memory)).
 
 Which files are being downloaded to keep whole is the same kind of fact. Ben
 prepares a pin of an album of 12 tracks; the prepare downloads up to the
@@ -632,28 +633,25 @@ download limit's number at once (§17.8). `coven_pins` lists none of them until
 the write committing the pin, and nothing stored says which are downloading
 now. `coven_downloading` lists
 each stored file this process is downloading to keep whole, for an app's pin,
-from the same memory and the same copy at each snapshot. Its live query runs
-again as
-each download starts or ends, and a reopened store lists none. A read that
-fetches a range into the cache isn't keeping a file whole, so it isn't listed.
+from a second such table, `_coven_downloading`, which each read takes at its
+snapshot too. Its live query runs again as a download it shows starts or ends,
+and a reopened store lists none. A read that fetches a range into the cache
+isn't keeping a file whole, so it isn't listed.
 
-App SQL reaches uploads and pin downloads in flight through these three views. The
-functions behind them, `_coven_sending`, `_coven_sending_objects` and
-`_coven_downloading_objects`, refuse a direct call, or one in the app's own view
-or trigger, with `StatementForbidden`: a live query learns that it read them
-from the views' columns, and would never run again otherwise. A read-only
-handle transfers nothing, so it shows every file waiting and none
-downloading.
+App SQL reaches uploads and pin downloads in flight through these three views.
+The tables behind them are coven's own, so app SQL that reads one, or an app's
+view or trigger that does, fails with `InternalTable`, as for every table of
+coven's. A read-only handle transfers nothing, so it shows every file waiting
+and none downloading.
 
 `coven_device_only_downloading` lists the files this process is downloading
-into a folder the person chose (§17.3). Its live queries run again as
-each download starts or ends. Only the view reads which copies are
-in flight, through `_coven_copy_download_paths`. The transaction that
-records a copy at its final path moves it into `coven_device_only_placed`.
-The placed view reads that record while the call holds its reservation.
-App SQL reaches the reservations only through this view, which reads
-`_coven_reserved_copy_paths`. A live query stops showing an abandoned copy
-as soon as the app drops the call, even when a disk step still holds the
+into a folder the person chose (§17.3), from `_coven_copy_downloads`, a table
+in memory that lists each copy in flight by its path. Its live queries run again
+as a download they show starts or ends. The transaction that records a copy at
+its final path moves it into `coven_device_only_placed`. The placed view reads
+that record while `_coven_reserved_copies`, another such table, lists the path:
+while the call holds its reservation. A live query stops showing an abandoned
+copy as soon as the app drops the call, even when a disk step still holds the
 copy to finish its work.
 
 What a file waits for lasts, and is in `coven_uploads`: the pause, a retry
@@ -670,14 +668,16 @@ first read is already true. The third is the setting to move files only on
 unmetered networks, which is stored. Ben's music app shows "Waiting for
 Wi-Fi" beside the albums it is pinning while both `metered` and
 `unmetered_only` say 1, and a live query that reads the view runs again as the
-network changes, as one reading `coven_sending` does as an upload starts.
+network changes.
 `coven_uploads.metered` says the same of each file the setting holds, as
-`paused` does for the pause. The network's facts come to SQL through a
-function of coven's, `_coven_network`, which refuses a direct call as the
-transfer functions do. A read sees the network as it stood at its snapshot, in
-the same copy as the files in flight, so one row of `coven_upload_phases`
-never pairs a send that a better network let start with the network from
-before it.
+`paused` does for the pause. The network's facts are the one row of a table in
+memory, `_coven_network`. No key narrows a fact about the whole device, so a
+change to it runs again each live query that reads `coven_network`,
+`coven_uploads` or `coven_upload_phases`, the views that say what the network
+holds, and no live query that reads none of them.
+A read sees the network as it stood at its snapshot, as it sees the files in
+flight, so one row of `coven_upload_phases` never pairs a send that a better
+network let start with the network from before it.
 
 The sync state (§19.1) is one row of `coven_sync_state`: the state's kind,
 when sync last finished, the pending record that names the state, and the
@@ -2891,9 +2891,8 @@ doesn't, when the database opens and after migrating.
   coven judges it there as it judges the app's statements. Otherwise a
   trigger on `coven_pins` could copy `_coven_cache`'s paths into an app table,
   and the app would read coven's tables after all. The same preparing at open
-  refuses a trigger that reads coven's tables with `InternalTable`, and one
-  that calls what only coven's views may, such as `_coven_sending_objects`, with
-  `StatementForbidden`.
+  refuses a trigger that reads coven's tables, those it keeps in memory
+  included (§4), with `InternalTable`.
 - **Following `coven_files` changes only this device.** The trigger writes no
   synced table and changes no record, so a migration that makes or drops one
   changes nothing that syncs, like one changing a local table, and is declared

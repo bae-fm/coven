@@ -4,9 +4,7 @@
 //! removal of what a failing call made.
 
 use super::{BytesWriting, FileDatabase, StoreDatabase};
-use crate::memory_facts::{MemoryFacts, SharedFacts};
 use crate::sqlite::StoreSql;
-use crate::store_failure::StoreHandle;
 use crate::{DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::task::{BugSinkRef, CarriesBug, TaskFailed};
@@ -14,9 +12,8 @@ use coven_foundation::{
     files::{Flushed, ObservedFile},
     id_source::FileId,
 };
-use sqlive::rusqlite::functions::FunctionFlags;
 use sqlive::rusqlite::params;
-use sqlive::{Setup, SnapshotValue};
+use sqlive::{HostTables, SqlValue};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -228,65 +225,32 @@ impl StoreDatabase {
     }
 }
 
-/// The functions app SQL reaches only through the device-only copy views.
-pub(crate) const FUNCTIONS: [&str; 2] =
-    ["_coven_copy_download_paths", "_coven_reserved_copy_paths"];
-pub(crate) const DOWNLOAD_VIEW: [(&str, &str); 1] = [("coven_device_only_downloading", "")];
-pub(crate) const PLACED_VIEW: [(&str, &str); 1] = [("coven_device_only_placed", "")];
-
-/// Register the copy paths as they stood at each transaction's snapshot.
-pub(crate) fn register_copy_paths(
-    setup: &Setup<'_, crate::app_policy::CovenPolicy>,
-    at_snapshot: SnapshotValue<Arc<MemoryFacts>>,
-) -> sqlive::rusqlite::Result<()> {
-    type Paths = fn(&MemoryFacts) -> Vec<&String>;
-    let paths: [Paths; 2] = [
-        |facts| facts.copy_downloads.iter().collect(),
-        |facts| {
-            facts
-                .reserved_copies
-                .iter()
-                .filter_map(|(path, copy)| copy.held().then_some(path))
-                .collect()
-        },
-    ];
-    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
-    for (function, paths) in FUNCTIONS.into_iter().zip(paths) {
-        let at_snapshot = at_snapshot.clone();
-        setup.scalar_function(function, 0, flags, move |_| {
-            serde_json::to_string(&paths(&at_snapshot.get()))
-                .map_err(|error| sqlive::rusqlite::Error::UserFunctionError(Box::new(error)))
-        })?;
-    }
-    Ok(())
+/// A path as the host tables of copies key it.
+fn path_key(path: &str) -> SqlValue {
+    SqlValue::Text(path.as_bytes().to_vec())
 }
 
-/// One active download to a device-only copy. Dropping it clears the
-/// in-memory fact, including when preparing the copy fails or is cancelled.
+/// One active download to a device-only copy, which `_coven_copy_downloads`
+/// lists. Dropping it clears the row, including when preparing the copy
+/// fails or is cancelled.
 pub struct CopyDownload {
-    facts: SharedFacts,
-    observer: StoreHandle,
+    tables: HostTables,
     path: String,
 }
 
 impl CopyDownload {
-    pub(crate) fn start(
-        facts: SharedFacts,
-        observer: StoreHandle,
-        path: String,
-    ) -> Result<Self, DbError> {
-        if !facts.change(|facts| facts.copy_downloads.insert(path.clone())) {
+    pub(crate) fn start(tables: HostTables, path: String) -> Result<Self, DbError> {
+        let listed = tables.change(|rows| rows.put("_coven_copy_downloads", vec![path_key(&path)]));
+        if listed {
             return Err(DbError::Invariant { what: "only one download writes a reserved copy" });
         }
-        observer.changed_without_write(&DOWNLOAD_VIEW);
-        Ok(Self { facts, observer, path })
+        Ok(Self { tables, path })
     }
 }
 
 impl Drop for CopyDownload {
     fn drop(&mut self) {
-        self.facts.change(|facts| facts.copy_downloads.remove(&self.path));
-        self.observer.changed_without_write(&DOWNLOAD_VIEW);
+        self.tables.change(|rows| rows.delete("_coven_copy_downloads", &[path_key(&self.path)]));
     }
 }
 
@@ -453,51 +417,84 @@ impl CopyPaths {
     }
 }
 
-/// Release the copies that one dropped call or one write held. A live
-/// query sees every release in the batch at the same snapshot.
-pub(crate) fn release_reservations(
-    facts: &SharedFacts,
-    observer: &StoreHandle,
-    reservations: &[CopyPaths],
-) {
+/// The paths of copies calls reserve, and which calls can still switch them.
+/// `_coven_reserved_copies` lists each path whose call can, changed in the
+/// same step as the reservations. Clones share them.
+#[derive(Clone)]
+pub(crate) struct ReservedCopies {
+    paths: Arc<Mutex<BTreeMap<String, ReservedCopy>>>,
+    tables: HostTables,
+}
+
+impl ReservedCopies {
+    /// No path reserved yet.
+    pub(crate) fn new(tables: HostTables) -> Self {
+        Self { paths: Arc::default(), tables }
+    }
+
+    /// The reservations as they stand now, which none changes while `read`
+    /// runs.
+    pub(crate) fn with<R>(&self, read: impl FnOnce(&BTreeMap<String, ReservedCopy>) -> R) -> R {
+        read(&lock_unpoisoned(&self.paths))
+    }
+
+    /// Change the reservations of `touched` paths with `change`, and list
+    /// each of those paths in the table exactly while its call can switch
+    /// its copy. A live query sees every change in the batch at the same
+    /// snapshot.
+    fn change<'a>(
+        &self,
+        touched: impl IntoIterator<Item = &'a String>,
+        change: impl FnOnce(&mut BTreeMap<String, ReservedCopy>),
+    ) {
+        self.tables.change(|rows| {
+            let mut paths = lock_unpoisoned(&self.paths);
+            change(&mut paths);
+            for path in touched {
+                if paths.get(path).is_some_and(ReservedCopy::held) {
+                    rows.put("_coven_reserved_copies", vec![path_key(path)]);
+                } else {
+                    rows.delete("_coven_reserved_copies", &[path_key(path)]);
+                }
+            }
+        });
+    }
+}
+
+/// Release the copies that one dropped call or one write held.
+pub(crate) fn release_reservations(reserved: &ReservedCopies, reservations: &[CopyPaths]) {
     if reservations.iter().all(|reservation| reservation.paths.is_empty()) {
         return;
     }
-    let changed = facts.change(|facts| {
-        let mut changed = false;
+    let touched = reservations.iter().flat_map(|reservation| &reservation.paths);
+    reserved.change(touched, |copies| {
         for reservation in reservations {
             for path in &reservation.paths {
-                if let Some(copy) = reservation.owned_copy(&mut facts.reserved_copies, path) {
-                    changed |= copy.held();
-                    facts.reserved_copies.remove(path);
+                if reservation.owned_copy(copies, path).is_some() {
+                    copies.remove(path);
                 }
             }
         }
-        changed
     });
-    if changed {
-        observer.changed_without_write(&PLACED_VIEW);
-    }
 }
 
 /// The copies one call is writing, kept out of removals until the last of
 /// its reservation and the steps it runs drops.
 pub(crate) struct CopyNames {
-    facts: SharedFacts,
-    observer: StoreHandle,
+    reserved: ReservedCopies,
     /// Until a write takes them to release once it has decided.
     paths: Mutex<CopyPaths>,
 }
 
 impl CopyNames {
-    pub(crate) fn new(facts: SharedFacts, observer: StoreHandle, paths: Vec<String>) -> Self {
+    pub(crate) fn new(reserved: ReservedCopies, paths: Vec<String>) -> Self {
         let reservation = Arc::new(());
         let copy =
             ReservedCopy { reservation: reservation.clone(), state: CopyReservationState::Held };
-        facts.change(|facts| {
-            facts.reserved_copies.extend(paths.iter().cloned().map(|path| (path, copy.clone())));
+        reserved.change(&paths, |copies| {
+            copies.extend(paths.iter().cloned().map(|path| (path, copy.clone())));
         });
-        Self { facts, observer, paths: Mutex::new(CopyPaths { reservation, paths }) }
+        Self { reserved, paths: Mutex::new(CopyPaths { reservation, paths }) }
     }
 
     fn abandon(&self) {
@@ -505,26 +502,20 @@ impl CopyNames {
         if paths.paths.is_empty() {
             return;
         }
-        let changed = self.facts.change(|facts| {
-            let mut changed = false;
+        self.reserved.change(&paths.paths, |copies| {
             for path in &paths.paths {
-                if let Some(copy) = paths.owned_copy(&mut facts.reserved_copies, path) {
+                if let Some(copy) = paths.owned_copy(copies, path) {
                     copy.state = CopyReservationState::Abandoned;
-                    changed = true;
                 }
             }
-            changed
         });
-        if changed {
-            self.observer.changed_without_write(&PLACED_VIEW);
-        }
     }
 }
 
 impl Drop for CopyNames {
     fn drop(&mut self) {
         let reservation = lock_unpoisoned(&self.paths);
-        release_reservations(&self.facts, &self.observer, std::slice::from_ref(&*reservation));
+        release_reservations(&self.reserved, std::slice::from_ref(&*reservation));
     }
 }
 

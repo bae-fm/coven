@@ -38,8 +38,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     let file = statement.file.as_str();
     let sql = statement.template.as_str();
     match (file, sql, relation) {
-        ("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z" | "w") => Some(
-            "the view lists every queued file, which its link to its upload enumerates; the pause and setting tables hold at most one row each",
+        ("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z" | "w" | "n" | "s") => Some(
+            "the view lists every queued file, which its link to its upload enumerates; the pause and setting tables and the network's table in memory hold at most one row each, and the table in memory of files being sent holds one row per upload in flight",
         ),
         ("coven_cache_bytes", "SELECT * FROM coven_cache_bytes", "b" | "coven_cache_bytes") => {
             Some("the view lists every namespace the app declared, each grouped with its partials")
@@ -71,37 +71,34 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_user_files", "SELECT * FROM coven_user_files", "u") => {
             Some("the view lists every user original this device records")
         }
-        ("coven_sending", "SELECT * FROM coven_sending", "j") => {
+        ("coven_sending", "SELECT * FROM coven_sending", "s") => {
             Some("the files being sent, one per upload in flight, from this process's memory")
         }
-        ("coven_downloading", "SELECT * FROM coven_downloading", "j") => Some(
+        ("coven_downloading", "SELECT * FROM coven_downloading", "d") => Some(
             "the files being downloaded to keep whole, one per download in flight, from this process's memory",
         ),
         (
             "coven_device_only_downloading",
             "SELECT * FROM coven_device_only_downloading",
-            "j" | "coven_device_only_downloading",
+            "d" | "coven_device_only_downloading",
         ) => Some("the paths of copies in flight, from this process's memory, and their files"),
-        ("coven_device_only_placed", "SELECT * FROM coven_device_only_placed", "j" | "coven_device_only_placed") =>
+        ("coven_device_only_placed", "SELECT * FROM coven_device_only_placed", "r" | "coven_device_only_placed") =>
             Some("the reserved paths from this process's memory, and the files of their placed copies"),
         (
             "coven_upload_phases",
             "SELECT * FROM coven_upload_phases",
-            "one" | "s" | "r" | "w" | "z" | "x" | "y",
+            "one" | "s" | "r" | "n" | "w" | "z" | "x" | "y",
         ) => Some(
-            "the network's constant row, the status, retry, pause, setting and write pause tables, which hold at most one row each, and the subqueries that give one row and one row per queued file",
+            "a constant row, the status, retry, network, pause, setting and write pause tables, which hold at most one row each, the table in memory of files being sent, one per upload in flight, and the subqueries that give one row and one row per queued file",
         ),
         ("coven_upload_phases", "SELECT * FROM coven_upload_phases", "l") => {
             Some("the view lists every queued file, which its link to its upload enumerates")
         }
-        ("coven_upload_phases", "SELECT * FROM coven_upload_phases", "j") => {
-            Some("the files being sent, one per upload in flight, from this process's memory")
-        }
         ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") => {
             Some("one constant row, and the pause table holds at most one row")
         }
-        ("coven_network", "SELECT * FROM coven_network", "one" | "w") => {
-            Some("one constant row, and the setting's table holds at most one row")
+        ("coven_network", "SELECT * FROM coven_network", "one" | "n" | "w") => {
+            Some("one constant row, and the network's and the setting's tables hold at most one row each")
         }
         ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") => {
             Some("the table lists every pinned file")
@@ -226,9 +223,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_sync_state", "SELECT * FROM coven_sync_state", "f") => Some(
             "the walk to the first queued bound upload with no record and no retry, in id order over the unstored bound ones, stops at its first match",
         ),
-        ("coven_sync_state", "SELECT * FROM coven_sync_state", "j") => {
-            Some("the files being sent, one per upload in flight, from this process's memory")
-        }
         (
             "sync_facts.rs",
             "SELECT u.id,u.original,o.id,m.id FROM _coven_file_uploads AS u LEFT JOIN _coven_pending AS o ON o.work='upload' AND o.device=u.device AND o.object=u.object LEFT JOIN _coven_pending AS m ON m.move=u.move ORDER BY u.id",

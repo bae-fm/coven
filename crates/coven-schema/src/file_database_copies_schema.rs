@@ -7,11 +7,11 @@
 // prepare one file at different paths, so each view lists distinct files.
 pub(super) const VIEWS: &str = "
     CREATE VIEW coven_device_only_downloading(file) AS
-        SELECT DISTINCT c.file FROM json_each(_coven_copy_download_paths()) AS j
-        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='writing';
+        SELECT DISTINCT c.file FROM _coven_copy_downloads AS d
+        CROSS JOIN _coven_copies AS c ON c.path=d.path WHERE c.state='writing';
     CREATE VIEW coven_device_only_placed(file) AS
-        SELECT DISTINCT c.file FROM json_each(_coven_reserved_copy_paths()) AS j
-        CROSS JOIN _coven_copies AS c ON c.path=j.value WHERE c.state='placed';
+        SELECT DISTINCT c.file FROM _coven_reserved_copies AS r
+        CROSS JOIN _coven_copies AS c ON c.path=r.path WHERE c.state='placed';
 ";
 
 macro_rules! coven_device_only_copies_tables {

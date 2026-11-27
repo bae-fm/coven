@@ -73,19 +73,16 @@ async fn the_setting_persists_and_the_network_does_not() {
     db.close().await.unwrap();
 }
 
-/// App SQL reads the network only through coven's views, whose columns tell
-/// a live query to run again as it changes.
+/// App SQL reads the network only through coven's views: the table that
+/// holds it is coven's own.
 #[tokio::test]
 async fn app_sql_reads_the_network_only_through_the_views() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    for statement in ["SELECT _coven_network_usable()", "SELECT _coven_network_metered()"] {
+    for statement in ["SELECT usable FROM _coven_network", "SELECT count(*) FROM _coven_network"] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
-        assert!(
-            matches!(error, crate::DbError::StatementForbidden { .. }),
-            "{statement}: {error:?}"
-        );
+        assert!(matches!(error, DbError::InternalTable { .. }), "{statement}: {error:?}");
     }
     db.close().await.unwrap();
 }

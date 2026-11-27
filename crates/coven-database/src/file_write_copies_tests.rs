@@ -346,7 +346,7 @@ async fn a_failed_device_only_write_releases_its_copy_reservations_together() {
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotInCloud { file: refused } if refused == file));
-    assert_eq!(notices.pending_notices_for("coven_device_only_placed"), 1);
+    assert_eq!(notices.pending_notices_for("_coven_reserved_copies"), 1);
     assert!(placed.is_marked_for_rerun());
     assert_eq!(db.read(count_placed).await.unwrap(), 0);
     db.close().await.unwrap();

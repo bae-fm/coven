@@ -80,8 +80,8 @@ async fn the_upload_read_does_not_scan_the_queue() {
     // `s` and `r` are the status and retry rows, one each; `w` and `q` count
     // the send queue and the upload queue; `f` is the id-ordered walk under
     // LIMIT 1 over the unstored bound uploads alone, `p` first the pending
-    // records with an object, then every record the state reads, and `j` the
-    // files in flight, read once by each of the two walks that leave out the
+    // records with an object, then every record the state reads, and the other
+    // `s` the table of files in flight, read once by each of the two walks that leave out the
     // upload being sent and once to mark the uploads being sent. SQLite
     // searches `u`, the outer read of the queue, only by its primary key, and
     // the retry rows through their upload index.
@@ -94,9 +94,9 @@ async fn the_upload_read_does_not_scan_the_queue() {
             "SCAN q USING COVERING INDEX _coven_file_uploads_move",
             "SCAN p USING INDEX _coven_pending_object",
             "SCAN f USING INDEX _coven_file_uploads_bound_unstored",
-            "SCAN j VIRTUAL TABLE INDEX 1:",
-            "SCAN j VIRTUAL TABLE INDEX 1:",
-            "SCAN j VIRTUAL TABLE INDEX 1:",
+            "SCAN s VIRTUAL TABLE INDEX 0:",
+            "SCAN s VIRTUAL TABLE INDEX 0:",
+            "SCAN s VIRTUAL TABLE INDEX 0:",
             "SCAN p"
         ],
         "{plan:#?}"

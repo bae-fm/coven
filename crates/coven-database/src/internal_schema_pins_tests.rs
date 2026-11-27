@@ -268,10 +268,10 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
         (
             "CREATE TABLE sending(files TEXT NOT NULL PRIMARY KEY);
              CREATE TRIGGER sent AFTER DELETE ON coven_pins BEGIN
-                 INSERT INTO sending VALUES(_coven_sending_objects());
+                 INSERT INTO sending SELECT object FROM _coven_sending;
              END",
-            DbError::StatementForbidden {
-                operation: "reading what is being transferred outside coven_uploads, coven_sending and coven_downloading",
+            DbError::InternalTable {
+                table: "_coven_sending".into(),
             },
         ),
     ] {

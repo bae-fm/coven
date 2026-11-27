@@ -1,6 +1,7 @@
 //! Coven's state as the app's SQL reads it (Appendix C.1, api.md E4): views
 //! over coven's own tables, so they are true in every transaction that
-//! changes those tables. App SQL reads them and nothing writes them.
+//! changes those tables, and over the tables of what coven keeps in memory
+//! (`MEMORY_TABLES`). App SQL reads them and nothing writes them.
 //!
 //! Each view reads each of its tables through a column, in a join or a
 //! subquery: SQLite names the view to the authorizer for each column the
@@ -45,6 +46,37 @@ pub const READABLE: [&str; 28] = [
     "coven_devices",
     "coven_circles",
     "coven_circle_members",
+];
+
+/// What coven keeps in memory for its views to read, each fact by its key
+/// (§4): the stored objects this process is sending and those it is
+/// downloading to keep whole, each with its uploader; the paths of the
+/// device-only copies it is downloading, and of those it still reserves to
+/// switch files to; and the device's network as it last heard of it, one row
+/// from the first it hears. A store's connections read them as host tables,
+/// whose rows this process keeps (`memory_facts.rs`). The text for an app's
+/// build script, and a test outside any store, makes them as ordinary
+/// tables, which stay empty.
+pub const MEMORY_TABLES: [&str; 5] = [
+    "CREATE TABLE _coven_sending (
+        object BLOB NOT NULL PRIMARY KEY,
+        device BLOB NOT NULL
+    ) STRICT, WITHOUT ROWID;",
+    "CREATE TABLE _coven_downloading (
+        object BLOB NOT NULL PRIMARY KEY,
+        device BLOB NOT NULL
+    ) STRICT, WITHOUT ROWID;",
+    "CREATE TABLE _coven_copy_downloads (
+        path TEXT NOT NULL PRIMARY KEY
+    ) STRICT, WITHOUT ROWID;",
+    "CREATE TABLE _coven_reserved_copies (
+        path TEXT NOT NULL PRIMARY KEY
+    ) STRICT, WITHOUT ROWID;",
+    "CREATE TABLE _coven_network (
+        id INTEGER PRIMARY KEY NOT NULL,
+        usable INTEGER,
+        metered INTEGER NOT NULL
+    ) STRICT;",
 ];
 
 pub(crate) const SCHEMA: &str = concat!(
@@ -98,21 +130,22 @@ pub(crate) const SCHEMA: &str = concat!(
     // Files sharing one upload share its place. The pause holds only
     // trailing uploads (§17.4), and so does the setting to move files only
     // on unmetered networks while the network is metered (§17.9). `sending`
-    // and the network are this process's, which no table holds
-    // (`transfers_in_flight.rs`, `network_facts.rs`). `move` is the upload's
-    // move, for the app to cancel, but never a bound upload's, which can't
-    // be cancelled.
+    // and the network are this process's (`MEMORY_TABLES`). `move` is the
+    // upload's move, for the app to cancel, but never a bound upload's,
+    // which can't be cancelled.
     "CREATE VIEW coven_uploads(file,position,paused,metered,retry_at,pending,
             bytes_confirmed,bytes_total,sending,move) AS
         SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,
-            w.unmetered_only IS NOT NULL AND _coven_network_metered() AND u.holds IS NULL,
+            w.unmetered_only IS NOT NULL AND coalesce(n.metered,0) AND u.holds IS NULL,
             _coven_unix_ms(r.not_before),e.value,
-            u.bytes_confirmed,u.bytes_total,_coven_sending(u.object),
+            u.bytes_confirmed,u.bytes_total,
+            EXISTS(SELECT 1 FROM _coven_sending AS s WHERE s.object=u.object),
             CASE WHEN u.holds IS NULL THEN u.move END
         FROM _coven_upload_files AS l
         JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_unmetered_only AS w
+        LEFT JOIN _coven_network AS n
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.object=u.object;",
     // What each file in this device's upload queue is doing, as `uploads()`
@@ -165,13 +198,15 @@ pub(crate) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_upload_pause(paused) AS
         SELECT z.paused IS NOT NULL FROM (SELECT 1) AS one
         LEFT JOIN _coven_upload_pause AS z;",
-    // The device's network as this process last heard of it, which no table
-    // holds (`network_facts.rs`), and the setting that holds transfers on a
-    // metered one, as one row (§17.9). The setting's one row, if any, joins
-    // a constant one.
+    // The device's network as this process last heard of it
+    // (`MEMORY_TABLES`), and the setting that holds transfers on a metered
+    // one, as one row (§17.9): before the process hears of a network, none is
+    // known usable or metered. The network's row, if any, and the setting's,
+    // if any, join a constant one.
     "CREATE VIEW coven_network(usable,metered,unmetered_only) AS
-        SELECT _coven_network_usable(),_coven_network_metered(),w.unmetered_only IS NOT NULL
+        SELECT n.usable,coalesce(n.metered,0),w.unmetered_only IS NOT NULL
         FROM (SELECT 1) AS one
+        LEFT JOIN _coven_network AS n
         LEFT JOIN _coven_unmetered_only AS w;",
     // The queued files this process is sending now, by each upload in
     // flight, each found by its uploader and object: counting a window's or
@@ -179,17 +214,15 @@ pub(crate) const SCHEMA: &str = concat!(
     // planning the few files innermost, behind a scan of the queue.
     "CREATE VIEW coven_sending(file,position) AS
         SELECT l.file,u.id
-        FROM json_each(_coven_sending_objects()) AS j
-        CROSS JOIN _coven_file_uploads AS u
-            ON u.device=unhex(substr(j.value,1,16)) AND u.object=unhex(substr(j.value,17))
+        FROM _coven_sending AS s
+        CROSS JOIN _coven_file_uploads AS u ON u.device=s.device AND u.object=s.object
         CROSS JOIN _coven_upload_files AS l ON l.upload=u.id;",
     // The stored files this process is downloading now to keep whole, by
     // each download in flight, each found by its stored bytes.
     "CREATE VIEW coven_downloading(file) AS
         SELECT f.file
-        FROM json_each(_coven_downloading_objects()) AS j
-        CROSS JOIN _coven_stored_files AS f
-            ON f.device=unhex(substr(j.value,1,16)) AND f.object=unhex(substr(j.value,17));",
+        FROM _coven_downloading AS d
+        CROSS JOIN _coven_stored_files AS f ON f.device=d.device AND f.object=d.object;",
     // Each namespace's cache on this device, in bytes (§17.8): its budget,
     // its chunks and headers (`cached`), which the budget counts, its
     // pinned whole copies (`pinned`), which it doesn't, and the partial

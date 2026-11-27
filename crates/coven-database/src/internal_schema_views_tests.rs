@@ -103,16 +103,13 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         // A table counted without a view in the statement.
         "SELECT count(*) FROM _coven_members",
         "SELECT * FROM coven_uploads JOIN _coven_pending",
+        // The tables of what coven keeps in memory.
+        "SELECT * FROM _coven_copy_downloads",
+        "SELECT * FROM _coven_reserved_copies",
     ] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(matches!(error, DbError::InternalTable { .. }), "{statement}: {error:?}");
-    }
-    for statement in ["SELECT _coven_copy_download_paths()", "SELECT _coven_reserved_copy_paths()"]
-    {
-        let error =
-            db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
-        assert!(matches!(error, DbError::StatementForbidden { .. }), "{error:?}");
     }
     db.close().await.unwrap();
 }
@@ -427,5 +424,135 @@ async fn a_write_commits_beside_a_read_of_a_view_joining_covens_tables() {
     // `_coven_circle_members`.
     TestStore::register(&db, coven_foundation::id_source::DeviceId(2), 2);
     assert!(!members.is_marked_for_rerun());
+    db.close().await.unwrap();
+}
+
+/// A live query that reads which of one release's files this process is
+/// sending and downloading runs again as a transfer of its own file starts or
+/// ends, and not as one of another release's does. One that reads no view
+/// that names the network doesn't run again as the network changes (§4).
+#[tokio::test]
+async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
+    use crate::file_write::tests::open;
+    use crate::Provenance;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let files = crate::FileDatabase::new(db.clone());
+    stage_row(&db, "a", b"first").await;
+    let own = files.uploads().await.unwrap().remove(0).location;
+    stage_row(&db, "b", b"second").await;
+    let other = files
+        .uploads()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|upload| upload.location)
+        .find(|location| location.object() != own.object())
+        .unwrap();
+    let file: coven_foundation::id_source::FileId = db
+        .read(|sql| {
+            Ok::<_, DbError>(
+                sql.query_row("SELECT file FROM files WHERE id='a'", [], |r| r.get(0))?,
+            )
+        })
+        .await
+        .unwrap();
+    let mut release: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query_row(
+            "SELECT coalesce((SELECT u.sending FROM coven_uploads AS u WHERE u.file=f.file),0),
+                    EXISTS(SELECT 1 FROM coven_sending AS s WHERE s.file=f.file)
+             FROM files AS f WHERE f.id='a'",
+            [],
+            |r| Ok((r.get::<_, bool>(0)?, r.get::<_, bool>(1)?)),
+        )?)
+    });
+    assert_eq!(crate::tests::next(&mut release).await, (false, false));
+    let progress = crate::TransferProgress { bytes_transferred: 0, bytes_total: 1 };
+    let start = |transfers: crate::InFlight, location: &crate::FileLocation, file| {
+        transfers.start(location.uploader(), location.object(), vec![file], progress)
+    };
+    drop(start(db.uploads_in_flight(), &other, file));
+    assert!(!release.is_marked_for_rerun(), "sending");
+    let mut listed: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query_row(
+            "SELECT count(*) FROM files AS f JOIN coven_sending AS s ON s.file=f.file
+             WHERE f.id='a'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?)
+    });
+    assert_eq!(crate::tests::next(&mut listed).await, 0);
+    db.record_network(coven_foundation::network_watch::NetworkState {
+        usable: Some(true),
+        metered: true,
+        joined: 1,
+    });
+    assert!(!listed.is_marked_for_rerun());
+    // `coven_uploads` says what the network holds, so a read of it follows
+    // the network too.
+    assert!(release.is_marked_for_rerun());
+    let sending = start(db.uploads_in_flight(), &own, file);
+    assert_eq!(crate::tests::next(&mut release).await, (true, true));
+    drop(sending);
+    assert_eq!(crate::tests::next(&mut release).await, (false, false));
+    // A pin downloads stored files.
+    crate::file_write::tests::complete_uploads(&db).await;
+    let mut pinning: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT d.file FROM files AS f JOIN coven_downloading AS d ON d.file=f.file
+             WHERE f.id='a'",
+            [],
+            |r| r.get::<_, coven_foundation::id_source::FileId>(0),
+        )?)
+    });
+    assert!(crate::tests::next(&mut pinning).await.is_empty());
+    drop(start(db.downloads_in_flight(), &other, file));
+    assert!(!pinning.is_marked_for_rerun(), "downloading");
+    let downloading = start(db.downloads_in_flight(), &own, file);
+    assert_eq!(crate::tests::next(&mut pinning).await, [file]);
+    drop(downloading);
+    assert!(crate::tests::next(&mut pinning).await.is_empty());
+    db.close().await.unwrap();
+}
+
+/// A build analyzes app SQL against `readable_objects_sql`, naming no view
+/// to read whole, and a store runs each plan it ships: a compiled read of
+/// every table and view app SQL may read finds each as the build found it
+/// (§4).
+#[tokio::test]
+async fn a_store_finds_what_a_build_found_in_every_readable_table_and_view() {
+    use crate::file_write::tests::open;
+    use crate::Provenance;
+    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
+        .iter()
+        .map(|function| sqlive::StandInFunction {
+            name: function.name.into(),
+            arguments: function.arguments,
+            deterministic: function.deterministic,
+        })
+        .collect();
+    let probe =
+        sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[], &[])
+            .unwrap();
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    for name in coven_schema::READABLE {
+        let sql: &'static str = Box::leak(format!("SELECT count(*) FROM {name}").into_boxed_str());
+        let plan = probe.compiled_plan(sql).unwrap().expect(name).encode();
+        let statement = sqlive::CompiledStatement { sql, plan: Box::leak(plan.into_boxed_str()) };
+        let mut query: crate::LiveQuery<_, DbError> = db
+            .subscribe(move |read| Ok(read.query_compiled(statement, [], |r| r.get::<_, i64>(0))?));
+        let answer = query.next_inline().await.unwrap();
+        // A test of the database crate opens a store without sync's
+        // computations, which these two views call.
+        if !matches!(name, "coven_sync_state" | "coven_upload_phases") {
+            answer.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        } else {
+            assert!(
+                !matches!(answer, Err(DbError::CompiledSchemaDiffers(_))),
+                "{name}: {answer:?}"
+            );
+        }
+    }
     db.close().await.unwrap();
 }

@@ -261,22 +261,21 @@ async fn reading_what_is_being_sent_costs() {
     }
 }
 
-/// App SQL reads what is being sent only through coven's views, whose
-/// columns tell a live query to run again as an upload starts or ends.
+/// App SQL reads what is being sent only through coven's views: the tables
+/// that list what is in flight are coven's own.
 #[tokio::test]
 async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    for statement in [
-        "SELECT _coven_sending_objects()",
-        "SELECT _coven_sending(zeroblob(16))",
-        "SELECT value FROM json_each(_coven_sending_objects())",
-        "SELECT _coven_downloading_objects()",
+    for (statement, table) in [
+        ("SELECT * FROM _coven_sending", "_coven_sending"),
+        ("SELECT object FROM _coven_sending WHERE object = zeroblob(16)", "_coven_sending"),
+        ("SELECT count(*) FROM _coven_downloading", "_coven_downloading"),
     ] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(
-            matches!(error, crate::DbError::StatementForbidden { .. }),
+            matches!(&error, crate::DbError::InternalTable { table: read } if read == table),
             "{statement}: {error:?}"
         );
     }
@@ -291,7 +290,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
                 Migration::addition(
                     2,
                     "sending",
-                    "CREATE VIEW mine AS SELECT _coven_sending_objects() AS files;
+                    "CREATE VIEW mine AS SELECT object AS files FROM _coven_sending;
                      CREATE TABLE copied(files TEXT NOT NULL PRIMARY KEY); INSERT INTO copied SELECT files FROM mine",
                 ),
             ],
@@ -301,7 +300,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
         .err()
         .expect("an app view of what is being sent is refused");
     assert!(
-        matches!(crate::tests::database_error(error), crate::DbError::StatementForbidden { .. }),
+        matches!(crate::tests::database_error(error), crate::DbError::InternalTable { .. }),
         "app view"
     );
 }
@@ -400,8 +399,10 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
 fn an_attempt_whose_entry_is_gone_fails_the_handle() {
     let bugs = coven_foundation::task::HeardBugs::shared();
     let handle = crate::store_failure::StoreHandle::recording_all(bugs.clone());
-    let transfers =
-        super::TransfersInFlight::new(handle.clone(), crate::memory_facts::SharedFacts::new());
+    let transfers = super::TransfersInFlight::new(
+        handle.clone(),
+        sqlive::HostTables::new(&coven_schema::MEMORY_TABLES).unwrap(),
+    );
     let uploads = transfers.uploads();
     let object = ObjectId(uuid::Uuid::from_u128(1));
     let file = FileId(uuid::Uuid::from_u128(2));

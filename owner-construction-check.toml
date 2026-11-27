@@ -1453,7 +1453,12 @@ tables = [
 # A device-only call's step that makes a name in the person's folder runs
 # to its end with its record as its own task, though the call is dropped
 # (§17.3).
-"crates/coven-database/src/file_database_copies.rs" = ["CopyReservation::run_step"]
+# `ReservedCopies::new` makes the one list of reserved copy paths of an open
+# store, which its calls and the table in memory of them share.
+"crates/coven-database/src/file_database_copies.rs" = [
+    "CopyReservation::run_step",
+    "ReservedCopies::new",
+]
 "crates/sqlive/src/read_pool.rs" = ["ReadPool::new"]
 # A database opens its writer, readers and upkeep threads, each connection
 # with a policy and setup of its own.
@@ -1494,12 +1499,12 @@ tables = [
     # the state its clones share.
     "CommitSubscription::new",
 ]
-# One per open store, which its connections' functions read and the
-# store's network follower tells (§4, §6.7).
+# One per open store, whose row the connections read and the store's network
+# follower tells (§4, §6.7).
 "crates/coven-database/src/network_facts.rs" = ["NetworkFacts::new"]
-# One per open store: the facts its connections' functions read at each
-# snapshot, shared by the transfers in flight and the network (§4).
-"crates/coven-database/src/memory_facts.rs" = ["SharedFacts::new", "ProcessFacts::new"]
+# One per open store: its tables in memory, which its connections read at
+# each snapshot, and what changes them (§4).
+"crates/coven-database/src/memory_facts.rs" = ["ProcessFacts::new"]
 # One per open store, with each way's shared state, which its handles
 # share (§4).
 "crates/coven-database/src/transfers_in_flight.rs" = [

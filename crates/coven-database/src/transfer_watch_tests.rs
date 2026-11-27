@@ -31,7 +31,7 @@ async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
 async fn a_reader_hears_each_file_whose_progress_moved() {
     let transfers = TransfersInFlight::new(
         StoreHandle::recording_all(coven_foundation::task::HeardBugs::shared()),
-        crate::memory_facts::SharedFacts::new(),
+        sqlive::HostTables::new(&coven_schema::MEMORY_TABLES).unwrap(),
     );
     let uploads = transfers.uploads();
     let first = uploads.start(DeviceId(1), object(1), vec![file(1)], progress(0, 100));
@@ -70,7 +70,7 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
 async fn a_reader_hears_how_each_transfer_ended() {
     let transfers = TransfersInFlight::new(
         StoreHandle::recording_all(coven_foundation::task::HeardBugs::shared()),
-        crate::memory_facts::SharedFacts::new(),
+        sqlive::HostTables::new(&coven_schema::MEMORY_TABLES).unwrap(),
     );
     let downloads = transfers.downloads();
     let start = |n| downloads.start(DeviceId(1), object(n), vec![file(n)], progress(0, 100));
@@ -108,7 +108,7 @@ async fn a_reader_hears_how_each_transfer_ended() {
 async fn an_ended_attempt_moves_no_later_one() {
     let transfers = TransfersInFlight::new(
         StoreHandle::recording_all(coven_foundation::task::HeardBugs::shared()),
-        crate::memory_facts::SharedFacts::new(),
+        sqlive::HostTables::new(&coven_schema::MEMORY_TABLES).unwrap(),
     );
     let downloads = transfers.downloads();
     let ended = downloads.start(DeviceId(1), object(1), vec![file(1)], progress(0, 100));
@@ -134,8 +134,10 @@ async fn an_ended_attempt_moves_no_later_one() {
 #[tokio::test]
 async fn closing_the_store_ends_the_watch() {
     let observer = StoreHandle::recording_all(coven_foundation::task::HeardBugs::shared());
-    let transfers =
-        TransfersInFlight::new(observer.clone(), crate::memory_facts::SharedFacts::new());
+    let transfers = TransfersInFlight::new(
+        observer.clone(),
+        sqlive::HostTables::new(&coven_schema::MEMORY_TABLES).unwrap(),
+    );
     let mut open = transfers.uploads().subscribe();
     assert_eq!(next(&mut open).await, [TransferChange::Reset(BTreeMap::new())]);
     let waiting = tokio::spawn(async move { open.next().await });

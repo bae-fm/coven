@@ -114,7 +114,7 @@ pub(crate) fn followed(name: &str) -> bool {
 mod views;
 #[cfg(test)]
 pub(crate) use coven_schema::READABLE;
-pub(crate) use views::{app_readable, whole_views};
+pub(crate) use views::app_readable;
 
 #[cfg(test)]
 #[path = "internal_schema_tests.rs"]

@@ -67,7 +67,7 @@ mod fixture {
                 crate::store_failure::StoreHandle::recording_all(
                     coven_foundation::task::HeardBugs::shared(),
                 ),
-            )
+            )?
             .register(setup)
         })
         .unwrap();

@@ -70,7 +70,7 @@ impl AudienceDatabase {
     ) -> Result<Self, DbError> {
         directory.remove_audience_database()?;
         let before = Schema::read(live, &crate::file_table::registered_columns(live)?)?;
-        let facts = crate::memory_facts::ProcessFacts::new(observer.clone());
+        let facts = crate::memory_facts::ProcessFacts::new(observer.clone())?;
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(setup, device, &facts, sync_functions)
         };

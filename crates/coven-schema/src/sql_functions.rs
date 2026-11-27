@@ -20,22 +20,15 @@ const fn function(name: &'static str, arguments: i32, deterministic: bool) -> Sq
 /// Every SQL function coven registers on a store's connection, by name. A test in coven-database
 /// compares this list with the functions a connection holds after `make_readable_objects`, so a
 /// function added, renamed or changed there fails that test until this list agrees.
-pub const SQL_FUNCTIONS: [SqlFunction; 28] = [
-    function("_coven_copy_download_paths", 0, false),
+pub const SQL_FUNCTIONS: [SqlFunction; 21] = [
     function("_coven_device", 0, false),
-    function("_coven_downloading_objects", 0, false),
     function("_coven_file_id", 1, true),
     function("_coven_file_of_key", 1, true),
     function("_coven_json_bytes", 1, true),
     function("_coven_loss_order", 2, true),
-    function("_coven_network_metered", 0, false),
-    function("_coven_network_usable", 0, false),
     function("_coven_request_joiner", 1, true),
     function("_coven_request_member", 1, true),
-    function("_coven_reserved_copy_paths", 0, false),
     function("_coven_rowid_changed", 0, false),
-    function("_coven_sending", 1, false),
-    function("_coven_sending_objects", 0, false),
     function("_coven_stored_device", 1, true),
     function("_coven_stored_object", 1, true),
     function("_coven_stored_object_path", 1, true),

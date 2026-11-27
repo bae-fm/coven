@@ -3829,33 +3829,29 @@ let moved = handle
   one value or more, up to the 1,000 an SQL call can pass; `coven_key()` with
   none fails the statement.
 - Whether a file is being sent now lasts only as long as the process, and is
-  never stored. `coven_uploads.sending` and `coven_sending` read it from the
-  upload worker's memory as it stood at the read's snapshot, and a live query
-  that reads either runs again each time an upload starts or ends. So does
-  whether a stored file is being
-  downloaded to keep whole, which `coven_downloading` reads, again as each
-  download starts or ends. Only these views reach it: calling
-  `_coven_sending`, `_coven_sending_objects` or `_coven_downloading_objects`
-  directly, or in the app's own view or trigger, fails with
-  `StatementForbidden`. A read-only handle transfers nothing, and shows every
-  file waiting and none downloading.
+  never stored. `coven_uploads.sending` and `coven_sending` read it from a table
+  the upload worker keeps in memory, as it stood at the read's snapshot, and a
+  live query that reads either runs again as an upload it shows starts or ends.
+  So does whether a stored file is being downloaded to keep whole, which
+  `coven_downloading` reads, again as each download it shows starts or ends. A
+  read-only handle transfers nothing, and shows every file waiting and none
+  downloading.
 - `coven_device_only_downloading` lists the files this process is downloading
-  to make device-only. A live query runs again when the download starts or ends.
-  `coven_device_only_placed` lists files with a copy coven has placed in the
-  chosen folder and still reserves for a switch. The placement transaction
-  moves the copy from one view to the other. The placed view reads placement
-  from the database and reservations from the process's snapshot. Each view
-  lists a file once, even when concurrent calls prepare it at different paths.
-  App SQL reaches `_coven_copy_download_paths` and `_coven_reserved_copy_paths`
-  only through these views. A read-only handle reserves and downloads no
+  to make device-only. A live query runs again when a download it shows starts
+  or ends. `coven_device_only_placed` lists files with a copy coven has placed
+  in the chosen folder and still reserves for a switch. The placement
+  transaction moves the copy from one view to the other. The placed view reads
+  placement from the database and reservations from memory, as they stood at the
+  read's snapshot. Each view lists a file once, even when concurrent calls
+  prepare it at different paths. A read-only handle reserves and downloads no
   copies, so both views are empty.
 - The device's network is the same kind of fact. `coven_network`'s `usable`
   and `metered`, and `coven_uploads.metered`, read it from the store's watch
   of the network (E5), as it stood at the read's snapshot, and a live query
-  that reads one runs again as the network changes. The function behind
-  them, `_coven_network`, refuses a direct call in the same way. A read-only
-  handle watches nothing: it shows `usable` NULL and nothing metered, with
-  the setting as stored.
+  that reads one runs again as the network changes. A read-only handle watches
+  nothing: it shows `usable` NULL and nothing metered, with the setting as
+  stored. The tables in memory behind these views are coven's own: app SQL that
+  reads one fails with `InternalTable`.
 - `coven_sync_state` and `coven_upload_phases` are the two views whose rows
   coven's own code computes. `coven_sync_state` reads the facts coven
   computes the sync state from and passes them to `_coven_sync_state`, which
@@ -3955,11 +3951,8 @@ let moved = handle
   test-utils feature, says which rows of each table and view a statement depends
   on when a live query runs it ([sqlive's spec, section
   12](../crates/sqlive/SPEC.md#12-testing-what-a-statement-depends-on)). The
-  views it reads whole are the ones its caller names. A coven store's live
-  queries read whole only the views that read coven's memory
-  ([§4](coven.md#4-writing-locally)), `coven_uploads`, `coven_sending`,
-  `coven_downloading`, `coven_device_only_downloading`,
-  `coven_device_only_placed` and `coven_network`. A test that depends on sqlive
+  views it reads whole are the ones its caller names, and a coven store's live
+  queries name none ([§4](coven.md#4-writing-locally)). A test that depends on sqlive
   asserts the report of Ben's album page, and fails when the page's statement
   starts to read `tracks` whole.
 

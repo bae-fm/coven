@@ -276,13 +276,13 @@ impl DatabaseBuilder {
             sync_functions: self.sync_functions.clone(),
         };
         let path = self.directory.database_path();
-        let whole = crate::internal_schema::whole_views();
+        let whole = Arc::new(sqlive::WholeViews::new([]));
         // Commits are reported here once the writer observes them, after
         // migrating; the transfers in flight report their starts and ends.
         let observer = store_observer(self.directory.bugs());
         #[cfg(test)]
         observer.refuse_upkeep_thread_after(self.upkeep_threads);
-        let facts = crate::memory_facts::ProcessFacts::new(observer.clone());
+        let facts = crate::memory_facts::ProcessFacts::new(observer.clone())?;
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(
                 setup,
@@ -396,7 +396,7 @@ impl DatabaseBuilder {
                 settings: coven_only_settings(),
                 readers: NonZeroUsize::MIN,
                 prepare_on_reader: false,
-                whole_views: crate::internal_schema::whole_views(),
+                whole_views: Arc::new(sqlive::WholeViews::new([])),
                 policy: &|| CovenPolicy::new(&[]),
                 setup: &input_setup,
                 capture: None,
@@ -487,12 +487,12 @@ impl DatabaseBuilder {
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
-        let whole = crate::internal_schema::whole_views();
+        let whole = Arc::new(sqlive::WholeViews::new([]));
         // Only the cache connection commits, and nothing subscribes to it.
         let observer = store_observer(self.directory.bugs());
         // A read-only handle transfers nothing: every file reads as waiting.
         // Nor does it watch the network: none is known (api.md E4).
-        let facts = crate::memory_facts::ProcessFacts::new(observer.clone());
+        let facts = crate::memory_facts::ProcessFacts::new(observer.clone())?;
         let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
             crate::coven_functions::register_views(
                 setup,
@@ -637,7 +637,7 @@ pub async fn closed_sync_facts<P: crate::PendingValue + Clone + Send + 'static>(
             let _lock = lock;
             let settings = directory.settings()?;
             let observer = store_observer(directory.bugs());
-            let facts = crate::memory_facts::ProcessFacts::new(observer);
+            let facts = crate::memory_facts::ProcessFacts::new(observer)?;
             let views = |setup: &Setup<'_, crate::app_policy::CovenPolicy>| {
                 // Sync computes a closed store's state from the facts in
                 // Rust, and no app SQL reads the view here.
@@ -706,7 +706,7 @@ pub(crate) fn coven_only(
         path,
         read_only,
         CovenPolicy::new(&[]),
-        crate::internal_schema::whole_views(),
+        Arc::new(sqlive::WholeViews::new([])),
         &coven_only_settings(),
         &setup,
     )?;

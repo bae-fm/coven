@@ -177,7 +177,7 @@ pub use pins::PINS;
 pub use retry_effect::RETRY_EFFECT;
 pub use sync_status::SYNC_STATUS;
 pub use upload_queue::UPLOAD_QUEUE;
-pub use views::READABLE;
+pub use views::{MEMORY_TABLES, READABLE};
 
 macro_rules! coven_tables {
     ($visit:ident) => {
@@ -351,6 +351,10 @@ pub fn readable_objects_sql() -> String {
         sql.push_str(followed.table);
     }
     sql.push_str(pending::SOURCE);
+    // Outside a store no process fills them, so they stay empty.
+    for table in MEMORY_TABLES {
+        sql.push_str(table);
+    }
     sql.push_str(file_database_copies_schema::VIEWS);
     sql.push_str(views::SCHEMA);
     sql
