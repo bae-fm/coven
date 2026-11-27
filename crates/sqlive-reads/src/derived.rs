@@ -615,6 +615,63 @@ pub(crate) fn passed_source(
     Some((*source, passed.clone()))
 }
 
+/// A table, or a subquery, CTE or view, that one arm of a derived item passes
+/// columns on from.
+struct ArmTarget<'a> {
+    item: usize,
+    /// Each column of the derived item that the arm passes on from `item`,
+    /// with the column of `item` it passes on.
+    columns: Vec<(&'a str, String)>,
+}
+
+impl ArmTarget<'_> {
+    /// The column of the target that the arm passes on as the derived item's
+    /// column `reached`.
+    fn column(&self, reached: &str) -> Option<String> {
+        self.columns.iter().find(|(from, _)| *from == reached).map(|(_, column)| column.clone())
+    }
+}
+
+/// The targets that `arm` of the derived item `item` passes the columns
+/// `reached` on from, in the order those columns first name them: what a
+/// condition on those columns can pass into.
+fn arm_targets<'a>(
+    planner: &Planner,
+    item: usize,
+    arm: &Passed,
+    reached: &[&'a str],
+) -> Vec<ArmTarget<'a>> {
+    let mut targets: Vec<ArmTarget<'a>> = Vec::new();
+    for &column in reached {
+        let passed = passed_on(&planner.items[item].columns, std::slice::from_ref(arm), column);
+        let Some((source, passed)) = passed.into_iter().next().flatten() else { continue };
+        let found = &planner.items[*source];
+        if found.source.table().is_none() && found.derived.is_none() {
+            continue;
+        }
+        let entry = (column, passed.clone());
+        match targets.iter_mut().find(|target| target.item == *source) {
+            Some(target) => target.columns.push(entry),
+            None => targets.push(ArmTarget { item: *source, columns: vec![entry] }),
+        }
+    }
+    targets
+}
+
+/// The targets of `arm_targets` that no LEFT JOIN adds: those a carried term
+/// or an OR passes into, as the NULLs such a join gives a left row pass
+/// neither.
+fn inner_targets<'a>(
+    planner: &Planner,
+    item: usize,
+    arm: &Passed,
+    reached: &[&'a str],
+) -> Vec<ArmTarget<'a>> {
+    let mut targets = arm_targets(planner, item, arm, reached);
+    targets.retain(|target| planner.items[target.item].always_bound());
+    targets
+}
+
 /// Narrow the cores of the subquery, CTE or view `item` by `term` and
 /// `edges`, which its own core's conditions put on its rows: each arm's
 /// source an output column passes on takes them as its own. A LEFT JOIN's
@@ -643,38 +700,17 @@ pub(crate) fn push_down(
         .map(String::as_str)
         .chain(edges.iter().flat_map(|edge| edge.member.columns()))
         .collect();
-    // What each arm passes on in each column the term and edges reach.
-    let passed: Vec<(&str, Passed)> = reached
-        .iter()
-        .map(|column| {
-            let arms = passed_on(&planner.items[item].columns, &derived.arms, column);
-            (*column, arms.into_iter().map(Option::<&_>::cloned).collect())
-        })
-        .collect();
-    for arm in 0..derived.arms.len() {
-        let through = |column: &str| {
-            passed.iter().find(|(reached, _)| *reached == column)?.1.get(arm)?.clone()
-        };
-        let mut targets: Vec<usize> = Vec::new();
-        for &column in &reached {
-            if let Some((target, _)) = through(column) {
-                if !targets.contains(&target) {
-                    targets.push(target);
-                }
-            }
-        }
-        for target in targets {
+    let arms: Vec<Vec<ArmTarget>> =
+        derived.arms.iter().map(|arm| arm_targets(planner, item, arm, &reached)).collect();
+    for targets in arms {
+        for passing in targets {
+            let target = passing.item;
             let found = &planner.items[target];
-            if found.source.table().is_none() && found.derived.is_none() {
-                continue;
-            }
             // A term a row of NULLs can pass narrows nothing on a LEFT JOIN's
             // right side that stays one, and doesn't make it inner.
             let left = found.left_on.is_some();
             let rows = &found.source.qualifier;
-            let column = |column: &str| {
-                through(column).filter(|(passed, _)| *passed == target).map(|(_, column)| column)
-            };
+            let column = |column: &str| passing.column(column);
             let renamed = term
                 .as_ref()
                 .and_then(|term| term.renamed(&column, Some(rows)))
@@ -716,36 +752,13 @@ pub(crate) fn push_carried(planner: &mut Planner, item: usize, term: &ScopeTerm)
     };
     let mut tested = Vec::new();
     term.columns(&mut tested);
+    let reached: Vec<&str> = tested.iter().map(String::as_str).collect();
     let mut given: Vec<(usize, ScopeTerm)> = Vec::new();
     for arm in &derived.arms {
-        let passed: Vec<(&str, (usize, String))> = tested
-            .iter()
-            .filter_map(|column| {
-                let arms =
-                    passed_on(&planner.items[item].columns, std::slice::from_ref(arm), column);
-                Some((column.as_str(), arms.into_iter().next()??.clone()))
-            })
-            .collect();
-        let mut targets: Vec<usize> = Vec::new();
-        for (_, (target, _)) in &passed {
-            if !targets.contains(target) {
-                targets.push(*target);
-            }
-        }
-        for target in targets {
-            let found = &planner.items[target];
-            if (found.source.table().is_none() && found.derived.is_none()) || !found.always_bound()
-            {
-                continue;
-            }
-            let column = |column: &str| {
-                passed
-                    .iter()
-                    .find(|(reached, (into, _))| *reached == column && *into == target)
-                    .map(|(_, (_, passed))| passed.clone())
-            };
-            let renamed = term.renamed(&column, Some(&found.source.qualifier));
-            given.extend(renamed.map(|renamed| (target, renamed)));
+        for passing in inner_targets(planner, item, arm, &reached) {
+            let rows = &planner.items[passing.item].source.qualifier;
+            let renamed = term.renamed(&|column| passing.column(column), Some(rows));
+            given.extend(renamed.map(|renamed| (passing.item, renamed)));
         }
     }
     for (target, term) in given {
@@ -768,40 +781,14 @@ pub(crate) fn push_ors(planner: &mut Planner, item: usize, ors: &[Vec<Side>]) {
     let mut given: Vec<(usize, Vec<Side>)> = Vec::new();
     for arm in &derived.arms {
         for sides in ors {
-            let reached: Vec<String> = sides.iter().flat_map(Side::columns).collect();
-            let passed: Vec<(&str, (usize, String))> = reached
-                .iter()
-                .map(String::as_str)
-                .filter_map(|column| {
-                    let arms =
-                        passed_on(&planner.items[item].columns, std::slice::from_ref(arm), column);
-                    Some((column, arms.into_iter().next()??.clone()))
-                })
-                .collect();
-            let mut targets: Vec<usize> = Vec::new();
-            for (_, (target, _)) in &passed {
-                if !targets.contains(target) {
-                    targets.push(*target);
-                }
-            }
-            for target in targets {
-                let found = &planner.items[target];
-                if (found.source.table().is_none() && found.derived.is_none())
-                    || !found.always_bound()
-                {
-                    continue;
-                }
-                let column = |column: &str| {
-                    passed
-                        .iter()
-                        .find(|(reached, (into, _))| *reached == column && *into == target)
-                        .map(|(_, (_, passed))| passed.clone())
-                };
-                let sides: Option<Vec<Side>> = sides
-                    .iter()
-                    .map(|side| side.over(target, &found.source.qualifier, &column))
-                    .collect();
-                given.extend(sides.map(|sides| (target, sides)));
+            let columns: Vec<String> = sides.iter().flat_map(Side::columns).collect();
+            let reached: Vec<&str> = columns.iter().map(String::as_str).collect();
+            for passing in inner_targets(planner, item, arm, &reached) {
+                let rows = &planner.items[passing.item].source.qualifier;
+                let column = |column: &str| passing.column(column);
+                let sides: Option<Vec<Side>> =
+                    sides.iter().map(|side| side.over(passing.item, rows, &column)).collect();
+                given.extend(sides.map(|sides| (passing.item, sides)));
             }
         }
     }
