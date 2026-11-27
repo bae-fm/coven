@@ -52,18 +52,35 @@ pub struct MainSchema {
 struct MainObject {
     /// Its name as the schema stores it.
     stored: String,
-    /// Its type, as `pragma_table_list` gives it: `table`, `view`, `shadow`
-    /// or `virtual`.
-    kind: String,
-    /// Whether it is a contentful FTS5 table (`FTS5_CONTENT`).
-    contentful: bool,
-    without_rowid: bool,
+    kind: ObjectKind,
     /// The SQL that made it, when `sqlite_schema` holds it.
     sql: Option<String>,
     /// Its columns, in order, or why SQLite can't list them, as for a view
     /// whose table was dropped, which only a lookup of those columns reports.
     columns: Result<Vec<DeclaredColumn>, Unlisted>,
+}
+
+enum ObjectKind {
+    View,
+    Table(MainTable),
+}
+
+/// What the schema holds of a table beyond what it holds of a view.
+struct MainTable {
+    form: TableForm,
+    without_rowid: bool,
     indexes: Vec<DeclaredIndex>,
+}
+
+/// A table's type, as `pragma_table_list` gives it.
+enum TableForm {
+    Ordinary,
+    /// A table that holds a virtual table's rows.
+    Shadow,
+    Virtual {
+        /// Whether it is a contentful FTS5 table (`FTS5_CONTENT`).
+        contentful: bool,
+    },
 }
 
 /// SQLite's error for a table or view whose columns it can't list.
@@ -110,7 +127,7 @@ impl MainSchema {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
             })?
             .map(|listed| {
-                let (stored, kind, without_rowid) = listed?;
+                let (stored, listed_type, without_rowid) = listed?;
                 let columns = match declared_columns(connection, &stored) {
                     Ok(columns) => Ok(columns),
                     // SQLITE_ERROR says the schema's own SQL doesn't
@@ -122,19 +139,21 @@ impl MainSchema {
                     }
                     Err(error) => return Err(error),
                 };
-                let indexes = match kind.as_str() {
-                    "view" => Vec::new(),
-                    _ => declared_indexes(connection, &stored)?,
+                let table = |form| -> rusqlite::Result<ObjectKind> {
+                    let indexes = declared_indexes(connection, &stored)?;
+                    Ok(ObjectKind::Table(MainTable { form, without_rowid, indexes }))
                 };
-                let object = MainObject {
-                    columns,
-                    indexes,
-                    contentful: contentful.contains(&stored),
-                    sql: made.remove(&stored).flatten(),
-                    stored,
-                    kind,
-                    without_rowid,
+                let kind = match listed_type.as_str() {
+                    "view" => ObjectKind::View,
+                    "table" => table(TableForm::Ordinary)?,
+                    "shadow" => table(TableForm::Shadow)?,
+                    "virtual" => {
+                        table(TableForm::Virtual { contentful: contentful.contains(&stored) })?
+                    }
+                    other => unreachable!("pragma_table_list gives no type {other}"),
                 };
+                let object =
+                    MainObject { columns, kind, sql: made.remove(&stored).flatten(), stored };
                 Ok((object.stored.to_ascii_lowercase(), object))
             })
             .collect::<rusqlite::Result<_>>()?;
@@ -158,11 +177,13 @@ impl MainSchema {
     /// table, is `None`.
     pub(crate) fn object(&self, name: &Name<'_>) -> Option<(&str, &'static str)> {
         let object = self.named(&crate::sql::name(name.0))?;
-        let kind = match object.kind.as_str() {
-            "table" => "table",
-            "view" => "view",
-            _ if object.contentful => "virtual",
-            _ => return None,
+        let kind = match &object.kind {
+            ObjectKind::View => "view",
+            ObjectKind::Table(table) => match table.form {
+                TableForm::Ordinary => "table",
+                TableForm::Virtual { contentful: true } => "virtual",
+                TableForm::Virtual { contentful: false } | TableForm::Shadow => return None,
+            },
         };
         Some((&object.stored, kind))
     }
@@ -172,7 +193,9 @@ impl MainSchema {
     pub(crate) fn tables(&self) -> impl Iterator<Item = &str> {
         self.objects
             .values()
-            .filter(|object| object.kind != "view" && !object.stored.starts_with("sqlite_"))
+            .filter(|object| {
+                matches!(object.kind, ObjectKind::Table(_)) && !object.stored.starts_with("sqlite_")
+            })
             .map(|object| object.stored.as_str())
     }
 
@@ -191,14 +214,22 @@ impl MainSchema {
         }
     }
 
+    /// The table `name`, which the caller knows is no view.
+    fn table(&self, name: &str) -> rusqlite::Result<&MainTable> {
+        match &self.held(name)?.kind {
+            ObjectKind::Table(table) => Ok(table),
+            ObjectKind::View => Err(rusqlite::Error::QueryReturnedNoRows),
+        }
+    }
+
     /// The indexes of the table `name`.
     pub(crate) fn indexes(&self, name: &str) -> rusqlite::Result<&[DeclaredIndex]> {
-        Ok(&self.held(name)?.indexes)
+        Ok(&self.table(name)?.indexes)
     }
 
     /// Whether the table `name` is WITHOUT ROWID.
     pub(crate) fn without_rowid(&self, name: &str) -> rusqlite::Result<bool> {
-        Ok(self.held(name)?.without_rowid)
+        Ok(self.table(name)?.without_rowid)
     }
 
     /// The SQL that made the table or view `name`.
