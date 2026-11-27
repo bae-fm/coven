@@ -756,12 +756,16 @@ test-utils feature, `make_readable_objects` makes every table and view app
 SQL reads, with the tables of coven's own that the views read, and registers
 coven's SQL functions, each as a store makes it
 ([api.md E4](api.md#e4-reading)). coven writes no rows on that connection.
-A build script that checks the app's SQL against those objects calls
-`readable_objects_sql` of `coven-schema`, which returns the SQL that makes
-them as text, opens no connection and compiles no async runtime. It reads
-`SQL_FUNCTIONS` of the same crate for the functions the SQL calls: the name,
-argument count and determinism of each function coven registers, which a
-test of coven-database keeps equal to what a connection holds. Ben's test
+A build script that compiles the app's statements against those objects calls
+`compiler_setup` of `coven-schema`, which gives sqlive-compose's compiler
+everything it must know of coven: the SQL that makes the objects, a stand-in
+for each function coven registers, and the views and tables only the writer
+reads. The script adds its own schema's SQL, so no app keeps a copy of coven's
+part that could fall behind it. `compiler_setup` opens no connection and
+compiles no async runtime. Another build script that checks the app's SQL
+reads the same facts from `readable_objects_sql` and `SQL_FUNCTIONS` of that
+crate, and a test of coven-database keeps the functions' names, argument counts
+and determinism equal to what a connection holds. Ben's test
 writes the rows coven would write in the tables his triggers fire on, and
 records each track's original with `record_user_file`, which writes what
 staging the original writes.
@@ -13670,7 +13674,7 @@ document:
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
-| `coven-schema` | coven's local schema as SQL text: the `CREATE` statements of every table, view and trigger, each in the file of the domain that writes the table, and the text of the objects app SQL may read. It holds no connection and no runtime, so a build script takes it without compiling async code | §4, §9, api.md E4 |
+| `coven-schema` | coven's local schema as SQL text: the `CREATE` statements of every table, view and trigger, each in the file of the domain that writes the table, and the text of the objects app SQL may read; and, with its `compiler` feature, what sqlive-compose's compiler must know of coven. It holds no connection and no runtime, so a build script takes it without compiling async code | §4, §9, api.md E4 |
 | `coven-database` | coven's policy for its SQLite connections, coven's internal tables, applying the merge's results, triggers, migrations | §4, §9, §18 |
 | `coven-storage` | each provider, and the operations coven needs from it, including upload sessions | §20, Appendix E |
 | `coven-sync` | the sequence, members, circles, snapshots, files and the cache, operations, recovery | §5, §6, §10, §11, §13 to §19 |
@@ -13681,8 +13685,10 @@ document:
   database never reaches storage, and storage never reads the database;
   `coven-sync` is where the two meet.
 - `sqlive-compose` depends on `sqlive-reads` and on no coven crate, and `coven`
-  depends on sqlive and not on `sqlive-compose`, so the two are siblings. An app
-  names `sqlive-compose` itself, for its read macros and for the compiler in its
+  depends on sqlive and not on `sqlive-compose`, so the two are siblings. Only
+  `coven-schema`'s `compiler` feature, which an app's build script takes,
+  depends on `sqlive-compose`, for the compiler's setup type. An app names
+  `sqlive-compose` itself, for its read macros and for the compiler in its
   build scripts; `coven` re-exports neither. The compiler opens SQLite only
   through the schema probe of `sqlive-reads`, so F.2 needs no exception for it,
   and a build script that takes `sqlive-compose` compiles no async runtime.

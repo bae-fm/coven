@@ -39,18 +39,11 @@ fn outside_store() -> Connection {
     connection
 }
 
-/// The schema a build checks app SQL against, as an app's build script makes
-/// it from coven's objects.
+/// The schema a build checks app SQL against, opened from coven's setup of
+/// the compiler.
 pub(crate) fn build_probe() -> sqlive::SchemaProbe {
-    let functions: Vec<sqlive::StandInFunction> = coven_schema::SQL_FUNCTIONS
-        .iter()
-        .map(|function| sqlive::StandInFunction {
-            name: function.name.into(),
-            arguments: function.arguments,
-            deterministic: function.deterministic,
-        })
-        .collect();
-    sqlive::SchemaProbe::open(&[coven_schema::readable_objects_sql()], &functions, &[]).unwrap()
+    let setup = coven_schema::compiler_setup();
+    sqlive::SchemaProbe::open(&setup.sql, &setup.functions, &setup.collations).unwrap()
 }
 
 /// Every readable object, and every table in `OUTSIDE_STORE_TABLES`.

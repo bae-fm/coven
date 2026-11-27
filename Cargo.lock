@@ -1065,6 +1065,9 @@ dependencies = [
 [[package]]
 name = "coven-schema"
 version = "0.1.0"
+dependencies = [
+ "sqlive-compose",
+]
 
 [[package]]
 name = "coven-storage"

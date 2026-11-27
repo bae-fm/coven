@@ -3899,9 +3899,11 @@ let moved = handle
   triggers and views apply and run as in a store, and the app keeps no copy of
   coven's objects or functions that could fall behind them. A build script
   that checks the app's SQL against coven's objects reads the same objects as
-  text from `readable_objects_sql`, with no connection and no function; the
-  `coven-schema` crate has no dependency, so a build script takes it without
-  compiling coven's runtime. coven writes no rows on that connection. Of
+  text from `readable_objects_sql`, with no connection and no function. A
+  build script that compiles the app's statements takes them in
+  `compiler_setup`. The `coven-schema` crate depends on no coven crate and no
+  async runtime, so a build script takes it without compiling coven's
+  runtime. coven writes no rows on that connection. Of
   coven's triggers that keep the eight tables an app's triggers may follow in
   a store, those that keep `coven_pending` run there too: the test writes the
   rows coven would in the other seven. The test gives coven's views and
@@ -4360,11 +4362,11 @@ pub fn readable_objects_sql() -> String;
 
 /// The views and tables app SQL reads that only the store's writer reads:
 /// `coven_sync_state`, `coven_upload_phases`, `coven_sync_status` and
-/// `coven_retry_effect` (E5). A build that compiles an app's reads names them
-/// as the compiler's `Setup::writer_only`, so that a read not marked
-/// `writer` that reads one fails the build (sqlive-compose's spec, section
-/// 8), and a read-only handle refuses app SQL that reads one of them (E5).
-/// `coven-schema` defines the list, and `coven` re-exports it.
+/// `coven_retry_effect` (E5). `compiler_setup` names them as the compiler's
+/// `Setup::writer_only`, so that a read not marked `writer` that reads one
+/// fails the build (sqlive-compose's spec, section 8), and a read-only handle
+/// refuses app SQL that reads one of them (E5). `coven-schema` defines the
+/// list, and `coven` re-exports it.
 pub const WRITER_ONLY: [&str; 4];
 
 /// Every SQL function coven registers on a store's connection, by name, with
@@ -4372,8 +4374,9 @@ pub const WRITER_ONLY: [&str; 4];
 /// the functions that `make_readable_objects` registers, which coven's views
 /// call and app SQL may call. A build script that checks app SQL against the
 /// objects of `readable_objects_sql` registers a stand-in for each, so the
-/// SQL prepares with no connection to a store. `coven-schema` defines the
-/// list, and `coven` re-exports it with `SqlFunction`.
+/// SQL prepares with no connection to a store, and `compiler_setup` gives the
+/// compiler those stand-ins. `coven-schema` defines the list, and `coven`
+/// re-exports it with `SqlFunction`.
 pub const SQL_FUNCTIONS: [SqlFunction; 28];
 
 /// One entry of `SQL_FUNCTIONS`.
@@ -4382,6 +4385,19 @@ pub struct SqlFunction {
     pub arguments: i32,
     pub deterministic: bool,
 }
+
+/// Everything sqlive-compose's compiler must know of coven, as the compiler's
+/// own `Setup`: `readable_objects_sql` as its one SQL text, a stand-in for
+/// each function of `SQL_FUNCTIONS`, `WRITER_ONLY` as what only the writer
+/// reads, and no collation. An app's build script appends its schema's SQL,
+/// in the order its migrations run it, with the functions and collations
+/// that SQL names, and compiles against the result, so no app assembles
+/// coven's part itself. The setup names no view to read whole: sqlive decides
+/// that from each view's SQL, in the compiler as in a store. `coven-schema`
+/// defines it with its `compiler` feature, which adds sqlive-compose's
+/// compiler and no async runtime. `coven` doesn't re-export it.
+#[cfg(feature = "compiler")]
+pub fn compiler_setup() -> sqlive_compose::compiler::Setup;
 
 /// Journals `invite` on a connection `make_readable_objects` prepared, as
 /// creating an invite and its later steps do, returning its operation (E4).

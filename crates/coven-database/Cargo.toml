@@ -24,6 +24,8 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "io-util"] }
 uuid.workspace = true
 
 [dev-dependencies]
+# `compiler_setup`, which the tests of what a build refuses open.
+coven-schema = { workspace = true, features = ["compiler"] }
 proc-macro2.workspace = true
 syn.workspace = true
 coven-crypto = { workspace = true, features = ["test-utils"] }

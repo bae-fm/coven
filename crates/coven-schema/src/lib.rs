@@ -156,6 +156,8 @@ mod write_sources_schema;
 #[path = "written_values_schema.rs"]
 mod written_values_schema;
 
+#[cfg(feature = "compiler")]
+mod compiler_setup;
 mod files;
 #[path = "input_database_schema.rs"]
 mod input;
@@ -168,6 +170,8 @@ mod sync_status;
 mod upload_queue;
 mod views;
 
+#[cfg(feature = "compiler")]
+pub use compiler_setup::compiler_setup;
 pub use files::FILES;
 pub use input::initial_input_schema;
 pub use moves::MOVES;

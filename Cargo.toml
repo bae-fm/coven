@@ -18,6 +18,7 @@ panic-as-error = { path = "crates/panic-as-error", version = "0.1.0" }
 sqlive-reads = { path = "crates/sqlive-reads" }
 sqlive = { path = "crates/sqlive" }
 sqlive-compose-macros = { path = "crates/sqlive-compose-macros" }
+sqlive-compose = { path = "crates/sqlive-compose" }
 coven-foundation = { path = "crates/coven-foundation" }
 coven-crypto = { path = "crates/coven-crypto" }
 coven-merge = { path = "crates/coven-merge" }

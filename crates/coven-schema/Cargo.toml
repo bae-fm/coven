@@ -8,5 +8,13 @@ description = "Coven's local schema as SQL text, with no connection and no runti
 keywords = ["sqlite", "sql", "schema"]
 categories = ["database"]
 
+[features]
+# `compiler_setup`, for an app's build script that runs sqlive-compose's
+# compiler.
+compiler = ["dep:sqlive-compose"]
+
+[dependencies]
+sqlive-compose = { workspace = true, features = ["compiler"], optional = true }
+
 [lints]
 workspace = true
