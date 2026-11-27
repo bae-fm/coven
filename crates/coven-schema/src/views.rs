@@ -56,7 +56,7 @@ pub const READABLE: [&str; 28] = [
 /// from the first it hears. A store's connections read them as host tables,
 /// whose rows this process keeps (`memory_facts.rs`). The text for an app's
 /// build script, and a test outside any store, makes them as ordinary
-/// tables, which stay empty.
+/// tables, empty but for the network's row (`NETWORK_NOT_HEARD_OF`).
 pub const MEMORY_TABLES: [&str; 5] = [
     "CREATE TABLE _coven_sending (
         object BLOB NOT NULL PRIMARY KEY,
@@ -78,6 +78,11 @@ pub const MEMORY_TABLES: [&str; 5] = [
         metered INTEGER NOT NULL
     ) STRICT;",
 ];
+
+/// The network's row outside any store, where no process keeps the tables:
+/// no usable network known, and none metered, as a store's row starts.
+pub(crate) const NETWORK_NOT_HEARD_OF: &str =
+    "INSERT INTO _coven_network(id,usable,metered) VALUES(1,NULL,0);";
 
 pub(crate) const SCHEMA: &str = concat!(
     // Where a read on this device takes each file's bytes from (§17.7), by
@@ -136,7 +141,7 @@ pub(crate) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_uploads(file,position,paused,metered,retry_at,pending,
             bytes_confirmed,bytes_total,sending,move) AS
         SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,
-            w.unmetered_only IS NOT NULL AND coalesce(n.metered,0) AND u.holds IS NULL,
+            w.unmetered_only IS NOT NULL AND n.metered AND u.holds IS NULL,
             _coven_unix_ms(r.not_before),e.value,
             u.bytes_confirmed,u.bytes_total,
             EXISTS(SELECT 1 FROM _coven_sending AS s WHERE s.object=u.object),
@@ -145,7 +150,7 @@ pub(crate) const SCHEMA: &str = concat!(
         JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z
         LEFT JOIN _coven_unmetered_only AS w
-        LEFT JOIN _coven_network AS n
+        JOIN _coven_network AS n
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.object=u.object;",
     // What each file in this device's upload queue is doing, as `uploads()`
@@ -200,13 +205,11 @@ pub(crate) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_upload_pause AS z;",
     // The device's network as this process last heard of it
     // (`MEMORY_TABLES`), and the setting that holds transfers on a metered
-    // one, as one row (§17.9): before the process hears of a network, none is
-    // known usable or metered. The network's row, if any, and the setting's,
-    // if any, join a constant one.
+    // one, as one row (§17.9). The network's one row, which the process puts
+    // before any connection reads it, joins the setting's row, if any.
     "CREATE VIEW coven_network(usable,metered,unmetered_only) AS
-        SELECT n.usable,coalesce(n.metered,0),w.unmetered_only IS NOT NULL
-        FROM (SELECT 1) AS one
-        LEFT JOIN _coven_network AS n
+        SELECT n.usable,n.metered,w.unmetered_only IS NOT NULL
+        FROM _coven_network AS n
         LEFT JOIN _coven_unmetered_only AS w;",
     // The queued files this process is sending now, by each upload in
     // flight, each found by its uploader and object: counting a window's or

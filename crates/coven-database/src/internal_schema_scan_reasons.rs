@@ -87,9 +87,9 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         (
             "coven_upload_phases",
             "SELECT * FROM coven_upload_phases",
-            "one" | "s" | "r" | "n" | "w" | "z" | "x" | "y",
+            "s" | "r" | "n" | "w" | "z" | "x" | "y",
         ) => Some(
-            "a constant row, the status, retry, network, pause, setting and write pause tables, which hold at most one row each, the table in memory of files being sent, one per upload in flight, and the subqueries that give one row and one row per queued file",
+            "the status, retry, network, pause, setting and write pause tables, which hold at most one row each, the table in memory of files being sent, one per upload in flight, and the subqueries that give one row and one row per queued file",
         ),
         ("coven_upload_phases", "SELECT * FROM coven_upload_phases", "l") => {
             Some("the view lists every queued file, which its link to its upload enumerates")
@@ -97,8 +97,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
         ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") => {
             Some("one constant row, and the pause table holds at most one row")
         }
-        ("coven_network", "SELECT * FROM coven_network", "one" | "n" | "w") => {
-            Some("one constant row, and the network's and the setting's tables hold at most one row each")
+        ("coven_network", "SELECT * FROM coven_network", "n" | "w") => {
+            Some("the network's and the setting's tables hold at most one row each")
         }
         ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") => {
             Some("the table lists every pinned file")

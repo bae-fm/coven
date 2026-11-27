@@ -3881,32 +3881,32 @@ let moved = handle
 - A pending record's cause is the text of the error the running process met
   for it, written with the record. Opening clears every cause: one an earlier
   run wrote names a failure nothing has met since (E5).
-- *The app's schema outside a store, in tests.* With the test-utils
-  feature, `make_readable_objects` makes every object app SQL reads, on a
-  connection a test opened itself, outside any store, as every store makes
-  it: the ten tables above, `coven_sync_status` and `coven_retry_effect`
-  with their one row, `coven_library_bytes` with its rows at no bytes, and
-  the eighteen views. The function also makes the
-  tables of coven's own that the views read or that the test writes below
-  fill, all empty. The function registers coven's SQL functions there too,
-  `coven_key`, `coven_file_device` and `coven_path_text` among them, with
-  the device the test names as this device. coven transfers no files there
-  and watches no network, so the transfer and network views show what a
-  read-only handle shows. `coven_sync_state` shows the state that sync's own
-  computation, the one every store registers, gives from the facts there. A
-  test that runs the app's schema there calls it first, so the app's
-  triggers and views apply and run as in a store, and the app keeps no copy
-  of coven's objects or functions that could fall behind them. A build script
-  that checks the app's SQL against coven's objects reads the same objects
-  as text from `readable_objects_sql`, with no connection and no function; the
+- *The app's schema outside a store, in tests.* With the test-utils feature,
+  `make_readable_objects` makes every object app SQL reads, on a connection a
+  test opened itself, outside any store, as every store makes it: the ten
+  tables above, `coven_sync_status` and `coven_retry_effect` with their one
+  row, `coven_library_bytes` with its rows at no bytes, and the eighteen
+  views. The function also makes the tables of coven's own that the views read
+  or that the test writes below fill, all empty but the table in memory of the
+  network, which has the one row of a network coven has heard nothing of, so
+  `coven_network` has its one row. The function registers coven's SQL
+  functions there too, `coven_key`, `coven_file_device` and `coven_path_text`
+  among them, with the device the test names as this device. coven transfers
+  no files there and watches no network, so the transfer and network views
+  show what a read-only handle shows. `coven_sync_state` shows the state that
+  sync's own computation, the one every store registers, gives from the facts
+  there. A test that runs the app's schema there calls it first, so the app's
+  triggers and views apply and run as in a store, and the app keeps no copy of
+  coven's objects or functions that could fall behind them. A build script
+  that checks the app's SQL against coven's objects reads the same objects as
+  text from `readable_objects_sql`, with no connection and no function; the
   `coven-schema` crate has no dependency, so a build script takes it without
-  compiling coven's runtime. coven writes
-  no rows on that connection. Of coven's triggers that keep the eight
-  tables an app's triggers may follow in a store, those that keep
-  `coven_pending` run there too: the test writes the rows coven would in
-  the other seven. The test gives
-  coven's views and `coven_pending` their rows with test writes, each
-  running the statements coven's own code runs:
+  compiling coven's runtime. coven writes no rows on that connection. Of
+  coven's triggers that keep the eight tables an app's triggers may follow in
+  a store, those that keep `coven_pending` run there too: the test writes the
+  rows coven would in the other seven. The test gives coven's views and
+  `coven_pending` their rows with test writes, each running the statements
+  coven's own code runs:
   - `record_user_file` takes a file's id, the original's path and
     modification time, and the bytes it holds, and records the original as
     staging it for the cloud does, with the size, content hash and chunk
