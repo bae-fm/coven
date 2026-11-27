@@ -745,7 +745,7 @@ impl<P: Policy> HostSql<P> {
 
     /// Judge the changes to the host tables the connection's setup
     /// registered on this connection, which serves its database's handle.
-    pub(crate) fn judge_host_changes(self) -> HostAttachment<P> {
+    pub(crate) fn judge_host_changes(self) -> Result<HostAttachment<P>, PolicyError<P>> {
         let tables = self.host_tables.clone().expect("the connection reads host tables");
         HostAttachment::attach(tables, self)
     }

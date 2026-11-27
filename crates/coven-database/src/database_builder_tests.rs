@@ -225,7 +225,7 @@ async fn a_refused_upkeep_thread_fails_the_open_and_the_store_opens_again() {
             .err()
             .unwrap_or_else(|| panic!("the thread after {started} is refused"));
         let error = crate::tests::database_error(error);
-        assert!(matches!(error, DbError::UpkeepThread(_)), "{error:?}");
+        assert!(matches!(error, DbError::Thread(_)), "{error:?}");
         assert_eq!(notes_after_opening(&store).await, 1);
     }
 }

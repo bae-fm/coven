@@ -84,9 +84,9 @@ pub enum Error<F, R> {
         /// The largest value SQLite holds for it.
         maximum: u64,
     },
-    /// The system refused a thread of sqlive's upkeep, so the database
-    /// did not open.
-    UpkeepThread(std::io::Error),
+    /// The system refused a thread of sqlive's own, for a database's upkeep
+    /// or its host tables' judge, so the database did not open.
+    Thread(std::io::Error),
     /// Opening the database's file at `path` failed. Only on Windows can a
     /// name in the path mean another file once sqlive drops the path's
     /// verbatim prefix.
@@ -137,7 +137,7 @@ impl<F: std::fmt::Display, R: std::fmt::Display> std::fmt::Display for Error<F, 
             Self::SqliteSettingOutOfRange { setting, maximum } => {
                 write!(f, "SQLite setting {setting} exceeds {maximum}")
             }
-            Self::UpkeepThread(error) => write!(f, "an upkeep thread could not start: {error}"),
+            Self::Thread(error) => write!(f, "a thread of sqlive's could not start: {error}"),
             Self::Path { path, source } => write!(f, "open database at {path:?}: {source}"),
             Self::Rollback { operation, rollback } => {
                 write!(f, "{operation}; rollback failed: {rollback}")
@@ -155,7 +155,7 @@ impl<F: std::error::Error + 'static, R: std::error::Error + 'static> std::error:
             Self::Refused(refusal) => refusal.source(),
             Self::Bug(bug) => bug.source(),
             Self::Host(failure) => failure.source(),
-            Self::UpkeepThread(error) => Some(error),
+            Self::Thread(error) => Some(error),
             Self::CompiledSchemaDiffers(differs) => Some(differs),
             Self::UndecodablePlan(error) => Some(error),
             Self::Path { source, .. } => Some(source),

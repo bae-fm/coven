@@ -31,7 +31,7 @@ impl From<sqlive::Error<StoreFailure, DbError>> for DbError {
             sqlive::Error::SqliteSettingOutOfRange { setting, maximum } => {
                 Self::SqliteSettingOutOfRange { setting, maximum }
             }
-            sqlive::Error::UpkeepThread(error) => Self::UpkeepThread(error),
+            sqlive::Error::Thread(error) => Self::Thread(error),
             sqlive::Error::Path { path, source } => {
                 Self::Disk(coven_foundation::files::FileError::Io {
                     operation: "open database",

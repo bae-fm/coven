@@ -77,14 +77,14 @@ impl<U: Upkeep> UpkeepThread<U> {
     ) -> Result<Self, PolicyError<U::Policy>> {
         #[cfg(any(test, feature = "test-utils"))]
         if handle.upkeep_thread_refused() {
-            return Err(crate::Error::UpkeepThread(std::io::ErrorKind::WouldBlock.into()));
+            return Err(crate::Error::Thread(std::io::ErrorKind::WouldBlock.into()));
         }
         let shared = Arc::new(Shared { closing: AtomicBool::new(false), upkeep });
         let serving = Serving { shared: shared.clone(), handle };
         let thread = std::thread::Builder::new()
             .name(U::THREAD.into())
             .spawn(move || serving.serve())
-            .map_err(crate::Error::UpkeepThread)?;
+            .map_err(crate::Error::Thread)?;
         Ok(Self { shared, thread: Some(thread) })
     }
 

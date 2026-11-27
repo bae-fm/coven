@@ -195,7 +195,7 @@ impl<P: Policy> Database<P> {
         if host_tables {
             let mut judge = open(true)?;
             judge.serve(handle);
-            database.host_judge = Some(judge.judge_host_changes());
+            database.host_judge = Some(judge.judge_host_changes()?);
         }
         Ok((database, prepared))
     }

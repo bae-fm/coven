@@ -1798,10 +1798,10 @@ pub enum DbError {
     /// this same cause until reopened, and opening writes each expiry
     /// already past (§13.2).
     WallTimer(WallTimerError),
-    /// The system refused a thread of coven's upkeep, the one that
-    /// checkpoints a WAL or the one that keeps the planner's statistics, so
-    /// the store did not open (§4).
-    UpkeepThread(std::io::Error),
+    /// The system refused a thread of the store's databases, one that
+    /// checkpoints a WAL, keeps the planner's statistics or judges changes to
+    /// the tables in memory, so the store did not open (§4).
+    Thread(std::io::Error),
     /// Reading a claim's sealed bytes to retain them failed, and the claim's
     /// transaction did not commit (§11).
     ClaimRead(std::io::Error),

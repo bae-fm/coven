@@ -103,11 +103,11 @@ pub enum DbError {
     /// already past (§13.2).
     #[error(transparent)]
     WallTimer(coven_foundation::clock::WallTimerError),
-    /// The system refused a thread of coven's upkeep, the one that
-    /// checkpoints a WAL or the one that keeps the planner's statistics, so
-    /// the store did not open (§4).
-    #[error("an upkeep thread could not start: {0}")]
-    UpkeepThread(#[source] std::io::Error),
+    /// The system refused a thread of the store's databases, one that
+    /// checkpoints a WAL, keeps the planner's statistics or judges changes to
+    /// the tables in memory, so the store did not open (§4).
+    #[error("a database thread could not start: {0}")]
+    Thread(#[source] std::io::Error),
     /// Reading a claim's sealed bytes to retain them failed, and the claim's
     /// transaction did not commit (§11).
     #[error("reading a claim's bytes failed: {0}")]

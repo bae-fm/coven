@@ -492,7 +492,13 @@ those rows (section 7), in one order with the database's writes. A change waits
 while a write judges its own changes, commits and reports them. It doesn't wait
 while the write runs its statements. sqlive runs the change's lookups on a
 connection of its own, which reads the database's latest commit beside the rows
-as the change left them. A write's statements read the host rows as they were
+as the change left them, on a thread of the database's own. The call that
+changes the rows returns once that thread has judged the change. The value
+through which the host changes rows reaches the thread by a channel and holds no
+connection, so the host can keep it in whatever changes a row, such as the
+object that marks one upload in flight. The thread starts as the database opens,
+closing the database stops it, and a system that refuses it fails the open with
+`Error::Thread`. A write's statements read the host rows as they were
 when it began, but its lookups read them as they are when it judges. The write
 commits after every change made until then. A screen lists each upload with its
 note. Say a write adds a track's first note while that track's upload starts,
@@ -1680,7 +1686,7 @@ database again starts a new checkpointer, which copies the WAL the next commit
 past the threshold wakes it to. sqlive never reopens by itself: a panic that
 happened once will likely happen again, and the host shows the failure and
 offers the reopen. A system that refuses the thread fails the open with
-`Error::UpkeepThread`.
+`Error::Thread`.
 
 ### The planner's statistics
 
@@ -2242,7 +2248,7 @@ policy refuses with.
 | `UndecodablePlan` | a compiled statement's plan is no text this sqlive's `CompiledPlan::encode` writes | 4 |
 | `WalUnavailable` | SQLite kept another journal mode instead of WAL | 1 |
 | `SqliteSettingOutOfRange` | a SQLite setting is larger than SQLite can hold | 10 |
-| `UpkeepThread` | the system refused a thread of sqlive's upkeep, so the database did not open | 10 |
+| `Thread` | the system refused a thread of sqlive's own, for upkeep or for judging host tables' changes, so the database did not open | 3, 10 |
 | `Path` | opening the database's file failed; only on Windows can a name in the path mean another file once sqlive drops the path's verbatim prefix | 10 |
 | `Rollback` | a transaction failed and rolling it back failed too | 2 |
 

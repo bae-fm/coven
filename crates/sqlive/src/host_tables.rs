@@ -7,6 +7,7 @@
 #[path = "host_table_module.rs"]
 mod module;
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use panic_as_error::locks::lock_unpoisoned;
@@ -58,13 +59,18 @@ impl Declared {
     }
 }
 
-/// What judges a change to the rows, for the database the tables are
-/// attached to.
-pub(crate) trait HostJudge: Send {
-    /// Judge `changes`, which the rows already hold, and tell the live
-    /// queries of them. No write judges or commits meanwhile.
-    fn report(&mut self, changes: Vec<RowChange>);
+/// A change for the judge of the database the tables are attached to
+/// (`host_judge.rs`): it judges `changes`, which the rows already hold,
+/// tells the live queries of them, and then answers on `judged`. No write
+/// judges or commits meanwhile.
+pub(crate) struct JudgeRequest {
+    pub(crate) changes: Vec<RowChange>,
+    pub(crate) judged: mpsc::SyncSender<()>,
 }
+
+/// The way to the attached database's judge, or none while no database is
+/// attached.
+type JudgeChannel = Option<mpsc::Sender<JudgeRequest>>;
 
 struct Shared {
     /// The tables as the scope planner reads them.
@@ -74,10 +80,11 @@ struct Shared {
     /// as long as it does.
     rows: Arc<Mutex<Rows>>,
     /// Orders changes to the rows against writes: a change holds it while
-    /// it changes the rows, judges the change and reports it, and a write
-    /// while it judges its own changes, commits and reports them. It holds
-    /// the judge of the database the tables are attached to.
-    order: Mutex<Option<Box<dyn HostJudge>>>,
+    /// it changes the rows and has the change judged and reported, and a
+    /// write while it judges its own changes, commits and reports them.
+    order: Mutex<()>,
+    /// Where a change is judged. Attaching and detaching hold `order` too.
+    judge: Mutex<JudgeChannel>,
 }
 
 /// The tables whose rows a host keeps in memory beside one database. Clones
@@ -122,7 +129,8 @@ impl HostTables {
             schema,
             tables,
             rows: Arc::new(Mutex::new(rows)),
-            order: Mutex::new(None),
+            order: Mutex::new(()),
+            judge: Mutex::new(None),
         })))
     }
 
@@ -139,7 +147,7 @@ impl HostTables {
     /// call it from a thread that is judging, such as from a SQL function a
     /// lookup calls.
     pub fn change<R>(&self, edit: impl FnOnce(&mut HostRows<'_>) -> R) -> R {
-        let mut judge = lock_unpoisoned(&self.0.order);
+        let _ordered = lock_unpoisoned(&self.0.order);
         let (result, changes) = {
             let mut rows = lock_unpoisoned(&self.0.rows);
             let mut edited =
@@ -150,8 +158,13 @@ impl HostTables {
             edited.net.finish(&mut changes);
             (result, changes)
         };
-        if let (false, Some(judge)) = (changes.is_empty(), judge.as_mut()) {
-            judge.report(changes);
+        if let (false, Some(judge)) = (changes.is_empty(), lock_unpoisoned(&self.0.judge).as_ref())
+        {
+            let (judged, answer) = mpsc::sync_channel(1);
+            judge
+                .send(JudgeRequest { changes, judged })
+                .expect("the judge serves while the tables are attached");
+            answer.recv().expect("the judge answers each change");
         }
         result
     }
@@ -162,17 +175,18 @@ impl HostTables {
         HeldHostRows { _order: lock_unpoisoned(&self.0.order) }
     }
 
-    /// Judge changes from now on with `judge`.
-    pub(crate) fn attach(&self, judge: Box<dyn HostJudge>) {
-        let previous = lock_unpoisoned(&self.0.order).replace(judge);
+    /// Send changes to `judge` from now on.
+    pub(crate) fn attach(&self, judge: mpsc::Sender<JudgeRequest>) {
+        let _ordered = lock_unpoisoned(&self.0.order);
+        let previous = lock_unpoisoned(&self.0.judge).replace(judge);
         assert!(previous.is_none(), "host tables serve one database");
     }
 
-    /// Stop judging changes, dropping what judged them, once no change or
-    /// write holds it.
+    /// Stop judging changes, closing the channel to the judge, once no
+    /// change or write holds it.
     pub(crate) fn detach(&self) {
-        let judge = lock_unpoisoned(&self.0.order).take();
-        drop(judge);
+        let _ordered = lock_unpoisoned(&self.0.order);
+        drop(lock_unpoisoned(&self.0.judge).take());
     }
 
     /// The rows as they are now, for a connection's transactions to take.
@@ -197,7 +211,7 @@ pub(crate) fn register(
 
 /// The rows stay as they are while this lives (`HostTables::hold`).
 pub(crate) struct HeldHostRows<'a> {
-    _order: MutexGuard<'a, Option<Box<dyn HostJudge>>>,
+    _order: MutexGuard<'a, ()>,
 }
 
 /// The rows of the host tables, as one change edits them.
