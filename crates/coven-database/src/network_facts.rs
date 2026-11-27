@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub(crate) const FUNCTIONS: [&str; 2] = ["_coven_network_usable", "_coven_network_metered"];
 
 /// What a change of the network changes, as live queries read it.
-const READ_AS: [(&str, &str); 3] =
+pub(crate) const READ_AS: [(&str, &str); 3] =
     [("coven_network", "usable"), ("coven_network", "metered"), ("coven_uploads", "metered")];
 
 /// What the views show of the network: whether the device has a usable

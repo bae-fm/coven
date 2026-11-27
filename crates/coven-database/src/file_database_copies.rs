@@ -231,8 +231,8 @@ impl StoreDatabase {
 /// The functions app SQL reaches only through the device-only copy views.
 pub(crate) const FUNCTIONS: [&str; 2] =
     ["_coven_copy_download_paths", "_coven_reserved_copy_paths"];
-const DOWNLOAD_VIEW: [(&str, &str); 1] = [("coven_device_only_downloading", "")];
-const PLACED_VIEW: [(&str, &str); 1] = [("coven_device_only_placed", "")];
+pub(crate) const DOWNLOAD_VIEW: [(&str, &str); 1] = [("coven_device_only_downloading", "")];
+pub(crate) const PLACED_VIEW: [(&str, &str); 1] = [("coven_device_only_placed", "")];
 
 /// Register the copy paths as they stood at each transaction's snapshot.
 pub(crate) fn register_copy_paths(

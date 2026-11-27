@@ -71,6 +71,12 @@ const DOWNLOADING: Direction = Direction {
 pub(crate) const FUNCTIONS: [&str; 3] =
     ["_coven_sending", "_coven_sending_objects", "_coven_downloading_objects"];
 
+/// What a start or end of a transfer changes, either way, as live queries
+/// read it.
+pub(crate) fn read_as() -> impl Iterator<Item = (&'static str, &'static str)> {
+    [&SENDING, &DOWNLOADING].into_iter().flat_map(|direction| direction.read_as).copied()
+}
+
 /// Both ways files go: one owner per open store, whose clones share it.
 #[derive(Clone)]
 pub(crate) struct TransfersInFlight {

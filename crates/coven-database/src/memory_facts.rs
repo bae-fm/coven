@@ -20,6 +20,16 @@ use sqlive::Setup;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+/// The views whose rows change with the facts, once for each column or view
+/// a change of one tells live queries of.
+pub(crate) fn views() -> impl Iterator<Item = &'static str> {
+    crate::transfers_in_flight::read_as()
+        .chain(crate::network_facts::READ_AS)
+        .chain(copies::DOWNLOAD_VIEW)
+        .chain(copies::PLACED_VIEW)
+        .map(|(view, _)| view)
+}
+
 /// The facts at one moment.
 #[derive(Clone, Default)]
 pub(crate) struct MemoryFacts {
