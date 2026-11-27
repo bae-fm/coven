@@ -54,7 +54,7 @@ fn wrap(rng: &mut Rng, item: &mut Item) {
     item.source = Source::Query(Box::new(select(Core {
         from: vec![table(alias, name)],
         conditions,
-        select: columns(name).into_iter().map(|column| out(col(alias, column))).collect(),
+        select: columns(name).iter().map(|column| out(col(alias, column))).collect(),
         group: Vec::new(),
         distinct: false,
     })));

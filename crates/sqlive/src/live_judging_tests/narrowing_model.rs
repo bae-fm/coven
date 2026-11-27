@@ -95,12 +95,12 @@ const TABLE_SQL: &str =
 /// The columns of `table`: the plain tables also have `s`, a text column of
 /// the digits `0` to `3`, whose `fold` collation ties `0` with `3`, as
 /// NOCASE ties `'a'` with `'A'`. `SEARCH`'s columns have no collation.
-pub(super) fn columns(table: &str) -> Vec<&'static str> {
-    let mut columns = COLUMNS.to_vec();
-    if table != SEARCH {
-        columns.push("s");
+pub(super) fn columns(table: &str) -> &'static [&'static str] {
+    if table == SEARCH {
+        &COLUMNS
+    } else {
+        &["id", "a", "b", "c", "n", "s"]
     }
-    columns
 }
 
 /// The order `fold` gives two strings of digits.
@@ -240,7 +240,11 @@ fn schema_json() -> Json {
                     (_, "n" | "s") => Json::Null,
                     _ => json!("numeric"),
                 };
-                json!({"name": name, "affinity": affinity, "collated": *name == "s"})
+                let mut column = json!({"name": name, "affinity": affinity});
+                if *name == "s" {
+                    column["collation"] = json!("fold");
+                }
+                column
             })
             .collect()
     };

@@ -67,7 +67,11 @@ pub(super) enum Join {
         left: bool,
         columns: &'static [&'static str],
     },
-    Natural,
+    /// `NATURAL JOIN`, which compares `columns`, those its two sides share:
+    /// the model reads them as USING's.
+    Natural {
+        columns: &'static [&'static str],
+    },
 }
 
 #[derive(Clone)]
@@ -387,7 +391,7 @@ fn items_sql(items: &[Item]) -> String {
                     columns.join(", ")
                 ));
             }
-            (_, Join::Natural) => sql.push_str(&format!(" NATURAL JOIN {source}")),
+            (_, Join::Natural { .. }) => sql.push_str(&format!(" NATURAL JOIN {source}")),
         }
     }
     sql
@@ -398,6 +402,7 @@ fn item_json(item: &Item) -> Json {
     let (left, using) = match item.join {
         Join::Left => (true, &[][..]),
         Join::Using { left, columns } => (left, columns),
+        Join::Natural { columns } => (false, columns),
         _ => (false, &[][..]),
     };
     let mut entry = json!({
@@ -405,7 +410,7 @@ fn item_json(item: &Item) -> Json {
         "left": left,
         "using": using,
         "on": item.on.iter().map(Cond::json).collect::<Vec<_>>(),
-        "whole": if item.join == Join::Natural { vec!["natural"] } else { Vec::new() },
+        "whole": if matches!(item.join, Join::Natural { .. }) { vec!["natural"] } else { Vec::new() },
     });
     let (key, value) = match &item.source {
         Source::Table(name) => ("table", json!(name)),

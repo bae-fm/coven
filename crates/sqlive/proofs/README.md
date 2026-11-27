@@ -17,7 +17,12 @@ statement as the planner numbers it: its FROM items, the SELECT cores that hold
 them, the queries whose arms the cores are, and the conditions on each core's
 rows, each in the WHERE or in a LEFT JOIN's ON. A join's USING stands for the
 equality of each column it names with the column of that name of the leftmost
-item before it that has one, as SQLite compares them. A parenthesized join's
+item before it that has one, as SQLite compares them: where that column is a
+table's with a collation other than BINARY, by that collation
+(`Cond.collated`), which compares two values by their keys and which the
+planner reads as any condition SQLite judges. The runner reads a NATURAL join's
+columns the same way, from the list of them that the differential gives it. A
+parenthesized join's
 tables are items of the core it sits in. A subquery is a query
 number, so an expression names it without nesting. COALESCE of more than two
 arguments nests in its second. A CASE with one WHEN and an ELSE, which is also
@@ -791,9 +796,10 @@ nothing of sqlive's own code: the differential checks sqlive's planner and
 judge against the model, and the model against SQLite, on every statement it
 generates.
 
-The model leaves out text, real and blob values, collations and the
-conversions an affinity makes: sqlive's checks that refuse them are modelled as
-refusals. A partner column of no affinity gives a member column of another
+The model leaves out text, real and blob values, the conversions an affinity
+makes, and every collation but those of ORDER BY terms and of the equalities
+that a USING or NATURAL join stands for: sqlive's checks that refuse them are
+modelled as refusals. A partner column of no affinity gives a member column of another
 affinity its values: SQLite compares a TEXT member with it as they are, and
 gives its values an INTEGER member's affinity, which leaves an integer as it
 is. The differential's column of no affinity holds integers, so it checks the

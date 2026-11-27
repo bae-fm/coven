@@ -32,6 +32,10 @@ inductive Expr where
 /-- A condition, in SQL's three-valued logic. -/
 inductive Cond where
   | cmp (op : Op) (left right : Expr)
+  /-- `left op right` under a collation other than BINARY, as SQLite compares a
+  column that declares one: by the two values' keys, as `Dir.key` states a
+  collation. The planner reads it as any condition SQLite judges. -/
+  | collated (key : Int → Int) (op : Op) (left right : Expr)
   /-- `e IS NULL`, or `e IS NOT NULL` when `not`. -/
   | null (e : Expr) (not : Bool)
   | inList (e : Expr) (values : List Expr)
@@ -249,7 +253,7 @@ def Expr.strict : Expr → Bool
   | .coalesce .. | .iif .. | .isNull _ => false
 
 def Cond.refs : Cond → List (Nat × Nat)
-  | .cmp _ l r => l.refs ++ r.refs
+  | .cmp _ l r | .collated _ _ l r => l.refs ++ r.refs
   | .null e _ => e.refs
   | .inList e vs => e.refs ++ vs.flatMap Expr.refs
   | .inQuery e _ _ => e.refs
@@ -262,7 +266,7 @@ def Cond.refs : Cond → List (Nat × Nat)
 def Cond.items (c : Cond) : List Nat := c.refs.map (·.1)
 
 def Cond.queries : Cond → List Nat
-  | .cmp _ l r => l.queries ++ r.queries
+  | .cmp _ l r | .collated _ _ l r => l.queries ++ r.queries
   | .null e _ => e.queries
   | .inList e vs => e.queries ++ vs.flatMap Expr.queries
   | .inQuery e q _ => e.queries ++ [q]
@@ -276,7 +280,7 @@ def Cond.queries : Cond → List Nat
 the subquery a row value is compared with by `=`. An IN and an EXISTS take
 none, as they read every row. -/
 def Cond.firstRows : Cond → List Nat
-  | .cmp _ l r => l.queries ++ r.queries
+  | .cmp _ l r | .collated _ _ l r => l.queries ++ r.queries
   | .null e _ => e.queries
   | .inList e vs => e.queries ++ vs.flatMap Expr.queries
   | .inQuery e _ _ => e.queries

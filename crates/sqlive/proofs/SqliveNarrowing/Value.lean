@@ -1,7 +1,8 @@
 /-! Values, rows and SQL's three-valued truth.
 
 The model's tables hold NULL and integers only, in columns SQLite compares
-without converting a value, so a comparison here is SQLite's. -/
+without converting a value, so a comparison here is SQLite's, and one under a
+collation compares the values' keys (`Cond.collated`). -/
 namespace SqliveNarrowing
 
 /-- NULL (`none`) or an integer. -/

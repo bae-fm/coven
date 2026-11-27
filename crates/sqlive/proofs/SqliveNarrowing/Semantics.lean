@@ -53,6 +53,7 @@ def Expr.eval (b : Bind) (sub : Subs) : Expr → Value
 
 def Cond.eval (b : Bind) (sub : Subs) : Cond → Truth
   | .cmp op l r => op.apply (l.eval b sub) (r.eval b sub)
+  | .collated key op l r => op.apply ((l.eval b sub).map key) ((r.eval b sub).map key)
   | .null e n => some ((e.eval b sub).isNone != n)
   | .inList e vs => memberTruth (e.eval b sub) (vs.map (Expr.eval b sub))
   | .inQuery e q n =>

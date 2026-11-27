@@ -2,7 +2,7 @@
 //! statement whole, and a statement with no condition depends on every
 //! row of each table it reads.
 
-use super::{col, eq, item, out, pick, select, table, Core, Join, Out, Query, Source, TABLES};
+use super::{col, item, out, pick, select, table, Core, Join, Out, Query, Source, TABLES};
 use crate::random_scopes::Rng;
 
 pub(super) fn statement(rng: &mut Rng) -> Query {
@@ -26,13 +26,9 @@ pub(super) fn statement(rng: &mut Rng) -> Query {
                 item(
                     "y",
                     Source::Table(second),
-                    Join::Natural,
-                    // A NATURAL join compares each column the tables share.
-                    super::columns(first)
-                        .into_iter()
-                        .filter(|column| super::columns(second).contains(column))
-                        .map(|column| eq(col("y", column), col("x", column)))
-                        .collect(),
+                    // The two tables have the same columns.
+                    Join::Natural { columns: super::columns(first) },
+                    Vec::new(),
                 ),
             ],
             conditions: vec![super::term::condition(rng, "x", 1)],

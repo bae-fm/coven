@@ -219,6 +219,7 @@ theorem read_sound {s : Statement} {i : Nat} {cd : Cond} {t : STerm}
           simp [hv]
         · split at hc <;> simp_all
     · cases h
+  | collated key op l r => simp [read] at h
   | inQuery e q n => simp [read] at h
   | «exists» q n => simp [read] at h
   | rowSub vs q isIn n => simp [read] at h

@@ -57,6 +57,12 @@ theorem Cond.eval_congr (cd : Cond) {b b' : Bind} {sub sub' : Subs}
         (fun q h => hs q (by simp [Cond.queries, h])),
       r.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))
         (fun q h => hs q (by simp [Cond.queries, h]))]
+  | collated key op l r =>
+    simp only [Cond.eval]
+    rw [l.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))
+        (fun q h => hs q (by simp [Cond.queries, h])),
+      r.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))
+        (fun q h => hs q (by simp [Cond.queries, h]))]
   | null e n =>
     simp only [Cond.eval]
     rw [e.eval_congr (fun i c h => hb i c (by simp [Cond.refs, h]))

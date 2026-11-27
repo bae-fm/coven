@@ -13,9 +13,9 @@ open Lean
 structure Schema where
   /-- Each table's name and its columns' names and affinities. -/
   tables : List (String × List (String × Option Affinity))
-  /-- Whether each column of each table is a stored column of a collation
-  other than BINARY (`Item.collated`), in the order of `tables`. -/
-  collated : List (List Bool) := []
+  /-- Each column's collation, by its key, where it is a stored column of one
+  other than BINARY, in the order of `tables`. -/
+  collations : List (List (Option (Int → Int))) := []
   views : List (String × Json)
   /-- The tables whose first column sqlive doesn't know to hold their rowid,
   as a contentful FTS5 table's (`Item.rowidFirst`). -/
@@ -25,6 +25,9 @@ structure Schema where
 structure Named where
   alias : String
   columns : List (Option String)
+  /-- A table's columns' collations (`Schema.collations`); a list that ends
+  early gives each column past its end none. -/
+  collations : List (Option (Int → Int)) := []
   deriving Inhabited
 
 structure Built where
@@ -79,7 +82,7 @@ SQLite compares the term's values by, BINARY when it names none. The runner
 knows three, each a total preorder on the integers: `binary`, the integers'
 own order; `fold`, which ties the integers that leave one remainder on
 division by three, as NOCASE ties 'a' and 'A'; and `reversed`, their order
-reversed. -/
+reversed. A schema's column names its collation the same way. -/
 def readDir (term : Json) : Except String Dir := do
   let desc := (field term "desc").bind (·.getBool?.toOption) |>.getD false
   match (field term "collation").bind (·.getStr?.toOption) |>.getD "binary" with
@@ -117,7 +120,9 @@ def usingCond (before : List Nat) (i : Nat) (column : String) : M Cond := do
   let some (l, lc) := before.findSome? fun j => (position j).map (j, ·)
     | lift (throw s!"no item before USING has column {column}")
   let some rc := position i | lift (throw s!"a USING item has no column {column}")
-  pure (.cmp .eq (.col l lc) (.col i rc))
+  match ((b.named.getD l default).collations[lc]?).join with
+  | some key => pure (.collated key .eq (.col l lc) (.col i rc))
+  | none => pure (.cmp .eq (.col l lc) (.col i rc))
 
 /-- Whether query `q`, read as the queries from `first` to `q`, names
 nothing outside them (`View.closed`). -/
@@ -263,13 +268,13 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
   let rowidFirst := match field j "table" with
     | some (.str name) => !schema.unkeyed.contains name
     | _ => true
-  let (kind, columns, names, readable, collated) ← match field j "table", field j "view", field j "cte", field j "query" with
+  let (kind, columns, names, readable, collations) ← match field j "table", field j "view", field j "cte", field j "query" with
     | some (.str name), _, _, _ =>
       match schema.tables.findIdx? (·.1 == name) with
       | some t =>
         let cols := (schema.tables.getD t default).2
         pure (ItemKind.table t, cols.map (·.2), cols.map (some ·.1), true,
-          schema.collated.getD t [])
+          schema.collations.getD t [])
       | none => lift (throw s!"no table {name}")
     | _, some (.str name), _, _ =>
       match schema.views.find? (·.1 == name) with
@@ -296,8 +301,10 @@ partial def readItem (schema : Schema) (j : Json) (k : Nat) (parent : Option Nat
     | _, _, _, _ => lift (throw "a FROM item names no source")
   let b ← get
   set { b with
-    items := b.items.push { core := k, kind, left, columns, collated, readable, rowidFirst }
-    named := b.named.push { alias, columns := names } }
+    items := b.items.push
+      { core := k, kind, left, columns, collated := collations.map Option.isSome, readable,
+        rowidFirst }
+    named := b.named.push { alias, columns := names, collations } }
   pure b.items.size
 
 /-- A derived item's columns: the names of its first arm's result columns,
@@ -436,14 +443,16 @@ def readSchema (j : Json) : Except String Schema := do
     let columns ← (list t "columns").mapM fun c => do
       pure ((← str c "name"), (← affinity ((c.getObjVal? "affinity").toOption.getD .null)))
     pure ((← str t "name"), columns)
-  let collated := (list j "tables").map fun t => (list t "columns").map fun c =>
-    ((field c "collated").bind (·.getBool?.toOption)).getD false
+  let collations ← (list j "tables").mapM fun t => (list t "columns").mapM fun c => do
+    match field c "collation" with
+    | some _ => pure (some (← readDir c).key)
+    | none => pure none
   let unkeyed ← (list j "tables").filterMapM fun t => do
     match (t.getObjVal? "rowid").toOption with
     | some (.bool false) => pure (some (← str t "name"))
     | _ => pure none
   let views ← (list j "views").mapM fun v => do pure ((← str v "name"), (← v.getObjVal? "query"))
-  pure { tables, collated, views, unkeyed }
+  pure { tables, collations, views, unkeyed }
 
 /-- The statement the tree `j` holds. -/
 def readStatement (schema : Schema) (j : Json) : Except String Statement := do
