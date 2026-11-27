@@ -62,7 +62,7 @@ impl<'connection, M: Mode> SqlReadContext<'connection, M> {
 /// A read that starts when polled and retains its store borrow until it
 /// ends, on the store's writer or a read-only handle.
 #[must_use = "reads run when awaited"]
-pub struct Read<'a, F, M: Mode = Writer> {
+pub struct PendingRead<'a, F, M: Mode = Writer> {
     database: &'a StoreDatabase<M>,
     state: ReadState<F>,
 }
@@ -75,7 +75,7 @@ enum ReadState<F> {
     Finished,
 }
 
-impl<'a, F, R, E, M: Mode> Read<'a, F, M>
+impl<'a, F, R, E, M: Mode> PendingRead<'a, F, M>
 where
     F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
@@ -99,9 +99,9 @@ where
 }
 
 // No field relies on a pinned address. The task itself is a movable handle.
-impl<F, M: Mode> Unpin for Read<'_, F, M> {}
+impl<F, M: Mode> Unpin for PendingRead<'_, F, M> {}
 
-impl<F, R, E, M: Mode> Future for Read<'_, F, M>
+impl<F, R, E, M: Mode> Future for PendingRead<'_, F, M>
 where
     F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
@@ -130,7 +130,7 @@ where
 }
 
 /// One read's call on the blocking pool, which its database started for the
-/// `Read` that awaits it.
+/// `PendingRead` that awaits it.
 pub(crate) struct RunningRead<R, E> {
     call: coven_foundation::task::CompletingTask<Result<R, E>>,
 }

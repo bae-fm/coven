@@ -4171,9 +4171,9 @@ impl Mode for Writer {}
 impl Mode for ReadOnly {}
 
 /// An awaitable read that keeps its store borrow until it finishes (E4).
-pub struct Read<'a, F, M: Mode = Writer> { /* private fields */ }
+pub struct PendingRead<'a, F, M: Mode = Writer> { /* private fields */ }
 
-impl<F, R, E, M: Mode> Future for Read<'_, F, M>
+impl<F, R, E, M: Mode> Future for PendingRead<'_, F, M>
 where
     F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
@@ -4215,7 +4215,7 @@ impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
     /// to work on the result after the connection is released. It fails
     /// with the closure's own error type.
-    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F>
+    pub fn read<F, R, E>(&self, read: F) -> PendingRead<'_, F>
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
@@ -4328,7 +4328,7 @@ impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 impl SqlRead for CommitSql<'_> {}
 
-impl<'a, F, R, E, M: Mode> Read<'a, F, M>
+impl<'a, F, R, E, M: Mode> PendingRead<'a, F, M>
 where
     F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
@@ -4626,7 +4626,7 @@ impl CovenReadHandle {
     /// runs as its own task (E15).
     pub async fn close(&self) -> Result<(), DbError>;
 
-    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
+    pub fn read<F, R, E>(&self, read: F) -> PendingRead<'_, F, ReadOnly>
     where
         F: FnOnce(SqlReadContext<'_, ReadOnly>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,

@@ -432,7 +432,7 @@ task_types = [
     # stages its files, giving each a new id.
     "coven_database::write_batch::WriteBatch",
     "coven_database::read::SqlReadContext",
-    "coven_database::read::Read",
+    "coven_database::read::PendingRead",
     # One search of a host table's rows, which SQLite closes before it
     # disconnects the table.
     "sqlive::host_tables::module::Cursor",

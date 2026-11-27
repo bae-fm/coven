@@ -203,7 +203,7 @@ pub use migration::{
 };
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
 pub use open_error::{CovenSchemaError, MigrationError, OpenError};
-pub use read::{Read, SqlReadContext};
+pub use read::{PendingRead, SqlReadContext};
 pub use row_key::RowKey;
 pub use schema_error::SchemaError;
 pub use snapshot_error::SnapshotError;

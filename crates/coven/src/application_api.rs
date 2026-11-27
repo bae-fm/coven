@@ -52,12 +52,13 @@ pub use coven_database::{
     FileSource, FunctionArguments, Joining, JoiningWrite, LiveQuery, LiveQueryCause,
     LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LoadStep, Lost, LostCell, LostValue,
     Migration, MigrationContext, MigrationError, Mode, MoveFile, MoveId, Namespace, OldWrites,
-    OpenStep, Params, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile, Provenance, Read,
-    ReadOnly, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
-    RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead,
-    SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError,
-    ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch, UnsentWork, UserFile,
-    WriteBatch, WriteFailure, WriteId, WritePermission, WriteWait, Writer, BOUND_FILE_LIMIT,
+    OpenStep, Params, PendingRead, Place, PreparedDeviceOnly, PreparedPin, PreparedUserFile,
+    Provenance, ReadOnly, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule,
+    Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError,
+    SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable,
+    TemporaryDirectoryError, ToSql, TransferChange, TransferEnd, TransferProgress, TransferWatch,
+    UnsentWork, UserFile, WriteBatch, WriteFailure, WriteId, WritePermission, WriteWait, Writer,
+    BOUND_FILE_LIMIT,
 };
 pub use coven_database::{SchemaDiffers, UndecodablePlan};
 #[cfg(any(test, feature = "test-utils"))]

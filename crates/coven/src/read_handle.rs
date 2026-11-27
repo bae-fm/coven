@@ -64,7 +64,7 @@ impl CovenReadHandle {
     }
 
     /// A read of one consistent snapshot, run when awaited.
-    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
+    pub fn read<F, R, E>(&self, read: F) -> PendingRead<'_, F, ReadOnly>
     where
         F: FnOnce(SqlReadContext<'_, ReadOnly>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,

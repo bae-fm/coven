@@ -67,7 +67,7 @@ use crate::store_failure::StoreFailure;
 use crate::store_failure::StoreHandle;
 use crate::write_failure::Hosted;
 use crate::{DbError, Migration, MigrationOutcome, SyncedTable};
-use crate::{LiveQuery, LostValue, Read, SqlReadContext};
+use crate::{LiveQuery, LostValue, PendingRead, SqlReadContext};
 use sqlive::Setup;
 
 #[path = "database_builder.rs"]
@@ -526,13 +526,13 @@ impl<M: Mode> StoreDatabase<M> {
     /// Run ordinary SQL against one consistent snapshot when awaited. The
     /// read fails with the closure's own error type, and with a failure of
     /// the database's own as that type's `From<DbError>`.
-    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, M>
+    pub fn read<F, R, E>(&self, read: F) -> PendingRead<'_, F, M>
     where
         F: FnOnce(SqlReadContext<'_, M>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
-        Read::new(self, read)
+        PendingRead::new(self, read)
     }
 
     /// Decode every lost cell and removed row in one snapshot.

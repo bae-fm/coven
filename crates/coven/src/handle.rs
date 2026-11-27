@@ -459,7 +459,7 @@ impl CovenHandle {
     /// to work on the result after the connection is released. It fails
     /// with the closure's own error type, a database failure as its
     /// `From<DbError>`.
-    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F>
+    pub fn read<F, R, E>(&self, read: F) -> PendingRead<'_, F>
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
