@@ -430,20 +430,6 @@ impl<P: Policy> SqlAuthorization<P> {
         result
     }
 
-    /// Run SQL of the host's own for the statement being read, judged as app
-    /// SQL is, without recording its reads for the statement: it reads only
-    /// what the statement read.
-    pub(crate) fn judged_unrecorded<T>(
-        &self,
-        run: impl FnOnce() -> rusqlite::Result<T>,
-    ) -> rusqlite::Result<T> {
-        let reads = lock_unpoisoned(&self.state).reads.take();
-        self.begin_app_call();
-        let result = self.app_result(run());
-        lock_unpoisoned(&self.state).reads = reads;
-        result
-    }
-
     /// End the statement begun last: each table it read in the scope
     /// `scopes` gives it, or whole when `scopes` gives none.
     pub(crate) fn record_statement(&self, scopes: &Scopes) {

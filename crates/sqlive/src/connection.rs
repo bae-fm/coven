@@ -687,12 +687,7 @@ impl<P: Policy> HostSql<P> {
             crate::authorization::Owner::Host => run(statement),
             _ => self.counting_steps(statement, StepsOf::AppRead, run),
         };
-        self.record_app_statement(
-            plan.as_deref(),
-            owner == crate::authorization::Owner::Host,
-            &parameters,
-            last.as_deref(),
-        );
+        self.record_app_statement(plan.as_deref(), &parameters, last.as_deref());
         #[cfg(any(test, feature = "test-utils"))]
         if recorded == Recorded::Yes {
             if let Some(log) = self.statement_log.borrow().as_ref() {

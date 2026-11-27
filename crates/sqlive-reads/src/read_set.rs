@@ -28,9 +28,6 @@ pub struct TableRead {
     pub scope: RowScope,
     /// Only inserted rows affect this read, not updates or deletions.
     pub inserted_only: bool,
-    /// A host statement made the read, so the questions its scope asks run
-    /// as the host's own SQL.
-    pub host: bool,
 }
 
 /// One change a commit made to a table's column or row.
@@ -57,10 +54,6 @@ impl TableRead {
         }
         let Some((old, new)) = &change.rows else {
             return Ok(true);
-        };
-        let host = self.host;
-        let lookups = &mut |judging: Judging<'_>| {
-            lookups(if host { Judging::Host(&judging) } else { judging })
         };
         for row in [old, new].into_iter().flatten() {
             if self.scope.matches(row, lookups)? {
@@ -148,12 +141,7 @@ impl Answers {
         judging: Judging<'_>,
         lookups: &mut Lookups<'_>,
     ) -> Result<bool, NoAnswer> {
-        // A question's answer doesn't depend on whose SQL asks it.
-        let mut plain = judging;
-        while let Judging::Host(question) = plain {
-            plain = *question;
-        }
-        match plain {
+        match judging {
             Judging::Partner(lookup, value) => {
                 let key = (std::ptr::from_ref(lookup) as usize, ValueKey::of(value).owned());
                 if let Some(found) = self.partners.get(&key) {
@@ -175,7 +163,6 @@ impl Answers {
                 self.rows.insert(key, found);
                 Ok(found)
             }
-            Judging::Host(_) => lookups(judging),
         }
     }
 }

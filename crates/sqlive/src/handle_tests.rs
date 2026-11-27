@@ -75,7 +75,6 @@ fn a_run_that_reads_an_unrecorded_table_panics() {
             columns: BTreeSet::new(),
             scope: RowScope::All,
             inserted_only: false,
-            host: false,
         }]
     };
     let subscription = observer.subscribe();
@@ -103,7 +102,6 @@ fn kept_columns_read_only_the_subscriptions_that_changed() {
             columns: [column.to_owned()].into(),
             scope: RowScope::equal(column.into(), vec![crate::SqlValue::Integer(1)]),
             inserted_only: false,
-            host: false,
         }]
     };
     let entries_read = || std::mem::take(&mut lock_unpoisoned(&handle.state).entries_read);
@@ -150,7 +148,6 @@ fn kept_columns_read_only_the_subscriptions_that_changed() {
         columns: BTreeSet::new(),
         scope: RowScope::All,
         inserted_only: false,
-        host: false,
     }]);
     assert_eq!(handle.kept_columns(), columns(&[("notes", &[]), ("tracks", &["release"])]));
     assert_eq!(entries_read(), 1);

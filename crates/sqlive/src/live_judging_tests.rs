@@ -31,6 +31,8 @@ mod narrowing_model;
 mod net_change;
 #[path = "live_judging_tests/plan.rs"]
 mod plan;
+#[path = "live_judging_tests/policy.rs"]
+mod policy;
 #[path = "live_judging_tests/row.rs"]
 mod row;
 #[path = "live_judging_tests/row_scope.rs"]

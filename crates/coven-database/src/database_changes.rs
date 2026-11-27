@@ -35,7 +35,6 @@ impl StoreDatabase {
                 columns: BTreeSet::new(),
                 scope: sqlive::RowScope::All,
                 inserted_only,
-                host: false,
             })
             .collect();
         self.observer.changes(reads, first, DbError::from)

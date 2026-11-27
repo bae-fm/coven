@@ -994,6 +994,13 @@ same of `track_artists`, with the tracks of this release inside it. sqlive asks
 the tables, not the query's result: a release with no tracks yet has no row in
 the result, and its first track must still rerun a query that joins it.
 
+A lookup is sqlive's own SQL, and the policy judges it as it judges the host's.
+It reads what a statement the authorizer allowed reads, but it can name a table
+alone that the statement reached only through a view. Coven lets app SQL read
+some of its own tables only through its views, and a view that joins two of
+them has a lookup of one for a change to the other. Judged as app SQL, that
+lookup would be refused, and a write that needs it would fail.
+
 Asking at the write keeps a live query's run as fast as a one-shot read of the
 same SQL, and its memory the same whatever its partners hold: it keeps its
 statements' conditions, no values. Reading the joined values in each run

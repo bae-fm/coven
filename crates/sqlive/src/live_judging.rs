@@ -63,22 +63,18 @@ impl<P: Policy> HostSql<P> {
     }
 
     /// Answer one question about a changed row, read in this connection's
-    /// transaction, judged as app SQL is without recording its reads.
+    /// transaction, a write's own or a live query's run, as sqlive's own
+    /// SQL, without recording its reads. A question reads what a statement
+    /// the authorizer allowed reads, but it can name alone a table that
+    /// statement reached only through a view, which the policy may refuse
+    /// app SQL (SPEC.md section 7).
     fn ask_judged(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
-        match judging {
-            // A host statement's read can name tables the app's SQL can't, so
-            // its questions run as the host's own SQL.
-            Judging::Host(question) => self.authorization.unrecorded(|| self.ask(*question)),
-            question => self.authorization.judged_unrecorded(|| Ok(self.ask(question)))?,
-        }
+        self.authorization.unrecorded(|| self.ask(judging))
     }
 
-    /// Answer one question about a changed row, read in this connection's
-    /// transaction: a write's own, or a live query's run. The caller sets
-    /// how the authorizer judges it.
+    /// Answer one question about a changed row.
     fn ask(&self, judging: Judging<'_>) -> Result<bool, NoAnswer> {
         match judging {
-            Judging::Host(question) => self.ask(*question),
             Judging::Partner(lookup, value) => {
                 let (sql, parameters) = lookup.sql(value);
                 self.run_limited(sql, &parameters)

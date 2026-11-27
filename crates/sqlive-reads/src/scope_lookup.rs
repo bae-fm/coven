@@ -21,10 +21,6 @@ pub enum Judging<'a> {
     Partner(&'a Lookup, &'a Value),
     /// Whether a row passes a condition: the SQL and its parameters.
     Row(&'a str, &'a [Value]),
-    /// A question about a row of a table that a host statement read, which
-    /// SQLite answers as the host's own SQL: the tables such a statement
-    /// reads can be ones the app's SQL can't.
-    Host(&'a Judging<'a>),
 }
 
 /// Runs one question about a changed row: whether SQLite found a row.

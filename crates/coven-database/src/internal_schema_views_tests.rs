@@ -406,3 +406,26 @@ async fn a_read_of_one_releases_uploads_ignores_another_releases_upload() {
     assert!(release.next_inline().await.unwrap().unwrap().is_empty());
     db.close().await.unwrap();
 }
+
+/// A view that joins two of coven's own tables has a write to one of them ask
+/// about the other, which app SQL reads only through the view. The write
+/// commits, and reruns no live query of the view that it changes no row of
+/// (§4).
+#[tokio::test]
+async fn a_write_commits_beside_a_read_of_a_view_joining_covens_tables() {
+    use crate::file_write::tests::open;
+    use crate::Provenance;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let mut members: crate::LiveQuery<_, DbError> = db.subscribe(|read| {
+        Ok(read.query("SELECT member FROM coven_circle_members WHERE circle='gifts'", [], |r| {
+            r.get::<_, String>(0)
+        })?)
+    });
+    assert!(members.next_inline().await.unwrap().unwrap().is_empty());
+    // The circle doesn't have the new member: a lookup of
+    // `_coven_circle_members`.
+    TestStore::register(&db, coven_foundation::id_source::DeviceId(2), 2);
+    assert!(!members.is_marked_for_rerun());
+    db.close().await.unwrap();
+}

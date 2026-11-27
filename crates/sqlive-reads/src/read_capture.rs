@@ -166,7 +166,6 @@ impl ReadCapture {
                 columns,
                 scope,
                 inserted_only: false,
-                host: scopes.host,
             };
             match scopes.tables.get(&table) {
                 Some(references) if frame.read_inside(&table, &scopes.inlined) => {
