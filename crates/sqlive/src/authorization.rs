@@ -117,10 +117,9 @@ pub(crate) struct AppContext {
 pub(crate) struct Judgment {
     /// What the statement reads.
     pub(crate) reads: ReadFrame,
-    /// Whether it does more than read, which a read refuses.
-    more_than_reads: bool,
-    /// Whether it does what a write refuses: changing the schema, or
-    /// `ANALYZE`.
+    /// Whether a read refuses it ([`read_refusal`]).
+    refused_in_read: bool,
+    /// Whether a write refuses it ([`write_refusal`]).
     refused_in_write: bool,
 }
 
@@ -128,7 +127,7 @@ impl Judgment {
     /// Whether the authorizer's own rules allow the statement in `context`,
     /// as they would if SQLite prepared it there.
     pub(crate) fn allows(&self, context: AppContext) -> bool {
-        !(context.reading && self.more_than_reads || context.writing && self.refused_in_write)
+        !(context.reading && self.refused_in_read || context.writing && self.refused_in_write)
     }
 
     /// Add `action`, which SQLite reports as it prepares the statement,
@@ -137,11 +136,8 @@ impl Judgment {
         if let AuthAction::Read { table_name, column_name } = action {
             self.reads.read(table_name, column_name, accessor, whole);
         }
-        if !reads_data_version(action) {
-            self.more_than_reads |= !only_reads(action);
-            self.refused_in_write |=
-                changes_schema(action) || matches!(action, AuthAction::Analyze { .. });
-        }
+        self.refused_in_read |= read_refusal(action).is_some();
+        self.refused_in_write |= write_refusal(action).is_some();
     }
 }
 
@@ -154,35 +150,42 @@ fn reads_data_version(action: AuthAction<'_>) -> bool {
     matches!(action, AuthAction::Pragma { pragma_name: "data_version", pragma_value: None })
 }
 
-fn only_reads(action: AuthAction<'_>) -> bool {
+/// What the authorizer's rules refuse `action` as in a read, which may only
+/// read.
+fn read_refusal(action: AuthAction<'_>) -> Option<&'static str> {
     use AuthAction::*;
-    matches!(action, Read { .. } | Select | Function { .. } | Recursive)
+    let reads = matches!(action, Read { .. } | Select | Function { .. } | Recursive);
+    (!reads && !reads_data_version(action)).then_some("writing through a read context")
 }
 
-fn changes_schema(action: AuthAction<'_>) -> bool {
+/// What the authorizer's rules refuse `action` as in a write.
+fn write_refusal(action: AuthAction<'_>) -> Option<&'static str> {
     use AuthAction::*;
-    matches!(
-        action,
+    match action {
         CreateTable { .. }
-            | CreateTempTable { .. }
-            | DropTable { .. }
-            | DropTempTable { .. }
-            | CreateVtable { .. }
-            | DropVtable { .. }
-            | AlterTable { .. }
-            | CreateIndex { .. }
-            | CreateTempIndex { .. }
-            | DropIndex { .. }
-            | DropTempIndex { .. }
-            | CreateTrigger { .. }
-            | CreateTempTrigger { .. }
-            | DropTrigger { .. }
-            | DropTempTrigger { .. }
-            | CreateView { .. }
-            | CreateTempView { .. }
-            | DropView { .. }
-            | DropTempView { .. }
-    )
+        | CreateTempTable { .. }
+        | DropTable { .. }
+        | DropTempTable { .. }
+        | CreateVtable { .. }
+        | DropVtable { .. }
+        | AlterTable { .. }
+        | CreateIndex { .. }
+        | CreateTempIndex { .. }
+        | DropIndex { .. }
+        | DropTempIndex { .. }
+        | CreateTrigger { .. }
+        | CreateTempTrigger { .. }
+        | DropTrigger { .. }
+        | DropTempTrigger { .. }
+        | CreateView { .. }
+        | CreateTempView { .. }
+        | DropView { .. }
+        | DropTempView { .. } => Some("schema changes in a write"),
+        // Statistics aren't data: a write's capture would record them, and
+        // the host gathers them itself.
+        Analyze { .. } => Some("ANALYZE in a write"),
+        _ => None,
+    }
 }
 
 /// One call of a SQL function registered through a connection's setup.
@@ -746,15 +749,10 @@ impl<P: Policy> AuthorizationState<P> {
         if reads_data_version(context.action) {
             return Ok(());
         }
-        if self.reading && !only_reads(context.action) {
-            return Err(crate::Error::StatementForbidden {
-                operation: "writing through a read context",
-            });
-        }
-        if self.writing && changes_schema(context.action) {
-            return Err(crate::Error::StatementForbidden {
-                operation: "schema changes in a write",
-            });
+        let in_read = read_refusal(context.action).filter(|_| self.reading);
+        let in_write = write_refusal(context.action).filter(|_| self.writing);
+        if let Some(operation) = in_read.or(in_write) {
+            return Err(crate::Error::StatementForbidden { operation });
         }
         if matches!(context.action, AlterTable { .. }) {
             self.altering = true;
@@ -773,9 +771,6 @@ impl<P: Policy> AuthorizationState<P> {
             }
             Pragma { pragma_name: "quick_check", .. } if internal_check => None,
             Read { table_name: "pragma_quick_check", .. } if internal_check => None,
-            // Statistics aren't data: a write's capture would record them,
-            // and the host gathers them itself.
-            Analyze { .. } if self.writing => Some("ANALYZE in a write"),
             Transaction { .. } | Savepoint { .. } => Some("transaction control"),
             Attach { .. } | Detach { .. } => Some("attaching or detaching databases"),
             Pragma { .. } => Some("PRAGMA"),
