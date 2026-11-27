@@ -660,21 +660,27 @@ wait, and its pending record. Whether uploads are paused is also its own view,
 banner and the toggle beside it from that view, which `coven_uploads` can't
 give once the queue is empty: it has no row to carry its `paused` column.
 
-What holds transfers for the network is one row of `coven_network` (§17.9).
-Two of its facts last only as long as the process: whether the device has a
-usable network, and whether it is metered, as coven last heard from the
-platform (§6.7). Opening asks the platform before the handle exists, so the
-first read is already true. The third is the setting to move files only on
-unmetered networks, which is stored. Ben's music app shows "Waiting for
-Wi-Fi" beside the albums it is pinning while both `metered` and
-`unmetered_only` say 1, and a live query that reads the view runs again as the
-network changes.
+What holds transfers for the network is one row of `coven_network` (§17.9). Two
+of its facts last only as long as the process: whether the device has a usable
+network, and whether it is metered, as coven last heard from the platform
+(§6.7). Opening asks the platform before the handle exists, so the first read
+is already true. The third is the setting to move files only on unmetered
+networks, which is stored. Ben's music app shows "Waiting for Wi-Fi" beside the
+albums it is pinning while both `metered` and `unmetered_only` say 1, and the
+live query that reads the two runs again as either changes.
 `coven_uploads.metered` says the same of each file the setting holds, as
 `paused` does for the pause. The network's facts are the one row of a table in
 memory, `_coven_network`. No key narrows a fact about the whole device, so a
-change to it runs again each live query that reads `coven_network`,
-`coven_uploads` or `coven_upload_phases`, the views that say what the network
-holds, and no live query that reads none of them.
+change to one runs again each live query that reads a column showing it, and no
+other live query. Ben's queue screen reads each file and whether it is being
+sent from `coven_uploads`, and not its `metered`, so going from Wi-Fi to
+cellular doesn't run that query again ([sqlive's spec, section
+8](../crates/sqlive/SPEC.md#subqueries-in-from-ctes-and-views)). A change to
+the network does run again every live query of `coven_upload_phases`, whichever
+of the view's columns it reads. The view's subqueries keep rows by an OFFSET,
+and the order SQLite reads rows in could decide which rows they keep, so a live
+query of the view depends on every column of each table the view reads, the
+network's among them.
 A read sees the network as it stood at its snapshot, as it sees the files in
 flight, so one row of `coven_upload_phases` never pairs a send that a better
 network let start with the network from before it.

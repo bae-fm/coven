@@ -1,6 +1,7 @@
-//! The tables of a statement that only a column nothing reads of a subquery,
-//! CTE or view reads, which the statement depends on no row of (SPEC.md
-//! section 8).
+//! What a statement names only in a column nothing reads of a subquery, CTE
+//! or view, which it doesn't depend on (SPEC.md section 8): the tables only
+//! such a column reads, none of whose rows it depends on, and the columns of
+//! its other tables that only such a column names.
 //!
 //! A column of a subquery, CTE or view that no clause names and no result
 //! column left reads changes no row the statement returns: SQLite keeps no
@@ -22,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::derived::Output;
 use crate::from_item::Columns;
+use crate::read_set::ColumnSet;
 use crate::scope_plan::{Object, Planner, Source, Subqueries};
 use crate::select_syntax::{parts, Part};
 use sqlite3_parser::ast::Expr;
@@ -66,6 +68,20 @@ impl UnreadReads {
             && !direct
             && through.is_some_and(|names| names.is_subset(&self.inside))
     }
+}
+
+/// The columns of each table of `live` that only what nothing reads names:
+/// those some source of the table names there, and no source of it reads.
+pub(crate) fn unread_columns<T>(sources: &[Source], live: &BTreeMap<String, T>) -> ColumnSet {
+    let mut found = ColumnSet::new();
+    for table in live.keys() {
+        let of_table = || sources.iter().filter(|source| source.table() == Some(table));
+        let unread = of_table().flat_map(|source| &source.unread_columns);
+        let unread =
+            unread.filter(|column| !of_table().any(|source| source.columns.contains(*column)));
+        found.extend(unread.map(|column| (table.clone(), column.clone())));
+    }
+    found
 }
 
 /// What `sources` read only in columns nothing reads, where `live` are the
@@ -252,6 +268,14 @@ impl Planner<'_, '_> {
                 .filter(move |(position, _)| !live.unread.contains(&(core, *position)))
                 .flat_map(|(_, output)| &output.refs);
             found.clause_refs.iter().chain(outputs)
+        })
+    }
+
+    /// Every column the statement names, whether it reads it or not.
+    pub(crate) fn every_ref(&self) -> impl Iterator<Item = &ColumnRef> {
+        self.cores.iter().flat_map(|core| {
+            let outputs = core.outputs.iter().flat_map(|output| &output.refs);
+            core.clause_refs.iter().chain(outputs)
         })
     }
 

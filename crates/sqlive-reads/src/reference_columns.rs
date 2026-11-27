@@ -6,6 +6,10 @@
 //! parenthesized join that SQLite reads through a `SELECT *` of its own, and
 //! one a `*` over columns sqlive doesn't know can span. The model states the
 //! rule as `Statement.split` in `crates/sqlive/proofs`.
+//!
+//! A column that only what nothing reads names, as a view's result column the
+//! statement doesn't select (`unread_columns.rs`), is read through no
+//! reference. The model states that as `Statement.pruned`.
 
 use std::collections::BTreeSet;
 
@@ -17,20 +21,53 @@ use crate::table_keys::rowid_column;
 use crate::unread_columns::{ColumnRef, Live};
 use crate::unreported_columns::Node;
 
+/// The columns, lowercase, one item names of the table it reads; none for an
+/// item that reads no table.
+pub(crate) struct ReferenceColumns {
+    /// Those the statement reads through it.
+    pub(crate) read: BTreeSet<String>,
+    /// Those only what nothing reads names, which the statement doesn't read
+    /// through it though SQLite reports them.
+    pub(crate) unread: BTreeSet<String>,
+}
+
 impl Planner<'_, '_> {
-    /// The columns, lowercase, each item reads of the table it reads, in the
-    /// order of the items; none for an item that reads no table. `live` says
+    /// The columns each item names, in the order of the items. `live` says
     /// which clauses the statement reads, and `picked` which of its SELECTs
     /// and cores keep rows SQLite picks.
     pub(crate) fn reference_columns(
         &self,
         live: &Live,
         picked: &BTreeSet<Node>,
+    ) -> rusqlite::Result<Vec<ReferenceColumns>> {
+        let mut columns = self.named_columns(self.refs_read(live))?;
+        for item in self.items_read_whole_rows(picked) {
+            let Some(table) = self.items[item].source.table() else { continue };
+            for column in self.schema.columns(table)? {
+                columns[item].insert(column.name.to_ascii_lowercase());
+            }
+        }
+        let named = self.named_columns(self.every_ref())?;
+        Ok(columns
+            .into_iter()
+            .zip(named)
+            .map(|(read, named)| {
+                let unread = named.difference(&read).cloned().collect();
+                ReferenceColumns { read, unread }
+            })
+            .collect())
+    }
+
+    /// The columns, lowercase, of each item's table that `refs` name, in the
+    /// order of the items.
+    fn named_columns<'r>(
+        &self,
+        refs: impl Iterator<Item = &'r ColumnRef>,
     ) -> rusqlite::Result<Vec<BTreeSet<String>>> {
         let mut columns = vec![BTreeSet::new(); self.items.len()];
         // The names that resolve to no one item's column.
         let mut unresolved = BTreeSet::new();
-        for column in self.refs_read(live) {
+        for column in refs {
             match column {
                 ColumnRef::Of(item, column) => {
                     columns[*item].insert(column.clone());
@@ -53,12 +90,6 @@ impl Planner<'_, '_> {
                     let column = rowid_column(self.schema, table)?.unwrap_or("rowid");
                     columns[item].insert(column.to_ascii_lowercase());
                 }
-            }
-        }
-        for item in self.items_read_whole_rows(picked) {
-            let Some(table) = self.items[item].source.table() else { continue };
-            for column in self.schema.columns(table)? {
-                columns[item].insert(column.name.to_ascii_lowercase());
             }
         }
         Ok(columns)

@@ -137,7 +137,11 @@ impl ReadCapture {
             };
             match scopes.tables.get(&table) {
                 Some(references) if frame.read_inside(&table, &scopes.inlined) => {
-                    let columns = of_references(columns, references, &scopes.unreported);
+                    let columns = of_references(
+                        read_somewhere(&table, columns, scopes),
+                        references,
+                        &scopes.unreported,
+                    );
                     let reads = references.iter().zip(columns);
                     self.completed.extend(
                         reads.map(|(reference, columns)| read(columns, reference.scope.clone())),
@@ -147,6 +151,17 @@ impl ReadCapture {
             }
         }
     }
+}
+
+/// The columns among `columns`, those SQLite reports and those it doesn't of
+/// `table`, that the statement reads: all but those only what nothing reads
+/// names (`unread_columns.rs`), unless its rows depend on them unreported.
+fn read_somewhere(table: &str, mut columns: BTreeSet<String>, scopes: &Scopes) -> BTreeSet<String> {
+    columns.retain(|column| {
+        let found = (table.to_owned(), column.clone());
+        !scopes.unread_columns.contains(&found) || scopes.unreported.columns().contains(&found)
+    });
+    columns
 }
 
 /// The columns each of `references`, those to one table, reads among

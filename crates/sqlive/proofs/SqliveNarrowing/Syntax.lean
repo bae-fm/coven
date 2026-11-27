@@ -208,9 +208,9 @@ structure Statement where
   root : Nat
   /-- The shapes in it that sqlive reads whole. -/
   whole : List WholeShape
-  /-- The columns, each of a table, SQLite reports the statement reads that no
-  clause of these cores names: those a column nothing reads names, which
-  `Statement.pruned` writes NULL for. -/
+  /-- The columns, each of a table, the statement reads that no clause of
+  these cores names, as `Statement.pruned` keeps those of the statement it
+  prunes (`Statement.unclaused`). -/
   reported : List (Nat × Nat) := []
   deriving Repr, Inhabited
 

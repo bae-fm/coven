@@ -254,6 +254,9 @@ pub struct Scopes {
     /// What the statement reads only in columns nothing reads
     /// (`unread_columns.rs`).
     pub(crate) unread: crate::unread_columns::UnreadReads,
+    /// The columns of the tables in `tables` that only what nothing reads
+    /// names, which no reference reads though SQLite reports them.
+    pub(crate) unread_columns: crate::read_set::ColumnSet,
     /// Columns the statement reads that SQLite's authorizer doesn't report:
     /// those its USING and NATURAL joins compare and every column of a table
     /// that a query whose rows SQLite picks reads, or every column when the
@@ -269,6 +272,7 @@ impl Default for Scopes {
             inlined: BTreeSet::new(),
             fts5_shadows: BTreeSet::new(),
             unread: Default::default(),
+            unread_columns: crate::read_set::ColumnSet::new(),
             unreported: std::sync::Arc::new(crate::unreported_columns::UnreportedColumns::Known(
                 crate::read_set::ColumnSet::new(),
             )),

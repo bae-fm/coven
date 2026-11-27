@@ -260,19 +260,21 @@ JOIN adds, so where such a part holds, its item has a row.
   statement has, since leaving one out can leave another unnamed, and then
   empties the cores the statement no longer reads. A column goes only where
   the rows of its SELECT are the same without it: one written as an
-  expression, which calls no aggregate and no window function, in a core that
-  is neither DISTINCT nor grouped, of a query with no ORDER BY and no
+  expression, which calls no aggregate and no window function, in a core
+  that is neither DISTINCT nor grouped, of a query with no ORDER BY and no
   compound but UNION ALL that is neither the statement's own nor a subquery.
   `result_pruned` proves that the pruned statement returns the statement's
   rows from every database, and `pruned_narrowing_sound` that a write its
-  judge lets pass leaves them unchanged. SQLite reports every column the
-  statement names, so the pruned statement reads, of each table it still
-  reads, what the statement does (`Statement.reported`). The runner judges
-  each case with the pruned statement. A view read whole in such a column
-  goes with its core, as any other item there does, since `result_pruned`
-  holds whatever the core's items read. The model has no names of SQLite's
-  reports, so the live judging tests check which of a view's reads sqlive
-  drops.
+  judge lets pass leaves them unchanged. The pruned statement reads, of each
+  table it still reads, the columns its own clauses name and those the
+  statement reads that no clause names (`Statement.unclaused`). So a column
+  that only a column nothing reads names isn't read, though SQLite reports
+  it, and `result_pruned` holds whatever columns the statement is said to
+  read. The runner judges each case with the pruned statement. A view read
+  whole in such a column goes with its core, as any other item there does,
+  since `result_pruned` holds whatever the core's items read. The model has
+  no names of SQLite's reports, so the live judging tests check which of a
+  view's reads sqlive drops.
 - **A condition carried across an equality.** `transfer_sound` proves that
   when `a.x = b.y` holds of a binding, a term true of `b`'s row on `y` is
   true of `a`'s row on `x`. The planner adds such a term to `a`'s scope,

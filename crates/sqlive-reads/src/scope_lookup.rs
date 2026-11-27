@@ -64,6 +64,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         tables.entry(table.to_owned()).or_default().push(reference);
     }
     let unread = crate::unread_columns::unread_reads(&sources.sources, &tables);
+    let unread_columns = crate::unread_columns::unread_columns(&sources.sources, &tables);
     // A read through a view read whole in a column nothing reads gives the
     // statement no row, so it widens no table's scope.
     let mut inlined = sources.inlined.clone().unwrap_or_default();
@@ -71,6 +72,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
     Scopes {
         tables,
         unread,
+        unread_columns,
         inlined,
         fts5_shadows: sources.fts5_shadows.clone(),
         ..Scopes::default()

@@ -651,6 +651,54 @@ CREATE VIEW covered AS SELECT a.id, (SELECT c.id FROM covers AS c WHERE c.album 
     db.close();
 }
 
+/// A column of a table that only a view's column nothing reads names is not
+/// read: a change to it reruns only the statements that read the view's
+/// column. A column that a clause, the view's own or the statement's, names
+/// too is read, and the table's rows still count, so a row added or removed
+/// reruns every statement that joins it.
+#[tokio::test]
+async fn a_column_only_an_unread_column_names_is_not_read() {
+    let db = TestDatabase::open(
+        "CREATE TABLE files(id INTEGER PRIMARY KEY, name TEXT, size INTEGER);
+CREATE TABLE network(id INTEGER PRIMARY KEY, usable INTEGER, metered INTEGER);
+INSERT INTO files VALUES (1,'one',10),(2,'two',20);
+INSERT INTO network VALUES (1,1,0);
+CREATE VIEW queued AS SELECT f.id, f.name, n.metered AS metered, f.size > 15 AND n.usable AS held
+    FROM files f JOIN network n;
+CREATE VIEW listed AS SELECT q.* FROM queued q",
+    );
+    for (sql, metered, usable) in [
+        ("SELECT name FROM queued ORDER BY id", false, false),
+        ("SELECT name FROM listed ORDER BY id", false, false),
+        ("SELECT q.name FROM (SELECT * FROM queued) AS q ORDER BY q.id", false, false),
+        ("SELECT name || metered FROM queued ORDER BY id", true, false),
+        ("SELECT name || metered FROM listed ORDER BY id", true, false),
+        ("SELECT name || held FROM queued ORDER BY id", false, true),
+        ("SELECT name FROM queued WHERE metered = 0 ORDER BY id", true, false),
+        (
+            "SELECT q.name || (SELECT max(n.metered) FROM network n) FROM queued q ORDER BY q.id",
+            true,
+            false,
+        ),
+    ] {
+        follows(
+            &db,
+            sql,
+            vec![],
+            &[
+                ("UPDATE network SET metered = 1", metered),
+                ("UPDATE network SET metered = 0", metered),
+                ("UPDATE network SET usable = 0", usable),
+                ("UPDATE network SET usable = 1", usable),
+                ("INSERT INTO network VALUES (2,1,0)", true),
+                ("DELETE FROM network WHERE id = 2", true),
+            ],
+        )
+        .await;
+    }
+    db.close();
+}
+
 /// A view read whole in a column nothing reads adds no table the statement
 /// depends on, nor does one sqlive can't read as cores of its own. A table
 /// the view reads stays whole when the statement also reads it through a

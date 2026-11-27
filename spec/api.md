@@ -3854,8 +3854,8 @@ let moved = handle
 - The device's network is the same kind of fact. `coven_network`'s `usable`
   and `metered`, and `coven_uploads.metered`, read it from the store's watch
   of the network (E5), as it stood at the read's snapshot, and a live query
-  that reads one runs again as the network changes. A read-only handle watches
-  nothing: it shows `usable` NULL and nothing metered, with the setting as
+  that reads one runs again as the fact it shows changes. A read-only handle
+  watches nothing: it shows `usable` NULL and nothing metered, with the setting as
   stored. The tables in memory behind these views are coven's own: app SQL that
   reads one fails with `InternalTable`.
 - `coven_sync_state` and `coven_upload_phases` are the two views whose rows

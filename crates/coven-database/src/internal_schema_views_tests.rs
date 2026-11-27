@@ -429,8 +429,8 @@ async fn a_write_commits_beside_a_read_of_a_view_joining_covens_tables() {
 
 /// A live query that reads which of one release's files this process is
 /// sending and downloading runs again as a transfer of its own file starts or
-/// ends, and not as one of another release's does. One that reads no view
-/// that names the network doesn't run again as the network changes (§4).
+/// ends, and not as one of another release's does. One that reads no column
+/// that shows the network doesn't run again as the network changes (§4).
 #[tokio::test]
 async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
     use crate::file_write::tests::open;
@@ -459,7 +459,7 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
         .unwrap();
     let mut release: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row(
-            "SELECT coalesce((SELECT u.sending FROM coven_uploads AS u WHERE u.file=f.file),0),
+            "SELECT (SELECT count(*) FROM coven_uploads AS u WHERE u.file=f.file AND u.sending)>0,
                     EXISTS(SELECT 1 FROM coven_sending AS s WHERE s.file=f.file)
              FROM files AS f WHERE f.id='a'",
             [],
@@ -488,9 +488,8 @@ async fn a_read_of_one_releases_transfers_ignores_another_releases_transfers() {
         joined: 1,
     });
     assert!(!listed.is_marked_for_rerun());
-    // `coven_uploads` says what the network holds, so a read of it follows
-    // the network too.
-    assert!(release.is_marked_for_rerun());
+    // `release` reads `coven_uploads` without its `metered`.
+    assert!(!release.is_marked_for_rerun());
     let sending = start(db.uploads_in_flight(), &own, file);
     assert_eq!(crate::tests::next(&mut release).await, (true, true));
     drop(sending);

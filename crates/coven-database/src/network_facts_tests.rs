@@ -37,6 +37,33 @@ async fn a_live_query_of_the_network_runs_again_as_it_changes() {
     db.close().await.unwrap();
 }
 
+/// A live query over `coven_uploads` that doesn't read `metered` doesn't run
+/// again as the network becomes metered or stops being, and one that reads it
+/// does.
+#[tokio::test]
+async fn a_metered_change_reruns_only_the_upload_reads_that_read_metered() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    stage(&db, b"photo".to_vec(), true).await.unwrap();
+    db.write(|sql| sql.set_unmetered_only(true)).await.unwrap();
+    let mut files: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query_row("SELECT count(file) FROM coven_uploads WHERE NOT sending", [], |r| {
+            r.get::<_, i64>(0)
+        })?)
+    });
+    let mut held: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
+        Ok(sql.query_row("SELECT metered FROM coven_uploads", [], |r| r.get::<_, bool>(0))?)
+    });
+    assert_eq!(next(&mut files).await, 1);
+    assert!(!next(&mut held).await);
+    for metered in [true, false] {
+        db.record_network(NetworkState { usable: Some(true), metered, joined: 1 });
+        assert!(!files.is_marked_for_rerun(), "metered {metered}");
+        assert_eq!(next(&mut held).await, metered);
+    }
+    db.close().await.unwrap();
+}
+
 /// The setting persists across reopening; the network doesn't, until the
 /// store's watch says it again.
 #[tokio::test]

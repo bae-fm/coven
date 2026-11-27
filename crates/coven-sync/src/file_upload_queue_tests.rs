@@ -215,3 +215,23 @@ async fn a_failed_upload_names_the_record_that_says_why() {
     assert_eq!(recorded.subject, record.subject);
     f.close().await;
 }
+
+/// A live query of `coven_upload_phases` that selects only each file runs
+/// again as the network changes: the view's subqueries keep rows by an OFFSET,
+/// so the query depends on every column of each table the view reads (§4).
+#[tokio::test]
+async fn a_read_of_the_phases_files_alone_follows_the_network() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let photo = f.attach("files", "photo", vec![7; 64]).await.id();
+    let mut files: coven_database::LiveQuery<Vec<FileId>, coven_database::DbError> = f
+        .database
+        .subscribe(|sql| Ok(sql.query("SELECT file FROM coven_upload_phases", [], |r| r.get(0))?));
+    assert_eq!(files.next_inline().await.unwrap().unwrap(), [photo]);
+    f.database.record_network(coven_foundation::network_watch::NetworkState {
+        usable: Some(true),
+        metered: true,
+        joined: 1,
+    });
+    assert!(files.is_marked_for_rerun());
+}

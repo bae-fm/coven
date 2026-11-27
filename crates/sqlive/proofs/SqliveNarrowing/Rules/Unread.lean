@@ -8,9 +8,10 @@ statement returns, so sqlive plans the statement without it
 `Statement.pruned` writes NULL for each such column, until no more are
 unread, as leaving one out can leave another unnamed, and then empties the
 cores the statement no longer reads. SQLite reports every column the
-statement names, those under an unread column too, so the pruned statement
-reads of each table it still reads what the statement does
-(`Statement.reported`). `result_pruned` proves the pruned
+statement names, those under an unread column too, but sqlive keeps of them
+only the ones a clause it still reads names, so a column only an unread
+column names is not read. What no clause names, the statement keeps as it
+read it (`Statement.unclaused`). `result_pruned` proves the pruned
 statement returns the statement's rows from every database, so a write the
 judge of the pruned statement lets pass leaves the statement's rows
 unchanged. -/
@@ -88,12 +89,22 @@ def pruneTimes : Nat → Statement → Statement
 
 end Unread
 
+/-- The columns, each of a table, `s` reads whether or not a clause names
+them: every column of a table that a query whose rows SQLite picks, a
+compound or core whose rows follow the order SQLite reads its rows in, or a
+parenthesized join reads, and those `Statement.reported` names. -/
+def Statement.unclaused (s : Statement) : List (Nat × Nat) :=
+  (((s.itemNumbers.filterMap s.table?).eraseDups.filter fun t =>
+      s.pickedTables.contains t || s.groupedTables.contains t).flatMap fun t =>
+    (List.range (s.width t)).map (t, ·)) ++ s.reported
+
 /-- The statement sqlive plans: `s` without the columns nothing reads. It
 writes NULL for them once for each column the statement has, which is more
-often than any of them waits for another. -/
+often than any of them waits for another. It reads the columns its own
+clauses name, and what `s` reads that no clause names. -/
 def Statement.pruned (s : Statement) : Statement :=
   { Unread.dropUnreached (Unread.pruneTimes (s.cores.flatMap (·.output)).length s) with
-    reported := s.reads.flatMap fun (t, columns) => columns.map (t, ·) }
+    reported := s.unclaused }
 
 namespace Unread
 
@@ -899,7 +910,7 @@ theorem joinItems_items {s t : Statement} (h : t.items = s.items) (c : Core)
     have hi : t.item i = s.item i := by simp [Statement.item, h]
     simp only [joinItems, hi, joinItems_items h c rowsOf subs is]
 
-/-- What SQLite reports a statement reads changes no row it returns. -/
+/-- The columns a statement is said to read change no row it returns. -/
 theorem result_reported (s : Statement) (reported : List (Nat × Nat)) (db : Db) :
     ({ s with reported } : Statement).result db = s.result db := by
   have heval : ∀ f, evalQuery { s with reported } db f = evalQuery s db f := by
