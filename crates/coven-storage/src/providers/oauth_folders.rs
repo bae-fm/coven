@@ -86,6 +86,39 @@ impl OAuthFolders {
         crate::cooldown::observed(self.cooldown.as_ref(), result).await
     }
 
+    /// The status of the sharing job `job`, read at `url`. A check that
+    /// fails as a network failure or is rate limited says nothing of the
+    /// job, so it is sent again, after the backoff of §6.7 or the longer
+    /// wait Dropbox asks for.
+    async fn share_job_status(
+        &self,
+        url: &str,
+        job: &str,
+    ) -> Result<(Value, http::ProviderResponse), StorageError> {
+        let mut resends = 0u32;
+        loop {
+            let body = Body::Json(json!({"async_job_id":job}));
+            match self.request_response(Method::POST, url, body).await {
+                Err(error)
+                    if matches!(
+                        error.failure(),
+                        StorageFailure::Network | StorageFailure::RateLimited
+                    ) =>
+                {
+                    let wait = crate::cooldown::throttled_wait(&error, resends);
+                    tracing::warn!(
+                        ?error,
+                        ?wait,
+                        "a Dropbox sharing job's status check will be sent again"
+                    );
+                    self.session.wait_out(wait).await;
+                    resends = resends.saturating_add(1);
+                }
+                answered => return answered,
+            }
+        }
+    }
+
     /// The signed-in person's default OneDrive root, including its actual item id.
     pub(super) async fn onedrive_root(&self) -> Result<StorageFolder, StorageError> {
         self.require(OAuthAccess::OneDrive)?;
@@ -176,7 +209,8 @@ impl OAuthFolders {
     /// share it. The name is looked up first, so a name already taken fails
     /// with `AlreadyExists` and nothing of the person's is shared; then one
     /// `share_folder` request makes the folder and shares it, and its job, if
-    /// Dropbox runs one, is checked until it completes.
+    /// Dropbox runs one, is followed until Dropbox reports it complete or
+    /// failed.
     pub(super) async fn create_dropbox_shared_folder(
         &self,
         name: &str,
@@ -210,11 +244,7 @@ impl OAuthFolders {
                 let status =
                     http::endpoint(&self.api, &["sharing", "check_share_job_status"], &[])?;
                 super::dropbox_job::completed(&self.session, "folder sharing", || {
-                    self.request_response(
-                        Method::POST,
-                        &status,
-                        Body::Json(json!({"async_job_id":job})),
-                    )
+                    self.share_job_status(&status, job)
                 })
                 .await?
             }
@@ -283,3 +313,7 @@ fn onedrive_folder(value: &Value, drive: &str, name: &str) -> Result<StorageFold
     storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
     Ok(StorageFolder { name: name.into(), storage })
 }
+
+#[cfg(test)]
+#[path = "oauth_folders_tests.rs"]
+mod tests;

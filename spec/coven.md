@@ -11085,10 +11085,17 @@ Household or create a OneDrive folder for it, then pass that location to setup.
 On Dropbox she can make a new shared folder for it instead. Coven looks the name
 up at the top of her Dropbox first, and refuses one already taken with
 `StorageFailure::AlreadyExists`, so no folder of hers is shared by mistake; then
-one `sharing/share_folder` request makes the folder and shares it, and coven
-checks the job Dropbox may run for it until it completes. A name with a slash
-is refused before any request. Choosing the location is separate from accessing
-the store's objects below it.
+one `sharing/share_folder` request makes the folder and shares it. A name with
+a slash is refused before any request. Choosing the location is separate from
+accessing the store's objects below it.
+
+Dropbox may run that request as a job. Coven checks the job, spaced as the
+automatic waits of §6.7, until Dropbox reports it complete or failed, however
+long that takes. Only the running call knows the job's id: if it gave up while
+the job ran, the folder would still appear, and Ana's retry would find the name
+taken. For the same reason, a check that meets a network failure or a 429 is
+sent again, after the same delays or the longer wait Dropbox asks for. Any
+other failed check ends the call with its failure.
 
 Every object path starts with the store's id: slots, the floor, snapshots, files,
 the setup check's test objects, and S3 detection's probes. The one exception is
@@ -12827,9 +12834,13 @@ acceptance where the provider documents an undo that keeps the invite usable
   the acceptance; it ends when the invite does.
 
 **Dropbox links left in place.** Taking an account back on Dropbox removes
-it from the shared folder's members, then reads the links that still reach
-the folder: `sharing/list_shared_links` with the folder's path lists the
-links to it and to its parents
+it from the shared folder's members. Dropbox runs the removal as a job, which
+coven follows until it completes or fails, with checks spaced as §20.3 spaces
+a sharing job's. A check that fails fails the revocation, which stays pending
+(§20.9), since a revocation is safe to send again. Once the job completes,
+coven reads the links that still reach the folder:
+`sharing/list_shared_links` with the folder's path lists the links to it and
+to its parents
 ([sharing.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing.stone)).
 Coven changes none of them. A link only the folder's members, the caller or
 no one can use doesn't reach the removed account; any other is reported in

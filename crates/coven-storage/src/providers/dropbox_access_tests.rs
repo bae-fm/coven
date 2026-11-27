@@ -1,4 +1,5 @@
 use super::*;
+use crate::providers::tests::RecordingClock;
 use crate::test_utils::STORE_ID;
 
 async fn removal_result(status: Value) -> Result<Vec<RetainedAccess>, StorageError> {
@@ -376,41 +377,11 @@ async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
     }
 }
 
-#[derive(Default)]
-struct RemovalClock(Mutex<Vec<std::time::Duration>>);
-
-impl coven_foundation::clock::Clock for RemovalClock {
-    fn now(&self) -> std::time::SystemTime {
-        std::time::SystemTime::UNIX_EPOCH
-    }
-    fn elapsed(&self) -> std::time::Duration {
-        self.0.lock().unwrap().iter().sum()
-    }
-    fn deadline(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.0.lock().unwrap().push(duration);
-        Box::pin(std::future::ready(()))
-    }
-    fn sleep_until(
-        &self,
-        _at: std::time::SystemTime,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
-                + Send,
-        >,
-    > {
-        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::NoTimer)))
-    }
-}
-
 #[tokio::test]
 async fn asynchronous_removal_waits_for_publication_and_retries_after_completion() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let clock = Arc::new(RemovalClock::default());
+    let clock = Arc::new(RecordingClock::default());
     let mut storage = provider(&server.url);
     Arc::get_mut(storage.provider_mut()).unwrap().session =
         crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
@@ -423,36 +394,31 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
     assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
-    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_secs(1)]);
+    assert_eq!(clock.waits(), [std::time::Duration::from_secs(1)]);
 }
 
+/// A job Dropbox still runs after many checks is followed until it
+/// completes, however long that takes, with checks spaced by the backoff of
+/// §6.7.
 #[tokio::test]
-async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
+async fn asynchronous_removal_is_followed_until_it_completes() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let clock = Arc::new(RemovalClock::default());
+    let clock = Arc::new(RecordingClock::default());
     let mut storage = provider(&server.url);
     Arc::get_mut(storage.provider_mut()).unwrap().session =
         crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     storage.grant_access("member").await.unwrap();
-    state.lock().unwrap().removal_job = Some(RemovalJob {
-        member: "member".into(),
-        statuses: [json!({".tag":"in_progress"})].into(),
-    });
-    let error = storage.revoke_access("member").await.err().unwrap();
-    assert_eq!(error.failure(), StorageFailure::Network);
-    let StorageError::Provider { source, .. } = error else { panic!("timeout cause discarded") };
-    assert_eq!(
-        source.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::TimedOut
-    );
-    assert!(state.lock().unwrap().members.contains_key("member"));
-    // Status checks back off.
-    assert_eq!(*clock.0.lock().unwrap(), [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_secs));
-    state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
-        [json!({".tag":"complete"})].into();
+    let mut statuses = vec![json!({".tag":"in_progress"}); 11];
+    statuses.push(json!({".tag":"complete"}));
+    state.lock().unwrap().removal_job =
+        Some(RemovalJob { member: "member".into(), statuses: statuses.into() });
     storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
+    assert_eq!(
+        clock.waits(),
+        [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300].map(std::time::Duration::from_secs)
+    );
 }
 
 /// Dropbox writes an absent optional field as null too: a members page whose

@@ -82,6 +82,41 @@ pub(crate) fn session_with_clock(
     )
     .unwrap()
 }
+/// A clock whose every wait ends at once, keeping each wait's length.
+#[derive(Default)]
+pub(crate) struct RecordingClock(std::sync::Mutex<Vec<std::time::Duration>>);
+impl RecordingClock {
+    /// The length of each wait armed so far, in order.
+    pub(crate) fn waits(&self) -> Vec<std::time::Duration> {
+        self.0.lock().unwrap().clone()
+    }
+}
+impl coven_foundation::clock::Clock for RecordingClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.lock().unwrap().iter().sum()
+    }
+    fn deadline(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.0.lock().unwrap().push(duration);
+        Box::pin(std::future::ready(()))
+    }
+    fn sleep_until(
+        &self,
+        _at: SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::NoTimer)))
+    }
+}
 pub(crate) fn json(value: serde_json::Value) -> Response<Body> {
     Response::builder()
         .header("content-type", "application/json")

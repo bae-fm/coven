@@ -4992,7 +4992,9 @@ impl CovenHandle {
     /// fails with `AlreadyExists` and nothing is made or shared; a name with
     /// a slash, or an empty one, fails with `InvalidConfiguration` before any
     /// request. Requires Full Dropbox sign-in; returns a setup location
-    /// without committing it.
+    /// without committing it. The call lasts as long as Dropbox's sharing
+    /// job does (§20.3), and it finishes even if the app drops its
+    /// future.
     pub async fn create_dropbox_shared_folder(
         &self, name: &str,
     ) -> Result<StorageFolder, StorageSetupError>;
