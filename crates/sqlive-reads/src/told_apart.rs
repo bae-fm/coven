@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use crate::comparison::{
     at_least_as_fine, comparison_collation, keeps_values, Carried, Traits, BINARY,
 };
+use crate::from_item::{Column, ColumnValue, Columns};
 use crate::schema_objects::{declared_columns, ROWID_NAMES};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{conjuncts, order_term, parts, Functions, OrderTerm, Part};
@@ -37,8 +38,11 @@ pub(crate) struct ItemColumn {
 /// What a FROM item reads rows from.
 #[derive(Clone)]
 enum Source<'a> {
-    /// A table of the main schema, by its stored name.
-    Table(String),
+    /// A table of the main schema, by its stored name, with the columns,
+    /// lowercase, that hold equal values only where they are the same: its
+    /// stored columns of BINARY collation whose declared type gives them an
+    /// affinity other than BLOB.
+    Table { name: String, exact: BTreeSet<String> },
     /// A FROM subquery.
     Subquery(&'a Select<'a>),
     /// A CTE, a view or a table function, whose rows nothing tells apart.
@@ -449,11 +453,11 @@ impl Telling<'_> {
                     let qualifier = Some(alias(given).unwrap_or(name.name.0));
                     match scope.object(name, &["table", "virtual"])? {
                         // A CTE's name names no table.
-                        Some(table) => Item {
-                            qualifier,
-                            columns: Some(self.table_columns(&table)?),
-                            source: Source::Table(table),
-                        },
+                        Some(table) => {
+                            let named = alias(given).unwrap_or(name.name.0);
+                            let (source, columns) = self.table_item(named, table)?;
+                            Item { qualifier, columns: Some(columns), source }
+                        }
                         None => {
                             let columns = match scope.object(name, &["view"])? {
                                 Some(view) => Some(
@@ -491,28 +495,41 @@ impl Telling<'_> {
         Ok(Some(items))
     }
 
-    /// A table's columns, each with its affinity and the collation it
-    /// declares.
-    fn table_columns(&self, table: &str) -> rusqlite::Result<Vec<ItemColumn>> {
-        declared_columns(self.connection, table)?
+    /// The table `table`, which the statement names by `qualifier`, as a
+    /// FROM item reads it: its columns' traits, as `from_item::columns` reads
+    /// them, and which of them hold equal values only where they are the
+    /// same.
+    fn table_item(
+        &self,
+        qualifier: &str,
+        table: String,
+    ) -> rusqlite::Result<(Source<'static>, Vec<ItemColumn>)> {
+        let listed =
+            crate::from_item::columns(self.connection, self.functions, qualifier, &table, true)?;
+        let Columns::Listed(listed) = listed else { panic!("a table's columns are listed") };
+        let mut exact = BTreeSet::new();
+        let columns = listed
             .into_iter()
-            .map(|column| {
-                let (_, collation, _, _, _) =
-                    self.connection.column_metadata(Some("main"), table, column.name.as_str())?;
-                Ok(ItemColumn {
-                    name: Some(column.name.to_ascii_lowercase()),
-                    traits: Traits {
-                        affinity: Carried::Of(Affinity::declared(&column.declared)),
-                        collation: match collation {
-                            Some(collation) => {
-                                Carried::Of(collation.to_string_lossy().into_owned())
-                            }
-                            None => Carried::Unfollowed,
-                        },
-                    },
-                })
+            .map(|Column { name, value }| {
+                if let ColumnValue::Compared(Affinity::Numeric | Affinity::Text) = value {
+                    exact.extend(name.clone());
+                }
+                let compared = |affinity, collation: &str| Traits {
+                    affinity: Carried::Of(affinity),
+                    collation: Carried::Of(collation.to_owned()),
+                };
+                let traits = match value {
+                    ColumnValue::Compared(affinity) => compared(affinity, BINARY),
+                    ColumnValue::Generated(expression) => compared(expression.affinity, BINARY),
+                    ColumnValue::Collated(affinity, collation) => compared(affinity, &collation),
+                    ColumnValue::Unknown | ColumnValue::Volatile | ColumnValue::Hidden => {
+                        Traits::UNFOLLOWED
+                    }
+                };
+                ItemColumn { name, traits }
             })
-            .collect()
+            .collect();
+        Ok((Source::Table { name: table, exact }, columns))
     }
 
     /// The columns the subquery `select` returns, as its first SELECT names
@@ -759,7 +776,7 @@ impl Telling<'_> {
             .find(|left| left.item == item)
             .map(|left| left.needs.iter().all(|need| *need == item || known.contains(need)));
         match &rows.items[item].source {
-            Source::Table(table) => {
+            Source::Table { name: table, .. } => {
                 let not_null = not_null_columns(self.connection, table)?;
                 for key in unique_keys(self.connection, table)? {
                     let mut covered = true;
@@ -915,14 +932,8 @@ impl Telling<'_> {
         item: usize,
         column: &str,
     ) -> rusqlite::Result<bool> {
-        let Source::Table(table) = &items[item].source else { return Ok(false) };
-        if is_rowid(self.connection, table, column)? {
-            return Ok(true);
-        }
-        let qualifier = items[item].qualifier.unwrap_or(table);
-        let columns =
-            crate::from_item::columns(self.connection, self.functions, qualifier, table, true)?;
-        Ok(matches!(columns.affinity(column), Some(Affinity::Numeric | Affinity::Text)))
+        let Source::Table { name, exact } = &items[item].source else { return Ok(false) };
+        Ok(exact.contains(column) || is_rowid(self.connection, name, column)?)
     }
 
     /// The FROM item, by its place in `items`, and the column, lowercase,
