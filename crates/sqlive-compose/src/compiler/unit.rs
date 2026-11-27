@@ -111,7 +111,10 @@ pub(crate) fn compile(
     }
     check_parameters(header, &prepared).map_err(&fail)?;
     let bare = sqlive_reads::bare_column_beside_table_function(&expansion.own)
-        .map_err(|error| fail(Cause::Sqlite(error)))?;
+        .map_err(|error| fail(Cause::Sqlite(error)))?
+        .map_err(|sqlive_reads::Unanalyzable { why }| {
+            fail(Cause::Unanalyzable { concerns: header.name.clone(), why })
+        })?;
     if let Some(column) = bare {
         return Err(fail(Cause::BareColumn { concerns: header.name.clone(), column }));
     }

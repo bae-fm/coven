@@ -6,25 +6,28 @@
 use std::collections::BTreeSet;
 
 use sqlite3_parser::ast::{
-    As, Cmd, Expr, FromClause, Name, OneSelect, ResultColumn, Select, SelectTable, Stmt,
+    As, Expr, FromClause, Name, OneSelect, ResultColumn, Select, SelectTable,
 };
-use sqlite3_parser::lexer::sql::Parser;
-use sqlite3_parser::{Bump, FallibleIterator};
+use sqlite3_parser::Bump;
 
+use crate::compiled_plan::Unanalyzable;
 use crate::schema_objects::{MainSchema, SchemaLookups};
+use crate::select_syntax::one_select;
 use crate::sql_walk::{Reads, Scope, Visit, Walk};
 use crate::view_trees::ViewTrees;
 
 /// The first column that `sql`, a SELECT, names without its table, when it
 /// reads a table function anywhere. A name of a result column that is a whole
 /// ORDER BY term, which no table qualifies, is none, and neither are `true`
-/// and `false`. SQL the parser can't read as one SELECT gives none: sqlive
-/// can't analyze it.
-pub fn bare_column_beside_table_function(sql: &str) -> rusqlite::Result<Option<String>> {
+/// and `false`. SQL the parser can't read as one SELECT, which sqlive can't
+/// analyze, gives why.
+pub fn bare_column_beside_table_function(
+    sql: &str,
+) -> rusqlite::Result<Result<Option<String>, Unanalyzable>> {
     let bump = Bump::new();
-    let mut parser = Parser::new(&bump, sql.as_bytes());
-    let Ok(Some(Cmd::Stmt(Stmt::Select(select)))) = parser.next() else {
-        return Ok(None);
+    let select = match one_select(&bump, sql) {
+        Ok(select) => select,
+        Err(why) => return Ok(Err(Unanalyzable { why: why.to_string() })),
     };
     // The walk looks each FROM item up in a schema with no object, so it
     // reads no view's SQL, which the call didn't write.
@@ -35,7 +38,7 @@ pub fn bare_column_beside_table_function(sql: &str) -> rusqlite::Result<Option<S
     walk.select(select, false)?;
     let BareNames { table_function, names, result_names } = walk.visit;
     let bare = names.into_iter().find(|(address, _)| !result_names.contains(address));
-    Ok(bare.filter(|_| table_function).map(|(_, name)| name))
+    Ok(Ok(bare.filter(|_| table_function).map(|(_, name)| name)))
 }
 
 /// What the walk of a statement finds.

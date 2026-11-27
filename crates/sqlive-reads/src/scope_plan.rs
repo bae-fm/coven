@@ -35,7 +35,9 @@ use crate::scope_row::item_row_term;
 use crate::scope_subquery::compared_subquery;
 use crate::scope_term::{term, Affinity, RunValues, ScopeTerm};
 use crate::scope_window::{read_window, Window};
-use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Functions, Part};
+use crate::select_syntax::{
+    conjuncts, number_parameters, one_select, parts, window_parts, Functions, Part,
+};
 use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use crate::table_places::Places;
@@ -44,9 +46,8 @@ use crate::unreported_columns::{unreported_columns, Node, UnreportedColumns};
 use crate::view_trees::ViewTrees;
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
-    ast::{As, Cmd, Expr, Name, OneSelect, Operator, ResultColumn, Select, Stmt},
-    lexer::sql::Parser,
-    Bump, FallibleIterator,
+    ast::{As, Expr, Name, OneSelect, Operator, ResultColumn, Select},
+    Bump,
 };
 
 /// The rows of each table a statement can depend on, before its values are
@@ -123,17 +124,11 @@ impl ScopePlan {
         let written = sql;
         let sql = number_parameters(sql, statement)?;
         let bump = Bump::new();
-        let mut parser = Parser::new(&bump, sql.as_bytes());
-        // SQLite and the parser can accept different language versions. A
-        // SQL form this parser cannot represent depends on whole tables.
-        let select = match parser.next() {
-            Ok(Some(Cmd::Stmt(Stmt::Select(select)))) => select,
-            Ok(_) => return unread("the statement isn't one SELECT the parser reads"),
-            Err(error) => return unread(&format!("the parser can't read the statement: {error}")),
+        // A SQL form the parser can't represent depends on whole tables.
+        let select = match one_select(&bump, &sql) {
+            Ok(select) => select,
+            Err(why) => return unread(&why.to_string()),
         };
-        if !matches!(parser.next(), Ok(None)) {
-            return unread("the statement isn't one SELECT the parser reads");
-        }
         let functions = Functions::read(connection)?;
         let views = ViewTrees::new(&bump);
         let (unreported, picked) =

@@ -6,10 +6,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sqlite3_parser::ast::{
-    As, Expr, FrameBound, FromClause, FunctionCallOrder, FunctionTail, LikeOperator, Literal, Name,
-    Operator, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, Window,
+    As, Cmd, Expr, FrameBound, FromClause, FunctionCallOrder, FunctionTail, LikeOperator, Literal,
+    Name, Operator, Over, QualifiedName, ResultColumn, Select, SelectTable, SortedColumn, Stmt,
+    Window,
 };
-use sqlite3_parser::lexer::sql::TokenType;
+use sqlite3_parser::lexer::sql::{Error as ParseError, Parser, TokenType};
+use sqlite3_parser::{Bump, FallibleIterator};
 
 // Number every parameter in source order, before interpreting any predicate.
 // The parser's AST normalizes LIMIT offset,count into count/OFFSET, so read the
@@ -105,6 +107,53 @@ impl Part<'_> {
             }
             _ => false,
         }
+    }
+}
+
+/// Why the parser reads no one SELECT in some SQL: SQLite and the parser
+/// can accept different language versions.
+#[derive(Debug)]
+pub(crate) enum NotOneSelect {
+    /// It reads another statement, none, or more than one.
+    Statements,
+    /// It can't read the SQL.
+    Unreadable(ParseError),
+}
+
+impl std::fmt::Display for NotOneSelect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Statements => {
+                formatter.write_str("the statement isn't one SELECT the parser reads")
+            }
+            Self::Unreadable(error) => {
+                write!(formatter, "the parser can't read the statement: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NotOneSelect {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Statements => None,
+            Self::Unreadable(error) => Some(error),
+        }
+    }
+}
+
+/// The SELECT that `sql` is, read into `bump`.
+pub(crate) fn one_select<'b>(bump: &'b Bump, sql: &'b str) -> Result<&'b Select<'b>, NotOneSelect> {
+    let mut parser = Parser::new(bump, sql.as_bytes());
+    let select = match parser.next() {
+        Ok(Some(Cmd::Stmt(Stmt::Select(select)))) => select,
+        Ok(_) => return Err(NotOneSelect::Statements),
+        Err(error) => return Err(NotOneSelect::Unreadable(error)),
+    };
+    match parser.next() {
+        Ok(None) => Ok(select),
+        Ok(Some(_)) => Err(NotOneSelect::Statements),
+        Err(error) => Err(NotOneSelect::Unreadable(error)),
     }
 }
 
