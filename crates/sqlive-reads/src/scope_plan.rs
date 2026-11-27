@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
 use crate::read_report::ReadPlace;
+use crate::reference_columns::ReferenceColumns;
 use crate::row_scope::Scopes;
 use crate::schema_objects::{MainSchema, SchemaLookups};
 use crate::scope_edge::{Edge, MemberValue};
@@ -225,12 +226,9 @@ pub(crate) struct Source {
     /// Whether only a column nothing reads reads it, so the statement
     /// depends on none of its rows (`unread_columns.rs`).
     pub(crate) unread: bool,
-    /// The columns the statement reads through it, of the table it reads
-    /// (`reference_columns.rs`).
-    pub(crate) columns: Arc<BTreeSet<String>>,
-    /// The columns of the table it reads that only what nothing reads names
-    /// through it (`reference_columns.rs`).
-    pub(crate) unread_columns: BTreeSet<String>,
+    /// The columns of the table it reads that the statement names through it,
+    /// those it reads and those it doesn't (`reference_columns.rs`).
+    pub(crate) columns: ReferenceColumns,
     /// Columns that must equal a value an earlier source holds.
     pub(crate) memberships: Vec<Membership>,
     /// The ORs that narrow it, each a list of sides whose memberships take
@@ -414,8 +412,7 @@ impl Sources {
         }
         let columns = planner.reference_columns(&live, picked)?;
         for (item, columns) in planner.items.iter_mut().zip(columns) {
-            item.source.columns = Arc::new(columns.read);
-            item.source.unread_columns = columns.unread;
+            item.source.columns = columns;
         }
         Ok((Ok(planner.ordered(sorted)), size))
     }

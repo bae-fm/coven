@@ -12,6 +12,7 @@
 //! reference. The model states that as `Statement.pruned`.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use sqlite3_parser::ast::Name;
 
@@ -23,9 +24,10 @@ use crate::unreported_columns::Node;
 
 /// The columns, lowercase, one item names of the table it reads; none for an
 /// item that reads no table.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReferenceColumns {
     /// Those the statement reads through it.
-    pub(crate) read: BTreeSet<String>,
+    pub(crate) read: Arc<BTreeSet<String>>,
     /// Those only what nothing reads names, which the statement doesn't read
     /// through it though SQLite reports them.
     pub(crate) unread: BTreeSet<String>,
@@ -53,7 +55,7 @@ impl Planner<'_, '_> {
             .zip(named)
             .map(|(read, named)| {
                 let unread = named.difference(&read).cloned().collect();
-                ReferenceColumns { read, unread }
+                ReferenceColumns { read: Arc::new(read), unread }
             })
             .collect())
     }

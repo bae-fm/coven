@@ -60,7 +60,7 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value], last: Option<&[Val
         let Some(table) = source.table().filter(|_| !source.unread) else {
             continue;
         };
-        let reference = Reference { scope, columns: Arc::clone(&source.columns) };
+        let reference = Reference { scope, columns: Arc::clone(&source.columns.read) };
         tables.entry(table.to_owned()).or_default().push(reference);
     }
     let unread = crate::unread_columns::unread_reads(&sources.sources, &tables);

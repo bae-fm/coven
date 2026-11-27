@@ -76,9 +76,9 @@ pub(crate) fn unread_columns<T>(sources: &[Source], live: &BTreeMap<String, T>) 
     let mut found = ColumnSet::new();
     for table in live.keys() {
         let of_table = || sources.iter().filter(|source| source.table() == Some(table));
-        let unread = of_table().flat_map(|source| &source.unread_columns);
+        let unread = of_table().flat_map(|source| &source.columns.unread);
         let unread =
-            unread.filter(|column| !of_table().any(|source| source.columns.contains(*column)));
+            unread.filter(|column| !of_table().any(|source| source.columns.read.contains(*column)));
         found.extend(unread.map(|column| (table.clone(), column.clone())));
     }
     found
