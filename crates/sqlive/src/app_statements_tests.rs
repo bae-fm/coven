@@ -1,7 +1,7 @@
 use super::ScopePlans;
 use crate::tests::{next, QueryError, TestDatabase, TestError, TestOptions, TestRead};
 use crate::triggered_inserts::SCHEMA as TRIGGERED;
-use crate::{ScopePlan, ScopePlanSize};
+use crate::{MainSchema, ScopePlan, ScopePlanSize};
 use std::sync::Arc;
 
 fn notes() -> TestDatabase {
@@ -233,8 +233,33 @@ async fn a_plan_that_stops_counts_what_it_read_before() {
 fn some_plan() -> Arc<ScopePlan> {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     let statement = connection.prepare("SELECT 1").unwrap();
+    let schema = MainSchema::read(&connection).unwrap();
     let whole = crate::WholeViews::new([]);
-    Arc::new(ScopePlan::build(&connection, "SELECT 1", &statement, &whole).unwrap())
+    Arc::new(ScopePlan::build(&connection, &schema, "SELECT 1", &statement, &whole).unwrap())
+}
+
+/// The plans built against one schema share one read of it, and a later
+/// schema's plans share a read of their own.
+#[test]
+fn the_plans_of_a_schema_share_one_read_of_it() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let plans = ScopePlans::new();
+    let mut reads = 0;
+    let mut build = |cookie, sql| {
+        let built = plans.plan(cookie, sql, || {
+            plans.schema(cookie, || {
+                reads += 1;
+                MainSchema::read(&connection)
+            })?;
+            Ok(some_plan())
+        });
+        built.unwrap();
+        reads
+    };
+    assert_eq!(build(1, "SELECT 1"), 1);
+    assert_eq!(build(1, "SELECT 2"), 1);
+    assert_eq!(build(2, "SELECT 1"), 2);
+    assert_eq!(build(2, "SELECT 2"), 2);
 }
 
 /// What a second caller did first while another was building the plan.

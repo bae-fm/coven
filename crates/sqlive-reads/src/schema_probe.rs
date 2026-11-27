@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use crate::read_capture::WholeViews;
 use crate::read_report::ReadReport;
 use crate::result_nulls::{statement_nulls, ColumnNulls, SelectNull, StatementNulls};
+use crate::schema_objects::MainSchema;
 use crate::scope_plan::ScopePlan;
 
 /// A SQL function the schema's SQL names, which the probe registers so that
@@ -85,6 +86,9 @@ pub struct TableColumn {
 /// An in-memory database that holds a schema's tables, views and triggers.
 pub struct SchemaProbe {
     connection: Connection,
+    /// The schema `open` ran, which no later call changes: the probe prepares
+    /// statements and runs none.
+    schema: MainSchema,
 }
 
 impl SchemaProbe {
@@ -116,7 +120,8 @@ impl SchemaProbe {
         for sql in schema {
             connection.execute_batch(sql)?;
         }
-        Ok(Self { connection })
+        let schema = MainSchema::read(&connection)?;
+        Ok(Self { connection, schema })
     }
 
     /// Prepare `sql` and describe it. SQLite's own error says what it can't
@@ -124,7 +129,8 @@ impl SchemaProbe {
     pub fn prepare(&self, sql: &str) -> rusqlite::Result<ProbedStatement> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let statement_nulls = statement_nulls(&self.connection, sql, statement.column_count())?;
+        let statement_nulls =
+            statement_nulls(&self.connection, &self.schema, sql, statement.column_count())?;
         let mut columns = Vec::new();
         for (position, metadata) in statement.columns_with_metadata().enumerate() {
             let origin =
@@ -203,7 +209,13 @@ impl SchemaProbe {
     pub fn read_report(&self, sql: &str) -> rusqlite::Result<ReadReport> {
         let sql = crate::sql::up_to_nul(sql);
         let statement = self.connection.prepare(sql)?;
-        let plan = ScopePlan::build(&self.connection, sql, &statement, &WholeViews::new([]))?;
+        let plan = ScopePlan::build(
+            &self.connection,
+            &self.schema,
+            sql,
+            &statement,
+            &WholeViews::new([]),
+        )?;
         Ok(ReadReport::of(&plan))
     }
 }

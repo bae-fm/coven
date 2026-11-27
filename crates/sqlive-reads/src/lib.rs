@@ -52,7 +52,7 @@ pub use result_nulls::{ColumnNulls, SelectNull};
 pub use row_scope::{compare, RowImage, RowScope, Scopes};
 pub use rusqlite;
 pub use rusqlite::{Error as SqliteError, Result as SqliteResult, Row, ToSql};
-pub use schema_objects::{FTS5_CONTENT, MAIN_TABLES};
+pub use schema_objects::{MainSchema, FTS5_CONTENT, MAIN_TABLES};
 pub use schema_probe::{
     ColumnOrigin, ProbedColumn, ProbedStatement, SchemaProbe, StandInFunction, TableColumn,
 };

@@ -4,7 +4,7 @@
 //! FROM, whose parenthesized joins' tables are items of the core too.
 
 use crate::derived::{read_derived_item, Ctes, Derived};
-use crate::schema_objects::{declared_columns, main_object, read_generated, DeclaredColumn};
+use crate::schema_objects::{DeclaredColumn, MainSchema};
 use crate::scope_plan::{is_name, Object, Place, Planner, Source, Unread, Written};
 use crate::scope_row::{row_term, RowExpression};
 use crate::scope_term::Affinity;
@@ -224,13 +224,15 @@ pub(crate) fn read_item<'a>(
             if !in_main(name) {
                 return Ok(Err(Unread("a table outside the main schema")));
             }
-            let Some((stored, kind)) = main_object(connection, &name.name)? else {
+            let schema = planner.schema;
+            let Some((stored, kind)) = schema.object(&name.name) else {
                 return Ok(Err(Unread(
                     "a name that is no CTE, ordinary table, view or contentful FTS5 table",
                 )));
             };
             let ordinary = kind == "table";
             let contentful = kind == "virtual";
+            let stored = stored.to_owned();
             let name = stored.to_ascii_lowercase();
             let object = if kind == "view" {
                 let why = if planner.whole.contains(&stored) {
@@ -270,7 +272,7 @@ pub(crate) fn read_item<'a>(
                 // A read SQLite reports inside a view read whole names the
                 // view or a CTE or view inside it, which the statement's own
                 // CTEs and views may share.
-                let found = crate::whole_view_names::whole_view_names(connection, &stored)?;
+                let found = crate::whole_view_names::whole_view_names(schema, &stored)?;
                 let inside = found.as_ref().ok().cloned();
                 planner.note_whole_view(found);
                 Object::View { name, why, inside }
@@ -288,12 +290,12 @@ pub(crate) fn read_item<'a>(
                     ["content", "data", "idx", "docsize", "config"]
                         .map(|suffix| format!("{name}_{suffix}")),
                 );
-                let columns = fts5_columns(connection, &stored)?;
+                let columns = fts5_columns(schema, &stored)?;
                 let from = fts5_content_from(&stored, &qualifier, &columns);
                 (Columns::Listed(columns), from)
             } else {
                 (
-                    columns(connection, planner.functions, &qualifier, &stored, ordinary)?,
+                    columns(connection, schema, planner.functions, &qualifier, &stored, ordinary)?,
                     stored_from,
                 )
             };
@@ -597,12 +599,17 @@ fn in_main(name: &QualifiedName<'_>) -> bool {
 /// content table holds, of no affinity, which compare by BINARY; its hidden
 /// ones, the one that bears the table's name and `rank`, give values that
 /// depend on rows besides their own.
-fn fts5_columns(connection: &Connection, table: &str) -> rusqlite::Result<Vec<Column>> {
-    let columns = declared_columns(connection, table)?
-        .into_iter()
+fn fts5_columns(schema: &MainSchema, table: &str) -> rusqlite::Result<Vec<Column>> {
+    let columns = schema
+        .columns(table)?
+        .iter()
         .map(|DeclaredColumn { name, hidden, .. }| Column {
             name: Some(name.to_ascii_lowercase()),
-            value: if hidden { ColumnValue::Hidden } else { ColumnValue::Compared(Affinity::Blob) },
+            value: if *hidden {
+                ColumnValue::Hidden
+            } else {
+                ColumnValue::Compared(Affinity::Blob)
+            },
         })
         .collect();
     Ok(columns)
@@ -634,6 +641,7 @@ fn fts5_content_from(table: &str, qualifier: &str, columns: &[Column]) -> String
 /// `functions` tell whether a generated column's calls repeat.
 pub(crate) fn columns(
     connection: &Connection,
+    schema: &MainSchema,
     functions: &Functions,
     qualifier: &str,
     table: &str,
@@ -642,7 +650,8 @@ pub(crate) fn columns(
     let mut columns = Vec::new();
     // A table's hidden columns are its generated ones.
     let mut generated = Vec::new();
-    for DeclaredColumn { name: column, declared, hidden } in declared_columns(connection, table)? {
+    for DeclaredColumn { name: column, declared, hidden, .. } in schema.columns(table)? {
+        let hidden = *hidden;
         let collation = if ordinary {
             let (_, collation, _, _, _) =
                 connection.column_metadata(Some("main"), table, column.as_str())?;
@@ -651,7 +660,7 @@ pub(crate) fn columns(
             None
         };
         let binary = collation.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("BINARY"));
-        let affinity = Affinity::declared(&declared);
+        let affinity = Affinity::declared(declared);
         if binary && hidden {
             generated.push((columns.len(), affinity));
         }
@@ -665,7 +674,7 @@ pub(crate) fn columns(
     if generated.is_empty() {
         return Ok(Columns::Listed(columns));
     }
-    let read = read_generated(connection, table, |expressions| {
+    let read = schema.read_generated(table, |expressions| {
         let mut found = Vec::new();
         for (position, affinity) in generated {
             let name = columns[position].name.as_deref().expect("a table's columns are named");

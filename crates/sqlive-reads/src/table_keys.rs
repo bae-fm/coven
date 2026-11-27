@@ -4,8 +4,7 @@
 use std::collections::BTreeSet;
 
 use crate::comparison::BINARY;
-use crate::schema_objects::{declared_columns, ROWID_NAMES};
-use rusqlite::Connection;
+use crate::schema_objects::{MainSchema, ROWID_NAMES};
 
 /// The name a key holds for a table's rowid, whichever name a statement
 /// gives it: no column's name holds a NUL.
@@ -15,43 +14,27 @@ pub(crate) const ROWID: &str = "\0rowid";
 /// the main schema: its INTEGER PRIMARY KEY column, or `rowid`, `oid` or
 /// `_rowid_` where no column has that name. A WITHOUT ROWID table has no
 /// rowid.
-pub(crate) fn is_rowid(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-) -> rusqlite::Result<bool> {
-    if without_rowid(connection, table)? {
+pub(crate) fn is_rowid(schema: &MainSchema, table: &str, column: &str) -> rusqlite::Result<bool> {
+    if schema.without_rowid(table)? {
         return Ok(false);
     }
     if ROWID_NAMES.contains(&column) {
-        return Ok(!declared_columns(connection, table)?
+        return Ok(!schema
+            .columns(table)?
             .iter()
             .any(|found| found.name.eq_ignore_ascii_case(column)));
     }
-    Ok(rowid_column(connection, table)?.is_some_and(|key| key.eq_ignore_ascii_case(column)))
-}
-
-/// Whether `table`, a table of the main schema, is WITHOUT ROWID.
-fn without_rowid(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
-    connection
-        .prepare_cached("SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1")?
-        .query_row([table], |row| row.get(0))
+    Ok(rowid_column(schema, table)?.is_some_and(|key| key.eq_ignore_ascii_case(column)))
 }
 
 /// The column of a rowid table that holds its rowid: its single primary
 /// key column, when SQLite keeps no index for the key: `INTEGER PRIMARY
 /// KEY`, but not `INT PRIMARY KEY` or `INTEGER PRIMARY KEY DESC`.
-fn rowid_column(connection: &Connection, table: &str) -> rusqlite::Result<Option<String>> {
-    let mut keys = connection
-        .prepare_cached("SELECT name FROM pragma_table_info(?1,'main') WHERE pk > 0")?
-        .query_map([table], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let indexed: bool = connection
-        .prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM pragma_index_list(?1,'main') WHERE origin='pk')",
-        )?
-        .query_row([table], |row| row.get(0))?;
-    Ok(if !indexed && keys.len() == 1 { keys.pop() } else { None })
+fn rowid_column<'s>(schema: &'s MainSchema, table: &str) -> rusqlite::Result<Option<&'s str>> {
+    let mut keys = schema.columns(table)?.iter().filter(|column| column.primary_key);
+    let (Some(key), None) = (keys.next(), keys.next()) else { return Ok(None) };
+    let indexed = schema.indexes(table)?.iter().any(|index| index.primary_key);
+    Ok((!indexed).then_some(key.name.as_str()))
 }
 
 /// The unique keys of `table`, each as its columns, lowercase, with the
@@ -59,32 +42,22 @@ fn rowid_column(connection: &Connection, table: &str) -> rusqlite::Result<Option
 /// index over columns, with no WHERE. A partial index and one over an
 /// expression let two rows hold the same values of its columns.
 pub(crate) fn unique_keys(
-    connection: &Connection,
+    schema: &MainSchema,
     table: &str,
 ) -> rusqlite::Result<Vec<Vec<(String, String)>>> {
     let mut keys = Vec::new();
-    if !without_rowid(connection, table)? {
+    if !schema.without_rowid(table)? {
         keys.push(vec![(ROWID.to_owned(), BINARY.to_owned())]);
     }
-    let indexes = connection
-        .prepare_cached(
-            "SELECT name FROM pragma_index_list(?1,'main') WHERE \"unique\" AND NOT partial",
-        )?
-        .query_map([table], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for index in indexes {
-        let columns = connection
-            .prepare_cached(
-                "SELECT name, coll FROM pragma_index_xinfo(?1,'main') WHERE key ORDER BY seqno",
-            )?
-            .query_map([index], |row| {
-                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let key: Option<Vec<(String, String)>> = columns
-            .into_iter()
-            .map(|(name, collation)| Some((name?.to_ascii_lowercase(), collation)))
-            .collect();
+    for index in schema.indexes(table)? {
+        let key: Option<Vec<(String, String)>> = index.unique.as_ref().and_then(|columns| {
+            columns
+                .iter()
+                .map(|(name, collation)| {
+                    Some((name.as_ref()?.to_ascii_lowercase(), collation.clone()))
+                })
+                .collect()
+        });
         keys.extend(key);
     }
     Ok(keys)
@@ -92,11 +65,13 @@ pub(crate) fn unique_keys(
 
 /// The columns of `table`, lowercase, that hold no NULL.
 pub(crate) fn not_null_columns(
-    connection: &Connection,
+    schema: &MainSchema,
     table: &str,
 ) -> rusqlite::Result<BTreeSet<String>> {
-    connection
-        .prepare_cached("SELECT name FROM pragma_table_xinfo(?1,'main') WHERE \"notnull\"")?
-        .query_map([table], |row| Ok(row.get::<_, String>(0)?.to_ascii_lowercase()))?
-        .collect()
+    Ok(schema
+        .columns(table)?
+        .iter()
+        .filter(|column| column.not_null)
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect())
 }

@@ -7,8 +7,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::schema_objects::MainSchema;
 use crate::sql_walk::Walk;
-use rusqlite::Connection;
 
 /// The names, lowercase, SQLite can report a read through while it runs
 /// the main schema's view `stored`: its own, each CTE its SQL declares, and
@@ -16,10 +16,10 @@ use rusqlite::Connection;
 /// message when it can't read one of those views, whose SQL could declare
 /// any name.
 pub(crate) fn whole_view_names(
-    connection: &Connection,
+    schema: &MainSchema,
     stored: &str,
 ) -> rusqlite::Result<Result<BTreeSet<String>, String>> {
-    let mut walk = Walk::new(connection, ());
+    let mut walk = Walk::new(schema, ());
     walk.view(stored)?;
     Ok(match walk.scope.unread() {
         Some(why) => Err(why.to_owned()),

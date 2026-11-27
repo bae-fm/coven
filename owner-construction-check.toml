@@ -631,6 +631,12 @@ counters = [
 # A scope plan reads a statement's tables and views through the connection
 # that prepared the statement, and `parameters` reads the values bound to that
 # statement: sqlive passes both its own connection and its own statement.
+# `MainSchema::read` reads through that connection the schema its plans look
+# names up in.
+[[database.raw_handle_parameters]]
+path = "crates/sqlive-reads/src/schema_objects.rs"
+callable = "MainSchema::read"
+
 [[database.raw_handle_parameters]]
 path = "crates/sqlive-reads/src/scope_plan.rs"
 callable = "ScopePlan::build"

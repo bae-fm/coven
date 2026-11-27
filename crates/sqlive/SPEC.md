@@ -530,6 +530,12 @@ slow to open the first time, the log shows how large its statement is.
   waits for what that one reads, since reading it twice would only take more of
   the processor. When that reading fails, the waiting reader reads the
   statement itself.
+- **One read of the schema.** A statement can name tables and views many times,
+  so sqlive doesn't ask SQLite about each name. Once for each version of the
+  schema, it reads every table and view, with the SQL that made each, its
+  columns and its indexes. Every scope plan it builds against that version
+  looks names up in what it read. SQLite can't list the columns of a view whose
+  table was dropped, and only a plan that asks for those columns fails.
 
 ## 5. Narrowing one table
 

@@ -33,7 +33,7 @@ use sqlite3_parser::{
 use crate::derived::{Ctes, Declared};
 use crate::from_star::{star, StarItem};
 use crate::never_null;
-use crate::schema_objects::{declared_columns, main_object, read_view, ROWID_NAMES};
+use crate::schema_objects::{declared_columns, MainSchema, ROWID_NAMES};
 use crate::schema_probe::table_column_never_null;
 use crate::scope_term::null_test;
 use crate::select_syntax::{
@@ -323,6 +323,7 @@ fn returning_subqueries(
 /// `width` result columns, does to their NULLs.
 pub(crate) fn statement_nulls(
     connection: &Connection,
+    schema: &MainSchema,
     sql: &str,
     width: usize,
 ) -> rusqlite::Result<StatementNulls> {
@@ -348,7 +349,7 @@ pub(crate) fn statement_nulls(
         }
         _ => return Ok(StatementNulls::Unknown),
     };
-    let analysis = Analysis { connection, functions: &functions };
+    let analysis = Analysis { connection, schema, functions: &functions };
     let columns = analysis.select(select, &Ctes::default())?;
     Ok(columns.map_or(StatementNulls::Unknown, |columns| {
         StatementNulls::Select(columns.into_iter().map(|column| column.nulls).collect())
@@ -357,6 +358,7 @@ pub(crate) fn statement_nulls(
 
 struct Analysis<'c> {
     connection: &'c Connection,
+    schema: &'c MainSchema,
     functions: &'c Functions,
 }
 
@@ -663,11 +665,19 @@ impl Analysis<'_> {
         Ok(())
     }
 
-    /// The columns a `*` gives of the view or table function `stored`, each
-    /// of which can be NULL, or `None` when SQLite lists none.
+    /// The columns a `*` gives of the view, virtual table or table function
+    /// `stored`, each of which can be NULL, or `None` when SQLite lists none.
     fn any_nulls(&self, stored: &str) -> rusqlite::Result<Option<Vec<Column>>> {
-        let columns: Vec<Column> = declared_columns(self.connection, stored)?
-            .into_iter()
+        let function;
+        let declared = if self.schema.holds(stored) {
+            self.schema.columns(stored)?
+        } else {
+            // A table function.
+            function = declared_columns(self.connection, stored)?;
+            &function[..]
+        };
+        let columns: Vec<Column> = declared
+            .iter()
             .filter(|column| !column.hidden)
             .map(|column| Column::new(Some(column.name.to_ascii_lowercase()), SelectNull::Value))
             .collect();
@@ -710,13 +720,13 @@ impl Analysis<'_> {
         if name.db_name.as_ref().is_some_and(|database| *database != "main") {
             return Ok(item);
         }
-        let Some((stored, kind)) = main_object(self.connection, &name.name)? else {
+        let Some((stored, kind)) = self.schema.object(&name.name) else {
             // Another virtual table.
             item.columns = self.any_nulls(&crate::sql::name(name.name.0))?;
             return Ok(item);
         };
         if kind == "view" {
-            let read = read_view(self.connection, &stored, |names, select| {
+            let read = self.schema.read_view(stored, |names, select| {
                 let names = names.map(crate::sql::column_list_names);
                 Ok(self.select(select, &Ctes::default())?.map(|columns| renamed(columns, names)))
             })?;
@@ -730,19 +740,19 @@ impl Analysis<'_> {
             // A view the analysis can't read can give NULL in any column.
             item.columns = match columns {
                 Some(columns) => Some(columns),
-                None => self.any_nulls(&stored)?,
+                None => self.any_nulls(stored)?,
             };
             return Ok(item);
         }
         let ordinary = kind == "table";
         let mut columns = Vec::new();
-        for column in declared_columns(self.connection, &stored)? {
+        for column in self.schema.columns(stored)? {
             // A table's hidden columns are its generated ones, which a `*`
             // gives; a virtual table's it leaves out.
             if column.hidden && !ordinary {
                 continue;
             }
-            let never_null = table_column_never_null(self.connection, &stored, &column.name)?;
+            let never_null = table_column_never_null(self.connection, stored, &column.name)?;
             let null = if never_null { SelectNull::Never } else { SelectNull::Value };
             columns.push(Column::new(Some(column.name.to_ascii_lowercase()), null));
         }

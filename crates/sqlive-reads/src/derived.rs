@@ -13,7 +13,6 @@
 
 use crate::from_item::{Column, ColumnValue, Columns, FromItem};
 use crate::from_star::StarItem;
-use crate::schema_objects::read_view;
 use crate::scope_edge::Edge;
 use crate::scope_one_of::constant;
 use crate::scope_or::Side;
@@ -216,7 +215,7 @@ pub(crate) fn read_derived_item<'a>(
         }
         Named::View(stored) => {
             let around = planner.within.replace(stored.to_ascii_lowercase());
-            let read = read_view(connection, stored, |columns, select| {
+            let read = planner.schema.read_view(stored, |columns, select| {
                 let names = columns.map(crate::sql::column_list_names);
                 // A view names only the schema's tables and views.
                 read_derived(connection, planner, select, names, None, &Ctes::default())

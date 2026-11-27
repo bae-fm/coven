@@ -27,6 +27,7 @@ use crate::derived::Ctes;
 use crate::from_item::{Columns, FromItem};
 use crate::read_capture::WholeViews;
 use crate::row_scope::Scopes;
+use crate::schema_objects::MainSchema;
 use crate::scope_edge::{Edge, MemberValue};
 use crate::scope_narrowing::Narrowing;
 use crate::scope_order::{sorted_limit, LastRow, SortedLimit};
@@ -88,9 +89,11 @@ impl std::ops::AddAssign for ScopePlanSize {
 
 impl ScopePlan {
     /// The plan for `sql`, prepared as `statement`, up to the first NUL
-    /// (`sql::up_to_nul`).
+    /// (`sql::up_to_nul`). `schema` is the main schema as `connection` sees
+    /// it.
     pub fn build(
         connection: &Connection,
+        schema: &MainSchema,
         sql: &str,
         statement: &Statement<'_>,
         whole: &WholeViews,
@@ -98,7 +101,7 @@ impl ScopePlan {
         let unread = |why: &str| -> rusqlite::Result<Self> {
             Ok(Self {
                 sources: Err(why.to_owned()),
-                unreported: Arc::new(UnreportedColumns::unknown(connection, why.to_owned())?),
+                unreported: Arc::new(UnreportedColumns::unknown(schema, why.to_owned())?),
                 size: ScopePlanSize::default(),
             })
         };
@@ -116,10 +119,10 @@ impl ScopePlan {
             return unread("the statement isn't one SELECT the parser reads");
         }
         let functions = Functions::read(connection)?;
-        let (sources, size) = Sources::read(connection, select, whole, &functions)?;
+        let (sources, size) = Sources::read(connection, schema, select, whole, &functions)?;
         Ok(Self {
             sources: sources.map_err(|Unread(why)| why.to_owned()),
-            unreported: Arc::new(unreported_columns(connection, &functions, select)?),
+            unreported: Arc::new(unreported_columns(connection, schema, &functions, select)?),
             size,
         })
     }
@@ -321,6 +324,7 @@ impl Sources {
     /// The sources of `select`, and how much of it the planner read.
     fn read(
         connection: &Connection,
+        schema: &MainSchema,
         select: &Select<'_>,
         whole: &WholeViews,
         functions: &Functions,
@@ -329,6 +333,7 @@ impl Sources {
             items: Vec::new(),
             cores: Vec::new(),
             edges: Vec::new(),
+            schema,
             functions,
             inlined: Vec::new(),
             fts5_shadows: Vec::new(),
@@ -367,6 +372,7 @@ pub(crate) struct Planner<'a> {
     /// Each core after the core it sits in.
     pub(crate) cores: Vec<Core>,
     pub(crate) edges: Vec<Edge>,
+    pub(crate) schema: &'a MainSchema,
     /// The connection's functions, which tell an aggregate call from a
     /// scalar one.
     pub(crate) functions: &'a Functions,

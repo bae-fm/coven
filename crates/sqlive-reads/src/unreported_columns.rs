@@ -54,7 +54,7 @@
 use std::collections::BTreeSet;
 
 use crate::read_set::ColumnSet;
-use crate::schema_objects::{declared_columns, MAIN_TABLES};
+use crate::schema_objects::MainSchema;
 use crate::select_syntax::{
     aggregate_call, order_term, parts, parts_outside, window_call, AggregateCall, Functions,
     OrderTerm, Part,
@@ -87,19 +87,15 @@ impl UnreportedColumns {
     }
 
     /// Unknown columns, for the reason `why`, which goes to the log.
-    pub(crate) fn unknown(connection: &Connection, why: String) -> rusqlite::Result<Self> {
+    pub(crate) fn unknown(schema: &MainSchema, why: String) -> rusqlite::Result<Self> {
         tracing::warn!(
             %why,
             "the planner can't tell which columns a statement's rows depend on, so every \
              column of every table counts as read"
         );
-        let mut tables = connection.prepare_cached(MAIN_TABLES)?;
-        let tables = tables
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut every = ColumnSet::new();
-        for table in tables {
-            for column in declared_columns(connection, &table)? {
+        for table in schema.tables() {
+            for column in schema.columns(table)? {
                 every.insert((table.to_ascii_lowercase(), column.name.to_ascii_lowercase()));
             }
         }
@@ -111,19 +107,20 @@ impl UnreportedColumns {
 /// with the connection's `functions`.
 pub(crate) fn unreported_columns(
     connection: &Connection,
+    schema: &MainSchema,
     functions: &Functions,
     select: &Select<'_>,
 ) -> rusqlite::Result<UnreportedColumns> {
     let found = Found {
-        telling: Telling { connection, functions },
+        telling: Telling { connection, schema, functions },
         outer: Vec::new(),
         picked: Vec::new(),
         found: Vec::new(),
     };
-    let mut walk = Walk::new(connection, found);
+    let mut walk = Walk::new(schema, found);
     let reads = walk.select(select, false)?;
     if let Some(why) = walk.scope.unread() {
-        return UnreportedColumns::unknown(connection, why.to_owned());
+        return UnreportedColumns::unknown(schema, why.to_owned());
     }
     let run = walk.scope.run(&reads);
     let counts =
@@ -267,9 +264,9 @@ impl Found<'_> {
         item: &SelectTable<'_>,
     ) -> rusqlite::Result<Option<(String, Vec<String>)>> {
         let SelectTable::Table(name, ..) = item else { return Ok(None) };
-        let Some(table) = scope.object(name, &["table", "virtual"])? else { return Ok(None) };
-        let columns = self.columns(&table)?;
-        Ok(Some((table, columns)))
+        let Some(table) = scope.object(name, &["table", "virtual"]) else { return Ok(None) };
+        let columns = self.columns(table)?;
+        Ok(Some((table.to_owned(), columns)))
     }
 
     /// Count `column` of the table `item` reads directly, when it has one.
@@ -299,10 +296,10 @@ impl Found<'_> {
     ) -> rusqlite::Result<Option<bool>> {
         let names = match item {
             SelectTable::Table(name, ..) => {
-                let Some(object) = scope.object(name, &["table", "view", "virtual"])? else {
+                let Some(object) = scope.object(name, &["table", "view", "virtual"]) else {
                     return Ok(None);
                 };
-                self.columns(&object)?
+                self.columns(object)?
             }
             SelectTable::Select(select, _) => {
                 let Some(names) = result_names(select) else { return Ok(None) };
@@ -511,8 +508,11 @@ impl Found<'_> {
 
     /// A table's columns, lowercase.
     fn columns(&self, table: &str) -> rusqlite::Result<Vec<String>> {
-        Ok(declared_columns(self.telling.connection, table)?
-            .into_iter()
+        Ok(self
+            .telling
+            .schema
+            .columns(table)?
+            .iter()
             .map(|column| column.name.to_ascii_lowercase())
             .collect())
     }

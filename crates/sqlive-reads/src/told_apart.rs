@@ -15,7 +15,7 @@ use crate::comparison::{
     at_least_as_fine, comparison_collation, keeps_values, Carried, Traits, BINARY,
 };
 use crate::from_item::{Column, ColumnValue, Columns};
-use crate::schema_objects::{declared_columns, ROWID_NAMES};
+use crate::schema_objects::{MainSchema, ROWID_NAMES};
 use crate::scope_term::Affinity;
 use crate::select_syntax::{conjuncts, order_term, parts, Functions, OrderTerm, Part};
 use crate::sql::unparenthesized;
@@ -121,6 +121,7 @@ struct Output {
 /// Reads what tells a SELECT's rows apart, from the connection's schema.
 pub(crate) struct Telling<'c> {
     pub(crate) connection: &'c Connection,
+    pub(crate) schema: &'c MainSchema,
     /// The connection's functions, which tell an aggregate call from a scalar
     /// one.
     pub(crate) functions: &'c Functions,
@@ -129,7 +130,7 @@ pub(crate) struct Telling<'c> {
 /// Each name `expr` could resolve to a column, in it and in every SELECT
 /// inside it, as its qualifier, as written, and its column, lowercase.
 fn names_in(
-    connection: &Connection,
+    schema: &MainSchema,
     expr: &Expr<'_>,
 ) -> rusqlite::Result<Vec<(Option<String>, String)>> {
     #[derive(Default)]
@@ -141,7 +142,7 @@ fn names_in(
             }
         }
     }
-    let mut walk = Walk::new(connection, Names::default());
+    let mut walk = Walk::new(schema, Names::default());
     walk.expr(expr)?;
     Ok(walk.visit.0)
 }
@@ -451,18 +452,19 @@ impl Telling<'_> {
             items.push(match item {
                 SelectTable::Table(name, given, _) => {
                     let qualifier = Some(alias(given).unwrap_or(name.name.0));
-                    match scope.object(name, &["table", "virtual"])? {
+                    match scope.object(name, &["table", "virtual"]) {
                         // A CTE's name names no table.
                         Some(table) => {
                             let named = alias(given).unwrap_or(name.name.0);
-                            let (source, columns) = self.table_item(named, table)?;
+                            let (source, columns) = self.table_item(named, table.to_owned())?;
                             Item { qualifier, columns: Some(columns), source }
                         }
                         None => {
-                            let columns = match scope.object(name, &["view"])? {
+                            let columns = match scope.object(name, &["view"]) {
                                 Some(view) => Some(
-                                    declared_columns(self.connection, &view)?
-                                        .into_iter()
+                                    self.schema
+                                        .columns(view)?
+                                        .iter()
                                         .map(|column| ItemColumn {
                                             name: Some(column.name.to_ascii_lowercase()),
                                             traits: Traits::UNFOLLOWED,
@@ -504,8 +506,14 @@ impl Telling<'_> {
         qualifier: &str,
         table: String,
     ) -> rusqlite::Result<(Source<'static>, Vec<ItemColumn>)> {
-        let listed =
-            crate::from_item::columns(self.connection, self.functions, qualifier, &table, true)?;
+        let listed = crate::from_item::columns(
+            self.connection,
+            self.schema,
+            self.functions,
+            qualifier,
+            &table,
+            true,
+        )?;
         let Columns::Listed(listed) = listed else { panic!("a table's columns are listed") };
         let mut exact = BTreeSet::new();
         let columns = listed
@@ -650,7 +658,7 @@ impl Telling<'_> {
         expr: &Expr<'_>,
     ) -> rusqlite::Result<Option<BTreeSet<usize>>> {
         let mut needs = BTreeSet::new();
-        for (qualifier, column) in names_in(self.connection, expr)? {
+        for (qualifier, column) in names_in(self.schema, expr)? {
             let mut found = false;
             for (place, item) in items.iter().enumerate() {
                 let holds = match &qualifier {
@@ -777,14 +785,14 @@ impl Telling<'_> {
             .map(|left| left.needs.iter().all(|need| *need == item || known.contains(need)));
         match &rows.items[item].source {
             Source::Table { name: table, .. } => {
-                let not_null = not_null_columns(self.connection, table)?;
-                for key in unique_keys(self.connection, table)? {
+                let not_null = not_null_columns(self.schema, table)?;
+                for key in unique_keys(self.schema, table)? {
                     let mut covered = true;
                     let mut anchored = false;
                     for (column, key_collation) in &key {
                         let is_key = |named: &str| -> rusqlite::Result<bool> {
                             Ok(match column.as_str() {
-                                ROWID => is_rowid(self.connection, table, named)?,
+                                ROWID => is_rowid(self.schema, table, named)?,
                                 column => named == column,
                             })
                         };
@@ -933,7 +941,7 @@ impl Telling<'_> {
         column: &str,
     ) -> rusqlite::Result<bool> {
         let Source::Table { name, exact } = &items[item].source else { return Ok(false) };
-        Ok(exact.contains(column) || is_rowid(self.connection, name, column)?)
+        Ok(exact.contains(column) || is_rowid(self.schema, name, column)?)
     }
 
     /// The FROM item, by its place in `items`, and the column, lowercase,

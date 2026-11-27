@@ -17,5 +17,8 @@ rusqlite = { workspace = true, features = ["functions", "collation", "column_met
 sqlite3-parser.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["trace"] }
+
 [lints]
 workspace = true

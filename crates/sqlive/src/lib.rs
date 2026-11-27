@@ -97,8 +97,8 @@ pub use sqlive_reads::{
     WholeViews, LOOKUP_STEPS, ROWS_PER_TABLE,
 };
 pub(crate) use sqlive_reads::{
-    affected_by, compare, parameters, past_row_limit, ScopePlan, ValueKey, FTS5_CONTENT,
-    MAIN_TABLES,
+    affected_by, compare, parameters, past_row_limit, MainSchema, ScopePlan, ValueKey,
+    FTS5_CONTENT, MAIN_TABLES,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_records::{

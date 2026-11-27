@@ -10,11 +10,14 @@
 //! What a kept statement lets a live query narrow depends on its SQL, the
 //! schema, and the SQL functions and whole views its connection was set up
 //! with. A database sets each of its connections up alike, so they share one
-//! map of those plans, and one of them builds each plan for all.
+//! map of those plans, and one of them builds each plan for all. The plans of
+//! one schema look their names up in one read of it (`MainSchema`), which the
+//! map keeps beside them.
 
 use super::HostSql;
 use crate::authorization::AppContext;
 use crate::authorization::Policy;
+use crate::MainSchema;
 use crate::ReadReport;
 use crate::ScopePlanSize;
 use crate::{ReadFrame, ScopePlan};
@@ -35,6 +38,9 @@ const RECORDED: usize = 512;
 /// connection opened outside a database keeps its own.
 pub(crate) struct ScopePlans {
     kept: Mutex<KeptPlans>,
+    /// Held by the one caller reading a schema, apart from `kept`, so that
+    /// the callers of plans already built don't wait for the read.
+    reading: Mutex<()>,
     /// Woken as each build ends, for the callers waiting for its plan.
     ended: Condvar,
     /// What a test runs as the next caller waits.
@@ -42,9 +48,17 @@ pub(crate) struct ScopePlans {
     next_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
-/// Each statement's plan by its SQL, under the schema cookie it was built
-/// against.
-struct KeptPlans(BTreeMap<i64, HashMap<String, Kept>>);
+/// What the map keeps for each schema cookie.
+struct KeptPlans(BTreeMap<i64, SchemaPlans>);
+
+/// What the map keeps for one schema.
+#[derive(Default)]
+struct SchemaPlans {
+    /// The schema, once a build has read it.
+    schema: Option<Arc<MainSchema>>,
+    /// Each statement's plan, by its SQL.
+    plans: HashMap<String, Kept>,
+}
 
 enum Kept {
     /// A connection builds the plan now.
@@ -54,25 +68,25 @@ enum Kept {
 
 impl KeptPlans {
     /// Say that `sql`'s plan against `schema` is being built. The first plan
-    /// of a schema drops those of every earlier one, whose last readers are
+    /// of a schema drops what every earlier one kept, whose last readers are
     /// ending, and leaves a later schema's kept. Once the map holds
     /// [`RECORDED`] statements, every built plan goes.
     fn begin(&mut self, schema: i64, sql: &str) {
         if !self.0.contains_key(&schema) {
             self.0 = self.0.split_off(&schema);
         }
-        if self.0.values().map(HashMap::len).sum::<usize>() >= RECORDED {
-            for plans in self.0.values_mut() {
-                plans.retain(|_, kept| matches!(kept, Kept::Building));
+        if self.0.values().map(|of| of.plans.len()).sum::<usize>() >= RECORDED {
+            for of in self.0.values_mut() {
+                of.plans.retain(|_, kept| matches!(kept, Kept::Building));
             }
         }
-        self.0.entry(schema).or_default().insert(sql.to_owned(), Kept::Building);
+        self.0.entry(schema).or_default().plans.insert(sql.to_owned(), Kept::Building);
     }
 
     /// End a build of `sql`'s plan against `schema`, keeping what it built,
     /// unless a later schema dropped that one meanwhile.
     fn end(&mut self, schema: i64, sql: &str, built: Option<Arc<ScopePlan>>) {
-        let Some(plans) = self.0.get_mut(&schema) else { return };
+        let Some(SchemaPlans { plans, .. }) = self.0.get_mut(&schema) else { return };
         match built {
             Some(plan) => {
                 plans.insert(sql.to_owned(), Kept::Built(plan));
@@ -89,6 +103,7 @@ impl ScopePlans {
     pub(crate) fn new() -> Self {
         Self {
             kept: Mutex::new(KeptPlans(BTreeMap::new())),
+            reading: Mutex::new(()),
             ended: Condvar::new(),
             #[cfg(test)]
             next_wait: Mutex::new(None),
@@ -107,7 +122,7 @@ impl ScopePlans {
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let mut kept = lock_unpoisoned(&self.kept);
         loop {
-            match kept.0.get(&schema).and_then(|plans| plans.get(sql)) {
+            match kept.0.get(&schema).and_then(|of| of.plans.get(sql)) {
                 Some(Kept::Built(plan)) => return Ok(Arc::clone(plan)),
                 Some(Kept::Building) => {
                     #[cfg(test)]
@@ -125,6 +140,27 @@ impl ScopePlans {
         let plan = build()?;
         building.built = Some(Arc::clone(&plan));
         Ok(plan)
+    }
+
+    /// The schema `cookie` counts, for a plan being built against it, which
+    /// `read` reads when the map keeps none. A caller waits while another
+    /// reads, and reads itself when that read fails or panics. A read that
+    /// ends after a later schema dropped its entry is kept for no other build.
+    fn schema(
+        &self,
+        cookie: i64,
+        read: impl FnOnce() -> rusqlite::Result<MainSchema>,
+    ) -> rusqlite::Result<Arc<MainSchema>> {
+        let _reading = lock_unpoisoned(&self.reading);
+        let kept = lock_unpoisoned(&self.kept).0.get(&cookie).and_then(|of| of.schema.clone());
+        if let Some(schema) = kept {
+            return Ok(schema);
+        }
+        let schema = Arc::new(read()?);
+        if let Some(of) = lock_unpoisoned(&self.kept).0.get_mut(&cookie) {
+            of.schema = Some(Arc::clone(&schema));
+        }
+        Ok(schema)
     }
 
     /// Run `run` as the next caller waits for a plan being built.
@@ -299,20 +335,31 @@ impl<P: Policy> HostSql<P> {
         statement: &Statement<'_>,
         schema: Option<i64>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
-        let Some(schema) = schema else {
-            return self.build_scope_plan(sql, statement);
+        let Some(cookie) = schema else {
+            return self.build_scope_plan(None, sql, statement);
         };
-        self.app_statements.plans.plan(schema, sql, || self.build_scope_plan(sql, statement))
+        self.app_statements
+            .plans
+            .plan(cookie, sql, || self.build_scope_plan(Some(cookie), sql, statement))
     }
 
+    /// Build `statement`'s plan against the schema `cookie` counts, or, with
+    /// no cookie to keep a read under, against a read of its own.
     fn build_scope_plan(
         &self,
+        cookie: Option<i64>,
         sql: &str,
         statement: &Statement<'_>,
     ) -> rusqlite::Result<Arc<ScopePlan>> {
         let started = Instant::now();
         let plan = self.authorization.unrecorded(|| {
-            ScopePlan::build(&self.connection, sql, statement, self.authorization.whole_views())
+            let read = || MainSchema::read(&self.connection);
+            let schema = match cookie {
+                Some(cookie) => self.app_statements.plans.schema(cookie, read)?,
+                None => Arc::new(read()?),
+            };
+            let whole = self.authorization.whole_views();
+            ScopePlan::build(&self.connection, &schema, sql, statement, whole)
         })?;
         let built_in = started.elapsed();
         let ScopePlanSize { sources, cores, edges } = plan.size;

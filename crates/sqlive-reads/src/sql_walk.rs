@@ -8,9 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::schema_objects::{main_object, read_view};
+use crate::schema_objects::MainSchema;
 use crate::select_syntax::{parts, window_parts, Part};
-use rusqlite::Connection;
 use sqlite3_parser::ast::{
     Expr, FromClause, JoinConstraint, OneSelect, QualifiedName, ResultColumn, Select, SelectTable,
     SortedColumn,
@@ -100,7 +99,7 @@ impl Visit for () {}
 
 /// Where the walk is, and what it has met so far.
 pub(crate) struct Scope<'c> {
-    pub(crate) connection: &'c Connection,
+    schema: &'c MainSchema,
     /// What each view read so far reads, by its name, lowercase, so a view
     /// read twice is read once.
     views: BTreeMap<String, Reads>,
@@ -118,7 +117,7 @@ pub(crate) struct Scope<'c> {
     unread: Option<String>,
 }
 
-impl Scope<'_> {
+impl<'c> Scope<'c> {
     /// The CTE or view whose SQL the walk is reading now.
     pub(crate) fn within(&self) -> Option<Within> {
         self.within.clone()
@@ -149,28 +148,22 @@ impl Scope<'_> {
 
     /// The stored name of the main schema's object that `name` names, when
     /// its type is one of `kinds`, `table` or `view`.
-    pub(crate) fn object(
-        &self,
-        name: &QualifiedName<'_>,
-        kinds: &[&str],
-    ) -> rusqlite::Result<Option<String>> {
-        Ok(self
-            .main(name)?
-            .filter(|(_, found)| kinds.contains(&found.as_str()))
-            .map(|(stored, _)| stored))
+    pub(crate) fn object(&self, name: &QualifiedName<'_>, kinds: &[&str]) -> Option<&'c str> {
+        self.main(name).filter(|(_, found)| kinds.contains(found)).map(|(stored, _)| stored)
     }
 
     /// The stored name and the type, `table`, `view` or `virtual`
-    /// (`main_object`), of the main schema's object that `name` names. A name of another schema reads no table of
-    /// the app's, and a CTE's name none of the schema's objects.
-    fn main(&self, name: &QualifiedName<'_>) -> rusqlite::Result<Option<(String, String)>> {
+    /// (`MainSchema::object`), of the main schema's object that `name` names.
+    /// A name of another schema reads no table of the app's, and a CTE's name
+    /// none of the schema's objects.
+    fn main(&self, name: &QualifiedName<'_>) -> Option<(&'c str, &'static str)> {
         if name.db_name.as_ref().is_some_and(|schema| *schema != "main") {
-            return Ok(None);
+            return None;
         }
         if self.cte(name).is_some() {
-            return Ok(None);
+            return None;
         }
-        main_object(self.connection, &name.name)
+        self.schema.object(&name.name)
     }
 
     /// The CTEs and views a query that reads `reads` runs: those it reads,
@@ -222,10 +215,10 @@ pub(crate) struct Walk<'c, V> {
 }
 
 impl<'c, V: Visit> Walk<'c, V> {
-    pub(crate) fn new(connection: &'c Connection, visit: V) -> Self {
+    pub(crate) fn new(schema: &'c MainSchema, visit: V) -> Self {
         Self {
             scope: Scope {
-                connection,
+                schema,
                 views: BTreeMap::new(),
                 ctes: Vec::new(),
                 defined: Vec::new(),
@@ -373,11 +366,11 @@ impl<'c, V: Visit> Walk<'c, V> {
         if let Some(place) = self.scope.cte(name) {
             return Ok(Reads { ctes: BTreeSet::from([place]), ..Reads::default() });
         }
-        match self.scope.main(name)? {
-            Some((table, kind)) if kind == "table" || kind == "virtual" => {
-                Ok(Reads { tables: BTreeSet::from([table]), ..Reads::default() })
+        match self.scope.main(name) {
+            Some((table, "table" | "virtual")) => {
+                Ok(Reads { tables: BTreeSet::from([table.to_owned()]), ..Reads::default() })
             }
-            Some((view, _)) => self.view(&view),
+            Some((view, _)) => self.view(view),
             None => Ok(Reads::default()),
         }
     }
@@ -388,11 +381,11 @@ impl<'c, V: Visit> Walk<'c, V> {
         if let Some(reads) = self.scope.views.get(&name) {
             return Ok(reads.clone());
         }
-        let connection = self.scope.connection;
+        let schema = self.scope.schema;
         // A view's SELECT names no CTE of the statement.
         let ctes = std::mem::take(&mut self.scope.ctes);
         let around = self.scope.within.replace(Within::View(name.clone()));
-        let read = read_view(connection, stored, |_, select| self.select(select, false));
+        let read = schema.read_view(stored, |_, select| self.select(select, false));
         self.scope.within = around;
         self.scope.ctes = ctes;
         match read? {
