@@ -13,37 +13,42 @@ Dropbox, invites Ben, and they keep a Gifts list Carol can't read.
 Notes can be in the store or in a circle; attachments and tags follow their
 note. Attachments reference the user's own files.
 
-```rust
-use coven::{
-    Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
-    InviteLifetime, MemberRole, Migration, Namespace, OAuthAccess,
-    Provenance, RowIdentity, StorageConfig, StoreLayout, SyncState, SyncStatus,
-    SyncedTable, UuidText,
-};
-use uuid::Uuid;
+`schema.sql` is the app's one migration:
 
-const SCHEMA: &str = "
+```sql
 CREATE TABLE notes (
     id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     body TEXT NOT NULL DEFAULT '',
     audience TEXT NOT NULL,
     UNIQUE (audience, title)
-);
+) STRICT;
 CREATE TABLE attachments (
     id TEXT PRIMARY KEY NOT NULL,
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     file TEXT
-);
-CREATE TABLE tags (id TEXT PRIMARY KEY NOT NULL);
+) STRICT;
+CREATE TABLE tags (id TEXT PRIMARY KEY NOT NULL) STRICT;
 CREATE TABLE note_tags (
     note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
     tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (note_id, tag_id)
-);
-CREATE TABLE ui_state (key TEXT PRIMARY KEY, value TEXT);  -- local: not declared
-";
+) STRICT;
+CREATE TABLE ui_state (key TEXT PRIMARY KEY, value TEXT) STRICT;  -- local: not declared
+```
+
+```rust
+use coven::{
+    Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
+    InviteLifetime, MemberRole, Migration, Namespace, OAuthAccess,
+    Provenance, RowIdentity, StorageConfig, StoreLayout, SyncState, SyncStatus,
+    SqlRead, SqlWrite, SyncedTable, UuidText,
+};
+use uuid::Uuid;
+
+// The file the build script checks the app's statements against.
+const SCHEMA: &str = include_str!("../schema.sql");
 
 fn tables() -> Vec<SyncedTable> {
     vec![
@@ -109,15 +114,32 @@ let handle = Coven::builder(layout.clone())
 
 ## Write and read
 
+The app's queries are compiled statements, which its
+[build script](/docs/local-data#compiled-statements) checks against
+`schema.sql`:
+
+```rust
+coven::write!(AddNote(id: coven::UuidText, title: String, audience: coven::Audience), r#"
+    INSERT INTO notes (id, title, audience) VALUES (:id, :title, :audience)
+"#);
+coven::write!(AddTag(tag: String), r#"
+    INSERT INTO tags (id) VALUES (:tag) ON CONFLICT DO NOTHING
+"#);
+coven::write!(TagNote(note: coven::UuidText, tag: String), r#"
+    INSERT INTO note_tags (note_id, tag_id) VALUES (:note, :tag)
+"#);
+coven::read!(writer NoteList, r#"
+    SELECT n.id, n.title FROM notes AS n ORDER BY n.title
+"#);
+```
+
 ```rust
 let note = UuidText(Uuid::now_v7());
 handle.write(move |sql| {
-    sql.execute(
-        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-        (note, "Groceries", Audience::Store),
-    )?;
-    sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
-    sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
+    let title = "Groceries".to_owned();
+    sql.run(&AddNoteParams { id: note, title, audience: Audience::Store })?;
+    sql.run(&AddTagParams { tag: "urgent".to_owned() })?;
+    sql.run(&TagNoteParams { note, tag: "urgent".to_owned() })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```
@@ -127,12 +149,10 @@ transaction. A live query reruns whenever a write changes rows it read, whether
 the write was Ana's or arrived from another device:
 
 ```rust
-let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?)
-});
-while let Some(Ok(rows)) = notes.next().await {
+let mut notes: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch(&NoteListParams {})?));
+// On a thread that may block.
+while let Some(Ok(rows)) = notes.next_blocking() {
     show_notes(rows);
 }
 ```
@@ -162,7 +182,7 @@ starts syncing. Her note goes out in the next pass. On later launches,
 
 ```rust
 let mut status = handle.subscribe(|sql| Ok::<_, CovenError>(SyncStatus::read(sql)?));
-while let Some(result) = status.next().await {
+while let Some(result) = status.next_blocking() {
     let SyncStatus { state, last_synced } = result?;
     show_last_synced(last_synced);
     match state {
@@ -191,7 +211,7 @@ device; the other is a lost value the app can show and offer back:
 
 ```rust
 let mut lost = handle.subscribe_lost_values();
-while let Some(Ok(values)) = lost.next().await {
+while let Some(Ok(values)) = lost.next_blocking() {
     for value in &values {
         offer_to_restore(value); // e.g. "Ben's title was replaced"
     }
@@ -204,15 +224,19 @@ write drops the loss, on every device ([Merge](/docs/merge#lost-values)).
 ## Attach a file
 
 ```rust
+coven::write!(AddAttachment(id: coven::UuidText, note: coven::UuidText, name: String, file: coven::FileId), r#"
+    INSERT INTO attachments (id, note_id, name, file) VALUES (:id, :note, :name, :file)
+"#);
+```
+
+```rust
 let attachment = UuidText(Uuid::now_v7());
 let lease = files.lease(1).await?;
 let prepared = coven::prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 let file = handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, coven::Place::Cloud)?;
-    sql.execute(
-        "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",
-        (&attachment, &note, "receipt.pdf", file),
-    )?;
+    let name = "receipt.pdf".to_owned();
+    sql.run(&AddAttachmentParams { id: attachment, note, name, file })?;
     Ok::<_, CovenError>(file)
 }).await?;
 ```
@@ -241,7 +265,7 @@ let (invite, ben, _) = handle
     .await?;
 // A pass shares the folder with Ben's account, then the invite shows its code.
 let mut invites = handle.subscribe(Invite::list);
-while let Some(open) = invites.next().await {
+while let Some(open) = invites.next_blocking() {
     let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);
     if let Some(InviteStage::Waiting { code, .. }) = found {
         show_qr_code(&code);
@@ -268,10 +292,8 @@ circles.add_member(gifts, &ben).await?;
 
 let list = UuidText(Uuid::now_v7());
 handle.write(move |sql| {
-    sql.execute(
-        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-        (list, "Carol's birthday", gifts),
-    )?;
+    let title = "Carol's birthday".to_owned();
+    sql.run(&AddNoteParams { id: list, title, audience: Audience::Circle(gifts) })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```

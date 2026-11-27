@@ -64,7 +64,12 @@ writes it as the same canonical text on every device.
 Find yourself with `is_self`, then insert or update your own row:
 
 ```rust
-use coven::{MemberId, UuidText};
+use coven::{MemberId, SqlWrite, UuidText};
+
+coven::write!(SetName(member_id: coven::UuidText, display_name: String), r#"
+    INSERT INTO profiles (member_id, display_name) VALUES (:member_id, :display_name)
+    ON CONFLICT (member_id) DO UPDATE SET display_name = excluded.display_name
+"#);
 
 async fn set_my_name(handle: &CovenHandle, name: String) -> Result<(), CovenError> {
     let Some(me) = handle.members().await?.into_iter().find(|m| m.is_self) else {
@@ -73,11 +78,7 @@ async fn set_my_name(handle: &CovenHandle, name: String) -> Result<(), CovenErro
     let me = UuidText(me.id.0);
     handle
         .write(move |sql| {
-            sql.execute(
-                "INSERT INTO profiles (member_id, display_name) VALUES (?1, ?2)
-                 ON CONFLICT (member_id) DO UPDATE SET display_name = excluded.display_name",
-                (me, name),
-            )?;
+            sql.run(&SetNameParams { member_id: me, display_name: name })?;
             Ok::<_, CovenError>(())
         })
         .await
@@ -95,17 +96,17 @@ joins the two lists itself:
 
 ```rust
 use std::collections::HashMap;
-use coven::{DeviceState, MemberId, MemberInfo, UuidText};
+use coven::{DeviceState, MemberId, MemberInfo, SqlRead};
+
+coven::read!(writer Profiles { member_id: coven::UuidText }, r#"
+    SELECT p.member_id, p.display_name FROM profiles AS p
+"#);
 
 async fn profiles(handle: &CovenHandle) -> Result<HashMap<MemberId, String>, CovenError> {
     let rows = handle
-        .read(|sql| {
-            Ok::<_, CovenError>(sql.query("SELECT member_id, display_name FROM profiles", [], |row| {
-                Ok((MemberId(row.get::<_, UuidText>(0)?.0), row.get::<_, String>(1)?))
-            })?)
-        })
+        .read(|sql| Ok::<_, CovenError>(sql.fetch(&ProfilesParams {})?))
         .await?;
-    Ok(rows.into_iter().collect())
+    Ok(rows.into_iter().map(|row| (MemberId(row.member_id.0), row.display_name)).collect())
 }
 
 fn label(member: &MemberInfo, names: &HashMap<MemberId, String>) -> String {

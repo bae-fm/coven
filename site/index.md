@@ -94,8 +94,8 @@ features:
 The phone inserts a row. It commits on-device; nothing waits on a network.
 
 ```rust
-handle.write(|sql| {
-    sql.execute("INSERT …", params)?;
+handle.write(move |sql| {
+    sql.run(&AddNoteParams { id, title })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```
@@ -218,7 +218,7 @@ streams the photo on first view.
 ```rust
 handle.write(move |sql| {
     let file = sql.put_user_file("photos", photo, Place::Cloud)?;
-    sql.execute("INSERT INTO photos (id, file) VALUES (?1, ?2)", (id, file))?;
+    sql.run(&AddPhotoParams { id, file })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```

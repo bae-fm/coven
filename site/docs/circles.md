@@ -109,8 +109,12 @@ pointed at a parent in another audience. A move is an ordinary write, and it
 commits at once:
 
 ```rust
+coven::write!(MoveNote(audience: coven::Audience, note: coven::UuidText), r#"
+    UPDATE notes SET audience = :audience WHERE id = :note
+"#);
+
 handle.write(move |sql| {
-    sql.execute("UPDATE notes SET audience = ?1 WHERE id = ?2", (gifts, note))?;
+    sql.run(&MoveNoteParams { audience: Audience::Circle(gifts), note })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```

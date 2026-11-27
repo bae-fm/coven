@@ -6,8 +6,9 @@ that holds every user's data in the clear.
 coven syncs without the server. Devices exchange end-to-end-encrypted changes
 through cloud storage the household already pays for, and merge them locally.
 
-The data is SQLite. You keep your schema and write ordinary SQL. coven owns the
-connections and runs your SQL through them, so it can record each change as it
+The data is SQLite. You keep your schema and write ordinary SQL, which your
+build checks against the schema. coven owns the connections and runs your SQL
+through them, so it can record each change as it
 commits, encrypt and sign it, publish it to storage, read everyone else's, and
 merge them into your tables. Rows can carry files, such as songs, photos or
 documents, which sync with them.
@@ -120,22 +121,33 @@ committed write is never lost, even if the app crashes a moment later. There is
 no timestamp column to maintain; coven stamps each write itself.
 
 ```rust
-use coven::UuidText;
+use coven::{SqlRead, SqlWrite, UuidText};
 use uuid::Uuid;
 
-let note = UuidText(Uuid::now_v7());
+// The app's build checks both statements against its schema.
+coven::write!(AddNote(id: coven::UuidText, title: String), r#"
+    INSERT INTO notes (id, title) VALUES (:id, :title)
+"#);
+coven::read!(writer NoteTitles, r#"
+    SELECT n.title FROM notes AS n ORDER BY n.title
+"#);
+
+let id = UuidText(Uuid::now_v7());
 handle.write(move |sql| {
-    sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Groceries"))?;
+    sql.run(&AddNoteParams { id, title: "Groceries".to_owned() })?;
     Ok::<_, CovenError>(())
 }).await?;
 
-let mut titles: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get::<_, String>(0))?)
-});
-while let Some(Ok(titles)) = titles.next().await {
-    show(titles);
+let mut titles: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch(&NoteTitlesParams {})?));
+// On a thread that may block.
+while let Some(Ok(rows)) = titles.next_blocking() {
+    show(rows);
 }
 ```
+
+The [build step](/docs/local-data#compiled-statements) is what checks them.
+An app can also run [SQL strings](/docs/local-data#sql-strings).
 
 **Connect storage.** Setting up storage creates the store there, returns the
 person's restore code, and starts syncing. On later launches,

@@ -156,6 +156,13 @@ SQL to put in the rows that reference it. A user's file is read once before the
 write, with `prepare_user_file`, and the write stages it with `put_user_file`:
 
 ```rust
+coven::write!(AddNote(id: coven::UuidText, title: String, audience: coven::Audience), r#"
+    INSERT INTO notes (id, title, audience) VALUES (:id, :title, :audience)
+"#);
+coven::write!(Attach(id: coven::UuidText, note: coven::UuidText, title: String, file: coven::FileId), r#"
+    INSERT INTO attachments (id, note_id, title, file) VALUES (:id, :note, :title, :file)
+"#);
+
 let note = UuidText(Uuid::now_v7());
 let attachment = UuidText(Uuid::now_v7());
 let lease = files.lease(1).await?;
@@ -163,14 +170,9 @@ let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).awai
 
 let file = handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, Place::Cloud)?;
-    sql.execute(
-        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-        (&note, "Paint colors", Audience::Store),
-    )?;
-    sql.execute(
-        "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-        (&attachment, &note, "Swatches", file),
-    )?;
+    let title = "Paint colors".to_owned();
+    sql.run(&AddNoteParams { id: note, title, audience: Audience::Store })?;
+    sql.run(&AttachParams { id: attachment, note, title: "Swatches".to_owned(), file })?;
     Ok::<_, CovenError>(file)
 }).await?;
 ```
@@ -181,12 +183,16 @@ its batch's `put_file` takes a byte buffer or a stream, read once, and a
 The write then puts the staged files in its rows with `put_staged`:
 
 ```rust
+coven::write!(SetCover(cover: coven::FileId, note: coven::UuidText), r#"
+    UPDATE notes SET cover = :cover WHERE id = :note
+"#);
+
 let staged = handle
     .stage_files(move |batch| Ok::<_, CovenError>(batch.put_file("covers", cover_bytes, Place::Cloud)))
     .await?;
 let cover = handle.write(move |sql| {
     let cover = sql.put_staged(staged)?;
-    sql.execute("UPDATE notes SET cover = ?1 WHERE id = ?2", (cover, &note))?;
+    sql.run(&SetCoverParams { cover, note })?;
     Ok::<_, CovenError>(cover)
 }).await?;
 ```
@@ -212,10 +218,7 @@ let lease = files.lease(1).await?;
 let prepared = prepare_user_file(&path, &lease, |read| show_progress(read)).await?;
 handle.write(move |sql| {
     let file = sql.put_user_file("attachments", prepared, Place::DeviceOnly)?;
-    sql.execute(
-        "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-        (&attachment, &note, "Swatches", file),
-    )?;
+    sql.run(&AttachParams { id: attachment, note, title: "Swatches".to_owned(), file })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```
@@ -385,17 +388,19 @@ resumable upload. Each part the provider confirms is recorded before it counts
 as progress, so after a crash the upload resumes from its confirmed parts.
 
 ```rust
-let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
-         FROM coven_uploads AS u JOIN photos AS p ON u.file = p.file
-         ORDER BY u.position",
-        [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?,
-                  row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)),
-    )?)
-});
-while let Some(rows) = outbox.next().await {
+coven::read!(
+    writer Outbox { sending: bool, bytes_confirmed: Option<i64>, bytes_total: Option<i64> },
+    r#"
+    SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
+    FROM coven_uploads AS u JOIN photos AS p ON u.file = p.file
+    ORDER BY u.position
+"#
+);
+
+let mut outbox: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch(&OutboxParams {})?));
+// On a thread that may block.
+while let Some(rows) = outbox.next_blocking() {
     let rows = rows?;
     show_outbox(&rows);
     if rows.is_empty() {

@@ -138,14 +138,12 @@ let handle = Coven::builder(layout.clone())
 
 // A migration can declare an index in that order:
 //   CREATE INDEX notes_by_title ON notes(title COLLATE natural_order)
+// The build script names "natural_order" among the setup's collations.
+coven::read!(writer NaturalTitles, r#"
+    SELECT n.title FROM notes AS n ORDER BY n.title COLLATE natural_order
+"#);
 let titles = handle
-    .read(|sql| {
-        Ok::<_, CovenError>(sql.query(
-            "SELECT title FROM notes ORDER BY title COLLATE natural_order",
-            [],
-            |row| row.get::<_, String>(0),
-        )?)
-    })
+    .read(|sql| Ok::<_, CovenError>(sql.fetch(&NaturalTitlesParams {})?))
     .await?;
 ```
 
@@ -199,14 +197,13 @@ let handle = Coven::builder(layout.clone())
 
 // A migration can declare an index on it:
 //   CREATE INDEX notes_folded ON notes(fold(title))
+// The build script names `fold` among the setup's functions.
+coven::read!(writer TitlesLike(wanted: String), r#"
+    SELECT n.title FROM notes AS n WHERE fold(n.title) = fold(:wanted)
+"#);
+let wanted = TitlesLikeParams { wanted: "école".to_owned() };
 let matches = handle
-    .read(|sql| {
-        Ok::<_, CovenError>(sql.query(
-            "SELECT title FROM notes WHERE fold(title) = fold(?1)",
-            ["école"],
-            |row| row.get::<_, String>(0),
-        )?)
-    })
+    .read(move |sql| Ok::<_, CovenError>(sql.fetch(&wanted)?))
     .await?;
 ```
 
@@ -290,9 +287,9 @@ bind as a blob.
 ```rust
 let note = UuidText(Uuid::now_v7());
 handle.write(move |sql| {
-    sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Paint colors"))?;
-    sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
-    sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
+    sql.run(&AddNoteParams { id: note, title: "Paint colors".to_owned() })?;
+    sql.run(&AddTagParams { tag: "urgent".to_owned() })?;
+    sql.run(&TagNoteParams { note, tag: "urgent".to_owned() })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```
@@ -316,11 +313,83 @@ The rules for foreign keys, unique constraints, CHECKs and triggers are on the
 [Merge](/docs/merge#the-rules-sql-brings-with-it) page;
 [Constraints](/docs/constraints) lists what can't be expressed at all.
 
+## Compiled statements
+
+An app writes its queries as `coven::read!`, `coven::write!` and
+`coven::fragment!` calls. Its build script checks each one against the app's
+schema and coven's objects, so a column the schema doesn't have fails the build,
+and each read ships with what its live query needs to know about which writes
+rerun it. A call has a name, its typed parameters and its SQL:
+
+```rust
+coven::write!(AddNote(id: coven::UuidText, title: String), r#"
+    INSERT INTO notes (id, title) VALUES (:id, :title)
+"#);
+coven::write!(AddTag(tag: String), r#"
+    INSERT INTO tags (id) VALUES (:tag) ON CONFLICT DO NOTHING
+"#);
+coven::write!(TagNote(note: coven::UuidText, tag: String), r#"
+    INSERT INTO note_tags (note_id, tag_id) VALUES (:note, :tag)
+"#);
+coven::read!(writer NoteList, r#"
+    SELECT n.id, n.title FROM notes AS n ORDER BY n.title
+"#);
+```
+
+The build writes `NoteListParams` and `NoteListRow` for the read, and a
+`…Params` struct for each write. A context runs a statement by that type: a read
+with `fetch` or `fetch_row` (from the `SqlRead` trait), a write with `run`, or
+`run_returning` for one with a RETURNING clause (from `SqlWrite`). A read marked
+`writer` runs on `CovenHandle`; one without the mark runs on a
+[`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle). A column the app
+computes needs a type in the call's header, as in
+`coven::read!(writer NoteCount { n: i64 }, …)`.
+
+The app's crate depends on `coven`, and its build script on `coven-schema` and
+on `sqlive-compose` with its `compiler` feature; neither compiles an async
+runtime:
+
+```toml
+[dependencies]
+coven = { git = "https://github.com/bae-fm/coven" }
+
+[build-dependencies]
+sqlive-compose = { git = "https://github.com/bae-fm/coven", features = ["compiler"] }
+coven-schema = { git = "https://github.com/bae-fm/coven", features = ["compiler"] }
+```
+
+The script hands the compiler the schema. `coven_schema::compiler_setup()` gives
+coven's part, and the script appends the SQL of each migration in order, with the
+app's own functions and collations that the schema or a statement names. It names
+`coven` as the crate the calls are written through. Copy
+[`examples/notes/build.rs`](https://github.com/bae-fm/coven/blob/main/examples/notes/build.rs),
+which does all of it. What a call may say, such as fragments that several reads
+share, is in
+[sqlive-compose's spec](https://github.com/bae-fm/coven/blob/main/crates/sqlive-compose/SPEC.md).
+
+### SQL strings
+
+Every context also takes SQL as a string, with `query`, `query_row`, `execute`
+and `execute_batch`. Nothing checks a string before it runs. It suits a
+statement the app builds as it runs, such as a table whose columns the person
+picks:
+
+```rust
+let sql = format!("SELECT {} FROM notes ORDER BY title", columns.join(", "));
+let table = handle
+    .read(move |context| {
+        Ok::<_, CovenError>(context.query(&sql, [], |row| row.get::<_, String>(0))?)
+    })
+    .await?;
+```
+
+Migrations run strings too: each runs on the schema of its own version.
+
 ## Writing
 
 A write is one SQLite transaction through `handle.write`. Its closure gets a
-[`CovenWrite`](rustdoc:struct:coven::CovenWrite) with `execute`,
-`execute_batch`, `query_row` and `query`, and coven's own steps, such as
+[`CovenWrite`](rustdoc:struct:coven::CovenWrite), which runs the app's
+statements, and coven's own steps, such as
 retrying an operation, which commit or roll back with the app's statements. If
 the closure returns an error, or a statement or a step fails, the whole
 transaction rolls back, even when the closure drops the error and returns
@@ -377,9 +446,12 @@ alongside each other and alongside the writer, and a read after an awaited
 write sees that write. SQLite itself refuses writes on these connections.
 
 ```rust
+coven::read!(writer EveryTitle, r#"SELECT n.title FROM notes AS n"#);
+
 let titles: Vec<String> = handle
-    .read(|sql| Ok::<_, CovenError>(sql.query("SELECT title FROM notes", [], |row| row.get(0))?))
-    .process(|mut titles| {
+    .read(|sql| Ok::<_, CovenError>(sql.fetch(&EveryTitleParams {})?))
+    .process(|rows| {
+        let mut titles: Vec<String> = rows.into_iter().map(|row| row.title).collect();
         titles.sort();
         Ok(titles)
     })
@@ -395,18 +467,17 @@ the read; `process` gets owned values and no SQL.
 `handle.subscribe` runs a query once, then again whenever a write commits that
 changes rows it read, whether the write was local or arrived from another
 device. Coven records the tables, columns and keys the query reads, so an
-unrelated write doesn't rerun it. The first `next()` returns the current
-result; an error is a result too and doesn't end the query, except the one
-saying the store closed or its handle failed: after it, `next()` returns `None`,
-so a loop over it ends. Dropping the `LiveQuery` ends it.
+unrelated write doesn't rerun it. `next_blocking()`, called on a thread that
+may block, returns the current result first, then each changed one; an async
+caller awaits `changed()` and calls `run_changed()` on such a thread. An error is
+a result too and doesn't end the query, except the one saying the store closed
+or its handle failed: after it, `next_blocking()` returns `None`, so a loop over
+it ends. Dropping the `LiveQuery` ends it.
 
 ```rust
-let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?)
-});
-while let Some(Ok(rows)) = notes.next().await {
+let mut notes: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch(&NoteListParams {})?));
+while let Some(Ok(rows)) = notes.next_blocking() {
     show_notes(rows);
 }
 ```
@@ -437,18 +508,19 @@ another:
 
 ```rust
 // A window: the 100 notes from one title on.
+coven::read!(writer NotesFrom(from: String), r#"
+    SELECT n.id, n.title FROM notes AS n
+    WHERE n.title >= :from ORDER BY n.title LIMIT 100
+"#);
+coven::read!(writer NoteCount { n: i64 }, r#"SELECT count(*) AS n FROM notes AS counted"#);
+
 let window = |from: &String, sql: SqlReadContext<'_>| {
-    Ok(sql.query(
-        "SELECT id, title FROM notes WHERE title >= ?1 ORDER BY title LIMIT 100",
-        [from],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    )?)
+    Ok::<_, CovenError>(sql.fetch(&NotesFromParams { from: from.clone() })?)
 };
 let top = handle.subscribe_reconfigurable(String::new(), window);
 // The count, read by itself.
-let count = handle.subscribe(|sql| {
-    Ok(sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get::<_, i64>(0))?)
-});
+let count: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch_row(&NoteCountParams {})?.n));
 ```
 
 A write that adds a row reruns `count`, and reruns the window only when the row
@@ -522,31 +594,29 @@ old installation that a reset kept. A settings screen sums them in one live
 query:
 
 ```rust
-let device_bytes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query_row(
-        "SELECT (SELECT coalesce(sum(cached+pinned+pinning),0) FROM coven_cache_bytes)
-              + (SELECT sum(bytes) FROM coven_library_bytes)
-              + (SELECT coalesce(sum(bytes),0) FROM coven_archive_bytes)",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?)
-});
+coven::read!(writer DeviceBytes { bytes: i64 }, r#"
+    SELECT (SELECT coalesce(sum(c.cached + c.pinned + c.pinning), 0) FROM coven_cache_bytes AS c)
+         + (SELECT sum(l.bytes) FROM coven_library_bytes AS l)
+         + (SELECT coalesce(sum(a.bytes), 0) FROM coven_archive_bytes AS a) AS bytes
+"#);
+
+let device_bytes: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch_row(&DeviceBytesParams {})?.bytes));
 ```
 
 The file views and tables name a file by its id, the id the app's file
 reference columns hold, so a join reads `u.file = p.file`:
 
 ```rust
-let uploading_first: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    Ok(sql.query(
-        "SELECT a.title FROM albums AS a
-         ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
-                         ON u.file = p.file
-                         WHERE p.album_id=a.id) DESC, a.title",
-        [],
-        |row| row.get::<_, String>(0),
-    )?)
-});
+coven::read!(writer UploadingFirst, r#"
+    SELECT a.title FROM albums AS a
+    ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
+                    ON u.file = p.file
+                    WHERE p.album_id = a.id) DESC, a.title
+"#);
+
+let uploading_first: LiveQuery<_, CovenError> =
+    handle.subscribe(|sql| Ok(sql.fetch(&UploadingFirstParams {})?));
 ```
 
 Each view is a query over coven's own tables, so it is never out of date, and a
@@ -565,13 +635,13 @@ written in the Lean proof language. A screen that lists notes under its sync
 line reads both in one live query, so the line never lags the list:
 
 ```rust
+coven::read!(writer SyncLine { state: String }, r#"
+    SELECT s.state FROM coven_sync_state AS s
+"#);
+
 let screen: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
-    let state: String =
-        sql.query_row("SELECT state FROM coven_sync_state", [], |row| row.get(0))?;
-    let titles = sql.query("SELECT title FROM notes ORDER BY title", [], |row| {
-        row.get::<_, String>(0)
-    })?;
-    Ok((state, titles))
+    let state = sql.fetch_row(&SyncLineParams {})?.state;
+    Ok((state, sql.fetch(&NoteListParams {})?))
 });
 ```
 
@@ -612,14 +682,14 @@ waiting. `coven_sending` holds one row per upload in flight, so counting an
 album's files being sent takes a lookup per file, however long the queue:
 
 ```rust
-let sending: LiveQuery<_, CovenError> = handle.subscribe(move |sql| {
-    Ok(sql.query_row(
-        "SELECT count(*) FROM coven_sending AS s JOIN photos AS p ON s.file = p.file
-         WHERE p.album_id=?1",
-        [&album],
-        |row| row.get::<_, i64>(0),
-    )?)
-});
+coven::read!(writer SendingOfAlbum(album: String) { n: i64 }, r#"
+    SELECT count(*) AS n FROM coven_sending AS s JOIN photos AS p ON s.file = p.file
+    WHERE p.album_id = :album
+"#);
+
+let of_album = SendingOfAlbumParams { album };
+let sending: LiveQuery<_, CovenError> =
+    handle.subscribe(move |sql| Ok(sql.fetch_row(&of_album)?.n));
 ```
 
 The bytes the provider has confirmed do last, so `coven_uploads` gives them as

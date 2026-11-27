@@ -70,11 +70,15 @@ The cache is evictable. Pinning keeps a file whole on the device whatever the
 budget, until the app unpins it, and its bytes don't count toward the budget: the gesture for "keep this for the flight".
 
 ```rust
+coven::write!(KeepAlbumOffline(album: String), r#"
+    UPDATE albums SET offline = 1 WHERE id = :album
+"#);
+
 let files = vec![handle.file_ref(track_file).await?];
 let prepared = handle.prepare_pin(&files).await?; // downloads; pins nothing
 handle.write(move |sql| {
     sql.pin(prepared)?; // every file whole on this device, as this write commits
-    sql.execute("UPDATE albums SET offline = 1 WHERE id = ?1", [&album])?;
+    sql.run(&KeepAlbumOfflineParams { album })?;
     Ok::<_, CovenError>(())
 }).await?;
 ```
