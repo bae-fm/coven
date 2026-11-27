@@ -187,6 +187,26 @@ fn a_select_a_write_prepared_is_reused_by_a_read() {
     db.close();
 }
 
+/// Preparing `VACUUM` or a comment asks the authorizer about nothing, so
+/// sqlive can't judge it, and refuses it.
+#[test]
+fn a_statement_the_authorizer_never_judges_is_refused() {
+    let db = notes();
+    for sql in ["VACUUM", "-- nothing to run"] {
+        let refused = db.write_app(|writer| writer.app_execute(sql, []));
+        assert!(
+            matches!(
+                refused,
+                Err(crate::Error::StatementForbidden {
+                    operation: "a statement SQLite asks nothing about"
+                })
+            ),
+            "{sql}: {refused:?}"
+        );
+    }
+    db.close();
+}
+
 /// A schema change drops what the cache kept: the statement is prepared and
 /// judged again against the new schema.
 #[test]

@@ -32,6 +32,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
         // the transaction's own statements have run.
         let refusing = Arc::new(AtomicBool::new(false));
         let refuses = Arc::clone(&refusing);
+        let mut judge = writer.authorization.callback();
         writer
             .connection
             .authorizer(Some(move |context: AuthContext<'_>| {
@@ -40,7 +41,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
                 {
                     Authorization::Deny
                 } else {
-                    Authorization::Allow
+                    judge(context)
                 }
             }))
             .unwrap();

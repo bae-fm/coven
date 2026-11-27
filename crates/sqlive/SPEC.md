@@ -94,7 +94,10 @@ host statement runs, sqlive applies its own rules first. They refuse, with
 - loading an extension;
 - changing the schema in a write, since a schema change belongs in a migration;
 - `ANALYZE` in a write (below);
-- any statement that writes, in a read.
+- any statement that writes, in a read;
+- in a write or a read, a statement that SQLite asks the authorizer nothing
+  about as it prepares it, such as `VACUUM` or a comment alone, since sqlive
+  can't judge it.
 
 Then the host's policy judges every action that passed, the host's own
 statements' included. A host implements `Policy` to refuse what it forbids, such
@@ -2213,7 +2216,7 @@ policy refuses with.
 | `Sqlite` | SQLite refused or failed a statement, with its error | 1 |
 | `DamagedDatabase` | a statement met damage SQLite reports (`SQLITE_CORRUPT`, `SQLITE_NOTADB`) | 10 |
 | `Refused` | the host's policy, or one of the host's SQL functions, refused a statement | 1 |
-| `StatementForbidden` | app SQL tried transaction control, a PRAGMA, ATTACH, loading an extension, changing the schema outside a migration, `ANALYZE` in a write, or writing in a read | 1 |
+| `StatementForbidden` | app SQL tried transaction control, a PRAGMA, ATTACH, loading an extension, changing the schema outside a migration, `ANALYZE` in a write, writing in a read, or a statement SQLite asks the authorizer nothing about | 1 |
 | `TransactionEnded` | SQLite rolled the transaction back itself, so it can't go on | 2 |
 | `Closed` | the handle closed the database | 3 |
 | `Bug` | the call's work panicked, a bug, which the caller reports | 2 |

@@ -336,7 +336,15 @@ impl<P: Policy> HostSql<P> {
                 statement.discard();
                 let (prepared, judgment) = prepare();
                 statement = prepared?;
-                judgment.unwrap_or_default()
+                // SQLite prepared this one, so it asked the authorizer about
+                // nothing, as for `VACUUM`: sqlive can't judge it, or know
+                // what it reads.
+                judgment.ok_or_else(|| {
+                    let refused: PolicyError<P> = crate::Error::StatementForbidden {
+                        operation: "a statement SQLite asks nothing about",
+                    };
+                    rusqlite::Error::UserFunctionError(Box::new(refused))
+                })?
             }
         };
         #[cfg(any(test, feature = "test-utils"))]
