@@ -70,9 +70,9 @@ theorem PState.Sem.pushStepEdges {s : Statement} (h : s.wellFormed = true) {P : 
           { (match renamed with
               | some r => st.addTerm target r
               | none => st) with
-            edges := (match renamed with
+            edges := addOnce (match renamed with
               | some r => st.addTerm target r
-              | none => st).edges ++ passed,
+              | none => st).edges passed,
             pushed := (match renamed with
               | some r => st.addTerm target r
               | none => st).pushed ++ passed } target
@@ -80,9 +80,9 @@ theorem PState.Sem.pushStepEdges {s : Statement} (h : s.wellFormed = true) {P : 
         { (match renamed with
             | some r => st.addTerm target r
             | none => st) with
-          edges := (match renamed with
+          edges := addOnce (match renamed with
             | some r => st.addTerm target r
-            | none => st).edges ++ passed,
+            | none => st).edges passed,
           pushed := (match renamed with
             | some r => st.addTerm target r
             | none => st).pushed ++ passed }) target renamed passed).Grows Fin) :
@@ -92,9 +92,9 @@ theorem PState.Sem.pushStepEdges {s : Statement} (h : s.wellFormed = true) {P : 
           { (match renamed with
               | some r => st.addTerm target r
               | none => st) with
-            edges := (match renamed with
+            edges := addOnce (match renamed with
               | some r => st.addTerm target r
-              | none => st).edges ++ passed,
+              | none => st).edges passed,
             pushed := (match renamed with
               | some r => st.addTerm target r
               | none => st).pushed ++ passed } target
@@ -102,20 +102,20 @@ theorem PState.Sem.pushStepEdges {s : Statement} (h : s.wellFormed = true) {P : 
         { (match renamed with
             | some r => st.addTerm target r
             | none => st) with
-          edges := (match renamed with
+          edges := addOnce (match renamed with
             | some r => st.addTerm target r
-            | none => st).edges ++ passed,
+            | none => st).edges passed,
           pushed := (match renamed with
             | some r => st.addTerm target r
             | none => st).pushed ++ passed }) target renamed passed).Sem s P := by
   subst hren
   simp only [Option.isSome_none, Bool.false_or] at hfin ⊢
-  have hs3 : ({ st with edges := st.edges ++ passed, pushed := st.pushed ++ passed } : PState).Sem s P :=
+  have hs3 : ({ st with edges := addOnce st.edges passed, pushed := st.pushed ++ passed } : PState).Sem s P :=
     ⟨hs.rows, hs.terms, hs.carried, fun Z f b e he hb hm => by
-      rcases List.mem_append.mp he with he | he
+      rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
       · exact (hs.edges Z f b e he hb hm).imp_left (List.mem_append_left _)
       · exact Or.inl (List.mem_append_right _ he), hs.ors, hs.held⟩
-  have hp3 : ∀ e ∈ passed, e ∈ ({ st with edges := st.edges ++ passed, pushed := st.pushed ++ passed } :
+  have hp3 : ∀ e ∈ passed, e ∈ ({ st with edges := addOnce st.edges passed, pushed := st.pushed ++ passed } :
       PState).pushed := fun e he => List.mem_append_right _ he
   cases hemp : passed.isEmpty with
   | false =>
@@ -176,9 +176,9 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
                   { (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1) with
-                    edges := (match renamed with
+                    edges := addOnce (match renamed with
                       | some r => st1.addTerm target r
-                      | none => st1).edges ++ passed,
+                      | none => st1).edges passed,
                     pushed := (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1).pushed ++ passed } target
@@ -186,20 +186,20 @@ theorem PState.Sem.pushEdges {s : Statement} (h : s.wellFormed = true) {P : Cls}
                 { (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1) with
-                  edges := (match renamed with
+                  edges := addOnce (match renamed with
                     | some r => st1.addTerm target r
-                    | none => st1).edges ++ passed,
+                    | none => st1).edges passed,
                   pushed := (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1).pushed ++ passed }) target renamed passed) := by
           intro st1 target renamed passed hren hpm
           subst hren
           simp only [Option.isSome_none, Bool.false_or]
-          have h13 : st1.Grows ({ st1 with edges := st1.edges ++ passed, pushed := st1.pushed ++ passed } :
+          have h13 : st1.Grows ({ st1 with edges := addOnce st1.edges passed, pushed := st1.pushed ++ passed } :
               PState) := ⟨fun _ h => h, fun _ _ h => h, fun _ h => List.mem_append_left _ h⟩
           split
           · have h34 := (PState.joinInner_keeps s narrowFuel
-              ({ st1 with edges := st1.edges ++ passed, pushed := st1.pushed ++ passed } : PState) target).1
+              ({ st1 with edges := addOnce st1.edges passed, pushed := st1.pushed ++ passed } : PState) target).1
             exact (h13.trans h34).trans (hgrow _ _ _ fun e he =>
               ⟨by rw [PState.joinInner_pushed]; exact List.mem_append_right _ he, hpm e he⟩)
           · exact h13.trans (hgrow _ _ _ fun e he => ⟨List.mem_append_right _ he, hpm e he⟩)
@@ -282,7 +282,7 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
   unfold ordered.placed at hfin ⊢
   simp only at hfin ⊢
   have hs' := hs.update (i := next) (g := fun p => { p with
-      memberships := p.memberships ++ (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups,
+      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
       either := (st.items next).ors.filter fun sides =>
         sides.all fun side => side.edges.all fun e => e.placedIn order })
     (fun hl Z f k b hb hi => hs.rows Z f k b hb next hi hl)
@@ -291,10 +291,10 @@ theorem PState.Sem.placed {s : Statement} (h : s.wellFormed = true) {rel : Nat �
     (fun Z f b hb hr sides hsides => hs.ors Z f b next hb hr sides hsides)
     (fun n hn => hs.held next n hn)
   have hpass : (st.update next fun p => { p with
-      memberships := p.memberships ++ (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups,
+      memberships := p.memberships ++ st.edges.filter fun e => e.member == next && e.placedIn order,
       either := (st.items next).ors.filter fun sides =>
         sides.all fun side => side.edges.all fun e => e.placedIn order }).Passes next
-      ((st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups) :=
+      (st.edges.filter fun e => e.member == next && e.placedIn order) :=
     fun e he => Or.inl (by simp only [PState.update, ↓reduceIte]; exact List.mem_append_right _ he)
   have hgrow := (PushDown.pushDown_keeps s s.fuel s.fuel _ next none _ hpass).1
   refine PState.Sem.pushEdges h (fun _ _ _ _ hb => hb.1) (Fin := Fin)
@@ -516,7 +516,7 @@ theorem PState.edgesGrow_add (st : PState) (n : Narrowing) : st.EdgesGrow (st.ad
   intro e he
   simp only [PState.add]
   rw [hors, hterms]
-  exact List.mem_append_left _ he
+  exact mem_addOnce.mpr (List.mem_append_left _ he)
 
 theorem PState.edgesGrow_narrow : ∀ (fuel : Nat) (st : PState) (n : Narrowing),
     st.EdgesGrow (PState.narrow fuel st n)
@@ -567,8 +567,8 @@ theorem PushDown.edgesGrow_pushDown (s : Statement) (narrowFuel : Nat) :
           · exact PState.EdgesGrow.refl st1
           · exact PState.edgesGrow_update _ _ _
         have hrec : ∀ (st2 : PState) (passed : List Edge),
-            st2.EdgesGrow { st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :=
-          fun _ _ _ h => List.mem_append_left _ h
+            st2.EdgesGrow { st2 with edges := addOnce st2.edges passed, pushed := st2.pushed ++ passed } :=
+          fun _ _ _ h => mem_addOnce.mpr (List.mem_append_left _ h)
         split
         · exact (h2 _).trans ((hrec _ _).trans (PState.edgesGrow_joinInner _ _ _))
         · exact (h2 _).trans (hrec _ _)
@@ -617,7 +617,7 @@ theorem ordered_go_membersEdges (s : Statement) :
         subst hi
         rcases List.mem_append.mp hm with hm | hm
         · exact h _ m hm
-        · exact (List.mem_filter.mp (List.mem_eraseDups.mp hm)).1
+        · exact (List.mem_filter.mp hm).1
       · exact h i m hm
 
 /-- Each item's memberships are edges of the planned state. -/

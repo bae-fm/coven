@@ -77,7 +77,7 @@ def pushDown (s : Statement) (narrowFuel : Nat) :
           let st := match renamed with
             | some r => st.addTerm target r
             | none => st
-          let st := { st with edges := st.edges ++ passed, pushed := st.pushed ++ passed }
+          let st := { st with edges := addOnce st.edges passed, pushed := st.pushed ++ passed }
           let st := if renamed.isSome || !passed.isEmpty then st.joinInner narrowFuel target else st
           pushDown s narrowFuel fuel st target renamed passed) st) st
 

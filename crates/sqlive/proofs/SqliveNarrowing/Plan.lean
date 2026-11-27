@@ -440,12 +440,49 @@ def PState.initial (s : Statement) : PState :=
 def PState.addTerm (st : PState) (i : Nat) (t : STerm) : PState :=
   st.update i fun p => { p with term := some (match p.term with | some e => .and e t | none => t) }
 
+/-- The planner's edges with `new` added, each edge once
+(`Planner::add_edge`). An equality can reach a column through several columns
+of a derived item, which passes an edge into the column for each: a copy of
+an edge passes no row the edge doesn't, and a lookup that read it would
+write the partner's scope once more. -/
+def addOnce (edges new : List Edge) : List Edge :=
+  new.foldl (fun edges e => if e ∈ edges then edges else edges ++ [e]) edges
+
+theorem addOnce_nil (edges : List Edge) : addOnce edges [] = edges := rfl
+
+theorem mem_addOnce {edges new : List Edge} {e : Edge} :
+    e ∈ addOnce edges new ↔ e ∈ edges ++ new := by
+  induction new generalizing edges with
+  | nil => simp [addOnce]
+  | cons a new ih =>
+    change e ∈ addOnce (if a ∈ edges then edges else edges ++ [a]) new ↔ _
+    rw [ih]
+    split
+    · rename_i ha
+      simp only [List.mem_append, List.mem_cons]
+      refine ⟨fun h => h.imp_right Or.inr, fun h => h.elim Or.inl fun h => ?_⟩
+      exact h.elim (fun heq => Or.inl (heq ▸ ha)) Or.inr
+    · simp [or_assoc]
+
+theorem nodup_addOnce {edges new : List Edge} (h : edges.Nodup) : (addOnce edges new).Nodup := by
+  induction new generalizing edges with
+  | nil => exact h
+  | cons a new ih =>
+    change (addOnce (if a ∈ edges then edges else edges ++ [a]) new).Nodup
+    refine ih ?_
+    split
+    · exact h
+    · rename_i ha
+      refine List.nodup_append.mpr ⟨h, by simp, fun x hx y hy heq => ?_⟩
+      rw [List.mem_singleton] at hy
+      exact ha (hy ▸ heq ▸ hx)
+
 /-- Add `n`'s terms, edges and ORs, and the items it narrows
 (`Planner::add`). -/
 def PState.add (st : PState) (n : Narrowing) : PState × List Nat :=
   let st := n.terms.foldl (fun st (i, t) => st.addTerm i t) st
   let st := n.ors.foldl (fun st d => st.update d.item fun p => { p with ors := p.ors ++ [d.sides] }) st
-  ({ st with edges := st.edges ++ n.edges },
+  ({ st with edges := addOnce st.edges n.edges },
    n.terms.map (·.1) ++ n.edges.map (·.member) ++ n.ors.map (·.item))
 
 /-- Narrow by `n`, which conditions on the joined rows give, and make each

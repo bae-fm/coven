@@ -82,7 +82,7 @@ theorem PState.Lookups.add {s : Statement} {st : PState} (h : st.Lookups s) {n :
       (fun sides hs => List.mem_append_left _ (hst.2.2.1 d.item sides hs))
       (fun m hm => hst.2.2.2.1 d.item m hm)) _ hterms
   refine ⟨fun e he => ?_, hors.2.1, hors.2.2.1, hors.2.2.2.1, hors.2.2.2.2⟩
-  rcases List.mem_append.mp he with he | he
+  rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
   · exact hors.1 e he
   · exact hn.1 e he
 
@@ -180,14 +180,15 @@ theorem PState.Lookups.pushDown {s : Statement} (hwf : s.wellFormed = true) (nar
           have hst3 : ∀ (renamed : Option STerm), PState.Lookups s { (match renamed with
               | some r => st1.addTerm target r
               | none => st1) with
-              edges := (match renamed with
+              edges := addOnce (match renamed with
                 | some r => st1.addTerm target r
-                | none => st1).edges ++ PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges,
+                | none => st1).edges (PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges),
               pushed := (match renamed with
                 | some r => st1.addTerm target r
                 | none => st1).pushed ++ PushDown.passedInto s (st1.items target).leftOn.isSome target (PushDown.renameInto arm target) edges } := by
             intro renamed
-            refine ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (fun he => (hpassed e he).1),
+            refine ⟨fun e he => (List.mem_append.mp (mem_addOnce.mp he)).elim ((hst2 _).1 e)
+              (fun he => (hpassed e he).1),
               (hst2 _).2.1, (hst2 _).2.2.1, (hst2 _).2.2.2.1, fun e he => ?_⟩
             rcases List.mem_append.mp he with he | he
             · exact (hst2 _).2.2.2.2 e he
@@ -234,7 +235,7 @@ theorem PState.Lookups.ordered {s : Statement} (hwf : s.wellFormed = true) :
       simp only
       refine PState.Lookups.pushDown hwf _ _ _ _ (h.update (fun sides hs => h.2.1 next sides hs)
         (fun sides hs => (List.mem_filter.mp hs).1) (fun n hn => h.2.2.2.1 next n hn)) ?_
-      exact fun e he => h.1 e (List.mem_filter.mp (List.mem_eraseDups.mp he)).1
+      exact fun e he => h.1 e (List.mem_filter.mp he).1
 
 /-- Every edge, OR side and held narrowing of the planned state takes values
 from items a lookup reads alone, each OR an item keeps is one of its ORs, and

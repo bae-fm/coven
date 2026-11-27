@@ -147,7 +147,7 @@ theorem PushDown.termGrows_pushDown (s : Statement) (narrowFuel : Nat) :
           · exact PState.TermGrows.refl st1
           · exact PState.termGrows_addTerm st1 target _
         have hrec : ∀ (st2 : PState) (passed : List Edge),
-            st2.TermGrows { st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :=
+            st2.TermGrows { st2 with edges := addOnce st2.edges passed, pushed := st2.pushed ++ passed } :=
           fun _ _ _ t h => ⟨t, h, fun _ hr => hr⟩
         split
         · exact (h2 _).trans ((hrec _ _).trans (PState.termGrows_joinInner _ _ _))
@@ -345,9 +345,9 @@ theorem PState.Sem.pushStep {s : Statement} (h : s.wellFormed = true) {P : Cls}
           { (match renamed with
               | some r => st.addTerm target r
               | none => st) with
-            edges := (match renamed with
+            edges := addOnce (match renamed with
               | some r => st.addTerm target r
-              | none => st).edges ++ ([] : List Edge),
+              | none => st).edges ([] : List Edge),
             pushed := (match renamed with
               | some r => st.addTerm target r
               | none => st).pushed ++ ([] : List Edge) } target
@@ -355,9 +355,9 @@ theorem PState.Sem.pushStep {s : Statement} (h : s.wellFormed = true) {P : Cls}
         { (match renamed with
             | some r => st.addTerm target r
             | none => st) with
-          edges := (match renamed with
+          edges := addOnce (match renamed with
             | some r => st.addTerm target r
-            | none => st).edges ++ ([] : List Edge),
+            | none => st).edges ([] : List Edge),
           pushed := (match renamed with
             | some r => st.addTerm target r
             | none => st).pushed ++ ([] : List Edge) }) target renamed []).TermGrows Fin) :
@@ -367,9 +367,9 @@ theorem PState.Sem.pushStep {s : Statement} (h : s.wellFormed = true) {P : Cls}
           { (match renamed with
               | some r => st.addTerm target r
               | none => st) with
-            edges := (match renamed with
+            edges := addOnce (match renamed with
               | some r => st.addTerm target r
-              | none => st).edges ++ ([] : List Edge),
+              | none => st).edges ([] : List Edge),
             pushed := (match renamed with
               | some r => st.addTerm target r
               | none => st).pushed ++ ([] : List Edge) } target
@@ -377,14 +377,14 @@ theorem PState.Sem.pushStep {s : Statement} (h : s.wellFormed = true) {P : Cls}
         { (match renamed with
             | some r => st.addTerm target r
             | none => st) with
-          edges := (match renamed with
+          edges := addOnce (match renamed with
             | some r => st.addTerm target r
-            | none => st).edges ++ ([] : List Edge),
+            | none => st).edges ([] : List Edge),
           pushed := (match renamed with
             | some r => st.addTerm target r
             | none => st).pushed ++ ([] : List Edge) }) target renamed []).Sem s P := by
-  have heta : ∀ x : PState, ({ x with edges := x.edges ++ [], pushed := x.pushed ++ [] } : PState) = x := by
-    intro x; cases x; simp
+  have heta : ∀ x : PState, ({ x with edges := addOnce x.edges [], pushed := x.pushed ++ [] } : PState) = x := by
+    intro x; cases x; simp [addOnce_nil]
   simp only [heta, List.isEmpty_nil, Bool.not_true, Bool.or_false] at hfin ⊢
   cases renamed with
   | none =>
@@ -451,9 +451,9 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
                   { (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1) with
-                    edges := (match renamed with
+                    edges := addOnce (match renamed with
                       | some r => st1.addTerm target r
-                      | none => st1).edges ++ ([] : List Edge),
+                      | none => st1).edges ([] : List Edge),
                     pushed := (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1).pushed ++ ([] : List Edge) } target
@@ -461,9 +461,9 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
                 { (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1) with
-                  edges := (match renamed with
+                  edges := addOnce (match renamed with
                     | some r => st1.addTerm target r
-                    | none => st1).edges ++ ([] : List Edge),
+                    | none => st1).edges ([] : List Edge),
                   pushed := (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1).pushed ++ ([] : List Edge) }) target renamed []) := by
@@ -476,7 +476,7 @@ theorem PState.Sem.pushDown {s : Statement} (h : s.wellFormed = true) {P : Cls}
             · exact PState.TermGrows.refl st1
             · exact PState.termGrows_addTerm st1 target _
           have hrec : ∀ (st2 : PState), st2.TermGrows
-              { st2 with edges := st2.edges ++ ([] : List Edge), pushed := st2.pushed ++ ([] : List Edge) } :=
+              { st2 with edges := addOnce st2.edges ([] : List Edge), pushed := st2.pushed ++ ([] : List Edge) } :=
             fun _ _ t h => ⟨t, h, fun _ hr => hr⟩
           split
           · exact h2.trans ((hrec _).trans (PState.termGrows_joinInner _ _ _))

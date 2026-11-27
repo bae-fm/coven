@@ -572,11 +572,12 @@ each item's memberships, and the sides of each OR it keeps, take values from
 items the planner placed before it, through derived items it placed before
 it: the planner sets them only as it places the item, from the edges and
 sides whose partners and derived items it placed before, and no other step
-changes them. `plan_placedBefore` states the partners' part of it. An item
-takes each of those edges once, and `plan_once` proves that no item of the
-planned state has a membership twice. An equality that reaches a column
-through several columns of a derived item gives the planner an edge for each,
-and a second membership of one edge would pass no row the first doesn't.
+changes them. `plan_placedBefore` states the partners' part of it. The
+planner adds an edge only when it doesn't hold it (`addOnce`): an equality
+that reaches a column through several columns of a derived item passes an
+edge into it for each, and a copy of an edge passes no row the edge doesn't.
+`plan_edges_once` proves that the planned state holds no edge twice, and
+`plan_once` that no item of it has a membership twice.
 [ReadOrder.lean](SqliveNarrowing/ReadOrder.lean)
 states the order the planner reads cores in. A core sits below another when
 it is an arm of a query the other reads, as a derived item's or a subquery's,

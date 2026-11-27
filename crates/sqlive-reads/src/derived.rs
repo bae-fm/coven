@@ -636,7 +636,9 @@ pub(crate) fn push_down(
             if let Some(renamed) = &renamed {
                 ScopeTerm::add_to(&mut planner.items[target].source.term, renamed.clone());
             }
-            planner.edges.extend(passed.iter().cloned());
+            for edge in &passed {
+                planner.add_edge(edge.clone());
+            }
             if renamed.is_some() || !passed.is_empty() {
                 planner.join_inner(target);
             }

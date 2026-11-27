@@ -308,9 +308,9 @@ theorem PushDown.step_keeps {s : Statement} {narrowFuel fuel : Nat} {st1 : PStat
           { (match renamed with
               | some r => st1.addTerm target r
               | none => st1) with
-            edges := (match renamed with
+            edges := addOnce (match renamed with
               | some r => st1.addTerm target r
-              | none => st1).edges ++ passed,
+              | none => st1).edges passed,
             pushed := (match renamed with
               | some r => st1.addTerm target r
               | none => st1).pushed ++ passed } target
@@ -318,9 +318,9 @@ theorem PushDown.step_keeps {s : Statement} {narrowFuel fuel : Nat} {st1 : PStat
         { (match renamed with
             | some r => st1.addTerm target r
             | none => st1) with
-          edges := (match renamed with
+          edges := addOnce (match renamed with
             | some r => st1.addTerm target r
-            | none => st1).edges ++ passed,
+            | none => st1).edges passed,
           pushed := (match renamed with
             | some r => st1.addTerm target r
             | none => st1).pushed ++ passed })
@@ -333,7 +333,7 @@ theorem PushDown.step_keeps {s : Statement} {narrowFuel fuel : Nat} {st1 : PStat
     cases renamed
     · exact PState.Keeps.refl s st1
     · exact PState.addTerm_keeps s st1 target _
-  generalize hst3 : ({ st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :
+  generalize hst3 : ({ st2 with edges := addOnce st2.edges passed, pushed := st2.pushed ++ passed } :
     PState) = st3
   have h23 : st2.Grows st3 := by
     subst hst3
@@ -477,7 +477,7 @@ theorem getD_find_mem {l : List Nat} {p1 p2 p3 : Nat → Bool} {first : Nat} {S 
 /-- The state after `ordered` places `next` with the items `order` placed
 before it. -/
 def ordered.placed (s : Statement) (st : PState) (order : List Nat) (next : Nat) : PState :=
-  let taken := (st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups
+  let taken := st.edges.filter fun e => e.member == next && e.placedIn order
   let either := (st.items next).ors.filter fun sides =>
     sides.all fun side => side.edges.all fun e => e.placedIn order
   let st := st.update next fun p => { p with memberships := p.memberships ++ taken, either }
@@ -669,7 +669,7 @@ theorem PState.NestedOK.add {s : Statement} {st : PState} (h : st.NestedOK s) {n
     st.update d.item fun p => { p with ors := p.ors ++ [d.sides] })
     n.ors (fun st d _ hst => hst.update_same rfl (fun _ hl => hl)) _ hterms
   refine ⟨fun e he => ?_, hors.2.1, hors.2.2⟩
-  rcases List.mem_append.mp he with he | he
+  rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
   · exact hors.1 e he
   · exact hn e he
 
@@ -754,9 +754,9 @@ theorem PState.NestedOK.pushDown {s : Statement} (narrowFuel : Nat) :
             · exact hst1.addTerm target _
           split
           · apply PState.NestedOK.joinInner
-            exact ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (hpassed e),
+            exact ⟨fun e he => (List.mem_append.mp (mem_addOnce.mp he)).elim ((hst2 _).1 e) (hpassed e),
               (hst2 _).2.1, (hst2 _).2.2⟩
-          · exact ⟨fun e he => (List.mem_append.mp he).elim ((hst2 _).1 e) (hpassed e),
+          · exact ⟨fun e he => (List.mem_append.mp (mem_addOnce.mp he)).elim ((hst2 _).1 e) (hpassed e),
               (hst2 _).2.1, (hst2 _).2.2⟩
         · intro e he
           obtain ⟨e0, he0, value, _, rfl⟩ := PushDown.mem_passed he
@@ -814,11 +814,11 @@ theorem PState.NestedOK.ordered {s : Statement} :
       · intro m hm
         rcases List.mem_append.mp hm with hm | hm
         · exact h.2.1 _ m hm
-        · have := List.mem_filter.mp (List.mem_eraseDups.mp hm)
+        · have := List.mem_filter.mp hm
           simp only [Bool.and_eq_true, beq_iff_eq] at this
           exact ⟨this.2.1, h.1 m this.1⟩
       · exact h.2.2 _
-      · exact fun e he => h.1 e (List.mem_filter.mp (List.mem_eraseDups.mp he)).1
+      · exact fun e he => h.1 e (List.mem_filter.mp he).1
 
 /-- Every edge, membership and held edge of the planned state to a
 subquery's source has its partner in an arm of a subquery of some core, and
@@ -930,7 +930,7 @@ theorem PushDown.sameLinks_pushDown (s : Statement) (narrowFuel : Nat) :
           · exact PState.SameLinks.refl st1
           · exact PState.sameLinks_addTerm st1 target _
         have hrec : ∀ (st2 : PState) (passed : List Edge),
-            st2.SameLinks { st2 with edges := st2.edges ++ passed, pushed := st2.pushed ++ passed } :=
+            st2.SameLinks { st2 with edges := addOnce st2.edges passed, pushed := st2.pushed ++ passed } :=
           fun _ _ _ => ⟨rfl, rfl⟩
         split
         · exact (h2 _).trans ((hrec _ _).trans (PState.sameLinks_joinInner _ _ _))
@@ -965,48 +965,13 @@ theorem Edge.before_of_placedIn {order : List Nat} {e : Edge} (h : e.placedIn or
 
 /-- Whether each item placed in `order` takes its memberships' values and
 its kept ORs' sides' values from items placed before it, through derived
-items placed before it, each item not placed has no membership and keeps no
-OR, and no item has a membership twice. -/
+items placed before it, and each item not placed has no membership and keeps
+no OR. -/
 def PState.PlacedLinks (st : PState) (order : List Nat) : Prop :=
   ∀ i, (i ∉ order → (st.items i).memberships = [] ∧ (st.items i).either = []) ∧
     (∀ m ∈ (st.items i).memberships, ∃ pre post, order = pre ++ i :: post ∧ m.Before pre) ∧
     ∀ sides ∈ (st.items i).either, ∀ side ∈ sides, ∀ e ∈ side.edges,
       ∃ pre post, order = pre ++ i :: post ∧ e.Before pre
-
-/-- A list with its repeats dropped holds nothing twice. -/
-theorem nodup_eraseDups {α : Type} [BEq α] [LawfulBEq α] (l : List α) : l.eraseDups.Nodup := by
-  match l with
-  | [] => simp
-  | a :: as =>
-    rw [List.eraseDups_cons, List.nodup_cons]
-    refine ⟨fun hm => ?_, nodup_eraseDups _⟩
-    rw [List.mem_eraseDups, List.mem_filter] at hm
-    simp at hm
-  termination_by l.length
-  decreasing_by exact Nat.lt_succ_of_le (List.length_filter_le _ _)
-
-/-- No item of `st` has a membership twice. -/
-def PState.Once (st : PState) : Prop := ∀ i, (st.items i).memberships.Nodup
-
-theorem PState.Once.placed {s : Statement} {st : PState} {order : List Nat} (h : st.Once)
-    (hl : st.PlacedLinks order) {next : Nat} (hnext : next ∉ order) :
-    (ordered.placed s st order next).Once := by
-  unfold ordered.placed
-  simp only
-  generalize hst' : st.update next _ = st'
-  have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
-    ((st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups)
-  generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
-  intro i
-  rw [(hsame i).1]
-  subst hst'
-  simp only [PState.update]
-  split
-  · rename_i hi
-    subst hi
-    simp only [((hl i).1 hnext).1, List.nil_append]
-    exact nodup_eraseDups _
-  · exact h i
 
 theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Nat}
     (h : st.PlacedLinks order) {next : Nat} (hnext : next ∉ order) :
@@ -1015,7 +980,7 @@ theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Na
   simp only
   generalize hst' : st.update next _ = st'
   have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
-    ((st.edges.filter fun e => e.member == next && e.placedIn order).eraseDups)
+    (st.edges.filter fun e => e.member == next && e.placedIn order)
   generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
   have hext : ∀ {i : Nat} {x : Edge}, (∃ pre post, order = pre ++ i :: post ∧ x.Before pre) →
       ∃ pre post, order ++ [next] = pre ++ i :: post ∧ x.Before pre := by
@@ -1031,7 +996,7 @@ theorem PState.PlacedLinks.placed {s : Statement} {st : PState} {order : List Na
     obtain ⟨hm0, he0⟩ := (h i).1 hnext
     refine ⟨fun hn => absurd (List.mem_append_right _ (List.mem_singleton_self i)) hn, ?_, ?_⟩
     · intro m hm
-      simp only [hm0, List.nil_append, List.mem_eraseDups, List.mem_filter, Bool.and_eq_true, beq_iff_eq] at hm
+      simp only [hm0, List.nil_append, List.mem_filter, Bool.and_eq_true, beq_iff_eq] at hm
       exact ⟨order, [], rfl, Edge.before_of_placedIn hm.2.2⟩
     · intro sides hsides side hside e he
       simp only [List.mem_filter, List.all_eq_true] at hsides
@@ -1052,32 +1017,6 @@ theorem ordered_go_placedLinks (s : Statement) : ∀ (fuel : Nat) (all : List Na
         have := (List.mem_filter.mp hnext).2
         simpa using this
       exact ordered_go_placedLinks s fuel all _ _ _ (h.placed hnin)
-
-theorem ordered_go_once (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st : PState)
-    (order waited : List Nat), st.PlacedLinks order → st.Once →
-    (ordered.go s fuel all st order waited).1.Once
-  | 0, _, _, _, _, _, h => h
-  | fuel + 1, all, st, order, waited, hl, h => by
-    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', hnext, heq⟩
-    · rw [heq]; exact h
-    · rw [heq]
-      have hnin : next ∉ order := by
-        have := (List.mem_filter.mp hnext).2
-        simpa using this
-      exact ordered_go_once s fuel all _ _ _ (hl.placed hnin) (h.placed hl hnin)
-
-/-- No item of the planned state has a membership twice, however many
-columns of a derived item an equality reached it through. -/
-theorem plan_once (s : Statement) (i : Nat) : ((plan s).state.items i).memberships.Nodup := by
-  have hsame := fun j => PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder
-    (PState.initial s) j
-  unfold plan ordered
-  simp only
-  refine ordered_go_once s _ _ _ [] [] (fun j => ?_) (fun j => ?_) i
-  · rw [(hsame j).1, (hsame j).2]
-    simp [PState.initial]
-  · rw [(hsame j).1]
-    simp [PState.initial]
 
 /-- Each item's memberships, and the sides of each OR it keeps, take values
 from items the planner placed before it, through derived items it placed
@@ -1107,5 +1046,161 @@ theorem plan_placedBefore (s : Statement) (i : Nat) :
   fun sides hs side hside e he => by
     obtain ⟨pre, post, h, hb⟩ := (plan_before s i).2 sides hs side hside e he
     exact ⟨pre, post, h, hb.1⟩⟩
+
+/-! The planner holds each edge once. -/
+
+/-- A step that keeps the edges free of repeats. -/
+def PState.KeepsOnce (st st' : PState) : Prop := st.edges.Nodup → st'.edges.Nodup
+
+theorem PState.KeepsOnce.foldl {α : Type} {g : PState → α → PState}
+    (hg : ∀ (st : PState) (x : α), st.KeepsOnce (g st x)) (l : List α) (st : PState) :
+    st.KeepsOnce (l.foldl g st) := fun h =>
+  foldl_invariant (P := fun st => st.edges.Nodup) l (fun st x _ hst => hg st x hst) st h
+
+theorem PState.keepsOnce_add (st : PState) (n : Narrowing) : st.KeepsOnce (st.add n).1 := by
+  intro h
+  simp only [PState.add]
+  refine nodup_addOnce ?_
+  refine PState.KeepsOnce.foldl ?_ n.ors _ (PState.KeepsOnce.foldl ?_ n.terms st h)
+  · exact fun _ _ h => h
+  · exact fun _ _ h => h
+
+theorem PState.keepsOnce_narrow : ∀ (fuel : Nat) (st : PState) (n : Narrowing),
+    st.KeepsOnce (PState.narrow fuel st n)
+  | 0, _, _ => id
+  | fuel + 1, st, n => fun h => by
+    simp only [PState.narrow]
+    refine PState.KeepsOnce.foldl (fun st i h => ?_) _ _ (PState.keepsOnce_add st _ h)
+    split
+    · exact PState.keepsOnce_narrow fuel _ _ h
+    · exact h
+
+theorem PState.keepsOnce_joinInner (fuel : Nat) (st : PState) (i : Nat) :
+    st.KeepsOnce (st.joinInner fuel i) := by
+  intro h
+  unfold PState.joinInner
+  split
+  · exact PState.keepsOnce_narrow fuel _ _ h
+  · exact h
+
+theorem PState.keepsOnce_narrowOn (fuel : Nat) (st : PState) (i : Nat) (n : Narrowing) :
+    st.KeepsOnce (st.narrowOn fuel i n) := by
+  intro h
+  unfold PState.narrowOn
+  simp only
+  split
+  · exact PState.keepsOnce_add st _ h
+  · exact PState.keepsOnce_narrow fuel _ _ (PState.keepsOnce_add st _ h)
+
+theorem PushDown.keepsOnce_pushDown (s : Statement) (narrowFuel : Nat) :
+    ∀ (fuel : Nat) (st : PState) (item : Nat) (term : Option STerm) (edges : List Edge),
+      st.KeepsOnce (PushDown.pushDown s narrowFuel fuel st item term edges)
+  | 0, _, _, _, _ => id
+  | fuel + 1, st, item, term, edges => by
+    simp only [PushDown.pushDown]
+    split
+    · exact id
+    · split
+      · exact id
+      · refine PState.KeepsOnce.foldl (fun st0 arm => ?_) _ st
+        refine PState.KeepsOnce.foldl (fun st1 target h => ?_) _ st0
+        refine PushDown.keepsOnce_pushDown s narrowFuel fuel _ _ _ _ ?_
+        have h2 : ∀ (renamed : Option STerm), (match renamed with
+            | some r => st1.addTerm target r
+            | none => st1).edges.Nodup := by
+          intro renamed
+          cases renamed <;> exact h
+        split
+        · exact PState.keepsOnce_joinInner _ _ _ (nodup_addOnce (h2 _))
+        · exact nodup_addOnce (h2 _)
+
+theorem keepsOnce_readCore (s : Statement) (st : PState) (k : Nat) :
+    st.KeepsOnce (readCore s st k) := by
+  intro h
+  unfold readCore
+  simp only
+  refine PState.KeepsOnce.foldl
+    (fun st i => PushDown.keepsOnce_pushDown s _ _ st i _ _) _ _ ?_
+  have hcarry : ∀ st : PState, st.KeepsOnce (Transfer.carry s st k) := fun st =>
+    PState.KeepsOnce.foldl (fun st (x : Nat × STerm) h => by
+      unfold Transfer.addCarried
+      exact h) _ st
+  refine hcarry _ (PState.KeepsOnce.foldl (fun st x => ?_) _ st h)
+  obtain ⟨n, p⟩ := x
+  cases p
+  · exact PState.keepsOnce_narrow _ _ _
+  · exact PState.keepsOnce_narrowOn _ _ _ _
+
+theorem ordered_go_keepsOnce (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st : PState)
+    (order waited : List Nat), st.KeepsOnce (ordered.go s fuel all st order waited).1
+  | 0, _, _, _, _ => id
+  | fuel + 1, all, st, order, waited => fun h => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', _, heq⟩
+    · rw [heq]; exact h
+    · rw [heq]
+      refine ordered_go_keepsOnce s fuel all _ _ _ ?_
+      unfold ordered.placed
+      exact PushDown.keepsOnce_pushDown s _ _ _ _ _ _ h
+
+/-- The planned state holds each edge once, however many columns of a derived
+item an equality reached a column through. -/
+theorem plan_edges_once (s : Statement) : (plan s).state.edges.Nodup := by
+  unfold plan ordered
+  simp only
+  refine ordered_go_keepsOnce s _ _ _ _ _ ?_
+  exact PState.KeepsOnce.foldl (fun st k => keepsOnce_readCore s st k) s.readOrder
+    (PState.initial s) (by simp [PState.initial])
+
+/-- No item of `st` has a membership twice. -/
+def PState.Once (st : PState) : Prop := ∀ i, (st.items i).memberships.Nodup
+
+theorem PState.Once.placed {s : Statement} {st : PState} {order : List Nat} (h : st.Once)
+    (he : st.edges.Nodup) (hl : st.PlacedLinks order) {next : Nat} (hnext : next ∉ order) :
+    (ordered.placed s st order next).Once := by
+  unfold ordered.placed
+  simp only
+  generalize hst' : st.update next _ = st'
+  have hsame := PushDown.sameLinks_pushDown s s.fuel s.fuel st' next none
+    (st.edges.filter fun e => e.member == next && e.placedIn order)
+  generalize PushDown.pushDown s s.fuel s.fuel st' next none _ = st'' at hsame
+  intro i
+  rw [(hsame i).1]
+  subst hst'
+  simp only [PState.update]
+  split
+  · rename_i hi
+    subst hi
+    simp only [((hl i).1 hnext).1, List.nil_append]
+    exact List.Pairwise.filter _ he
+  · exact h i
+
+theorem ordered_go_once (s : Statement) : ∀ (fuel : Nat) (all : List Nat) (st : PState)
+    (order waited : List Nat), st.edges.Nodup → st.PlacedLinks order → st.Once →
+    (ordered.go s fuel all st order waited).1.Once
+  | 0, _, _, _, _, _, _, h => h
+  | fuel + 1, all, st, order, waited, he, hl, h => by
+    rcases ordered_go_place s fuel all st order waited with ⟨_, heq⟩ | ⟨next, waited', hnext, heq⟩
+    · rw [heq]; exact h
+    · rw [heq]
+      have hnin : next ∉ order := by
+        have := (List.mem_filter.mp hnext).2
+        simpa using this
+      refine ordered_go_once s fuel all _ _ _ ?_ (hl.placed hnin) (h.placed he hl hnin)
+      unfold ordered.placed
+      exact PushDown.keepsOnce_pushDown s _ _ _ _ _ _ he
+
+/-- No item of the planned state has a membership twice. -/
+theorem plan_once (s : Statement) (i : Nat) : ((plan s).state.items i).memberships.Nodup := by
+  have hsame := fun j => PState.SameLinks.foldl (fun st k => sameLinks_readCore s st k) s.readOrder
+    (PState.initial s) j
+  have he := PState.KeepsOnce.foldl (fun st k => keepsOnce_readCore s st k) s.readOrder
+    (PState.initial s) (by simp [PState.initial])
+  unfold plan ordered
+  simp only
+  refine ordered_go_once s _ _ _ [] [] he (fun j => ?_) (fun j => ?_) i
+  · rw [(hsame j).1, (hsame j).2]
+    simp [PState.initial]
+  · rw [(hsame j).1]
+    simp [PState.initial]
 
 end SqliveNarrowing

@@ -324,7 +324,7 @@ theorem PState.Sem.add {s : Statement} {P : Cls} {st : PState} (hs : st.Sem s P)
           exact hn.2.2 d hd Z f b hb hr)
       (fun m hm => hst.held d.item m hm)) _ hterms
   refine ⟨hors.rows, hors.terms, hors.carried, fun Z f b e he hb hm => ?_, hors.ors, hors.held⟩
-  rcases List.mem_append.mp he with he | he
+  rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
   · exact hors.edges Z f b e he hb hm
   · exact Or.inr (hn.2.1 e he Z f b hb hm)
 

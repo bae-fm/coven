@@ -555,6 +555,16 @@ impl Planner<'_> {
         }
     }
 
+    /// Add `edge` to the edges, each once. An equality can reach a column
+    /// through several columns of a derived item, which passes an edge into
+    /// the column for each: a copy of an edge passes no row the edge doesn't,
+    /// and a lookup that read it would write the partner's scope once more.
+    pub(crate) fn add_edge(&mut self, edge: Edge) {
+        if !self.edges.contains(&edge) {
+            self.edges.push(edge);
+        }
+    }
+
     /// Add `found` to the sources' terms, the edges and the sources' ORs,
     /// and say which sources it narrows.
     fn add(&mut self, found: Narrowing) -> Vec<usize> {
@@ -565,7 +575,7 @@ impl Planner<'_> {
         }
         for edge in found.edges {
             narrowed.push(edge.member.item);
-            self.edges.push(edge);
+            self.add_edge(edge);
         }
         for or in found.ors {
             narrowed.push(or.item);

@@ -147,7 +147,7 @@ theorem PState.add_other (st : PState) (n : Narrowing) {i : Nat} (hi : i ∉ (st
   obtain ⟨d1, d2⟩ := hD n.ors _ (fun d hd he => hors d hd he)
   refine ⟨by rw [d1, t1], fun e he hm => ?_⟩
   rw [d2, t2] at he
-  rcases he with he | he
+  rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
   · exact he
   · exact absurd hm (hedges e he)
 
@@ -222,9 +222,9 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
                   { (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1) with
-                    edges := (match renamed with
+                    edges := addOnce (match renamed with
                       | some r => st1.addTerm target r
-                      | none => st1).edges ++ passed,
+                      | none => st1).edges passed,
                     pushed := (match renamed with
                       | some r => st1.addTerm target r
                       | none => st1).pushed ++ passed } target
@@ -232,9 +232,9 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
                 { (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1) with
-                  edges := (match renamed with
+                  edges := addOnce (match renamed with
                     | some r => st1.addTerm target r
-                    | none => st1).edges ++ passed,
+                    | none => st1).edges passed,
                   pushed := (match renamed with
                     | some r => st1.addTerm target r
                     | none => st1).pushed ++ passed }) target renamed passed) := by
@@ -245,18 +245,18 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
               ({ (match renamed with
                   | some r => st1.addTerm target r
                   | none => st1) with
-                edges := (match renamed with
+                edges := addOnce (match renamed with
                   | some r => st1.addTerm target r
-                  | none => st1).edges ++ passed,
+                  | none => st1).edges passed,
                 pushed := (match renamed with
                   | some r => st1.addTerm target r
                   | none => st1).pushed ++ passed } : PState).items i = st1.items i ∧
               ∀ e ∈ ({ (match renamed with
                   | some r => st1.addTerm target r
                   | none => st1) with
-                edges := (match renamed with
+                edges := addOnce (match renamed with
                   | some r => st1.addTerm target r
-                  | none => st1).edges ++ passed,
+                  | none => st1).edges passed,
                 pushed := (match renamed with
                   | some r => st1.addTerm target r
                   | none => st1).pushed ++ passed } : PState).edges, e.member = i → e ∈ st1.edges := by
@@ -264,12 +264,12 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
             cases renamed with
             | none =>
               refine ⟨rfl, fun e he hm => ?_⟩
-              rcases List.mem_append.mp he with he | he
+              rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
               · exact he
               · exact absurd (hm.symm.trans (hpm e he)) hit
             | some r =>
               refine ⟨by simp [PState.addTerm, PState.update, hit], fun e he hm => ?_⟩
-              rcases List.mem_append.mp he with he | he
+              rcases List.mem_append.mp (mem_addOnce.mp he) with he | he
               · simpa [PState.addTerm, PState.update] using he
               · exact absurd (hm.symm.trans (hpm e he)) hit
           split
@@ -294,7 +294,7 @@ theorem PushDown.untouched_pushDown (s : Statement) (narrowFuel : Nat) :
             subst hr
             subst hp
             intro i _
-            exact ⟨rfl, fun e he _ => by simpa using he⟩
+            exact ⟨rfl, fun e he _ => by simpa [addOnce_nil] using he⟩
         have hpm : ∀ {left : Bool} {target : Nat} {rename : Nat → Option Nat} {e : Edge},
             e ∈ PushDown.passedInto s left target rename edges → e.member = target := by
           intro left target rename e he
@@ -421,7 +421,7 @@ theorem PState.Held.add {s : Statement} {st Fin : PState} (h : st.Held s Fin) {n
         · simp [PState.update, hi, hx.2.1]) _ hterms
   obtain ⟨hH, hleft, hedges⟩ := hors
   refine ⟨hH.term, hH.carried, fun i hi e he' hm => ?_, hH.ors⟩
-  rcases List.mem_append.mp he' with he' | he'
+  rcases List.mem_append.mp (mem_addOnce.mp he') with he' | he'
   · exact hH.edges i hi e he' hm
   · have hl : (st.items e.member).leftOn.isSome = true := by rw [← hleft, hm]; exact hi
     have := he e he' hl
