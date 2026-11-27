@@ -133,15 +133,6 @@ impl std::fmt::Display for NotOneSelect {
     }
 }
 
-impl std::error::Error for NotOneSelect {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Statements => None,
-            Self::Unreadable(error) => Some(error),
-        }
-    }
-}
-
 /// The SELECT that `sql` is, read into `bump`.
 pub(crate) fn one_select<'b>(bump: &'b Bump, sql: &'b str) -> Result<&'b Select<'b>, NotOneSelect> {
     let mut parser = Parser::new(bump, sql.as_bytes());
