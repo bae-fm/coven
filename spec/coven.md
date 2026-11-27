@@ -757,20 +757,19 @@ A live query reruns as sqlive's spec states ([sections 4 to
 changes a column its statements read, in a row their conditions and joins allow.
 Ben's album page reads `SELECT title FROM tracks WHERE release_id = ?1 ORDER BY
 position`, and a write to another release's tracks doesn't rerun it. A list
-window, a statement with a LIMIT and no OFFSET whose ORDER BY starts with a
-column sqlive can compare, also narrows by that column: a write to the table it
-sorts reruns the window only when the written row's value there, before the
-write or after it, is in the window's range ([sqlive's sections 5 and
-6](../crates/sqlive/SPEC.md#6-limit-and-the-order-sqlite-reads-rows-in) state
-which columns it can compare). The range starts at the key the WHERE starts the
-window at, and ends at the window's last row. Ben's track list reads a window of
-50 tracks, `WHERE (title, id) >= (?1, ?2) ORDER BY title, id LIMIT 50`, and an
-edit to a track whose title sorts before `?1`, or after the title of the
-window's last row, doesn't rerun it. A window that returns fewer than 50 tracks
-reaches the list's end, so its range has no end there. A live query of coven's
-own, one that follows a table app SQL can't read, runs a statement of coven's
-own, which sqlive reads as it reads an app's, so it narrows by the same
-rules.
+window that sqlive's LIMIT bound covers narrows by its first sort column too
+([sqlive's section
+6](../crates/sqlive/SPEC.md#6-limit-and-the-order-sqlite-reads-rows-in) states
+which statements the bound covers): a write to the table the window sorts reruns
+it only when the written row's value there, before the write or after it, is in
+the window's range. The range starts at the key the WHERE starts the window at,
+and ends at the window's last row. Ben's track list reads a window of 50 tracks,
+`WHERE (title, id) >= (?1, ?2) ORDER BY title, id LIMIT 50`, and an edit to a
+track whose title sorts before `?1`, or after the title of the window's last row,
+doesn't rerun it. A window that returns fewer than 50 tracks reaches the list's
+end, so its range has no end there. A live query of coven's own, one that follows
+a table app SQL can't read, runs a statement of coven's own, which sqlive reads
+as it reads an app's, so it narrows by the same rules.
 
 Applying another device's slot narrows the same way: coven applies it in one of
 sqlive's streamed transactions, which judges each row's net change as a local
